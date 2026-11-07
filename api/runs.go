@@ -584,7 +584,7 @@ func (a *API) startTurn(w http.ResponseWriter, t turn) {
 	if err != nil {
 		a.cfg.Logf("run.refused agent=%s reason=permissions_file error=%q", t.agent, err.Error())
 		writeError(w, http.StatusBadRequest, "the permissions file "+PermissionsFile+" in the data folder cannot be used, so the turn did not start: "+
-			err.Error()+". Fix the file and send the turn again; a missing file means empty lists.")
+			err.Error()+". Fix the file, or remove it for empty lists, and send the turn again.")
 		return
 	}
 	turnID := "t_" + randomHex(8)

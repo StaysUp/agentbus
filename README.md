@@ -222,13 +222,15 @@ A turn runs with no person to click "allow". So a claude turn is refused anythin
 folder says what turns may do:
 
 ```toml
-read_folders = ["~/.agents"]           # claude may Read, Grep and Glob there, never write
+read_folders = ["~/.agents"]           # claude may Read, Grep and Glob there
 allow = ["go test", "make test"]       # claude gets --allowedTools Bash(go test:*),...
 forbid = ["git push", "git checkout"]  # claude gets --disallowedTools Bash(git push:*),...
 ```
 
 `agentbus up` makes it with empty lists, which change nothing. Every turn reads it when it starts,
 so an edit applies to the next turn. A broken file stops the turn with the line and the problem.
+`read_folders` grants reads only in the default and acceptEdits modes. Under your own Claude Code
+"auto" mode, claude may still write there.
 A `read_only` turn stays read-only.
 
 codex gets nothing from it yet. Its sandbox can read every folder already. It cannot be stopped from

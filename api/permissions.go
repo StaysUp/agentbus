@@ -28,7 +28,8 @@ const PermissionsFile = "permissions.toml"
 const PermissionsStarter = `# What AgentBus turns may do without asking. Read at the start of every turn.
 # Empty lists change nothing. Folders may start with ~ for your home folder.
 #
-# read_folders: folders claude may read and search beyond its own folder, never write.
+# read_folders: folders claude may read and search beyond its own folder. Reads only in the
+# default and acceptEdits modes; under your own "auto" mode, Claude Code may still write there.
 # allow: commands claude may run without asking (a command and its arguments).
 # forbid: commands claude may never run.
 # codex can read every folder already, and has no command lists yet.
