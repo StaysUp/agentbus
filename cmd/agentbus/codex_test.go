@@ -135,7 +135,12 @@ func TestUnclaimedPathRefusedLocally(t *testing.T) {
 	cg := newRecorder(t, codexReply)
 	svc := startTwoVendors(t, t.TempDir(), anth.srv.URL, cg.srv.URL)
 
-	for _, p := range []string{"/", "/v2/messages", "/v1x", "/backend-api/other", "/backend-api/codexx/responses",
+	// GET / redirects to the docs (main.go route); every other method on it
+	// is unclaimed.
+	if code := post(t, svc.addr, "/", `{}`); code != 404 {
+		t.Errorf("POST /: status %d, want 404", code)
+	}
+	for _, p := range []string{"/v2/messages", "/v1x", "/backend-api/other", "/backend-api/codexx/responses",
 		"/s/abc/backend-api/wham/usage", "/s/abc", "/s/a.b/v1/messages", "/responses"} {
 		if code := rawGet(t, svc.addr, p, ""); code != 404 {
 			t.Errorf("%s: status %d, want 404", p, code)

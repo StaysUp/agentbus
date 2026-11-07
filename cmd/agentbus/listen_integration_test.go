@@ -157,3 +157,37 @@ func TestRefusalDoesNotWaitForBody(t *testing.T) {
 		c.Close()
 	}
 }
+
+// The root redirects a browser to the docs on loopback and on 0.0.0.0, and
+// the docs it lands on answer. A path no vendor claims gets 404 on both.
+func TestRootRedirectsToDocs(t *testing.T) {
+	noFollow := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	for _, listen := range []string{"127.0.0.1:0", "0.0.0.0:0"} {
+		home := t.TempDir()
+		svc, err := start(config{listen: listen, home: home, upstream: mustURL("http://127.0.0.1:1"),
+			chatgpt: mustURL("http://127.0.0.1:1"), logf: t.Logf})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, port, _ := net.SplitHostPort(svc.addr)
+		base := "http://127.0.0.1:" + port
+		for _, method := range []string{"GET", "HEAD"} {
+			req, _ := http.NewRequest(method, base+"/", nil)
+			resp, err := noFollow.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/docs" {
+				t.Errorf("%s: %s /: %d, Location %q; want 302 to /docs", listen, method, resp.StatusCode, resp.Header.Get("Location"))
+			}
+		}
+		if code, _ := get(t, svc.addr, "127.0.0.1:"+port, "/", ""); code != 200 {
+			t.Errorf("%s: / followed to /docs: %d, want 200", listen, code)
+		}
+		if code, body := get(t, svc.addr, "127.0.0.1:"+port, "/favicon.ico", ""); code != 404 {
+			t.Errorf("%s: /favicon.ico: %d %s, want 404", listen, code, body)
+		}
+		svc.stop()
+	}
+}

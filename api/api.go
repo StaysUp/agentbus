@@ -59,6 +59,9 @@ type Config struct {
 	// Origin, when set, is the one cross-origin caller allowed, such as
 	// http://localhost:5173. Empty allows every origin. See ServeHTTP.
 	Origin string
+	// Build is which build of AgentBus this is, for GET /api/v0/version.
+	// The zero value answers an empty version.
+	Build Version
 
 	// Ping is how often a stream sends a comment to keep the connection
 	// open. Zero means 15 seconds.

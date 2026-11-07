@@ -10,7 +10,7 @@
 // /backend-api/codex to chatgpt.com (codex), /v1 to api.anthropic.com (Claude
 // Code), each with or without /s/<session> in front. Any other path is
 // answered 404 here and sent nowhere. The vendor paths answer only callers on
-// this machine, whatever the address.
+// this machine, whatever the address. GET / redirects to /docs.
 package main
 
 import (
@@ -244,7 +244,7 @@ func start(c config) (*service, error) {
 	a, err := api.New(api.Config{Store: st, Token: token, Port: port, AnyHost: !loopback,
 		BaseURL: "http://" + agentAddr(ln.Addr()), Origin: c.origin, ReplayBase: replayBase,
 		Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace,
-		LookPath: c.lookPath, Environ: c.environ, Logf: svcLog.Printf,
+		LookPath: c.lookPath, Environ: c.environ, Logf: svcLog.Printf, Build: build(debug.ReadBuildInfo()),
 		RunLog: func(session string, data []byte) {
 			// The session id is the service's own hex, so it is a plain
 			// file name.
@@ -326,13 +326,16 @@ func (k keeper) KeepReply(r body.Reply) error {
 // route refuses odd paths, then sends the API namespace to the API and each
 // vendor path to its vendor's gateway. A request carries the agent's sign-in,
 // so it goes only to the vendor whose path it uses: a path no vendor claims is
-// answered 404 here and forwarded nowhere.
+// answered 404 here and forwarded nowhere. The root sends a browser to the
+// docs.
 //
 // open is true when the service listens beyond loopback. The vendor paths
 // have no token: a request there carries its own sign-in to the vendor, and
 // a run's turn gets its session's history put in front. Only a run's agent
 // needs them, and it runs on this machine, so with open set they answer 403
-// to any other caller. Without it only this machine can connect anyway.
+// to any other caller, before anything is forwarded. Without it only this
+// machine can connect anyway. Paths no vendor claims get the same 404 from
+// any caller.
 func route(a *api.API, anthropicGW, openaiGW http.Handler, open bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !plainPath(r) {
@@ -343,19 +346,26 @@ func route(a *api.API, anthropicGW, openaiGW http.Handler, open bool) http.Handl
 			a.ServeHTTP(w, r)
 			return
 		}
+		if r.URL.Path == "/" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			http.Redirect(w, r, "/docs", http.StatusFound)
+			return
+		}
+		_, _, rest := gateway.SplitSession(r.URL.EscapedPath())
+		var gw http.Handler
+		switch {
+		case under(rest, "/backend-api/codex"):
+			gw = openaiGW
+		case under(rest, "/v1"):
+			gw = anthropicGW
+		default:
+			localError(w, "agentbus: no vendor is routed for this path", http.StatusNotFound)
+			return
+		}
 		if open && !thisMachine(r) {
 			localError(w, "agentbus: the model gateway answers callers on this machine only", http.StatusForbidden)
 			return
 		}
-		_, _, rest := gateway.SplitSession(r.URL.EscapedPath())
-		switch {
-		case under(rest, "/backend-api/codex"):
-			openaiGW.ServeHTTP(w, r)
-		case under(rest, "/v1"):
-			anthropicGW.ServeHTTP(w, r)
-		default:
-			localError(w, "agentbus: no vendor is routed for this path", http.StatusNotFound)
-		}
+		gw.ServeHTTP(w, r)
 	})
 }
 

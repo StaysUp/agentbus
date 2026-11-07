@@ -203,6 +203,7 @@ func TestTurnToken(t *testing.T) {
 		{"GET", "/api/v0/sessions", "", 403},
 		{"GET", "/api/v0/events?session=" + own, "", 403},
 		{"GET", "/api/v0/agents", "", 403},
+		{"GET", "/api/v0/version", "", 403},
 	} {
 		code, out := as(t, e, tok, tc.method, tc.path, tc.body)
 		if code != tc.want {

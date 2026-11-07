@@ -21,6 +21,8 @@ The client API shares the gateway's address: `agentbus up` starts one service on
 |---|---|---|
 | `/s/<session>/v1/...` and `/v1/...` | the agents | the vendor's, passed through untouched |
 | `/api/...` | cockpits and programs | **our token** |
+| `/docs/...` | people and coding agents | none |
+| `/` | a browser | none: `GET` and `HEAD` redirect (302) to `/docs` |
 
 - **A program is a cockpit that also acts**: it starts turns (`POST /api/v0/turns`) and writes its
   own events (`POST /api/v0/events`), with the same token.
@@ -42,7 +44,9 @@ The client API shares the gateway's address: `agentbus up` starts one service on
   the service there, and send any `Host` they like, so the check would add nothing. The token on
   every API request is the guard. There is no HTTPS: use an SSH tunnel or a private network.
 - **The agents' paths answer this machine only** when the service is not on loopback: a request to
-  a vendor path from another machine gets 403. The agents run on the service's machine, and
+  a vendor path (`/v1/...` or `/backend-api/codex/...`, with or without `/s/<session>` or
+  `/s/<session>/t/<turn>` in front) from another machine gets 403, before anything is forwarded.
+  Any other path outside `/api` and `/docs` gets 404 from every caller, as on loopback. The agents run on the service's machine, and
   `AGENTBUS_URL` and the vendor base URL a turn gets are `http://127.0.0.1:<port>` on `0.0.0.0`.
   "This machine" means the caller's address: loopback, or the address the request arrived on. A
   reverse proxy on this machine makes every caller look local, so a proxy in front of the service
@@ -624,6 +628,20 @@ its `cost_complete`, for those.
   ends any other way.
 - Never a path, and nothing from the agents' configuration.
 - The answer is kept for one minute.
+
+### `GET /api/v0/version` — which build this service is
+
+```json
+{"version":"0.1.0","commit":"5fea80b5aaaabbbbccccddddeeeeffff00001111","modified":false}
+```
+
+- The same values `agentbus version` prints. A release build has its version and commit from the
+  release's ldflags. A build from a clone has `dev` and the commit Go read from git, with
+  `modified` true when the tree had changes. `go install …@v0.1.0` has the module's version and no
+  commit.
+- `commit`: absent when the build does not know it. `modified` is always sent, false for a release.
+- The main token only; a turn token gets 403. Fixed for the life of the process, so a cockpit
+  reads it once when it connects.
 
 ### `POST /api/v0/events` — a program writes its own event
 

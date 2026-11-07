@@ -86,6 +86,8 @@ func TestGatewayThisMachineOnly(t *testing.T) {
 		{true, "172.17.0.2:5000", "/backend-api/codex/responses", true}, // its own address
 		{true, "172.17.0.1:5000", "/v1/messages", false},                // the Docker host
 		{true, "192.0.2.9:5000", "/s/abc/t/t_1/backend-api/codex/responses", false},
+		{true, "192.0.2.9:5000", "/s/abc/v1/messages", false},
+		{true, "192.0.2.9:5000", "/backend-api/codex", false},
 	} {
 		anth, oai = false, false
 		h := route(nil, reached("anthropic", &anth), reached("openai", &oai), tc.open)
@@ -99,6 +101,49 @@ func TestGatewayThisMachineOnly(t *testing.T) {
 		}
 		if !tc.want && (w.Code != http.StatusForbidden || w.Header().Get("Connection") != "close") {
 			t.Errorf("open %v from %s to %s: status %d, Connection %q; want 403 and close", tc.open, tc.remote, tc.path, w.Code, w.Header().Get("Connection"))
+		}
+	}
+}
+
+// Only the vendor paths are this machine's alone. The root sends anyone to
+// the docs, and a path no vendor claims gets 404 from every caller, as on
+// loopback: a browser asking for /favicon.ico is told there is none, not that
+// it is on the wrong machine.
+func TestRootAndUnroutedPaths(t *testing.T) {
+	reached := false
+	gw := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { reached = true })
+	local := &net.TCPAddr{IP: net.ParseIP("172.17.0.2"), Port: 8787}
+	for _, open := range []bool{false, true} {
+		for _, remote := range []string{"127.0.0.1:5000", "172.17.0.1:5000"} {
+			for _, tc := range []struct {
+				method, path string
+				code         int
+				location     string
+			}{
+				{"GET", "/", http.StatusFound, "/docs"},
+				{"HEAD", "/", http.StatusFound, "/docs"},
+				{"GET", "/?x=1", http.StatusFound, "/docs"},
+				{"POST", "/", http.StatusNotFound, ""},
+				{"GET", "/favicon.ico", http.StatusNotFound, ""},
+				{"GET", "/index.html", http.StatusNotFound, ""},
+				{"GET", "/s/abc", http.StatusNotFound, ""},
+				{"GET", "/s/abc/favicon.ico", http.StatusNotFound, ""},
+				{"GET", "/s/abc/t/t_1/", http.StatusNotFound, ""},
+				{"GET", "/v1x", http.StatusNotFound, ""},
+				{"GET", "/backend-api", http.StatusNotFound, ""},
+			} {
+				reached = false
+				h := route(nil, gw, gw, open)
+				r := httptest.NewRequest(tc.method, tc.path, nil)
+				r.RemoteAddr = remote
+				r = r.WithContext(context.WithValue(r.Context(), http.LocalAddrContextKey, net.Addr(local)))
+				w := httptest.NewRecorder()
+				h.ServeHTTP(w, r)
+				if w.Code != tc.code || w.Header().Get("Location") != tc.location || reached {
+					t.Errorf("open %v from %s: %s %s: %d, Location %q, reached %v; want %d, Location %q, not reached",
+						open, remote, tc.method, tc.path, w.Code, w.Header().Get("Location"), reached, tc.code, tc.location)
+				}
+			}
 		}
 	}
 }

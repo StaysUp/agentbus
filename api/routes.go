@@ -212,6 +212,13 @@ var routes = []route{
 		doc:     "Which agents this service can start. Kept for one minute.",
 		replies: []reply{ok(200, AgentList{}, "The agents."), badRequest},
 		serve:   plain((*API).listAgents)},
+	{method: "GET", path: "/api/v0/version", op: "getVersion",
+		tag:     "Service",
+		summary: "Get the version",
+		doc: "Which build of AgentBus this service is: the values agentbus version prints. " +
+			"Takes the main token only. No body is read.",
+		replies: []reply{ok(200, Version{}, "The version."), badRequest},
+		serve:   plain((*API).version)},
 	{method: "GET", path: "/api/v0/calls/{id}/context", op: "callContext",
 		idDoc:   "A model call: the exchange field of its events. Another shape gets 404.",
 		tag:     "Calls",

@@ -6,6 +6,8 @@ import (
 	"runtime/debug"
 	"strings"
 	"testing"
+
+	"github.com/staysup/agentbus/api"
 )
 
 func TestVersionCommand(t *testing.T) {
@@ -41,6 +43,31 @@ func TestVersionLine(t *testing.T) {
 		version, commit = c.version, c.commit
 		if got := versionLine(c.info, c.ok); got != c.want {
 			t.Errorf("%s: %q, want %q", c.name, got, c.want)
+		}
+	}
+	version, commit = "dev", ""
+}
+
+// build gives the API the same values versionLine prints.
+func TestBuildFields(t *testing.T) {
+	dirty := &debug.BuildInfo{Settings: []debug.BuildSetting{
+		{Key: "vcs.revision", Value: "e4fed25c0ffee0000000000000000000000000ab"}, {Key: "vcs.modified", Value: "true"}}}
+	noCommit := &debug.BuildInfo{Settings: []debug.BuildSetting{{Key: "vcs.modified", Value: "true"}}}
+	for _, c := range []struct {
+		name            string
+		version, commit string
+		info            *debug.BuildInfo
+		want            api.Version
+	}{
+		{"release", "0.1.0", "5fea80b5aaaabbbbccccddddeeeeffff00001111", dirty,
+			api.Version{Version: "0.1.0", Commit: "5fea80b5aaaabbbbccccddddeeeeffff00001111"}},
+		{"clone with changes", "dev", "", dirty,
+			api.Version{Version: "dev", Commit: "e4fed25c0ffee0000000000000000000000000ab", Modified: true}},
+		{"no commit", "dev", "", noCommit, api.Version{Version: "dev"}},
+	} {
+		version, commit = c.version, c.commit
+		if got := build(c.info, true); got != c.want {
+			t.Errorf("%s: %+v, want %+v", c.name, got, c.want)
 		}
 	}
 	version, commit = "dev", ""

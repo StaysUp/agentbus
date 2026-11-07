@@ -15,6 +15,7 @@ words is `docs/CLIENT_API.md` in the repository.
 - The service listens on `http://127.0.0.1:8787` by default. `agentbus up -listen 0.0.0.0`
   makes it reachable from the network, such as from outside a container. With no port, 8787.
 - Every request except `/api/v0/openapi.json` and `/docs` sends `Authorization: Bearer <token>`.
+- `GET /` redirects to `/docs`.
 - The token is the file `token` in the data folder: `$AGENTBUS_HOME`, else
   `$XDG_DATA_HOME/agentbus`, else `~/.local/share/agentbus`.
 - Never put the token in a URL. In a browser, read the stream with `fetch`, not `EventSource`.
@@ -241,6 +242,15 @@ Which agents this service can start: found on PATH, version, signed in.
 
 ```sh
 curl -s -H "Authorization: Bearer $TOKEN" $B/api/v0/agents
+```
+
+### GET /api/v0/version
+
+Which build of AgentBus this service is: what `agentbus version` prints. Main token only.
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" $B/api/v0/version
+# {"version":"0.1.0","commit":"5fea80b5…","modified":false}
 ```
 
 ### GET /api/v0/openapi.json
