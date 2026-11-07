@@ -14,8 +14,6 @@ and no screens. Cockpits and programs are clients of the API and live in their o
 You need Go 1.27.1 or later.
 
 ```sh
-go build ./...
-go test ./...
 go build ./cmd/agentbus && ./agentbus version
 ```
 
@@ -23,18 +21,21 @@ A source build prints `agentbus dev` and the commit Go read from git, with `, mo
 tree had changes. Release builds set the version and commit through the ldflags in
 `.goreleaser.yaml` (`main.version`, `main.commit`).
 
-## The gate
-
-A change is ready when all three pass:
+## Tests and the gate
 
 ```sh
-gofmt -l $(git ls-files '*.go')   # prints nothing
-go vet ./...
-go test -race ./...
+make test   # unit tests, a few seconds: use this while you work
+make gate   # gofmt, go vet, every test with -race, the build: run before every commit
 ```
 
-Use `git ls-files` with gofmt, not `gofmt -l .`. A local `_references/` folder (git-ignored) may hold
-other projects' Go code. Go's own tools skip folders that start with `_`; gofmt does not.
+Tests that start a child process or wait on real time (timeouts, sleeps, streams held open) carry
+`//go:build integration` and run only in `make gate`. Put a new test of that kind in a
+`*_integration_test.go` file. Helpers both kinds use stay in untagged files.
+
+CI runs `make gate` on Linux and macOS, and it must pass before a change merges to `main`.
+
+The gate runs gofmt on `git ls-files`, not `gofmt -l .`. A local `_references/` folder (git-ignored)
+may hold other projects' Go code. Go's own tools skip folders that start with `_`; gofmt does not.
 
 ## Rules of the code
 

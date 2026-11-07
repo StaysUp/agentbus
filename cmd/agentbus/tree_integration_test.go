@@ -1,4 +1,4 @@
-//go:build darwin || linux
+//go:build integration && (darwin || linux)
 
 package main
 

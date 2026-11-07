@@ -30,22 +30,8 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # Same check as the gate in AGENTS.md: list tracked files only, so a
-      # local _references/ folder never counts.
-      - name: gofmt
-        run: |
-          unformatted=$(gofmt -l $(git ls-files '*.go'))
-          if [ -n "$unformatted" ]; then
-            echo "These files need gofmt:"
-            echo "$unformatted"
-            exit 1
-          fi
-
-      - name: go vet
-        run: go vet ./...
-
-      - name: go test -race
-        run: go test -race ./...
-
-      - name: go build
-        run: go build ./cmd/agentbus
+      # The gate from AGENTS.md: gofmt on tracked files only (so a local
+      # _references/ folder never counts), go vet with and without the
+      # integration tag, every test with -race, and the build.
+      - name: make gate
+        run: make gate
