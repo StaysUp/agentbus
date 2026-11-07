@@ -433,6 +433,11 @@ func (r *Replayer) history(session, turn string, keep bool) (*history, error) {
 		h.messages = append(h.messages, items...)
 		e = how
 	}
+	// A finished reply ends the history whole, even for a turn the person
+	// stopped after that reply came and before its agent exited: the model
+	// had done the turn's work, and Claude Code's layout has no place for a
+	// note after a final reply (the note is an assistant message). The stop
+	// is still on the turn's session.closed and in the turn list.
 	if !e.finished {
 		end, err := r.src.TurnEnd(session, turn)
 		if err != nil {
@@ -470,7 +475,7 @@ func (r *Replayer) notReached(session, turn string, ti turnInfo, keep bool) (*hi
 	if !end.Closed {
 		return nil, &missing{why: "turn " + turn + " made no model call and has not ended", kind: unusableCall}
 	}
-	if end.Error == "" && end.ExitCode != nil && *end.ExitCode == 0 && !end.ReplayFailed {
+	if end.Error == "" && end.ExitCode != nil && *end.ExitCode == 0 && !end.ReplayFailed && !end.Stopped {
 		return nil, &missing{why: "turn " + turn + " ended normally but none of its model calls are stored", kind: unusableCall}
 	}
 	if end.ExitCode == nil && end.Error == "" && !end.ReplayFailed {
@@ -502,6 +507,8 @@ func (r *Replayer) notReached(session, turn string, ti turnInfo, keep bool) (*hi
 		why = "AgentBus could not give it the earlier conversation, so the model was not called"
 	case end.Error != "":
 		why += " (" + strings.TrimSuffix(end.Error, ".") + ")"
+	case end.Stopped:
+		why += " (" + stoppedWords + ")"
 	case end.ExitCode != nil:
 		why += " (" + exitWords(*end.ExitCode) + ")"
 	}
@@ -569,6 +576,8 @@ func endUnfinished(f format, h *history, turn string, a store.Call, end store.Tu
 	switch {
 	case end.Error != "":
 		how += "; " + strings.TrimSuffix(end.Error, ".")
+	case end.Stopped:
+		how += "; " + stoppedWords
 	case end.ExitCode != nil && *end.ExitCode != 0:
 		how += "; " + exitWords(*end.ExitCode)
 	}
@@ -577,6 +586,9 @@ func endUnfinished(f format, h *history, turn string, a store.Call, end store.Tu
 		". It may have changed files in part. Check the folder before going on."))
 	return nil
 }
+
+// stoppedWords says the person stopped a turn (session.closed's stopped).
+const stoppedWords = "the person stopped this turn"
 
 // exitWords says how an agent's process ended, from its exit code.
 func exitWords(code int) string {

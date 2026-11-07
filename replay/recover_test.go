@@ -464,3 +464,58 @@ func TestUnknownLayoutIsNotNotActedOn(t *testing.T) {
 		t.Errorf("plan %+v %v, want t2 not acted on", plan, err)
 	}
 }
+
+// A turn the person stopped (session.closed's stopped) continues like one
+// stopped any other way, and its note says the person stopped it.
+func TestRecoverStoppedByThePerson(t *testing.T) {
+	src, r := twoTurns(t)
+	delete(src.turns, "t2")
+	src.order = src.order[1:]
+	src.setEnd("t1", store.TurnEnd{Closed: true, ExitCode: intp(0)})
+	_, m2 := replayTurn(t, src, r, "t2", "run the tests", toolReply, "tool_use", 200)
+	src.setEnd("t2", store.TurnEnd{Closed: true, ExitCode: intp(143), Stopped: true})
+	plan, m3 := replayTurn(t, src, r, "t3", "what happened?", okReply, "end_turn", 200)
+	if plan.Turn != "t2" || plan.Failed != "it stopped while a tool was running; the person stopped this turn" {
+		t.Fatalf("plan %+v", plan)
+	}
+	wantNote := `{"role":"assistant","content":[{"type":"text","text":"[Note from AgentBus, not written by the model] The turn above did not finish: ` +
+		`it stopped while a tool was running; the person stopped this turn. ` +
+		`It may have changed files in part. Check the folder before going on."}]}`
+	if note := stripped(t, m3[len(m2)+2]); note != wantNote {
+		t.Errorf("note\n got %s\nwant %s", note, wantNote)
+	}
+}
+
+// A turn the person stopped before it made any model call, whose agent still
+// exited 0, was not acted on: the next turn continues, told so. Without
+// stopped, that end is refused as one whose calls are missing.
+func TestRecoverStoppedBeforeAnyCall(t *testing.T) {
+	src, r := twoTurns(t)
+	delete(src.turns, "t2")
+	src.order = src.order[1:]
+	src.setEnd("t1", store.TurnEnd{Closed: true, ExitCode: intp(0)})
+	src.addTurn("t2", "fix the parser", "t1")
+	src.setEnd("t2", store.TurnEnd{Closed: true, ExitCode: intp(0), Stopped: true})
+	plan, _ := replayTurn(t, src, r, "t3", "did you fix it?", okReply, "end_turn", 200)
+	if plan.Turn != "t2" || plan.Failed != "it was not acted on: it ended before the model was called (the person stopped this turn)" {
+		t.Fatalf("plan %+v", plan)
+	}
+}
+
+// A turn stopped after its last reply finished continues as a finished turn:
+// its history is whole, with no note.
+func TestStoppedAfterFinishedReplyIsWhole(t *testing.T) {
+	src, r := twoTurns(t)
+	delete(src.turns, "t2")
+	src.order = src.order[1:]
+	src.setEnd("t1", store.TurnEnd{Closed: true, ExitCode: intp(0)})
+	replayTurn(t, src, r, "t2", "say hi", okReply, "end_turn", 200)
+	src.setEnd("t2", store.TurnEnd{Closed: true, ExitCode: intp(143), Stopped: true})
+	plan, m3 := replayTurn(t, src, r, "t3", "go on", okReply, "end_turn", 200)
+	if plan.Turn != "t2" || plan.Failed != "" {
+		t.Fatalf("plan %+v, want t2, finished", plan)
+	}
+	if c := countIn(m3, "Note from AgentBus"); c != 0 {
+		t.Errorf("%d notes, want none", c)
+	}
+}

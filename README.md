@@ -184,6 +184,14 @@ curl -s "http://127.0.0.1:8787/api/v0/turns?session=<id>" -H "Authorization: Bea
 
 To continue the conversation, send the next prompt with `"session":"<id>"` and no agent or folder.
 
+To stop a running turn, and every process it started:
+
+```sh
+curl -s -X POST "http://127.0.0.1:8787/api/v0/turns/<turn>/stop" -H "Authorization: Bearer $TOKEN"
+```
+
+The next turn of the session continues after it, and the agent is told that you stopped it.
+
 ## Docs
 
 The running service describes its own API. None of these need the token or the internet:
@@ -209,7 +217,9 @@ To clear it, stop `agentbus up` and delete the data folder. A new one is made on
 
 ## How it works
 
-- **The agent changes one setting**, its API address. Nothing else in the agent changes.
+- **The agent changes one setting**, its API address. It also gets three lines of instructions
+  (Claude Code's `--append-system-prompt`, codex's `developer_instructions`) saying how to search
+  its session's earlier turns with the turn's own read-only token. Your prompt is never changed.
 - **Traffic passes through.** Requests go to the vendor with their headers, so the agent's own
   sign-in is used. Headers are never stored. The one change: a turn that continues a session gets
   the earlier turns' history put in front of its requests. For codex, the earlier turn's thread id

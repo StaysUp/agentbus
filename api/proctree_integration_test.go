@@ -35,12 +35,12 @@ func TestStopWithoutProcTableReachesTheChild(t *testing.T) {
 			cmd := exec.Command("sleep", "30")
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 			var rs runs
-			code, msg, tree := rs.start(cmd)
+			code, msg, lt := rs.start(cmd, "s", "t_1")
 			if code != 0 {
 				t.Fatalf("start: %d %s", code, msg)
 			}
 			defer cmd.Process.Kill()
-			defer tree.exited() // stops the poll
+			defer lt.tree.exited() // stops the poll
 			failing.Store(true)
 			waited := make(chan error, 1)
 			go func() { waited <- cmd.Wait() }()

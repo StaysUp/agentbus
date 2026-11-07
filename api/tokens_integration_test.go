@@ -197,6 +197,9 @@ func TestTurnToken(t *testing.T) {
 		{"POST", "/api/v0/turns", `{"session":"` + own + `","prompt":"again"}`, 403},
 		{"POST", "/api/v0/turns", `{"agent":"claude","folder":"` + folder + `","prompt":"new"}`, 403},
 		{"POST", "/api/v0/events", `{"kind":"x.a.b","session":"` + own + `","text":"hi"}`, 403},
+		// Not even its own turn: only the main token stops a turn.
+		{"POST", "/api/v0/turns/" + s.Turn + "/stop", "", 403},
+		{"POST", "/api/v0/turns/t_other/stop", "", 403},
 		{"GET", "/api/v0/sessions", "", 403},
 		{"GET", "/api/v0/events?session=" + own, "", 403},
 		{"GET", "/api/v0/agents", "", 403},
@@ -225,6 +228,10 @@ func TestTurnToken(t *testing.T) {
 	// The session's next turn gets a token of its own.
 	os.WriteFile(filepath.Join(dir, "release"), nil, 0o600)
 	waitSessionClosed(t, e.store, own)
+	// The refused stop stopped nothing.
+	if end, err := e.store.TurnEnd(own, s.Turn); err != nil || end.Stopped || end.ExitCode == nil || *end.ExitCode != 0 {
+		t.Errorf("the turn after a turn token's stop: %+v %v, want exit 0, not stopped", end, err)
+	}
 	if code, _ := as(t, e, tok, "GET", "/api/v0/sessions/"+own+"/events", ""); code != http.StatusUnauthorized {
 		t.Fatalf("the token after session.closed: %d, want 401", code)
 	}

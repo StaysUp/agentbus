@@ -66,7 +66,7 @@ var Kinds = []KindInfo{
 	{EventsDropped, "Events were lost because the output did not keep up: dropped, and sessions or all_sessions.", []string{"dropped"}},
 	{SessionRegistered, "Older stores only: a launcher or a run registered the session, with agent and folder. Nothing writes it now.", []string{"session"}},
 	{SessionOpened, "A run's child is starting: hold names it; agent and folder say what and where; turn is the turn it runs. Stored just before the child starts.", []string{"session", "hold"}},
-	{SessionClosed, "A run's child exited: hold, exit_code, resume_id, turn, and unsettled when the gateway could not confirm all of the turn's calls were stored. Also stored at start, with unsettled, for a child the previous service left running.", []string{"session"}},
+	{SessionClosed, "A run's child exited: hold, exit_code, resume_id, turn, stopped when the person stopped the turn, and unsettled when the gateway could not confirm all of the turn's calls were stored. Also stored at start, with unsettled, for a child the previous service left running.", []string{"session"}},
 	{SchemaUnexpected, "The vendor sent a shape the adapter does not know: unexpected, as names only. Show it as a quiet warning.", []string{"unexpected"}},
 	{ReplayFailed, "A model request of a replayed turn (a turn.started with replay_from) could not be given the earlier turn's history: error says why, such as the harness's request layout not being one the gateway knows. The gateway refused that request with 400 and did not send it to the vendor, so the turn fails rather than continue without its history. Show it as an error.", []string{"error"}},
 }
@@ -192,6 +192,9 @@ type Event struct {
 	// confirm that all of the turn's model calls were stored (it gave up
 	// waiting, or a queue was full), so the turn may be missing calls.
 	Unsettled bool `json:"unsettled,omitempty" doc:"On a run's session.closed: the gateway could not confirm that every model call of the turn was stored, so the turn may be missing calls. Own replay does not continue from such a turn."`
+	// Stopped, only on a run's session.closed: the person stopped the turn
+	// (POST /api/v0/turns/{id}/stop) while its child ran.
+	Stopped bool `json:"stopped,omitempty" doc:"On a run's session.closed: the person stopped the turn with POST /api/v0/turns/{id}/stop while its child ran. The session's next turn continues after it, told that the person stopped it."`
 	// Continuity, only on a next turn's turn.started: how it reaches the
 	// session's earlier turns, "replay" or "resume".
 	Continuity string `json:"continuity,omitempty" doc:"On the turn.started of a session's next turn started by POST /api/v0/turns: replay (own replay, see replay_from) or resume (the vendor's resume_id). Absent on a first turn."`

@@ -36,6 +36,9 @@ func runServiceVendors(t *testing.T, home string, getenv func(string) string, gr
 		t.Fatal(err)
 	}
 	t.Setenv("AGENTBUS_FAKE_AGENT", "1")
+	// codex's config is read for the person's own developer_instructions;
+	// an empty one, so the machine's own config never changes a test.
+	t.Setenv("CODEX_HOME", t.TempDir())
 	// The service's own environment must not send an agent elsewhere.
 	t.Setenv("ANTHROPIC_BASE_URL", "")
 	t.Setenv("OPENAI_BASE_URL", "")
@@ -57,6 +60,7 @@ type runEvent struct {
 	Hold     string `json:"hold"`
 	ExitCode *int   `json:"exit_code"`
 	ResumeID string `json:"resume_id"`
+	Stopped  bool   `json:"stopped"`
 }
 
 func runEvents(t *testing.T, st *store.Store, session string) []runEvent {
@@ -159,8 +163,8 @@ func TestRunSetsBaseURLInChildOnlyAndClosesWithExitCode(t *testing.T) {
 		t.Fatalf("the service's own ANTHROPIC_BASE_URL changed to %q", got)
 	}
 	// The prompt comes last, after --, so a prompt shaped like a flag stays a prompt.
-	want := "-p --output-format json --model haiku -- --dangerously-skip-permissions hello"
-	if got := strings.Join(r.Args, " "); got != want {
+	want := "-p --output-format json --append-system-prompt HINT --model haiku -- --dangerously-skip-permissions hello"
+	if got := argsOf(t, r.Args, id); got != want {
 		t.Fatalf("child args %q, want %q", got, want)
 	}
 	wantDir, _ := filepath.EvalSymlinks(folder)
@@ -221,15 +225,15 @@ func TestRunReadOnlyFlags(t *testing.T) {
 		readOnly any
 		want     string // with BASE for the session's base URL
 	}{
-		{"claude", false, "-p --output-format json -- hi"},
-		{"claude", true, "-p --output-format json --tools Read,Grep,Glob --allowedTools Read,Grep,Glob --strict-mcp-config -- hi"},
-		{"claude", nil, "-p --output-format json -- hi"},
-		{"codex", nil, `-c openai_base_url="BASE/backend-api/codex" exec --skip-git-repo-check --json --sandbox workspace-write -c sandbox_workspace_write.network_access=true -- hi`},
-		{"codex", true, `-c openai_base_url="BASE/backend-api/codex" exec --skip-git-repo-check --json --sandbox read-only -- hi`},
+		{"claude", false, "-p --output-format json --append-system-prompt HINT -- hi"},
+		{"claude", true, "-p --output-format json --append-system-prompt HINT --tools Read,Grep,Glob --allowedTools Read,Grep,Glob --strict-mcp-config -- hi"},
+		{"claude", nil, "-p --output-format json --append-system-prompt HINT -- hi"},
+		{"codex", nil, `-c openai_base_url="BASE/backend-api/codex" exec --skip-git-repo-check --json --sandbox workspace-write -c developer_instructions=HINT -c sandbox_workspace_write.network_access=true -- hi`},
+		{"codex", true, `-c openai_base_url="BASE/backend-api/codex" exec --skip-git-repo-check --json --sandbox read-only -c developer_instructions=HINT -- hi`},
 		// False names workspace-write with network on: codex exec's own
 		// default is read-only, and its workspace-write has no network
 		// (acceptance soak, 2026-11-06). True gets neither.
-		{"codex", false, `-c openai_base_url="BASE/backend-api/codex" exec --skip-git-repo-check --json --sandbox workspace-write -c sandbox_workspace_write.network_access=true -- hi`},
+		{"codex", false, `-c openai_base_url="BASE/backend-api/codex" exec --skip-git-repo-check --json --sandbox workspace-write -c developer_instructions=HINT -c sandbox_workspace_write.network_access=true -- hi`},
 	} {
 		report := filepath.Join(t.TempDir(), "report")
 		t.Setenv("AGENTBUS_FAKE_OUT", report)
@@ -243,7 +247,7 @@ func TestRunReadOnlyFlags(t *testing.T) {
 		}
 		want := strings.ReplaceAll(tc.want, "BASE", out["base_url"].(string))
 		rep := readReport(t, report)
-		if got := strings.Join(rep.Args, " "); got != want {
+		if got := argsOf(t, rep.Args, out["id"].(string)); got != want {
 			t.Errorf("%s read_only %v: args %q, want %q", tc.agent, tc.readOnly, got, want)
 		}
 		// Both agents get a turn token, read-only or not.
@@ -509,5 +513,54 @@ func TestRunTurnCarriesAgentAndFolder(t *testing.T) {
 	}
 	if s := snapSession(t, svc, tok, "byhand"); s["agent"] != "" || s["folder"] != "" || s["open"] != false {
 		t.Fatalf("hand-pointed session %v, want no agent, no folder, not open", s)
+	}
+}
+
+// argsOf joins a child's arguments as the tests compare them: the history
+// hint, which names the session and is long, becomes HINT, once it is checked
+// to name session.
+func argsOf(t *testing.T, args []string, session string) string {
+	t.Helper()
+	out := append([]string(nil), args...)
+	search := "/api/v0/sessions/" + session + "/search?q="
+	for i, a := range out {
+		switch {
+		case i > 0 && out[i-1] == "--append-system-prompt":
+			if !strings.Contains(a, search) {
+				t.Errorf("claude's hint does not name session %s: %q", session, a)
+			}
+			out[i] = "HINT"
+		case strings.HasPrefix(a, "developer_instructions="):
+			if !strings.Contains(a, search) {
+				t.Errorf("codex's hint does not name session %s: %q", session, a)
+			}
+			out[i] = "developer_instructions=HINT"
+		}
+	}
+	return strings.Join(out, " ")
+}
+
+// A developer_instructions the person set for codex wins: the turn gets no
+// hint, and claude is unaffected.
+func TestCodexOwnInstructionsLeaveOutTheHint(t *testing.T) {
+	home := t.TempDir()
+	svc := runService(t, home, nil, 0)
+	tok := readToken(t, home)
+	if err := os.WriteFile(filepath.Join(os.Getenv("CODEX_HOME"), "config.toml"), []byte("developer_instructions = \"mine\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTBUS_FAKE_EXIT", "0")
+	for agent, want := range map[string]bool{"codex": false, "claude": true} {
+		report := filepath.Join(t.TempDir(), "report")
+		t.Setenv("AGENTBUS_FAKE_OUT", report)
+		code, out, raw := postRun(t, svc, tok, map[string]any{"agent": agent, "folder": t.TempDir(), "prompt": "hi"})
+		if code != http.StatusAccepted {
+			t.Fatalf("%s: %d %s", agent, code, raw)
+		}
+		got := argsOf(t, readReport(t, report).Args, out["id"].(string))
+		if strings.Contains(got, "HINT") != want {
+			t.Errorf("%s: args %q, want the hint %v", agent, got, want)
+		}
+		waitClosed(t, svc.store, out["id"].(string))
 	}
 }

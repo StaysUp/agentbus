@@ -72,7 +72,7 @@ func TestReplayedClaudeTurn(t *testing.T) {
 	}
 	waitClosedN(t, svc, id, 2)
 	r := readReport(t, report)
-	if got := strings.Join(r.Args, " "); got != "-p --output-format json -- which word?" {
+	if got := argsOf(t, r.Args, id); got != "-p --output-format json --append-system-prompt HINT -- which word?" {
 		t.Errorf("args %q, want a fresh claude with no --resume", got)
 	}
 	recs, err := svc.store.After(0, store.Filter{Session: id, Only: true}, 1000)
@@ -153,7 +153,7 @@ func TestReplayFallsBackToResumeForOldSessions(t *testing.T) {
 		t.Fatalf("%d %s, want 202 by resume", code, raw)
 	}
 	waitClosedN(t, svc, id, 2)
-	if got := strings.Join(readReport(t, report).Args, " "); got != "-p --output-format json --resume "+idA+" -- next" {
+	if got := argsOf(t, readReport(t, report).Args, id); got != "-p --output-format json --append-system-prompt HINT --resume "+idA+" -- next" {
 		t.Errorf("args %q, want --resume", got)
 	}
 	if c, from := continuityOf(t, svc, id, out["turn"].(string)); c != "resume" || from != "" {

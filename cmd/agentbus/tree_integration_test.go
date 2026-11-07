@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -150,5 +151,80 @@ func TestFinishedTurnKeepsItsTools(t *testing.T) {
 	defer syscall.Kill(pid, syscall.SIGKILL)
 	if !alive(pid) {
 		t.Fatal("a finished turn's tool was stopped")
+	}
+}
+
+// turnOf is the one turn of session, from GET /api/v0/turns.
+func turnOf(t *testing.T, svc *service, tok, session string) store.Turn {
+	t.Helper()
+	code, out := getAPI(t, svc, tok, "/api/v0/turns?session="+session)
+	var list store.TurnList
+	if err := json.Unmarshal([]byte(out), &list); code != http.StatusOK || err != nil || len(list.Turns) != 1 {
+		t.Fatalf("GET /turns: %d %s", code, out)
+	}
+	return list.Turns[0]
+}
+
+// POST /api/v0/turns/{id}/stop ends the turn's whole tree, a tool in a
+// session of its own included, and nothing else. Its session.closed and the
+// turn list say the person stopped it. A child that ignores SIGTERM gets
+// SIGKILL after the grace period. Once it has ended, a stop gets 409; a turn
+// no event names gets 404.
+func TestStopRouteEndsTheTurnsTree(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		ignoreTerm bool
+		want       int
+	}{{"agent stops on SIGTERM", false, 143}, {"agent ignores SIGTERM", true, 137}} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			svc := runService(t, home, nil, time.Second)
+			tok := readToken(t, home)
+			if tc.ignoreTerm {
+				t.Setenv("AGENTBUS_FAKE_IGNORE_TERM", "1")
+			}
+			id, agent, tool, other := startToolRun(t, svc, tok, true)
+			time.Sleep(600 * time.Millisecond) // the poll sees the tool through its parent
+			turn := turnOf(t, svc, tok, id).ID
+			// Two stops at once: both get 202, and the turn stops once.
+			stoppedAt := time.Now()
+			codes := make(chan int, 2)
+			for i := 0; i < 2; i++ {
+				go func() {
+					code, _, _ := postAPI(t, svc, tok, "/api/v0/turns/"+turn+"/stop", nil)
+					codes <- code
+				}()
+			}
+			for i := 0; i < 2; i++ {
+				if code := <-codes; code != http.StatusAccepted {
+					t.Errorf("stop: %d, want 202", code)
+				}
+			}
+			c := waitClosed(t, svc.store, id)
+			// One deadline for the whole tree: the tool, which ignores
+			// SIGTERM too (it inherits the agent's ignored signal), gets
+			// SIGKILL with the agent, not a second grace period later.
+			if took := time.Since(stoppedAt); took > 1700*time.Millisecond {
+				t.Errorf("the turn closed %s after the stop, want about the 1s grace", took)
+			}
+			if c.ExitCode == nil || *c.ExitCode != tc.want || !c.Stopped {
+				t.Fatalf("session.closed %+v, want exit %d and stopped", c, tc.want)
+			}
+			if alive(agent) || alive(tool) {
+				t.Fatalf("the agent (pid %d) or its tool (pid %d) outlived the stop", agent, tool)
+			}
+			if !alive(other) {
+				t.Fatal("a process outside the turn's tree was stopped")
+			}
+			if tr := turnOf(t, svc, tok, id); !tr.Stopped || tr.State != store.TurnFailed {
+				t.Errorf("listed turn %+v, want stopped and failed", tr)
+			}
+			if code, _, raw := postAPI(t, svc, tok, "/api/v0/turns/"+turn+"/stop", nil); code != http.StatusConflict {
+				t.Errorf("stop after it ended: %d %s, want 409", code, raw)
+			}
+			if code, _, raw := postAPI(t, svc, tok, "/api/v0/turns/t_0000000000000000/stop", nil); code != http.StatusNotFound {
+				t.Errorf("stop of an unknown turn: %d %s, want 404", code, raw)
+			}
+		})
 	}
 }

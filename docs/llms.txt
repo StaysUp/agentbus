@@ -44,7 +44,10 @@ It works on: `GET /api/v0/turns` (your session's turns; `session` defaults to yo
 `GET /api/v0/calls/{id}/pieces/{n}` for your session's calls. Anything else, every write
 included, answers 403. Your session id is the `<session>` in your base URL
 (`.../s/<session>/t/<turn>`, in `ANTHROPIC_BASE_URL` for claude), and every turn
-`GET /api/v0/turns` lists carries it.
+`GET /api/v0/turns` lists carries it. Every turn is also told this in its instructions (claude:
+`--append-system-prompt`; codex: `developer_instructions`), with its session id filled in: three
+lines, the same on every turn of the session, never added to the prompt. A codex turn gets none
+when the person set `developer_instructions` in codex's own config, so theirs is kept.
 
 ```sh
 curl -s -H "Authorization: Bearer $AGENTBUS_TOKEN" "$AGENTBUS_URL/api/v0/turns"
@@ -146,8 +149,8 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 
 The turns, newest first, with `store` and `seq` like the sessions snapshot, so you can stream from
 there. Each has `id`, `session`, `agent`, `folder`, `prompt`, `started`, `ended` (when done),
-`state` (`running`, `finished`, `failed`), `outcome`, `exit_code`, `usage`, `cost_usd` and
-`cost_complete`. A started turn's `state` comes from its agent's exit: 0 is `finished`, anything else
+`state` (`running`, `finished`, `failed`), `outcome`, `exit_code`, `stopped` (true when the
+person stopped it), `usage`, `cost_usd` and `cost_complete`. A started turn's `state` comes from its agent's exit: 0 is `finished`, anything else
 `failed`. `prompt` is the first 500 characters, with `prompt_truncated: true` when cut; the whole
 prompt is the `text` of the turn's `turn.started` in `/turns/{id}/events`. `reply` is the first 500
 characters of the reply to the turn's last model call, with `reply_truncated: true` when cut; it is
@@ -159,6 +162,22 @@ older turns send `before=<next_before>` until it is null.
 ```sh
 curl -s -H "Authorization: Bearer $TOKEN" "$B/api/v0/turns?session=abc"
 # {"store":"st_9f2c…","seq":1041,"turns":[{"id":"t_91ee…","session":"abc","state":"running",…}],"next_before":null}
+```
+
+### POST /api/v0/turns/{id}/stop
+
+Stop a running turn. Its agent and every process it started end, as when the service stops:
+SIGTERM to the whole tree, then SIGKILL after 5 seconds to what still runs. The reply is 202
+`{"id":"<session>","turn":"<turn>"}` at once; the turn's `session.closed`, with `stopped: true`,
+comes once the tree has ended, and `GET /api/v0/turns` then shows `stopped: true`. The session's
+next turn continues after it, and the model is told the person stopped it (`recovered_reason`
+ends with `the person stopped this turn`). A second stop while it is stopping gets 202 again and
+sends nothing more. 409 when the turn is not running (it ended, or this service did not start it),
+404 when no event carries the turn id. The main token only: a turn token gets 403. No body.
+
+```sh
+curl -s -X POST -H "Authorization: Bearer $TOKEN" "$B/api/v0/turns/t_91ee…/stop"
+# {"id":"abc","turn":"t_91ee…"}
 ```
 
 ### GET /api/v0/turns/{id}/events
@@ -247,7 +266,7 @@ fields depend on the kind. Ignore kinds and fields you do not know: v0 may add b
 | `tool.completed` | a tool's result reached the model | `tool_id`, `tool_output`, `tool_error` |
 | `turn.completed` | the turn ended | `outcome` (`finished`, `partial`, `refused`, `unknown`), `stop_reason` |
 | `session.opened` | a turn's agent started | `hold`, `agent`, `folder`, `turn` |
-| `session.closed` | a turn's agent exited | `hold`, `exit_code`, `resume_id`, `turn`, `unsettled` (its calls may not all be stored) |
+| `session.closed` | a turn's agent exited | `hold`, `exit_code`, `resume_id`, `turn`, `stopped` (the person stopped the turn), `unsettled` (its calls may not all be stored) |
 | `session.registered` | older stores only; nothing writes it now | `agent`, `folder` |
 | `events.dropped` | events were lost; those sessions' costs are incomplete | `dropped`, `sessions`, `all_sessions` |
 | `schema.unexpected` | the vendor sent a shape the adapter does not know | `unexpected` (`where`, `value` or `field`) |

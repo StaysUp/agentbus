@@ -107,7 +107,7 @@ environment is replaced.
 | `GET /api/v0/calls/<exchange>/pieces/<n>` | the same |
 
 Everything else gets **403** with a plain reason: every write (`POST /api/v0/turns`,
-`POST /api/v0/events`), the snapshot `GET /api/v0/sessions`, the stream `GET /api/v0/events`, and
+`POST /api/v0/turns/<id>/stop`, `POST /api/v0/events`), the snapshot `GET /api/v0/sessions`, the stream `GET /api/v0/events`, and
 `GET /api/v0/agents`. The description and the docs need no token at all.
 
 **It stops working when the turn's child process exits**, even if a process it left behind still
@@ -267,8 +267,28 @@ arrives later, as events of that session, **every one carrying `turn`** (below).
 - **The base URL reaches the agent through the child only**: Claude Code gets
   `ANTHROPIC_BASE_URL` in the child's environment; codex gets `-c openai_base_url=…`.
 - **What runs**, with the prompt always last, after `--`, so it is never read as a flag:
-  - claude: `claude -p --output-format json [--model M] -- <prompt>`
-  - codex: `codex -c openai_base_url=… exec --skip-git-repo-check --json --sandbox <mode> [-c sandbox_workspace_write.network_access=true] [--model M] -- <prompt>`
+  - claude: `claude -p --output-format json --append-system-prompt <hint> [--model M] -- <prompt>`
+  - codex: `codex -c openai_base_url=… exec --skip-git-repo-check --json --sandbox <mode> -c developer_instructions=<hint> [-c sandbox_workspace_write.network_access=true] [--model M] -- <prompt>`
+- **The hint tells the agent its history is there.** It is three lines, with the session id filled
+  in, the same on every turn of the session:
+
+  ```
+  Your session's earlier turns are stored by AgentBus. To look something up, run:
+  curl -s -H "Authorization: Bearer $AGENTBUS_TOKEN" "$AGENTBUS_URL/api/v0/sessions/<session>/search?q=<text>"
+  with <text> URL-encoded. Each hit's "read" is a path under $AGENTBUS_URL that returns the whole of what matched, with the same header.
+  ```
+
+  It goes through the agent's own instruction flag, never into the prompt: claude adds it at the
+  end of its system prompt, codex puts it in its developer message (as a TOML string, the way `-c`
+  reads values). Because it never changes within a session, own replay recognises each turn's
+  requests as before, and the vendor's prompt cache still holds the earlier turns (measured
+  2026-11-07, Claude Code 2.1.319 and codex-cli 0.164.0: turn 2 continued by replay with no
+  `replay.failed`, and a later turn ran the search when asked).
+  **If the person set `developer_instructions` for codex themselves**, as a top-level key in
+  `$CODEX_HOME/config.toml` (`~/.codex/config.toml` by default) or a `.codex/config.toml` in the
+  folder or any folder above it, a codex turn gets no hint: a `-c` value would replace theirs. The service
+  log then says `run.hint … left_out=codex_developer_instructions_set`. Only that key is looked
+  for; the file is never written.
 - **`read_only` is false unless the body says true.**
   - claude gets `--tools Read,Grep,Glob --allowedTools Read,Grep,Glob`. `--tools` is what removes
     every other tool. `--allowedTools` alone only approves tools without asking, and the person's
@@ -306,7 +326,8 @@ arrives later, as events of that session, **every one carrying `turn`** (below).
   **The service never watches process ids**: a process id can be reused by an unrelated process.
 - **At most 4 turns running at once.** A fifth gets 429.
 - **When the service stops**, it sends each running child SIGTERM, then SIGKILL after 5 seconds,
-  and stores each `session.closed` before the store closes. A run that started while the service
+  and stores each `session.closed` before the store closes. One turn is stopped the same way with
+  [`POST /api/v0/turns/<id>/stop`](#post-apiv0turnsidstop--stop-a-turn). A run that started while the service
   was stopping gets 503.
 - **The token never reaches the child**: not in its environment, its arguments or a log.
 - Refused with **400** and fixed wording:
@@ -535,6 +556,8 @@ the sessions snapshot.
     the service closed on restart, which has no `exit_code`). `ended` is that `session.closed`'s time.
   - any other turn (traffic pointed at the gateway by hand): `finished` once it has a
     `turn.completed`, else `running`. `ended` is its latest `turn.completed`.
+- `stopped` is `true` when the person stopped the turn with `POST /api/v0/turns/<id>/stop`, absent
+  otherwise.
 - `outcome` is the latest `turn.completed`'s, when there is one. A one-shot agent can end several
   model calls with `turn.completed`; `state` is what says the turn is over.
 - `usage`, `cost_usd` and `cost_complete` follow the session rules above, over the turn's own
@@ -543,6 +566,36 @@ the sessions snapshot.
 - Events with a turn id and no `turn.started` are not listed: such as a hashed id codex's compaction
   started mid-turn in hand-pointed traffic (see [Turns](#turns)). Their events are still in
   `/turns/<id>/events`.
+
+### `POST /api/v0/turns/<id>/stop` — stop a turn
+
+Stops one running turn, the way the service stops every turn when it shuts down. The reply is
+**202** `{"id":"abc","turn":"t_5d0c19a2e7b3f481"}` (`id` is the session), sent at once.
+
+- **What ends:** the turn's agent and every process it started. The service sends SIGTERM to the
+  agent's process group and to every process its tree counts (a tool in a process group or session
+  of its own included), then SIGKILL after 5 seconds to whatever still runs. Processes outside the
+  turn's tree are never signalled.
+- **What is recorded:** the turn's `session.closed` carries `stopped: true` with the agent's
+  `exit_code` (143 for SIGTERM, 137 for SIGKILL). It is stored once the tree has ended, as for any
+  turn. `GET /api/v0/turns` shows the turn with `stopped: true` and `state` `failed` (`finished`
+  only if the agent still exited 0). The service log gets `run.stop session=… turn=…`, and the
+  turn's `run.exit` line says `stopped=true`.
+- **What the next turn sees:** the session's next turn continues by own replay as after any turn
+  that did not finish: what the stopped turn did, an error result for each tool call that got no
+  result, then a note. The note and the next turn's `recovered_reason` end with `the person
+  stopped this turn` (in place of the exit code's words), such as `it stopped while a tool was
+  running; the person stopped this turn`. A turn stopped after its last reply had finished, before
+  its agent exited, continues as a finished turn, with no note: the model had done the work, and
+  the stop is on its `session.closed` and in the turn list.
+- **Twice:** a stop while the turn is already stopping gets **202** again and sends nothing more.
+  Two stops at once both get 202; the turn is stopped once.
+- **409** when the turn is not running: it has ended (its agent's process has exited, even if its
+  `session.closed` is not stored yet), or this service did not start it (a turn of traffic pointed
+  at the gateway by hand, or one the previous service process started).
+- **404** when no stored event carries the turn id, and when starting turns is turned off.
+- **The main token only.** A turn token gets **403**, its own turn included.
+- No body is read.
 
 ### `GET /api/v0/turns/<id>/events?store=<store>&after=<seq>&limit=<n>`
 
@@ -725,6 +778,7 @@ Refusing, holding and starting a review are planned for a later version.
 | kinds `session.opened`, `session.closed` | a run's child started, or exited; `hold` names that child; `turn` the turn it runs |
 | `exit_code` on `session.closed` | the child's exit code, or 128 plus the signal that ended it. A hold closed by a service restart has none |
 | `resume_id` on `session.closed` | when the child's stdout named the vendor's session: claude's `session_id`, codex's `thread_id`. What a next turn continues |
+| `stopped` on `session.closed` | the person stopped the turn with `POST /api/v0/turns/<id>/stop` while its agent ran. The next turn continues after it and is told so. Omitted when false |
 | `unsettled` on `session.closed` | the gateway could not confirm that every model call of the turn was stored (it gave up after 30 seconds, or a queue was full), or the service closed the turn at start because the previous service stopped without its usual shutdown. Own replay does not continue from such a turn. Omitted when false |
 | `continuity` on `turn.started` | on a session's next turn: `replay` (own replay, with `replay_from`) or `resume` (the vendor's `resume_id`). Absent on a first turn |
 | `replay_from` on `turn.started` | the session's earlier turn whose history the gateway replays in front of every model request of this turn (own replay, claude and codex). Absent on a first turn and on a turn continued by the vendor's resume |

@@ -150,24 +150,26 @@ type TurnEnd struct {
 	ExitCode     *int   // its exit code; nil when the service closed it at start, or it never started
 	Error        string // its error, such as "the agent could not be started"
 	ReplayFailed bool   // a replay.failed of the turn is stored
+	Stopped      bool   // the person stopped the turn (session.closed's stopped)
 }
 
 // TurnEnd reads how the turn's run ended: its newest session.closed.
 func (s *Store) TurnEnd(session, turn string) (TurnEnd, error) {
 	var e TurnEnd
-	var closed, failed int
+	var closed, failed, stopped int
 	var code sql.NullInt64
 	var msg sql.NullString
 	err := s.r.QueryRow(`SELECT
 		EXISTS(SELECT 1 FROM events WHERE session = ?1 AND turn = ?2 AND kind = 'session.closed'),
 		(SELECT json_extract(data, '$.exit_code') FROM events WHERE session = ?1 AND turn = ?2 AND kind = 'session.closed' ORDER BY seq DESC LIMIT 1),
 		(SELECT json_extract(data, '$.error') FROM events WHERE session = ?1 AND turn = ?2 AND kind = 'session.closed' ORDER BY seq DESC LIMIT 1),
-		EXISTS(SELECT 1 FROM events WHERE session = ?1 AND turn = ?2 AND kind = 'replay.failed')`,
-		session, turn).Scan(&closed, &code, &msg, &failed)
+		EXISTS(SELECT 1 FROM events WHERE session = ?1 AND turn = ?2 AND kind = 'replay.failed'),
+		COALESCE((SELECT json_extract(data, '$.stopped') FROM events WHERE session = ?1 AND turn = ?2 AND kind = 'session.closed' ORDER BY seq DESC LIMIT 1), 0)`,
+		session, turn).Scan(&closed, &code, &msg, &failed, &stopped)
 	if err != nil {
 		return e, fmt.Errorf("store: read a turn: %w", err)
 	}
-	e.Closed, e.ReplayFailed, e.Error = closed > 0, failed > 0, msg.String
+	e.Closed, e.ReplayFailed, e.Error, e.Stopped = closed > 0, failed > 0, msg.String, stopped > 0
 	if code.Valid {
 		c := int(code.Int64)
 		e.ExitCode = &c

@@ -89,13 +89,21 @@ func missingAgent(agent string) string {
 
 // turnArgs is what an agent runs, after the Launch's own arguments: a new
 // conversation when resumeID is empty, else the next turn of that one. The
-// prompt is always last, after "--", so it is never read as a flag. ok is false
-// for an agent the API cannot start.
-func turnArgs(agent, resumeID, model string, readOnly bool, prompt string) (args []string, ok bool) {
+// prompt is always last, after "--", so it is never read as a flag. hint, when
+// not empty, goes in as an instruction of the agent's own, never inside the
+// prompt (historyHint). ok is false for an agent the API cannot start.
+func turnArgs(agent, hint, resumeID, model string, readOnly bool, prompt string) (args []string, ok bool) {
 	switch agent {
 	case "claude":
 		// --output-format json prints one result object with the session_id.
 		a := []string{"-p", "--output-format", "json"}
+		// The hint goes at the end of Claude Code's system prompt. Own replay
+		// keeps each request's system prompt as the agent sent it, and the
+		// text is the same on every turn of the session, so the main thread
+		// is still recognised and the prompt cache still holds.
+		if hint != "" {
+			a = append(a, "--append-system-prompt", hint)
+		}
 		if resumeID != "" {
 			a = append(a, "--resume", resumeID)
 		}
@@ -130,6 +138,12 @@ func turnArgs(agent, resumeID, model string, readOnly bool, prompt string) (args
 		// turn's recorded sandbox policy follows it (codex-cli 0.164.0,
 		// 2026-11-05).
 		a = append(a, "--sandbox", codexSandbox(readOnly))
+		// The hint as codex's developer_instructions, which codex puts in a
+		// developer message of the context before the prompt; own replay
+		// keeps it from the session's first turn.
+		if hint != "" {
+			a = append(a, "-c", "developer_instructions="+tomlString(hint))
+		}
 		// A turn that may write may also reach the network, as Claude Code
 		// can under typical settings: the person's decision, 2026-11-06. Per
 		// turn, on the command line; ~/.codex/config.toml is never edited.
@@ -150,6 +164,90 @@ func turnArgs(agent, resumeID, model string, readOnly bool, prompt string) (args
 		return append(a, prompt), true
 	}
 	return nil, false
+}
+
+// historyHint tells the agent that its session's earlier turns are stored and
+// how to search them with its turn token (tokens.go). It names the session
+// and nothing that changes between turns, so it is the same text on every
+// turn of a session.
+func historyHint(session string) string {
+	return "Your session's earlier turns are stored by AgentBus. To look something up, run:\n" +
+		`curl -s -H "Authorization: Bearer $AGENTBUS_TOKEN" "$AGENTBUS_URL/api/v0/sessions/` + session + `/search?q=<text>"` + "\n" +
+		`with <text> URL-encoded. Each hit's "read" is a path under $AGENTBUS_URL that returns the whole of what matched, with the same header.`
+}
+
+// codexOwnInstructions says the person set codex's developer_instructions
+// themselves, in $CODEX_HOME/config.toml (~/.codex by default, read from env,
+// the child's environment) or in a .codex/config.toml of the folder or any
+// folder above it: codex reads a project's config from its root down to the
+// folder it runs in (codex-cli 0.164.0, 2026-11-07, found in review). Every
+// folder above is checked, so a file codex would skip still leaves the hint
+// out, which keeps the person's setting either way. A -c value
+// would replace theirs, so a turn then gets no hint: their own setting wins.
+// A top-level key is a line naming it before the first table header; nothing
+// else of the file is read, and the file is never written.
+func codexOwnInstructions(env []string, folder string) bool {
+	var home, codexHome string
+	for _, kv := range env {
+		k, v, _ := strings.Cut(kv, "=")
+		switch k {
+		case "HOME":
+			home = v
+		case "CODEX_HOME":
+			codexHome = v
+		}
+	}
+	if codexHome == "" && home != "" {
+		codexHome = filepath.Join(home, ".codex")
+	}
+	if codexHome != "" && topLevelKey(filepath.Join(codexHome, "config.toml"), "developer_instructions") {
+		return true
+	}
+	// Both the folder as given and its real path: codex walks the physical
+	// parents of a folder reached through a symlink (found in review).
+	starts := []string{filepath.Clean(folder)}
+	if real, err := filepath.EvalSymlinks(folder); err == nil && real != starts[0] {
+		starts = append(starts, real)
+	}
+	for _, start := range starts {
+		for dir := start; ; dir = filepath.Dir(dir) {
+			if topLevelKey(filepath.Join(dir, ".codex", "config.toml"), "developer_instructions") {
+				return true
+			}
+			if filepath.Dir(dir) == dir {
+				break
+			}
+		}
+	}
+	return false
+}
+
+// topLevelKey says a TOML file sets key before its first table header. A
+// missing or unreadable file sets nothing.
+func topLevelKey(path, key string) bool {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "[") {
+			return false
+		}
+		k, _, ok := strings.Cut(line, "=")
+		if ok && strings.Trim(strings.TrimSpace(k), `"'`) == key {
+			return true
+		}
+	}
+	return false
+}
+
+// tomlString quotes s as a TOML basic string, for a codex -c value, which
+// codex reads as TOML. A JSON string is one: TOML takes the same escapes,
+// \uXXXX among them.
+func tomlString(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 // codexSandbox is the value of codex's --sandbox for a turn: read-only when
@@ -179,7 +277,8 @@ type runs struct {
 	stopping bool
 	n        int             // slots taken, starting or running
 	busy     map[string]bool // sessions with a run or turn starting or running
-	live     map[*exec.Cmd]*procTree
+	live     map[*exec.Cmd]*liveTurn
+	byTurn   map[string]*liveTurn // the same runs, by turn id, for POST /api/v0/turns/{id}/stop
 	wg       sync.WaitGroup
 }
 
@@ -233,7 +332,7 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		a.next(w, body)
 		return
 	}
-	if _, ok := turnArgs(body.Agent, "", "", false, ""); !ok {
+	if _, ok := turnArgs(body.Agent, "", "", "", false, ""); !ok {
 		writeError(w, http.StatusBadRequest, "agent must be claude or codex")
 		return
 	}
@@ -292,7 +391,7 @@ func (a *API) next(w http.ResponseWriter, body TurnRequest) {
 		refuse(http.StatusConflict, turnRunning)
 		return
 	}
-	if _, ok := turnArgs(c.Agent, "", "", false, ""); !ok {
+	if _, ok := turnArgs(c.Agent, "", "", "", false, ""); !ok {
 		refuse(http.StatusConflict, "this session cannot be continued from here")
 		return
 	}
@@ -475,10 +574,16 @@ func (a *API) startTurn(w http.ResponseWriter, t turn) {
 		a.internal(w)
 		return
 	}
-	args, _ := turnArgs(t.agent, t.resumeID, t.model, t.readOnly, t.prompt)
-	all := append(append([]string{}, l.Args...), args...)
-	cmd := exec.Command(l.Path, all...)
+	cmd := exec.Command(l.Path)
 	cmd.Env = turnEnv(l.Env, os.Environ(), a.cfg.BaseURL, tok)
+	hint := historyHint(t.session)
+	if t.agent == "codex" && codexOwnInstructions(cmd.Env, t.folder) {
+		hint = ""
+		a.cfg.Logf("run.hint session=%s turn=%s left_out=codex_developer_instructions_set", t.session, turnID)
+	}
+	args, _ := turnArgs(t.agent, hint, t.resumeID, t.model, t.readOnly, t.prompt)
+	all := append(append([]string{}, l.Args...), args...)
+	cmd.Args = append([]string{l.Path}, all...)
 	cmd.Dir = t.folder
 	// Stdin stays nil: the child reads an empty stdin. Stdout is read for the
 	// vendor's session id, the only thing from it that reaches an event; the
@@ -531,7 +636,7 @@ func (a *API) startTurn(w http.ResponseWriter, t turn) {
 		return
 	}
 	cmd.Stdout, cmd.Stderr = pipes.outW, pipes.errW
-	code, msg, tree := a.runs.start(cmd)
+	code, msg, lt := a.runs.start(cmd, t.session, turnID)
 	pipes.closeWriters() // the child holds its own copies
 	if code != 0 {
 		pipes.closeReaders()
@@ -553,14 +658,22 @@ func (a *API) startTurn(w http.ResponseWriter, t turn) {
 		// its output is collected and before the turn's session.closed is
 		// stored: nothing of the turn may read after it.
 		a.turnTokens.revoke(tok)
+		// From here a stop is refused: the child has exited. stopped says a
+		// stop came before that.
+		stopped, killAt := lt.exit()
 		code := ExitCode(cmd.ProcessState, err)
 		ended := a.cfg.Now()
-		// A stopped child (a signal's exit code, or the service stopping)
-		// ends its whole tree: a tool it started must not outlive it
-		// (acceptance soak, 2026-11-06). A child that ended by itself keeps
-		// what it left running, as before.
+		tree := lt.tree
+		// A stopped child (a signal's exit code, a stop by the person, or the
+		// service stopping) ends its whole tree: a tool it started must not
+		// outlive it (acceptance soak, 2026-11-06). A child that ended by
+		// itself keeps what it left running, as before.
 		tree.exited()
-		if stoppedBySignal(code) || a.runs.isStopping() {
+		switch {
+		case stopped:
+			// The stop's own deadline: no second grace period.
+			tree.end(max(0, time.Until(killAt)))
+		case stoppedBySignal(code) || a.runs.isStopping():
 			tree.end(a.cfg.RunGrace)
 		}
 		// A process the child left behind can keep its output open; the
@@ -568,11 +681,11 @@ func (a *API) startTurn(w http.ResponseWriter, t turn) {
 		copied(OutputGrace)
 		a.keepOutput(t, all[:len(all)-1], code, ended, out)
 		unsettled := a.cfg.Settle != nil && !a.cfg.Settle(t.session, turnID)
-		a.cfg.Logf("%s.exit session=%s agent=%s turn=%s hold=%s exit=%d duration=%s", kind, t.session, t.agent, turnID, holdID,
-			code, ended.Sub(begun).Round(time.Millisecond))
+		a.cfg.Logf("%s.exit session=%s agent=%s turn=%s hold=%s exit=%d stopped=%t duration=%s", kind, t.session, t.agent, turnID, holdID,
+			code, stopped, ended.Sub(begun).Round(time.Millisecond))
 		_, _, _ = a.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.SessionClosed,
 			Time: ended.UTC(), Session: t.session, Turn: turnID, Hold: holdID, ExitCode: &code, ResumeID: ids.ID(),
-			Unsettled: unsettled})
+			Unsettled: unsettled, Stopped: stopped})
 		a.runs.release(cmd, t.session)
 	}()
 	writeJSON(w, http.StatusAccepted, Started{baseURL, t.session, turnID})
@@ -752,9 +865,9 @@ func (rs *runs) take(session string) (int, string) {
 	return 0, ""
 }
 
-// start starts cmd in a slot already taken, unless the service began
-// stopping, and starts tracking its process tree.
-func (rs *runs) start(cmd *exec.Cmd) (int, string, *procTree) {
+// start starts cmd, the child of turn in session, in a slot already taken,
+// unless the service began stopping, and starts tracking its process tree.
+func (rs *runs) start(cmd *exec.Cmd, session, turn string) (int, string, *liveTurn) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	if rs.stopping {
@@ -764,12 +877,14 @@ func (rs *runs) start(cmd *exec.Cmd) (int, string, *procTree) {
 		return http.StatusInternalServerError, "the agent could not be started", nil
 	}
 	if rs.live == nil {
-		rs.live = map[*exec.Cmd]*procTree{}
+		rs.live = map[*exec.Cmd]*liveTurn{}
+		rs.byTurn = map[string]*liveTurn{}
 	}
-	tree := newProcTree(cmd.Process.Pid)
-	rs.live[cmd] = tree
+	lt := &liveTurn{session: session, turn: turn, tree: newProcTree(cmd.Process.Pid), done: make(chan struct{})}
+	rs.live[cmd] = lt
+	rs.byTurn[turn] = lt
 	rs.wg.Add(1)
-	return 0, "", tree
+	return 0, "", lt
 }
 
 func (rs *runs) isStopping() bool {
@@ -786,6 +901,9 @@ func (rs *runs) release(cmd *exec.Cmd, session string) {
 	rs.n--
 	delete(rs.busy, session)
 	if cmd != nil {
+		if lt := rs.live[cmd]; lt != nil {
+			delete(rs.byTurn, lt.turn)
+		}
 		delete(rs.live, cmd)
 		rs.wg.Done()
 	}
@@ -796,8 +914,8 @@ func (rs *runs) release(cmd *exec.Cmd, session string) {
 func (rs *runs) signal(sig syscall.Signal) {
 	rs.mu.Lock()
 	trees := make([]*procTree, 0, len(rs.live))
-	for _, t := range rs.live {
-		trees = append(trees, t)
+	for _, lt := range rs.live {
+		trees = append(trees, lt.tree)
 	}
 	rs.mu.Unlock()
 	for _, t := range trees {

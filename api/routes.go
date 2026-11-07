@@ -192,6 +192,20 @@ var routes = []route{
 		replies: []reply{ok(200, Page{}, "A page."), badRequest, mismatch, storeFailed},
 		turn:    ownSessionQuery,
 		serve:   (*API).turnEvents},
+	{method: "POST", path: "/api/v0/turns/{id}/stop", op: "stopTurn",
+		idDoc:   "A turn id, as POST /api/v0/turns named it. Another shape gets 404.",
+		tag:     "Turns",
+		summary: "Stop a turn",
+		doc: "Stop a running turn: its agent and every process it started end, as when the service stops.\n\n" +
+			"The service sends SIGTERM to the turn's whole process tree, then SIGKILL after 5 seconds to what still runs. " +
+			"The reply comes at once; the turn's session.closed, with stopped true, comes once the tree has ended. " +
+			"The session's next turn continues after it, and the model is told that the person stopped it. " +
+			"A second stop while it is stopping gets 202 again and sends nothing more. Takes the main token only. No body is read.",
+		replies: []reply{ok(202, Stopping{}, "The turn is stopping."),
+			fail(404, "Starting turns is turned off in this service, or no event carries this turn id."),
+			fail(409, "The turn is not running: it has ended, or this service did not start it."),
+			storeFailed},
+		serve: (*API).stopTurn},
 	{method: "GET", path: "/api/v0/agents", op: "listAgents",
 		tag:     "Service",
 		summary: "List agents",

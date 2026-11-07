@@ -140,3 +140,26 @@ func TestTurnIncomplete(t *testing.T) {
 		}
 	}
 }
+
+// TurnEnd reads stopped from the turn's newest session.closed.
+func TestTurnEndStopped(t *testing.T) {
+	s := open(t, filepath.Join(t.TempDir(), "events.db"))
+	code := 143
+	for _, e := range []event.Event{
+		{ID: "c1", Kind: event.SessionClosed, Time: time.Unix(1, 0), Session: "s", Turn: "t_a", ExitCode: &code, Stopped: true},
+		{ID: "c2", Kind: event.SessionClosed, Time: time.Unix(2, 0), Session: "s", Turn: "t_b", ExitCode: &code},
+	} {
+		if _, _, err := s.Append(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if e, err := s.TurnEnd("s", "t_a"); err != nil || !e.Stopped || !e.Closed || *e.ExitCode != 143 {
+		t.Errorf("t_a %+v %v, want stopped", e, err)
+	}
+	if e, err := s.TurnEnd("s", "t_b"); err != nil || e.Stopped {
+		t.Errorf("t_b %+v %v, want not stopped", e, err)
+	}
+	if e, err := s.TurnEnd("s", "t_none"); err != nil || e.Stopped || e.Closed {
+		t.Errorf("t_none %+v %v", e, err)
+	}
+}

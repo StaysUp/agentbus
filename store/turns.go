@@ -52,6 +52,7 @@ type Turn struct {
 	State      string     `json:"state" doc:"running, finished or failed. A run's turn: running until its child exits, then finished on exit code 0, else failed. Another turn: finished once it has a turn.completed, else running."`
 	Outcome    string     `json:"outcome,omitempty" doc:"The outcome of the turn's latest turn.completed, when it has one."`
 	ExitCode   *int       `json:"exit_code,omitempty" doc:"A run's turn: its child's exit code, once it exited. Absent for a child the service closed on restart."`
+	Stopped    bool       `json:"stopped,omitempty" doc:"A run's turn: the person stopped it with POST /api/v0/turns/{id}/stop. Its state is failed unless its child still exited 0."`
 	// Usage, CostUSD and CostComplete follow Session's rules, over the
 	// turn's own model.responded events.
 	Usage        *event.Usage `json:"usage" doc:"Sums the turn's replies that carried usage. Null when none did: unknown, never zero."`
@@ -234,6 +235,7 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 			MAX(CASE WHEN kind = 'session.closed' THEN time END),
 			MAX(CASE WHEN kind = 'session.closed' THEN json_extract(data, '$.exit_code') END),
 			MAX(CASE WHEN kind = 'session.closed' THEN COALESCE(json_extract(data, '$.error'), '') END),
+			COALESCE(MAX(CASE WHEN kind = 'session.closed' THEN json_extract(data, '$.stopped') END), 0),
 			MAX(CASE WHEN kind = 'turn.completed' THEN time END),
 			(SELECT json_extract(e2.data, '$.outcome') FROM events e2
 				WHERE e2.turn = events.turn AND e2.session = events.session AND e2.kind = 'turn.completed' AND e2.seq <= ?
@@ -248,7 +250,7 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 	for rows.Next() {
 		var session, turn string
 		var withUsage, usageMissing, costMissing, opened, closed int
-		var outputIncomplete bool
+		var outputIncomplete, stopped bool
 		var u event.Usage
 		var cost float64
 		var closedAt, exitCode, completedAt sql.NullInt64
@@ -256,7 +258,7 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 		if err := rows.Scan(&session, &turn, &withUsage, &usageMissing,
 			&u.InputTokens, &u.OutputTokens, &u.CacheReadTokens, &u.CacheWriteTokens,
 			&u.CacheWrite5mTokens, &u.CacheWrite1hTokens, &outputIncomplete, &cost, &costMissing,
-			&opened, &closed, &closedAt, &exitCode, &closeErr, &completedAt, &outcome); err != nil {
+			&opened, &closed, &closedAt, &exitCode, &closeErr, &stopped, &completedAt, &outcome); err != nil {
 			return list, fmt.Errorf("store: read turns: %w", err)
 		}
 		i, ok := at[key{session, turn}]
@@ -279,6 +281,7 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 				c := int(exitCode.Int64)
 				t.ExitCode = &c
 			}
+			t.Stopped = stopped
 			t.State = TurnFailed
 			if exitCode.Valid && exitCode.Int64 == 0 && closeErr.String == "" {
 				t.State = TurnFinished

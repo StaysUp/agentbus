@@ -520,3 +520,18 @@ func TestCodexRecoverEndsOfAnUnkeptRequest(t *testing.T) {
 		t.Fatalf("a call with no output: %v, want ErrUnusable", err)
 	}
 }
+
+// A codex turn the person stopped: the same history, and the note says so.
+func TestCodexRecoverStoppedByThePerson(t *testing.T) {
+	src := newSource()
+	src.addTurn("t1", p1, "")
+	src.addCodexCall(t, "t1", "x1", t1Req(), completedCall, items(reasoning1, fnCall1))
+	src.setEnd("t1", store.TurnEnd{Closed: true, ExitCode: intp(143), Stopped: true})
+	plan, in := recoverAfter(t, src)
+	if plan.Turn != "t1" || plan.Failed != "it stopped while a tool was running; the person stopped this turn" {
+		t.Fatalf("plan %+v", plan)
+	}
+	if note := noteText(t, in[len(in)-2]); !strings.Contains(note, "the person stopped this turn") || strings.Contains(note, "signal 15") {
+		t.Fatalf("note: %s", note)
+	}
+}
