@@ -97,9 +97,21 @@ func (r *statusRecorder) errorText() string {
 
 // localError answers with the router's own fixed text and notes it for the
 // request's log line.
+//
+// Every caller refuses the request before reading its body. After the
+// handler the server still reads what is left of a short body, and a client
+// that withholds it would hold the connection and its goroutine with no
+// deadline. So the connection closes after the answer, and the read of the
+// body left behind has a short deadline.
 func localError(w http.ResponseWriter, msg string, code int) {
 	if r, ok := w.(*statusRecorder); ok {
 		r.local = msg
 	}
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(refusedBodyWait))
+	w.Header().Set("Connection", "close")
 	http.Error(w, msg, code)
 }
+
+// refusedBodyWait bounds how long a refused request's unread body is waited
+// for.
+const refusedBodyWait = time.Second

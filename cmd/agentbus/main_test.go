@@ -178,23 +178,6 @@ func TestTokenReadableByOthersRefused(t *testing.T) {
 	}
 }
 
-func TestListenLoopbackOnly(t *testing.T) {
-	for addr, ok := range map[string]bool{
-		"127.0.0.1:8787": true, "[::1]:8787": true,
-		"0.0.0.0:8787": false, ":8787": false, "localhost:8787": false, "192.168.1.2:8787": false,
-		// Loopback, but the Host check names only 127.0.0.1, localhost and [::1].
-		"127.0.0.2:8787": false, "127.1.2.3:8787": false, "[::ffff:127.0.0.2]:8787": false,
-	} {
-		if err := loopbackOnly(addr); (err == nil) != ok {
-			t.Errorf("%s: %v", addr, err)
-		}
-	}
-	up, _ := url.Parse("http://127.0.0.1:1")
-	if _, err := start(config{listen: "0.0.0.0:0", home: t.TempDir(), upstream: up, logf: t.Logf}); err == nil {
-		t.Fatal("started on 0.0.0.0")
-	}
-}
-
 func TestOriginFlag(t *testing.T) {
 	for o, ok := range map[string]bool{
 		"": true, "http://localhost:5173": true, "https://cockpit.example": true,

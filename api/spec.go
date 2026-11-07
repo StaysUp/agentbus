@@ -34,7 +34,8 @@ const specIntro = "agentbus runs on your machine, between your coding agents and
 	"- Every request but this document sends `Authorization: Bearer <token>`: the file `token` in the data folder. Never put it in a URL.\n" +
 	"- A turn started by `POST /api/v0/turns` gets its own token in `$AGENTBUS_TOKEN`, and this service's address in `$AGENTBUS_URL`. " +
 	"That token reads only its own session, on the operations that say so, and stops working when the turn's child exits.\n" +
-	"- The `Host` must be `127.0.0.1`, `localhost` or `[::1]` with the service's port, or the answer is 403.\n" +
+	"- On loopback, the default, the `Host` must be `127.0.0.1`, `localhost` or `[::1]` with the service's port, or the answer is 403. " +
+	"On another address, such as `0.0.0.0`, any `Host` is accepted and the token is the guard.\n" +
 	"- Start up with `GET /api/v0/sessions`, then stream `GET /api/v0/events` from its `store` and `seq`. Nothing is lost or counted twice.\n" +
 	"- A cursor is a `store` and a `seq`. A cursor of another store gets 409: start over from the snapshot.\n" +
 	"- v0 may change without notice. Ignore kinds and fields you do not know."
@@ -399,7 +400,7 @@ func describe() (*openapi3.T, error) {
 			}
 			op.Responses.Set(strconv.Itoa(r.status), resp)
 		}
-		forbidden := "The Host header does not name this service on 127.0.0.1, localhost or [::1]."
+		forbidden := "The service is on loopback and the Host header does not name it on 127.0.0.1, localhost or [::1]."
 		if !rt.public {
 			forbidden += " Or a turn token was sent where it may not read: another session, or an operation that does not take one."
 		}

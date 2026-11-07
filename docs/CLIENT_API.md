@@ -15,7 +15,7 @@ uses the same API.
 ## Where it listens
 
 The client API shares the gateway's address: `agentbus up` starts one service on
-`127.0.0.1:8787`.
+`127.0.0.1:8787`. `-listen` takes another IP and port, such as `0.0.0.0:8787` in a container.
 
 | Path | Who calls it | Sign-in |
 |---|---|---|
@@ -33,9 +33,20 @@ The client API shares the gateway's address: `agentbus up` starts one service on
   included: a `.` or `..` segment, an empty segment, a percent-encoded dot, slash or backslash, or a
   request line not in origin form. No agent or cockpit sends such paths; refusing them is what keeps
   the namespace rule above a simple prefix check. This 400 carries no CORS header.
-- **Loopback only**, like the gateway.
-- **A request whose `Host` is not `127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>` is refused** with 403.
-  That stops a web page on another site from reaching the API through DNS rebinding.
+- **Loopback by default.** `-listen` must be an IP address, not a name. Of the loopback addresses
+  only `127.0.0.1` and `[::1]` are accepted.
+- **On loopback, a request whose `Host` is not `127.0.0.1:<port>`, `localhost:<port>` or
+  `[::1]:<port>` is refused** with 403. That stops a web page on another site from reaching the API
+  through DNS rebinding.
+- **On any other address, such as `0.0.0.0`, every `Host` is accepted.** Other machines can reach
+  the service there, and send any `Host` they like, so the check would add nothing. The token on
+  every API request is the guard. There is no HTTPS: use an SSH tunnel or a private network.
+- **The agents' paths answer this machine only** when the service is not on loopback: a request to
+  a vendor path from another machine gets 403. The agents run on the service's machine, and
+  `AGENTBUS_URL` and the vendor base URL a turn gets are `http://127.0.0.1:<port>` on `0.0.0.0`.
+  "This machine" means the caller's address: loopback, or the address the request arrived on. A
+  reverse proxy on this machine makes every caller look local, so a proxy in front of the service
+  should pass on `/api` and `/docs` only.
 - **No cross-origin access by default.** `agentbus up -origin http://localhost:5173` allows one named
   origin, for a cockpit served from its own port. For that origin only:
   - an `OPTIONS` preflight to an `/api/` path is answered **without a token**, with
@@ -63,7 +74,8 @@ The client API shares the gateway's address: `agentbus up` starts one service on
 Every turn started by `POST /api/v0/turns` gets two variables in its child's environment, for claude
 and codex alike:
 
-- `AGENTBUS_URL`: the service's own address, such as `http://127.0.0.1:8787`.
+- `AGENTBUS_URL`: the service's own address, such as `http://127.0.0.1:8787`. On `0.0.0.0` it is
+  still `http://127.0.0.1:<port>`.
 - `AGENTBUS_TOKEN`: a token for **this turn only**, `abt_` and 64 hex characters (256 random bits).
 
 The main token never reaches a child. An `AGENTBUS_URL` or `AGENTBUS_TOKEN` in the service's own

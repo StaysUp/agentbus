@@ -146,6 +146,38 @@ func TestHostChecked(t *testing.T) {
 	}
 }
 
+// With AnyHost, the service is beyond loopback: any Host is served, and the
+// token is still needed on every API call.
+func TestAnyHost(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewUnstartedServer(nil)
+	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	a, err := New(Config{Store: st, Token: token, Port: port, AnyHost: true, BaseURL: "http://127.0.0.1:" + port})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Config.Handler = a
+	srv.Start()
+	defer func() { srv.Close(); st.Close() }()
+	for _, host := range []string{"127.0.0.1:" + port, "127.0.0.1:8788", "localhost:1", "[::1]", "myvm.example.com", "evil.example:" + port} {
+		for auth, want := range map[string]int{"Bearer " + token: 200, "": 401, "Bearer wrong": 401} {
+			r, _ := http.NewRequest("GET", srv.URL+"/api/v0/sessions", nil)
+			r.Host = host
+			if auth != "" {
+				r.Header.Set("Authorization", auth)
+			}
+			resp, body := do(t, r)
+			if resp.StatusCode != want {
+				t.Errorf("Host %q, auth sent %v: %d, want %d", host, auth != "", resp.StatusCode, want)
+			}
+			noToken(t, resp, body)
+		}
+	}
+}
+
 func TestPreflightOnlyForAllowedOrigin(t *testing.T) {
 	e := newEnv(t)
 	pre := func(o, path string) *http.Response {

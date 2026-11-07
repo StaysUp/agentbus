@@ -46,9 +46,14 @@ type Config struct {
 	// Token is the bearer token every request but an allowed preflight sends.
 	Token string
 	// Port is the port the service listens on. A request's Host must be
-	// 127.0.0.1:<Port> or localhost:<Port>.
+	// 127.0.0.1:<Port>, localhost:<Port> or [::1]:<Port>, unless AnyHost.
 	Port string
-	// BaseURL is the service's own address, such as http://127.0.0.1:8787.
+	// AnyHost turns the Host check off. Set it when the service listens on
+	// an address other machines can reach, such as 0.0.0.0. See ServeHTTP.
+	AnyHost bool
+	// BaseURL is the address a run's agent reaches the service on, such as
+	// http://127.0.0.1:8787. The agent runs on this machine, so it is a
+	// loopback address whenever the service listens on one.
 	// A run's session has the base URL BaseURL/s/<id>.
 	BaseURL string
 	// Origin is the one cross-origin caller allowed, such as
@@ -215,7 +220,16 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.ContentLength != 0 {
 		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(a.cfg.BodyTimeout))
 	}
-	if r.Host != a.hosts[0] && r.Host != a.hosts[1] && r.Host != a.hosts[2] {
+	// The Host check stops DNS rebinding: a web page whose name the attacker
+	// points at 127.0.0.1 reaches a loopback service from the person's own
+	// browser, and its requests carry the attacker's name in Host. It only
+	// helps while the service is on loopback. On 0.0.0.0 any machine that
+	// reaches the address can send any Host it likes, and behind a port
+	// publish or a proxy the Host names an address the service cannot know.
+	// There the token on every API request is the guard, and a rebound page
+	// does not have it. The docs and the description need no token either
+	// way; they hold nothing of the person's.
+	if !a.cfg.AnyHost && r.Host != a.hosts[0] && r.Host != a.hosts[1] && r.Host != a.hosts[2] {
 		// Before anything else, and without Allow-Origin: a page reaching
 		// us through DNS rebinding learns nothing.
 		writeError(w, http.StatusForbidden, "the Host header must name this service on 127.0.0.1, localhost or [::1]")

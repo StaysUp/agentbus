@@ -3,12 +3,14 @@
 //	agentbus up [-listen 127.0.0.1:8787] [-origin http://localhost:5173]
 //	agentbus version
 //
-// up starts one service on one loopback address. /api and /s/<session>/api go
+// up starts one service on one address, 127.0.0.1:8787 unless -listen says
+// another, such as 0.0.0.0:8787 in a container. /api and /s/<session>/api go
 // to the client API, which needs the token in the data folder. Vendor paths go
 // to that vendor's gateway, which forwards them and stores their events:
 // /backend-api/codex to chatgpt.com (codex), /v1 to api.anthropic.com (Claude
 // Code), each with or without /s/<session> in front. Any other path is
-// answered 404 here and sent nowhere.
+// answered 404 here and sent nowhere. The vendor paths answer only callers on
+// this machine, whatever the address.
 package main
 
 import (
@@ -68,7 +70,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	}
 	fl := flag.NewFlagSet("up", flag.ContinueOnError)
 	fl.SetOutput(stderr)
-	listen := fl.String("listen", "127.0.0.1:8787", "address to listen on; must be a loopback IP")
+	listen := fl.String("listen", "127.0.0.1:8787", "address to listen on, an IP and a port; 0.0.0.0:8787 is reachable from the network, with the token guarding the API")
 	origin := fl.String("origin", "", "the one cross-origin cockpit allowed, such as http://localhost:5173")
 	replayOn := fl.Bool("replay", true, "continue claude and codex sessions by own replay (the gateway sends the earlier turn's history); false uses the vendor's resume")
 	if err := fl.Parse(args[1:]); err != nil {
@@ -97,7 +99,11 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		own.Print(err)
 		return 1
 	}
-	own.Printf("listening on http://%s, data folder %s", svc.addr, home)
+	if svc.loopback {
+		own.Printf("listening on http://%s, data folder %s", svc.addr, home)
+	} else {
+		own.Printf("listening on http://%s, data folder %s; reachable from the network; the token guards the API; no HTTPS", svc.shown, home)
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
@@ -134,19 +140,22 @@ type config struct {
 }
 
 type service struct {
-	addr  string // the address listened on
-	srv   *http.Server
-	gws   []*gateway.Gateway
-	api   *api.API
-	store *store.Store
-	log   *logfile.Log // logs/service.log
-	done  chan error
-	once  sync.Once
+	addr     string // the address listened on
+	shown    string // -listen with its port filled in: Go reports 0.0.0.0 as [::]
+	loopback bool   // addr is 127.0.0.1 or [::1]
+	srv      *http.Server
+	gws      []*gateway.Gateway
+	api      *api.API
+	store    *store.Store
+	log      *logfile.Log // logs/service.log
+	done     chan error
+	once     sync.Once
 }
 
 // start opens the store, makes the token if needed, and serves.
 func start(c config) (*service, error) {
-	if err := loopbackOnly(c.listen); err != nil {
+	loopback, err := checkListen(c.listen)
+	if err != nil {
 		return nil, err
 	}
 	if err := checkOrigin(c.origin); err != nil {
@@ -231,7 +240,8 @@ func start(c config) (*service, error) {
 			return api.ReplayPlan{Turn: p.Turn, Failed: p.Failed}, nil
 		}
 	}
-	a, err := api.New(api.Config{Store: st, Token: token, Port: port, BaseURL: "http://" + addr, Origin: c.origin, ReplayBase: replayBase,
+	a, err := api.New(api.Config{Store: st, Token: token, Port: port, AnyHost: !loopback,
+		BaseURL: "http://" + agentAddr(ln.Addr()), Origin: c.origin, ReplayBase: replayBase,
 		Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace,
 		LookPath: c.lookPath, Environ: c.environ, Logf: svcLog.Printf,
 		RunLog: func(session string, data []byte) {
@@ -274,9 +284,10 @@ func start(c config) (*service, error) {
 		anth.SetRewriter(claudeReplay)
 		oai.SetRewriter(codexReplay)
 	}
-	s := &service{addr: addr, gws: []*gateway.Gateway{anth, oai}, api: a, store: st, log: svcLog, done: make(chan error, 1)}
+	host, _, _ := net.SplitHostPort(c.listen)
+	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: []*gateway.Gateway{anth, oai}, api: a, store: st, log: svcLog, done: make(chan error, 1)}
 	s.srv = &http.Server{
-		Handler:           logRequests(svcLog, route(a, anth, oai)),
+		Handler:           logRequests(svcLog, route(a, anth, oai, !loopback)),
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          log.New(io.Discard, "", 0),
 	}
@@ -315,7 +326,13 @@ func (k keeper) KeepReply(r body.Reply) error {
 // vendor path to its vendor's gateway. A request carries the agent's sign-in,
 // so it goes only to the vendor whose path it uses: a path no vendor claims is
 // answered 404 here and forwarded nowhere.
-func route(a *api.API, anthropicGW, openaiGW http.Handler) http.Handler {
+//
+// open is true when the service listens beyond loopback. The vendor paths
+// have no token: a request there carries its own sign-in to the vendor, and
+// a run's turn gets its session's history put in front. Only a run's agent
+// needs them, and it runs on this machine, so with open set they answer 403
+// to any other caller. Without it only this machine can connect anyway.
+func route(a *api.API, anthropicGW, openaiGW http.Handler, open bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !plainPath(r) {
 			localError(w, "agentbus: the path has a dot, empty or encoded segment and is refused", http.StatusBadRequest)
@@ -323,6 +340,10 @@ func route(a *api.API, anthropicGW, openaiGW http.Handler) http.Handler {
 		}
 		if api.Reserved(r) {
 			a.ServeHTTP(w, r)
+			return
+		}
+		if open && !thisMachine(r) {
+			localError(w, "agentbus: the model gateway answers callers on this machine only", http.StatusForbidden)
 			return
 		}
 		_, _, rest := gateway.SplitSession(r.URL.EscapedPath())
@@ -451,20 +472,66 @@ func loadToken(path string) (string, error) {
 	return tok, nil
 }
 
-// loopbackOnly keeps the service on this machine, as cmd/abgateway does, and
-// on an address the API's Host check accepts: 127.0.0.1 or [::1]. Only those
-// IP literals are accepted. Other loopback addresses such as 127.0.0.2 would
-// listen, but every API request would fail the Host check. A name such as
-// localhost resolves through the hosts file, which can map it to any address.
-func loopbackOnly(addr string) error {
+// checkListen accepts an IP literal and a port, or a port alone (":8787",
+// every address), and reports whether the address is loopback: 127.0.0.1 or
+// [::1], where the API checks the Host. A name such as localhost is refused:
+// it resolves through the hosts file, which can map it to any address. Other
+// loopback addresses such as 127.0.0.2 are refused as before: every API
+// request would fail the Host check there.
+func checkListen(addr string) (loopback bool, err error) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		return fmt.Errorf("-listen %q: %w", addr, err)
+		return false, fmt.Errorf("-listen %q is not an IP and a port such as 127.0.0.1:8787 or 0.0.0.0:8787", addr)
 	}
 	if host == "127.0.0.1" || host == "::1" {
-		return nil
+		return true, nil
 	}
-	return fmt.Errorf("-listen %q must use 127.0.0.1 or [::1]; the service stays on this machine", addr)
+	if host == "" {
+		return false, nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || strings.Contains(host, "%") {
+		return false, fmt.Errorf("-listen %q must use an IP address such as 127.0.0.1 or 0.0.0.0, not a name", addr)
+	}
+	if ip.IsLoopback() {
+		return false, fmt.Errorf("-listen %q: of the loopback addresses only 127.0.0.1 and [::1] are accepted", addr)
+	}
+	return false, nil
+}
+
+// agentAddr is the address a run's agent reaches the service on. The agent
+// runs on this machine, so on every address (0.0.0.0, [::] or none) it is
+// 127.0.0.1, and the agent's sign-in never crosses a network. Go listens on
+// both IPv4 and IPv6 there, and reports [::] even for 0.0.0.0. On one
+// address it is that address.
+func agentAddr(listened net.Addr) string {
+	host, port, _ := net.SplitHostPort(listened.String())
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
+}
+
+// thisMachine reports whether the request came from this machine: from a
+// loopback address, or from the very address it arrived on.
+func thisMachine(r *http.Request) bool {
+	peer, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(peer)
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() {
+		return true
+	}
+	local, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
+	if !ok {
+		return false
+	}
+	host, _, err := net.SplitHostPort(local.String())
+	return err == nil && ip.Equal(net.ParseIP(host))
 }
 
 // checkOrigin accepts an empty origin or one scheme://host[:port], as a browser

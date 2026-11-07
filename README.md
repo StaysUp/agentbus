@@ -94,7 +94,7 @@ Flags:
 
 | Flag | Default | What it does |
 |---|---|---|
-| `-listen` | `127.0.0.1:8787` | The address. Only `127.0.0.1` or `[::1]` are accepted. |
+| `-listen` | `127.0.0.1:8787` | The address: an IP and a port. `0.0.0.0:8787` can be reached from the network. |
 | `-origin` | none | The one browser origin allowed to call the API, such as `http://localhost:5173`. |
 | `-replay` | `true` | Continue Claude and codex sessions from AgentBus's own store. `false` uses the agent's own resume. |
 
@@ -109,6 +109,28 @@ agentbus up -origin http://localhost:5173
 ```
 
 Then follow the cockpit's README, and paste the token from the token file when it asks.
+
+### Reach it from another machine or a container
+
+By default the service answers this machine only. To reach it from elsewhere, listen on every
+address:
+
+```sh
+agentbus up -listen 0.0.0.0:8787 -origin http://localhost:5173
+```
+
+In Docker, run that inside the container and publish the port to your own machine only:
+
+```sh
+docker run -p 127.0.0.1:8788:8787 ...
+```
+
+The cockpit then uses `http://127.0.0.1:8788` with the same token.
+
+On `0.0.0.0` the service can be reached from the network. The token guards every API call. The
+agents' model traffic answers callers on the service's own machine only. There is no HTTPS, so
+across a network use an SSH tunnel or a private network. If you put a reverse proxy in front, pass
+on `/api` and `/docs` only: the proxy's requests look local to the service.
 
 ### 3. Or start a turn with curl
 
@@ -193,8 +215,8 @@ To clear it, stop `agentbus up` and delete the data folder. A new one is made on
   the earlier turns' history put in front of its requests. For codex, the earlier turn's thread id
   also replaces the new one, so the vendor reads the history from its cache.
 - **Adapters read a copy** of each body and turn the vendor's format into the same events.
-- **Everything stays on loopback.** The service carries your sign-in, and it never leaves your
-  machine.
+- **Your sign-in stays on your machine.** Agents reach the service on loopback, even when it
+  listens on `0.0.0.0`, and the model traffic answers callers on that machine only.
 
 | Path | What it is |
 |---|---|

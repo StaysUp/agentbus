@@ -12,12 +12,14 @@ words is `docs/CLIENT_API.md` in the repository.
 
 ## Address and token
 
-- The service listens on loopback only: `http://127.0.0.1:8787` by default (`agentbus up -listen`).
+- The service listens on `http://127.0.0.1:8787` by default. `agentbus up -listen 0.0.0.0:8787`
+  makes it reachable from the network, such as from outside a container.
 - Every request except `/api/v0/openapi.json` and `/docs` sends `Authorization: Bearer <token>`.
 - The token is the file `token` in the data folder: `$AGENTBUS_HOME`, else
   `$XDG_DATA_HOME/agentbus`, else `~/.local/share/agentbus`.
 - Never put the token in a URL. In a browser, read the stream with `fetch`, not `EventSource`.
-- The `Host` header must be `127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>`, or the answer is 403.
+- On loopback, the `Host` header must be `127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>`,
+  or the answer is 403. On another address any `Host` is accepted; the token is the guard.
 - Every error is JSON: `{"error": "..."}`, with fixed wording.
 
 ```sh

@@ -43,8 +43,9 @@ other projects' Go code. Go's own tools skip folders that start with `_`; gofmt 
   token, when shaped `name/version`, becomes the event's `client`.
 - **Error text is fixed wording.** Never pass Go's own error message on: it can quote a header. A
   binary that embeds the gateway sends Go's global logger nowhere, since net/http writes to it.
-- **The service listens on loopback only.** It carries the user's own sign-in, which never leaves
-  their machine.
+- **The sign-in never leaves the user's machine.** The service listens on loopback by default.
+  On another address, such as `0.0.0.0` in a container, the token guards the API, the agents are
+  still handed a loopback URL, and the vendor paths answer callers on this machine only.
 - **An adapter is per API format, not per agent.** Record a vendor quirk with the date and the
   agent version it was seen on, in a comment next to the code and in a test with that exact shape.
 - **Own replay covers both agents.** `replay/` continues Claude and codex sessions from the store.
