@@ -15,6 +15,8 @@
 
 </div>
 
+![AgentBus API docs](docs/assets/api-docs.png)
+
 AgentBus is a cross-vendor middleware framework for coding agents. It sits between your agents and every model vendor.
 
 ## Why
