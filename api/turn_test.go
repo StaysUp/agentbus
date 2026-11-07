@@ -252,6 +252,15 @@ func TestCodexOwnInstructions(t *testing.T) {
 	if !codexOwnInstructions([]string{"HOME=" + t.TempDir(), "CODEX_HOME=" + other}, folder) {
 		t.Error("$CODEX_HOME/config.toml not read")
 	}
+	// A relative CODEX_HOME is the turn folder's, never the service's.
+	rel := t.TempDir()
+	write(filepath.Join(rel, "state", "codex", "config.toml"), "developer_instructions = \"x\"\n")
+	if !codexOwnInstructions([]string{"HOME=" + t.TempDir(), "CODEX_HOME=state/codex"}, rel) {
+		t.Error("a relative CODEX_HOME not read against the turn's folder")
+	}
+	if codexOwnInstructions([]string{"HOME=" + t.TempDir(), "CODEX_HOME=state/codex"}, t.TempDir()) {
+		t.Error("a relative CODEX_HOME read against another folder")
+	}
 	sub := filepath.Join(folder, "a", "b")
 	if codexOwnInstructions([]string{"HOME=" + t.TempDir()}, sub) {
 		t.Fatal("own instructions with no project config")

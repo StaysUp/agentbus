@@ -200,6 +200,11 @@ func codexOwnInstructions(env []string, folder string) bool {
 	if codexHome == "" && home != "" {
 		codexHome = filepath.Join(home, ".codex")
 	}
+	// A relative CODEX_HOME is read by codex from its own working folder,
+	// the turn's folder, not from the service's (found in review).
+	if codexHome != "" && !filepath.IsAbs(codexHome) {
+		codexHome = filepath.Join(folder, codexHome)
+	}
 	if codexHome != "" && topLevelKey(filepath.Join(codexHome, "config.toml"), "developer_instructions") {
 		return true
 	}

@@ -285,7 +285,8 @@ arrives later, as events of that session, **every one carrying `turn`** (below).
   2026-11-07, Claude Code 2.1.319 and codex-cli 0.164.0: turn 2 continued by replay with no
   `replay.failed`, and a later turn ran the search when asked).
   **If the person set `developer_instructions` for codex themselves**, as a top-level key in
-  `$CODEX_HOME/config.toml` (`~/.codex/config.toml` by default) or a `.codex/config.toml` in the
+  `$CODEX_HOME/config.toml` (`~/.codex/config.toml` by default; a relative `CODEX_HOME` is read
+  from the turn's folder, as codex reads it) or a `.codex/config.toml` in the
   folder or any folder above it, a codex turn gets no hint: a `-c` value would replace theirs. The service
   log then says `run.hint … left_out=codex_developer_instructions_set`. Only that key is looked
   for; the file is never written.
