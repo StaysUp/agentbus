@@ -205,8 +205,8 @@ The contract in words is [docs/CLIENT_API.md](docs/CLIENT_API.md).
 
 ## Your data
 
-Everything stays on your machine, in the data folder: `events.db` (a SQLite file), `token` and
-`logs/`. Nothing is sent anywhere except the model calls themselves, to the vendor your agent
+Everything stays on your machine, in the data folder: `events.db` (a SQLite file), `token`,
+`permissions.toml` and `logs/`. Nothing is sent anywhere except the model calls themselves, to the vendor your agent
 already uses.
 
 `events.db` holds each turn's model requests and replies, so it holds whatever your agent read or
@@ -214,6 +214,25 @@ printed during a turn, such as a file it opened or a command's output. It is not
 is kept until you remove it. Request headers, including your sign-in, are never stored.
 
 To clear it, stop `agentbus up` and delete the data folder. A new one is made on the next start.
+
+## Permissions
+
+A turn runs with no person to click "allow". So a claude turn is refused anything that needs a
+"may I?", such as `go test` or reading a folder outside its own. `permissions.toml` in the data
+folder says what turns may do:
+
+```toml
+read_folders = ["~/.agents"]           # claude gets --add-dir
+allow = ["go test", "make test"]       # claude gets --allowedTools Bash(go test:*),...
+forbid = ["git push", "git checkout"]  # claude gets --disallowedTools Bash(git push:*),...
+```
+
+`agentbus up` makes it with empty lists, which change nothing. Every turn reads it when it starts,
+so an edit applies to the next turn. A broken file stops the turn with the line and the problem.
+A `read_only` turn stays read-only.
+
+codex gets nothing from it yet. Its sandbox can read every folder already. It cannot be stopped from
+a forbidden command until the gateway guard lands. Details: [docs/CLIENT_API.md](docs/CLIENT_API.md#permissionstoml).
 
 ## How it works
 

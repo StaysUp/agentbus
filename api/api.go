@@ -91,6 +91,9 @@ type Config struct {
 	// RunGrace is how long StopRuns waits after SIGTERM before SIGKILL. Zero
 	// means 5 seconds.
 	RunGrace time.Duration
+	// Permissions is the path of permissions.toml (permissions.go), read at
+	// the start of every turn. Empty gives every turn empty lists.
+	Permissions string
 
 	// LookPath finds an agent's binary for GET /api/v0/agents, the same
 	// lookup runs use. Environ is the environment its --version and status

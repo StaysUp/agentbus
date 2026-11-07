@@ -133,7 +133,52 @@ already has (`ANTHROPIC_BASE_URL` for claude). `GET /api/v0/turns` without `sess
 
 `$AGENTBUS_HOME` if set, otherwise `$XDG_DATA_HOME/agentbus`, otherwise `~/.local/share/agentbus`.
 It holds `events.db` (the store: events, and since this version every model request's body, see
-`GET /api/v0/calls/<exchange>/context`), `token`, `logs/` (below), and `events.db.lock`, which one service holds while it runs, so a second `agentbus up` on the same folder refuses to start. No version in the name.
+`GET /api/v0/calls/<exchange>/context`), `token`, `permissions.toml` (below), `logs/` (below), and `events.db.lock`, which one service holds while it runs, so a second `agentbus up` on the same folder refuses to start. No version in the name.
+
+### permissions.toml
+
+What a turn may do without a person to ask. A turn has no one to click "allow", so without this
+file a claude turn is refused anything its settings would ask about, such as running `go test`.
+
+```toml
+read_folders = ["~/.agents", "~/Sites/agentbus-notes"]
+allow = ["go test", "make test", "git commit"]
+forbid = ["git push", "git checkout"]
+```
+
+- `agentbus up` makes the file when it is missing, mode 0600, with empty lists and examples in
+  comments. It never writes an existing file.
+- **Every turn reads it when it starts.** An edit applies to the next turn. No restart.
+- Empty lists change nothing. A missing file is empty lists.
+- **A broken file stops the turn.** The answer is 400, it names `permissions.toml` and the problem,
+  with the line when there is one, and nothing is stored. A turn never runs without the policy.
+- `read_folders`: absolute paths, or starting with `~/`. Each must be an existing folder.
+- `allow` and `forbid`: a command and its first arguments, such as `go test`. No comma, no
+  parenthesis, no leading `-`.
+
+What each list becomes:
+
+| List | claude | codex |
+|---|---|---|
+| `read_folders` | one `--add-dir <folder>` each | nothing: codex's sandbox reads every folder already |
+| `allow` | `--allowedTools Bash(<cmd>:*),…` | nothing yet |
+| `forbid` | `--disallowedTools Bash(<cmd>:*),…` | nothing yet |
+
+- A `read_only` turn stays read-only: `allow` does not widen it. `read_folders` and `forbid` still
+  apply.
+- A `forbid` wins over an `allow`, and over the person's own Claude Code settings.
+- The flags are in the turn's header line in `logs/runs/<session>.log` (below), so a turn shows
+  what it was given.
+
+**The limits, plainly:**
+
+- **codex cannot be stopped from a forbidden command yet.** It has no per-command flag. A guard in
+  the gateway will do it in a later step.
+- codex's own `--add-dir` makes a folder writable, which `read_folders` never means, so it is not
+  used (codex-cli 0.164.0).
+- `forbid` stops claude's shell from running the command. It does not stop the same thing done
+  another way, such as reading `.env` with the Read tool.
+- Nothing asks a person yet. A command on neither list is refused when claude's settings would ask.
 
 **The store keeps full request bodies.** A model request carries everything the agent sent: file
 contents, tool output, the memory files in its system prompt. Much of it already reached the store
@@ -300,7 +345,8 @@ arrives later, as events of that session, **every one carrying `turn`** (below).
     own settings could approve more.
   - codex gets `--sandbox read-only`.
   - With `read_only` false or absent, claude keeps its own permission handling. No flag bypasses
-    it, so a headless run is refused anything its settings would ask the person about.
+    it, so a headless run is refused anything its settings would ask the person about, except
+    what `permissions.toml` allows ([The data folder](#the-data-folder)).
   - With `read_only` false or absent, codex gets `--sandbox workspace-write -c
     sandbox_workspace_write.network_access=true`: it can edit the folder (and its temporary
     folders) and reach the network, as Claude Code can under typical settings, so it can call the

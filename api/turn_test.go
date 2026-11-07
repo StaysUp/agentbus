@@ -206,11 +206,11 @@ func TestHistoryHint(t *testing.T) {
 		t.Fatalf("hint\n got %q\nwant %q", got, want)
 	}
 	for _, resume := range []string{"", "r-1"} {
-		a, _ := turnArgs("claude", historyHint("abc"), resume, "", false, "hi")
+		a, _ := turnArgs("claude", historyHint("abc"), resume, "", false, Permissions{}, "hi")
 		if i := slices.Index(a, "--append-system-prompt"); i < 0 || a[i+1] != want || a[len(a)-1] != "hi" {
 			t.Errorf("claude resume %q: %q", resume, a)
 		}
-		a, _ = turnArgs("codex", historyHint("abc"), resume, "", false, "hi")
+		a, _ = turnArgs("codex", historyHint("abc"), resume, "", false, Permissions{}, "hi")
 		if i := slices.Index(a, "developer_instructions="+tomlString(want)); i < 1 || a[i-1] != "-c" || a[len(a)-1] != "hi" {
 			t.Errorf("codex resume %q: %q", resume, a)
 		}
@@ -284,7 +284,7 @@ func TestCodexOwnInstructions(t *testing.T) {
 	if !codexOwnInstructions([]string{"HOME=" + t.TempDir()}, link) {
 		t.Error("a symlinked folder's real parents not read")
 	}
-	if a, _ := turnArgs("codex", "", "", "", false, "hi"); slices.ContainsFunc(a, func(s string) bool { return strings.HasPrefix(s, "developer_instructions=") }) {
+	if a, _ := turnArgs("codex", "", "", "", false, Permissions{}, "hi"); slices.ContainsFunc(a, func(s string) bool { return strings.HasPrefix(s, "developer_instructions=") }) {
 		t.Errorf("no hint, yet %q", a)
 	}
 }

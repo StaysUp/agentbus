@@ -176,6 +176,10 @@ func start(c config) (*service, error) {
 	if err != nil {
 		return nil, err
 	}
+	permissions := filepath.Join(c.home, api.PermissionsFile)
+	if err := makePermissions(permissions); err != nil {
+		return nil, err
+	}
 	st, err := store.Open(filepath.Join(c.home, "events.db"))
 	if err != nil {
 		return nil, err
@@ -242,7 +246,7 @@ func start(c config) (*service, error) {
 		}
 	}
 	a, err := api.New(api.Config{Store: st, Token: token, Port: port, AnyHost: !loopback,
-		BaseURL: "http://" + agentAddr(ln.Addr()), Origin: c.origin, ReplayBase: replayBase,
+		BaseURL: "http://" + agentAddr(ln.Addr()), Origin: c.origin, ReplayBase: replayBase, Permissions: permissions,
 		Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace,
 		LookPath: c.lookPath, Environ: c.environ, Logf: svcLog.Printf, Build: build(debug.ReadBuildInfo()),
 		RunLog: func(session string, data []byte) {
@@ -481,6 +485,27 @@ func loadToken(path string) (string, error) {
 		return "", fmt.Errorf("the token file %s is empty; delete it to make a new one", path)
 	}
 	return tok, nil
+}
+
+// makePermissions writes the starter permissions.toml, with empty lists and
+// examples in comments, when there is none, with mode 0600. An existing file
+// is never written: it is the person's. Each turn reads it (api.Permissions).
+func makePermissions(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if errors.Is(err, fs.ErrExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("the permissions file %s could not be made", path)
+	}
+	if _, err := f.WriteString(api.PermissionsStarter); err != nil {
+		f.Close()
+		return fmt.Errorf("the permissions file %s could not be written", path)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("the permissions file %s could not be written", path)
+	}
+	return nil
 }
 
 // defaultPort is the port -listen uses when it names an IP alone.

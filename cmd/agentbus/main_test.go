@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/staysup/agentbus/api"
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/store"
 )
@@ -386,5 +387,34 @@ func TestStoredReplyCarriesCost(t *testing.T) {
 			t.Fatal("no model.responded stored")
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// permissions.toml is made once, mode 0600, with the starter's empty lists,
+// and an existing file is never written again.
+func TestMakePermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), api.PermissionsFile)
+	if err := makePermissions(path); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("mode %v, want 0600", info.Mode().Perm())
+	}
+	if b, _ := os.ReadFile(path); string(b) != api.PermissionsStarter {
+		t.Errorf("starter %q", b)
+	}
+	const mine = "allow = [\"go test\"]\n"
+	if err := os.WriteFile(path, []byte(mine), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := makePermissions(path); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(path); string(b) != mine {
+		t.Errorf("an existing file was written: %q", b)
 	}
 }

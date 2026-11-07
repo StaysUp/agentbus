@@ -91,8 +91,9 @@ func missingAgent(agent string) string {
 // conversation when resumeID is empty, else the next turn of that one. The
 // prompt is always last, after "--", so it is never read as a flag. hint, when
 // not empty, goes in as an instruction of the agent's own, never inside the
-// prompt (historyHint). ok is false for an agent the API cannot start.
-func turnArgs(agent, hint, resumeID, model string, readOnly bool, prompt string) (args []string, ok bool) {
+// prompt (historyHint). perm is the person's permissions.toml (permissions.go).
+// ok is false for an agent the API cannot start.
+func turnArgs(agent, hint, resumeID, model string, readOnly bool, perm Permissions, prompt string) (args []string, ok bool) {
 	switch agent {
 	case "claude":
 		// --output-format json prints one result object with the session_id.
@@ -107,17 +108,34 @@ func turnArgs(agent, hint, resumeID, model string, readOnly bool, prompt string)
 		if resumeID != "" {
 			a = append(a, "--resume", resumeID)
 		}
+		// read_folders: one --add-dir per folder. The flag takes several
+		// values, so each is followed by another flag or by "--". The tools
+		// may read there without asking (Claude Code 2.1.319, 2026-11-07,
+		// checked live: a Read outside the folder was refused without it).
+		for _, f := range perm.ReadFolders {
+			a = append(a, "--add-dir", f)
+		}
 		if readOnly {
 			// Claude Code's --tools and --allowedTools take several values,
 			// so each gets one comma-joined value (Claude Code 2.1.318,
 			// 2026-11-05). --tools removes every other tool. --allowedTools
 			// only approves without asking, and the person's settings could
-			// approve more.
+			// approve more. allow never widens a read-only turn.
 			a = append(a, "--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob")
 			// --tools restricts built-in tools only: an MCP server from the
 			// person's settings could still write. --strict-mcp-config with
 			// no --mcp-config loads no MCP server at all.
 			a = append(a, "--strict-mcp-config")
+		} else if len(perm.Allow) > 0 {
+			// allow: each command runs without asking, as Bash(<cmd>:*),
+			// comma-joined into one value (Claude Code 2.1.319, 2026-11-07,
+			// checked live with a rule that has a space in it).
+			a = append(a, "--allowedTools", bashRules(perm.Allow))
+		}
+		// forbid: never run, even when allow or the person's settings
+		// approve it; a deny wins over an allow (checked live, 2026-11-07).
+		if len(perm.Forbid) > 0 {
+			a = append(a, "--disallowedTools", bashRules(perm.Forbid))
 		}
 		if model != "" {
 			a = append(a, "--model", model)
@@ -150,6 +168,13 @@ func turnArgs(agent, hint, resumeID, model string, readOnly bool, prompt string)
 		if !readOnly {
 			a = append(a, codexNetwork()...)
 		}
+		// permissions.toml gives codex nothing yet. read_folders: codex's
+		// sandbox reads every folder already, in read-only and in
+		// workspace-write, and its --add-dir makes a folder writable, which
+		// read_folders never means (codex-cli 0.164.0, 2026-11-07, checked
+		// with codex sandbox). allow and forbid: codex has no per-command
+		// flag; forbid for codex will come from the gateway guard, a later
+		// step.
 		if resumeID != "" {
 			a = append(a, "resume", "--json")
 		}
@@ -337,7 +362,7 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		a.next(w, body)
 		return
 	}
-	if _, ok := turnArgs(body.Agent, "", "", "", false, ""); !ok {
+	if _, ok := turnArgs(body.Agent, "", "", "", false, Permissions{}, ""); !ok {
 		writeError(w, http.StatusBadRequest, "agent must be claude or codex")
 		return
 	}
@@ -396,7 +421,7 @@ func (a *API) next(w http.ResponseWriter, body TurnRequest) {
 		refuse(http.StatusConflict, turnRunning)
 		return
 	}
-	if _, ok := turnArgs(c.Agent, "", "", "", false, ""); !ok {
+	if _, ok := turnArgs(c.Agent, "", "", "", false, Permissions{}, ""); !ok {
 		refuse(http.StatusConflict, "this session cannot be continued from here")
 		return
 	}
@@ -553,6 +578,15 @@ func (a *API) startTurn(w http.ResponseWriter, t turn) {
 	}()
 	// The same shape as the gateway's own turn ids, t_ and 16 hex characters,
 	// so a client sees one shape. Random, so two turns never share one.
+	// The person's permissions.toml, read for every turn, before anything is
+	// stored. A broken file stops the turn: it never runs without the policy.
+	perm, err := a.permissions()
+	if err != nil {
+		a.cfg.Logf("run.refused agent=%s reason=permissions_file error=%q", t.agent, err.Error())
+		writeError(w, http.StatusBadRequest, "the permissions file "+PermissionsFile+" in the data folder is broken, so the turn did not start: "+
+			err.Error()+". Fix the file, or delete it for empty lists, and send the turn again.")
+		return
+	}
 	turnID := "t_" + randomHex(8)
 	baseURL := a.cfg.BaseURL + "/s/" + t.session + "/t/" + turnID
 	l, err := a.cfg.Wire(t.agent, baseURL)
@@ -586,7 +620,7 @@ func (a *API) startTurn(w http.ResponseWriter, t turn) {
 		hint = ""
 		a.cfg.Logf("run.hint session=%s turn=%s left_out=codex_developer_instructions_set", t.session, turnID)
 	}
-	args, _ := turnArgs(t.agent, hint, t.resumeID, t.model, t.readOnly, t.prompt)
+	args, _ := turnArgs(t.agent, hint, t.resumeID, t.model, t.readOnly, perm, t.prompt)
 	all := append(append([]string{}, l.Args...), args...)
 	cmd.Args = append([]string{l.Path}, all...)
 	cmd.Dir = t.folder

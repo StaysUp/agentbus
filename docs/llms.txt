@@ -18,6 +18,12 @@ words is `docs/CLIENT_API.md` in the repository.
 - `GET /` redirects to `/docs`.
 - The token is the file `token` in the data folder: `$AGENTBUS_HOME`, else
   `$XDG_DATA_HOME/agentbus`, else `~/.local/share/agentbus`.
+- `permissions.toml` in the data folder has three lists: `read_folders`, `allow` and `forbid`.
+  Every turn reads it when it starts. claude gets `--add-dir <folder>` per folder,
+  `--allowedTools Bash(<cmd>:*),…` and `--disallowedTools Bash(<cmd>:*),…`. A `read_only` turn
+  ignores `allow`. codex gets nothing from it yet: its sandbox reads every folder, and a forbidden
+  command is not stopped until the gateway guard lands. A broken file answers 400 and nothing is
+  stored. A missing file is empty lists.
 - Never put the token in a URL. In a browser, read the stream with `fetch`, not `EventSource`.
 - A browser page from any origin may call the API: CORS answers `Access-Control-Allow-Origin: *`
   and allows the `Authorization` header. No cookies are used; the token is the guard.

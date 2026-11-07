@@ -30,3 +30,10 @@ entry, and run the tests: `api/docs_test.go` checks that `/docs` serves the file
   `github.com/go-openapi/jsonpointer` and `github.com/go-openapi/swag/jsonname` (Apache 2.0),
   `github.com/oasdiff/yaml` and `github.com/oasdiff/yaml3` (MIT and Apache 2.0). Tests alone use
   `github.com/gorilla/mux` (BSD 3-Clause).
+
+### BurntSushi/toml v1.5.0
+
+- What: reads `permissions.toml` in the data folder at the start of every turn
+  (`api/permissions.go`), with the line of a parse error for the reply.
+- Source: https://github.com/BurntSushi/toml
+- License: MIT, Copyright (c) 2013 TOML authors.
