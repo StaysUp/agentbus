@@ -47,17 +47,31 @@ The client API shares the gateway's address: `agentbus up` starts one service on
   "This machine" means the caller's address: loopback, or the address the request arrived on. A
   reverse proxy on this machine makes every caller look local, so a proxy in front of the service
   should pass on `/api` and `/docs` only.
-- **No cross-origin access by default.** `agentbus up -origin http://localhost:5173` allows one named
-  origin, for a cockpit served from its own port. For that origin only:
-  - an `OPTIONS` preflight to an `/api/` path is answered **without a token**, with
-    `Access-Control-Allow-Origin: <origin>`, `Access-Control-Allow-Methods: GET, POST`,
+- **Any browser origin may call the API by default.** CORS mainly guards cookies, and AgentBus has
+  none: every API call needs the token in the `Authorization` header, which a page from another
+  origin does not have. So with no `-origin`:
+  - an `OPTIONS` preflight to an `/api/` path from any origin is answered `204` **without a token**,
+    with `Access-Control-Allow-Origin: *`, `Access-Control-Allow-Methods: GET, POST`,
     `Access-Control-Allow-Headers: Authorization, Content-Type`. A preflight carries no token, so
-    requiring one would stop every browser request before it starts.
-  - the real request still needs the token.
-  - **every response to that origin carries `Access-Control-Allow-Origin: <origin>`**, errors
-    included (401, 404, 409), and streams too. Without it the browser hides the response from the
-    cockpit even after a successful preflight.
-  - a preflight from any other origin gets 403.
+    requiring one would stop every browser request before it starts. `Authorization` is named
+    because `*` in `Allow-Headers` does not cover it.
+  - the real request still needs the token. A missing or wrong one gets 401.
+  - **every response carries `Access-Control-Allow-Origin: *`**, errors included (401, 404, 409),
+    and streams too. There is no `Access-Control-Allow-Credentials`: a browser client sends no
+    cookies, and does not need to.
+  - `*`, not the request's own `Origin` echoed back: the answer is the same for every origin, so
+    it needs no `Vary` and caches cleanly.
+- **`-origin` is an optional lock.** `agentbus up -origin http://localhost:5173` allows that one
+  origin only:
+  - its preflight to an `/api/` path is answered as above, with `Access-Control-Allow-Origin:
+    <origin>` and `Vary: Origin`.
+  - every response to that origin carries `Access-Control-Allow-Origin: <origin>`, errors and
+    streams included. Without it the browser hides the response even after a successful preflight.
+  - a preflight from any other origin gets 403, and responses to it carry no
+    `Access-Control-Allow-Origin`.
+- A preflight to a path outside `/api/` gets 403 in both modes.
+- **The model gateway paths** (`/v1`, `/backend-api/codex`) send no CORS headers. Only agents on
+  this machine call them, never a browser.
 
 ## The token
 
@@ -689,8 +703,8 @@ for the call's kept reply.
   application/json`, so their SHA-256 is the piece's hash. The headers describe it:
   `X-Piece-Kind`, `X-Piece-Hash`, `X-Piece-Count` (the request's number of pieces), and
   `X-Piece-Label` when the label is printable ASCII.
-  With `-origin` set, a reply to that origin also carries `Access-Control-Expose-Headers` naming
-  them, so a browser cockpit can read them.
+  A reply to an allowed origin (any origin, unless `-origin` locks it) also carries
+  `Access-Control-Expose-Headers` naming them, so a browser cockpit can read them.
 - **404** when no body is stored for the call, when it has no piece `n`, or, for `reply`, when no
   reply is kept. An `n` that is not a whole number without leading zeros, or `reply`, gets the
   unknown-path 404.

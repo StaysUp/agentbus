@@ -94,21 +94,21 @@ Flags:
 
 | Flag | Default | What it does |
 |---|---|---|
-| `-listen` | `127.0.0.1:8787` | The address: an IP and a port. `0.0.0.0:8787` can be reached from the network. |
-| `-origin` | none | The one browser origin allowed to call the API, such as `http://localhost:5173`. |
+| `-listen` | `127.0.0.1:8787` | The address: an IP, with or without a port. With no port it uses 8787. `0.0.0.0` can be reached from the network. |
+| `-origin` | none | An optional lock: allow only this browser origin, such as `http://localhost:5173`. Without it any origin may call the API. |
 | `-replay` | `true` | Continue Claude and codex sessions from AgentBus's own store. `false` uses the agent's own resume. |
 
 ### 2. Open a cockpit
 
 A cockpit is any client of the API. The browser cockpit is in its own repository,
-[staysup/agentbus-cockpit](https://github.com/staysup/agentbus-cockpit). It runs on
-`http://localhost:5173`, so start the service with that origin allowed:
+[staysup/agentbus-cockpit](https://github.com/staysup/agentbus-cockpit). It works with the plain
+`agentbus up` from step 1. Follow the cockpit's README, and paste the token from the token file
+when it asks.
 
-```sh
-agentbus up -origin http://localhost:5173
-```
-
-Then follow the cockpit's README, and paste the token from the token file when it asks.
+A page from any origin may call the API, because every call needs the token in a header and a
+foreign page does not have it. AgentBus uses no cookies, so there is nothing for the browser to
+send on your behalf. To lock the API to one origin anyway, start it with
+`agentbus up -origin http://localhost:5173`.
 
 ### Reach it from another machine or a container
 
@@ -116,7 +116,7 @@ By default the service answers this machine only. To reach it from elsewhere, li
 address:
 
 ```sh
-agentbus up -listen 0.0.0.0:8787 -origin http://localhost:5173
+agentbus up -listen 0.0.0.0
 ```
 
 In Docker, run that inside the container and publish the port to your own machine only:

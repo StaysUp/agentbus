@@ -56,8 +56,8 @@ type Config struct {
 	// loopback address whenever the service listens on one.
 	// A run's session has the base URL BaseURL/s/<id>.
 	BaseURL string
-	// Origin is the one cross-origin caller allowed, such as
-	// http://localhost:5173. Empty allows none.
+	// Origin, when set, is the one cross-origin caller allowed, such as
+	// http://localhost:5173. Empty allows every origin. See ServeHTTP.
 	Origin string
 
 	// Ping is how often a stream sends a comment to keep the connection
@@ -235,19 +235,34 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusForbidden, "the Host header must name this service on 127.0.0.1, localhost or [::1]")
 		return
 	}
+	// CORS mainly guards cookies, and this API has none: every request
+	// needs the bearer token in a header, which a page from another origin
+	// does not have. So by default every origin is allowed, with "*" and
+	// no credentials, and the token stays the guard. "*" rather than the
+	// request's own Origin echoed back: the answer is the same for every
+	// origin, so it needs no Vary and caches cleanly, and "*" can never be
+	// combined with credentials. -origin, when set, locks it to that one
+	// origin.
 	origin := r.Header.Get("Origin")
-	allowed := a.cfg.Origin != "" && origin == a.cfg.Origin
-	if allowed {
+	allowed := origin != "" && (a.cfg.Origin == "" || origin == a.cfg.Origin)
+	if a.cfg.Origin == "" {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+	} else if allowed {
 		w.Header().Set("Access-Control-Allow-Origin", a.cfg.Origin)
 		w.Header().Add("Vary", "Origin")
 	}
 	if r.Method == http.MethodOptions && origin != "" {
-		if !allowed || !strings.HasPrefix(r.URL.Path, "/api/") {
+		if !allowed {
 			writeError(w, http.StatusForbidden, "this origin is not allowed")
+			return
+		}
+		if !strings.HasPrefix(r.URL.Path, "/api/") {
+			writeError(w, http.StatusForbidden, "no preflight is answered on this path")
 			return
 		}
 		h := w.Header()
 		h.Set("Access-Control-Allow-Methods", "GET, POST")
+		// Named, not "*": the wildcard never covers Authorization.
 		h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 		w.WriteHeader(http.StatusNoContent)
 		return

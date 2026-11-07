@@ -403,3 +403,19 @@ func TestCallPieceExposesHeadersToOrigin(t *testing.T) {
 		t.Error("headers exposed to an origin that is not allowed")
 	}
 }
+
+// Without -origin, every origin gets the piece's headers exposed.
+func TestCallPieceExposesHeadersToAnyOrigin(t *testing.T) {
+	e := newEnvOrigin(t, filepath.Join(t.TempDir(), "events.db"), "")
+	if err := e.store.KeepCall(body.Call{Exchange: "x-1", Session: "s1", Vendor: "anthropic", Time: time.Now(),
+		Request: body.Request{Top: json.RawMessage(`{}`), Pieces: []body.Piece{{Kind: body.Message, Label: "user", JSON: json.RawMessage(`{"role":"user","content":"hi"}`)}}}}); err != nil {
+		t.Fatal(err)
+	}
+	r := e.req(t, "GET", "/api/v0/calls/x-1/pieces/0", nil)
+	r.Header.Set("Origin", "http://example.test")
+	resp, _ := do(t, r)
+	if resp.StatusCode != 200 || resp.Header.Get("Access-Control-Allow-Origin") != "*" ||
+		!strings.Contains(resp.Header.Get("Access-Control-Expose-Headers"), "X-Piece-Hash") {
+		t.Fatalf("%d %v", resp.StatusCode, resp.Header)
+	}
+}

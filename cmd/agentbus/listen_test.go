@@ -34,6 +34,32 @@ func TestCheckListen(t *testing.T) {
 	}
 }
 
+// -listen may name an IP alone; it then gets port 8787. A name gets no port,
+// so checkListen still refuses it.
+func TestListenWithoutPort(t *testing.T) {
+	for in, want := range map[string]string{
+		"0.0.0.0": "0.0.0.0:8787", "127.0.0.1": "127.0.0.1:8787", "[::1]": "[::1]:8787", "::1": "[::1]:8787",
+		"[::]": "[::]:8787",
+		// Already a full form, or not an IP: unchanged.
+		"0.0.0.0:9000": "0.0.0.0:9000", ":9000": ":9000", "[::1]:9000": "[::1]:9000",
+		"localhost": "localhost", "myhost": "myhost", "8787": "8787", "": "",
+	} {
+		if got := withPort(in); got != want {
+			t.Errorf("withPort(%q) = %q, want %q", in, got, want)
+		}
+	}
+	type want struct{ ok, loopback bool }
+	for in, w := range map[string]want{
+		"0.0.0.0": {true, false}, "127.0.0.1": {true, true}, "[::1]": {true, true},
+		"localhost": {false, false}, "myhost": {false, false}, "127.0.0.2": {false, false},
+	} {
+		loopback, err := checkListen(withPort(in))
+		if (err == nil) != w.ok || loopback != w.loopback {
+			t.Errorf("%q: loopback %v, err %v; want ok %v loopback %v", in, loopback, err, w.ok, w.loopback)
+		}
+	}
+}
+
 func TestAgentAddrStaysOnThisMachine(t *testing.T) {
 	for in, want := range map[string]string{
 		"0.0.0.0:8787": "127.0.0.1:8787", "[::]:8787": "127.0.0.1:8787",

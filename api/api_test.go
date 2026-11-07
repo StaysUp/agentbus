@@ -30,6 +30,12 @@ type env struct {
 
 func newEnvAt(t *testing.T, dbPath string) *env {
 	t.Helper()
+	return newEnvOrigin(t, dbPath, origin)
+}
+
+// newEnvOrigin is newEnvAt with the given -origin; "" allows every origin.
+func newEnvOrigin(t *testing.T, dbPath, allow string) *env {
+	t.Helper()
 	st, err := store.Open(dbPath)
 	if err != nil {
 		t.Fatal(err)
@@ -37,7 +43,7 @@ func newEnvAt(t *testing.T, dbPath string) *env {
 	srv := httptest.NewUnstartedServer(nil)
 	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
 	a, err := New(Config{Store: st, Token: token, Port: port, BaseURL: "http://127.0.0.1:" + port,
-		Origin: origin, Ping: 50 * time.Millisecond, BodyTimeout: 300 * time.Millisecond})
+		Origin: allow, Ping: 50 * time.Millisecond, BodyTimeout: 300 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,19 +209,45 @@ func TestPreflightOnlyForAllowedOrigin(t *testing.T) {
 	}
 }
 
-func TestPreflightRefusedWithoutConfiguredOrigin(t *testing.T) {
-	st, _ := store.Open(filepath.Join(t.TempDir(), "events.db"))
-	defer st.Close()
-	a, err := New(Config{Store: st, Token: token, Port: "1"})
-	if err != nil {
-		t.Fatal(err)
+// Without -origin every origin may call the API: the preflight is answered
+// with "*" and names Authorization, since "*" in Allow-Headers does not cover
+// it. The token is still required on the request itself.
+func TestAnyOriginWithoutConfiguredOrigin(t *testing.T) {
+	e := newEnvOrigin(t, filepath.Join(t.TempDir(), "events.db"), "")
+	for _, o := range []string{"http://example.test", "https://cockpit.example:9443", "null"} {
+		r, _ := http.NewRequest("OPTIONS", e.srv.URL+"/api/v0/events", nil)
+		r.Header.Set("Origin", o)
+		r.Header.Set("Access-Control-Request-Method", "GET")
+		r.Header.Set("Access-Control-Request-Headers", "authorization")
+		resp, _ := do(t, r)
+		if resp.StatusCode != 204 || resp.Header.Get("Access-Control-Allow-Origin") != "*" ||
+			resp.Header.Get("Access-Control-Allow-Methods") != "GET, POST" ||
+			resp.Header.Get("Access-Control-Allow-Headers") != "Authorization, Content-Type" ||
+			resp.Header.Get("Access-Control-Allow-Credentials") != "" {
+			t.Errorf("preflight from %q: %d %v", o, resp.StatusCode, resp.Header)
+		}
 	}
-	r := httptest.NewRequest("OPTIONS", "http://127.0.0.1:1/api/v0/events", nil)
-	r.Header.Set("Origin", "http://localhost:5173")
-	w := httptest.NewRecorder()
-	a.ServeHTTP(w, r)
-	if w.Code != 403 || w.Header().Get("Access-Control-Allow-Origin") != "" {
-		t.Fatalf("no -origin set: %d %v", w.Code, w.Header())
+	// A preflight outside /api/ is still refused.
+	r, _ := http.NewRequest("OPTIONS", e.srv.URL+"/docs", nil)
+	r.Header.Set("Origin", "http://example.test")
+	if resp, _ := do(t, r); resp.StatusCode != 403 {
+		t.Errorf("preflight to /docs: %d", resp.StatusCode)
+	}
+
+	r = e.req(t, "GET", "/api/v0/sessions", nil)
+	r.Header.Del("Authorization")
+	r.Header.Set("Origin", "http://example.test")
+	resp, body := do(t, r)
+	if resp.StatusCode != 401 || resp.Header.Get("Access-Control-Allow-Origin") != "*" {
+		t.Errorf("no token: %d %v", resp.StatusCode, resp.Header)
+	}
+	noToken(t, resp, body)
+
+	r = e.req(t, "GET", "/api/v0/sessions", nil)
+	r.Header.Set("Origin", "http://example.test")
+	if resp, _ := do(t, r); resp.StatusCode != 200 || resp.Header.Get("Access-Control-Allow-Origin") != "*" ||
+		resp.Header.Get("Vary") != "" {
+		t.Errorf("with token: %d %v", resp.StatusCode, resp.Header)
 	}
 }
 

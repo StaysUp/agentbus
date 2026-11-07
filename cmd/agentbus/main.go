@@ -70,8 +70,8 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	}
 	fl := flag.NewFlagSet("up", flag.ContinueOnError)
 	fl.SetOutput(stderr)
-	listen := fl.String("listen", "127.0.0.1:8787", "address to listen on, an IP and a port; 0.0.0.0:8787 is reachable from the network, with the token guarding the API")
-	origin := fl.String("origin", "", "the one cross-origin cockpit allowed, such as http://localhost:5173")
+	listen := fl.String("listen", "127.0.0.1:8787", "address to listen on: an IP, with or without a port (8787 if none); 0.0.0.0 is reachable from the network, with the token guarding the API")
+	origin := fl.String("origin", "", "lock the API to this one browser origin, such as http://localhost:5173; without it any origin may call the API, and the token still guards every call")
 	replayOn := fl.Bool("replay", true, "continue claude and codex sessions by own replay (the gateway sends the earlier turn's history); false uses the vendor's resume")
 	if err := fl.Parse(args[1:]); err != nil {
 		return 2
@@ -154,6 +154,7 @@ type service struct {
 
 // start opens the store, makes the token if needed, and serves.
 func start(c config) (*service, error) {
+	c.listen = withPort(c.listen)
 	loopback, err := checkListen(c.listen)
 	if err != nil {
 		return nil, err
@@ -472,6 +473,24 @@ func loadToken(path string) (string, error) {
 	return tok, nil
 }
 
+// defaultPort is the port -listen uses when it names an IP alone.
+const defaultPort = "8787"
+
+// withPort gives -listen the default port when it names an IP alone:
+// 0.0.0.0, 127.0.0.1, [::1] or ::1. Anything else is returned as it is, for
+// checkListen to accept or refuse. A name gets no port here, so it is still
+// refused as a name.
+func withPort(addr string) string {
+	host := addr
+	if strings.HasPrefix(host, "[") && strings.HasSuffix(host, "]") {
+		host = host[1 : len(host)-1]
+	}
+	if net.ParseIP(host) == nil {
+		return addr
+	}
+	return net.JoinHostPort(host, defaultPort)
+}
+
 // checkListen accepts an IP literal and a port, or a port alone (":8787",
 // every address), and reports whether the address is loopback: 127.0.0.1 or
 // [::1], where the API checks the Host. A name such as localhost is refused:
@@ -481,7 +500,7 @@ func loadToken(path string) (string, error) {
 func checkListen(addr string) (loopback bool, err error) {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
-		return false, fmt.Errorf("-listen %q is not an IP and a port such as 127.0.0.1:8787 or 0.0.0.0:8787", addr)
+		return false, fmt.Errorf("-listen %q is not an IP, with or without a port, such as 127.0.0.1, 0.0.0.0 or 0.0.0.0:8787", addr)
 	}
 	if host == "127.0.0.1" || host == "::1" {
 		return true, nil

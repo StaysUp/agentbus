@@ -36,6 +36,8 @@ const specIntro = "agentbus runs on your machine, between your coding agents and
 	"That token reads only its own session, on the operations that say so, and stops working when the turn's child exits.\n" +
 	"- On loopback, the default, the `Host` must be `127.0.0.1`, `localhost` or `[::1]` with the service's port, or the answer is 403. " +
 	"On another address, such as `0.0.0.0`, any `Host` is accepted and the token is the guard.\n" +
+	"- A browser page from any origin may call the API: CORS answers `Access-Control-Allow-Origin: *` and allows `Authorization`. " +
+	"No cookies are used, so the token is the guard. `agentbus up -origin <url>` locks it to that one origin.\n" +
 	"- Start up with `GET /api/v0/sessions`, then stream `GET /api/v0/events` from its `store` and `seq`. Nothing is lost or counted twice.\n" +
 	"- A cursor is a `store` and a `seq`. A cursor of another store gets 409: start over from the snapshot.\n" +
 	"- v0 may change without notice. Ignore kinds and fields you do not know."
