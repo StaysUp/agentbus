@@ -28,7 +28,7 @@ const PermissionsFile = "permissions.toml"
 const PermissionsStarter = `# What AgentBus turns may do without asking. Read at the start of every turn.
 # Empty lists change nothing. Folders may start with ~ for your home folder.
 #
-# read_folders: folders a turn may read beyond its own folder.
+# read_folders: folders claude may read and search beyond its own folder, never write.
 # allow: commands claude may run without asking (a command and its arguments).
 # forbid: commands claude may never run.
 # codex can read every folder already, and has no command lists yet.
@@ -64,6 +64,11 @@ func loadPermissions(path, home string) (Permissions, error) {
 	var p Permissions
 	b, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
+		// A symlink whose target is gone is not a missing file: the person
+		// meant a policy, and it is not there (found in review).
+		if _, lerr := os.Lstat(path); lerr == nil {
+			return p, errors.New("it is a link to a file that does not exist")
+		}
 		return p, nil
 	}
 	if err != nil {
@@ -104,12 +109,18 @@ func loadPermissions(path, home string) (Permissions, error) {
 
 // permissionFolder is f as an absolute, clean path: ~ alone or ~/ at the start
 // is home. Anything relative is refused, so no entry can be read as a flag.
+// The path goes inside Claude Code's rules (readRules), so a comma or a
+// parenthesis, which would end the rule, and a glob character, which would
+// widen it, are refused.
 func permissionFolder(f, home string) (string, error) {
 	if f == "" {
 		return "", errors.New("is empty")
 	}
 	if strings.ContainsFunc(f, isControl) {
 		return "", errors.New("has a control character")
+	}
+	if strings.ContainsAny(f, ",()*?[]{}") {
+		return "", errors.New("has a comma, a parenthesis or a glob character")
 	}
 	if f == "~" || strings.HasPrefix(f, "~/") {
 		if home == "" {
@@ -129,7 +140,11 @@ func permissionFolder(f, home string) (string, error) {
 
 // permissionCommand accepts a command and its leading arguments, such as
 // "go test". Claude Code's rule is Bash(<command>:*), and its lists are
-// comma-joined, so a comma or a parenthesis would change the rule.
+// comma-joined, so a comma or a parenthesis would change the rule. A star, as
+// in "go test:*", or two spaces in a row would make a rule that never matches
+// (found in review), so they are refused rather than passed on. A colon is
+// fine: the rule ends at the last ":*", so "curl http://localhost:3000" works
+// (Claude Code 2.1.319, 2026-11-07, checked live in review).
 func permissionCommand(c string) error {
 	switch {
 	case strings.TrimSpace(c) == "":
@@ -140,6 +155,10 @@ func permissionCommand(c string) error {
 		return errors.New("starts with -")
 	case strings.ContainsAny(c, ",()"):
 		return errors.New("has a comma or a parenthesis")
+	case strings.Contains(c, "*"):
+		return errors.New("has a star; write the command alone, such as \"go test\"")
+	case strings.Contains(c, "  "):
+		return errors.New("has two spaces in a row")
 	case strings.ContainsFunc(c, isControl):
 		return errors.New("has a control character")
 	}
@@ -147,6 +166,22 @@ func permissionCommand(c string) error {
 }
 
 func isControl(r rune) bool { return r < 0x20 || r == 0x7f }
+
+// readRules is Claude Code's rules that let Read, Grep and Glob reach each
+// folder and everything under it without asking: Read(//<folder>/**), with
+// "//" marking an absolute path. They grant reading only. --add-dir is not
+// used: it makes the folder a working folder, which under the person's
+// acceptEdits mode lets a turn write there too (Claude Code 2.1.319,
+// 2026-11-07, checked live, found in review). A Read rule alone does not
+// cover Grep, so each tool gets its own.
+func readRules(folders []string) []string {
+	var rules []string
+	for _, f := range folders {
+		p := "/" + strings.TrimSuffix(f, "/") + "/**"
+		rules = append(rules, "Read("+p+")", "Grep("+p+")", "Glob("+p+")")
+	}
+	return rules
+}
 
 // bashRules is Claude Code's rule for each command: Bash(<command>:*), the
 // command with any arguments after it, comma-joined into one value.

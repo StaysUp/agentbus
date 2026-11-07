@@ -222,7 +222,7 @@ A turn runs with no person to click "allow". So a claude turn is refused anythin
 folder says what turns may do:
 
 ```toml
-read_folders = ["~/.agents"]           # claude gets --add-dir
+read_folders = ["~/.agents"]           # claude may Read, Grep and Glob there, never write
 allow = ["go test", "make test"]       # claude gets --allowedTools Bash(go test:*),...
 forbid = ["git push", "git checkout"]  # claude gets --disallowedTools Bash(git push:*),...
 ```

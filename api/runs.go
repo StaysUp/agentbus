@@ -108,29 +108,29 @@ func turnArgs(agent, hint, resumeID, model string, readOnly bool, perm Permissio
 		if resumeID != "" {
 			a = append(a, "--resume", resumeID)
 		}
-		// read_folders: one --add-dir per folder. The flag takes several
-		// values, so each is followed by another flag or by "--". The tools
-		// may read there without asking (Claude Code 2.1.319, 2026-11-07,
-		// checked live: a Read outside the folder was refused without it).
-		for _, f := range perm.ReadFolders {
-			a = append(a, "--add-dir", f)
-		}
+		// One --allowedTools, comma-joined (Claude Code 2.1.318,
+		// 2026-11-05): what the tools may do without asking.
+		allowed := readRules(perm.ReadFolders)
 		if readOnly {
-			// Claude Code's --tools and --allowedTools take several values,
-			// so each gets one comma-joined value (Claude Code 2.1.318,
-			// 2026-11-05). --tools removes every other tool. --allowedTools
-			// only approves without asking, and the person's settings could
-			// approve more. allow never widens a read-only turn.
-			a = append(a, "--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob")
+			// --tools removes every other tool. --allowedTools only approves
+			// without asking, and the person's settings could approve more.
+			// allow never widens a read-only turn.
+			allowed = append([]string{"Read", "Grep", "Glob"}, allowed...)
+			a = append(a, "--tools", "Read,Grep,Glob", "--allowedTools", strings.Join(allowed, ","))
 			// --tools restricts built-in tools only: an MCP server from the
 			// person's settings could still write. --strict-mcp-config with
 			// no --mcp-config loads no MCP server at all.
 			a = append(a, "--strict-mcp-config")
-		} else if len(perm.Allow) > 0 {
-			// allow: each command runs without asking, as Bash(<cmd>:*),
-			// comma-joined into one value (Claude Code 2.1.319, 2026-11-07,
-			// checked live with a rule that has a space in it).
-			a = append(a, "--allowedTools", bashRules(perm.Allow))
+		} else {
+			// allow: each command runs without asking, as Bash(<cmd>:*)
+			// (Claude Code 2.1.319, 2026-11-07, checked live with a rule
+			// that has a space in it).
+			if len(perm.Allow) > 0 {
+				allowed = append(allowed, bashRules(perm.Allow))
+			}
+			if len(allowed) > 0 {
+				a = append(a, "--allowedTools", strings.Join(allowed, ","))
+			}
 		}
 		// forbid: never run, even when allow or the person's settings
 		// approve it; a deny wins over an allow (checked live, 2026-11-07).
@@ -583,8 +583,8 @@ func (a *API) startTurn(w http.ResponseWriter, t turn) {
 	perm, err := a.permissions()
 	if err != nil {
 		a.cfg.Logf("run.refused agent=%s reason=permissions_file error=%q", t.agent, err.Error())
-		writeError(w, http.StatusBadRequest, "the permissions file "+PermissionsFile+" in the data folder is broken, so the turn did not start: "+
-			err.Error()+". Fix the file, or delete it for empty lists, and send the turn again.")
+		writeError(w, http.StatusBadRequest, "the permissions file "+PermissionsFile+" in the data folder cannot be used, so the turn did not start: "+
+			err.Error()+". Fix the file and send the turn again; a missing file means empty lists.")
 		return
 	}
 	turnID := "t_" + randomHex(8)

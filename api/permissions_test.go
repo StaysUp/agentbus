@@ -48,6 +48,11 @@ func TestLoadPermissions(t *testing.T) {
 	if want := []string{home, filepath.Join(home, "notes", "a"), dir}; !slices.Equal(p.ReadFolders, want) {
 		t.Errorf("folders %q, want %q", p.ReadFolders, want)
 	}
+	// A colon in an argument is fine: the rule ends at the last ":*".
+	writePerm(t, path, "allow = [\"curl http://localhost:3000/health\"]\n")
+	if q, err := loadPermissions(path, home); err != nil || !slices.Equal(q.Allow, []string{"curl http://localhost:3000/health"}) {
+		t.Errorf("a colon in an argument: %+v %v", q, err)
+	}
 	if !slices.Equal(p.Allow, []string{"go test", "make test"}) || !slices.Equal(p.Forbid, []string{"git push"}) {
 		t.Errorf("commands %+v", p)
 	}
@@ -69,6 +74,10 @@ func TestLoadPermissions(t *testing.T) {
 		{"comma", "allow = [\"go test,Edit\"]\n", "comma or a parenthesis"},
 		{"parenthesis", "forbid = [\"x)\"]\n", "comma or a parenthesis"},
 		{"padded", "allow = [\"go test \"]\n", "starts or ends with a space"},
+		{"rule syntax in a command", "allow = [\"go test:*\"]\n", "has a star"},
+		{"two spaces", "allow = [\"go  test\"]\n", "two spaces in a row"},
+		{"glob in a folder", "read_folders = [\"/tmp/*\"]\n", "glob character"},
+		{"comma in a folder", "read_folders = [\"/tmp,Edit\"]\n", "comma"},
 		{"tab", "allow = [\"go\\ttest\"]\n", "control character"},
 	} {
 		writePerm(t, path, tc.file)
@@ -76,6 +85,16 @@ func TestLoadPermissions(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("%s: %+v %v, want an error with %q", tc.name, p, err, tc.want)
 		}
+	}
+	// A link to a file that is gone is not a missing file.
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "gone.toml"), path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadPermissions(path, home); err == nil || !strings.Contains(err.Error(), "link to a file that does not exist") {
+		t.Errorf("a dangling link: %v", err)
 	}
 	// Something there that is not a readable file.
 	if err := os.Remove(path); err != nil {
@@ -94,10 +113,11 @@ func TestLoadPermissions(t *testing.T) {
 func TestTurnArgsPermissions(t *testing.T) {
 	perm := Permissions{ReadFolders: []string{"/home/me/.agents", "/home/me/notes"},
 		Allow: []string{"go test", "make test"}, Forbid: []string{"git push", "git checkout"}}
-	dirs := []string{"--add-dir", "/home/me/.agents", "--add-dir", "/home/me/notes"}
-	allow := []string{"--allowedTools", "Bash(go test:*),Bash(make test:*)"}
+	const reads = "Read(//home/me/.agents/**),Grep(//home/me/.agents/**),Glob(//home/me/.agents/**)," +
+		"Read(//home/me/notes/**),Grep(//home/me/notes/**),Glob(//home/me/notes/**)"
+	allow := []string{"--allowedTools", reads + ",Bash(go test:*),Bash(make test:*)"}
 	forbid := []string{"--disallowedTools", "Bash(git push:*),Bash(git checkout:*)"}
-	readOnly := []string{"--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob", "--strict-mcp-config"}
+	readOnly := []string{"--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob," + reads, "--strict-mcp-config"}
 	cat := func(parts ...[]string) []string { return slices.Concat(parts...) }
 	head := []string{"-p", "--output-format", "json"}
 	for _, tc := range []struct {
@@ -107,15 +127,21 @@ func TestTurnArgsPermissions(t *testing.T) {
 		want                       []string
 	}{
 		{"claude, no policy", "claude", "", "", false, Permissions{}, cat(head, []string{"--", "hi"})},
-		{"claude", "claude", "", "", false, perm, cat(head, dirs, allow, forbid, []string{"--", "hi"})},
+		{"claude", "claude", "", "", false, perm, cat(head, allow, forbid, []string{"--", "hi"})},
+		// read_folders never becomes --add-dir: that would let a turn write
+		// there under the person's acceptEdits mode.
+		{"claude, folders only", "claude", "", "", false, Permissions{ReadFolders: []string{"/x"}},
+			cat(head, []string{"--allowedTools", "Read(//x/**),Grep(//x/**),Glob(//x/**)", "--", "hi"})},
+		{"claude read-only, no policy", "claude", "", "", true, Permissions{},
+			cat(head, []string{"--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob", "--strict-mcp-config", "--", "hi"})},
 		{"claude, allow only", "claude", "", "", false, Permissions{Allow: []string{"go test"}},
 			cat(head, []string{"--allowedTools", "Bash(go test:*)", "--", "hi"})},
 		// allow never widens a read-only turn; folders and forbid still apply.
-		{"claude read-only", "claude", "", "", true, perm, cat(head, dirs, readOnly, forbid, []string{"--", "hi"})},
+		{"claude read-only", "claude", "", "", true, perm, cat(head, readOnly, forbid, []string{"--", "hi"})},
 		{"claude resume and model", "claude", "r-1", "opus", false, perm,
-			cat(head, []string{"--resume", "r-1"}, dirs, allow, forbid, []string{"--model", "opus", "--", "hi"})},
+			cat(head, []string{"--resume", "r-1"}, allow, forbid, []string{"--model", "opus", "--", "hi"})},
 		{"claude read-only, resume and model", "claude", "r-1", "opus", true, perm,
-			cat(head, []string{"--resume", "r-1"}, dirs, readOnly, forbid, []string{"--model", "opus", "--", "hi"})},
+			cat(head, []string{"--resume", "r-1"}, readOnly, forbid, []string{"--model", "opus", "--", "hi"})},
 		// codex gets nothing from the policy (see turnArgs).
 		{"codex", "codex", "", "", false, perm, []string{"exec", "--skip-git-repo-check", "--json", "--sandbox", "workspace-write",
 			"-c", "sandbox_workspace_write.network_access=true", "--", "hi"}},

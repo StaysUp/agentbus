@@ -152,18 +152,23 @@ forbid = ["git push", "git checkout"]
 - Empty lists change nothing. A missing file is empty lists.
 - **A broken file stops the turn.** The answer is 400, it names `permissions.toml` and the problem,
   with the line when there is one, and nothing is stored. A turn never runs without the policy.
-- `read_folders`: absolute paths, or starting with `~/`. Each must be an existing folder.
-- `allow` and `forbid`: a command and its first arguments, such as `go test`. No comma, no
-  parenthesis, no leading `-`.
+  A file that cannot be read, or a link to a file that is gone, stops the turn the same way.
+- `read_folders`: absolute paths, or starting with `~/`. Each must be an existing folder. No
+  comma, parenthesis or glob character (`*?[]{}`).
+- `allow` and `forbid`: a command and its first arguments, such as `go test`. No comma,
+  parenthesis or star, no two spaces in a row, no leading `-`.
 
 What each list becomes:
 
 | List | claude | codex |
 |---|---|---|
-| `read_folders` | one `--add-dir <folder>` each | nothing: codex's sandbox reads every folder already |
+| `read_folders` | `--allowedTools Read(//<folder>/**),Grep(//<folder>/**),Glob(//<folder>/**),…` | nothing: codex's sandbox reads every folder already |
 | `allow` | `--allowedTools Bash(<cmd>:*),…` | nothing yet |
 | `forbid` | `--disallowedTools Bash(<cmd>:*),…` | nothing yet |
 
+- `read_folders` grants reading only. It is not `--add-dir`: that makes a working folder, which
+  under the person's `acceptEdits` mode a turn could also write to (Claude Code 2.1.319).
+- All of `--allowedTools` is one comma-joined value.
 - A `read_only` turn stays read-only: `allow` does not widen it. `read_folders` and `forbid` still
   apply.
 - A `forbid` wins over an `allow`, and over the person's own Claude Code settings.
@@ -176,6 +181,10 @@ What each list becomes:
   the gateway will do it in a later step.
 - codex's own `--add-dir` makes a folder writable, which `read_folders` never means, so it is not
   used (codex-cli 0.164.0).
+- `read_folders` approves claude's Read, Grep and Glob tools only. A shell command that reads
+  there, such as `cat`, is still refused: Claude Code limits those to its working folders, and
+  `allow` cannot change that (Claude Code 2.1.319). Only the person's own settings can add a
+  working folder.
 - `forbid` stops claude's shell from running the command. It does not stop the same thing done
   another way, such as reading `.env` with the Read tool.
 - Nothing asks a person yet. A command on neither list is refused when claude's settings would ask.
@@ -340,7 +349,8 @@ arrives later, as events of that session, **every one carrying `turn`** (below).
   log then says `run.hint … left_out=codex_developer_instructions_set`. Only that key is looked
   for; the file is never written.
 - **`read_only` is false unless the body says true.**
-  - claude gets `--tools Read,Grep,Glob --allowedTools Read,Grep,Glob`. `--tools` is what removes
+  - claude gets `--tools Read,Grep,Glob --allowedTools Read,Grep,Glob`, plus the `read_folders`
+    rules of `permissions.toml` in the same `--allowedTools` value. `--tools` is what removes
     every other tool. `--allowedTools` alone only approves tools without asking, and the person's
     own settings could approve more.
   - codex gets `--sandbox read-only`.
