@@ -1,0 +1,216 @@
+<div align="center">
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/agentbus-logo-dark.svg">
+  <img alt="AgentBus" src="docs/assets/agentbus-logo-light.svg" width="360">
+</picture>
+
+**A cross-vendor middleware framework for coding agents.**
+
+[![GitHub stars](https://img.shields.io/github/stars/staysup/agentbus?style=flat)](https://github.com/staysup/agentbus/stargazers)
+[![Latest release](https://img.shields.io/github/v/release/staysup/agentbus)](https://github.com/staysup/agentbus/releases)
+[![CI](https://github.com/StaysUp/agentbus/actions/workflows/ci.yml/badge.svg)](https://github.com/StaysUp/agentbus/actions/workflows/ci.yml)
+
+[Quickstart](#quickstart) &nbsp;&bull;&nbsp; [Docs](#docs) &nbsp;&bull;&nbsp; [Cockpit](https://github.com/staysup/agentbus-cockpit) &nbsp;&bull;&nbsp; [Releases](https://github.com/staysup/agentbus/releases)
+
+</div>
+
+AgentBus is a cross-vendor middleware framework for coding agents. It sits between your agents and every model vendor.
+
+## Why
+
+- **You see every model call.** Each request and reply an agent makes passes through AgentBus and
+  is stored on your machine.
+- **You see the cost.** Every call is priced, and each turn and session shows its total.
+- **The conversation is kept.** Each turn is a fresh one-shot agent run. AgentBus keeps the history
+  and continues the conversation from its own store.
+- **Any vendor.** Claude Code and codex today, through one API. Every vendor tomorrow.
+
+AgentBus runs the agents you already have, signed in as you.
+
+## Prerequisites
+
+- `claude` (Claude Code) or `codex`, or both, installed and signed in.
+- macOS or Linux.
+- Go 1.27.1 or later, only if you install with `go install` or build from source.
+
+## Install
+
+Pick one.
+
+**Homebrew:**
+
+```sh
+brew install staysup/tap/agentbus
+```
+
+**Install script** (puts `agentbus` in `~/.local/bin`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/staysup/agentbus/main/install.sh | sh
+```
+
+**Go:**
+
+```sh
+go install github.com/staysup/agentbus/cmd/agentbus@latest
+```
+
+**Build from source:**
+
+```sh
+git clone https://github.com/staysup/agentbus.git
+cd agentbus
+go install ./cmd/agentbus
+```
+
+Both Go routes put `agentbus` in `$(go env GOPATH)/bin`. That folder must be on your `PATH`:
+
+```sh
+export PATH="$PATH:$(go env GOPATH)/bin"
+```
+
+Check the install with `agentbus version`.
+
+## Quickstart
+
+### 1. Start the service
+
+```sh
+agentbus up
+```
+
+It listens on `http://127.0.0.1:8787` and prints its data folder:
+
+```
+agentbus: 2026/11/06 12:00:00 listening on http://127.0.0.1:8787, data folder /Users/you/.local/share/agentbus
+```
+
+The data folder is `$AGENTBUS_HOME` if set, else `$XDG_DATA_HOME/agentbus`, else
+`~/.local/share/agentbus`. On first start AgentBus writes a random token to `token` in that folder,
+readable only by you. Every API request needs it.
+
+Flags:
+
+| Flag | Default | What it does |
+|---|---|---|
+| `-listen` | `127.0.0.1:8787` | The address. Only `127.0.0.1` or `[::1]` are accepted. |
+| `-origin` | none | The one browser origin allowed to call the API, such as `http://localhost:5173`. |
+| `-replay` | `true` | Continue Claude and codex sessions from AgentBus's own store. `false` uses the agent's own resume. |
+
+### 2. Open a cockpit
+
+A cockpit is any client of the API. The browser cockpit is in its own repository,
+[staysup/agentbus-cockpit](https://github.com/staysup/agentbus-cockpit). It runs on
+`http://localhost:5173`, so start the service with that origin allowed:
+
+```sh
+agentbus up -origin http://localhost:5173
+```
+
+Then follow the cockpit's README, and paste the token from the token file when it asks.
+
+### 3. Or start a turn with curl
+
+Open a second terminal in any folder. First check that the service finds your agents:
+
+```sh
+TOKEN=$(cat ~/.local/share/agentbus/token)
+
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/api/v0/agents
+```
+
+```json
+{"agents":[{"name":"claude","found":true,"version":"2.1.319","signed_in":true},{"name":"codex","found":false}]}
+```
+
+`found` means the agent's program is on the service's `PATH`. `signed_in` is the agent's own
+answer, and it is left out when the agent gives no clear one. Start a turn only with an agent that
+is found and signed in.
+
+Then start a turn:
+
+```sh
+curl -s http://127.0.0.1:8787/api/v0/turns \
+  -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"agent":"claude","folder":"'"$PWD"'","prompt":"Say hello in five words.","model":"haiku","read_only":true}'
+```
+
+Use your own token path if the data folder is elsewhere. `folder` must be an absolute path to a
+folder that exists: the agent works there. `model` is passed to the agent as `--model`; a small
+model keeps this first turn cheap. `read_only` gives the agent read tools only. For codex, use
+`"agent":"codex"` and one of its models, or leave `model` out.
+
+The reply names the new session (`id`) and turn (`turn`):
+
+```json
+{"id":"8c1f…","turn":"t_5d0c19a2e7b3f481","base_url":"http://127.0.0.1:8787/s/8c1f…/t/t_5d0c19a2e7b3f481"}
+```
+
+If the service cannot find the agent's program, the reply is HTTP 400 and nothing is stored:
+
+```json
+{"error":"agent claude cannot start: the program claude is not on the service's PATH. Install Claude Code and run claude once to sign in, then try again. If it is installed, start agentbus from a shell where claude runs."}
+```
+
+Read the turn back, with its reply, state and cost:
+
+```sh
+curl -s "http://127.0.0.1:8787/api/v0/turns?session=<id>" -H "Authorization: Bearer $TOKEN"
+```
+
+To continue the conversation, send the next prompt with `"session":"<id>"` and no agent or folder.
+
+## Docs
+
+The running service describes its own API. None of these need the token or the internet:
+
+- `http://127.0.0.1:8787/docs`: an interactive reference.
+- `http://127.0.0.1:8787/api/v0/openapi.json`: the OpenAPI 3.1 description. Generate a client from
+  it in any language. There are no client SDKs.
+- `http://127.0.0.1:8787/docs/llms.txt`: one plain file for coding agents.
+
+The contract in words is [docs/CLIENT_API.md](docs/CLIENT_API.md).
+
+## Your data
+
+Everything stays on your machine, in the data folder: `events.db` (a SQLite file), `token` and
+`logs/`. Nothing is sent anywhere except the model calls themselves, to the vendor your agent
+already uses.
+
+`events.db` holds each turn's model requests and replies, so it holds whatever your agent read or
+printed during a turn, such as a file it opened or a command's output. It is not encrypted, and it
+is kept until you remove it. Request headers, including your sign-in, are never stored.
+
+To clear it, stop `agentbus up` and delete the data folder. A new one is made on the next start.
+
+## How it works
+
+- **The agent changes one setting**, its API address. Nothing else in the agent changes.
+- **Traffic passes through.** Requests go to the vendor with their headers, so the agent's own
+  sign-in is used. Headers are never stored. The one change: a turn that continues a session gets
+  the earlier turns' history put in front of its requests. For codex, the earlier turn's thread id
+  also replaces the new one, so the vendor reads the history from its cache.
+- **Adapters read a copy** of each body and turn the vendor's format into the same events.
+- **Everything stays on loopback.** The service carries your sign-in, and it never leaves your
+  machine.
+
+| Path | What it is |
+|---|---|
+| `cmd/agentbus/` | The `agentbus` command |
+| `api/` | The client API and its generated docs |
+| `gateway/` | The pass-through proxy that feeds adapters |
+| `adapter/` | One adapter per API format: Anthropic, OpenAI |
+| `event/` | The vendor-neutral events |
+| `store/` | The SQLite store |
+| `replay/` | Own replay: continues Claude and codex conversations from the store |
+| `cost/` | Prices every model call |
+
+Third-party code shipped in the binary is listed in [THIRD_PARTY.md](THIRD_PARTY.md).
+
+## License
+
+Free to use, change and run, including inside your business. You can't sell it as a competing product or service. Each release becomes Apache 2.0 two years after it is published.
+
+Licensed under the [Functional Source License](https://fsl.software) (FSL-1.1-ALv2). See [LICENSE](LICENSE).

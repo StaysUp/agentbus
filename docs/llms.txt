@@ -1,0 +1,260 @@
+# agentbus client API
+
+> agentbus runs on your machine, between coding agents (Claude Code, codex) and their vendors.
+> It records each step of their work as an event, in one local store.
+> This API lets any program read those events, start agents, and write its own events.
+
+This file is a short guide. The full reference is generated from the code when the service starts:
+the OpenAPI 3.1 description at `GET /api/v0/openapi.json`, and an interactive page built from it at
+`/docs`. Both are served by the service itself, without the token and without internet. There are no
+client SDKs: call the endpoints directly, or generate a client from the description. The contract in
+words is `docs/CLIENT_API.md` in the repository.
+
+## Address and token
+
+- The service listens on loopback only: `http://127.0.0.1:8787` by default (`agentbus up -listen`).
+- Every request except `/api/v0/openapi.json` and `/docs` sends `Authorization: Bearer <token>`.
+- The token is the file `token` in the data folder: `$AGENTBUS_HOME`, else
+  `$XDG_DATA_HOME/agentbus`, else `~/.local/share/agentbus`.
+- Never put the token in a URL. In a browser, read the stream with `fetch`, not `EventSource`.
+- The `Host` header must be `127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>`, or the answer is 403.
+- Every error is JSON: `{"error": "..."}`, with fixed wording.
+
+```sh
+TOKEN=$(cat "${AGENTBUS_HOME:-${XDG_DATA_HOME:-$HOME/.local/share}/agentbus}/token")
+B=http://127.0.0.1:8787
+```
+
+## Inside a turn: `$AGENTBUS_URL` and `$AGENTBUS_TOKEN`
+
+If you are an agent that agentbus started (`POST /api/v0/turns`), your environment has:
+
+- `AGENTBUS_URL`: the service's address, such as `http://127.0.0.1:8787`.
+- `AGENTBUS_TOKEN`: a token for your turn only. It reads **your own session** and nothing else,
+  and stops working when your turn ends.
+
+It works on: `GET /api/v0/turns` (your session's turns; `session` defaults to yours),
+`GET /api/v0/turns/{id}/events`, `GET /api/v0/sessions/{your session}/events`,
+`GET /api/v0/sessions/{your session}/search`, and `GET /api/v0/calls/{id}/context` and
+`GET /api/v0/calls/{id}/pieces/{n}` for your session's calls. Anything else, every write
+included, answers 403. Your session id is the `<session>` in your base URL
+(`.../s/<session>/t/<turn>`, in `ANTHROPIC_BASE_URL` for claude), and every turn
+`GET /api/v0/turns` lists carries it.
+
+```sh
+curl -s -H "Authorization: Bearer $AGENTBUS_TOKEN" "$AGENTBUS_URL/api/v0/turns"
+curl -s -H "Authorization: Bearer $AGENTBUS_TOKEN" "$AGENTBUS_URL/api/v0/sessions/abc/search?q=login"
+curl -s -H "Authorization: Bearer $AGENTBUS_TOKEN" "$AGENTBUS_URL/api/v0/calls/x-9f2c01ab-7/pieces/12"
+```
+
+## Starting up: snapshot, then stream
+
+1. `GET /api/v0/sessions` returns every session and the `store` and `seq` it was computed at.
+2. `GET /api/v0/events?store=<store>&after=<seq>` streams every event after that point, then new ones.
+
+An event that lands between the two calls is in the stream, not in the snapshot. Nothing is lost or
+counted twice. To resume after a disconnect, reconnect with the last `store` and `seq` you saw.
+
+The cursor is the pair `store` and `seq`. If the `store` you send is not the current one, the answer
+is 409 with the current `store` in the body: start over from step 1.
+
+## Endpoints
+
+### GET /api/v0/sessions
+
+The sessions, newest activity first, with tokens, cost, open state and title. `agent` and `folder`
+come from the session's latest turn that names them. `open` is true while a turn's agent for the
+session is running. A session groups turns; `GET /api/v0/turns` lists the turns themselves.
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" $B/api/v0/sessions
+# {"store":"st_9f2c…","seq":1041,"sessions":[{"id":"abc","agent":"claude","open":true,"turns":7,…}]}
+```
+
+### GET /api/v0/events
+
+A live stream (`text/event-stream`). Each message is `id: <store>/<seq>`, `event: <kind>`,
+`data: <one event as JSON>`, then a blank line. `: ping` comes every 15 seconds. `session=<id>`
+limits it to one session. Without `store` and `after` it starts with new events only.
+
+```sh
+curl -sN -H "Authorization: Bearer $TOKEN" "$B/api/v0/events?store=st_9f2c…&after=1041"
+```
+
+### GET /api/v0/sessions/{id}/events
+
+One session's stored events, oldest first, a page at a time. `limit` is 1 to 10000 (default 1000).
+`next_after` is the `after` for the next page, or null.
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" "$B/api/v0/sessions/abc/events?store=st_9f2c…&after=0&limit=100"
+```
+
+### POST /api/v0/turns
+
+Start a turn. Without `session`: an agent (`claude` or `codex`) with a prompt in a folder, in a new
+session. With `session`: the next turn of a session the snapshot marks `resumable`, in its own agent
+and folder (send neither, or the session's own; a different one is refused with 400). Answers 202
+as soon as it starts, with the session `id` and the new `turn` id. Every event of the turn carries
+that id in `turn`, and its `turn.started` (with the prompt) is stored before the reply. `read_only`
+is false unless true. True gives claude Read, Grep and Glob only, and codex `--sandbox read-only`.
+False leaves claude its own tools and settings, and gives codex `--sandbox workspace-write` with
+network on (`-c sandbox_workspace_write.network_access=true`): it can edit the folder and reach the
+network, so it can call this API with its turn token. Read-only codex has no writes and no network. 404 for an unknown session, 409 when a turn is already running or the session
+cannot be continued. At most 4 turns running at once (429). There is no `/api/v0/runs`. An agent
+whose program is not on the service's PATH gets 400 and nothing is stored: `agent claude cannot
+start: the program claude is not on the service's PATH. Install Claude Code and run claude once to
+sign in, then try again. If it is installed, start agentbus from a shell where claude runs.`
+`GET /api/v0/agents` shows which agents the service finds.
+
+claude and codex both continue by own replay: the agent starts fresh, with no `--resume` or
+`exec resume`, its `turn.started` names the earlier turn in `replay_from`, and the gateway puts
+that turn's whole history in front of each of the turn's model requests. For claude that is
+messages, tool calls, tool results and thinking blocks as sent and received. For codex it is input
+items and the reply's output items, encrypted reasoning byte for byte, and the gateway also writes
+the session's first thread id over the fresh one (body and headers) so the history is read from
+cache. If it cannot, it stores `replay.failed` and the turn fails, rather than run without its
+past. `replay_from` is always the newest turn. If that turn did not finish (its agent was stopped,
+the service restarted mid-turn, or its last model call failed), the next turn still continues: the
+history is what that turn did, with an error result for each tool call that got no result
+(`tool_result`, or codex's `function_call_output` / `custom_tool_call_output`), then a note
+starting `[Note from AgentBus, not written by the model]` (an assistant message for claude, a
+developer message for codex) saying how it ended and to check the folder. A turn that never
+reached the model adds the person's message and a note that it was not acted on. The next turn's
+`turn.started` then carries `recovered_from` and `recovered_reason`. The 409 for a session that
+cannot be continued gives the reason, naming the turn (such as one that may be missing events, or
+whose last request was compacted). `agentbus up -replay=false` puts both on the vendor's resume (a
+session already continued by replay is then refused with 409), and a session from before replies
+were kept continues by the vendor's resume. A next turn's `turn.started` says which it used in
+`continuity` (`replay` or `resume`).
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"agent":"codex","folder":"/Users/ana/Sites/x","prompt":"Review the last commit"}' $B/api/v0/turns
+# {"id":"abc","turn":"t_5d0c…","base_url":"http://127.0.0.1:8787/s/abc/t/t_5d0c…"}
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"session":"abc","prompt":"Now fix the second one"}' $B/api/v0/turns
+# {"id":"abc","turn":"t_91ee…","base_url":"http://127.0.0.1:8787/s/abc/t/t_91ee…"}
+```
+
+### GET /api/v0/turns
+
+The turns, newest first, with `store` and `seq` like the sessions snapshot, so you can stream from
+there. Each has `id`, `session`, `agent`, `folder`, `prompt`, `started`, `ended` (when done),
+`state` (`running`, `finished`, `failed`), `outcome`, `exit_code`, `usage`, `cost_usd` and
+`cost_complete`. A started turn's `state` comes from its agent's exit: 0 is `finished`, anything else
+`failed`. `prompt` is the first 500 characters, with `prompt_truncated: true` when cut; the whole
+prompt is the `text` of the turn's `turn.started` in `/turns/{id}/events`. `reply` is the first 500
+characters of the reply to the turn's last model call, with `reply_truncated: true` when cut; it is
+empty while that reply has not come. `model` is the model that last call asked for, and
+`model_calls` counts the turn's `model.requested` events. `session=<id>` filters
+to one session. `limit` is 1 to 1000 (default 100), and a page also stops at 4 MiB of rows; for
+older turns send `before=<next_before>` until it is null.
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" "$B/api/v0/turns?session=abc"
+# {"store":"st_9f2c…","seq":1041,"turns":[{"id":"t_91ee…","session":"abc","state":"running",…}],"next_before":null}
+```
+
+### GET /api/v0/turns/{id}/events
+
+One turn's stored events, oldest first, paged like a session's events. `events.dropped` names
+sessions, not turns, so it is not among them. The same turn id can be in two sessions: send
+`session=<id>` for one session's events only.
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" "$B/api/v0/turns/t_91ee…/events?session=abc&store=st_9f2c…&after=0"
+```
+
+### GET /api/v0/sessions/{id}/search
+
+Text search over one session's stored history, newest first. Searched: the messages and input
+items of its model requests (tool calls and tool results among them), each once, in the first call
+that carried it; each call's kept reply; and the text of `turn.started` (the prompt), of a
+program's `x.*` events, and of a `model.responded` whose reply is not kept (or is kept without its request). Not searched: system
+blocks, instructions, tool definitions (codex's `additional_tools` items included). Case is ignored; `q` is found as written (no regex).
+`q` is 1 to 256 bytes. Each hit has `source` (`request`, `reply` or `event`), `turn`, `call`,
+`piece`, `seq`, `kind`, `role`, `block` (such as `tool_result`), a `snippet` of up to 80
+characters each side, and `read`: the path that returns the whole of it. `limit` is 1 to 200
+(default 20); send `before=<next_before>` for older hits until it is null. A page can hold fewer
+than `limit` hits and still have a next page.
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" "$B/api/v0/sessions/abc/search?q=login&limit=5"
+# {"store":"st_9f2c…","hits":[{"source":"request","turn":"t_5d0c…","call":"x-9f2c01ab-7","piece":12,"seq":1042,
+#   "kind":"message","role":"user","block":"tool_result","snippet":"…func Login(…","read":"/api/v0/calls/x-9f2c01ab-7/pieces/12"}],"next_before":null}
+```
+
+### GET /api/v0/calls/{id}/context
+
+Everything one model call's request carried, piece by piece, with sizes. `{id}` is the `exchange`
+of the call's events. `full=false` leaves out each piece's `json`.
+
+### GET /api/v0/calls/{id}/pieces/{n}
+
+One piece of a call: `n` is its index in the context's `pieces`, from 0, or `reply` for the kept
+reply. The body is the piece's bytes exactly as stored (`application/json`); `X-Piece-Kind`,
+`X-Piece-Hash`, `X-Piece-Count` and `X-Piece-Label` describe it. 404 when there is no such piece.
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" "$B/api/v0/calls/x-9f2c01ab-7/pieces/reply"
+```
+
+### POST /api/v0/events
+
+A program writes its own event. `kind` is `x.<program>.<name>`; `session` is a known session or
+`default`. Answers 201 with `seq` and `id`.
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"kind":"x.review.finding","session":"abc","text":"Line 12 reads past the end.","data":{"line":12}}' \
+  $B/api/v0/events
+```
+
+### GET /api/v0/agents
+
+Which agents this service can start: found on PATH, version, signed in.
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" $B/api/v0/agents
+```
+
+### GET /api/v0/openapi.json
+
+The OpenAPI 3.1 description, generated from the code at startup, with JSON Schemas for every body
+and every event kind. No token.
+
+```sh
+curl -s $B/api/v0/openapi.json
+```
+
+## Events
+
+Every event has `seq`, `id`, `kind`, `time`, `exchange` and `vendor`, and usually `session`. Other
+fields depend on the kind. Ignore kinds and fields you do not know: v0 may add both.
+
+| kind | what happened | main fields |
+|---|---|---|
+| `turn.started` | a person's message started a turn | `turn`, `text`, `agent`, `folder` (empty when the turn was not started through `POST /api/v0/turns`), `replay_from` (the earlier turn a replayed turn continues), `continuity` (`replay` or `resume`, on a next turn), `recovered_from` and `recovered_reason` (the previous turn did not finish and how it ended; this turn continues after it) |
+| `model.requested` | the harness sent a request to the model | `model`, `tools_offered`, `replayed` (history messages the gateway put in front) |
+| `model.responded` | the model replied | `status`, `text`, `stop_reason`, `usage`, `cost_usd`, `cost_complete`, `error` |
+| `tool.requested` | the model asked for a tool | `tool_id`, `tool_name`, `tool_input` |
+| `tool.completed` | a tool's result reached the model | `tool_id`, `tool_output`, `tool_error` |
+| `turn.completed` | the turn ended | `outcome` (`finished`, `partial`, `refused`, `unknown`), `stop_reason` |
+| `session.opened` | a turn's agent started | `hold`, `agent`, `folder`, `turn` |
+| `session.closed` | a turn's agent exited | `hold`, `exit_code`, `resume_id`, `turn`, `unsettled` (its calls may not all be stored) |
+| `session.registered` | older stores only; nothing writes it now | `agent`, `folder` |
+| `events.dropped` | events were lost; those sessions' costs are incomplete | `dropped`, `sessions`, `all_sessions` |
+| `schema.unexpected` | the vendor sent a shape the adapter does not know | `unexpected` (`where`, `value` or `field`) |
+| `replay.failed` | a replayed turn's request could not be given the earlier turn's history; the gateway refused it and the turn fails | `error` |
+| `x.<program>.<name>` | a program's own event | `text`, `data`, `turn`; `vendor` is `program` |
+
+- `usage` is absent when the vendor sent none. Absent is not zero.
+- Match a `tool.completed` to its `tool.requested` by `tool_id`, never by `turn`.
+- A turn started through `POST /api/v0/turns` has the id the reply named on every event, however
+  many model calls its agent makes. Traffic pointed at the gateway by hand gets a turn id hashed
+  from the conversation.
+- A turn's agent may end several model calls with `turn.completed`; its `state` in `GET /turns`
+  comes from the agent's exit.
+- `probe`: true on every event of a harness's own check, such as Claude Code's startup
+  quota check. It has no turn. A cockpit may hide it.

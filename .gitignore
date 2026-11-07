@@ -1,0 +1,18 @@
+/abgateway
+*.test
+*.out
+/_references/
+/bin/
+
+# internal planning docs, kept on disk and not published
+/TODO.md
+/docs/MAIL.md
+/docs/PLAN_ONE_SHOT_TURNS.md
+/docs/PROGRAM_REVIEW.md
+/agentbus
+# goreleaser output
+/dist/
+
+# local, internal-only agent rules (CLAUDE.local.md is a symlink to AGENTS.local.md)
+/AGENTS.local.md
+/CLAUDE.local.md

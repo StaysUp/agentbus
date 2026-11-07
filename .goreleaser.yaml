@@ -1,0 +1,63 @@
+# Release builds of the agentbus binary. Run by `goreleaser release` on a tag.
+version: 2
+
+project_name: agentbus
+
+builds:
+  - id: agentbus
+    main: ./cmd/agentbus
+    binary: agentbus
+    env:
+      # The store's SQLite is pure Go, so no C toolchain is needed.
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      # agentbus version prints these (cmd/agentbus/version.go). A source
+      # build keeps version "dev" and reads its commit from Go's build info.
+      - -s -w -X main.version={{ .Version }} -X main.commit={{ .FullCommit }}
+
+archives:
+  - id: agentbus
+    ids:
+      - agentbus
+    formats:
+      - tar.gz
+    # agentbus_0.1.0_darwin_arm64.tar.gz; install.sh builds the same name.
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+      - THIRD_PARTY.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  sort: asc
+
+brews:
+  - name: agentbus
+    ids:
+      - agentbus
+    repository:
+      owner: staysup
+      name: homebrew-tap
+      # A token that can push to staysup/homebrew-tap, set in the release job.
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: https://github.com/staysup/agentbus
+    description: Cross-vendor middleware framework for coding agents
+    license: FSL-1.1-ALv2
+    install: |
+      bin.install "agentbus"
+    test: |
+      assert_match "usage: agentbus up", shell_output("#{bin}/agentbus 2>&1", 2)
+      assert_match version.to_s, shell_output("#{bin}/agentbus version")

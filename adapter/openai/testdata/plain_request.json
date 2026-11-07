@@ -1,0 +1,351 @@
+{
+ "model": "gpt-6.1-sol",
+ "stream": true,
+ "input": [
+  {
+   "type": "additional_tools",
+   "id": "at_01a1ab2b-401a-74f1-ac91-1d405571c8bf",
+   "role": "developer",
+   "tools": [
+    {
+     "type": "namespace",
+     "name": "functions",
+     "description": "",
+     "tools": [
+      {
+       "type": "custom",
+       "name": "exec",
+       "description": "(trimmed)",
+       "format": {
+        "type": "grammar"
+       }
+      },
+      {
+       "type": "function",
+       "name": "wait",
+       "strict": false,
+       "description": "(trimmed)",
+       "parameters": {
+        "type": "object",
+        "properties": {}
+       }
+      },
+      {
+       "type": "function",
+       "name": "request_user_input",
+       "strict": false,
+       "description": "(trimmed)",
+       "parameters": {
+        "type": "object",
+        "properties": {}
+       }
+      },
+      {
+       "type": "function",
+       "name": "request_user_input_async",
+       "strict": false,
+       "description": "(trimmed)",
+       "parameters": {
+        "type": "object",
+        "properties": {}
+       }
+      }
+     ]
+    },
+    {
+     "type": "namespace",
+     "name": "clock",
+     "description": "",
+     "tools": [
+      {
+       "type": "function",
+       "name": "sleep",
+       "strict": false,
+       "description": "(trimmed)",
+       "parameters": {
+        "type": "object",
+        "properties": {}
+       }
+      }
+     ]
+    },
+    {
+     "type": "namespace",
+     "name": "collaboration",
+     "description": "",
+     "tools": [
+      {
+       "type": "function",
+       "name": "followup_task",
+       "strict": false,
+       "description": "(trimmed)",
+       "parameters": {
+        "type": "object",
+        "properties": {}
+       }
+      },
+      {
+       "type": "function",
+       "name": "interrupt_agent",
+       "strict": false,
+       "description": "(trimmed)",
+       "parameters": {
+        "type": "object",
+        "properties": {}
+       }
+      },
+      {
+       "type": "function",
+       "name": "list_agents",
+       "strict": false,
+       "description": "(trimmed)",
+       "parameters": {
+        "type": "object",
+        "properties": {}
+       }
+      },
+      {
+       "type": "function",
+       "name": "send_message",
+       "strict": false,
+       "description": "(trimmed)",
+       "parameters": {
+        "type": "object",
+        "properties": {}
+       }
+      },
+      {
+       "type": "function",
+       "name": "spawn_agent",
+       "strict": false,
+       "description": "(trimmed)",
+       "parameters": {
+        "type": "object",
+        "properties": {}
+       }
+      },
+      {
+       "type": "function",
+       "name": "wait_agent",
+       "strict": false,
+       "description": "(trimmed)",
+       "parameters": {
+        "type": "object",
+        "properties": {}
+       }
+      }
+     ]
+    }
+   ]
+  },
+  {
+   "type": "message",
+   "id": "msg_01a1ab2b-401a-74f1-ac91-1d55b7526fb9",
+   "role": "developer",
+   "content": [
+    {
+     "type": "input_text",
+     "text": "You are Codex, an agent based on GPT-6.  (trimmed)"
+    }
+   ],
+   "internal_chat_message_metadata_passthrough": {
+    "turn_id": "01a1ab2b-38bf-7f32-a883-6803bb5204fb",
+    "create_time": 1793873100.826387,
+    "content_item_kinds": [
+     "model.base_instructions"
+    ],
+    "content_item_metadata": [
+     {
+      "provenance": {
+       "type": "harness",
+       "hook": false
+      }
+     }
+    ]
+   }
+  },
+  {
+   "type": "message",
+   "id": "msg_01a1ab2b-401a-74f1-ac91-1d62884d5dd8",
+   "role": "developer",
+   "content": [
+    {
+     "type": "input_text",
+     "text": "<skills_instructions>\n## Skills\nA skill  (trimmed)"
+    }
+   ],
+   "internal_chat_message_metadata_passthrough": {
+    "turn_id": "01a1ab2b-38bf-7f32-a883-6803bb5204fb",
+    "create_time": 1793873100.826387,
+    "content_item_kinds": [
+     "host_skills.instructions",
+     "permissions.instructions",
+     "collaboration_mode.instructions",
+     "plugins.recommendations"
+    ],
+    "content_item_metadata": [
+     {
+      "provenance": {
+       "type": "skills"
+      }
+     },
+     {
+      "provenance": {
+       "type": "harness",
+       "hook": false
+      }
+     },
+     {
+      "provenance": {
+       "type": "harness",
+       "hook": false
+      }
+     },
+     {
+      "provenance": {
+       "type": "harness",
+       "hook": false
+      }
+     }
+    ]
+   }
+  },
+  {
+   "type": "message",
+   "id": "msg_01a1ab2b-401a-74f1-ac91-1d78599b7661",
+   "role": "developer",
+   "content": [
+    {
+     "type": "input_text",
+     "text": "<multi_agent_role>You are `/root`, the p (trimmed)"
+    }
+   ],
+   "internal_chat_message_metadata_passthrough": {
+    "turn_id": "01a1ab2b-38bf-7f32-a883-6803bb5204fb",
+    "create_time": 1793873100.826387,
+    "content_item_kinds": [
+     "multi_agent.role_instructions"
+    ],
+    "content_item_metadata": [
+     {
+      "provenance": {
+       "type": "tool",
+       "namespace": "collaboration"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "type": "message",
+   "id": "msg_01a1ab2b-401a-74f1-ac91-1d826d8f99ae",
+   "role": "developer",
+   "content": [
+    {
+     "type": "input_text",
+     "text": "<multi_agent_mode>Any earlier instructio (trimmed)"
+    }
+   ],
+   "internal_chat_message_metadata_passthrough": {
+    "turn_id": "01a1ab2b-38bf-7f32-a883-6803bb5204fb",
+    "create_time": 1793873100.826387,
+    "content_item_kinds": [
+     "multi_agent.mode_instructions"
+    ],
+    "content_item_metadata": [
+     {
+      "provenance": {
+       "type": "tool",
+       "namespace": "collaboration"
+      }
+     }
+    ]
+   }
+  },
+  {
+   "type": "message",
+   "id": "msg_01a1ab2b-401a-74f1-ac91-1d9c699f61eb",
+   "role": "user",
+   "content": [
+    {
+     "type": "input_text",
+     "text": "# AGENTS.md instructions\n\n<INSTRUCTIONS>\n(trimmed)\n</INSTRUCTIONS>"
+    }
+   ],
+   "internal_chat_message_metadata_passthrough": {
+    "turn_id": "01a1ab2b-38bf-7f32-a883-6803bb5204fb",
+    "create_time": 1793873100.826387,
+    "content_item_kinds": [
+     "agents_md.instructions",
+     "environments.environment_context"
+    ],
+    "content_item_metadata": [
+     {
+      "provenance": {
+       "type": "agents_md"
+      }
+     },
+     {
+      "provenance": {
+       "type": "harness",
+       "hook": false
+      }
+     }
+    ]
+   }
+  },
+  {
+   "type": "message",
+   "id": "msg_01a1ab2b-403c-7a32-8668-c1b803631e48",
+   "role": "user",
+   "content": [
+    {
+     "type": "input_text",
+     "text": "Reply with exactly the word: pong"
+    }
+   ],
+   "internal_chat_message_metadata_passthrough": {
+    "turn_id": "01a1ab2b-38bf-7f32-a883-6803bb5204fb",
+    "create_time": 1793873100.860119,
+    "content_item_kinds": [
+     "user.text"
+    ],
+    "content_item_metadata": [
+     {
+      "provenance": {
+       "type": "user"
+      }
+     }
+    ]
+   }
+  }
+ ],
+ "tool_choice": "auto",
+ "parallel_tool_calls": false,
+ "reasoning": {
+  "effort": "low",
+  "context": "all_turns"
+ },
+ "store": false,
+ "include": [
+  "reasoning.encrypted_content"
+ ],
+ "prompt_cache_key": "01a1ab2b-314b-7e72-ab73-893acc46fe58",
+ "text": {
+  "verbosity": "low"
+ },
+ "client_metadata": {
+  "root_turn_id": "01a1ab2b-38bf-7f32-a883-6803bb5204fb",
+  "thread_id": "01a1ab2b-314b-7e72-ab73-893acc46fe58",
+  "session_id": "01a1ab2b-314b-7e72-ab73-893acc46fe58",
+  "guardian_credits_requested": "true",
+  "mcp_attribution": "{\"status\":\"none\"}",
+  "x-codex-turn-metadata": "{\"installation_id\":\"00000000-0000-0000-0000-000000000000\",\"session_id\":\"01a1ab2b-314b-7e72-ab73-893acc46fe58\",\"thread_id\":\"01a1ab2b-314b-7e72-ab73-893acc46fe58\",\"agent_name\":\"/root\",\"turn_id\":\"01a1ab2b-38bf-7f32-a883-6803bb5204fb\",\"window_id\":\"01a1ab2b-314b-7e72-ab73-893acc46fe58:0\",\"window_number\":0,\"context_window_id\":\"01a1ab2b-384a-7493-91c4-360621769a91\",\"request_kind\":\"turn\",\"history_initialization\":\"new\",\"root_turn_id\":\"01a1ab2b-38bf-7f32-a883-6803bb5204fb\",\"thread_source\":\"user\",\"turn_trigger\":\"exec\",\"sandbox\":\"seatbelt\",\"sandbox_mode\":\"read-only\",\"auto_review_enabled\":false,\"node_repl_auto_review_required\":true,\"node_repl_disabled\":false,\"turn_started_at_unix_ms\":1793873098951,\"analytics_enabled\":true,\"model\":\"gpt-6.1-sol\",\"reasoning_effort\":\"low\"}",
+  "turn_id": "01a1ab2b-38bf-7f32-a883-6803bb5204fb",
+  "x-codex-window-id": "01a1ab2b-314b-7e72-ab73-893acc46fe58:0",
+  "x-codex-installation-id": "00000000-0000-0000-0000-000000000000"
+ },
+ "access_programs": {
+  "cyber": "standard"
+ }
+}
