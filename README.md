@@ -196,6 +196,8 @@ The next turn of the session continues after it, and the agent is told that you 
 
 The running service describes its own API. None of these need the token or the internet:
 
+![AgentBus API docs](docs/assets/api-docs.png)
+
 - `http://127.0.0.1:8787/docs`: an interactive reference.
 - `http://127.0.0.1:8787/api/v0/openapi.json`: the OpenAPI 3.1 description. Generate a client from
   it in any language. There are no client SDKs.
