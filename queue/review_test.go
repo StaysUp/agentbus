@@ -38,6 +38,13 @@ func TestParseVerdict(t *testing.T) {
 		{"an empty summary", block(`{"verdict":"pass","findings":[{"severity":"P3","summary":" "}]}`), VerdictUnknown, 0},
 		{"an unknown field", block(`{"verdict":"pass","score":9}`), VerdictUnknown, 0},
 		{"not JSON", block(`verdict: pass`), VerdictUnknown, 0},
+		// Seen live, 2026-11-08: the reviewer's own settings add a recap line.
+		{"a recap line after the block", block(`{"verdict":"pass","findings":[{"severity":"P3","summary":"x"}]}`) +
+			"\n**recap:** _clean, one P3_\n", VerdictPass, 1},
+		{"a plain recap line", block(`{"verdict":"fail"}`) + "recap: it fails", VerdictFail, 0},
+		{"two lines after the block", block(`{"verdict":"pass"}`) + "**recap:** a\nmore", VerdictUnknown, 0},
+		{"a recap after a quoted pass and words", "```json\n{\"verdict\":\"pass\"}\n```\nThis fails: P1.\n**recap:** fails", VerdictUnknown, 0},
+		{"words that are not a recap", block(`{"verdict":"pass"}`) + "In short: it fails.", VerdictUnknown, 0},
 	} {
 		got, fs := ParseVerdict(c.text)
 		if got != c.want || len(fs) != c.findings {

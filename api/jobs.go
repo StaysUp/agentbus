@@ -39,6 +39,7 @@ var jobRoutes = []route{
 		doc: "Make a job. " + jobsDoc + "\n\n" +
 			"A session's first turn job names agent and a workspace: folder, or repo and base (a git worktree the runner makes). " +
 			"A later turn job names session only, and runs in that session's workspace. " +
+			"A later turn job with no model keeps the model of the session's newest turn job that named one. " +
 			"A retry with the same idempotency_key and fields answers 200 with the same job.",
 		body: jobs.JobRequest{},
 		replies: []reply{ok(201, queue.Job{}, "The job, queued."), ok(200, queue.Job{}, "A retry: the job the key first made."),

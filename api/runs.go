@@ -49,7 +49,7 @@ type TurnRequest struct {
 	Agent    string `json:"agent,omitempty" doc:"Required without session. With session it is the session's own; if sent it must match."`
 	Folder   string `json:"folder,omitempty" doc:"An absolute path to an existing directory on the runner's machine. Required without session. With session it is the session's own; if sent it must match."`
 	Prompt   string `json:"prompt" doc:"From 1 byte to 256 KiB, no NUL byte. Always passed after --."`
-	Model    string `json:"model,omitempty" doc:"Passed only as the value of --model."`
+	Model    string `json:"model,omitempty" doc:"Passed only as the value of --model. A session's next turn with no model keeps the model of the session's newest turn that named one."`
 	ReadOnly *bool  `json:"read_only,omitempty" doc:"False unless true. True: claude gets Read, Grep and Glob only; codex runs with --sandbox read-only. False: claude keeps its own tools and permission settings; codex runs with --sandbox workspace-write and network access on, so it can edit the folder and reach the network. Read-only codex has no network."`
 	// IdempotencyKey makes a retry safe: a client whose request timed out
 	// sends it again with the same key and gets the same turn.

@@ -299,7 +299,7 @@ curl -s -H "Authorization: Bearer $TOKEN" $B/api/v0/version
 A job is a requested turn, of kind `turn` or `review`. A runner takes it and runs it; its attempt
 is its turn (the attempt id is the turn id, and `turn_started` says the turn started). A session's
 first turn job names `agent` and `folder`, or `repo` and `base` for a git worktree of its own; a
-later one names `session` only and waits for the one before it. Each job's `result` lists the files
+later one names `session` only, waits for the one before it, and keeps the session's model when it names none. Each job's `result` lists the files
 it changed. A review job runs read-only in the reviewed job's workspace, in a session of its own,
 and ends with `verdict` (`pass`, `fail` or `unknown`) and `findings`; any P1 makes it `fail`.
 `POST /api/v0/jobs/{id}/cancel` stops one. `GET /api/v0/workspaces` lists the sessions'

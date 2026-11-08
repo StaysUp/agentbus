@@ -518,6 +518,41 @@ func TestUnknownSessionAnyRunner(t *testing.T) {
 	}
 }
 
+// A session's next turn with no model keeps the model of the session's
+// newest turn job that named one; one that names a model keeps its own. The
+// same request sent again under its key is still the same job.
+func TestNextTurnKeepsTheSessionModel(t *testing.T) {
+	q, c := open(t)
+	first, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Agent: "claude", Folder: "/w", Prompt: "one", Model: "haiku"}, Links{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.add(time.Millisecond)
+	next, _, err := q.Create(DefaultTeam, KindTurn, "k2", Spec{Session: first.Session, Prompt: "fix it"}, Links{})
+	if err != nil || next.Spec.Model != "haiku" {
+		t.Fatalf("next: %q %v, want haiku", next.Spec.Model, err)
+	}
+	again, created, err := q.Create(DefaultTeam, KindTurn, "k2", Spec{Session: first.Session, Prompt: "fix it"}, Links{})
+	if err != nil || created || again.ID != next.ID {
+		t.Fatalf("a retry under the key: %v %v %s", err, created, again.ID)
+	}
+	c.add(time.Millisecond)
+	own, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: first.Session, Prompt: "bigger", Model: "sonnet"}, Links{})
+	if err != nil || own.Spec.Model != "sonnet" {
+		t.Fatalf("own model: %q %v", own.Spec.Model, err)
+	}
+	c.add(time.Millisecond)
+	later, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: first.Session, Prompt: "more"}, Links{})
+	if err != nil || later.Spec.Model != "sonnet" {
+		t.Fatalf("after a model was named: %q %v, want the newest, sonnet", later.Spec.Model, err)
+	}
+	// A session no job named a model for keeps the agent's default.
+	plain, _, _ := q.Create(DefaultTeam, KindTurn, "", Spec{Agent: "claude", Folder: "/w", Prompt: "one"}, Links{})
+	if n, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: plain.Session, Prompt: "two"}, Links{}); err != nil || n.Spec.Model != "" {
+		t.Fatalf("no model anywhere: %q %v", n.Spec.Model, err)
+	}
+}
+
 // A session's turn jobs run one at a time, on one runner or on two: a next
 // turn waits while the one before it is taken or running, and is takeable
 // once it ends. A review of the session does not wait.

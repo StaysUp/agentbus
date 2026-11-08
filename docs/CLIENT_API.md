@@ -997,6 +997,9 @@ turn. The jobs API is the whole way: worktrees, reviews, cancel, and the list.
   while the turn ran) or `runner_stopped` (its runner shut down).
 - **A session's turn jobs run one at a time**, in the order they were made. A next turn waits for
   the one before it. Reviews never wait.
+- **A session's next turn keeps the session's model.** A turn job of a session that names no model
+  gets the model of the session's newest turn job that named one, so a Fix after a review runs on
+  the model the author used. Its `spec.model` shows it. A job that names a model keeps its own.
 - **No automatic retry once a job is running.** A lease lost before the turn started puts the job
   back in the queue; a lease lost while it runs fails it with `runner_lost`.
 - **The job's result** holds how the turn ended (`state`, `exit_code`, `stopped`, `reply`,

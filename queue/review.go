@@ -40,15 +40,27 @@ var (
 )
 
 // ParseVerdict reads the verdict block that ends text: a fenced block, with
-// nothing after it but blank space, holding exactly one object
+// nothing after it but blank space and at most one recap line, holding
+// exactly one object
 // {"verdict":"pass"|"fail","findings":[{"severity":"P1"|"P2"|"P3",...}]}.
 // It is found from the end, so a reply cut at its front, or a block the
 // reviewer quoted earlier in its reply, cannot change it. Any P1 makes the
 // verdict fail, whatever the reviewer wrote: work lands only with no P1.
 // Anything else is unknown, never pass.
+//
+// The recap line: a reviewer's own settings can end every reply with one
+// line, such as "**recap:** _the change is clean_" (claude, 2026-11-08). Only
+// a line that starts with recap counts, so a conclusion in words after a
+// quoted block still reads as unknown.
 func ParseVerdict(text string) (string, []Finding) {
 	lines := strings.Split(strings.ReplaceAll(strings.TrimRight(text, " \t\r\n"), "\r\n", "\n"), "\n")
 	last := len(lines) - 1
+	if last >= 1 && isRecap(lines[last]) {
+		last--
+		for last >= 0 && strings.TrimSpace(lines[last]) == "" {
+			last--
+		}
+	}
 	if last < 1 || !closingFence.MatchString(strings.TrimSpace(lines[last])) {
 		return VerdictUnknown, nil
 	}
@@ -105,6 +117,13 @@ func ParseVerdict(text string) (string, []Finding) {
 		}
 		return verdict, v.Findings
 	}
+}
+
+// isRecap says a line is a reviewer's one-line recap: "recap" first, after
+// markdown's * and _ and spaces.
+func isRecap(line string) bool {
+	t := strings.ToLower(strings.TrimLeft(line, " \t*_"))
+	return strings.HasPrefix(t, "recap:") || strings.HasPrefix(t, "recap ")
 }
 
 // reviewed is the part of a turn job's result a review prompt is built from:
