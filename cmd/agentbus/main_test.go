@@ -455,7 +455,7 @@ func TestTurnsTokenMadeAndScoped(t *testing.T) {
 
 func TestMaxRunsFlag(t *testing.T) {
 	var b bytes.Buffer
-	for _, v := range []string{"0", "-1", "x"} {
+	for _, v := range []string{"0", "-1", "x", "65"} {
 		b.Reset()
 		if code := run([]string{"up", "-max-runs", v}, func(string) string { return t.TempDir() }, &b, &b); code != 2 {
 			t.Errorf("-max-runs %s: exit %d, want 2", v, code)

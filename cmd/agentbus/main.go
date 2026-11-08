@@ -42,8 +42,11 @@ import (
 	"github.com/staysup/agentbus/body"
 	"github.com/staysup/agentbus/cost"
 	"github.com/staysup/agentbus/gateway"
+	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/logfile"
+	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/replay"
+	"github.com/staysup/agentbus/runner"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -73,12 +76,12 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	listen := fl.String("listen", "127.0.0.1:8787", "address to listen on: an IP, with or without a port (8787 if none); 0.0.0.0 is reachable from the network, with the token guarding the API")
 	origin := fl.String("origin", "", "lock the API to this one browser origin, such as http://localhost:5173; without it any origin may call the API, and the token still guards every call")
 	replayOn := fl.Bool("replay", true, "continue claude and codex sessions by own replay (the gateway sends the earlier turn's history); false uses the vendor's resume")
-	maxRuns := fl.Int("max-runs", api.DefaultMaxRuns, "how many turns may run at once; past it POST /api/v0/turns answers 429")
+	maxRuns := fl.Int("max-runs", api.DefaultMaxRuns, "how many turns may run at once, 1 to 64; it is also the built-in runner's capacity; past it POST /api/v0/turns answers 429")
 	if err := fl.Parse(args[1:]); err != nil {
 		return 2
 	}
-	if *maxRuns < 1 {
-		fmt.Fprintln(stderr, "agentbus up: -max-runs must be 1 or more")
+	if *maxRuns < 1 || *maxRuns > jobs.MaxCapacity {
+		fmt.Fprintln(stderr, "agentbus up: -max-runs must be 1 to 64")
 		return 2
 	}
 	if fl.NArg() > 0 {
@@ -154,9 +157,16 @@ type service struct {
 	gws      []*gateway.Gateway
 	api      *api.API
 	store    *store.Store
+	queue    *queue.Queue
 	log      *logfile.Log // logs/service.log
 	done     chan error
 	once     sync.Once
+
+	// The built-in runner, and the lease sweep: stopped before the API.
+	stopRunner func()
+	runnerDone chan struct{}
+	stopSweep  func()
+	sweepDone  chan struct{}
 }
 
 // start opens the store, makes the token if needed, and serves.
@@ -193,8 +203,28 @@ func start(c config) (*service, error) {
 	if err := makePermissions(permissions); err != nil {
 		return nil, err
 	}
+	// The enrollment token adds a runner. It stays in the data folder: the
+	// built-in runner reads it, and a runner on another machine is given it.
+	enrollToken, err := loadToken(filepath.Join(c.home, "enroll_token"), enrollTokenPrefix)
+	if err != nil {
+		return nil, err
+	}
 	st, err := store.Open(filepath.Join(c.home, "events.db"))
 	if err != nil {
+		return nil, err
+	}
+	// The job queue, in its own file beside the record: the record knows
+	// nothing about jobs. Opened after the store, which refuses a second
+	// service on this folder.
+	q, err := queue.Open(filepath.Join(c.home, "jobs.db"), nil)
+	if err != nil {
+		st.Close()
+		return nil, err
+	}
+	js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollToken})
+	if err != nil {
+		q.Close()
+		st.Close()
 		return nil, err
 	}
 	// The logs are opened after the store, which refuses a second service on
@@ -203,15 +233,18 @@ func start(c config) (*service, error) {
 	runLogs := filepath.Join(logs, "runs")
 	if err := logfile.Dir(logs); err != nil {
 		st.Close()
+		q.Close()
 		return nil, fmt.Errorf("log folder %s could not be made: %w", logs, err)
 	}
 	if err := logfile.Dir(runLogs); err != nil {
 		st.Close()
+		q.Close()
 		return nil, fmt.Errorf("log folder %s could not be made: %w", runLogs, err)
 	}
 	svcLog, err := logfile.Open(filepath.Join(logs, "service.log"), c.logMax, nil)
 	if err != nil {
 		st.Close()
+		q.Close()
 		return nil, fmt.Errorf("the service log could not be opened: %w", err)
 	}
 	st.OnError = func(err error) {
@@ -222,6 +255,7 @@ func start(c config) (*service, error) {
 	if err != nil {
 		svcLog.Close()
 		st.Close()
+		q.Close()
 		return nil, fmt.Errorf("-listen %s: %w", c.listen, err)
 	}
 	addr := ln.Addr().String()
@@ -261,7 +295,7 @@ func start(c config) (*service, error) {
 	a, err := api.New(api.Config{Store: st, Token: token, TurnsToken: turnsToken, MaxRuns: c.maxRuns, Port: port, AnyHost: !loopback,
 		BaseURL: "http://" + agentAddr(ln.Addr()), Origin: c.origin, ReplayBase: replayBase, Permissions: permissions,
 		Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace,
-		LookPath: c.lookPath, Environ: c.environ, Logf: svcLog.Printf, Build: build(debug.ReadBuildInfo()),
+		LookPath: c.lookPath, Environ: c.environ, Logf: svcLog.Printf, Build: build(debug.ReadBuildInfo()), Jobs: js,
 		RunLog: func(session string, data []byte) {
 			// The session id is the service's own hex, so it is a plain
 			// file name.
@@ -273,6 +307,7 @@ func start(c config) (*service, error) {
 		ln.Close()
 		svcLog.Close()
 		st.Close()
+		q.Close()
 		return nil, err
 	}
 	// Every model.responded is priced, and every turn.started of a run's
@@ -306,7 +341,8 @@ func start(c config) (*service, error) {
 		oai.SetRewriter(codexReplay)
 	}
 	host, _, _ := net.SplitHostPort(c.listen)
-	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: []*gateway.Gateway{anth, oai}, api: a, store: st, log: svcLog, done: make(chan error, 1)}
+	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: []*gateway.Gateway{anth, oai}, api: a, store: st,
+		queue: q, log: svcLog, done: make(chan error, 1)}
 	s.srv = &http.Server{
 		Handler:           logRequests(svcLog, route(a, anth, oai, !loopback)),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -314,7 +350,66 @@ func start(c config) (*service, error) {
 	}
 	svcLog.Printf("service.start listen=%s pid=%d", addr, os.Getpid())
 	go func() { s.done <- s.srv.Serve(ln) }()
+	s.sweep(svcLog)
+	// The built-in runner takes jobs through the runner protocol over
+	// loopback, as a runner on another machine would.
+	if err := s.startRunner(c, "http://"+agentAddr(ln.Addr()), enrollToken, turnsToken, svcLog); err != nil {
+		s.stop()
+		return nil, err
+	}
 	return s, nil
+}
+
+// sweep settles expired leases every second until the service stops.
+func (s *service) sweep(svcLog *logfile.Log) {
+	stop := make(chan struct{})
+	s.stopSweep = sync.OnceFunc(func() { close(stop) })
+	s.sweepDone = make(chan struct{})
+	go func() {
+		defer close(s.sweepDone)
+		t := time.NewTicker(time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-stop:
+				return
+			case <-t.C:
+				if n, err := s.queue.Sweep(); err != nil {
+					svcLog.Printf("queue.sweep_failed")
+				} else if n > 0 {
+					svcLog.Printf("queue.leases_expired n=%d", n)
+				}
+			}
+		}
+	}()
+}
+
+// startRunner enrolls the built-in runner and starts it.
+func (s *service) startRunner(c config, self, enrollToken, turnsToken string, svcLog *logfile.Log) error {
+	capacity := c.maxRuns
+	if capacity == 0 {
+		capacity = api.DefaultMaxRuns
+	}
+	name, _ := os.Hostname()
+	if name == "" {
+		name = "built-in"
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	rn, err := runner.Enroll(ctx, runner.Config{Queue: self, EnrollToken: enrollToken, Name: name, Capacity: capacity,
+		Agentbus: self, AgentbusToken: turnsToken, Logf: svcLog.Printf,
+		Workdir: filepath.Join(c.home, "worktrees"), StateFile: filepath.Join(c.home, "runner.json")})
+	if err != nil {
+		cancel()
+		return fmt.Errorf("the built-in runner could not enroll: %w", err)
+	}
+	svcLog.Printf("runner.start id=%s capacity=%d", rn.ID(), capacity)
+	s.stopRunner = cancel
+	s.runnerDone = make(chan struct{})
+	go func() {
+		defer close(s.runnerDone)
+		rn.Run(ctx)
+	}()
+	return nil
 }
 
 // settleTimeout bounds how long a turn's session.closed waits for the
@@ -429,7 +524,13 @@ func (s *service) stop() { s.once.Do(s.shutdown) }
 
 func (s *service) shutdown() {
 	s.log.Printf("service.stopping")
-	// Runs first: each stores its session.closed, and new runs are refused.
+	// The runner first: it stops its jobs' turns and finishes them through
+	// the API, which is still serving.
+	if s.stopRunner != nil {
+		s.stopRunner()
+		<-s.runnerDone
+	}
+	// Runs next: each stores its session.closed, and new runs are refused.
 	s.api.StopRuns()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -438,6 +539,11 @@ func (s *service) shutdown() {
 	for _, gw := range s.gws {
 		gw.Close()
 	}
+	if s.stopSweep != nil {
+		s.stopSweep()
+		<-s.sweepDone
+	}
+	_ = s.queue.Close()
 	_ = s.store.Close()
 	s.log.Printf("service.stop")
 	_ = s.log.Close()
@@ -465,6 +571,9 @@ func dataFolder(getenv func(string) string) (string, error) {
 // turnsTokenPrefix marks the turns token, so a person who finds one can tell
 // it from the main token and from a turn's own abt_ token.
 const turnsTokenPrefix = "abq_"
+
+// enrollTokenPrefix marks the enrollment token, which adds a runner.
+const enrollTokenPrefix = "abe_"
 
 // loadToken reads a token, or makes it on first start with mode 0600: prefix
 // and 64 hex characters. Its value is never printed or put in an error.

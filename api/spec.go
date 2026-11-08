@@ -48,6 +48,10 @@ const specIntro = "agentbus runs on your machine, between your coding agents and
 // description.
 const turnsTokenDoc = "The turns token (the file `turns_token` in the data folder) may call this too."
 
+// runnerTokenDoc is what an operation of the runner protocol adds to its
+// description: it checks its own token.
+const runnerTokenDoc = "Runner protocol: called by a runner, never by the cockpit. Takes the enrollment token (enroll) or the runner's own token (every other call), not the main token."
+
 // turnTokenDoc is what each turn-token rule adds to an operation's
 // description.
 var turnTokenDoc = map[int]string{
@@ -183,6 +187,9 @@ func customize(_ string, t reflect.Type, tag reflect.StructTag, s *openapi3.Sche
 type components struct {
 	schemas openapi3.Schemas
 	types   map[string]reflect.Type
+	// clash is the first name two Go types share: their schemas would be
+	// one, and one of them wrong.
+	clash error
 }
 
 // ref returns the schema of v's type, adding the structs it uses to the
@@ -200,7 +207,13 @@ func (c *components) collect(t reflect.Type) {
 	for t.Kind() == reflect.Pointer || t.Kind() == reflect.Slice || t.Kind() == reflect.Map {
 		t = t.Elem()
 	}
-	if t.Kind() != reflect.Struct || t == timeType || c.types[typeName(t)] != nil {
+	if t.Kind() != reflect.Struct || t == timeType {
+		return
+	}
+	if have := c.types[typeName(t)]; have != nil {
+		if have != t && c.clash == nil {
+			c.clash = fmt.Errorf("api: two types are both named %s: %v and %v", typeName(t), have, t)
+		}
 		return
 	}
 	c.types[typeName(t)] = t
@@ -211,6 +224,9 @@ func (c *components) collect(t reflect.Type) {
 
 // finish gives each component's fields their descriptions and constraints.
 func (c *components) finish() error {
+	if c.clash != nil {
+		return c.clash
+	}
 	for name, t := range c.types {
 		sr := c.schemas[name]
 		if sr == nil || sr.Value == nil {
@@ -350,6 +366,9 @@ func describe() (*openapi3.T, error) {
 		if rt.turns {
 			desc = strings.TrimSpace(desc + "\n\n" + turnsTokenDoc)
 		}
+		if rt.self {
+			desc = strings.TrimSpace(desc + "\n\n" + runnerTokenDoc)
+		}
 		op := &openapi3.Operation{OperationID: rt.op, Tags: []string{rt.tag}, Summary: rt.summary, Description: desc,
 			Responses: openapi3.NewResponsesWithCapacity(len(rt.replies) + 2)}
 		if strings.Contains(rt.path, "{id}") {
@@ -397,6 +416,8 @@ func describe() (*openapi3.T, error) {
 				// Any JSON value: the bytes as stored, never re-encoded.
 				resp = &openapi3.ResponseRef{Value: openapi3.NewResponse().WithDescription(r.doc).
 					WithContent(openapi3.NewContentWithJSONSchema(&openapi3.Schema{}))}
+			case r.empty:
+				resp = &openapi3.ResponseRef{Value: openapi3.NewResponse().WithDescription(r.doc)}
 			case r.body == nil:
 				resp = errorReply(r.doc)
 			default:
@@ -412,7 +433,7 @@ func describe() (*openapi3.T, error) {
 			op.Responses.Set(strconv.Itoa(r.status), resp)
 		}
 		forbidden := "The service is on loopback and the Host header does not name it on 127.0.0.1, localhost or [::1]."
-		if !rt.public {
+		if !rt.public && !rt.self {
 			forbidden += " Or a turn token was sent where it may not read: another session, or an operation that does not take one."
 			if !rt.turns {
 				forbidden += " Or the turns token was sent: it may only start, stop and read turns."

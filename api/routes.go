@@ -40,6 +40,10 @@ type route struct {
 	// turns says the turns token (Config.TurnsToken) may call the route. The
 	// zero value refuses it.
 	turns bool
+	// self routes check their own token: the runner protocol, which takes
+	// the enrollment token or a runner's own token (package jobs). ServeHTTP
+	// hands them to Config.Jobs before its own token check.
+	self  bool
 	serve func(a *API, w http.ResponseWriter, r *http.Request, id string)
 }
 
@@ -58,6 +62,7 @@ type reply struct {
 	body    any    // a zero value of the JSON type; nil means Error
 	stream  bool   // text/event-stream
 	raw     bool   // application/json of any shape, sent as stored
+	empty   bool   // no body, such as a 204
 	example string // for a stream: what it sends, so the docs show a sample
 }
 
@@ -107,13 +112,15 @@ const streamDoc = "Server-sent events. Every stored event after the cursor, in o
 // user starts a turn first. Every route names one.
 var tags = []struct{ name, doc string }{
 	{"Turns", "Start an agent and follow what it does. A turn is one prompt and the work it starts."},
+	{"Jobs", "Turns and reviews as jobs in a queue, each run by a runner, and the workspaces they run in."},
 	{"Sessions", "The sessions the service has seen, and each one's stored history."},
 	{"Events", "The live stream of every event, and a program's own events."},
 	{"Calls", "What one model call sent to the vendor, piece by piece, and the reply it got."},
 	{"Service", "What this service can start, and this description."},
+	{"Runners", "The protocol a runner uses to take jobs and report them. The cockpit never calls it."},
 }
 
-var routes = []route{
+var routes = append([]route{
 	{method: "GET", path: "/api/v0/sessions", op: "listSessions",
 		tag:     "Sessions",
 		summary: "List sessions",
@@ -265,7 +272,7 @@ var routes = []route{
 		doc:     "This description.",
 		replies: []reply{ok(200, map[string]any{}, "This document.")},
 		public:  true},
-}
+}, jobRoutes...)
 
 // match reports whether p is rt's path, and the id in it.
 func (rt *route) match(p string) (id string, ok bool) {
@@ -301,7 +308,7 @@ func (a *API) route(w http.ResponseWriter, r *http.Request, g *grant, turnsOnly 
 	var allow []string
 	for i := range routes {
 		rt := &routes[i]
-		if rt.public {
+		if rt.public || rt.self {
 			continue
 		}
 		id, ok := rt.match(r.URL.Path)
@@ -326,4 +333,20 @@ func (a *API) route(w http.ResponseWriter, r *http.Request, g *grant, turnsOnly 
 		return
 	}
 	writeError(w, http.StatusNotFound, "no such API path")
+}
+
+// self serves a request on a route that checks its own token (route.self),
+// and says whether it did.
+func (a *API) self(w http.ResponseWriter, r *http.Request) bool {
+	for i := range routes {
+		rt := &routes[i]
+		if !rt.self || rt.method != r.Method {
+			continue
+		}
+		if id, ok := rt.match(r.URL.Path); ok {
+			rt.serve(a, w, r, id)
+			return true
+		}
+	}
+	return false
 }

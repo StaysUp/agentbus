@@ -24,6 +24,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -113,6 +114,10 @@ type Config struct {
 	// exiting. Nil writes nothing. It is never
 	// given a token, a header, a body, a prompt or the child's output.
 	Logf func(format string, args ...any)
+	// Jobs serves the job queue's routes (api/jobs.go): package jobs. Nil
+	// answers them 404.
+	Jobs http.Handler
+
 	// RunLog keeps a run's child output, once per child exit: a header line
 	// and the last RunOutputMax bytes of its stdout and stderr together. Nil
 	// discards it. That output is the agent's own and may hold the person's
@@ -234,6 +239,9 @@ func bodyLimit(r *http.Request) int64 {
 		return MaxRunBody
 	case p == "/api/v0/events":
 		return MaxEventBody
+	case strings.HasPrefix(p, "/api/v0/jobs") || strings.HasPrefix(p, "/api/v0/attempts") || strings.HasPrefix(p, "/api/v0/runners"):
+		// A job carries a prompt, and a finish a result with the reply.
+		return jobs.MaxBody
 	}
 	return MaxBody
 }
@@ -305,6 +313,9 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if a.public(w, r) {
 		return // the docs and the description, docs.go
+	}
+	if a.self(w, r) {
+		return // the runner protocol checks its own tokens
 	}
 	who, g, ok := a.authorized(r)
 	if !ok {
