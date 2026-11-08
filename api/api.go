@@ -45,6 +45,10 @@ type Config struct {
 	Store *store.Store
 	// Token is the bearer token every request but an allowed preflight sends.
 	Token string
+	// TurnsToken, when set, is a second token that may only start, stop and
+	// read turns: the routes whose turns field is set. A job queue or a
+	// runner uses it in place of Token. Empty turns it off.
+	TurnsToken string
 	// Port is the port the service listens on. A request's Host must be
 	// 127.0.0.1:<Port>, localhost:<Port> or [::1]:<Port>, unless AnyHost.
 	Port string
@@ -88,6 +92,10 @@ type Config struct {
 	// confirmed; session.closed then carries unsettled, and own replay will
 	// not continue from that turn. Nil stores session.closed at once.
 	Settle func(session, turn string) bool
+	// MaxRuns bounds the turns running at once, service-wide (agentbus up
+	// -max-runs). Past it POST /api/v0/turns answers 429. Zero means
+	// DefaultMaxRuns.
+	MaxRuns int
 	// RunGrace is how long StopRuns waits after SIGTERM before SIGKILL. Zero
 	// means 5 seconds.
 	RunGrace time.Duration
@@ -116,12 +124,18 @@ type Config struct {
 type API struct {
 	cfg   Config
 	token [32]byte
-	hosts [3]string
+	// turnsToken is the SHA-256 of Config.TurnsToken, when hasTurnsToken.
+	turnsToken    [32]byte
+	hasTurnsToken bool
+	hosts         [3]string
 
 	// streams admits at most MaxStreams at once.
 	streams chan struct{}
 
 	runs runs
+
+	// keys serialises turn starts that share an idempotency key (runs.go).
+	keys keyLocks
 
 	// turnTokens are the live turns' tokens (tokens.go).
 	turnTokens turnTokens
@@ -166,6 +180,12 @@ func New(cfg Config) (*API, error) {
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
+	if cfg.MaxRuns == 0 {
+		cfg.MaxRuns = DefaultMaxRuns
+	}
+	if cfg.MaxRuns < 0 {
+		return nil, errors.New("api: MaxRuns below zero")
+	}
 	desc, err := spec()
 	if err != nil {
 		return nil, err
@@ -173,6 +193,13 @@ func New(cfg Config) (*API, error) {
 	a := &API{cfg: cfg, token: sha256.Sum256([]byte(cfg.Token)), spec: desc,
 		hosts:   [3]string{"127.0.0.1:" + cfg.Port, "localhost:" + cfg.Port, "[::1]:" + cfg.Port},
 		streams: make(chan struct{}, MaxStreams)}
+	a.runs.max = cfg.MaxRuns
+	if cfg.TurnsToken != "" {
+		if cfg.TurnsToken == cfg.Token {
+			return nil, errors.New("api: the turns token is the main token")
+		}
+		a.turnsToken, a.hasTurnsToken = sha256.Sum256([]byte(cfg.TurnsToken)), true
+	}
 	if _, err := cfg.Store.CloseStaleHolds(cfg.Now().UTC(), newEventID); err != nil {
 		return nil, err
 	}
@@ -279,32 +306,45 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if a.public(w, r) {
 		return // the docs and the description, docs.go
 	}
-	main, g, ok := a.authorized(r)
+	who, g, ok := a.authorized(r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "a valid bearer token is required")
 		return
 	}
-	if main {
-		a.route(w, r, nil)
-		return
+	switch who {
+	case byMain:
+		a.route(w, r, nil, false)
+	case byTurns:
+		a.route(w, r, nil, true)
+	default:
+		a.route(w, r, &g, false)
 	}
-	a.route(w, r, &g)
 }
 
-// authorized checks the bearer token: the main token (main true), or a live
-// turn token and what it may read.
-func (a *API) authorized(r *http.Request) (main bool, g grant, ok bool) {
+// Who sent a request, by its token.
+const (
+	byMain  = iota // the main token
+	byTurns        // the turns token (Config.TurnsToken)
+	byTurn         // a live turn token, with its grant
+)
+
+// authorized checks the bearer token: the main token, the turns token, or a
+// live turn token and what it may read.
+func (a *API) authorized(r *http.Request) (who int, g grant, ok bool) {
 	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok {
-		return false, g, false
+		return 0, g, false
 	}
 	// Hashed first, so the compare takes the same time whatever the length.
 	sum := sha256.Sum256([]byte(got))
 	if subtle.ConstantTimeCompare(sum[:], a.token[:]) == 1 {
-		return true, g, true
+		return byMain, g, true
+	}
+	if a.hasTurnsToken && subtle.ConstantTimeCompare(sum[:], a.turnsToken[:]) == 1 {
+		return byTurns, g, true
 	}
 	g, ok = a.turnTokens.lookup(got)
-	return false, g, ok
+	return byTurn, g, ok
 }
 
 func notAllowed(w http.ResponseWriter, allow string) {
@@ -558,6 +598,37 @@ func (a *API) turns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, list)
+}
+
+// GET /api/v0/turns/<id>: one turn, as GET /api/v0/turns lists it. session
+// picks one session's turn: the same turn id can be in two. Without it the
+// newest is answered.
+func (a *API) getTurn(w http.ResponseWriter, r *http.Request, id string) {
+	tq := store.TurnQuery{Turn: id, Limit: 1}
+	if q := r.URL.Query(); q.Has("session") {
+		tq.Session = q.Get("session")
+		if !sessionID.MatchString(tq.Session) {
+			writeError(w, http.StatusBadRequest, "session must match "+sessionID.String())
+			return
+		}
+	}
+	list, err := a.cfg.Store.Turns(tq)
+	if err != nil {
+		a.internal(w)
+		return
+	}
+	if len(list.Turns) == 0 {
+		writeError(w, http.StatusNotFound, noTurn)
+		return
+	}
+	writeJSON(w, http.StatusOK, OneTurn{list.Store, list.Seq, list.Turns[0]})
+}
+
+// OneTurn is the answer to GET /api/v0/turns/<id>.
+type OneTurn struct {
+	Store string     `json:"store" doc:"The store id. Send it back as store."`
+	Seq   int64      `json:"seq" doc:"The seq the turn was computed at. Send it back as after to stream from here."`
+	Turn  store.Turn `json:"turn"`
 }
 
 // GET /api/v0/turns/<id>/events: one turn's events, oldest first, a page at a

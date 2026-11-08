@@ -11,7 +11,7 @@ package api
 // before the turn's session.closed is stored, and on every path where the
 // child never starts. A restart forgets every token: the turns the previous
 // process started are closed by CloseStaleHolds, and none of their tokens
-// works in the new process. At most MaxRuns tokens exist at once.
+// works in the new process. At most Config.MaxRuns tokens exist at once.
 
 import (
 	"crypto/rand"

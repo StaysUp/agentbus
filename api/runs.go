@@ -23,6 +23,8 @@ package api
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,8 +44,9 @@ import (
 	"github.com/staysup/agentbus/logfile"
 )
 
-// MaxRuns bounds the runs at once, service-wide. Past it a run gets 429.
-const MaxRuns = 4
+// DefaultMaxRuns bounds the runs at once, service-wide, when Config.MaxRuns
+// is zero. Past the bound a run gets 429.
+const DefaultMaxRuns = 4
 
 // MaxRunBody bounds a run's request body. A 256 KiB prompt can take six
 // bytes per byte once JSON-escaped.
@@ -306,6 +309,7 @@ func codexNetwork() []string {
 type runs struct {
 	mu       sync.Mutex
 	stopping bool
+	max      int             // Config.MaxRuns
 	n        int             // slots taken, starting or running
 	busy     map[string]bool // sessions with a run or turn starting or running
 	live     map[*exec.Cmd]*liveTurn
@@ -313,7 +317,7 @@ type runs struct {
 	wg       sync.WaitGroup
 }
 
-const badRun = "the body must be one JSON object with prompt, agent and folder (or session), and optionally model and read_only, at most 2 MiB"
+const badRun = "the body must be one JSON object with prompt, agent and folder (or session), and optionally model, read_only and idempotency_key, at most 2 MiB"
 
 // TurnRequest is the body of POST /api/v0/turns. omitempty marks a field as
 // optional in the API's description.
@@ -324,6 +328,9 @@ type TurnRequest struct {
 	Prompt   string `json:"prompt" doc:"From 1 byte to 256 KiB, no NUL byte. Always passed after --."`
 	Model    string `json:"model,omitempty" doc:"Passed only as the value of --model. Not remembered between turns."`
 	ReadOnly *bool  `json:"read_only,omitempty" doc:"False unless true. True: claude gets Read, Grep and Glob only; codex runs with --sandbox read-only. False: claude keeps its own tools and permission settings; codex runs with --sandbox workspace-write and network access on, so it can edit the folder and reach the network. Read-only codex has no network."`
+	// IdempotencyKey makes a retry safe: a client whose request timed out
+	// sends it again with the same key and gets the same turn.
+	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"Optional, 1 to 128 characters of A-Z, a-z, 0-9 and . _ : -. A retry with the same key and the same fields answers 202 with the turn the key first started, existing true, and starts nothing. The same key with other fields gets 409. Stored on the turn's turn.started. A request that started nothing, such as a 400 or 429, used no key."`
 }
 
 // Started is the answer to a turn's start.
@@ -331,6 +338,65 @@ type Started struct {
 	BaseURL string `json:"base_url" doc:"The address the agent uses, <service>/s/<id>/t/<turn>. Give it to the agent's environment only."`
 	ID      string `json:"id" doc:"The session id: a new one, or the session sent."`
 	Turn    string `json:"turn" doc:"The new turn's id. Every event of the turn carries it in turn, and GET /api/v0/turns lists it."`
+	// Existing marks the answer to a retry: the idempotency key had already
+	// started this turn.
+	Existing bool `json:"existing,omitempty" doc:"True when idempotency_key had already started this turn, so nothing new started."`
+}
+
+// idempotencyKey is the shape of TurnRequest.IdempotencyKey.
+var idempotencyKey = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
+
+// requestHash is the SHA-256 of a turn request's fields, for a retry under
+// the same idempotency key to be compared with. withSession says session was
+// sent, which makes "" a session and not an absent one.
+func requestHash(body TurnRequest, withSession bool) string {
+	b, _ := json.Marshal(struct {
+		WithSession bool   `json:"with_session"`
+		Session     string `json:"session"`
+		Agent       string `json:"agent"`
+		Folder      string `json:"folder"`
+		Prompt      string `json:"prompt"`
+		Model       string `json:"model"`
+		ReadOnly    bool   `json:"read_only"`
+	}{withSession, body.Session, body.Agent, body.Folder, body.Prompt, body.Model, body.ReadOnly != nil && *body.ReadOnly})
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// keyLocks makes requests with the same idempotency key wait for each other,
+// so the second one finds the turn the first stored and starts nothing.
+type keyLocks struct {
+	mu sync.Mutex
+	m  map[string]*keyLock
+}
+
+type keyLock struct {
+	mu sync.Mutex
+	n  int // requests holding or waiting for mu
+}
+
+// lock waits for key and returns the function that frees it.
+func (k *keyLocks) lock(key string) func() {
+	k.mu.Lock()
+	if k.m == nil {
+		k.m = map[string]*keyLock{}
+	}
+	l := k.m[key]
+	if l == nil {
+		l = &keyLock{}
+		k.m[key] = l
+	}
+	l.n++
+	k.mu.Unlock()
+	l.mu.Lock()
+	return func() {
+		l.mu.Unlock()
+		k.mu.Lock()
+		if l.n--; l.n == 0 {
+			delete(k.m, key)
+		}
+		k.mu.Unlock()
+	}
 }
 
 func (a *API) run(w http.ResponseWriter, r *http.Request) {
@@ -359,8 +425,32 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, badRun)
 		return
 	}
+	var idem idempotency
+	if body.IdempotencyKey != "" {
+		if !idempotencyKey.MatchString(body.IdempotencyKey) {
+			writeError(w, http.StatusBadRequest, "idempotency_key must match "+idempotencyKey.String())
+			return
+		}
+		// Held until the turn is stored or refused, so a retry sent while
+		// this request still runs waits for it and then finds its turn.
+		defer a.keys.lock(body.IdempotencyKey)()
+		idem = idempotency{key: body.IdempotencyKey, hash: requestHash(body, sent.Session != nil)}
+		kt, found, err := a.cfg.Store.TurnByKey(idem.key)
+		if err != nil {
+			a.internal(w)
+			return
+		}
+		if found {
+			if kt.RequestHash != idem.hash {
+				writeError(w, http.StatusConflict, "idempotency_key already started a turn with other fields; send a new key for a new turn")
+				return
+			}
+			writeJSON(w, http.StatusAccepted, Started{a.cfg.BaseURL + "/s/" + kt.Session + "/t/" + kt.Turn, kt.Session, kt.Turn, true})
+			return
+		}
+	}
 	if sent.Session != nil {
-		a.next(w, body)
+		a.next(w, body, idem)
 		return
 	}
 	if _, ok := turnArgs(body.Agent, "", "", "", false, Permissions{}, ""); !ok {
@@ -380,11 +470,11 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.startTurn(w, turn{agent: body.Agent, folder: body.Folder, session: id,
-		model: body.Model, readOnly: body.ReadOnly != nil && *body.ReadOnly, prompt: body.Prompt})
+		model: body.Model, readOnly: body.ReadOnly != nil && *body.ReadOnly, prompt: body.Prompt, idem: idem})
 }
 
 // next starts the next turn of body.Session, in its own agent and folder.
-func (a *API) next(w http.ResponseWriter, body TurnRequest) {
+func (a *API) next(w http.ResponseWriter, body TurnRequest, idem idempotency) {
 	session := body.Session
 	if !sessionID.MatchString(session) {
 		writeError(w, http.StatusBadRequest, "session must match "+sessionID.String())
@@ -498,7 +588,7 @@ func (a *API) next(w http.ResponseWriter, body TurnRequest) {
 		return
 	}
 	t := turn{agent: c.Agent, folder: c.Folder, session: session, resumeID: c.ResumeID, replayFrom: from,
-		recoveredFrom: recovered, recoveredWhy: recoveredWhy, continuity: continuity, model: body.Model, readOnly: body.ReadOnly != nil && *body.ReadOnly, prompt: body.Prompt}
+		recoveredFrom: recovered, recoveredWhy: recoveredWhy, continuity: continuity, model: body.Model, readOnly: body.ReadOnly != nil && *body.ReadOnly, prompt: body.Prompt, idem: idem}
 	if from != "" {
 		t.resumeID = "" // a fresh child: the history comes from the gateway
 	}
@@ -558,6 +648,13 @@ type turn struct {
 	model                  string
 	readOnly               bool
 	prompt                 string
+	idem                   idempotency // empty without idempotency_key
+}
+
+// idempotency is a turn's idempotency_key and the hash of its request
+// (requestHash), stored on its turn.started.
+type idempotency struct {
+	key, hash string
 }
 
 // startTurn gives the turn its id, stores session.opened and turn.started,
@@ -664,7 +761,7 @@ func (a *API) startTurn(w http.ResponseWriter, t turn) {
 	if _, _, err := a.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.TurnStarted,
 		Time: a.cfg.Now().UTC(), Session: t.session, Turn: turnID, Text: t.prompt, Agent: t.agent, Folder: t.folder,
 		ReplayFrom: t.replayFrom, Continuity: t.continuity, RecoveredFrom: t.recoveredFrom,
-		RecoveredReason: t.recoveredWhy}); err != nil {
+		RecoveredReason: t.recoveredWhy, IdempotencyKey: t.idem.key, RequestHash: t.idem.hash}); err != nil {
 		closeHold()
 		a.internal(w)
 		return
@@ -734,7 +831,7 @@ func (a *API) startTurn(w http.ResponseWriter, t turn) {
 			Unsettled: unsettled, Stopped: stopped})
 		a.runs.release(cmd, t.session)
 	}()
-	writeJSON(w, http.StatusAccepted, Started{baseURL, t.session, turnID})
+	writeJSON(w, http.StatusAccepted, Started{baseURL, t.session, turnID, false})
 }
 
 // OutputGrace is how long a run waits for its child's output after the child
@@ -900,8 +997,8 @@ func (rs *runs) take(session string) (int, string) {
 	if rs.busy[session] {
 		return http.StatusConflict, turnRunning
 	}
-	if rs.n >= MaxRuns {
-		return http.StatusTooManyRequests, "4 runs are already running; wait for one to end and retry"
+	if rs.n >= rs.max {
+		return http.StatusTooManyRequests, strconv.Itoa(rs.max) + " runs are already running; wait for one to end and retry"
 	}
 	if rs.busy == nil {
 		rs.busy = map[string]bool{}

@@ -1,6 +1,6 @@
 // Command agentbus runs the framework on this machine.
 //
-//	agentbus up [-listen 127.0.0.1:8787] [-origin http://localhost:5173]
+//	agentbus up [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-max-runs 4]
 //	agentbus version
 //
 // up starts one service on one address, 127.0.0.1:8787 unless -listen says
@@ -64,7 +64,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		return 0
 	}
 	if len(args) == 0 || args[0] != "up" {
-		fmt.Fprintln(stderr, "usage: agentbus up [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false]")
+		fmt.Fprintln(stderr, "usage: agentbus up [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false] [-max-runs 4]")
 		fmt.Fprintln(stderr, "       agentbus version")
 		return 2
 	}
@@ -73,7 +73,12 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	listen := fl.String("listen", "127.0.0.1:8787", "address to listen on: an IP, with or without a port (8787 if none); 0.0.0.0 is reachable from the network, with the token guarding the API")
 	origin := fl.String("origin", "", "lock the API to this one browser origin, such as http://localhost:5173; without it any origin may call the API, and the token still guards every call")
 	replayOn := fl.Bool("replay", true, "continue claude and codex sessions by own replay (the gateway sends the earlier turn's history); false uses the vendor's resume")
+	maxRuns := fl.Int("max-runs", api.DefaultMaxRuns, "how many turns may run at once; past it POST /api/v0/turns answers 429")
 	if err := fl.Parse(args[1:]); err != nil {
+		return 2
+	}
+	if *maxRuns < 1 {
+		fmt.Fprintln(stderr, "agentbus up: -max-runs must be 1 or more")
 		return 2
 	}
 	if fl.NArg() > 0 {
@@ -94,7 +99,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	up, _ := url.Parse(upstream)
 	cg, _ := url.Parse(chatgpt)
 	svc, err := start(config{listen: *listen, origin: *origin, home: home, upstream: up, chatgpt: cg, logf: own.Printf,
-		noReplay: !*replayOn})
+		noReplay: !*replayOn, maxRuns: *maxRuns})
 	if err != nil {
 		own.Print(err)
 		return 1
@@ -137,6 +142,8 @@ type config struct {
 	// noReplay turns own replay off: claude's and codex's next turns use the
 	// vendor's resume. The zero value, replay on, is the default.
 	noReplay bool
+	// maxRuns bounds the turns running at once. Zero means the API's default.
+	maxRuns int
 }
 
 type service struct {
@@ -172,7 +179,13 @@ func start(c config) (*service, error) {
 	if err := os.Chmod(c.home, 0o700); err != nil {
 		return nil, fmt.Errorf("data folder %s could not be made private: %w", c.home, err)
 	}
-	token, err := loadToken(filepath.Join(c.home, "token"))
+	token, err := loadToken(filepath.Join(c.home, "token"), "")
+	if err != nil {
+		return nil, err
+	}
+	// The turns token: it may only start, stop and read turns, for a job
+	// queue or a runner that should not hold the main token.
+	turnsToken, err := loadToken(filepath.Join(c.home, "turns_token"), turnsTokenPrefix)
 	if err != nil {
 		return nil, err
 	}
@@ -245,7 +258,7 @@ func start(c config) (*service, error) {
 			return api.ReplayPlan{Turn: p.Turn, Failed: p.Failed}, nil
 		}
 	}
-	a, err := api.New(api.Config{Store: st, Token: token, Port: port, AnyHost: !loopback,
+	a, err := api.New(api.Config{Store: st, Token: token, TurnsToken: turnsToken, MaxRuns: c.maxRuns, Port: port, AnyHost: !loopback,
 		BaseURL: "http://" + agentAddr(ln.Addr()), Origin: c.origin, ReplayBase: replayBase, Permissions: permissions,
 		Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace,
 		LookPath: c.lookPath, Environ: c.environ, Logf: svcLog.Printf, Build: build(debug.ReadBuildInfo()),
@@ -449,9 +462,13 @@ func dataFolder(getenv func(string) string) (string, error) {
 	return filepath.Join(h, ".local", "share", "agentbus"), nil
 }
 
-// loadToken reads the token, or makes it on first start with mode 0600. Its
-// value is never printed or put in an error.
-func loadToken(path string) (string, error) {
+// turnsTokenPrefix marks the turns token, so a person who finds one can tell
+// it from the main token and from a turn's own abt_ token.
+const turnsTokenPrefix = "abq_"
+
+// loadToken reads a token, or makes it on first start with mode 0600: prefix
+// and 64 hex characters. Its value is never printed or put in an error.
+func loadToken(path, prefix string) (string, error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err == nil {
 		b := make([]byte, 32)
@@ -459,7 +476,7 @@ func loadToken(path string) (string, error) {
 			f.Close()
 			return "", errors.New("the token could not be made")
 		}
-		tok := hex.EncodeToString(b)
+		tok := prefix + hex.EncodeToString(b)
 		if _, err := f.WriteString(tok + "\n"); err != nil {
 			f.Close()
 			return "", fmt.Errorf("the token file %s could not be written", path)

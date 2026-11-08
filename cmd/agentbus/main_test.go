@@ -418,3 +418,47 @@ func TestMakePermissions(t *testing.T) {
 		t.Errorf("an existing file was written: %q", b)
 	}
 }
+
+// The turns token is made once beside the main token, with mode 0600 and its
+// own prefix. It starts, stops and reads turns, and nothing else.
+func TestTurnsTokenMadeAndScoped(t *testing.T) {
+	home := t.TempDir()
+	svc := startService(t, home, "http://127.0.0.1:1")
+	path := filepath.Join(home, "turns_token")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("turns_token mode %v", info.Mode().Perm())
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok := strings.TrimSpace(string(b))
+	if !strings.HasPrefix(tok, turnsTokenPrefix) || len(tok) != len(turnsTokenPrefix)+64 || tok == readToken(t, home) {
+		t.Fatal("turns_token is not abq_ and 64 hex characters, or is the main token")
+	}
+	if code := rawGet(t, svc.addr, "/api/v0/turns", "Bearer "+tok); code != 200 {
+		t.Errorf("GET /api/v0/turns with the turns token: %d, want 200", code)
+	}
+	if code := rawGet(t, svc.addr, "/api/v0/sessions", "Bearer "+tok); code != 403 {
+		t.Errorf("GET /api/v0/sessions with the turns token: %d, want 403", code)
+	}
+	svc.stop()
+	startService(t, home, "http://127.0.0.1:1")
+	if b2, _ := os.ReadFile(path); string(b2) != string(b) {
+		t.Fatal("turns_token changed across restarts")
+	}
+}
+
+func TestMaxRunsFlag(t *testing.T) {
+	var b bytes.Buffer
+	for _, v := range []string{"0", "-1", "x"} {
+		b.Reset()
+		if code := run([]string{"up", "-max-runs", v}, func(string) string { return t.TempDir() }, &b, &b); code != 2 {
+			t.Errorf("-max-runs %s: exit %d, want 2", v, code)
+		}
+	}
+}

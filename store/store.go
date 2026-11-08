@@ -50,6 +50,9 @@ CREATE INDEX IF NOT EXISTS events_time ON events(time);
 -- once per (session, turn).
 CREATE UNIQUE INDEX IF NOT EXISTS events_turn_started ON events(session, turn)
 	WHERE kind = 'turn.started' AND turn <> '';
+-- POST /api/v0/turns finds the turn an idempotency key started (TurnByKey).
+CREATE INDEX IF NOT EXISTS events_idempotency ON events(json_extract(data, '$.idempotency_key'))
+	WHERE kind = 'turn.started';
 `
 
 // Store is one events file. It is safe for concurrent use.
@@ -372,6 +375,30 @@ func (s *Store) Continuation(id string) (Continuation, error) {
 		}
 	}
 	return c, nil
+}
+
+// KeyedTurn is the turn an idempotency key started.
+type KeyedTurn struct {
+	Session, Turn string
+	RequestHash   string
+}
+
+// TurnByKey finds the turn.started stored with idempotency_key key: the first
+// one, which is the only one, since POST /api/v0/turns checks the key before it
+// stores a turn.
+func (s *Store) TurnByKey(key string) (t KeyedTurn, found bool, err error) {
+	var hash sql.NullString
+	err = s.r.QueryRow(`SELECT session, turn, json_extract(data, '$.request_hash') FROM events
+		WHERE kind = 'turn.started' AND json_extract(data, '$.idempotency_key') = ?
+		ORDER BY seq LIMIT 1`, key).Scan(&t.Session, &t.Turn, &hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return t, false, nil
+	}
+	if err != nil {
+		return t, false, fmt.Errorf("store: read turn by key: %w", err)
+	}
+	t.RequestHash = hash.String
+	return t, true, nil
 }
 
 // Known reports whether the store has any event of the session: a session

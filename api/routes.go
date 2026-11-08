@@ -36,7 +36,10 @@ type route struct {
 	public bool
 	// turn says whether a turn token may call the route, and how its session
 	// is checked (tokens.go). The zero value, mainOnly, refuses it.
-	turn  int
+	turn int
+	// turns says the turns token (Config.TurnsToken) may call the route. The
+	// zero value refuses it.
+	turns bool
 	serve func(a *API, w http.ResponseWriter, r *http.Request, id string)
 }
 
@@ -166,6 +169,7 @@ var routes = []route{
 			fail(404, "Starting turns is turned off in this service, or the session sent has no events."),
 			fail(409, "A turn is already running in the session sent, or it cannot be continued from here."),
 			tooMany, turnFailed, stopping},
+		turns: true,
 		serve: plain((*API).run)},
 	{method: "GET", path: "/api/v0/turns", op: "listTurns",
 		tag:     "Turns",
@@ -179,7 +183,22 @@ var routes = []route{
 			{name: "limit", doc: "Turns per page. 100 when absent.", integer: true, min: 1, max: maxTurnLimit}},
 		replies: []reply{ok(200, store.TurnList{}, "A page of turns."), badRequest, storeFailed},
 		turn:    ownSessionQuery,
+		turns:   true,
 		serve:   plain((*API).turns)},
+	{method: "GET", path: "/api/v0/turns/{id}", op: "getTurn",
+		idDoc:   "A turn id, as POST /api/v0/turns named it. Another shape gets 404.",
+		tag:     "Turns",
+		summary: "Get a turn",
+		doc: "One turn, with the same fields GET /api/v0/turns lists: state, exit code, stopped, unsettled, started and ended.\n\n" +
+			"Poll it to wait for a turn to end, or stream from its store and seq. " +
+			"The same turn id can be in two sessions; without session the newest is answered.",
+		query: []param{
+			{name: "session", doc: "Only this session's turn of that id."}},
+		replies: []reply{ok(200, OneTurn{}, "The turn."), badRequest,
+			fail(404, "No turn.started carries this turn id."), storeFailed},
+		turn:  ownSessionQuery,
+		turns: true,
+		serve: (*API).getTurn},
 	{method: "GET", path: "/api/v0/turns/{id}/events", op: "turnEvents",
 		idDoc:   "A turn id: the turn field of its events. Another shape gets 404.",
 		tag:     "Turns",
@@ -191,6 +210,7 @@ var routes = []route{
 			{name: "limit", doc: "Events per page. 1000 when absent.", integer: true, min: 1, max: maxLimit}},
 		replies: []reply{ok(200, Page{}, "A page."), badRequest, mismatch, storeFailed},
 		turn:    ownSessionQuery,
+		turns:   true,
 		serve:   (*API).turnEvents},
 	{method: "POST", path: "/api/v0/turns/{id}/stop", op: "stopTurn",
 		idDoc:   "A turn id, as POST /api/v0/turns named it. Another shape gets 404.",
@@ -200,11 +220,12 @@ var routes = []route{
 			"The service sends SIGTERM to the turn's whole process tree, then SIGKILL after 5 seconds to what still runs. " +
 			"The reply comes at once; the turn's session.closed, with stopped true, comes once the tree has ended. " +
 			"The session's next turn continues after it, and the model is told that the person stopped it. " +
-			"A second stop while it is stopping gets 202 again and sends nothing more. Takes the main token only. No body is read.",
+			"A second stop while it is stopping gets 202 again and sends nothing more. Takes the main token or the turns token; a turn token gets 403. No body is read.",
 		replies: []reply{ok(202, Stopping{}, "The turn is stopping."),
 			fail(404, "Starting turns is turned off in this service, or no event carries this turn id."),
 			fail(409, "The turn is not running: it has ended, or this service did not start it."),
 			storeFailed},
+		turns: true,
 		serve: (*API).stopTurn},
 	{method: "GET", path: "/api/v0/agents", op: "listAgents",
 		tag:     "Service",
@@ -270,9 +291,13 @@ func (rt *route) match(p string) (id string, ok bool) {
 	return id, true
 }
 
+// turnsRefused is the 403 for the turns token on a route it may not call.
+const turnsRefused = "the turns token may only start, stop and read turns; this route takes the main token"
+
 // route serves a request that has passed the Host, CORS and token checks. g is
-// the grant of a turn token, nil for the main token.
-func (a *API) route(w http.ResponseWriter, r *http.Request, g *grant) {
+// the grant of a turn token, nil for the main token and the turns token;
+// turnsOnly is true for the turns token.
+func (a *API) route(w http.ResponseWriter, r *http.Request, g *grant, turnsOnly bool) {
 	var allow []string
 	for i := range routes {
 		rt := &routes[i]
@@ -285,6 +310,10 @@ func (a *API) route(w http.ResponseWriter, r *http.Request, g *grant) {
 		}
 		if rt.method == r.Method {
 			if g != nil && !a.allowTurn(w, r, rt, id, *g) {
+				return
+			}
+			if turnsOnly && !rt.turns {
+				writeError(w, http.StatusForbidden, turnsRefused)
 				return
 			}
 			rt.serve(a, w, r, id)

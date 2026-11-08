@@ -29,6 +29,11 @@ words is `docs/CLIENT_API.md` in the repository.
   from a script is not seen, so a hard rule also needs the agent to lack what the command needs
   (no push credentials). codex gets nothing from `read_folders` and `allow`. A broken file
   answers 400 and nothing is stored. A missing file is empty lists.
+- The turns token, the file `turns_token` in the data folder (`abq_` and 64 hex characters), may
+  only start, stop and read turns: `POST /api/v0/turns`, `GET /api/v0/turns`,
+  `GET /api/v0/turns/{id}`, `GET /api/v0/turns/{id}/events` and `POST /api/v0/turns/{id}/stop`.
+  Every other route gets 403. A job queue or a runner uses it in place of the main token. To
+  replace it, stop the service, delete the file and start again.
 - Never put the token in a URL. In a browser, read the stream with `fetch`, not `EventSource`.
 - A browser page from any origin may call the API: CORS answers `Access-Control-Allow-Origin: *`
   and allows the `Authorization` header. No cookies are used; the token is the guard.
@@ -121,7 +126,10 @@ is false unless true. True gives claude Read, Grep and Glob only, and codex `--s
 False leaves claude its own tools and settings, and gives codex `--sandbox workspace-write` with
 network on (`-c sandbox_workspace_write.network_access=true`): it can edit the folder and reach the
 network, so it can call this API with its turn token. Read-only codex has no writes and no network. 404 for an unknown session, 409 when a turn is already running or the session
-cannot be continued. At most 4 turns running at once (429). There is no `/api/v0/runs`. An agent
+cannot be continued. At most 4 turns running at once (429), or the number `agentbus up -max-runs <n>` sets.
+`idempotency_key` (optional, 1 to 128 of `A-Za-z0-9._:-`) makes a retry safe: the same key with
+the same fields answers 202 with the same turn and `"existing":true`, and starts nothing; the same
+key with other fields gets 409. A request that started nothing (400, 429) stores no key. There is no `/api/v0/runs`. An agent
 whose program is not on the service's PATH gets 400 and nothing is stored: `agent claude cannot
 start: the program claude is not on the service's PATH. Install Claude Code and run claude once to
 sign in, then try again. If it is installed, start agentbus from a shell where claude runs.`
@@ -176,6 +184,19 @@ curl -s -H "Authorization: Bearer $TOKEN" "$B/api/v0/turns?session=abc"
 # {"store":"st_9f2c…","seq":1041,"turns":[{"id":"t_91ee…","session":"abc","state":"running",…}],"next_before":null}
 ```
 
+### GET /api/v0/turns/{id}
+
+One turn, with the same fields as a row of `GET /api/v0/turns`, plus `store` and `seq`. Poll it to
+wait for a turn to end: `state` leaves `running`. Every turn row also has `unsettled` (true when the
+gateway could not confirm every model call was stored, as after a restart), `error` (why the agent
+could not start) and `idempotency_key` (when it was started with one). `session=<id>` picks one
+session's turn; without it the newest. 404 when no `turn.started` carries the id.
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" "$B/api/v0/turns/t_91ee…"
+# {"store":"st_9f2c…","seq":1052,"turn":{"id":"t_91ee…","session":"abc","state":"finished","exit_code":0,…}}
+```
+
 ### POST /api/v0/turns/{id}/stop
 
 Stop a running turn. Its agent and every process it started end, as when the service stops:
@@ -185,7 +206,7 @@ comes once the tree has ended, and `GET /api/v0/turns` then shows `stopped: true
 next turn continues after it, and the model is told the person stopped it (`recovered_reason`
 ends with `the person stopped this turn`). A second stop while it is stopping gets 202 again and
 sends nothing more. 409 when the turn is not running (it ended, or this service did not start it),
-404 when no event carries the turn id. The main token only: a turn token gets 403. No body.
+404 when no event carries the turn id. The main token or the turns token: a turn token gets 403. No body.
 
 ```sh
 curl -s -X POST -H "Authorization: Bearer $TOKEN" "$B/api/v0/turns/t_91ee…/stop"

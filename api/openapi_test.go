@@ -221,10 +221,10 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 			}
 		}
 	}
-	if len(ops) != 14 {
-		t.Errorf("%d endpoints, want 14: %v", len(ops), ops)
+	if len(ops) != 15 {
+		t.Errorf("%d endpoints, want 15: %v", len(ops), ops)
 	}
-	for _, want := range []string{"POST /api/v0/turns", "GET /api/v0/turns", "GET /api/v0/turns/{id}/events", "POST /api/v0/turns/{id}/stop"} {
+	for _, want := range []string{"POST /api/v0/turns", "GET /api/v0/turns", "GET /api/v0/turns/{id}", "GET /api/v0/turns/{id}/events", "POST /api/v0/turns/{id}/stop"} {
 		if !slices.Contains(ops, want) {
 			t.Errorf("%s is not in the description", want)
 		}

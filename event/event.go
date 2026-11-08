@@ -212,6 +212,12 @@ type Event struct {
 	// after it anyway. The replayed history ends with a note saying so.
 	RecoveredFrom   string `json:"recovered_from,omitempty" doc:"On a replayed turn's turn.started: the session's previous turn, which did not finish (interrupted, its last model call failed, or it never reached the model). This turn continues after it, and the model is told what happened. Absent when the previous turn finished."`
 	RecoveredReason string `json:"recovered_reason,omitempty" doc:"With recovered_from: one sentence saying how that turn ended, such as its last model request getting status 529. The same words the model is told."`
+	// IdempotencyKey and RequestHash, only on the turn.started of a turn
+	// started by POST /api/v0/turns with idempotency_key: the client's key,
+	// and the SHA-256 of the request's fields, so a retry with the same key
+	// finds this turn and a different request under it is refused.
+	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"On turn.started: the idempotency_key POST /api/v0/turns was sent with. A retry with the same key returns this turn and starts nothing."`
+	RequestHash    string `json:"request_hash,omitempty" doc:"With idempotency_key: the SHA-256, in hex, of the request's fields. A request with the same key and other fields is refused."`
 	// Replayed, only on model.requested: how many messages of the earlier
 	// turn's history the gateway put in front of this request.
 	Replayed int `json:"replayed,omitempty" doc:"On model.requested: how many messages of the earlier turn's history the gateway put in front of this request. Absent when it put none."`

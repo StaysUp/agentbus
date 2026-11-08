@@ -99,6 +99,7 @@ Flags:
 | `-listen` | `127.0.0.1:8787` | The address: an IP, with or without a port. With no port it uses 8787. `0.0.0.0` can be reached from the network. |
 | `-origin` | none | An optional lock: allow only this browser origin, such as `http://localhost:5173`. Without it any origin may call the API. |
 | `-replay` | `true` | Continue Claude and codex sessions from AgentBus's own store. `false` uses the agent's own resume. |
+| `-max-runs` | `4` | How many turns may run at once. One more gets HTTP 429. |
 
 ### 2. Open a cockpit
 
@@ -178,11 +179,14 @@ If the service cannot find the agent's program, the reply is HTTP 400 and nothin
 {"error":"agent claude cannot start: the program claude is not on the service's PATH. Install Claude Code and run claude once to sign in, then try again. If it is installed, start agentbus from a shell where claude runs."}
 ```
 
-Read the turn back, with its reply, state and cost:
+Read the turn back, with its reply, state and cost (`GET /api/v0/turns/<turn>` reads just one):
 
 ```sh
 curl -s "http://127.0.0.1:8787/api/v0/turns?session=<id>" -H "Authorization: Bearer $TOKEN"
 ```
+
+To make a retry safe, add `"idempotency_key":"<your id>"`. Sending the same body again returns the
+same turn and starts nothing.
 
 To continue the conversation, send the next prompt with `"session":"<id>"` and no agent or folder.
 
@@ -208,7 +212,8 @@ The contract in words is [docs/CLIENT_API.md](docs/CLIENT_API.md).
 ## Your data
 
 Everything stays on your machine, in the data folder: `events.db` (a SQLite file), `token`,
-`permissions.toml` and `logs/`. Nothing is sent anywhere except the model calls themselves, to the vendor your agent
+`turns_token`, `permissions.toml` and `logs/`. `turns_token` is a second token for a job queue or
+a runner. It may only start, stop and read turns. Nothing is sent anywhere except the model calls themselves, to the vendor your agent
 already uses.
 
 `events.db` holds each turn's model requests and replies, so it holds whatever your agent read or

@@ -34,6 +34,8 @@ const specIntro = "agentbus runs on your machine, between your coding agents and
 	"- Every request but this document sends `Authorization: Bearer <token>`: the file `token` in the data folder. Never put it in a URL.\n" +
 	"- A turn started by `POST /api/v0/turns` gets its own token in `$AGENTBUS_TOKEN`, and this service's address in `$AGENTBUS_URL`. " +
 	"That token reads only its own session, on the operations that say so, and stops working when the turn's child exits.\n" +
+	"- The turns token, the file `turns_token` in the data folder, may only start, stop and read turns, on the operations that say so. " +
+	"A job queue or a runner uses it in place of the main token.\n" +
 	"- On loopback, the default, the `Host` must be `127.0.0.1`, `localhost` or `[::1]` with the service's port, or the answer is 403. " +
 	"On another address, such as `0.0.0.0`, any `Host` is accepted and the token is the guard.\n" +
 	"- A browser page from any origin may call the API: CORS answers `Access-Control-Allow-Origin: *` and allows `Authorization`. " +
@@ -41,6 +43,10 @@ const specIntro = "agentbus runs on your machine, between your coding agents and
 	"- Start up with `GET /api/v0/sessions`, then stream `GET /api/v0/events` from its `store` and `seq`. Nothing is lost or counted twice.\n" +
 	"- A cursor is a `store` and a `seq`. A cursor of another store gets 409: start over from the snapshot.\n" +
 	"- v0 may change without notice. Ignore kinds and fields you do not know."
+
+// turnsTokenDoc is what an operation the turns token may call adds to its
+// description.
+const turnsTokenDoc = "The turns token (the file `turns_token` in the data folder) may call this too."
 
 // turnTokenDoc is what each turn-token rule adds to an operation's
 // description.
@@ -341,6 +347,9 @@ func describe() (*openapi3.T, error) {
 		if rt.turn != mainOnly {
 			desc = strings.TrimSpace(desc + "\n\n" + turnTokenDoc[rt.turn])
 		}
+		if rt.turns {
+			desc = strings.TrimSpace(desc + "\n\n" + turnsTokenDoc)
+		}
 		op := &openapi3.Operation{OperationID: rt.op, Tags: []string{rt.tag}, Summary: rt.summary, Description: desc,
 			Responses: openapi3.NewResponsesWithCapacity(len(rt.replies) + 2)}
 		if strings.Contains(rt.path, "{id}") {
@@ -405,6 +414,9 @@ func describe() (*openapi3.T, error) {
 		forbidden := "The service is on loopback and the Host header does not name it on 127.0.0.1, localhost or [::1]."
 		if !rt.public {
 			forbidden += " Or a turn token was sent where it may not read: another session, or an operation that does not take one."
+			if !rt.turns {
+				forbidden += " Or the turns token was sent: it may only start, stop and read turns."
+			}
 		}
 		op.Responses.Set("403", errorReply(forbidden))
 		if rt.public {

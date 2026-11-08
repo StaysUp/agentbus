@@ -87,6 +87,21 @@ The client API shares the gateway's address: `agentbus up` starts one service on
   the stream with `fetch`, which can send the header, not with `EventSource`, which cannot.
 - The token is never written to an event, a log, or an error.
 
+### The turns token: start, stop and read turns, nothing else
+
+A job queue or a runner should not hold the main token. It uses the **turns token** instead.
+
+- `agentbus up` makes it on first start, beside `token`: the file `turns_token` in the data folder,
+  mode 0600, `abq_` and 64 hex characters. It stays the same across restarts.
+- To replace it, stop the service, delete the file and start again. The old one then gets 401.
+- It works on these operations only: `POST /api/v0/turns`, `GET /api/v0/turns`,
+  `GET /api/v0/turns/<id>`, `GET /api/v0/turns/<id>/events` and `POST /api/v0/turns/<id>/stop`.
+  It sees every session's turns, as the main token does.
+- Everything else gets **403** with `the turns token may only start, stop and read turns; this
+  route takes the main token`.
+- Like the main token, it never reaches a turn's child and is never written to an event, a log
+  or an error.
+
 ### The turn token: what a turn may read of its own session
 
 Every turn started by `POST /api/v0/turns` gets two variables in its child's environment, for claude
@@ -133,7 +148,7 @@ already has (`ANTHROPIC_BASE_URL` for claude). `GET /api/v0/turns` without `sess
 
 `$AGENTBUS_HOME` if set, otherwise `$XDG_DATA_HOME/agentbus`, otherwise `~/.local/share/agentbus`.
 It holds `events.db` (the store: events, and since this version every model request's body, see
-`GET /api/v0/calls/<exchange>/context`), `token`, `permissions.toml` (below), `logs/` (below), and `events.db.lock`, which one service holds while it runs, so a second `agentbus up` on the same folder refuses to start. No version in the name.
+`GET /api/v0/calls/<exchange>/context`), `token`, `turns_token` (above), `permissions.toml` (below), `logs/` (below), and `events.db.lock`, which one service holds while it runs, so a second `agentbus up` on the same folder refuses to start. No version in the name.
 
 ### permissions.toml
 
@@ -343,7 +358,7 @@ the event stream, or from `GET /api/v0/turns/<turn>/events`. It was `POST /api/v
 process that does it.
 
 ```json
-{"agent":"codex","folder":"/Users/ana/Sites/x","prompt":"Review this diff: …","model":"gpt-5.5","read_only":true}
+{"agent":"codex","folder":"/Users/ana/Sites/x","prompt":"Review this diff: …","model":"gpt-5.5","read_only":true,"idempotency_key":"job-42"}
 ```
 
 The reply is **202** `{"id":"abc","turn":"t_5d0c19a2e7b3f481","base_url":"http://127.0.0.1:8787/s/abc/t/t_5d0c19a2e7b3f481"}`,
@@ -431,7 +446,21 @@ arrives later, as events of that session, **every one carrying `turn`** (below).
   `session.closed` (with no `exit_code`, and `unsettled: true`) for each: that process can no
   longer report their exit, nor confirm that their calls were stored.
   **The service never watches process ids**: a process id can be reused by an unrelated process.
-- **At most 4 turns running at once.** A fifth gets 429.
+- **At most 4 turns running at once**, unless `agentbus up -max-runs <n>` sets another number.
+  One more gets 429.
+- **`idempotency_key` makes a retry safe.** It is optional: 1 to 128 characters of `A-Z`, `a-z`,
+  `0-9` and `. _ : -`. A client whose request timed out sends the same body again.
+  - The first request with a key stores it on the turn's `turn.started`, as `idempotency_key`, with
+    `request_hash`: the SHA-256 of the request's fields.
+  - A later request with the same key and the same fields answers **202** with that turn's `id`,
+    `turn` and `base_url`, plus `"existing":true`. It starts nothing, even after the turn has
+    ended. Requests sent at once with one key wait for each other, so only one turn starts.
+  - The same key with other fields (`session`, `agent`, `folder`, `prompt`, `model` or
+    `read_only`) gets **409**.
+  - A request that started nothing, such as a 400 or a 429, stores no key, so a retry starts the
+    turn. A turn whose `turn.started` was stored but whose agent then would not start keeps the
+    key: a retry names that failed turn.
+  - Keys are compared across the whole service, not per token. Use a new key for each new turn.
 - **When the service stops**, it sends each running child SIGTERM, then SIGKILL after 5 seconds,
   and stores each `session.closed` before the store closes. One turn is stopped the same way with
   [`POST /api/v0/turns/<id>/stop`](#post-apiv0turnsidstop--stop-a-turn). A run that started while the service
@@ -674,6 +703,35 @@ the sessions snapshot.
   started mid-turn in hand-pointed traffic (see [Turns](#turns)). Their events are still in
   `/turns/<id>/events`.
 
+### `GET /api/v0/turns/<id>?session=<id>` — one turn
+
+```json
+{"store":"st_9f2c…","seq":1052,
+ "turn":{"id":"t_5d0c…","session":"abc","agent":"claude","folder":"/Users/ana/Sites/x",
+   "prompt":"Review this diff: …","reply":"Two findings.","model":"claude-haiku-4-5","model_calls":3,
+   "started_seq":980,"started":"2026-11-05T09:12:03Z","ended":"2026-11-05T09:12:41Z",
+   "state":"finished","exit_code":0,"idempotency_key":"job-42",
+   "usage":{"input_tokens":1200,"output_tokens":540,"cache_read_tokens":0,"cache_write_tokens":0},
+   "cost_usd":0.01,"cost_complete":true}}
+```
+
+One turn, with the same fields as a row of `GET /api/v0/turns`. A program polls it to wait for a
+turn to end: `state` leaves `running`, and `ended`, `exit_code`, `stopped`, `unsettled` and `error`
+say how it ended. To follow it live, stream `GET /api/v0/events` from `store` and `seq`.
+
+- The same turn id can be in two sessions (only in traffic pointed at the gateway by hand).
+  `session=<id>` picks that session's turn; without it the newest is answered.
+- **404** when no `turn.started` carries the id.
+- A turn token may read its own session's turns only, as on `GET /api/v0/turns`.
+
+Three fields are added to every turn row, here and in the list:
+
+- `unsettled: true` when the turn's `session.closed` says the gateway could not confirm that every
+  model call was stored, as for a turn the service closed on restart. Own replay does not continue
+  from such a turn.
+- `error` when the turn's agent could not start, from its `session.closed`. Its `state` is `failed`.
+- `idempotency_key`, when the turn was started with one.
+
 ### `POST /api/v0/turns/<id>/stop` — stop a turn
 
 Stops one running turn, the way the service stops every turn when it shuts down. The reply is
@@ -701,7 +759,7 @@ Stops one running turn, the way the service stops every turn when it shuts down.
   `session.closed` is not stored yet), or this service did not start it (a turn of traffic pointed
   at the gateway by hand, or one the previous service process started).
 - **404** when no stored event carries the turn id, and when starting turns is turned off.
-- **The main token only.** A turn token gets **403**, its own turn included.
+- **The main token or the turns token.** A turn token gets **403**, its own turn included.
 - No body is read.
 
 ### `GET /api/v0/turns/<id>/events?store=<store>&after=<seq>&limit=<n>`
