@@ -187,16 +187,43 @@ func (e *GapError) Error() string { return fmt.Sprintf("queue: events must start
 
 // Spec is what a turn job asks for. It is frozen when the job is made. A
 // session's first job names its workspace: Repo and Base (a git worktree the
-// runner makes), or Folder (used as it is). A later job names Session only.
+// runner makes), or Folder (used as it is, or with Isolate a worktree of the
+// git repo it is in, at its HEAD). A later job names Session only.
+//
+// Agent is the harness. AgentID, Access and KeyEnv come from the saved agent
+// the job was made for; the API fills them, never the caller.
 type Spec struct {
 	Agent    string `json:"agent,omitempty"`
+	AgentID  string `json:"agent_id,omitempty"`
+	Access   string `json:"access,omitempty"`
+	KeyEnv   string `json:"key_env,omitempty"`
 	Folder   string `json:"folder,omitempty"`
+	Isolate  bool   `json:"isolate,omitempty"`
 	Repo     string `json:"repo,omitempty"`
 	Base     string `json:"base,omitempty"`
 	Session  string `json:"session,omitempty"`
 	Prompt   string `json:"prompt"`
 	Model    string `json:"model,omitempty"`
 	ReadOnly bool   `json:"read_only,omitempty"`
+	// ModelFromAgent: Model came from the saved agent, not the request. It
+	// is never stored; it only keeps the request's hash what was asked.
+	ModelFromAgent bool `json:"-"`
+}
+
+// asked is spec as the request named it, for the idempotency hash: the
+// saved agent by its id, without what the control plane filled in from it.
+// A retry after the agent was edited then still matches, and gets the job
+// the first request made, with what was frozen then.
+func (spec Spec) asked() Spec {
+	a := spec
+	if a.AgentID != "" {
+		a.Agent = a.AgentID
+	}
+	a.AgentID, a.Access, a.KeyEnv = "", "", ""
+	if a.ModelFromAgent {
+		a.Model = ""
+	}
+	return a
 }
 
 // Links ties a job to other work.
@@ -534,7 +561,7 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, session s
 		Kind  string `json:"kind"`
 		Spec  Spec   `json:"spec"`
 		Links Links  `json:"links"`
-	}{kind, spec, links})
+	}{kind, spec.asked(), links})
 	err = q.tx(func(tx *sql.Tx) error {
 		if key != "" {
 			var id, h string
@@ -1348,6 +1375,12 @@ func (q *Queue) Removed(runnerID, session, removalErr string) error {
 // ended and recorded its changed files, in a session that is not closed.
 // Several reviews of one job may run at once.
 func (q *Queue) Review(team, id, agent, model, key string, includeReply bool) (Job, bool, error) {
+	return q.ReviewAs(team, id, Spec{Agent: agent, Model: model}, key, includeReply)
+}
+
+// ReviewAs is Review with the reviewer as a saved agent: as names its
+// harness in Agent, and its AgentID, Access, KeyEnv and Model.
+func (q *Queue) ReviewAs(team, id string, as Spec, key string, includeReply bool) (Job, bool, error) {
 	j, err := q.Get(team, id)
 	if err != nil {
 		return Job{}, false, err
@@ -1365,6 +1398,7 @@ func (q *Queue) Review(team, id, agent, model, key string, includeReply bool) (J
 	if err != nil {
 		return Job{}, false, ErrNotReviewable
 	}
-	spec := Spec{Agent: agent, Model: model, Folder: j.Workspace.Folder, ReadOnly: true, Prompt: prompt}
+	spec := Spec{Agent: as.Agent, AgentID: as.AgentID, Access: as.Access, KeyEnv: as.KeyEnv, Model: as.Model,
+		ModelFromAgent: as.ModelFromAgent, Folder: j.Workspace.Folder, ReadOnly: true, Prompt: prompt}
 	return q.create(team, KindReview, key, spec, Links{ReviewsJob: j.ID}, j.Session, false)
 }

@@ -21,11 +21,13 @@ type Adapter struct{}
 
 func (Adapter) Vendor() string { return "openai" }
 
-// Watches the one path codex 0.164.0 posted model calls to. It first tries a
-// WebSocket on the same path (a GET with Upgrade), and posts only when that
-// fails; the WebSocket is not read here.
+// Watches the path codex 0.164.0 posted model calls to with its own sign-in,
+// and the Responses API's own path, /v1/responses, which codex posts to with a
+// provider of its own such as OpenRouter (codex-cli 0.167.0, 2026-11-08). On
+// the first codex tries a WebSocket (a GET with Upgrade), and posts only when
+// that fails; the WebSocket is not read here.
 func (Adapter) Watches(method, path string) bool {
-	return method == "POST" && path == "/backend-api/codex/responses"
+	return method == "POST" && (path == "/backend-api/codex/responses" || path == "/v1/responses")
 }
 
 // item is one entry of a request's input or a reply's output.

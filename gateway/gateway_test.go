@@ -1187,3 +1187,42 @@ func TestRunBaseURLNamesTheTurn(t *testing.T) {
 		}
 	}
 }
+
+// With a prefix, the vendor path under it is what the adapter reads and what
+// the upstream gets, after the upstream's own path: /s/x/t/t_1/openrouter/v1/messages
+// reaches <upstream>/api/v1/messages and is read as a model call.
+func TestPrefixCutBeforeReadAndForward(t *testing.T) {
+	var gotPath, gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotAuth = r.URL.Path, r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"type":"message","model":"m","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	}))
+	defer upstream.Close()
+	u, _ := url.Parse(upstream.URL + "/api")
+	mem := &event.Memory{}
+	g := New(u, anthropic.Adapter{}, mem)
+	g.SetPrefix("/openrouter")
+	srv := httptest.NewServer(g)
+	defer srv.Close()
+	req, _ := http.NewRequest("POST", srv.URL+"/s/sess-1/t/t_1/openrouter/v1/messages", strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer "+secret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if gotPath != "/api/v1/messages" || gotAuth != "Bearer "+secret {
+		t.Fatalf("upstream got %s %q", gotPath, gotAuth)
+	}
+	evs := waitFor(t, mem, 3)
+	if evs[1].Kind != event.ModelRequested || evs[1].Session != "sess-1" || evs[1].Turn != "t_1" || evs[2].Kind != event.ModelResponded {
+		t.Fatalf("events %+v", evs)
+	}
+	for _, e := range mem.Events() {
+		if b, _ := json.Marshal(e); strings.Contains(string(b), secret) {
+			t.Fatalf("an event holds the key: %s", b)
+		}
+	}
+}

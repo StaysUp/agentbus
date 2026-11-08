@@ -21,6 +21,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/staysup/agentbus/agents"
 	"io"
 	"io/fs"
 	"log"
@@ -57,6 +58,10 @@ const (
 	// chatgpt is where codex signed in with a ChatGPT plan sends model calls,
 	// under /backend-api/codex (codex-cli 0.164.0, 2026-11-05).
 	chatgpt = "https://chatgpt.com"
+	// openrouter is where an OpenRouter agent's model calls go: its Anthropic
+	// Messages endpoint for Claude Code and its Responses endpoint for codex,
+	// both under /api/v1 (research note 2026-11-08).
+	openrouter = "https://openrouter.ai/api"
 )
 
 func main() {
@@ -123,7 +128,9 @@ type config struct {
 	home     string
 	upstream *url.URL // Anthropic
 	chatgpt  *url.URL // codex's ChatGPT backend
-	logf     func(string, ...any)
+	// openrouter is OpenRouter's API; nil means openrouter above.
+	openrouter *url.URL
+	logf       func(string, ...any)
 
 	// For runs. Nil means the process's own: os.Getenv, os.Environ and
 	// exec.LookPath. Zero runGrace means the API's default.
@@ -232,12 +239,19 @@ func start(c config) (*service, error) {
 			q.Close()
 		}
 	}
+	// The saved agents live with the queue: where turns are asked for, not
+	// where they run.
+	var saved *agents.Store
 	if c.hasQueue() {
+		if saved, err = agents.Open(c.home, nil); err != nil {
+			st.Close()
+			return nil, err
+		}
 		if q, err = queue.Open(filepath.Join(c.home, "jobs.db"), nil); err != nil {
 			st.Close()
 			return nil, err
 		}
-		js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollToken, Heartbeat: c.heartbeat})
+		js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollToken, Heartbeat: c.heartbeat, Agents: saved})
 		if err != nil {
 			closeQ()
 			st.Close()
@@ -335,7 +349,7 @@ func start(c config) (*service, error) {
 	}
 	a, err := api.New(api.Config{Store: st, Token: token, TurnsToken: turnsToken, Port: port, AnyHost: !loopback,
 		BaseURL: baseURL, Origin: c.origin, LookPath: c.lookPath, Environ: c.environ, Build: build(debug.ReadBuildInfo()),
-		Queue: q, Jobs: jobsAPI, Engine: eng, TurnWait: c.turnWait})
+		Queue: q, Jobs: jobsAPI, Engine: eng, TurnWait: c.turnWait, Agents: saved})
 	if err != nil {
 		ln.Close()
 		svcLog.Close()
@@ -348,13 +362,24 @@ func start(c config) (*service, error) {
 	sink := cost.Sink{Table: cost.Default(), Next: engine.TurnSink(st, st)}
 	anth := gateway.New(c.upstream, anthropic.Adapter{}, sink)
 	oai := gateway.New(c.chatgpt, openai.Adapter{}, sink)
+	// An OpenRouter agent's calls, under /openrouter of its base URL: one
+	// gateway per API format, both to OpenRouter.
+	orURL := c.openrouter
+	if orURL == nil {
+		orURL, _ = url.Parse(openrouter)
+	}
+	orAnth := gateway.New(orURL, anthropic.Adapter{}, sink)
+	orOAI := gateway.New(orURL, openai.Adapter{}, sink)
+	orAnth.SetPrefix(openRouterPrefix)
+	orOAI.SetPrefix(openRouterPrefix)
+	gws := []*gateway.Gateway{anth, oai, orAnth, orOAI}
 	// A turn's session.closed waits for the gateway to write all of the
 	// turn's calls: their events and replies are written off the reply's
 	// path and can land after the child has exited.
 	if eng != nil {
 		eng.SetSettle(func(session, turn string) bool {
 			settled := true
-			for _, g := range []*gateway.Gateway{anth, oai} {
+			for _, g := range gws {
 				if !g.Settle(session, turn, settleTimeout) {
 					svcLog.Printf("settle.unconfirmed session=%s turn=%s", session, turn)
 					settled = false
@@ -366,22 +391,24 @@ func start(c config) (*service, error) {
 	// Every model request's body is kept as pieces, for a call's context
 	// view, and every reply an adapter can rebuild, for own replay.
 	keep := keeper{st: st, logf: svcLog.Printf}
-	anth.KeepBodies(keep)
-	oai.KeepBodies(keep)
-	// forbid in permissions.toml, applied to each run turn's replies.
-	if eng != nil {
-		anth.SetGuard(eng)
-		oai.SetGuard(eng)
+	for _, g := range gws {
+		g.KeepBodies(keep)
+		// forbid in permissions.toml, applied to each run turn's replies.
+		if eng != nil {
+			g.SetGuard(eng)
+		}
 	}
 	if claudeReplay != nil {
 		anth.SetRewriter(claudeReplay)
+		orAnth.SetRewriter(claudeReplay)
 		oai.SetRewriter(codexReplay)
+		orOAI.SetRewriter(codexReplay)
 	}
 	host, _, _ := net.SplitHostPort(c.listen)
-	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: []*gateway.Gateway{anth, oai}, api: a, eng: eng, store: st,
+	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: gws, api: a, eng: eng, store: st,
 		queue: q, log: svcLog, done: make(chan error, 1)}
 	s.srv = &http.Server{
-		Handler:           logRequests(svcLog, route(a, anth, oai, !loopback)),
+		Handler:           logRequests(svcLog, route(a, vendors{anth, oai, orAnth, orOAI}, !loopback)),
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          log.New(io.Discard, "", 0),
 	}
@@ -497,7 +524,13 @@ func (k keeper) KeepReply(r body.Reply) error {
 // to any other caller, before anything is forwarded. Without it only this
 // machine can connect anyway. Paths no vendor claims get the same 404 from
 // any caller.
-func route(a *api.API, anthropicGW, openaiGW http.Handler, open bool) http.Handler {
+// vendors are the gateways the router sends model calls to.
+type vendors struct {
+	anthropic, openai               http.Handler // the vendors' own, for a subscription
+	openrouterAnth, openrouterResps http.Handler // OpenRouter's, under /openrouter
+}
+
+func route(a *api.API, v vendors, open bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !plainPath(r) {
 			localError(w, "agentbus: the path has a dot, empty or encoded segment and is refused", http.StatusBadRequest)
@@ -515,9 +548,13 @@ func route(a *api.API, anthropicGW, openaiGW http.Handler, open bool) http.Handl
 		var gw http.Handler
 		switch {
 		case under(rest, "/backend-api/codex"):
-			gw = openaiGW
+			gw = v.openai
 		case under(rest, "/v1"):
-			gw = anthropicGW
+			gw = v.anthropic
+		case under(rest, openRouterPrefix+"/v1/responses"):
+			gw = v.openrouterResps
+		case under(rest, openRouterPrefix+"/v1"):
+			gw = v.openrouterAnth
 		default:
 			localError(w, "agentbus: no vendor is routed for this path", http.StatusNotFound)
 			return

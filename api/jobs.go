@@ -38,6 +38,9 @@ var jobRoutes = []route{
 		summary: "Make a job",
 		doc: "Make a job. " + jobsDoc + "\n\n" +
 			"A session's first turn job names agent and a workspace: folder, or repo and base (a git worktree the runner makes). " +
+			"agent is a saved agent's id (GET /api/v0/agents); the control plane fills agent_id, access and key_env from it, and model when none is sent. " +
+			"A caller never sends those three. With isolate true, a folder in a git repo with a commit gets a worktree of that repo at its HEAD; " +
+			"another folder is used as it is. " +
 			"A later turn job names session only, and runs in that session's workspace. " +
 			"A later turn job with no model keeps the model of the session's newest turn job that named one. " +
 			"A retry with the same idempotency_key and fields answers 200 with the same job.",

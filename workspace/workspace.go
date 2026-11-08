@@ -429,6 +429,32 @@ func labelGit(root string, files []Change) {
 	}
 }
 
+// RepoOf says whether folder is in a git work tree whose HEAD names a commit:
+// the top of that tree, folder's path inside it ("." at the top) and the
+// commit. A folder outside git, or in a repo with no commit yet, answers
+// false: it is used as it is.
+func RepoOf(folder string) (repo, rel, head string, ok bool) {
+	top, err := git(folder, nil, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", "", "", false
+	}
+	repo = strings.TrimSpace(string(top))
+	realTop, err1 := filepath.EvalSymlinks(repo)
+	realDir, err2 := filepath.EvalSymlinks(folder)
+	if err1 != nil || err2 != nil {
+		return "", "", "", false
+	}
+	rel, err = filepath.Rel(realTop, realDir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", "", "", false
+	}
+	out, err := git(folder, nil, "rev-parse", "--verify", "-q", "HEAD^{commit}")
+	if err != nil {
+		return "", "", "", false
+	}
+	return realTop, rel, strings.TrimSpace(string(out)), true
+}
+
 // MakeWorktree adds a detached git worktree of repo at base, in dir. A dir
 // that is already a worktree, from an earlier attempt of the same job, is
 // used as it is.
@@ -446,12 +472,16 @@ func MakeWorktree(repo, base, dir string) error {
 }
 
 // RemoveWorktree removes a worktree the runner made, with whatever is in it.
-// It refuses a folder outside workdir: a runner removes only its own.
+// dir is the worktree, or a folder inside it: a runner makes each worktree
+// one level under workdir, so that level is the worktree. It refuses a
+// folder outside workdir: a runner removes only its own.
 func RemoveWorktree(workdir, repo, dir string) error {
 	rel, err := filepath.Rel(workdir, dir)
 	if err != nil || rel == "." || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
 		return errors.New("the worktree is not under this runner's workdir")
 	}
+	top, _, _ := strings.Cut(rel, string(filepath.Separator))
+	dir = filepath.Join(workdir, top)
 	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
 		_, _ = git(repo, nil, "worktree", "prune")
 		return nil

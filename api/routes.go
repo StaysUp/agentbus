@@ -99,7 +99,7 @@ var (
 var (
 	turnRefused = fail(http.StatusBadRequest, "The request is refused; error says why. "+
 		"This includes an agent whose program is not on the service's PATH: error names the agent and how to install it, "+
-		"and nothing is stored. GET /api/v0/agents shows which agents the service finds.")
+		"and nothing is stored. GET /api/v0/harnesses shows which harnesses the service finds.")
 	turnFailed = fail(http.StatusInternalServerError, "The store could not be written, or the agent's program would not start.")
 )
 
@@ -113,6 +113,7 @@ const streamDoc = "Server-sent events. Every stored event after the cursor, in o
 // user starts a turn first. Every route names one.
 var tags = []struct{ name, doc string }{
 	{"Turns", "Start an agent and follow what it does. A turn is one prompt and the work it starts."},
+	{"Agents", "Saved agents: a harness, how it reaches its model, the model and a name. A turn names one."},
 	{"Jobs", "Turns and reviews as jobs in a queue, each run by a runner, and the workspaces they run in."},
 	{"Sessions", "The sessions the service has seen, and each one's stored history."},
 	{"Events", "The live stream of every event, and a program's own events."},
@@ -240,11 +241,54 @@ var routes = append([]route{
 		turns: true,
 		serve: (*API).stopTurn},
 	{method: "GET", path: "/api/v0/agents", op: "listAgents",
-		tag:     "Service",
+		tag:     "Agents",
 		summary: "List agents",
-		doc:     "Which agents this service can start. Kept for one minute.",
+		doc: "The saved agents, in the order they were made. A turn names one by id in agent.\n\n" +
+			"A new data folder starts with two: claude (Claude Code) and codex (Codex), each on its own subscription with its default model. " +
+			"Before 0.2 this route listed the harnesses this service finds; that is now GET /api/v0/harnesses.",
 		replies: []reply{ok(200, AgentList{}, "The agents."), badRequest},
-		serve:   plain((*API).listAgents)},
+		serve:   plain((*API).listSaved)},
+	{method: "POST", path: "/api/v0/agents", op: "createAgent",
+		tag:     "Agents",
+		summary: "Save an agent",
+		doc: "Save a new agent: a harness, how it reaches its model, the model and a name. It gets a new id.\n\n" +
+			"access subscription uses the harness's own sign-in. access openrouter needs a model in OpenRouter's naming and reads its key, " +
+			"when a turn starts, from the environment variable key_env names on the runner's machine (OPENROUTER_API_KEY when absent). " +
+			"The key itself is never sent, stored or logged. access api and harness opencode are refused: not available yet.",
+		body:    AgentRequest{},
+		replies: []reply{ok(201, SavedAgent{}, "Saved."), badRequest, fail(404, "This service keeps no saved agents."), fail(409, "Too many agents."), storeFailed},
+		serve:   plain((*API).createSaved)},
+	{method: "GET", path: "/api/v0/agents/{id}", op: "getAgent",
+		idDoc:   "A saved agent's id. Another shape gets 404.",
+		tag:     "Agents",
+		summary: "Get an agent",
+		doc:     "One saved agent.",
+		replies: []reply{ok(200, SavedAgent{}, "The agent."), badRequest, fail(404, "No such agent.")},
+		serve:   (*API).getSaved},
+	{method: "PUT", path: "/api/v0/agents/{id}", op: "updateAgent",
+		idDoc:   "A saved agent's id. Another shape gets 404.",
+		tag:     "Agents",
+		summary: "Edit an agent",
+		doc: "Replace a saved agent's fields; its id stays. The same rules as saving one. " +
+			"A session already started keeps the harness and access its turns recorded; its next turns use them, not the edit.",
+		body:    AgentRequest{},
+		replies: []reply{ok(200, SavedAgent{}, "Saved."), badRequest, fail(404, "No such agent."), storeFailed},
+		serve:   (*API).updateSaved},
+	{method: "DELETE", path: "/api/v0/agents/{id}", op: "removeAgent",
+		idDoc:   "A saved agent's id. Another shape gets 404.",
+		tag:     "Agents",
+		summary: "Remove an agent",
+		doc: "Remove a saved agent. Its sessions stay and can still be continued. " +
+			"A turn that names claude or codex still starts once that agent is removed: that harness on its own subscription. No body is read.",
+		replies: []reply{{status: 204, doc: "Removed.", empty: true}, badRequest, fail(404, "No such agent."), storeFailed},
+		serve:   (*API).removeSaved},
+	{method: "GET", path: "/api/v0/harnesses", op: "listHarnesses",
+		tag:     "Agents",
+		summary: "List harnesses",
+		doc: "The harnesses this service can run an agent on: whether it finds each, its version, whether it is signed in, " +
+			"and the access and models each offers, for a form that saves an agent. Probed at most once a minute.",
+		replies: []reply{ok(200, HarnessList{}, "The harnesses."), badRequest},
+		serve:   plain((*API).listHarnesses)},
 	{method: "GET", path: "/api/v0/version", op: "getVersion",
 		tag:     "Service",
 		summary: "Get the version",

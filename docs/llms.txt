@@ -125,8 +125,8 @@ curl -s -H "Authorization: Bearer $TOKEN" "$B/api/v0/sessions/abc/events?store=s
 ### POST /api/v0/turns
 
 Start a turn. Every turn runs as a job: this makes a turn job and answers once a runner has started
-its turn (the reply also names the `job`). Without `session`: an agent (`claude` or `codex`) with a prompt in a folder, in a new
-session. With `session`: the next turn of a session the snapshot marks `resumable`, in its own agent
+its turn (the reply also names the `job`). Without `session`: a saved agent (its id from `GET /api/v0/agents`; a new data folder has `claude` and `codex`) with a prompt in a folder, in a new
+session. The agent's harness, access and model start it; `model` sent here wins. A new session whose folder is in a git repo with a commit runs in its own git worktree of that repo at the folder's HEAD (in the same folder inside it); send `"isolate": false` to use the folder as it is. With `session`: the next turn of a session the snapshot marks `resumable`, in its own agent
 and folder (send neither, or the session's own; a different one is refused with 400). Answers 202
 as soon as it starts, with the session `id` and the new `turn` id. Every event of the turn carries
 that id in `turn`, and its `turn.started` (with the prompt) is stored before the reply. `read_only`
@@ -142,7 +142,7 @@ key with other fields gets 409. The key is the turn job's key; a request refused
 whose program is not on the service's PATH gets 400 and nothing is stored: `agent claude cannot
 start: the program claude is not on the service's PATH. Install Claude Code and run claude once to
 sign in, then try again. If it is installed, start agentbus from a shell where claude runs.`
-`GET /api/v0/agents` shows which agents the service finds.
+`GET /api/v0/harnesses` shows which harnesses the service finds.
 
 claude and codex both continue by own replay: the agent starts fresh, with no `--resume` or
 `exec resume`, its `turn.started` names the earlier turn in `replay_from`, and the gateway puts
@@ -277,12 +277,30 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   $B/api/v0/events
 ```
 
-### GET /api/v0/agents
+### Agents: GET, POST /api/v0/agents, GET, PUT, DELETE /api/v0/agents/{id}
 
-Which agents this service can start: found on PATH, version, signed in.
+Saved agents: `{id, name, harness, access, model, key_env}`. `harness` is `claude` or `codex`;
+`access` is `subscription` (the harness's own sign-in) or `openrouter` (a key read, when a turn
+starts, from the environment variable `key_env` names, `OPENROUTER_API_KEY` when absent; never the
+key itself). An OpenRouter agent needs `model` in OpenRouter's naming, such as
+`deepseek/deepseek-v4.1-flash`. `key_set` says whether the variable is set here. Main token only.
+Before 0.2, `GET /api/v0/agents` was what `GET /api/v0/harnesses` is now.
 
 ```sh
 curl -s -H "Authorization: Bearer $TOKEN" $B/api/v0/agents
+curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"DeepSeek","harness":"codex","access":"openrouter","model":"deepseek/deepseek-v4.1-flash"}' \
+  $B/api/v0/agents
+# then start a turn with "agent":"<its id>"
+```
+
+### GET /api/v0/harnesses
+
+Which harnesses this service can run an agent on: found on PATH, version, signed in, and for each
+the access kinds and models a "+ Agent" form offers (`api` and `opencode` are listed, disabled).
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" $B/api/v0/harnesses
 ```
 
 ### GET /api/v0/version

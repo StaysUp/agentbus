@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"github.com/staysup/agentbus/agents"
 	"reflect"
 	"strconv"
 	"strings"
@@ -78,12 +79,19 @@ var constraints = map[string]func(*openapi3.Schema){
 	},
 
 	"TurnRequest":           closed,
-	"TurnRequest.agent":     func(s *openapi3.Schema) { s.Enum = anys(AgentNames) },
+	"TurnRequest.agent":     pattern(sessionID.String()),
 	"TurnRequest.folder":    maxLength(MaxFolder),
 	"TurnRequest.prompt":    minLength(1),
 	"TurnRequest.model":     pattern(runModel.String()),
 	"TurnRequest.read_only": defaultFalse,
 	"TurnRequest.session":   pattern(sessionID.String()),
+
+	"AgentRequest":         closed,
+	"AgentRequest.name":    func(s *openapi3.Schema) { minLength(1)(s); maxLength(agents.MaxName)(s) },
+	"AgentRequest.harness": func(s *openapi3.Schema) { s.Enum = []any{agents.Claude, agents.Codex} },
+	"AgentRequest.access":  func(s *openapi3.Schema) { s.Enum = []any{agents.Subscription, agents.OpenRouter} },
+	"AgentRequest.model":   pattern(runModel.String()),
+	"AgentRequest.key_env": pattern(agents.KeyEnvShape()),
 
 	"EventRequest":         closed,
 	"EventRequest.kind":    pattern(customKind.String()),

@@ -25,7 +25,7 @@ func childEnv(t *testing.T) (*env, string) {
 	dir := t.TempDir()
 	script := `n=0; while [ -e "$D/env-$n" ]; do n=$((n+1)); done; env > "$D/env-$n.tmp"; mv "$D/env-$n.tmp" "$D/env-$n"; ` +
 		`i=0; while [ ! -e "$D/release" ] && [ $i -lt 1000 ]; do sleep 0.02; i=$((i+1)); done`
-	wire := func(agent, baseURL string) (run.Launch, error) {
+	wire := func(agent, baseURL string, _ run.Access) (run.Launch, error) {
 		// The service's own environment, as the real Wire passes it, with
 		// the main token in it as a person might have exported it.
 		return run.Launch{Path: "/bin/sh", Args: []string{"-c", script, "sh"},
@@ -246,7 +246,7 @@ func TestTurnToken(t *testing.T) {
 func TestTurnTokenRevokedAtProcessExitNotPipeClose(t *testing.T) {
 	dir := t.TempDir()
 	script := `sleep 3 & env > "$D/env-0.tmp"; mv "$D/env-0.tmp" "$D/env-0"; exit 0`
-	e := resumableEnv(t, func(agent, baseURL string) (run.Launch, error) {
+	e := resumableEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) {
 		return run.Launch{Path: "/bin/sh", Args: []string{"-c", script, "sh"}, Env: []string{"PATH=/usr/bin:/bin", "D=" + dir}}, nil
 	})
 	s := startTurn(t, e, `{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"x"}`)

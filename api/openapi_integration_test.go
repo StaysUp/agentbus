@@ -70,7 +70,7 @@ func TestOpenAPIResponsesMatch(t *testing.T) {
 	doc := loadSpec(t)
 	folder := t.TempDir()
 	// A run's child: a shell that prints claude's result line and exits.
-	e := resumableEnv(t, func(agent, baseURL string) (run.Launch, error) {
+	e := resumableEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) {
 		return run.Launch{Path: "/bin/sh", Args: []string{"-c", `echo '{"type":"result","session_id":"sess-1"}'`, "sh"}}, nil
 	})
 	fill(t, e.store)

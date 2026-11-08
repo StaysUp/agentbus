@@ -65,8 +65,13 @@ func fakeAgent() {
 		calls = []string{b}
 	}
 	for _, body := range calls {
-		resp, err := http.Post(os.Getenv("ANTHROPIC_BASE_URL")+"/v1/messages", "application/json",
-			strings.NewReader(body))
+		req, _ := http.NewRequest("POST", os.Getenv("ANTHROPIC_BASE_URL")+"/v1/messages", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		// As Claude Code sends a gateway credential.
+		if tok := os.Getenv("ANTHROPIC_AUTH_TOKEN"); tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		}
+		resp, err := http.DefaultClient.Do(req)
 		if err == nil {
 			io.Copy(io.Discard, resp.Body)
 			resp.Body.Close()

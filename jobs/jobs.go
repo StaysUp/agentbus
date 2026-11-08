@@ -16,6 +16,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"github.com/staysup/agentbus/agents"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/run"
 )
 
 // The protocol's timings.
@@ -56,6 +58,9 @@ type Config struct {
 	EnrollToken string // adds a runner
 	// Lease and Heartbeat override the defaults, for tests. Zero keeps them.
 	Lease, Heartbeat, MaxWait time.Duration
+	// Agents are the saved agents a job's spec.agent names. Nil takes
+	// spec.agent as a harness name, as before saved agents.
+	Agents *agents.Store
 }
 
 // Server is the http.Handler.
@@ -244,9 +249,37 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "spec.prompt must be from 1 byte to 256 KiB, with no NUL byte")
 		return
 	}
+	if b.Spec.AgentID != "" || b.Spec.Access != "" || b.Spec.KeyEnv != "" {
+		fail(w, http.StatusBadRequest, "spec.agent_id, spec.access and spec.key_env come from the saved agent; name it in spec.agent")
+		return
+	}
 	if msg := checkSpec(b.Spec); msg != "" {
 		fail(w, http.StatusBadRequest, msg)
 		return
+	}
+	if s.cfg.Agents != nil && b.Spec.Session == "" {
+		ag, err := s.cfg.Agents.Resolve(b.Spec.Agent)
+		if err != nil {
+			// A retry of a request whose agent was removed since: the
+			// queue matches the key against the request as asked and
+			// answers with the first job (Spec.asked).
+			known := false
+			if b.IdempotencyKey != "" {
+				if known, err = s.cfg.Queue.HasKey(queue.DefaultTeam, b.IdempotencyKey); err != nil {
+					s.internal(w)
+					return
+				}
+			}
+			if !known {
+				fail(w, http.StatusBadRequest, "spec.agent "+strconv.Quote(b.Spec.Agent)+" is not a saved agent; GET /api/v0/agents lists them")
+				return
+			}
+			ag = agents.Agent{ID: b.Spec.Agent, Harness: b.Spec.Agent}
+		}
+		b.Spec.Agent, b.Spec.AgentID, b.Spec.Access, b.Spec.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
+		if b.Spec.Model == "" && ag.Model != "" {
+			b.Spec.Model, b.Spec.ModelFromAgent = ag.Model, true
+		}
 	}
 	if b.Kind == queue.KindReview {
 		// A review never writes. The framework enforces it below the prompt.
@@ -293,10 +326,13 @@ func baseShape(b string) bool {
 // names session only.
 func checkSpec(sp queue.Spec) string {
 	if sp.Session != "" {
-		if sp.Agent != "" || sp.Folder != "" || sp.Repo != "" || sp.Base != "" {
-			return "spec with session takes no agent, folder, repo or base: they are the session's"
+		if sp.Agent != "" || sp.Folder != "" || sp.Repo != "" || sp.Base != "" || sp.Isolate {
+			return "spec with session takes no agent, folder, isolate, repo or base: they are the session's"
 		}
 		return ""
+	}
+	if sp.Isolate && sp.Folder == "" {
+		return "spec.isolate goes with spec.folder"
 	}
 	if sp.Agent == "" {
 		return "spec needs agent with folder, or with repo and base; or session"
@@ -475,23 +511,47 @@ type ReviewRequest struct {
 	IncludeReply bool `json:"include_reply,omitempty"`
 }
 
-var modelShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
-
 func (s *Server) reviewJob(w http.ResponseWriter, r *http.Request) {
 	var b ReviewRequest
 	if !decode(r, &b) {
 		fail(w, http.StatusBadRequest, "the body must be one JSON object with agent, and optionally model, idempotency_key and include_reply")
 		return
 	}
-	if !modelShape.MatchString(b.Agent) || (b.Model != "" && !modelShape.MatchString(b.Model)) {
-		fail(w, http.StatusBadRequest, "agent and model must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+	if !agentShape.MatchString(b.Agent) || (b.Model != "" && !run.ModelShape.MatchString(b.Model)) {
+		fail(w, http.StatusBadRequest, "agent must match "+agentShape.String()+" and model "+run.ModelShape.String())
 		return
+	}
+	// The reviewer is a saved agent, as for a turn; without saved agents its
+	// name is the harness.
+	as := queue.Spec{Agent: b.Agent, Model: b.Model}
+	if s.cfg.Agents != nil {
+		ag, err := s.cfg.Agents.Resolve(b.Agent)
+		if err != nil {
+			// A retry of a review whose reviewer was removed since gets the
+			// first review job, as a turn's retry does.
+			known := false
+			if b.IdempotencyKey != "" {
+				if known, err = s.cfg.Queue.HasKey(queue.DefaultTeam, b.IdempotencyKey); err != nil {
+					s.internal(w)
+					return
+				}
+			}
+			if !known {
+				fail(w, http.StatusBadRequest, "agent "+strconv.Quote(b.Agent)+" is not a saved agent; GET /api/v0/agents lists them")
+				return
+			}
+			ag = agents.Agent{ID: b.Agent, Harness: b.Agent}
+		}
+		as.Agent, as.AgentID, as.Access, as.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
+		if as.Model == "" && ag.Model != "" {
+			as.Model, as.ModelFromAgent = ag.Model, true
+		}
 	}
 	if b.IdempotencyKey != "" && !validKey(b.IdempotencyKey) {
 		fail(w, http.StatusBadRequest, "idempotency_key must be 1 to 128 of A-Z, a-z, 0-9 and . _ : -")
 		return
 	}
-	j, created, err := s.cfg.Queue.Review(queue.DefaultTeam, r.PathValue("id"), b.Agent, b.Model, b.IdempotencyKey, b.IncludeReply)
+	j, created, err := s.cfg.Queue.ReviewAs(queue.DefaultTeam, r.PathValue("id"), as, b.IdempotencyKey, b.IncludeReply)
 	switch {
 	case errors.Is(err, queue.ErrNotFound):
 		fail(w, http.StatusNotFound, "no such job")
@@ -511,6 +571,9 @@ func (s *Server) reviewJob(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, j)
 	}
 }
+
+// agentShape is a reviewer: a saved agent's id or a harness name.
+var agentShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
 
 // AttemptEventList is the answer to GET /api/v0/attempts/{id}/events.
 type AttemptEventList struct {

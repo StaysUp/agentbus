@@ -58,6 +58,7 @@ type Gateway struct {
 	rewrite Rewriter   // nil unless SetRewriter was called
 	guard   Guard      // nil unless SetGuard was called
 	refused refusals   // which rule refused each call (guard.go)
+	prefix  string     // cut from the vendor path before anything reads it (SetPrefix)
 
 	// open counts each run turn's exchanges not yet fully written: their
 	// events delivered to the sink and their reply handed to the keeper.
@@ -162,6 +163,12 @@ type Refusal struct {
 
 // SetRewriter sets the Rewriter. Call it before serving.
 func (g *Gateway) SetRewriter(r Rewriter) { g.rewrite = r }
+
+// SetPrefix makes the gateway serve the vendor's paths under prefix, such as
+// /openrouter: /openrouter/v1/messages is read and forwarded as
+// /v1/messages. A path not under it is forwarded unchanged. Call it before
+// serving.
+func (g *Gateway) SetPrefix(prefix string) { g.prefix = prefix }
 
 func runID() string {
 	b := make([]byte, 4)
@@ -351,6 +358,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r.URL.Path, r.URL.RawPath = path, rest
 	} else {
 		session = DefaultSession
+	}
+	if g.prefix != "" {
+		if p, ok := strings.CutPrefix(r.URL.Path, g.prefix); ok && strings.HasPrefix(p, "/") {
+			r.URL.Path = p
+			if r.URL.RawPath != "" {
+				r.URL.RawPath = strings.TrimPrefix(r.URL.RawPath, g.prefix)
+			}
+		}
 	}
 	// An agent may first try a WebSocket on its model-call path, as codex-cli
 	// 0.164.0 does with a GET and Upgrade on /backend-api/codex/responses

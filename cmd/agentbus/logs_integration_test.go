@@ -43,7 +43,7 @@ func TestServiceLogHasAPIErrorsAndNoTokenQueryOrBody(t *testing.T) {
 
 	s := waitLog(t, home,
 		`request method=POST path=/api/v0/turns status=400 `,
-		`error="agent must be claude or codex"`,
+		`is not a saved agent; GET /api/v0/agents lists them"`,
 		`request method=GET path=/api/v0/sessions/abc/events status=409 `,
 		`error="the cursor belongs to another store; start over from the snapshot"`,
 		`request method=GET path=/api/v0/sessions status=401 `,

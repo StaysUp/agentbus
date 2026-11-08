@@ -60,7 +60,7 @@ func TestNextTurnRefusedWhileAnotherIsStarting(t *testing.T) {
 	// Only the first caller waits, so a second turn that is wrongly let
 	// through answers 400 at once instead of hanging the test.
 	var once sync.Once
-	e := resumableEnv(t, func(agent, baseURL string) (run.Launch, error) {
+	e := resumableEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) {
 		first := false
 		once.Do(func() { first = true; close(entered) })
 		if first {
@@ -92,7 +92,7 @@ func TestNextTurnRefusedWhileAnotherIsStarting(t *testing.T) {
 // A child the store shows running keeps the session busy too, even one this
 // process did not start (such as one stored just before a restart).
 func TestNextTurnRefusedWhileAChildIsOpen(t *testing.T) {
-	e := resumableEnv(t, func(agent, baseURL string) (run.Launch, error) { return run.Launch{}, run.ErrNotFound })
+	e := resumableEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) { return run.Launch{}, run.ErrNotFound })
 	if _, _, err := e.store.Append(event.Event{ID: "evt_4", Kind: event.SessionOpened, Time: time.Now().UTC(),
 		Session: "s1", Hold: "hold_2"}); err != nil {
 		t.Fatal(err)

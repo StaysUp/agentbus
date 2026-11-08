@@ -168,7 +168,7 @@ func TestBrokenPermissionsRefusesTurn(t *testing.T) {
 	t.Cleanup(func() { st.Close() })
 	var wired atomic.Int32
 	e, err := New(Config{Store: st, BaseURL: "http://127.0.0.1:1", Permissions: path,
-		Wire: func(agent, baseURL string) (Launch, error) { wired.Add(1); return Launch{}, ErrNotFound }})
+		Wire: func(agent, baseURL string, _ Access) (Launch, error) { wired.Add(1); return Launch{}, ErrNotFound }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,5 +197,34 @@ func TestBrokenPermissionsRefusesTurn(t *testing.T) {
 	writePerm(t, path, "allow = [\"go test\"]\n")
 	if r := start(); r.Status != 400 || !strings.Contains(r.Msg, "is not on the service's PATH") || wired.Load() != 2 {
 		t.Fatalf("fixed file: %+v, wire %d", r, wired.Load())
+	}
+}
+
+// An access the engine does not know is refused before a slot is taken, so
+// the refusal holds none: with one slot, the next turn still gets it.
+func TestUnknownAccessHoldsNoSlot(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	e, err := New(Config{Store: st, BaseURL: "http://127.0.0.1:1", MaxRuns: 1,
+		Wire: func(agent, baseURL string, _ Access) (Launch, error) { return Launch{}, ErrNotFound }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, access := range []string{"bogus", "bogus", ""} {
+		_, err := e.Start(Request{Agent: "claude", Folder: t.TempDir(), Prompt: "hi", Access: access})
+		var r *Refusal
+		if !errors.As(err, &r) {
+			t.Fatalf("%d: %v", i, err)
+		}
+		want := "access must be"
+		if access == "" {
+			want = "is not on the service's PATH" // past the slot: it was free
+		}
+		if r.Status != 400 || !strings.Contains(r.Msg, want) {
+			t.Fatalf("%d (%q): %+v, want 400 %q", i, access, r, want)
+		}
 	}
 }

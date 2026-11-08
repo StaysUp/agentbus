@@ -51,8 +51,10 @@ const MaxPrompt = 256 << 10
 const MaxFolder = 4096
 
 // ModelShape is the shape of a model name: it is only ever the value of
-// --model.
-var ModelShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
+// --model. It takes OpenRouter's names too, such as
+// deepseek/deepseek-v4.1-flash or a name with a :free variant. It never starts
+// with a dash, so it is never read as a flag.
+var ModelShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
 
 // SessionShape is the shape of a session id, and of a turn id.
 var SessionShape = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
@@ -69,9 +71,25 @@ type Launch struct {
 }
 
 // Wire returns the Launch for agent, with baseURL reaching it through the
-// child's environment or arguments. It returns ErrOwnEndpoint or ErrNotFound
-// when it cannot.
-type Wire func(agent, baseURL string) (Launch, error)
+// child's environment or arguments, and acc saying how it reaches its model.
+// It returns ErrOwnEndpoint, ErrNotFound or a *Refusal when it cannot.
+type Wire func(agent, baseURL string, acc Access) (Launch, error)
+
+// Access is how a turn's agent reaches its model. The zero value is the
+// harness's own subscription.
+type Access struct {
+	// Kind is "" or "subscription", or "openrouter".
+	Kind string
+	// KeyEnv, for openrouter, names the variable that holds the key. The
+	// runner reads it when the turn starts; it is never stored.
+	KeyEnv string
+	// Model is the turn's model, for a wire that must name it in more than
+	// --model.
+	Model string
+}
+
+// Refused makes a refusal a Wire can return: status and the person's words.
+func Refused(status int, msg string) error { return refuse(status, msg) }
 
 var (
 	// ErrOwnEndpoint: the service's environment already sends the agent to
@@ -210,6 +228,9 @@ type Request struct {
 	Prompt, Model  string
 	ReadOnly       bool
 	IdempotencyKey string // stored on turn.started, as the caller's key
+	// AgentID, Access and KeyEnv, for a new session: the saved agent and how
+	// it reaches its model (Access). A next turn reads them from the record.
+	AgentID, Access, KeyEnv string
 }
 
 // Turn is a turn that started.
@@ -290,11 +311,16 @@ func (e *Engine) Start(req Request) (*Turn, error) {
 	} else if !SessionShape.MatchString(id) {
 		return nil, refuse(http.StatusBadRequest, "session must match "+SessionShape.String())
 	}
+	// Before the slot is taken: a refusal here holds nothing.
+	if req.Access != "" && req.Access != "subscription" && req.Access != "openrouter" {
+		return nil, refuse(http.StatusBadRequest, "access must be subscription or openrouter")
+	}
 	if code, msg := e.runs.take(id); code != 0 {
 		return nil, refuse(code, msg)
 	}
 	return e.start(turn{agent: req.Agent, folder: req.Folder, session: id, id: req.Turn,
-		model: req.Model, readOnly: req.ReadOnly, prompt: req.Prompt, key: req.IdempotencyKey})
+		model: req.Model, readOnly: req.ReadOnly, prompt: req.Prompt, key: req.IdempotencyKey,
+		agentID: req.AgentID, access: req.Access, keyEnv: req.KeyEnv})
 }
 
 // next starts the next turn of req.Session, in its own agent and folder.
@@ -391,7 +417,8 @@ func (e *Engine) next(req Request) (*Turn, error) {
 	}
 	t := turn{agent: c.Agent, folder: c.Folder, session: session, id: req.Turn, resumeID: c.ResumeID, replayFrom: from,
 		recoveredFrom: recovered, recoveredWhy: recoveredWhy, continuity: continuity, model: req.Model,
-		readOnly: req.ReadOnly, prompt: req.Prompt, key: req.IdempotencyKey}
+		readOnly: req.ReadOnly, prompt: req.Prompt, key: req.IdempotencyKey,
+		agentID: c.AgentID, access: c.Access, keyEnv: c.KeyEnv}
 	if from != "" {
 		t.resumeID = "" // a fresh child: the history comes from the gateway
 	}
@@ -439,6 +466,8 @@ type turn struct {
 	readOnly               bool
 	prompt                 string
 	key                    string // the caller's idempotency key, or ""
+	agentID, access        string // the saved agent and how it reaches its model
+	keyEnv                 string // for openrouter: the name of the key's variable
 }
 
 // start stores session.opened and turn.started, starts t's child in a slot
@@ -473,8 +502,12 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	if e.cfg.Wire == nil {
 		return nil, refuse(http.StatusNotFound, "this service starts no turns")
 	}
-	l, err := e.cfg.Wire(t.agent, baseURL)
+	l, err := e.cfg.Wire(t.agent, baseURL, Access{Kind: t.access, KeyEnv: t.keyEnv, Model: t.model})
+	var refusal *Refusal
 	switch {
+	case errors.As(err, &refusal):
+		e.cfg.Logf("run.refused agent=%s access=%s reason=wire", t.agent, t.access)
+		return nil, refusal
 	case errors.Is(err, ErrOwnEndpoint):
 		return nil, refuse(http.StatusBadRequest, "the service's environment already sends this agent to another endpoint; unset it and restart agentbus")
 	case errors.Is(err, ErrNotFound):
@@ -518,7 +551,8 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	// Before the child starts, so its first model call finds the agent and
 	// folder, and a store that cannot write starts nothing.
 	if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.SessionOpened,
-		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Hold: holdID, Agent: t.agent, Folder: t.folder}); err != nil {
+		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Hold: holdID, Agent: t.agent, Folder: t.folder,
+		AgentID: t.agentID, Access: t.access, KeyEnv: t.keyEnv}); err != nil {
 		return nil, storeFailed
 	}
 	// session.opened is stored, so on any failure below the hold must close,
@@ -534,7 +568,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.TurnStarted,
 		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Text: t.prompt, Agent: t.agent, Folder: t.folder,
 		ReplayFrom: t.replayFrom, Continuity: t.continuity, RecoveredFrom: t.recoveredFrom,
-		RecoveredReason: t.recoveredWhy, IdempotencyKey: t.key}); err != nil {
+		RecoveredReason: t.recoveredWhy, IdempotencyKey: t.key, AgentID: t.agentID, Access: t.access, KeyEnv: t.keyEnv}); err != nil {
 		closeHold()
 		return nil, storeFailed
 	}

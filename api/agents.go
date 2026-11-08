@@ -1,159 +1,150 @@
 package api
 
-// GET /api/v0/agents: which agents this service can start, their versions,
-// and whether each is signed in. docs/CLIENT_API.md is the contract.
+// /api/v0/agents: the saved agents. An agent is a harness, how it reaches its
+// model, the model and a name; a turn names one by id. docs/CLIENT_API.md is
+// the contract.
 
 import (
-	"bytes"
-	"context"
 	"errors"
 	"net/http"
-	"os/exec"
-	"regexp"
-	"strings"
-	"sync"
 	"time"
+
+	"github.com/staysup/agentbus/agents"
 )
-
-// AgentNames are the agents runs can start, in the order they are listed.
-var AgentNames = []string{"claude", "codex"}
-
-// AgentProbeTimeout bounds each --version or status command.
-const AgentProbeTimeout = 5 * time.Second
-
-// AgentCacheFor is how long an answer is kept.
-const AgentCacheFor = time.Minute
-
-// statusArgs is each agent's own offline sign-in status command. Its exit
-// code is the answer: 0 signed in, 1 not. Its output is discarded, since it
-// can name the account. Both answer with network access denied (Claude Code
-// 2.1.318 and codex-cli 0.164.0, 2026-11-05, run under a sandbox profile
-// that denies the network).
-var statusArgs = map[string][]string{
-	"claude": {"auth", "status"},
-	"codex":  {"login", "status"},
-}
-
-// Agent is one agent in GET /api/v0/agents.
-type Agent struct {
-	Name     string `json:"name"`
-	Found    bool   `json:"found" doc:"The binary is on the service's PATH."`
-	Version  string `json:"version,omitempty" doc:"From <bin> --version. Absent when not found or not shaped like a version."`
-	SignedIn *bool  `json:"signed_in,omitempty" doc:"From the agent's own offline status command. Absent when it gave no clear answer."`
-}
 
 // AgentList is the answer to GET /api/v0/agents.
 type AgentList struct {
-	Agents []Agent `json:"agents"`
+	Agents []SavedAgent `json:"agents"`
 }
 
-type agentCache struct {
-	mu   sync.Mutex
-	at   time.Time
-	list []Agent
+// SavedAgent is one saved agent, as the API sends it: agents.Agent and
+// key_set.
+type SavedAgent struct {
+	ID      string    `json:"id" doc:"The agent's id. A turn names it in agent."`
+	Name    string    `json:"name" doc:"What the person calls it, such as Claude Code · sonnet. Unique, ignoring case."`
+	Harness string    `json:"harness" doc:"The program that runs the agent's loop: claude or codex."`
+	Access  string    `json:"access" doc:"How the harness reaches its model: subscription (its own sign-in) or openrouter (a key from an environment variable)."`
+	Model   string    `json:"model,omitempty" doc:"The model, passed as --model. Absent: the harness's own default."`
+	KeyEnv  string    `json:"key_env,omitempty" doc:"For openrouter: the name of the environment variable on the runner's machine that holds the key. Never the key."`
+	KeySet  *bool     `json:"key_set,omitempty" doc:"For openrouter: whether key_env is set in this service's environment. Its value is never sent."`
+	Created time.Time `json:"created"`
+	Updated time.Time `json:"updated"`
 }
 
-func (a *API) listAgents(w http.ResponseWriter, r *http.Request) {
+// AgentRequest is the body of POST /api/v0/agents and PUT /api/v0/agents/{id}.
+type AgentRequest agents.Fields
+
+const (
+	noAgents   = "this service keeps no saved agents"
+	noAgent    = "no such agent"
+	badAgent   = "the body must be one JSON object with name, harness and access, and optionally model and key_env"
+	tooManyAgs = "too many agents; remove some first"
+)
+
+func (a *API) saved(ag agents.Agent) SavedAgent {
+	s := SavedAgent{ID: ag.ID, Name: ag.Name, Harness: ag.Harness, Access: ag.Access, Model: ag.Model,
+		KeyEnv: ag.KeyEnv, Created: ag.Created, Updated: ag.Updated}
+	if ag.Access == agents.OpenRouter {
+		set := a.keySet(ag.KeyEnv)
+		s.KeySet = &set
+	}
+	return s
+}
+
+func (a *API) listSaved(w http.ResponseWriter, r *http.Request) {
 	if !noBody(w, r) {
 		return
 	}
-	// One probe at a time; a caller arriving meanwhile waits and reads the
-	// fresh answer.
-	a.agents.mu.Lock()
-	defer a.agents.mu.Unlock()
-	now := a.cfg.Now()
-	if a.agents.list == nil || now.Sub(a.agents.at) >= AgentCacheFor {
-		list := make([]Agent, 0, len(AgentNames))
-		for _, name := range AgentNames {
-			list = append(list, a.probe(r.Context(), name))
-		}
-		a.agents.list, a.agents.at = list, now
+	if a.cfg.Agents == nil {
+		writeJSON(w, http.StatusOK, AgentList{[]SavedAgent{}})
+		return
 	}
-	writeJSON(w, http.StatusOK, AgentList{a.agents.list})
+	list := a.cfg.Agents.List()
+	out := make([]SavedAgent, 0, len(list))
+	for _, ag := range list {
+		out = append(out, a.saved(ag))
+	}
+	writeJSON(w, http.StatusOK, AgentList{out})
 }
 
-// probe finds one agent's binary and asks it its version and sign-in status.
-// It never returns the path.
-func (a *API) probe(ctx context.Context, name string) Agent {
-	ag := Agent{Name: name}
-	if a.cfg.LookPath == nil {
-		return ag
+func (a *API) getSaved(w http.ResponseWriter, r *http.Request, id string) {
+	if !noBody(w, r) {
+		return
 	}
-	bin, err := a.cfg.LookPath(name)
+	if a.cfg.Agents == nil {
+		writeError(w, http.StatusNotFound, noAgents)
+		return
+	}
+	ag, err := a.cfg.Agents.Get(id)
 	if err != nil {
-		return ag
+		writeError(w, http.StatusNotFound, noAgent)
+		return
 	}
-	ag.Found = true
-	out, code := a.runProbe(ctx, bin, "--version")
-	if code == 0 {
-		ag.Version = versionToken(out)
-	}
-	if args, ok := statusArgs[name]; ok {
-		switch _, code := a.runProbe(ctx, bin, args...); code {
-		case 0:
-			t := true
-			ag.SignedIn = &t
-		case 1:
-			f := false
-			ag.SignedIn = &f
-		}
-	}
-	return ag
+	writeJSON(w, http.StatusOK, a.saved(ag))
 }
 
-// runProbe runs bin with args, an empty stdin and the service's environment,
-// within AgentProbeTimeout. It returns at most 4 KiB of stdout and the exit
-// code, or -1 when the command did not end on its own.
-func (a *API) runProbe(ctx context.Context, bin string, args ...string) (string, int) {
-	ctx, cancel := context.WithTimeout(ctx, AgentProbeTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, args...)
-	if a.cfg.Environ != nil {
-		cmd.Env = a.cfg.Environ()
+func (a *API) createSaved(w http.ResponseWriter, r *http.Request) {
+	if a.cfg.Agents == nil {
+		writeError(w, http.StatusNotFound, noAgents)
+		return
 	}
-	out := &capped{max: 4 << 10}
-	cmd.Stdout = out
-	cmd.WaitDelay = time.Second
-	err := cmd.Run()
-	if ctx.Err() != nil {
-		return "", -1
+	var f AgentRequest
+	if !decodeObject(r, &f) {
+		writeError(w, http.StatusBadRequest, badAgent)
+		return
 	}
-	var ee *exec.ExitError
+	ag, err := a.cfg.Agents.Create(agents.Fields(f))
+	if a.agentFailed(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusCreated, a.saved(ag))
+}
+
+func (a *API) updateSaved(w http.ResponseWriter, r *http.Request, id string) {
+	if a.cfg.Agents == nil {
+		writeError(w, http.StatusNotFound, noAgents)
+		return
+	}
+	var f AgentRequest
+	if !decodeObject(r, &f) {
+		writeError(w, http.StatusBadRequest, badAgent)
+		return
+	}
+	ag, err := a.cfg.Agents.Update(id, agents.Fields(f))
+	if a.agentFailed(w, err) {
+		return
+	}
+	writeJSON(w, http.StatusOK, a.saved(ag))
+}
+
+func (a *API) removeSaved(w http.ResponseWriter, r *http.Request, id string) {
+	if !noBody(w, r) {
+		return
+	}
+	if a.cfg.Agents == nil {
+		writeError(w, http.StatusNotFound, noAgents)
+		return
+	}
+	if a.agentFailed(w, a.cfg.Agents.Remove(id)) {
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// agentFailed answers err, if there is one, and says whether it did.
+func (a *API) agentFailed(w http.ResponseWriter, err error) bool {
+	var bad *agents.Invalid
 	switch {
 	case err == nil:
-		return out.String(), 0
-	case errors.As(err, &ee) && ee.Exited():
-		return out.String(), ee.ExitCode()
+		return false
+	case errors.As(err, &bad):
+		writeError(w, http.StatusBadRequest, bad.Why)
+	case errors.Is(err, agents.ErrNotFound):
+		writeError(w, http.StatusNotFound, noAgent)
+	case errors.Is(err, agents.ErrFull):
+		writeError(w, http.StatusConflict, tooManyAgs)
+	default:
+		a.internal(w)
 	}
-	return "", -1
-}
-
-var versionShape = regexp.MustCompile(`^v?([0-9]+\.[0-9]+(\.[0-9]+)?([-+][0-9A-Za-z.-]+)?)$`)
-
-// versionToken is the first word of out shaped like a version: "2.1.318" from
-// "2.1.318 (Claude Code)", "0.164.0" from "codex-cli 0.164.0".
-func versionToken(out string) string {
-	for _, f := range strings.Fields(out) {
-		if m := versionShape.FindStringSubmatch(f); m != nil {
-			return m[1]
-		}
-	}
-	return ""
-}
-
-// capped keeps the first max bytes written to it.
-type capped struct {
-	bytes.Buffer
-	max int
-}
-
-func (c *capped) Write(p []byte) (int, error) {
-	if room := c.max - c.Len(); room > 0 {
-		if len(p) > room {
-			c.Buffer.Write(p[:room])
-		} else {
-			c.Buffer.Write(p)
-		}
-	}
-	return len(p), nil
+	return true
 }

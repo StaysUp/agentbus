@@ -24,7 +24,7 @@ func heldEnv(t *testing.T, maxRuns int) (*env, string) {
 	t.Helper()
 	dir := t.TempDir()
 	script := `: > "$D/child-$$"; i=0; while [ ! -e "$D/release" ] && [ $i -lt 1000 ]; do sleep 0.02; i=$((i+1)); done`
-	wire := func(agent, baseURL string) (run.Launch, error) {
+	wire := func(agent, baseURL string, _ run.Access) (run.Launch, error) {
 		return run.Launch{Path: "/bin/sh", Args: []string{"-c", script, "sh"}, Env: []string{"PATH=/usr/bin:/bin", "D=" + dir}}, nil
 	}
 	e := stackEnv(t, stack{wire: wire, maxRuns: maxRuns, turnsToken: true, turnWait: 2 * time.Second})
@@ -110,7 +110,7 @@ func TestIdempotentStartStartsOneChild(t *testing.T) {
 // fields under it get 409; a bad key gets 400 and is never queued.
 func TestIdempotencyKey(t *testing.T) {
 	var wired atomic.Int32
-	e := turnsEnv(t, func(agent, baseURL string) (run.Launch, error) {
+	e := turnsEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) {
 		wired.Add(1)
 		return run.Launch{Path: "/bin/sh", Args: []string{"-c", "exit 0", "sh"}}, nil
 	})

@@ -104,7 +104,7 @@ func TestGetTurn(t *testing.T) {
 // The turns token starts, stops and reads turns, and gets 403 everywhere else.
 // A wrong token still gets 401.
 func TestTurnsTokenScope(t *testing.T) {
-	e := turnsEnv(t, func(agent, baseURL string) (run.Launch, error) { return run.Launch{}, run.ErrNotFound })
+	e := turnsEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) { return run.Launch{}, run.ErrNotFound })
 	appendAll(t, e.store,
 		event.Event{ID: "e1", Kind: event.TurnStarted, Time: time.Now().UTC(), Session: "s1", Turn: "t_a", Text: "hi"})
 	for _, c := range []struct {
@@ -155,7 +155,7 @@ func TestTurnsTokenOff(t *testing.T) {
 // A turn the engine refuses answers with the engine's status and words: the
 // job failed with reason setup. A request the API refuses is never queued.
 func TestTurnRefusalsComeFromTheJob(t *testing.T) {
-	e := turnsEnv(t, func(agent, baseURL string) (run.Launch, error) { return run.Launch{}, run.ErrNotFound })
+	e := turnsEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) { return run.Launch{}, run.ErrNotFound })
 	resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"x"}`)))
 	if resp.StatusCode != 400 || !strings.Contains(out, "is not on the service's PATH") {
 		t.Fatalf("missing agent: %d %s", resp.StatusCode, out)

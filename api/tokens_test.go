@@ -19,7 +19,7 @@ import (
 
 // A turn whose child cannot start leaves no token behind.
 func TestTurnTokenRevokedWhenChildDoesNotStart(t *testing.T) {
-	e := resumableEnv(t, func(agent, baseURL string) (run.Launch, error) {
+	e := resumableEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) {
 		return run.Launch{Path: filepath.Join(t.TempDir(), "missing")}, nil
 	})
 	resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"x"}`)))

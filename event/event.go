@@ -181,7 +181,14 @@ type Event struct {
 	// a session no run started, such as one pointed at the gateway by hand.
 	Agent  string `json:"agent,omitempty" doc:"On turn.started and session.opened: the run's agent, such as claude. Empty on a turn of a session no run started."`
 	Folder string `json:"folder,omitempty" doc:"On turn.started and session.opened: the folder the run's agent started in. Empty on a turn of a session no run started."`
-	Hold   string `json:"hold,omitempty" doc:"On session.opened and session.closed: names one run's child."`
+	// AgentID, Access and KeyEnv, on a run's turn.started and session.opened:
+	// the saved agent the run started, how it reaches its model, and for an
+	// OpenRouter agent the name of the variable that holds its key. Never
+	// the key itself. A session's next turn reads them back.
+	AgentID string `json:"agent_id,omitempty" doc:"On a run's turn.started and session.opened: the saved agent the run started, as GET /api/v0/agents names it. Absent for a turn started by harness name alone."`
+	Access  string `json:"access,omitempty" doc:"On a run's turn.started and session.opened: how the agent reaches its model: subscription or openrouter. Absent means subscription."`
+	KeyEnv  string `json:"key_env,omitempty" doc:"On a run's turn.started and session.opened of an OpenRouter agent: the name of the environment variable that holds the key. Never the key."`
+	Hold    string `json:"hold,omitempty" doc:"On session.opened and session.closed: names one run's child."`
 	// ExitCode, only on session.closed from a run: the child's exit code, or
 	// 128 plus the signal that ended it. Nil for a child closed by a service
 	// restart.

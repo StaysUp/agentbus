@@ -222,8 +222,8 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 			}
 		}
 	}
-	if len(ops) != 31 {
-		t.Errorf("%d endpoints, want 31: %v", len(ops), ops)
+	if len(ops) != 36 {
+		t.Errorf("%d endpoints, want 36: %v", len(ops), ops)
 	}
 	for _, want := range []string{"POST /api/v0/turns", "GET /api/v0/turns", "GET /api/v0/turns/{id}", "GET /api/v0/turns/{id}/events", "POST /api/v0/turns/{id}/stop"} {
 		if !slices.Contains(ops, want) {
@@ -253,7 +253,7 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 
 func TestOpenAPIRoutesMatchCode(t *testing.T) {
 	doc := loadSpec(t)
-	e := resumableEnv(t, func(agent, baseURL string) (run.Launch, error) { return run.Launch{}, run.ErrNotFound })
+	e := resumableEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) { return run.Launch{}, run.ErrNotFound })
 	paths, prefixes, words := routeLiterals(t)
 	candidates := map[string]bool{}
 	for _, p := range paths {
@@ -313,7 +313,10 @@ func TestOpenAPISchemasMatchTypes(t *testing.T) {
 		"Unexpected":   reflect.TypeFor[event.Unexpected](),
 		"Snapshot":     reflect.TypeFor[store.Snapshot](),
 		"Session":      reflect.TypeFor[store.Session](),
-		"Agent":        reflect.TypeFor[Agent](),
+		"Harness":      reflect.TypeFor[Harness](),
+		"AccessOption": reflect.TypeFor[AccessOption](),
+		"SavedAgent":   reflect.TypeFor[SavedAgent](),
+		"AgentRequest": reflect.TypeFor[AgentRequest](),
 		"Page":         reflect.TypeFor[Page](),
 		"TurnRequest":  reflect.TypeFor[TurnRequest](),
 		"TurnList":     reflect.TypeFor[store.TurnList](),

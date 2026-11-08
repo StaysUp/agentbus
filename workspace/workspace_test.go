@@ -276,3 +276,41 @@ func mustRoot(t *testing.T, dir string) *os.Root {
 	t.Cleanup(func() { r.Close() })
 	return r
 }
+
+// RepoOf finds the repo a folder is in, the folder's place in it and HEAD's
+// commit; a folder outside git or a repo with no commit is not isolated.
+func TestRepoOf(t *testing.T) {
+	plain := t.TempDir()
+	if _, _, _, ok := RepoOf(plain); ok {
+		t.Fatal("a plain folder is a repo")
+	}
+	empty := t.TempDir()
+	mustGit(t, empty, "init", "-q")
+	if _, _, _, ok := RepoOf(empty); ok {
+		t.Fatal("a repo with no commit counts")
+	}
+	repo := t.TempDir()
+	mustGit(t, repo, "init", "-q")
+	write(t, filepath.Join(repo, "a", "b", "f.txt"), "x")
+	mustGit(t, repo, "add", ".")
+	mustGit(t, repo, "commit", "-q", "-m", "one")
+	real, _ := filepath.EvalSymlinks(repo)
+	for dir, wantRel := range map[string]string{repo: ".", filepath.Join(repo, "a", "b"): filepath.Join("a", "b")} {
+		top, rel, head, ok := RepoOf(dir)
+		if !ok || top != real || rel != wantRel || len(head) != 40 {
+			t.Errorf("%s: %q %q %q %v", dir, top, rel, head, ok)
+		}
+	}
+}
+
+// A folder whose name starts with two dots is inside the repo.
+func TestRepoOfDotDotName(t *testing.T) {
+	repo := t.TempDir()
+	mustGit(t, repo, "init", "-q")
+	write(t, filepath.Join(repo, "..data", "f.txt"), "x")
+	mustGit(t, repo, "add", ".")
+	mustGit(t, repo, "commit", "-q", "-m", "one")
+	if _, rel, _, ok := RepoOf(filepath.Join(repo, "..data")); !ok || rel != "..data" {
+		t.Fatalf("%q %v", rel, ok)
+	}
+}

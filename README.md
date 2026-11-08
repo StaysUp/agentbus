@@ -137,21 +137,20 @@ on `/api` and `/docs` only: the proxy's requests look local to the service.
 
 ### 3. Or start a turn with curl
 
-Open a second terminal in any folder. First check that the service finds your agents:
+Open a second terminal in any folder. First check that the service finds your harnesses:
 
 ```sh
 TOKEN=$(cat ~/.local/share/agentbus/token)
 
-curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/api/v0/agents
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/api/v0/harnesses
 ```
 
-```json
-{"agents":[{"name":"claude","found":true,"version":"2.1.319","signed_in":true},{"name":"codex","found":false}]}
-```
+Each one says `found`, its `version` and `signed_in`. `GET /api/v0/agents` lists your saved
+agents; a new data folder has `claude` and `codex`, each on its own subscription.
 
-`found` means the agent's program is on the service's `PATH`. `signed_in` is the agent's own
-answer, and it is left out when the agent gives no clear one. Start a turn only with an agent that
-is found and signed in.
+`found` means the harness's program is on the service's `PATH`. `signed_in` is the harness's own
+answer, and it is left out when it gives no clear one. Start a turn only with an agent whose
+harness is found and signed in.
 
 Then start a turn:
 
@@ -163,7 +162,8 @@ curl -s http://127.0.0.1:8787/api/v0/turns \
 ```
 
 Use your own token path if the data folder is elsewhere. `folder` must be an absolute path to a
-folder that exists: the agent works there. `model` is passed to the agent as `--model`; a small
+folder that exists. In a git repo with a commit, the agent works in its own git worktree of it, at
+its current HEAD, under the data folder; send `"isolate":false` to work in the folder itself. `model` is passed to the agent as `--model`; a small
 model keeps this first turn cheap. `read_only` gives the agent read tools only. For codex, use
 `"agent":"codex"` and one of its models, or leave `model` out.
 

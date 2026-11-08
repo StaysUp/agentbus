@@ -346,25 +346,33 @@ type Continuation struct {
 	Folder   string
 	ResumeID string
 	Open     bool
+	// AgentID, Access and KeyEnv come from the same event as Agent: the
+	// saved agent, how it reaches its model, and the name of its key's
+	// variable. Empty for a session started by harness name alone.
+	AgentID, Access, KeyEnv string
 }
 
 // Continuation reads what the session's next turn needs, as of now.
 func (s *Store) Continuation(id string) (Continuation, error) {
 	var c Continuation
-	var agent, folder, resume sql.NullString
-	err := s.r.QueryRow(`SELECT
+	var agent, folder, resume, agentID, access, keyEnv sql.NullString
+	err := s.r.QueryRow(`WITH latest AS (SELECT data FROM events
+				WHERE session = ?1 AND `+agentFrom+` ORDER BY seq DESC LIMIT 1)
+		SELECT
 			EXISTS(SELECT 1 FROM events WHERE session = ?1),
-			(SELECT json_extract(data, '$.agent') FROM events
-				WHERE session = ?1 AND `+agentFrom+` ORDER BY seq DESC LIMIT 1),
-			(SELECT json_extract(data, '$.folder') FROM events
-				WHERE session = ?1 AND `+agentFrom+` ORDER BY seq DESC LIMIT 1),
+			(SELECT json_extract(data, '$.agent') FROM latest),
+			(SELECT json_extract(data, '$.folder') FROM latest),
+			(SELECT json_extract(data, '$.agent_id') FROM latest),
+			(SELECT json_extract(data, '$.access') FROM latest),
+			(SELECT json_extract(data, '$.key_env') FROM latest),
 			(SELECT json_extract(data, '$.resume_id') FROM events
 				WHERE session = ?1 AND kind = 'session.closed' AND json_extract(data, '$.resume_id') IS NOT NULL
-				ORDER BY seq DESC LIMIT 1)`, id).Scan(&c.Known, &agent, &folder, &resume)
+				ORDER BY seq DESC LIMIT 1)`, id).Scan(&c.Known, &agent, &folder, &agentID, &access, &keyEnv, &resume)
 	if err != nil {
 		return c, fmt.Errorf("store: read session: %w", err)
 	}
 	c.Agent, c.Folder, c.ResumeID = agent.String, folder.String, resume.String
+	c.AgentID, c.Access, c.KeyEnv = agentID.String, access.String, keyEnv.String
 	holds, err := s.OpenHolds(s.Last())
 	if err != nil {
 		return c, err

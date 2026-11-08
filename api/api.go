@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/staysup/agentbus/agents"
 	"io"
 	"net/http"
 	"regexp"
@@ -83,6 +84,10 @@ type Config struct {
 	LookPath func(string) (string, error)
 	Environ  func() []string
 
+	// Agents are the saved agents: /api/v0/agents, and the agent a turn
+	// names. Nil lists none, saves none, and lets a turn name a harness only.
+	Agents *agents.Store
+
 	// Jobs serves the job queue's routes (api/jobs.go): package jobs. Nil
 	// answers them 404.
 	Jobs http.Handler
@@ -100,7 +105,7 @@ type API struct {
 	// streams admits at most MaxStreams at once.
 	streams chan struct{}
 
-	agents agentCache
+	harnesses harnessCache
 
 	// spec is the OpenAPI description, built from the route table.
 	spec []byte
@@ -236,7 +241,7 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h := w.Header()
-		h.Set("Access-Control-Allow-Methods", "GET, POST")
+		h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE")
 		// Named, not "*": the wildcard never covers Authorization.
 		h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 		w.WriteHeader(http.StatusNoContent)

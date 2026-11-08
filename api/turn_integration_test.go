@@ -22,7 +22,7 @@ import (
 // nothing.
 func TestRunRefusedWhenStoreCannotWrite(t *testing.T) {
 	mark := filepath.Join(t.TempDir(), "ran")
-	e := resumableEnv(t, func(agent, baseURL string) (run.Launch, error) {
+	e := resumableEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) {
 		return run.Launch{Path: "/bin/sh", Args: []string{"-c", `touch "$0"`, mark}}, nil
 	})
 	e.store.Close() // every Append now fails
@@ -41,7 +41,7 @@ func TestRunRefusedWhenStoreCannotWrite(t *testing.T) {
 // now reads them from the store's session.opened, so the API keeps nothing,
 // and a turn.started that arrives after its child exited is still named.
 func TestTurnSinkNamesTurnsAfterChildExits(t *testing.T) {
-	e := resumableEnv(t, func(agent, baseURL string) (run.Launch, error) {
+	e := resumableEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) {
 		return run.Launch{Path: "/bin/sh", Args: []string{"-c", "exit 0"}}, nil
 	})
 	folder := t.TempDir()

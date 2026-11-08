@@ -4,13 +4,14 @@ package main
 // child's environment or arguments only, never the service's own.
 
 import (
+	"net/http"
 	"strings"
 
 	engine "github.com/staysup/agentbus/run"
 )
 
-// agents maps each supported agent to how its base URL reaches the child.
-var agents = map[string]func(baseURL string) (env []string, args []string){
+// harnessWires maps each harness to how its base URL reaches the child, on its own subscription.
+var harnessWires = map[string]func(baseURL string) (env []string, args []string){
 	// Claude Code reads ANTHROPIC_BASE_URL (2.1.318, 2026-11-05).
 	"claude": func(b string) ([]string, []string) {
 		return []string{"ANTHROPIC_BASE_URL=" + b}, nil
@@ -53,20 +54,84 @@ var ownEndpoint = map[string]string{
 // child gets the service's environment with the base URL set; the token is
 // never in it, since the service reads the token from its file.
 func runWire(getenv func(string) string, environ func() []string, lookPath func(string) (string, error)) engine.Wire {
-	return func(agent, baseURL string) (engine.Launch, error) {
-		wire, ok := agents[agent]
+	return func(agent, baseURL string, acc engine.Access) (engine.Launch, error) {
+		wire, ok := harnessWires[agent]
 		if !ok {
 			return engine.Launch{}, engine.ErrNotFound
 		}
 		if v := ownEndpoint[agent]; v != "" && getenv(v) != "" {
 			return engine.Launch{}, engine.ErrOwnEndpoint
 		}
+		var env, pre []string
+		switch acc.Kind {
+		case "", "subscription":
+			env, pre = wire(baseURL)
+		case "openrouter":
+			if acc.KeyEnv == "" || getenv(acc.KeyEnv) == "" {
+				return engine.Launch{}, engine.Refused(http.StatusBadRequest, "this agent reads its OpenRouter key from "+
+					acc.KeyEnv+", which is not set where the turn runs; set it and restart agentbus")
+			}
+			env, pre = openRouterWire(agent, baseURL, acc, getenv)
+		default:
+			return engine.Launch{}, engine.Refused(http.StatusBadRequest, "access must be subscription or openrouter")
+		}
 		bin, err := lookPath(agent)
 		if err != nil {
 			return engine.Launch{}, engine.ErrNotFound
 		}
-		env, pre := wire(baseURL)
 		return engine.Launch{Path: bin, Env: childEnv(environ(), env), Args: pre}, nil
+	}
+}
+
+// openRouterPrefix is the path under a turn's base URL that the service
+// forwards to OpenRouter, https://openrouter.ai/api: /openrouter/v1/messages
+// for Claude Code, /openrouter/v1/responses for codex. The key travels in the
+// agent's own Authorization header, as a sign-in does, and is never stored.
+const openRouterPrefix = "/openrouter"
+
+// openRouterProvider is the id codex files the turn's provider under. The ids
+// openai, ollama and lmstudio are reserved (codex config reference, read
+// 2026-11-08).
+const openRouterProvider = "agentbus_openrouter"
+
+// openRouterWire is how an OpenRouter agent reaches its model through the
+// service. No format is translated: OpenRouter takes Anthropic Messages and
+// the Responses API (research note 2026-11-08, harnesses on other models).
+//
+// Claude Code: ANTHROPIC_BASE_URL at the service, the key in
+// ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY empty (OpenRouter's Claude Code
+// guide says it must be), every model alias set to the turn's model so a
+// subagent or a small fast call uses it too, and no experimental betas, which
+// a non-Anthropic upstream refuses.
+//
+// codex: a provider of its own, set by -c flags for this run only, reading
+// the key from the named variable itself. supports_websockets=false: codex
+// then posts at once, with no WebSocket try the service would refuse.
+func openRouterWire(agent, baseURL string, acc engine.Access, getenv func(string) string) (env, args []string) {
+	base := baseURL + openRouterPrefix
+	if agent == "claude" {
+		env = []string{
+			"ANTHROPIC_BASE_URL=" + base,
+			"ANTHROPIC_AUTH_TOKEN=" + getenv(acc.KeyEnv),
+			"ANTHROPIC_API_KEY=",
+			"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1",
+		}
+		if acc.Model != "" {
+			for _, v := range []string{"ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
+				"ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"} {
+				env = append(env, v+"="+acc.Model)
+			}
+		}
+		return env, nil
+	}
+	p := "model_providers." + openRouterProvider + "."
+	return nil, []string{
+		"-c", "model_provider=" + openRouterProvider,
+		"-c", p + `name="OpenRouter"`,
+		"-c", p + `base_url="` + base + `/v1"`,
+		"-c", p + `env_key="` + acc.KeyEnv + `"`,
+		"-c", p + `wire_api="responses"`,
+		"-c", p + "supports_websockets=false",
 	}
 }
 

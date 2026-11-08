@@ -1,6 +1,7 @@
 # The client API
 
-Status: **v0**, as built in AgentBus 0.1. Paths under `/api/v0` may still change before 1.0.
+Status: **v0**, as built in AgentBus 0.2. Paths under `/api/v0` may still change before 1.0.
+What 0.2 changed for a 0.1 client is listed under [Versions](#versions).
 
 **The service describes this API itself**, without the token and without internet: an interactive
 reference at `/docs`, the OpenAPI 3.1 description at `/api/v0/openapi.json` (generated from the
@@ -141,7 +142,7 @@ environment is replaced.
 
 Everything else gets **403** with a plain reason: every write (`POST /api/v0/turns`,
 `POST /api/v0/turns/<id>/stop`, `POST /api/v0/events`), the snapshot `GET /api/v0/sessions`, the stream `GET /api/v0/events`, and
-`GET /api/v0/agents`. The description and the docs need no token at all.
+`/api/v0/agents` and `GET /api/v0/harnesses`. The description and the docs need no token at all.
 
 **It stops working when the turn's child process exits**, even if a process it left behind still
 holds its output open, and before the turn's `session.closed` is
@@ -383,6 +384,20 @@ process that does it.
 {"agent":"codex","folder":"/Users/ana/Sites/x","prompt":"Review this diff: …","model":"gpt-5.5","read_only":true,"idempotency_key":"job-42"}
 ```
 
+- **`agent` is a saved agent's id** ([Agents](#agents)). Its harness, access and model start the
+  turn; a `model` sent here is used in place of the agent's. `claude` and `codex` are the ids of
+  the two agents a new data folder starts with, so a 0.1 client that sends them gets the same
+  turn as before. When the person has removed one of those two, the name still starts that harness
+  on its own subscription.
+- **Isolation is automatic.** A new session whose `folder` is in a git repo with a commit runs in a
+  new git worktree of that repo, at the folder's current HEAD, in the same folder inside it, under
+  `worktrees/` in the data folder. The session's `folder` in its events is that worktree folder.
+  Uncommitted changes in the folder are not in the worktree. A folder that is not in the repo's
+  last commit (new and untracked) is refused with 400 and why, and no worktree is left behind.
+  A folder outside git, or in a repo
+  with no commit, is used as it is. `"isolate": false` always uses the folder as it is.
+  `isolate` with `session` is refused: a session keeps its workspace.
+
 The reply is **202** `{"id":"abc","turn":"t_5d0c19a2e7b3f481","base_url":"http://127.0.0.1:8787/s/abc/t/t_5d0c19a2e7b3f481","job":"job_1f…"}`,
 sent as soon as the agent has started. `id` is the session, `turn` the new turn, `job` the turn
 job that runs it. The agent's work arrives later, as events of that session, **every one carrying
@@ -416,6 +431,21 @@ job that runs it. The agent's work arrives later, as events of that session, **e
   (`logs/runs/<session>.log`, under [Logs](#logs)) and nowhere else.
 - **The base URL reaches the agent through the child only**: Claude Code gets
   `ANTHROPIC_BASE_URL` in the child's environment; codex gets `-c openai_base_url=…`.
+- **An OpenRouter agent** ([Agents](#agents)) reaches OpenRouter through the service, under
+  `/openrouter` of its base URL, so its turns are in the record like any other. Claude Code gets
+  `ANTHROPIC_BASE_URL=<base>/openrouter`, the key in `ANTHROPIC_AUTH_TOKEN`, an empty
+  `ANTHROPIC_API_KEY`, `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1`, and the model in
+  `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU,FABLE}_MODEL`,
+  `ANTHROPIC_SMALL_FAST_MODEL` and `CLAUDE_CODE_SUBAGENT_MODEL`. codex gets a provider of its own,
+  set by `-c` for this run only: `model_provider=agentbus_openrouter`, its `base_url`
+  (`<base>/openrouter/v1`), `env_key` (the agent's `key_env`), `wire_api="responses"` and
+  `supports_websockets=false`; no `openai_base_url`. The service forwards
+  `/openrouter/v1/messages` (Anthropic Messages) and `/openrouter/v1/responses` (the Responses API)
+  to `https://openrouter.ai/api/v1/…` with the agent's own `Authorization` header. No format is
+  translated. The key is read from the runner's environment when the turn starts, and is never
+  stored or logged; events carry the variable's name in `key_env`. Anthropic does not support
+  Claude Code on non-Claude models through a gateway; OpenRouter says it is guaranteed only with
+  Anthropic's own models.
 - **What runs**, with the prompt always last, after `--`, so it is never read as a flag:
   - claude: `claude -p --output-format json --append-system-prompt <hint> [--model M] -- <prompt>`
   - codex: `codex -c openai_base_url=… exec --skip-git-repo-check --json --sandbox <mode> -c developer_instructions=<hint> [-c sandbox_workspace_write.network_access=true] [--model M] -- <prompt>`
@@ -499,12 +529,13 @@ job that runs it. The agent's work arrives later, as events of that session, **e
 - **The token never reaches the child**: not in its environment, its arguments or a log.
 - Refused with **400** and fixed wording. The first four are checked before anything is queued;
   the rest by the runner, whose refusal comes back with its status:
-  - an agent other than `claude` or `codex`
+  - an `agent` that is not a saved agent's id, nor `claude` or `codex`
   - a folder that is not absolute, or over 4096 bytes; the runner refuses one that is not an
     existing directory on its machine
   - an empty prompt, one over 256 KiB, or one holding a NUL byte (no argument can carry one)
-  - a model that does not match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`. A model is passed only as the
-    value of `--model`, never as a flag of its own.
+  - a model that does not match `^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$` (OpenRouter's names, such
+    as `deepseek/deepseek-v4.1-flash`, fit). A model is passed only as the value of `--model`,
+    never as a flag of its own.
   - a body that is not one JSON object with only these fields, or over 2 MiB
   - the service's own environment already sends this agent elsewhere (`ANTHROPIC_BASE_URL` for
     claude, `OPENAI_BASE_URL` for codex). The run would send that endpoint's credentials to the
@@ -516,7 +547,10 @@ job that runs it. The agent's work arrives later, as events of that session, **e
     Code and run claude once to sign in, then try again. If it is installed, start agentbus from a
     shell where claude runs.` For codex it says `Install the Codex CLI`. It is 400 like the
     endpoint refusal above: both are the service's own setup, which the person fixes. `GET
-    /api/v0/agents` shows which agents the service finds before a turn is sent.
+    /api/v0/harnesses` shows which harnesses the service finds before a turn is sent.
+  - an OpenRouter agent whose `key_env` is not set, or empty, where the turn runs: `this agent
+    reads its OpenRouter key from <name>, which is not set where the turn runs; set it and
+    restart agentbus`. Nothing is stored.
 - **500** when the store cannot be written, or the agent's program is found but will not start.
 
 **A note for Linux:** one argument there is at most 128 KiB, so a longer prompt fails to start (500).
@@ -808,22 +842,71 @@ it, every session's events of the turn are sent. Only events carrying that `turn
 `events.dropped` names sessions, never turns, so it is not among them; read the session's events, or
 its `cost_complete`, for those.
 
-### `GET /api/v0/agents` — which agents this service can start
+### Agents
+
+**An agent is a saved setup**: a harness, how it reaches its model (its access), the model and a
+name. A turn names one by id. An agent says nothing about where it runs. The agents are kept in
+`agents.json` in the data folder, written whole by an atomic rename. A new data folder starts with
+two, `claude` (Claude Code) and `codex` (Codex), each on its own subscription with the harness's
+default model.
 
 ```json
-{"agents":[{"name":"claude","found":true,"version":"2.1.318","signed_in":true},
-  {"name":"codex","found":false}]}
+{"id":"a_3f9c0d1e2b4a5c6d","name":"DeepSeek","harness":"claude","access":"openrouter",
+ "model":"deepseek/deepseek-v4.1-flash","key_env":"OPENROUTER_API_KEY","key_set":true,
+ "created":"2026-11-08T23:10:00Z","updated":"2026-11-08T23:10:00Z"}
 ```
 
-- `found`: the agent's binary is on the service's `PATH`, by the same lookup runs use.
+- `harness`: `claude` or `codex`. `opencode` is listed by `GET /api/v0/harnesses` and refused
+  here: not available yet.
+- `access`: `subscription` (the harness's own sign-in) or `openrouter` (an OpenRouter key).
+  `api` (the vendor's API key) is refused: not available yet.
+- `model`: optional for `subscription` (absent: the harness's default). Required for `openrouter`,
+  in OpenRouter's naming. Same shape as a turn's `model`.
+- `key_env`, for `openrouter` only: the name of the environment variable on the runner's machine
+  that holds the key, ending in `_KEY`; `OPENROUTER_API_KEY` when absent. **Never the key.**
+  `key_set` says whether it is set in this service's environment; its value is never sent.
+- `name`: 1 to 100 bytes on one line, unique among the agents ignoring case.
+
+Routes, all with the main token only:
+
+- `GET /api/v0/agents`: `{"agents":[…]}`, in the order they were made.
+- `POST /api/v0/agents` with `{name, harness, access, model?, key_env?}`: **201** with the agent and
+  a new id. **400** with the reason for a refused field.
+- `GET /api/v0/agents/<id>`: one agent, or **404**.
+- `PUT /api/v0/agents/<id>` with the same body: **200**, its fields replaced, its id kept.
+- `DELETE /api/v0/agents/<id>`: **204**. Its sessions stay and can still be continued: each turn
+  recorded its harness, access and `key_env` (`agent_id`, `access`, `key_env` on `turn.started` and
+  `session.opened`), and a next turn uses those, not the saved agent. An edit is not seen by a
+  session already started either.
+
+### `GET /api/v0/harnesses` — what an agent can run on
+
+```json
+{"harnesses":[
+  {"name":"claude","label":"Claude Code","found":true,"version":"2.1.319","signed_in":true,
+   "access":[{"kind":"subscription","label":"Claude subscription","models":["sonnet","opus","haiku"]},
+             {"kind":"openrouter","label":"OpenRouter key","models":["deepseek/deepseek-v4.1-flash","openai/gpt-oss-120b"],
+              "any_model":true,"key_env":"OPENROUTER_API_KEY","key_set":true},
+             {"kind":"api","label":"API key","disabled":true,"models":[]}]},
+  {"name":"codex","label":"Codex","found":false,"access":[…]},
+  {"name":"opencode","label":"opencode","disabled":true,"found":false,"access":[]}]}
+```
+
+It was `GET /api/v0/agents` in 0.1, renamed in 0.2 when agents became saved objects.
+
+- `found`: the harness's binary is on the service's `PATH`, by the same lookup runs use.
 - `version`: the version token of `<bin> --version`, run with a 5 second limit. Absent when the
   binary is not found or the output has no version.
-- `signed_in`: from the agent's own offline status command, by its exit code only, output
+- `signed_in`: from the harness's own offline status command, by its exit code only, output
   discarded: `claude auth status` and `codex login status` (exit 0 signed in, 1 not; both answer
   with network access denied, measured 2026-11-05 on 2.1.318 and 0.164.0). Absent when the command
   ends any other way.
-- Never a path, and nothing from the agents' configuration.
-- The answer is kept for one minute.
+- `access`: each way the harness can reach a model, in the order a form shows them, with the
+  models to offer first. `any_model` means any name is accepted, as an OpenRouter model id.
+  `disabled` means not available yet. `key_set` is read on every call.
+- `disabled` on a harness: no agent can be saved on it yet. It is not probed.
+- Never a path, and nothing from the harnesses' configuration.
+- The probe is kept for one minute.
 
 ### `GET /api/v0/version` — which build this service is
 
@@ -1012,15 +1095,27 @@ turn. The jobs API is the whole way: worktrees, reviews, cancel, and the list.
 
 - **A session's first job names its workspace.** Either `repo` and `base` (a branch, tag or
   commit): the runner makes a git worktree of the repo at that base, under `worktrees/` in its data
-  folder, and the turn runs there. Or `folder`, used as it is.
+  folder, and the turn runs there. Or `folder`, used as it is. Or `folder` with `isolate: true`:
+  when the folder is in a git repo with a commit, the runner makes a worktree of that repo at its
+  HEAD and the turn runs in the same folder inside it; otherwise the folder is used as it is.
+  `POST /api/v0/turns` sends `isolate: true` unless told otherwise; the jobs API takes it as sent.
+- **`spec.agent` is a saved agent's id**, as for `POST /api/v0/turns`. The control plane fills
+  `spec.agent` with its harness, and `spec.agent_id`, `spec.access`, `spec.key_env` and, when none
+  is sent, `spec.model` from it. A caller never sends those three: they are refused.
 - **Later jobs name `session` only.** They go to the runner that holds the session's workspace.
+- **A workspace's `folder` is where its turns run.** For an isolated folder in a repo's
+  subfolder, that is the same subfolder inside the worktree; later turns and reviews use it.
+- **A retry keeps what was frozen.** The idempotency key is matched against the request as sent,
+  the saved agent by its id, so a retry after the agent was edited gets the first job.
 - **A worktree is removed only when its workspace is closed**, never when a job ends:
   `POST /api/v0/workspaces/<session>/close`. A folder the job named is never removed.
 
 ### Reviews
 
 - **Ask for one:** `POST /api/v0/jobs/<id>/review` with `{"agent":"claude","model":"sonnet"}`.
-  `model`, `idempotency_key` and `include_reply` are optional. The reviewed job must be a turn job
+  `model`, `idempotency_key` and `include_reply` are optional. `agent` is a saved agent's id, as
+  for a turn: the review job's `spec` carries its harness, `agent_id`, `access`, `key_env`, and its
+  model when none is sent. An unknown id is refused with 400. The reviewed job must be a turn job
   that has ended, in a workspace that is not closed. Several reviews of one job may run at once.
 - **Where it runs:** read-only, in the reviewed job's workspace, on the runner that holds it, in a
   session of its own. The reviewer sees the files as the author left them.
@@ -1243,3 +1338,16 @@ Invalid API key · Please run /login
 
 `v0` may change without notice until the November demo. After that, a change that breaks a cockpit
 gets a new version path, and the old one stays for a while.
+
+**What 0.2 changed for a 0.1 client:**
+
+- `GET /api/v0/agents` lists the saved agents ([Agents](#agents)). What it listed before, the
+  harnesses this service finds, is `GET /api/v0/harnesses`, with each harness's access and models
+  added. `POST`, `GET <id>`, `PUT <id>` and `DELETE <id>` under `/api/v0/agents` are new. A
+  preflight now allows `PUT` and `DELETE`.
+- `agent` in `POST /api/v0/turns` and `spec.agent` in `POST /api/v0/jobs` name a saved agent. The
+  seeded `claude` and `codex` keep 0.1's turns working unchanged.
+- `POST /api/v0/turns` isolates a new session in a git worktree when its folder is in a git repo
+  with a commit. Send `"isolate": false` for 0.1's behaviour.
+- `model` takes OpenRouter's names: `^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`.
+- `turn.started` and `session.opened` of a run carry `agent_id`, `access` and `key_env`.

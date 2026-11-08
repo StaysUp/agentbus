@@ -116,7 +116,7 @@ func startRun(t *testing.T, svc *service, tok, agent, stdout string) (string, st
 	return id, out["base_url"].(string)
 }
 
-func TestAgentsListsFoundVersionsAndSignIn(t *testing.T) {
+func TestHarnessesListsFoundVersionsAndSignIn(t *testing.T) {
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
@@ -139,20 +139,46 @@ func TestAgentsListsFoundVersionsAndSignIn(t *testing.T) {
 	t.Cleanup(svc.stop)
 	tok := readToken(t, home)
 
-	code, raw := getAPI(t, svc, tok, "/api/v0/agents")
+	code, raw := getAPI(t, svc, tok, "/api/v0/harnesses")
 	if code != http.StatusOK {
 		t.Fatalf("%d %s", code, raw)
 	}
-	want := `{"agents":[{"name":"claude","found":true,"version":"2.1.318","signed_in":true},{"name":"codex","found":false}]}`
-	if strings.TrimSpace(raw) != want {
-		t.Fatalf("got %s\nwant %s", raw, want)
+	var got struct {
+		Harnesses []struct {
+			Name     string `json:"name"`
+			Found    bool   `json:"found"`
+			Version  string `json:"version"`
+			SignedIn *bool  `json:"signed_in"`
+			Disabled bool   `json:"disabled"`
+			Access   []struct {
+				Kind     string `json:"kind"`
+				Disabled bool   `json:"disabled"`
+			} `json:"access"`
+		} `json:"harnesses"`
+	}
+	if err := json.Unmarshal([]byte(raw), &got); err != nil || len(got.Harnesses) != 3 {
+		t.Fatalf("got %s (%v)", raw, err)
+	}
+	cl, cx, oc := got.Harnesses[0], got.Harnesses[1], got.Harnesses[2]
+	if cl.Name != "claude" || !cl.Found || cl.Version != "2.1.318" || cl.SignedIn == nil || !*cl.SignedIn {
+		t.Errorf("claude: %+v", cl)
+	}
+	if cx.Name != "codex" || cx.Found || cx.Version != "" || cx.SignedIn != nil {
+		t.Errorf("codex: %+v", cx)
+	}
+	if oc.Name != "opencode" || !oc.Disabled || oc.Found || !strings.HasSuffix(strings.TrimSpace(raw), `"access":[]}]}`) {
+		t.Errorf("opencode: %+v", oc)
+	}
+	if len(cl.Access) != 3 || cl.Access[0].Kind != "subscription" || cl.Access[1].Kind != "openrouter" ||
+		cl.Access[2].Kind != "api" || !cl.Access[2].Disabled || cl.Access[0].Disabled || cl.Access[1].Disabled {
+		t.Errorf("claude access: %+v", cl.Access)
 	}
 	if strings.Contains(raw, self) || strings.Contains(raw, "example.com") {
 		t.Fatal("a path or the status output reached the reply")
 	}
 	// Kept for a minute: a changed version is not seen yet.
 	t.Setenv("AGENTBUS_FAKE_VERSION", "codex-cli 9.9.9")
-	if _, raw2 := getAPI(t, svc, tok, "/api/v0/agents"); raw2 != raw {
+	if _, raw2 := getAPI(t, svc, tok, "/api/v0/harnesses"); raw2 != raw {
 		t.Fatalf("not cached: %s", raw2)
 	}
 }
@@ -349,7 +375,7 @@ func TestRunWithSessionRefusals(t *testing.T) {
 
 	// Body refusals, as runs.
 	const badPrompt = "prompt must be from 1 byte to 256 KiB, with no NUL byte"
-	const badBody = "the body must be one JSON object with prompt, agent and folder (or session), and optionally model, read_only and idempotency_key, at most 2 MiB"
+	const badBody = "the body must be one JSON object with prompt, agent and folder (or session), and optionally model, read_only, isolate and idempotency_key, at most 2 MiB"
 	folder := closedFolder(t, svc, id)
 	for _, tc := range []struct {
 		name string
@@ -360,7 +386,7 @@ func TestRunWithSessionRefusals(t *testing.T) {
 		{"no prompt", `{"read_only":true}`, badPrompt},
 		{"NUL", `{"prompt":"a\u0000b"}`, badPrompt},
 		{"over 256 KiB", `{"prompt":"` + strings.Repeat("a", 256<<10+1) + `"}`, badPrompt},
-		{"model as flag", `{"prompt":"a","model":"--x"}`, "model must match ^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+		{"model as flag", `{"prompt":"a","model":"--x"}`, "model must match ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"},
 		{"unknown field", `{"prompt":"a","bogus":1}`, badBody},
 		{"another agent", `{"prompt":"a","agent":"codex"}`,
 			`agent "codex" is not this session's agent "claude"; leave agent out to use the session's`},

@@ -105,7 +105,7 @@ func newWorld(t *testing.T, capacity int) *world {
 		t.Fatal(err)
 	}
 	eng, err := run.New(run.Config{Store: st, BaseURL: "http://127.0.0.1:1", MaxRuns: capacity, RunGrace: time.Second,
-		Wire: func(agent, baseURL string) (run.Launch, error) {
+		Wire: func(agent, baseURL string, _ run.Access) (run.Launch, error) {
 			return run.Launch{Path: self, Env: append(os.Environ(), "RUNNER_FAKE_AGENT=1", "RUNNER_FAKE_LOG="+log)}, nil
 		}})
 	if err != nil {

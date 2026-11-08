@@ -495,6 +495,7 @@ func (r *Runner) request(at *attempt) run.Request {
 		req.Session = sp.Session
 	default:
 		req.Agent, req.Folder = sp.Agent, at.folder
+		req.AgentID, req.Access, req.KeyEnv = sp.AgentID, sp.Access, sp.KeyEnv
 		if at.job.Kind == queue.KindTurn {
 			req.NewSession = at.job.Session
 		}
@@ -504,10 +505,48 @@ func (r *Runner) request(at *attempt) run.Request {
 
 // prepare finds or makes the job's workspace and takes its snapshot: a
 // worktree of the job's repo at its base (a session's first job), the job's
-// folder, or the folder of the session it continues. It answers why the job
+// folder, or the folder of the session it continues. A folder with Isolate
+// that is in a git repo with a commit gets a worktree of that repo at its
+// HEAD, and the turn runs in the same folder inside it. It answers why the job
 // cannot run, or nil.
 func (r *Runner) prepare(at *attempt) *Result {
 	sp := at.job.Spec
+	if sp.Folder != "" && sp.Isolate {
+		if repo, rel, head, ok := workspace.RepoOf(sp.Folder); ok {
+			if r.cfg.Workdir == "" {
+				return &Result{Refused: "this runner has no workdir for worktrees"}
+			}
+			dir := filepath.Join(r.cfg.Workdir, at.job.ID)
+			if err := workspace.MakeWorktree(repo, head, dir); err != nil {
+				return &Result{Refused: "the worktree could not be made: " + err.Error()}
+			}
+			// A refusal after this point removes the worktree: nothing
+			// records it yet, so nothing else would.
+			undo := func(res *Result) *Result {
+				if err := workspace.RemoveWorktree(r.cfg.Workdir, repo, dir); err != nil {
+					r.cfg.Logf("worktree %s for job %s could not be removed after a refused setup", dir, at.job.ID)
+				}
+				return res
+			}
+			// The folder must be a real folder inside the new worktree: one
+			// the commit records as a symlink could lead anywhere.
+			if !insideDir(dir, filepath.Join(dir, rel)) {
+				return undo(&Result{Refused: "the folder is not in its repo's last commit, so it cannot get its own worktree; " +
+					"commit it, or start the session with isolate false to use the folder as it is", Status: http.StatusBadRequest})
+			}
+			// The workspace is the folder the turn runs in, inside the
+			// worktree: later turns, their snapshots and a review use it.
+			// Removal finds the worktree from it (workspace.RemoveWorktree).
+			at.folder = filepath.Join(dir, rel)
+			at.ws = &queue.Workspace{Kind: queue.WorkspaceWorktree, Folder: at.folder, Repo: repo, Base: head}
+			if res := r.snapshot(at); res != nil {
+				at.ws = nil
+				return undo(res)
+			}
+			at.event("workspace.ready", map[string]any{"kind": "worktree", "folder": at.folder, "base": head, "from": sp.Folder})
+			return nil
+		}
+	}
 	switch {
 	case sp.Repo != "":
 		if r.cfg.Workdir == "" {
@@ -535,6 +574,26 @@ func (r *Runner) prepare(at *attempt) *Result {
 			at.folder = c.Folder
 		}
 	}
+	return r.snapshot(at)
+}
+
+// insideDir says whether folder is a folder at or below dir once every
+// symlink in both is resolved.
+func insideDir(dir, folder string) bool {
+	d, err1 := filepath.EvalSymlinks(dir)
+	f, err2 := filepath.EvalSymlinks(folder)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	if info, err := os.Stat(f); err != nil || !info.IsDir() {
+		return false
+	}
+	rel, err := filepath.Rel(d, f)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
+// snapshot takes the attempt's snapshot of its folder before the turn.
+func (r *Runner) snapshot(at *attempt) *Result {
 	if at.folder == "" {
 		return nil // no folder to watch: the engine still runs the turn, or refuses it
 	}
