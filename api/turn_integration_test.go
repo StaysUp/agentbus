@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -21,8 +22,8 @@ import (
 // nothing.
 func TestRunRefusedWhenStoreCannotWrite(t *testing.T) {
 	mark := filepath.Join(t.TempDir(), "ran")
-	e := resumableEnv(t, func(agent, baseURL string) (Launch, error) {
-		return Launch{Path: "/bin/sh", Args: []string{"-c", `touch "$0"`, mark}}, nil
+	e := resumableEnv(t, func(agent, baseURL string) (run.Launch, error) {
+		return run.Launch{Path: "/bin/sh", Args: []string{"-c", `touch "$0"`, mark}}, nil
 	})
 	e.store.Close() // every Append now fails
 	resp, body := do(t, e.req(t, "POST", "/api/v0/turns",
@@ -40,8 +41,8 @@ func TestRunRefusedWhenStoreCannotWrite(t *testing.T) {
 // now reads them from the store's session.opened, so the API keeps nothing,
 // and a turn.started that arrives after its child exited is still named.
 func TestTurnSinkNamesTurnsAfterChildExits(t *testing.T) {
-	e := resumableEnv(t, func(agent, baseURL string) (Launch, error) {
-		return Launch{Path: "/bin/sh", Args: []string{"-c", "exit 0"}}, nil
+	e := resumableEnv(t, func(agent, baseURL string) (run.Launch, error) {
+		return run.Launch{Path: "/bin/sh", Args: []string{"-c", "exit 0"}}, nil
 	})
 	folder := t.TempDir()
 	var ids []string
@@ -69,7 +70,7 @@ func TestTurnSinkNamesTurnsAfterChildExits(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
-	sink := e.api.TurnSink(e.store)
+	sink := e.eng.TurnSink(e.store)
 	sink.Emit(event.Event{ID: "evt_late", Kind: event.TurnStarted, Time: time.Now(), Session: ids[0], Turn: "t1", Text: "late"})
 	sink.Emit(event.Event{ID: "evt_hand", Kind: event.TurnStarted, Time: time.Now(), Session: "byhand", Turn: "t1", Text: "hand"})
 	for session, want := range map[string][2]string{ids[0]: {"codex", folder}, "byhand": {"", ""}} {

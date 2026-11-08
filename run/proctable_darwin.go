@@ -1,6 +1,6 @@
 //go:build darwin
 
-package api
+package run
 
 import "golang.org/x/sys/unix"
 

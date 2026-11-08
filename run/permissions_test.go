@@ -1,9 +1,7 @@
-package api
+package run
 
 import (
-	"net"
-	"net/http"
-	"net/http/httptest"
+	"errors"
 	"os"
 	"path/filepath"
 	"slices"
@@ -156,59 +154,48 @@ func TestTurnArgsPermissions(t *testing.T) {
 	}
 }
 
-// permEnv is an API that reads permissions.toml at path, whose Wire counts
-// its calls and answers ErrNotFound, so a turn that gets past the policy
-// answers 400 with the missing-agent reply.
-func permEnv(t *testing.T, path string) (*env, *atomic.Int32) {
-	t.Helper()
+func jsonString(s string) string { return tomlString(s) }
+
+// A broken permissions.toml stops the turn before anything is stored, with
+// the file and the line in the refusal. The file is read for every turn, so a
+// fix applies to the next one.
+func TestBrokenPermissionsRefusesTurn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), PermissionsFile)
 	st, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { st.Close() })
 	var wired atomic.Int32
-	srv := httptest.NewUnstartedServer(nil)
-	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
-	a, err := New(Config{Store: st, Token: token, Port: port, BaseURL: "http://127.0.0.1:" + port, Permissions: path,
+	e, err := New(Config{Store: st, BaseURL: "http://127.0.0.1:1", Permissions: path,
 		Wire: func(agent, baseURL string) (Launch, error) { wired.Add(1); return Launch{}, ErrNotFound }})
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv.Config.Handler = a
-	srv.Start()
-	t.Cleanup(func() { srv.Close(); a.StopRuns(); st.Close() })
-	return &env{srv: srv, api: a, store: st, port: port}, &wired
-}
-
-// A broken permissions.toml stops the turn before anything is stored, with
-// the file and the line in the reply. The file is read for every turn, so a
-// fix applies to the next one.
-func TestBrokenPermissionsRefusesTurn(t *testing.T) {
-	path := filepath.Join(t.TempDir(), PermissionsFile)
-	e, wired := permEnv(t, path)
-	post := func() (int, string) {
-		resp, body := do(t, e.req(t, "POST", "/api/v0/turns",
-			strings.NewReader(`{"agent":"claude","folder":`+jsonString(t.TempDir())+`,"prompt":"hi"}`)))
-		return resp.StatusCode, body
+	start := func() *Refusal {
+		_, err := e.Start(Request{Agent: "claude", Folder: t.TempDir(), Prompt: "hi"})
+		var r *Refusal
+		if !errors.As(err, &r) {
+			t.Fatalf("Start: %v, want a refusal", err)
+		}
+		return r
 	}
 	// Missing: empty lists, and the turn goes on to start its agent.
-	if code, body := post(); code != http.StatusBadRequest || !strings.Contains(body, "is not on the service's PATH") || wired.Load() != 1 {
-		t.Fatalf("missing file: %d %s, wire %d", code, body, wired.Load())
+	if r := start(); r.Status != 400 || !strings.Contains(r.Msg, "is not on the service's PATH") || wired.Load() != 1 {
+		t.Fatalf("missing file: %+v, wire %d", r, wired.Load())
 	}
 	writePerm(t, path, "# mine\nallow = go test\n")
-	code, body := post()
-	if code != http.StatusBadRequest || !strings.Contains(body, "permissions.toml") || !strings.Contains(body, "line 2") {
-		t.Fatalf("broken file: %d %s, want 400 naming the file and line 2", code, body)
+	if r := start(); r.Status != 400 || !strings.Contains(r.Msg, "permissions.toml") || !strings.Contains(r.Msg, "line 2") {
+		t.Fatalf("broken file: %+v, want 400 naming the file and line 2", r)
 	}
 	if wired.Load() != 1 {
 		t.Errorf("broken file: the agent was wired")
 	}
-	if s := snapshot(t, e); len(s.Sessions) != 0 {
-		t.Errorf("broken file: %d sessions stored, want none", len(s.Sessions))
+	if snap, _ := st.Snapshot(); len(snap.Sessions) != 0 {
+		t.Errorf("broken file: %d sessions stored, want none", len(snap.Sessions))
 	}
 	writePerm(t, path, "allow = [\"go test\"]\n")
-	if code, body := post(); code != http.StatusBadRequest || !strings.Contains(body, "is not on the service's PATH") || wired.Load() != 2 {
-		t.Fatalf("fixed file: %d %s, wire %d", code, body, wired.Load())
+	if r := start(); r.Status != 400 || !strings.Contains(r.Msg, "is not on the service's PATH") || wired.Load() != 2 {
+		t.Fatalf("fixed file: %+v, wire %d", r, wired.Load())
 	}
 }
-
-func jsonString(s string) string { return tomlString(s) }

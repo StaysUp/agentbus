@@ -44,7 +44,8 @@ func runServiceVendors(t *testing.T, home string, getenv func(string) string, gr
 	t.Setenv("OPENAI_BASE_URL", "")
 	svc, err := start(config{listen: "127.0.0.1:0", home: home, upstream: mustURL(upstream),
 		chatgpt: mustURL(chatgpt), logf: t.Logf, getenv: getenv, runGrace: grace,
-		lookPath: func(string) (string, error) { return self, nil }, noReplay: noReplay})
+		lookPath: func(string) (string, error) { return self, nil }, noReplay: noReplay,
+		heartbeat: 100 * time.Millisecond, turnWait: 2 * time.Second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,25 +361,22 @@ func TestRunConcurrencyBound(t *testing.T) {
 		}
 		ids = append(ids, out["id"].(string))
 	}
+	// A fifth waits in the queue: 202 queued, with its session and job,
+	// and nothing stored for it yet.
 	before := svc.store.Last()
-	if code, _, raw := postRun(t, svc, tok, body); code != http.StatusTooManyRequests {
-		t.Fatalf("fifth run: %d %s, want 429", code, raw)
+	code, out, raw := postRun(t, svc, tok, body)
+	if code != http.StatusAccepted || out["queued"] != true || out["turn"] != "" || out["job"] == "" {
+		t.Fatalf("fifth run: %d %s, want 202 queued", code, raw)
 	}
 	if svc.store.Last() != before {
-		t.Fatal("the refused fifth run stored events")
+		t.Fatal("the queued fifth run stored events")
 	}
 	os.WriteFile(release, nil, 0o600)
 	for _, id := range ids {
 		waitClosed(t, svc.store, id)
 	}
-	// A slot frees once the child's session.closed is stored.
-	waitFor(t, "a free slot", func() bool {
-		code, out, _ := postRun(t, svc, tok, body)
-		if code == http.StatusAccepted {
-			waitClosed(t, svc.store, out["id"].(string))
-		}
-		return code == http.StatusAccepted
-	})
+	// It runs once a slot is free, in the session its answer named.
+	waitClosed(t, svc.store, out["id"].(string))
 }
 
 func TestServiceStopEndsRuns(t *testing.T) {

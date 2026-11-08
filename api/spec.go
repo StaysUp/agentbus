@@ -32,10 +32,12 @@ const specIntro = "agentbus runs on your machine, between your coding agents and
 	"This document is generated from the code at startup. The contract in words is `docs/CLIENT_API.md`; " +
 	"a short guide for coding agents is at `/docs/llms.txt`.\n\n" +
 	"- Every request but this document sends `Authorization: Bearer <token>`: the file `token` in the data folder. Never put it in a URL.\n" +
+	"- Every turn runs as a job: `POST /api/v0/turns` makes one, and the jobs API (`/api/v0/jobs`) makes, reviews and cancels them. " +
+	"The runner protocol (`/api/v0/runners`, `/api/v0/attempts`) is for runners and takes its own tokens.\n" +
 	"- A turn started by `POST /api/v0/turns` gets its own token in `$AGENTBUS_TOKEN`, and this service's address in `$AGENTBUS_URL`. " +
 	"That token reads only its own session, on the operations that say so, and stops working when the turn's child exits.\n" +
 	"- The turns token, the file `turns_token` in the data folder, may only start, stop and read turns, on the operations that say so. " +
-	"A job queue or a runner uses it in place of the main token.\n" +
+	"A program that only starts and follows turns uses it in place of the main token.\n" +
 	"- On loopback, the default, the `Host` must be `127.0.0.1`, `localhost` or `[::1]` with the service's port, or the answer is 403. " +
 	"On another address, such as `0.0.0.0`, any `Host` is accepted and the token is the guard.\n" +
 	"- A browser page from any origin may call the API: CORS answers `Access-Control-Allow-Origin: *` and allows `Authorization`. " +

@@ -233,9 +233,10 @@ func TestRunWithSessionRunsNextTurnInSameSession(t *testing.T) {
 		}
 		code, out, raw := postMessage(t, svc, tok, id, body)
 		next, _ := out["turn"].(string)
+		job, _ := out["job"].(string)
 		session := strings.Split(base, "/t/")[0]
-		if code != http.StatusAccepted || next == "" || strings.HasSuffix(base, "/t/"+next) ||
-			strings.TrimSpace(raw) != `{"base_url":"`+session+`/t/`+next+`","id":"`+id+`","turn":"`+next+`"}` {
+		if code != http.StatusAccepted || next == "" || job == "" || strings.HasSuffix(base, "/t/"+next) ||
+			strings.TrimSpace(raw) != `{"base_url":"`+session+`/t/`+next+`","id":"`+id+`","turn":"`+next+`","job":"`+job+`"}` {
 			t.Fatalf("%s: %d %s, want 202 with the same id, a new turn, and the session's base URL with it", name, code, raw)
 		}
 		base = out["base_url"].(string) // this turn's own

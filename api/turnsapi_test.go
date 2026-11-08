@@ -2,42 +2,19 @@ package api
 
 import (
 	"encoding/json"
-	"net"
 	"net/http"
-	"net/http/httptest"
-	"path/filepath"
 	"strings"
+
 	"testing"
 	"time"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 )
 
 const turnsTok = "abq_TURNS-TOKEN-MUST-NEVER-APPEAR-0123"
-
-// turnsEnv is an API with a turns token, whose Wire answers wire.
-func turnsEnv(t *testing.T, wire Wire) *env {
-	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewUnstartedServer(nil)
-	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
-	a, err := New(Config{Store: st, Token: token, TurnsToken: turnsTok, Port: port,
-		BaseURL: "http://127.0.0.1:" + port, Wire: wire})
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv.Config.Handler = a
-	srv.Start()
-	t.Cleanup(func() {
-		srv.Close()
-		st.Close()
-	})
-	return &env{srv: srv, api: a, store: st, port: port}
-}
 
 func appendAll(t *testing.T, st *store.Store, evs ...event.Event) {
 	t.Helper()
@@ -46,6 +23,13 @@ func appendAll(t *testing.T, st *store.Store, evs ...event.Event) {
 			t.Fatal(err)
 		}
 	}
+}
+
+// turnsEnv is an API with a whole stack and a turns token, whose engine's
+// Wire answers wire.
+func turnsEnv(t *testing.T, wire run.Wire) *env {
+	t.Helper()
+	return stackEnv(t, stack{wire: wire, turnsToken: true})
 }
 
 func asTok(t *testing.T, e *env, tok, method, path, body string) (int, string) {
@@ -120,7 +104,7 @@ func TestGetTurn(t *testing.T) {
 // The turns token starts, stops and reads turns, and gets 403 everywhere else.
 // A wrong token still gets 401.
 func TestTurnsTokenScope(t *testing.T) {
-	e := turnsEnv(t, func(agent, baseURL string) (Launch, error) { return Launch{}, ErrNotFound })
+	e := turnsEnv(t, func(agent, baseURL string) (run.Launch, error) { return run.Launch{}, run.ErrNotFound })
 	appendAll(t, e.store,
 		event.Event{ID: "e1", Kind: event.TurnStarted, Time: time.Now().UTC(), Session: "s1", Turn: "t_a", Text: "hi"})
 	for _, c := range []struct {
@@ -133,7 +117,7 @@ func TestTurnsTokenScope(t *testing.T) {
 		{"GET", "/api/v0/turns/t_a/events", "", 200},
 		{"POST", "/api/v0/turns/t_a/stop", "", 409},
 		// Reached the handler: the agent is not found, so 400 and nothing stored.
-		{"POST", "/api/v0/turns", `{"agent":"claude","folder":"/","prompt":"x"}`, 400},
+		{"POST", "/api/v0/turns", `{"agent":"claude","folder":"` + t.TempDir() + `","prompt":"x"}`, 400},
 		{"GET", "/api/v0/sessions", "", 403},
 		{"GET", "/api/v0/sessions/s1/events", "", 403},
 		{"GET", "/api/v0/sessions/s1/search?q=hi", "", 403},
@@ -168,87 +152,29 @@ func TestTurnsTokenOff(t *testing.T) {
 	}
 }
 
-// An idempotency key that already started a turn answers that turn, with
-// existing true, and starts nothing; other fields under it get 409; a bad
-// key gets 400. A request that started nothing stores no key.
-func TestIdempotencyKey(t *testing.T) {
-	wired := 0
-	e := turnsEnv(t, func(agent, baseURL string) (Launch, error) { wired++; return Launch{}, ErrNotFound })
-	dir := t.TempDir()
-	body := `{"agent":"claude","folder":"` + dir + `","prompt":"hello","idempotency_key":"job-7:a1"}`
-	var req TurnRequest
-	if err := json.Unmarshal([]byte(body), &req); err != nil {
-		t.Fatal(err)
+// A turn the engine refuses answers with the engine's status and words: the
+// job failed with reason setup. A request the API refuses is never queued.
+func TestTurnRefusalsComeFromTheJob(t *testing.T) {
+	e := turnsEnv(t, func(agent, baseURL string) (run.Launch, error) { return run.Launch{}, run.ErrNotFound })
+	resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"x"}`)))
+	if resp.StatusCode != 400 || !strings.Contains(out, "is not on the service's PATH") {
+		t.Fatalf("missing agent: %d %s", resp.StatusCode, out)
 	}
-
-	// Nothing stored yet: the agent is not found, so 400, and the key is unused.
-	if resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(body))); resp.StatusCode != 400 {
-		t.Fatalf("first: %d %s", resp.StatusCode, out)
+	resp, out = do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"session":"nosuch","prompt":"x"}`)))
+	if resp.StatusCode != 404 || !strings.Contains(out, "no such session") {
+		t.Fatalf("unknown session: %d %s", resp.StatusCode, out)
 	}
-	if _, found, _ := e.store.TurnByKey("job-7:a1"); found {
-		t.Fatal("a turn that never started stored its key")
+	jobs, _ := e.q.List(queue.DefaultTeam, queue.Filter{}, 10)
+	if len(jobs) != 2 || jobs[0].Reason != queue.ReasonSetup {
+		t.Fatalf("jobs %+v", jobs)
 	}
-
-	// As if a turn had started with it.
-	appendAll(t, e.store, event.Event{ID: "e1", Kind: event.TurnStarted, Time: time.Now().UTC(), Session: "s9", Turn: "t_9",
-		Text: "hello", Agent: "claude", Folder: dir, IdempotencyKey: "job-7:a1", RequestHash: requestHash(req, false)})
-	wired = 0
-	resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(body)))
-	var s Started
-	_ = json.Unmarshal([]byte(out), &s)
-	if resp.StatusCode != 202 || s.ID != "s9" || s.Turn != "t_9" || !s.Existing || s.BaseURL != e.api.cfg.BaseURL+"/s/s9/t/t_9" {
-		t.Fatalf("retry: %d %s", resp.StatusCode, out)
-	}
-	if wired != 0 {
-		t.Fatal("a retry reached the agent's Wire")
-	}
-	// The turns token gets the same answer.
-	if got, out := asTok(t, e, turnsTok, "POST", "/api/v0/turns", body); got != 202 || !strings.Contains(out, `"existing":true`) {
-		t.Fatalf("retry with the turns token: %d %s", got, out)
-	}
-
-	for name, b := range map[string]string{
-		"another prompt":    `{"agent":"claude","folder":"` + dir + `","prompt":"other","idempotency_key":"job-7:a1"}`,
-		"another model":     `{"agent":"claude","folder":"` + dir + `","prompt":"hello","model":"haiku","idempotency_key":"job-7:a1"}`,
-		"read_only":         `{"agent":"claude","folder":"` + dir + `","prompt":"hello","read_only":true,"idempotency_key":"job-7:a1"}`,
-		"with a session":    `{"session":"s9","prompt":"hello","idempotency_key":"job-7:a1"}`,
-		"with session null": `{"session":null,"agent":"claude","folder":"` + dir + `","prompt":"hello","idempotency_key":"job-7:a1"}`,
-	} {
-		if resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(b))); resp.StatusCode != 409 {
-			t.Errorf("%s: %d %s, want 409", name, resp.StatusCode, out)
+	for _, b := range []string{`{"agent":"x","folder":"/","prompt":"x"}`, `{"agent":"claude","folder":"rel","prompt":"x"}`,
+		`{"agent":"claude","folder":"/","prompt":""}`, `{"session":"a b","prompt":"x"}`, `{"session":null,"prompt":"x"}`} {
+		if resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(b))); resp.StatusCode != 400 {
+			t.Errorf("%s: %d %s, want 400", b, resp.StatusCode, out)
 		}
 	}
-	for _, k := range []string{`""`, `"a b"`, `"` + strings.Repeat("k", 129) + `"`, `"é"`} {
-		b := `{"agent":"claude","folder":"` + dir + `","prompt":"hello","idempotency_key":` + k + `}`
-		resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(b)))
-		// An empty key is the same as none: it reaches the Wire, which says 400.
-		if resp.StatusCode != 400 {
-			t.Errorf("key %s: %d %s, want 400", k, resp.StatusCode, out)
-		}
-	}
-}
-
-// The run limit comes from Config.MaxRuns, and its 429 names it.
-func TestMaxRuns(t *testing.T) {
-	rs := runs{max: 2}
-	for i, s := range []string{"a", "b"} {
-		if code, _ := rs.take(s); code != 0 {
-			t.Fatalf("take %d: %d", i, code)
-		}
-	}
-	code, msg := rs.take("c")
-	if code != http.StatusTooManyRequests || !strings.HasPrefix(msg, "2 runs") {
-		t.Fatalf("third: %d %q", code, msg)
-	}
-	rs.release(nil, "a")
-	if code, _ := rs.take("c"); code != 0 {
-		t.Fatalf("after a release: %d", code)
-	}
-	e := newEnv(t)
-	if e.api.runs.max != DefaultMaxRuns {
-		t.Errorf("default %d, want %d", e.api.runs.max, DefaultMaxRuns)
-	}
-	if _, err := New(Config{Store: e.store, Token: token, Port: e.port, MaxRuns: -1}); err == nil {
-		t.Error("MaxRuns -1 accepted")
+	if jobs, _ := e.q.List(queue.DefaultTeam, queue.Filter{}, 10); len(jobs) != 2 {
+		t.Errorf("%d jobs after requests refused before the queue, want 2", len(jobs))
 	}
 }

@@ -4,9 +4,7 @@ package api
 
 import (
 	"encoding/json"
-	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +13,7 @@ import (
 
 	"github.com/staysup/agentbus/body"
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -24,32 +23,17 @@ import (
 func childEnv(t *testing.T) (*env, string) {
 	t.Helper()
 	dir := t.TempDir()
-	st, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewUnstartedServer(nil)
-	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
 	script := `n=0; while [ -e "$D/env-$n" ]; do n=$((n+1)); done; env > "$D/env-$n.tmp"; mv "$D/env-$n.tmp" "$D/env-$n"; ` +
 		`i=0; while [ ! -e "$D/release" ] && [ $i -lt 1000 ]; do sleep 0.02; i=$((i+1)); done`
-	wire := func(agent, baseURL string) (Launch, error) {
+	wire := func(agent, baseURL string) (run.Launch, error) {
 		// The service's own environment, as the real Wire passes it, with
 		// the main token in it as a person might have exported it.
-		return Launch{Path: "/bin/sh", Args: []string{"-c", script, "sh"},
+		return run.Launch{Path: "/bin/sh", Args: []string{"-c", script, "sh"},
 			Env: []string{"PATH=/usr/bin:/bin", "D=" + dir, "AGENTBUS_TOKEN=" + token, "ANTHROPIC_BASE_URL=" + baseURL}}, nil
 	}
-	a, err := New(Config{Store: st, Token: token, Port: port, BaseURL: "http://127.0.0.1:" + port, Wire: wire})
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv.Config.Handler = a
-	srv.Start()
-	t.Cleanup(func() {
-		os.WriteFile(filepath.Join(dir, "release"), nil, 0o600)
-		srv.Close()
-		a.StopRuns()
-		st.Close()
-	})
+	e := stackEnv(t, stack{wire: wire})
+	t.Cleanup(func() { os.WriteFile(filepath.Join(dir, "release"), nil, 0o600) })
+	st := e.store
 	now := time.Now().UTC()
 	for _, e := range []event.Event{
 		{ID: "o1", Kind: event.TurnStarted, Time: now, Session: "other", Turn: "t_other", Text: "secret plans"},
@@ -64,7 +48,7 @@ func childEnv(t *testing.T) (*env, string) {
 			JSON: json.RawMessage(`{"role":"user","content":"secret plans"}`)}}}}); err != nil {
 		t.Fatal(err)
 	}
-	return &env{srv: srv, api: a, store: st, port: port}, dir
+	return e, dir
 }
 
 // childVars waits for the n-th child's environment and returns its
@@ -154,7 +138,7 @@ func TestTurnToken(t *testing.T) {
 	s := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"the first needle"}`)
 	vars := childVars(t, dir, 0)
 	tok := vars["AGENTBUS_TOKEN"]
-	if vars["AGENTBUS_URL"] != e.srv.URL || !strings.HasPrefix(tok, turnTokenPrefix) || len(tok) != len(turnTokenPrefix)+64 {
+	if vars["AGENTBUS_URL"] != e.srv.URL || !strings.HasPrefix(tok, "abt_") || len(tok) != len("abt_")+64 {
 		t.Fatalf("child AGENTBUS_URL %q, AGENTBUS_TOKEN of %d bytes", vars["AGENTBUS_URL"], len(tok))
 	}
 	if vars["ANTHROPIC_BASE_URL"] != e.srv.URL+"/s/"+s.ID+"/t/"+s.Turn {
@@ -236,7 +220,7 @@ func TestTurnToken(t *testing.T) {
 	if code, _ := as(t, e, tok, "GET", "/api/v0/sessions/"+own+"/events", ""); code != http.StatusUnauthorized {
 		t.Fatalf("the token after session.closed: %d, want 401", code)
 	}
-	if n := e.api.turnTokens.live(); n != 0 {
+	if n := e.eng.LiveTokens(); n != 0 {
 		t.Errorf("%d live tokens after the turn", n)
 	}
 	os.Remove(filepath.Join(dir, "release"))
@@ -262,8 +246,8 @@ func TestTurnToken(t *testing.T) {
 func TestTurnTokenRevokedAtProcessExitNotPipeClose(t *testing.T) {
 	dir := t.TempDir()
 	script := `sleep 3 & env > "$D/env-0.tmp"; mv "$D/env-0.tmp" "$D/env-0"; exit 0`
-	e := resumableEnv(t, func(agent, baseURL string) (Launch, error) {
-		return Launch{Path: "/bin/sh", Args: []string{"-c", script, "sh"}, Env: []string{"PATH=/usr/bin:/bin", "D=" + dir}}, nil
+	e := resumableEnv(t, func(agent, baseURL string) (run.Launch, error) {
+		return run.Launch{Path: "/bin/sh", Args: []string{"-c", script, "sh"}, Env: []string{"PATH=/usr/bin:/bin", "D=" + dir}}, nil
 	})
 	s := startTurn(t, e, `{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"x"}`)
 	tok := childVars(t, dir, 0)["AGENTBUS_TOKEN"]

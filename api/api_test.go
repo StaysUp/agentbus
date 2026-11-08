@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -26,6 +28,9 @@ type env struct {
 	api   *API
 	store *store.Store
 	port  string
+	// With a stack (stackEnv): the queue and the engine behind the API.
+	q   *queue.Queue
+	eng *run.Engine
 }
 
 func newEnvAt(t *testing.T, dbPath string) *env {
@@ -484,17 +489,6 @@ func seenSession(t *testing.T, e *env) string {
 	t.Helper()
 	emit(t, e.store, event.ModelRequested, "seen1")
 	return "seen1"
-}
-
-func TestServiceStartClosesStaleHolds(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "events.db")
-	st, _ := store.Open(path)
-	st.Append(event.Event{ID: "o", Kind: event.SessionOpened, Session: "s", Hold: "h1", Time: time.Now()})
-	st.Close()
-	e := newEnvAt(t, path)
-	if s := snapshot(t, e); len(s.Sessions) != 1 || s.Sessions[0].Open {
-		t.Fatalf("after start: %+v", s)
-	}
 }
 
 func TestUnknownAPIPathIs404(t *testing.T) {

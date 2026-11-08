@@ -99,7 +99,7 @@ Flags:
 | `-listen` | `127.0.0.1:8787` | The address: an IP, with or without a port. With no port it uses 8787. `0.0.0.0` can be reached from the network. |
 | `-origin` | none | An optional lock: allow only this browser origin, such as `http://localhost:5173`. Without it any origin may call the API. |
 | `-replay` | `true` | Continue Claude and codex sessions from AgentBus's own store. `false` uses the agent's own resume. |
-| `-max-runs` | `4` | How many turns may run at once. One more gets HTTP 429. |
+| `-max-runs` | `4` | How many turns run at once, 1 to 64. More wait in the queue. |
 
 ### 2. Open a cockpit
 
@@ -198,6 +198,25 @@ curl -s -X POST "http://127.0.0.1:8787/api/v0/turns/<turn>/stop" -H "Authorizati
 
 The next turn of the session continues after it, and the agent is told that you stopped it.
 
+## Jobs, Review and CI/CD
+
+Every turn runs as a job. `agentbus up` keeps a job queue and runs a runner in the same process,
+so there is nothing else to start. The runner takes each job and runs it as a turn. The cockpit
+reads the jobs from the same address with the same token.
+
+- **A job can run in its own git worktree.** Name a `repo` and a `base` (a branch, tag or commit),
+  and the runner makes a worktree for the session. Your own checkout is not touched. The work
+  stays in the worktree until you close it. Nothing is committed or pushed.
+- **Every job records what it changed**: each file added, modified or deleted, untracked and
+  git-ignored files too, not only `git diff`.
+- **Review is another job.** It runs read-only in the author's workspace, with another agent and
+  model, and ends with a verdict (pass, fail or unknown) and its findings. Any P1 makes it fail.
+- **Fix is the session's next turn**, in the same workspace, with the findings as its prompt.
+
+In the cockpit: start a session with New worktree, open the turn, pick a reviewer under Checked by,
+and press Review. If it fails, press Fix, then Send, then Review again. With curl, see
+[Jobs](docs/CLIENT_API.md#jobs).
+
 ## Docs
 
 The running service describes its own API. None of these need the token or the internet:
@@ -211,9 +230,11 @@ The contract in words is [docs/CLIENT_API.md](docs/CLIENT_API.md).
 
 ## Your data
 
-Everything stays on your machine, in the data folder: `events.db` (a SQLite file), `token`,
-`turns_token`, `permissions.toml` and `logs/`. `turns_token` is a second token for a job queue or
-a runner. It may only start, stop and read turns. Nothing is sent anywhere except the model calls themselves, to the vendor your agent
+Everything stays on your machine, in the data folder: `events.db` (a SQLite file, the record),
+`jobs.db` (the job queue), `token`, `turns_token`, `enroll_token`, `runner.json`,
+`permissions.toml`, `worktrees/` and `logs/`. `turns_token` is a second token for a program that
+only starts, stops and reads turns. `enroll_token` adds a runner; the built-in runner reads it, and
+keeps its identity in `runner.json`. `worktrees/` holds the git worktrees jobs run in. Nothing is sent anywhere except the model calls themselves, to the vendor your agent
 already uses.
 
 `events.db` holds each turn's model requests and replies, so it holds whatever your agent read or
@@ -269,6 +290,11 @@ Details: [docs/CLIENT_API.md](docs/CLIENT_API.md#permissionstoml).
 |---|---|
 | `cmd/agentbus/` | The `agentbus` command |
 | `api/` | The client API and its generated docs |
+| `run/` | Starts one turn of a stock agent CLI, watches it and stops it |
+| `queue/` | Jobs, attempts, runners and reviews, in `jobs.db` beside the record |
+| `jobs/` | The jobs API and the runner protocol |
+| `runner/` | Takes jobs through the runner protocol and runs each one with `run/` |
+| `workspace/` | Git worktrees, and what a job changed |
 | `gateway/` | The pass-through proxy that feeds adapters |
 | `adapter/` | One adapter per API format: Anthropic, OpenAI |
 | `event/` | The vendor-neutral events |

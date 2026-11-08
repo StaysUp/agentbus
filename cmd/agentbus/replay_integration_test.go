@@ -198,7 +198,7 @@ func TestSessionClosedWaitsForSettle(t *testing.T) {
 	svc := runServiceWith(t, home, nil, 0, "http://127.0.0.1:1", false)
 	tok := readToken(t, home)
 	settled := make(chan bool, 1)
-	svc.api.SetSettle(func(session, turn string) bool {
+	svc.eng.SetSettle(func(session, turn string) bool {
 		closedYet := len(closedEvents(runEvents(t, svc.store, session))) > 0
 		time.Sleep(50 * time.Millisecond)
 		settled <- closedYet

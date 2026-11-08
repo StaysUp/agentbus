@@ -13,27 +13,21 @@ import (
 
 	"github.com/staysup/agentbus/body"
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 )
 
 // A turn whose child cannot start leaves no token behind.
 func TestTurnTokenRevokedWhenChildDoesNotStart(t *testing.T) {
-	e := resumableEnv(t, func(agent, baseURL string) (Launch, error) {
-		return Launch{Path: filepath.Join(t.TempDir(), "missing")}, nil
+	e := resumableEnv(t, func(agent, baseURL string) (run.Launch, error) {
+		return run.Launch{Path: filepath.Join(t.TempDir(), "missing")}, nil
 	})
 	resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"x"}`)))
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("%d %s", resp.StatusCode, out)
 	}
-	if n := e.api.turnTokens.live(); n != 0 {
+	if n := e.eng.LiveTokens(); n != 0 {
 		t.Errorf("%d live tokens after a child that did not start", n)
-	}
-}
-
-func TestTurnEnv(t *testing.T) {
-	got := turnEnv(nil, []string{"A=1", "AGENTBUS_TOKEN=main", "AGENTBUS_URL=x"}, "http://127.0.0.1:1", "abt_1")
-	if strings.Join(got, " ") != "A=1 AGENTBUS_URL=http://127.0.0.1:1 AGENTBUS_TOKEN=abt_1" {
-		t.Errorf("turnEnv: %v", got)
 	}
 }
 

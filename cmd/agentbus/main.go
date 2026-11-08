@@ -46,6 +46,7 @@ import (
 	"github.com/staysup/agentbus/logfile"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/replay"
+	engine "github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/runner"
 	"github.com/staysup/agentbus/store"
 )
@@ -76,7 +77,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	listen := fl.String("listen", "127.0.0.1:8787", "address to listen on: an IP, with or without a port (8787 if none); 0.0.0.0 is reachable from the network, with the token guarding the API")
 	origin := fl.String("origin", "", "lock the API to this one browser origin, such as http://localhost:5173; without it any origin may call the API, and the token still guards every call")
 	replayOn := fl.Bool("replay", true, "continue claude and codex sessions by own replay (the gateway sends the earlier turn's history); false uses the vendor's resume")
-	maxRuns := fl.Int("max-runs", api.DefaultMaxRuns, "how many turns may run at once, 1 to 64; it is also the built-in runner's capacity; past it POST /api/v0/turns answers 429")
+	maxRuns := fl.Int("max-runs", engine.DefaultMaxRuns, "how many turns the built-in runner runs at once, 1 to 64; more wait in the queue")
 	if err := fl.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -147,6 +148,9 @@ type config struct {
 	noReplay bool
 	// maxRuns bounds the turns running at once. Zero means the API's default.
 	maxRuns int
+	// For tests: how often a runner heartbeats, and how long POST
+	// /api/v0/turns waits for a turn to start. Zero means the defaults.
+	heartbeat, turnWait time.Duration
 }
 
 type service struct {
@@ -156,6 +160,7 @@ type service struct {
 	srv      *http.Server
 	gws      []*gateway.Gateway
 	api      *api.API
+	eng      *engine.Engine
 	store    *store.Store
 	queue    *queue.Queue
 	log      *logfile.Log // logs/service.log
@@ -199,7 +204,7 @@ func start(c config) (*service, error) {
 	if err != nil {
 		return nil, err
 	}
-	permissions := filepath.Join(c.home, api.PermissionsFile)
+	permissions := filepath.Join(c.home, engine.PermissionsFile)
 	if err := makePermissions(permissions); err != nil {
 		return nil, err
 	}
@@ -221,7 +226,7 @@ func start(c config) (*service, error) {
 		st.Close()
 		return nil, err
 	}
-	js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollToken})
+	js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollToken, Heartbeat: c.heartbeat})
 	if err != nil {
 		q.Close()
 		st.Close()
@@ -273,10 +278,10 @@ func start(c config) (*service, error) {
 	// vendor's gateway puts the earlier turn's history in front of their
 	// requests.
 	var claudeReplay, codexReplay *replay.Replayer
-	var replayBase func(string, string) (api.ReplayPlan, error)
+	var replayBase func(string, string) (engine.ReplayPlan, error)
 	if !c.noReplay {
 		claudeReplay, codexReplay = replay.New(st), replay.NewCodex(st)
-		replayBase = func(agent, session string) (api.ReplayPlan, error) {
+		replayBase = func(agent, session string) (engine.ReplayPlan, error) {
 			r := claudeReplay
 			if agent == "codex" {
 				r = codexReplay
@@ -284,22 +289,23 @@ func start(c config) (*service, error) {
 			p, err := r.Base(session)
 			var no *replay.NoBase
 			if errors.As(err, &no) {
-				return api.ReplayPlan{Refused: no.Why}, nil
+				return engine.ReplayPlan{Refused: no.Why}, nil
 			}
 			if err != nil {
-				return api.ReplayPlan{}, err
+				return engine.ReplayPlan{}, err
 			}
-			return api.ReplayPlan{Turn: p.Turn, Failed: p.Failed}, nil
+			return engine.ReplayPlan{Turn: p.Turn, Failed: p.Failed}, nil
 		}
 	}
-	a, err := api.New(api.Config{Store: st, Token: token, TurnsToken: turnsToken, MaxRuns: c.maxRuns, Port: port, AnyHost: !loopback,
-		BaseURL: "http://" + agentAddr(ln.Addr()), Origin: c.origin, ReplayBase: replayBase, Permissions: permissions,
-		Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace,
-		LookPath: c.lookPath, Environ: c.environ, Logf: svcLog.Printf, Build: build(debug.ReadBuildInfo()), Jobs: js,
+	baseURL := "http://" + agentAddr(ln.Addr())
+	// The engine starts each turn's agent. Only the built-in runner calls it,
+	// for the jobs it takes from the queue.
+	eng, err := engine.New(engine.Config{Store: st, BaseURL: baseURL, MaxRuns: c.maxRuns, ReplayBase: replayBase,
+		Permissions: permissions, Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace, Logf: svcLog.Printf,
 		RunLog: func(session string, data []byte) {
 			// The session id is the service's own hex, so it is a plain
 			// file name.
-			if err := logfile.AppendTail(filepath.Join(runLogs, session+".log"), data, api.RunOutputMax); err != nil {
+			if err := logfile.AppendTail(filepath.Join(runLogs, session+".log"), data, engine.RunOutputMax); err != nil {
 				svcLog.Printf("runlog.error session=%s", session)
 			}
 		}})
@@ -310,15 +316,25 @@ func start(c config) (*service, error) {
 		q.Close()
 		return nil, err
 	}
+	a, err := api.New(api.Config{Store: st, Token: token, TurnsToken: turnsToken, Port: port, AnyHost: !loopback,
+		BaseURL: baseURL, Origin: c.origin, LookPath: c.lookPath, Environ: c.environ, Build: build(debug.ReadBuildInfo()),
+		Queue: q, Jobs: js, Engine: eng, TurnWait: c.turnWait})
+	if err != nil {
+		ln.Close()
+		svcLog.Close()
+		st.Close()
+		q.Close()
+		return nil, err
+	}
 	// Every model.responded is priced, and every turn.started of a run's
 	// session gets the run's agent and folder, before it is stored.
-	sink := cost.Sink{Table: cost.Default(), Next: a.TurnSink(st)}
+	sink := cost.Sink{Table: cost.Default(), Next: eng.TurnSink(st)}
 	anth := gateway.New(c.upstream, anthropic.Adapter{}, sink)
 	oai := gateway.New(c.chatgpt, openai.Adapter{}, sink)
 	// A turn's session.closed waits for the gateway to write all of the
 	// turn's calls: their events and replies are written off the reply's
 	// path and can land after the child has exited.
-	a.SetSettle(func(session, turn string) bool {
+	eng.SetSettle(func(session, turn string) bool {
 		settled := true
 		for _, g := range []*gateway.Gateway{anth, oai} {
 			if !g.Settle(session, turn, settleTimeout) {
@@ -334,14 +350,14 @@ func start(c config) (*service, error) {
 	anth.KeepBodies(keep)
 	oai.KeepBodies(keep)
 	// forbid in permissions.toml, applied to each run turn's replies.
-	anth.SetGuard(a)
-	oai.SetGuard(a)
+	anth.SetGuard(eng)
+	oai.SetGuard(eng)
 	if claudeReplay != nil {
 		anth.SetRewriter(claudeReplay)
 		oai.SetRewriter(codexReplay)
 	}
 	host, _, _ := net.SplitHostPort(c.listen)
-	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: []*gateway.Gateway{anth, oai}, api: a, store: st,
+	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: []*gateway.Gateway{anth, oai}, api: a, eng: eng, store: st,
 		queue: q, log: svcLog, done: make(chan error, 1)}
 	s.srv = &http.Server{
 		Handler:           logRequests(svcLog, route(a, anth, oai, !loopback)),
@@ -353,7 +369,7 @@ func start(c config) (*service, error) {
 	s.sweep(svcLog)
 	// The built-in runner takes jobs through the runner protocol over
 	// loopback, as a runner on another machine would.
-	if err := s.startRunner(c, "http://"+agentAddr(ln.Addr()), enrollToken, turnsToken, svcLog); err != nil {
+	if err := s.startRunner(c, baseURL, enrollToken, svcLog); err != nil {
 		s.stop()
 		return nil, err
 	}
@@ -385,18 +401,15 @@ func (s *service) sweep(svcLog *logfile.Log) {
 }
 
 // startRunner enrolls the built-in runner and starts it.
-func (s *service) startRunner(c config, self, enrollToken, turnsToken string, svcLog *logfile.Log) error {
-	capacity := c.maxRuns
-	if capacity == 0 {
-		capacity = api.DefaultMaxRuns
-	}
+func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfile.Log) error {
+	capacity := s.eng.MaxRuns()
 	name, _ := os.Hostname()
 	if name == "" {
 		name = "built-in"
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	rn, err := runner.Enroll(ctx, runner.Config{Queue: self, EnrollToken: enrollToken, Name: name, Capacity: capacity,
-		Agentbus: self, AgentbusToken: turnsToken, Logf: svcLog.Printf,
+		Engine: s.eng, Store: s.store, Logf: svcLog.Printf,
 		Workdir: filepath.Join(c.home, "worktrees"), StateFile: filepath.Join(c.home, "runner.json")})
 	if err != nil {
 		cancel()
@@ -530,8 +543,8 @@ func (s *service) shutdown() {
 		s.stopRunner()
 		<-s.runnerDone
 	}
-	// Runs next: each stores its session.closed, and new runs are refused.
-	s.api.StopRuns()
+	// Turns next: each stores its session.closed, and new ones are refused.
+	s.eng.StopAll()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = s.srv.Shutdown(ctx) // streams never go idle, so this usually times out
@@ -618,7 +631,7 @@ func loadToken(path, prefix string) (string, error) {
 
 // makePermissions writes the starter permissions.toml, with empty lists and
 // examples in comments, when there is none, with mode 0600. An existing file
-// is never written: it is the person's. Each turn reads it (api.Permissions).
+// is never written: it is the person's. Each turn reads it (engine.Permissions).
 func makePermissions(path string) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if errors.Is(err, fs.ErrExist) {
@@ -627,7 +640,7 @@ func makePermissions(path string) error {
 	if err != nil {
 		return fmt.Errorf("the permissions file %s could not be made", path)
 	}
-	if _, err := f.WriteString(api.PermissionsStarter); err != nil {
+	if _, err := f.WriteString(engine.PermissionsStarter); err != nil {
 		f.Close()
 		return fmt.Errorf("the permissions file %s could not be written", path)
 	}

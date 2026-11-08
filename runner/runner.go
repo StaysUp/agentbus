@@ -1,11 +1,9 @@
-// Package runner takes jobs from the control plane and runs each one as an
-// AgentBus turn, through the framework's public HTTP API only:
-// POST /api/v0/turns, GET /api/v0/turns/{id} and POST /api/v0/turns/{id}/stop,
-// with the framework's turns token.
+// Package runner takes jobs from the job queue and runs each one as a turn,
+// through package run, in this process. It talks to the queue only through
+// the runner protocol over HTTP (package jobs), the same whether the queue is
+// in this process (agentbus up) or on another machine (agentbus runner).
 //
-// One job, one attempt, one turn. The attempt id is the turn's
-// idempotency_key, so a POST /api/v0/turns sent again after a lost reply
-// starts nothing new.
+// One job, one attempt, one turn: the attempt id is the turn id.
 package runner
 
 import (
@@ -16,28 +14,32 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/run"
+	"github.com/staysup/agentbus/store"
 	"github.com/staysup/agentbus/workspace"
 )
 
 // Config is what a runner needs.
 type Config struct {
-	Queue       string // the control plane, such as http://127.0.0.1:8790
+	Queue       string // the queue's service, such as http://127.0.0.1:8787
 	EnrollToken string
 	Name        string
 	Labels      []string
 	Capacity    int // jobs at once; 0 means DefaultCapacity
 
-	Agentbus      string // the framework, such as http://127.0.0.1:8787
-	AgentbusToken string // its turns token (turns_token in its data folder)
+	// Engine starts and stops the turns, and Store is the record it writes:
+	// a turn's end and its reply are read from it.
+	Engine *run.Engine
+	Store  *store.Store
 
 	// Workdir holds the git worktrees this runner makes, one per session.
 	Workdir string
@@ -46,16 +48,11 @@ type Config struct {
 	// Empty enrolls a new runner on every start.
 	StateFile string
 
-	// Poll is how often a running turn's state is read. Zero means 2 s.
-	Poll time.Duration
-	// StopWait bounds how long a runner waits for a stop to be taken and the
-	// turn to end, on a cancel or a shutdown. Zero means 15 s.
+	// StopWait bounds how long a runner waits for a stopped turn to end
+	// before it lets go of the job. Zero means one minute.
 	StopWait time.Duration
-	// Unreachable bounds how long the framework may fail to describe a
-	// running turn before the runner gives up on it. Zero means 2 minutes.
-	Unreachable time.Duration
-	HTTP        *http.Client
-	Logf        func(format string, args ...any)
+	HTTP     *http.Client
+	Logf     func(format string, args ...any)
 }
 
 // DefaultCapacity is how many jobs a runner runs at once by default.
@@ -65,15 +62,10 @@ const DefaultCapacity = 3
 // stopped its turn.
 const ReasonRunnerStopped = "runner_stopped"
 
-// ReasonTurnUnrecovered: the runner could not confirm that the job's turn
-// ended or was stopped. The result says may_still_run: the turn may still be
-// running in the framework.
-const ReasonTurnUnrecovered = "turn_unrecovered"
-
 // Runner is one enrolled runner.
 type Runner struct {
 	cfg       Config
-	short, fw *http.Client // control-plane calls other than take; framework calls
+	short     *http.Client // queue calls other than take
 	id, token string
 	heartbeat time.Duration
 	lease     time.Duration
@@ -94,14 +86,11 @@ func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 	if cfg.Capacity == 0 {
 		cfg.Capacity = DefaultCapacity
 	}
-	if cfg.Poll == 0 {
-		cfg.Poll = 2 * time.Second
-	}
 	if cfg.StopWait == 0 {
-		cfg.StopWait = 15 * time.Second
+		cfg.StopWait = time.Minute
 	}
-	if cfg.Unreachable == 0 {
-		cfg.Unreachable = 2 * time.Minute
+	if cfg.Engine == nil || cfg.Store == nil {
+		return nil, errors.New("runner: an engine and its store are required")
 	}
 	if cfg.HTTP == nil {
 		cfg.HTTP = &http.Client{Timeout: jobs.MaxWait + 15*time.Second}
@@ -114,8 +103,7 @@ func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 	}
 	r := &Runner{cfg: cfg,
 		// Shorter than a lease, so one slow call cannot outlast it.
-		short: &http.Client{Timeout: 10 * time.Second, Transport: cfg.HTTP.Transport},
-		fw:    &http.Client{Timeout: 15 * time.Second, Transport: cfg.HTTP.Transport}}
+		short: &http.Client{Timeout: 10 * time.Second, Transport: cfg.HTTP.Transport}}
 	// A saved identity is used again when the control plane still knows it.
 	if st, ok := loadState(cfg.StateFile); ok {
 		var rn queue.Runner
@@ -270,7 +258,7 @@ type attempt struct {
 
 	// The workspace, once known: its folder, and for a session's first job
 	// the workspace to record. before is its snapshot at the job's start;
-	// session is the framework session once the turn named it.
+	// session is the turn's session once it started.
 	folder  string
 	ws      *queue.Workspace
 	before  *workspace.Snapshot
@@ -358,12 +346,6 @@ func (at *attempt) addChanges(f *queue.Finish) {
 	} else {
 		c = workspace.Diff(at.folder, at.before, after)
 	}
-	if v, _ := res["may_still_run"].(bool); v {
-		c.Partial = true
-	}
-	// The finish must fit the queue's body bound, with room for the rest of
-	// the result: a reply text, the session and the workspace.
-	c.Fit(MaxChangesBytes)
 	res["changes"] = c
 	res["folder"] = at.folder
 	f.Result = mustJSON(res)
@@ -415,11 +397,12 @@ func (at *attempt) heartbeats(ctx context.Context, done <-chan struct{}) {
 	}
 }
 
-// Result is what a finished job's result holds: the framework turn and how it
-// ended.
+// Result is what a finished job's result holds: how its turn ended. The turn
+// is the attempt: its id is the attempt's.
 type Result struct {
+	// Session is the session the turn ran in. For a turn job it is the job's
+	// own session; a review runs in a session of its own.
 	Session    string   `json:"session,omitempty"`
-	Turn       string   `json:"turn,omitempty"`
 	State      string   `json:"state,omitempty"`
 	ExitCode   *int     `json:"exit_code,omitempty"`
 	Stopped    bool     `json:"stopped,omitempty"`
@@ -428,42 +411,14 @@ type Result struct {
 	Reply      string   `json:"reply,omitempty"`
 	ModelCalls int      `json:"model_calls,omitempty"`
 	CostUSD    *float64 `json:"cost_usd,omitempty"`
-	// Refused: the framework's error when it would not start the turn.
+	// Refused: why the turn did not start, and the status that says what
+	// kind (run.Refusal).
 	Refused string `json:"refused,omitempty"`
 	Status  int    `json:"status,omitempty"`
 	// ReplyText, for a review job: the whole text of the turn's last reply,
-	// at most MaxReplyText bytes. The control plane reads the verdict from
-	// it. Reply is only its first 500 characters.
+	// at most MaxReplyText bytes. The queue reads the verdict from it. Reply
+	// is only its first 500 characters.
 	ReplyText string `json:"reply_text,omitempty"`
-	// MayStillRun: the runner gave up without confirming that the turn
-	// ended. The job's state then never says the turn is over.
-	MayStillRun bool `json:"may_still_run,omitempty"`
-	// StopTaken, when the runner gave up: the framework took a stop of the
-	// turn (202), so it is ending, but its end was not seen.
-	StopTaken bool `json:"stop_taken,omitempty"`
-}
-
-// unrecovered is the finish for a turn the runner gave up on. stop is the
-// status the last stop got, 0 for none. Only a 409, the framework saying the
-// turn is not running, clears may_still_run.
-func unrecovered(session, turn string, stop int) queue.Finish {
-	return queue.Finish{Status: queue.Failed, Reason: ReasonTurnUnrecovered,
-		Result: mustJSON(Result{Session: session, Turn: turn, MayStillRun: stop != http.StatusConflict,
-			StopTaken: stop == http.StatusAccepted || stop == http.StatusConflict})}
-}
-
-// turnRow is the part of the framework's turn row the runner reads.
-type turnRow struct {
-	ID         string  `json:"id"`
-	Session    string  `json:"session"`
-	State      string  `json:"state"`
-	ExitCode   *int    `json:"exit_code"`
-	Stopped    bool    `json:"stopped"`
-	Unsettled  bool    `json:"unsettled"`
-	Error      string  `json:"error"`
-	Reply      string  `json:"reply"`
-	ModelCalls int     `json:"model_calls"`
-	CostUSD    float64 `json:"cost_usd"`
 }
 
 func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
@@ -496,35 +451,58 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 		at.finish(ctx, queue.Finish{Status: queue.Cancelled})
 		return
 	}
-	if refused := r.prepare(ctx, at); refused != nil {
+	if refused := r.prepare(at); refused != nil {
 		at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup, Result: mustJSON(refused)})
 		return
 	}
-	turn, refused := r.startTurn(ctx, at)
-	if turn == nil {
-		if refused != nil {
-			// No turn started, so no session owns a worktree made for it.
-			if at.ws != nil && at.ws.Kind == queue.WorkspaceWorktree {
-				if err := workspace.RemoveWorktree(r.cfg.Workdir, at.ws.Repo, at.ws.Folder); err == nil {
-					at.event("workspace.removed", map[string]any{"folder": at.ws.Folder})
-				}
-				at.before = nil
-			}
-			at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup, Result: mustJSON(refused)})
+	turn, err := r.cfg.Engine.Start(r.request(at))
+	if err != nil {
+		res := Result{Refused: "the turn could not be started", Status: http.StatusInternalServerError}
+		var rf *run.Refusal
+		if errors.As(err, &rf) {
+			res.Refused, res.Status = rf.Msg, rf.Status
 		}
+		// No turn started, so no session owns a worktree made for it.
+		if at.ws != nil && at.ws.Kind == queue.WorkspaceWorktree {
+			if err := workspace.RemoveWorktree(r.cfg.Workdir, at.ws.Repo, at.ws.Folder); err == nil {
+				at.event("workspace.removed", map[string]any{"folder": at.ws.Folder})
+			}
+			at.before = nil
+		}
+		at.event("turn.refused", map[string]any{"status": res.Status})
+		at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup, Result: mustJSON(res)})
 		return
 	}
-	at.session = turn.ID
-	at.event("turn.created", map[string]any{"session": turn.ID, "turn": turn.Turn, "existing": turn.Existing})
+	at.session = turn.Session
+	at.event("turn.created", map[string]any{"session": turn.Session, "turn": turn.ID})
 	at.flush(ctx)
-	r.follow(ctx, at, turn.ID, turn.Turn)
+	r.follow(ctx, at, turn)
+}
+
+// request is the turn the attempt runs. Its id is the attempt's. A turn
+// job's first turn opens the session the queue named for it; a review opens
+// one of its own, read-only, in the reviewed job's folder.
+func (r *Runner) request(at *attempt) run.Request {
+	sp := at.job.Spec
+	req := run.Request{Turn: at.a.ID, Prompt: sp.Prompt, Model: sp.Model, ReadOnly: sp.ReadOnly,
+		IdempotencyKey: at.job.IdempotencyKey}
+	switch {
+	case sp.Session != "":
+		req.Session = sp.Session
+	default:
+		req.Agent, req.Folder = sp.Agent, at.folder
+		if at.job.Kind == queue.KindTurn {
+			req.NewSession = at.job.Session
+		}
+	}
+	return req
 }
 
 // prepare finds or makes the job's workspace and takes its snapshot: a
 // worktree of the job's repo at its base (a session's first job), the job's
 // folder, or the folder of the session it continues. It answers why the job
 // cannot run, or nil.
-func (r *Runner) prepare(ctx context.Context, at *attempt) *Result {
+func (r *Runner) prepare(at *attempt) *Result {
 	sp := at.job.Spec
 	switch {
 	case sp.Repo != "":
@@ -539,25 +517,22 @@ func (r *Runner) prepare(ctx context.Context, at *attempt) *Result {
 		at.ws = &queue.Workspace{Kind: queue.WorkspaceWorktree, Folder: dir, Repo: sp.Repo, Base: sp.Base}
 		at.event("workspace.ready", map[string]any{"kind": "worktree", "folder": dir, "base": sp.Base})
 	case sp.Folder != "":
+		if info, err := os.Stat(sp.Folder); err != nil || !info.IsDir() {
+			return nil // the engine refuses it, in its own words
+		}
 		at.folder = sp.Folder
 		at.ws = &queue.Workspace{Kind: queue.WorkspaceFolder, Folder: sp.Folder}
 	case at.job.Workspace != nil:
 		at.folder = at.job.Workspace.Folder
 	default:
-		// A session the queue does not know: the framework knows its folder.
-		var list struct {
-			Turns []struct {
-				Folder string `json:"folder"`
-			} `json:"turns"`
-		}
-		status, err := call(context.WithoutCancel(ctx), r.fw, r.cfg.Agentbus+"/api/v0/turns?limit=1&session="+url.QueryEscape(sp.Session),
-			r.cfg.AgentbusToken, nil, &list)
-		if err == nil && status == http.StatusOK && len(list.Turns) > 0 {
-			at.folder = list.Turns[0].Folder
+		// A session the queue holds no workspace for: the record knows its
+		// folder.
+		if c, err := r.cfg.Store.Continuation(sp.Session); err == nil && c.Known {
+			at.folder = c.Folder
 		}
 	}
 	if at.folder == "" {
-		return nil // no folder to watch: the framework still runs the turn
+		return nil // no folder to watch: the engine still runs the turn, or refuses it
 	}
 	b, err := workspace.Take(at.folder, nil)
 	if err != nil {
@@ -567,282 +542,115 @@ func (r *Runner) prepare(ctx context.Context, at *attempt) *Result {
 	return nil
 }
 
-// started is the framework's answer to POST /api/v0/turns.
-type started struct {
-	ID       string `json:"id"`
-	Turn     string `json:"turn"`
-	Existing bool   `json:"existing"`
-}
-
-func (r *Runner) turnBody(at *attempt) map[string]any {
-	spec := at.job.Spec
-	body := map[string]any{"prompt": spec.Prompt, "idempotency_key": at.a.ID}
-	if spec.Session != "" {
-		body["session"] = spec.Session
-	} else {
-		body["agent"], body["folder"] = spec.Agent, at.folder
-	}
-	if spec.Model != "" {
-		body["model"] = spec.Model
-	}
-	if spec.ReadOnly {
-		body["read_only"] = true
-	}
-	return body
-}
-
-// startTurn sends POST /api/v0/turns, keyed by the attempt id, and sends it
-// again on a lost reply, a 5xx or a 429. It answers the turn, or why the
-// framework refused it. It answers neither when the attempt went stale, was
-// cancelled or the runner is shutting down; it has then finished the attempt
-// where that is still its to finish, and stopped any turn a request with an
-// unknown outcome may have started.
-func (r *Runner) startTurn(ctx context.Context, at *attempt) (*started, *Result) {
-	body := r.turnBody(at)
-	// uncertain: a request may have started a turn whose reply was lost. A
-	// 429 or a refusal starts nothing and stores no key.
-	uncertain := false
-	for wait := time.Second; ; wait = min(wait*2, 10*time.Second) {
-		var s started
-		var e jobs.JobError
-		status, err := callErr(context.WithoutCancel(ctx), r.fw, r.cfg.Agentbus+"/api/v0/turns", r.cfg.AgentbusToken, body, &s, &e)
-		if err == nil && status == http.StatusAccepted {
-			return &s, nil
-		}
-		if err == nil && status != http.StatusTooManyRequests && status < 500 {
-			if !uncertain {
-				return nil, &Result{Refused: e.Error, Status: status}
-			}
-			// An earlier request may have started a turn, and a refusal now
-			// (a replaced token, say) does not say it did not. Say so.
-			at.event("turn.unknown", map[string]any{"why": "refused_after_unknown", "status": status})
-			at.finish(ctx, unrecovered("", "", 0))
-			return nil, nil
-		}
-		uncertain = uncertain || err != nil || status >= 500
-		at.event("turn.retry", map[string]any{"status": status})
-		t := time.NewTimer(wait)
-		select {
-		case <-t.C:
-			continue
-		case <-at.stale:
-			t.Stop()
-			if uncertain {
-				r.recoverAndStop(ctx, at, body, "stale")
-			}
-			return nil, nil
-		case <-at.cancel:
-			t.Stop()
-			if uncertain {
-				if ok, turn, stop := r.recoverAndStop(ctx, at, body, "cancel"); !ok {
-					at.finish(ctx, unrecovered(turn.ID, turn.Turn, stop))
-					return nil, nil
-				}
-			}
-			at.finish(ctx, queue.Finish{Status: queue.Cancelled})
-			return nil, nil
-		case <-ctx.Done():
-			t.Stop()
-			if uncertain {
-				if ok, turn, stop := r.recoverAndStop(ctx, at, body, "runner_stopped"); !ok {
-					at.finish(ctx, unrecovered(turn.ID, turn.Turn, stop))
-					return nil, nil
-				}
-			}
-			at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: ReasonRunnerStopped})
-			return nil, nil
-		}
-	}
-}
-
-// recoverAndStop finds the turn an earlier request with a lost reply may have
-// started, by sending the same request with the same key, and stops it. If
-// no turn had started, this starts one and stops it at once: a turn left
-// running would be worse. ok is true only when the framework named the turn
-// and took its stop. A refusal does not count: after a lost reply it cannot
-// show that no turn started. turn is the turn when it was found, and stop the
-// status its last stop got.
-func (r *Runner) recoverAndStop(ctx context.Context, at *attempt, body map[string]any, why string) (ok bool, turn started, stop int) {
-	ctx = context.WithoutCancel(ctx)
-	for i := range 5 {
-		var s started
-		status, err := call(ctx, r.fw, r.cfg.Agentbus+"/api/v0/turns", r.cfg.AgentbusToken, body, &s)
-		if err == nil && status == http.StatusAccepted {
-			at.event("turn.created", map[string]any{"session": s.ID, "turn": s.Turn, "existing": s.Existing})
-			taken, code := r.stopTurn(ctx, at, s.Turn, why, r.cfg.StopWait)
-			if !taken {
-				at.event("turn.unknown", map[string]any{"why": why, "turn": s.Turn})
-			}
-			return taken, s, code
-		}
-		if err == nil && status != http.StatusTooManyRequests && status < 500 {
-			break // refused: the turn, if any, cannot be found
-		}
-		sleep(ctx, time.Duration(i+1)*time.Second)
-	}
-	at.event("turn.unknown", map[string]any{"why": why})
-	return false, turn, 0
-}
-
-// stopTurn sends POST /api/v0/turns/{id}/stop until the framework takes it or
-// says the turn is not running, for at most within. It says whether it got
-// there, and the status the last stop got.
-func (r *Runner) stopTurn(ctx context.Context, at *attempt, turnID, why string, within time.Duration) (bool, int) {
-	ctx = context.WithoutCancel(ctx)
-	deadline := time.Now().Add(within)
-	for {
-		taken, code := r.stopOnce(ctx, at, turnID, why)
-		if taken || time.Now().After(deadline) {
-			return taken, code
-		}
-		sleep(ctx, 500*time.Millisecond)
-	}
-}
-
-// stopOnce sends one stop. taken is true for 202 (stopping) and 409 (not
-// running). A 404 is not taken: a framework that does not know the turn
-// cannot say it ended. code is the status, 0 when no answer came.
-func (r *Runner) stopOnce(ctx context.Context, at *attempt, turnID, why string) (taken bool, code int) {
-	code, err := call(context.WithoutCancel(ctx), r.fw, r.cfg.Agentbus+"/api/v0/turns/"+turnID+"/stop", r.cfg.AgentbusToken, nil, nil)
-	if err != nil {
-		code = 0
-	}
-	at.event("turn.stop", map[string]any{"why": why, "status": code})
-	return code == http.StatusAccepted || code == http.StatusConflict, code
-}
-
-// follow reads the turn until it ends, then finishes the attempt with how it
-// ended. A cancel or a shutdown stops the turn, sent again on every poll until
-// the framework takes it. A stale attempt stops the turn and finishes
-// nothing: the control plane has already settled it.
-func (r *Runner) follow(ctx context.Context, at *attempt, session, turnID string) {
-	poll := time.NewTicker(r.cfg.Poll)
-	defer poll.Stop()
+// follow waits for the turn to end, then finishes the attempt with how it
+// ended. A cancel or a shutdown stops the turn. A stale attempt stops the
+// turn and finishes nothing: the queue has already settled it.
+func (r *Runner) follow(ctx context.Context, at *attempt, turn *run.Turn) {
 	quit, cancelCh := ctx.Done(), (<-chan struct{})(at.cancel)
-	cancelled := false
-	var why string         // why the turn must stop; empty while it may run
-	stopped := false       // the framework took the stop
-	stopCode := 0          // the status the last stop got
-	var stopAt time.Time   // when a shutdown asked for the stop
-	var wantAt time.Time   // when a stop was first wanted, for a cancel or a shutdown
-	var badSince time.Time // the first of the reads in a row that failed
+	cancelled, shutdown := false, false
+	var stopWait <-chan time.Time // set once a stop is sent
+	stop := func(why string) {
+		at.event("turn.stop", map[string]any{"why": why, "running": r.cfg.Engine.Stop(turn.ID)})
+		if stopWait == nil {
+			stopWait = time.After(r.cfg.StopWait)
+		}
+	}
+wait:
 	for {
 		select {
+		case <-turn.Done():
+			break wait
 		case <-quit:
-			quit = nil
-			stopAt, why = time.Now(), ReasonRunnerStopped
-		case <-cancelCh:
-			cancelCh = nil // closed: read it once
-			cancelled = true
-			if why == "" {
-				why = "cancel"
+			// The runner is stopping, as the service is: the turn is
+			// interrupted, not stopped by a person, so its next turn says
+			// its agent was stopped.
+			quit, shutdown = nil, true
+			at.event("turn.stop", map[string]any{"why": ReasonRunnerStopped, "running": r.cfg.Engine.Interrupt(turn.ID)})
+			if stopWait == nil {
+				stopWait = time.After(r.cfg.StopWait)
 			}
+		case <-cancelCh:
+			cancelCh, cancelled = nil, true
+			stop("cancel")
 		case <-at.stale:
-			if !stopped {
-				_, _ = r.stopTurn(ctx, at, turnID, "stale", r.cfg.StopWait)
+			stop("stale")
+			select {
+			case <-turn.Done():
+			case <-time.After(r.cfg.StopWait):
 			}
 			r.cfg.Logf("job %s attempt %d is no longer current; its turn was stopped", at.job.ID, at.a.Number)
 			return
-		case <-poll.C:
-		}
-		if why != "" && wantAt.IsZero() {
-			wantAt = time.Now()
-		}
-		if why != "" && !stopped {
-			stopped, stopCode = r.stopOnce(ctx, at, turnID, why)
-		}
-		at.flush(context.WithoutCancel(ctx))
-		var row struct {
-			Turn turnRow `json:"turn"`
-		}
-		status, err := call(context.WithoutCancel(ctx), r.fw, r.cfg.Agentbus+"/api/v0/turns/"+turnID+"?session="+url.QueryEscape(session), r.cfg.AgentbusToken, nil, &row)
-		// Give up on a turn the framework will not describe: at once when
-		// the token is refused, which no retry mends, else after
-		// Unreachable. The turn is stopped if it can be, and the job says
-		// the turn may still run.
-		readFailed := err != nil || status != http.StatusOK
-		if !readFailed {
-			badSince = time.Time{}
-		} else if badSince.IsZero() {
-			badSince = time.Now()
-		}
-		if readFailed && (status == http.StatusUnauthorized || status == http.StatusForbidden || time.Since(badSince) > r.cfg.Unreachable) {
-			if !stopped {
-				stopped, stopCode = r.stopOnce(ctx, at, turnID, "unreachable")
+		case <-stopWait:
+			// The stop's SIGKILL came and went and the turn has not ended:
+			// its session.closed waits on something. The job ends now and
+			// says so; the turn ends on its own.
+			at.event("turn.unended", map[string]any{"turn": turn.ID})
+			res := Result{Session: turn.Session, Error: "the turn was stopped and had not ended in time"}
+			f := queue.Finish{Status: queue.Failed, Reason: ReasonRunnerStopped, Result: mustJSON(res)}
+			if cancelled && !shutdown {
+				f = queue.Finish{Status: queue.Cancelled, Result: mustJSON(res)}
 			}
-			at.event("turn.unknown", map[string]any{"why": "unreachable", "status": status, "stop_taken": stopped})
-			at.finish(ctx, unrecovered(session, turnID, stopCode))
+			at.finish(ctx, f)
 			return
 		}
-		if readFailed || row.Turn.State == "running" {
-			// A stop that is wanted and not confirmed in time leaves the turn
-			// possibly running: the job says so, never cancelled or stopped.
-			if !wantAt.IsZero() && time.Since(wantAt) > r.cfg.StopWait {
-				at.event("turn.unknown", map[string]any{"why": why, "stop_taken": stopped})
-				at.finish(ctx, unrecovered(session, turnID, stopCode))
-				return
-			}
-			continue
-		}
-		t := row.Turn
-		cost := t.CostUSD
-		res := Result{Session: session, Turn: turnID, State: t.State, ExitCode: t.ExitCode, Stopped: t.Stopped,
-			Unsettled: t.Unsettled, Error: t.Error, Reply: t.Reply, ModelCalls: t.ModelCalls, CostUSD: &cost}
-		if at.job.Kind == queue.KindReview {
-			res.ReplyText = r.lastReply(ctx, session, turnID)
-		}
-		at.event("turn.ended", map[string]any{"state": t.State, "exit_code": t.ExitCode})
-		f := queue.Finish{Result: mustJSON(res)}
-		switch {
-		case !stopAt.IsZero():
-			f.Status, f.Reason = queue.Failed, ReasonRunnerStopped
-		case cancelled:
-			f.Status = queue.Cancelled
-		case t.State == "finished":
-			f.Status = queue.Finished
-		default:
-			f.Status, f.Reason = queue.Failed, queue.ReasonAgent
-		}
-		at.finish(ctx, f)
-		return
 	}
+	end := turn.Ended()
+	res := Result{Session: turn.Session, ExitCode: &end.ExitCode, Stopped: end.Stopped, Unsettled: end.Unsettled, State: "failed"}
+	if end.ExitCode == 0 {
+		res.State = "finished"
+	}
+	if list, err := r.cfg.Store.Turns(store.TurnQuery{Session: turn.Session, Turn: turn.ID, Limit: 1}); err == nil && len(list.Turns) > 0 {
+		t := list.Turns[0]
+		cost := t.CostUSD
+		res.State, res.Error, res.Reply, res.ModelCalls, res.CostUSD = t.State, t.Error, t.Reply, t.ModelCalls, &cost
+	}
+	if at.job.Kind == queue.KindReview {
+		res.ReplyText = r.lastReply(turn.Session, turn.ID)
+	}
+	at.event("turn.ended", map[string]any{"state": res.State, "exit_code": end.ExitCode})
+	f := queue.Finish{Result: mustJSON(res)}
+	switch {
+	case shutdown:
+		f.Status, f.Reason = queue.Failed, ReasonRunnerStopped
+	case cancelled:
+		f.Status = queue.Cancelled
+	case res.State == "finished":
+		f.Status = queue.Finished
+	default:
+		f.Status, f.Reason = queue.Failed, queue.ReasonAgent
+	}
+	at.finish(ctx, f)
 }
 
 // MaxReplyText bounds a review's reply text in its result.
 const MaxReplyText = 256 << 10
 
-// MaxChangesBytes bounds the changes in a result, as JSON. With the reply
-// text and the rest, a finish stays well under jobs.MaxBody.
-const MaxChangesBytes = 1 << 20
-
 // lastReply is the text of the turn's last model reply that has text, read
-// from the turn's events a page at a time. "" when none can be read.
-func (r *Runner) lastReply(ctx context.Context, session, turnID string) string {
-	ctx = context.WithoutCancel(ctx)
-	base := r.cfg.Agentbus + "/api/v0/turns/" + turnID + "/events?limit=1000&session=" + url.QueryEscape(session)
-	u, last := base, ""
+// from the record a page at a time. "" when none can be read.
+func (r *Runner) lastReply(session, turnID string) string {
+	f := store.Filter{Turn: turnID, TurnSession: session}
+	var after int64
+	last := ""
 	for range 1000 {
-		var page struct {
-			Store  string `json:"store"`
-			Events []struct {
-				Kind string `json:"kind"`
-				Text string `json:"text"`
-			} `json:"events"`
-			NextAfter *int64 `json:"next_after"`
-		}
-		status, err := call(ctx, r.fw, u, r.cfg.AgentbusToken, nil, &page)
-		if err != nil || status != http.StatusOK {
+		recs, more, err := r.cfg.Store.Page(after, f, 1000, store.PageBytes)
+		if err != nil {
 			return last
 		}
-		for _, e := range page.Events {
-			if e.Kind == "model.responded" && e.Text != "" {
+		for _, rec := range recs {
+			after = rec.Seq
+			if rec.Kind != event.ModelResponded {
+				continue
+			}
+			var e struct {
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(rec.Data, &e) == nil && e.Text != "" {
 				last = e.Text
 			}
 		}
-		if page.NextAfter == nil {
+		if !more {
 			break
 		}
-		u = base + "&store=" + url.QueryEscape(page.Store) + "&after=" + fmt.Sprint(*page.NextAfter)
 	}
 	if len(last) > MaxReplyText {
 		// The verdict block ends the reply, so the end is what is kept,

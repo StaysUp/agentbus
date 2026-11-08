@@ -1,8 +1,10 @@
 // Package queue keeps jobs, their attempts, runners and attempt events in one
 // SQLite file.
 //
-// A job is a requested turn. An attempt is one execution of it. A retry adds an
-// attempt and never overwrites an earlier one. Every call a runner makes after
+// A job is a requested turn. An attempt is one execution of it, and the
+// attempt is the turn: its id is the turn's id. A retry adds an attempt and
+// never overwrites an earlier one. A turn job's session is named when the job
+// is made, so its first turn opens that session. Every call a runner makes after
 // take names its attempt id and number, and a call for an attempt that is not
 // the job's current one is refused (fencing). Lease expiry is decided on this
 // process's clock.
@@ -276,6 +278,10 @@ type Attempt struct {
 	// ExpectedSeq is the last sequence number the runner said it sent, in
 	// its finish. When it is above LastSeq, events are missing.
 	ExpectedSeq *int64 `json:"expected_seq,omitempty"`
+	// TurnStarted: the runner reported the attempt's turn started. The
+	// attempt id is then a turn in the record. Read from its events, never
+	// kept.
+	TurnStarted bool `json:"turn_started,omitempty"`
 }
 
 // Runner is one enrolled runner.
@@ -494,12 +500,23 @@ func (q *Queue) runner(where string, arg string) (Runner, error) {
 // the same fields returns the first job and created false; other fields under
 // the same key get ErrKeyConflict.
 func (q *Queue) Create(team, kind, key string, spec Spec, links Links) (job Job, created bool, err error) {
-	return q.create(team, kind, key, spec, links, spec.Session)
+	return q.create(team, kind, key, spec, links, spec.Session, false)
+}
+
+// CreateTurn makes a turn job. With exclusive, a session that has a turn job
+// whose turn has not started yet (queued, taken, or running before its turn
+// started) gets ErrSessionBusy, in the same transaction, so two requests at
+// once cannot both pass. A job whose turn has started is not counted: whether
+// that turn still runs is the record's to say, and a job made now waits in
+// the queue until the one before it ends.
+func (q *Queue) CreateTurn(team, key string, spec Spec, exclusive bool) (job Job, created bool, err error) {
+	return q.create(team, KindTurn, key, spec, Links{}, spec.Session, exclusive)
 }
 
 // create is Create with the session the job is tied to: spec.Session for a
-// turn, the reviewed job's session for a review.
-func (q *Queue) create(team, kind, key string, spec Spec, links Links, session string) (job Job, created bool, err error) {
+// turn, the reviewed job's session for a review. A turn job that opens a new
+// session gets its id here.
+func (q *Queue) create(team, kind, key string, spec Spec, links Links, session string, exclusive bool) (job Job, created bool, err error) {
 	hash := hashOf(struct {
 		Kind  string `json:"kind"`
 		Spec  Spec   `json:"spec"`
@@ -529,6 +546,20 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, session s
 			if closed.Valid {
 				return ErrSessionClosed
 			}
+		}
+		if exclusive && session != "" {
+			var busy int
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs j WHERE team = ? AND session = ? AND kind = 'turn'
+				AND (state IN ('queued','taken') OR (state = 'running' AND NOT EXISTS (SELECT 1 FROM attempt_events e
+					WHERE e.attempt = j.attempt AND e.kind = 'turn.created')))`, team, session).Scan(&busy); err != nil {
+				return fmt.Errorf("queue: count jobs: %w", err)
+			}
+			if busy > 0 {
+				return ErrSessionBusy
+			}
+		}
+		if kind == KindTurn && session == "" {
+			session = NewID("") // the new session its first turn opens
 		}
 		var open int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND state IN ('queued','taken','running')`, team).Scan(&open); err != nil {
@@ -595,7 +626,10 @@ func scanJob(s scanner) (Job, error) {
 	return j, nil
 }
 
-const attemptCols = `id, job, number, runner, state, lease_until, taken, started, ended, reason, result, last_seq, expected_seq`
+// attemptCols reads an attempt, and whether its runner reported its turn
+// started (the turn.created event).
+const attemptCols = `id, job, number, runner, state, lease_until, taken, started, ended, reason, result, last_seq, expected_seq,
+	EXISTS (SELECT 1 FROM attempt_events e WHERE e.attempt = attempts.id AND e.kind = 'turn.created')`
 
 func scanAttempt(s scanner) (Attempt, error) {
 	var a Attempt
@@ -603,7 +637,8 @@ func scanAttempt(s scanner) (Attempt, error) {
 	var started, ended sql.NullInt64
 	var result sql.NullString
 	var expected sql.NullInt64
-	if err := s.Scan(&a.ID, &a.Job, &a.Number, &a.Runner, &a.State, &lease, &taken, &started, &ended, &a.Reason, &result, &a.LastSeq, &expected); err != nil {
+	if err := s.Scan(&a.ID, &a.Job, &a.Number, &a.Runner, &a.State, &lease, &taken, &started, &ended, &a.Reason, &result, &a.LastSeq, &expected,
+		&a.TurnStarted); err != nil {
 		return a, err
 	}
 	if expected.Valid {
@@ -793,7 +828,8 @@ func (q *Queue) Take(runnerID string, lease time.Duration) (job Job, att Attempt
 		if err := tx.QueryRow(`SELECT COALESCE(MAX(number), 0) + 1 FROM attempts WHERE job = ?`, id).Scan(&n); err != nil {
 			return fmt.Errorf("queue: number attempt: %w", err)
 		}
-		aid := NewID("att_")
+		// The attempt is the turn: the same id, in the turn id's shape.
+		aid := NewID("t_")
 		if _, err := tx.Exec(`INSERT INTO attempts(id, job, number, runner, state, lease_until, taken) VALUES(?,?,?,?,?,?,?)`,
 			aid, id, n, runnerID, Taken, nanos(now.Add(lease)), nanos(now)); err != nil {
 			return fmt.Errorf("queue: write attempt: %w", err)
@@ -1133,15 +1169,9 @@ func (q *Queue) End(runnerID, attemptID string, number int, f Finish) (Job, erro
 			f.Status, f.Reason, verdict, findings, result, nanos(now), nanos(now), j.ID); err != nil {
 			return fmt.Errorf("queue: write job: %w", err)
 		}
-		// A turn job learns its session at its end, so it can be listed by it.
-		if j.Kind == KindTurn && f.Session != "" && j.Session == "" {
-			if _, err := tx.Exec(`UPDATE jobs SET session = ? WHERE id = ?`, f.Session, j.ID); err != nil {
-				return fmt.Errorf("queue: write job: %w", err)
-			}
-		}
 		// A session's first job ties the session to this runner. A later
 		// finish naming the same session changes nothing.
-		if j.Kind == KindTurn && f.Session != "" && f.Workspace != nil && j.Spec.Session == "" {
+		if j.Kind == KindTurn && f.Session != "" && f.Session == j.Session && f.Workspace != nil && j.Spec.Session == "" {
 			w := f.Workspace
 			if w.Kind != WorkspaceWorktree && w.Kind != WorkspaceFolder {
 				return ErrBadState
@@ -1158,6 +1188,20 @@ func (q *Queue) End(runnerID, attemptID string, number int, f Finish) (Job, erro
 	}
 	q.wake() // a slot is free
 	return q.Get(team, jobID)
+}
+
+// JobByAttempt reads the job of team whose attempt, or turn, has this id.
+func (q *Queue) JobByAttempt(team, attemptID string) (Job, error) {
+	var id string
+	err := q.db.QueryRow(`SELECT a.job FROM attempts a JOIN jobs j ON j.id = a.job WHERE a.id = ? AND j.team = ?`,
+		attemptID, team).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Job{}, ErrNotFound
+	}
+	if err != nil {
+		return Job{}, fmt.Errorf("queue: read attempt: %w", err)
+	}
+	return q.Get(team, id)
 }
 
 // Cancel asks for a job of team to stop. A queued job is cancelled at once. A
@@ -1297,5 +1341,5 @@ func (q *Queue) Review(team, id, agent, model, key string, includeReply bool) (J
 		return Job{}, false, ErrNotReviewable
 	}
 	spec := Spec{Agent: agent, Model: model, Folder: j.Workspace.Folder, ReadOnly: true, Prompt: prompt}
-	return q.create(team, KindReview, key, spec, Links{ReviewsJob: j.ID}, j.Session)
+	return q.create(team, KindReview, key, spec, Links{ReviewsJob: j.ID}, j.Session, false)
 }

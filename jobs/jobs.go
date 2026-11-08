@@ -31,9 +31,9 @@ import (
 const (
 	// Lease is how long an attempt is held without a heartbeat.
 	Lease = 30 * time.Second
-	// Heartbeat is how often a runner should send one, so a cancel is heard
-	// within about this long.
-	Heartbeat = 10 * time.Second
+	// Heartbeat is how often a runner should send one, so a cancel, and so
+	// a stop of a turn, is heard within about this long.
+	Heartbeat = 2 * time.Second
 	// MaxWait bounds a take's long poll.
 	MaxWait = 30 * time.Second
 	// MaxBody bounds a request body. A prompt can be 256 KiB.

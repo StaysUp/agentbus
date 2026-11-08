@@ -6,7 +6,7 @@ package main
 import (
 	"strings"
 
-	"github.com/staysup/agentbus/api"
+	engine "github.com/staysup/agentbus/run"
 )
 
 // agents maps each supported agent to how its base URL reaches the child.
@@ -49,24 +49,24 @@ var ownEndpoint = map[string]string{
 	"codex":  "OPENAI_BASE_URL",
 }
 
-// runWire is the service's api.Wire, read from the service's environment. The
+// runWire is the service's engine.Wire, read from the service's environment. The
 // child gets the service's environment with the base URL set; the token is
 // never in it, since the service reads the token from its file.
-func runWire(getenv func(string) string, environ func() []string, lookPath func(string) (string, error)) api.Wire {
-	return func(agent, baseURL string) (api.Launch, error) {
+func runWire(getenv func(string) string, environ func() []string, lookPath func(string) (string, error)) engine.Wire {
+	return func(agent, baseURL string) (engine.Launch, error) {
 		wire, ok := agents[agent]
 		if !ok {
-			return api.Launch{}, api.ErrNotFound
+			return engine.Launch{}, engine.ErrNotFound
 		}
 		if v := ownEndpoint[agent]; v != "" && getenv(v) != "" {
-			return api.Launch{}, api.ErrOwnEndpoint
+			return engine.Launch{}, engine.ErrOwnEndpoint
 		}
 		bin, err := lookPath(agent)
 		if err != nil {
-			return api.Launch{}, api.ErrNotFound
+			return engine.Launch{}, engine.ErrNotFound
 		}
 		env, pre := wire(baseURL)
-		return api.Launch{Path: bin, Env: childEnv(environ(), env), Args: pre}, nil
+		return engine.Launch{Path: bin, Env: childEnv(environ(), env), Args: pre}, nil
 	}
 }
 

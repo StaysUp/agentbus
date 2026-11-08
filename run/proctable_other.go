@@ -1,6 +1,6 @@
 //go:build !darwin && !linux
 
-package api
+package run
 
 // readProcs cannot read the process table on this platform, so a run's
 // tree is not tracked and only the child's process group is signalled.

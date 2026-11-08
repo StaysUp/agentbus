@@ -16,6 +16,7 @@ import (
 
 	"github.com/staysup/agentbus/body"
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -69,8 +70,8 @@ func TestOpenAPIResponsesMatch(t *testing.T) {
 	doc := loadSpec(t)
 	folder := t.TempDir()
 	// A run's child: a shell that prints claude's result line and exits.
-	e := resumableEnv(t, func(agent, baseURL string) (Launch, error) {
-		return Launch{Path: "/bin/sh", Args: []string{"-c", `echo '{"type":"result","session_id":"sess-1"}'`, "sh"}}, nil
+	e := resumableEnv(t, func(agent, baseURL string) (run.Launch, error) {
+		return run.Launch{Path: "/bin/sh", Args: []string{"-c", `echo '{"type":"result","session_id":"sess-1"}'`, "sh"}}, nil
 	})
 	fill(t, e.store)
 

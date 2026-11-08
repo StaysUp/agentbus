@@ -27,6 +27,7 @@ import (
 	"github.com/getkin/kin-openapi/routers/gorillamux"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -252,7 +253,7 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 
 func TestOpenAPIRoutesMatchCode(t *testing.T) {
 	doc := loadSpec(t)
-	e := resumableEnv(t, func(agent, baseURL string) (Launch, error) { return Launch{}, ErrNotFound })
+	e := resumableEnv(t, func(agent, baseURL string) (run.Launch, error) { return run.Launch{}, run.ErrNotFound })
 	paths, prefixes, words := routeLiterals(t)
 	candidates := map[string]bool{}
 	for _, p := range paths {

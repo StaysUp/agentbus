@@ -29,7 +29,8 @@ var (
 	noAttempt   = fail(http.StatusNotFound, "No such attempt or runner for this runner token, or this service keeps no job queue.")
 )
 
-const jobsDoc = "A job is a requested turn. Its kind is turn or review. A runner takes it and runs it as an attempt."
+const jobsDoc = "A job is a requested turn. Its kind is turn or review. A runner takes it and runs it as an attempt, and " +
+	"the attempt is the turn: its id is the turn id. Its turn_started says the runner started the turn."
 
 var jobRoutes = []route{
 	{method: "POST", path: "/api/v0/jobs", op: "createJob",
@@ -66,7 +67,7 @@ var jobRoutes = []route{
 		idDoc:   "A job id. Another shape gets 404.",
 		tag:     "Jobs",
 		summary: "Cancel a job",
-		doc:     "Cancel a job. A queued job ends at once. A running one stops on its runner's next heartbeat. No body is read.",
+		doc:     "Cancel a job. A queued job ends at once. A running one stops on its runner's next heartbeat, within 2 seconds. No body is read.",
 		replies: []reply{ok(202, queue.Job{}, "The job, as it is now."), noJob, storeFailed},
 		serve:   jobsRoute},
 	{method: "POST", path: "/api/v0/jobs/{id}/review", op: "reviewJob",
@@ -137,7 +138,7 @@ var jobRoutes = []route{
 		replies: []reply{{status: 204, doc: "Recorded.", empty: true}, badRequest, noAttempt, storeFailed},
 		self:    true, serve: jobsRoute},
 	{method: "POST", path: "/api/v0/attempts/{id}/start", op: "startAttempt",
-		idDoc:   "The attempt id. Another shape gets 404.",
+		idDoc:   "The attempt id: the turn id. Another shape gets 404.",
 		tag:     "Runners",
 		summary: "Start an attempt",
 		doc:     "Taken to running. cancel in the reply says the job was asked to stop.",
@@ -145,15 +146,15 @@ var jobRoutes = []route{
 		replies: []reply{ok(200, jobs.AttemptStarted{}, "Running."), badRequest, noAttempt, staleReply, storeFailed},
 		self:    true, serve: jobsRoute},
 	{method: "POST", path: "/api/v0/attempts/{id}/heartbeat", op: "attemptHeartbeat",
-		idDoc:   "The attempt id. Another shape gets 404.",
+		idDoc:   "The attempt id: the turn id. Another shape gets 404.",
 		tag:     "Runners",
 		summary: "Renew a lease",
-		doc:     "Renew the attempt's 30-second lease. Send it every 10 seconds. cancel in the reply says the job was asked to stop.",
+		doc:     "Renew the attempt's 30-second lease. Send it every 2 seconds. cancel in the reply says the job was asked to stop.",
 		body:    jobs.AttemptCall{},
 		replies: []reply{ok(200, jobs.AttemptBeat{}, "Renewed."), badRequest, noAttempt, staleReply, storeFailed},
 		self:    true, serve: jobsRoute},
 	{method: "POST", path: "/api/v0/attempts/{id}/events", op: "addAttemptEvents",
-		idDoc:   "The attempt id. Another shape gets 404.",
+		idDoc:   "The attempt id: the turn id. Another shape gets 404.",
 		tag:     "Runners",
 		summary: "Send events",
 		doc:     "A batch of the attempt's events, numbered from offset. A batch sent again stores nothing new.",
@@ -161,7 +162,7 @@ var jobRoutes = []route{
 		replies: []reply{ok(200, jobs.EventBatchAck{}, "Stored."), badRequest, noAttempt, staleReply, storeFailed},
 		self:    true, serve: jobsRoute},
 	{method: "POST", path: "/api/v0/attempts/{id}/finish", op: "finishAttempt",
-		idDoc:   "The attempt id. Another shape gets 404.",
+		idDoc:   "The attempt id: the turn id. Another shape gets 404.",
 		tag:     "Runners",
 		summary: "Finish an attempt",
 		doc:     "End the attempt and its job: finished, failed or cancelled, with the result. The same finish again gets the same answer.",

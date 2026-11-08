@@ -117,7 +117,8 @@ curl -s -H "Authorization: Bearer $TOKEN" "$B/api/v0/sessions/abc/events?store=s
 
 ### POST /api/v0/turns
 
-Start a turn. Without `session`: an agent (`claude` or `codex`) with a prompt in a folder, in a new
+Start a turn. Every turn runs as a job: this makes a turn job and answers once a runner has started
+its turn (the reply also names the `job`). Without `session`: an agent (`claude` or `codex`) with a prompt in a folder, in a new
 session. With `session`: the next turn of a session the snapshot marks `resumable`, in its own agent
 and folder (send neither, or the session's own; a different one is refused with 400). Answers 202
 as soon as it starts, with the session `id` and the new `turn` id. Every event of the turn carries
@@ -126,10 +127,11 @@ is false unless true. True gives claude Read, Grep and Glob only, and codex `--s
 False leaves claude its own tools and settings, and gives codex `--sandbox workspace-write` with
 network on (`-c sandbox_workspace_write.network_access=true`): it can edit the folder and reach the
 network, so it can call this API with its turn token. Read-only codex has no writes and no network. 404 for an unknown session, 409 when a turn is already running or the session
-cannot be continued. At most 4 turns running at once (429), or the number `agentbus up -max-runs <n>` sets.
+cannot be continued. At most 4 turns running at once, or the number `agentbus up -max-runs <n>` sets;
+a turn no runner starts within 30 seconds answers 202 with `"queued":true`, its `job` and session `id`, and no `turn`: it runs later.
 `idempotency_key` (optional, 1 to 128 of `A-Za-z0-9._:-`) makes a retry safe: the same key with
 the same fields answers 202 with the same turn and `"existing":true`, and starts nothing; the same
-key with other fields gets 409. A request that started nothing (400, 429) stores no key. There is no `/api/v0/runs`. An agent
+key with other fields gets 409. The key is the turn job's key; a request refused with 400 before it is queued uses none. There is no `/api/v0/runs`. An agent
 whose program is not on the service's PATH gets 400 and nothing is stored: `agent claude cannot
 start: the program claude is not on the service's PATH. Install Claude Code and run claude once to
 sign in, then try again. If it is installed, start agentbus from a shell where claude runs.`
@@ -199,14 +201,14 @@ curl -s -H "Authorization: Bearer $TOKEN" "$B/api/v0/turns/t_91ee…"
 
 ### POST /api/v0/turns/{id}/stop
 
-Stop a running turn. Its agent and every process it started end, as when the service stops:
+Stop a running turn: this cancels its job, and the runner stops the turn within 2 seconds. Its agent and every process it started end, as when the service stops:
 SIGTERM to the whole tree, then SIGKILL after 5 seconds to what still runs. The reply is 202
 `{"id":"<session>","turn":"<turn>"}` at once; the turn's `session.closed`, with `stopped: true`,
 comes once the tree has ended, and `GET /api/v0/turns` then shows `stopped: true`. The session's
 next turn continues after it, and the model is told the person stopped it (`recovered_reason`
 ends with `the person stopped this turn`). A second stop while it is stopping gets 202 again and
-sends nothing more. 409 when the turn is not running (it ended, or this service did not start it),
-404 when no event carries the turn id. The main token or the turns token: a turn token gets 403. No body.
+sends nothing more. 409 when the turn is not running (its job ended, or it is not a job of this service),
+404 when no job or event carries the turn id. The main token or the turns token: a turn token gets 403. No body.
 
 ```sh
 curl -s -X POST -H "Authorization: Bearer $TOKEN" "$B/api/v0/turns/t_91ee…/stop"
@@ -283,6 +285,27 @@ Which build of AgentBus this service is: what `agentbus version` prints. Main to
 ```sh
 curl -s -H "Authorization: Bearer $TOKEN" $B/api/v0/version
 # {"version":"0.1.0","commit":"5fea80b5…","modified":false}
+```
+
+### Jobs: POST /api/v0/jobs, GET /api/v0/jobs, POST /api/v0/jobs/{id}/review
+
+A job is a requested turn, of kind `turn` or `review`. A runner takes it and runs it; its attempt
+is its turn (the attempt id is the turn id, and `turn_started` says the turn started). A session's
+first turn job names `agent` and `folder`, or `repo` and `base` for a git worktree of its own; a
+later one names `session` only and waits for the one before it. Each job's `result` lists the files
+it changed. A review job runs read-only in the reviewed job's workspace, in a session of its own,
+and ends with `verdict` (`pass`, `fail` or `unknown`) and `findings`; any P1 makes it `fail`.
+`POST /api/v0/jobs/{id}/cancel` stops one. `GET /api/v0/workspaces` lists the sessions'
+workspaces, and `POST /api/v0/workspaces/{id}/close` closes one, which removes a worktree. All take
+the main token. `/api/v0/runners` and `/api/v0/attempts/{id}/{start,heartbeat,events,finish}` are
+the runner protocol: runners only.
+
+```sh
+curl -s $B/api/v0/jobs -H "Authorization: Bearer $TOKEN" \
+  -d '{"kind":"turn","spec":{"agent":"claude","repo":"/path/to/repo","base":"main","prompt":"Add a test.","model":"haiku"}}'
+# {"id":"job_…","kind":"turn","state":"queued","session":"6f1c…",…}
+curl -s $B/api/v0/jobs/job_…/review -H "Authorization: Bearer $TOKEN" -d '{"agent":"claude","model":"sonnet"}'
+# {"id":"job_…","kind":"review","state":"queued","verdict":null,…}
 ```
 
 ### GET /api/v0/openapi.json

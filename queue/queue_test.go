@@ -437,6 +437,7 @@ func TestSessionAffinityAndClose(t *testing.T) {
 	q, _ := open(t)
 	a, b := runner(t, q, 2), runner(t, q, 2)
 	first, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Agent: "claude", Repo: "/r", Base: "main", Prompt: "one"}, Links{})
+	s1 := first.Session // the session the queue named for the first job
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -448,11 +449,11 @@ func TestSessionAffinityAndClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	ws := &Workspace{Kind: WorkspaceWorktree, Folder: "/w/job_1", Repo: "/r", Base: "main"}
-	done, err := q.End(a.ID, att.ID, 1, Finish{Status: Finished, Result: json.RawMessage(`{"session":"s1"}`), Session: "s1", Workspace: ws})
+	done, err := q.End(a.ID, att.ID, 1, Finish{Status: Finished, Session: s1, Workspace: ws})
 	if err != nil || done.Workspace == nil || done.Workspace.Runner != a.ID || done.Workspace.Folder != "/w/job_1" {
 		t.Fatalf("first: %+v %v", done.Workspace, err)
 	}
-	next, _, _ := q.Create(DefaultTeam, KindTurn, "", Spec{Session: "s1", Prompt: "two"}, Links{})
+	next, _, _ := q.Create(DefaultTeam, KindTurn, "", Spec{Session: s1, Prompt: "two"}, Links{})
 	if _, _, ok, _, _ := q.Take(b.ID, lease); ok {
 		t.Fatal("another runner took the session's job")
 	}
@@ -460,38 +461,38 @@ func TestSessionAffinityAndClose(t *testing.T) {
 	if err != nil || !ok || j.ID != next.ID || j.Workspace == nil || j.Workspace.Folder != "/w/job_1" {
 		t.Fatalf("the session's runner: %+v %v %v", j.Workspace, ok, err)
 	}
-	if _, err := q.CloseSession(DefaultTeam, "s1"); !errors.Is(err, ErrSessionBusy) {
+	if _, err := q.CloseSession(DefaultTeam, s1); !errors.Is(err, ErrSessionBusy) {
 		t.Fatalf("close while a job is open: %v", err)
 	}
 	if _, _, err := q.Start(a.ID, att2.ID, 1, lease); err != nil {
 		t.Fatal(err)
 	}
 	// A later job's finish naming the session changes nothing.
-	if _, err := q.End(a.ID, att2.ID, 1, Finish{Status: Finished, Session: "s1",
+	if _, err := q.End(a.ID, att2.ID, 1, Finish{Status: Finished, Session: s1,
 		Workspace: &Workspace{Kind: WorkspaceFolder, Folder: "/elsewhere"}}); err != nil {
 		t.Fatal(err)
 	}
-	w, err := q.CloseSession(DefaultTeam, "s1")
+	w, err := q.CloseSession(DefaultTeam, s1)
 	if err != nil || w.Closed == nil || w.Folder != "/w/job_1" {
 		t.Fatalf("close: %+v %v", w, err)
 	}
-	if _, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: "s1", Prompt: "three"}, Links{}); !errors.Is(err, ErrSessionClosed) {
+	if _, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: s1, Prompt: "three"}, Links{}); !errors.Is(err, ErrSessionClosed) {
 		t.Fatalf("a job for a closed session: %v", err)
 	}
 	if _, _, _, c, _ := q.Take(b.ID, lease); c != nil {
 		t.Fatal("another runner got the cleanup")
 	}
 	_, _, _, c, err := q.Take(a.ID, lease)
-	if err != nil || c == nil || c.Session != "s1" || c.Folder != "/w/job_1" {
+	if err != nil || c == nil || c.Session != s1 || c.Folder != "/w/job_1" {
 		t.Fatalf("cleanup: %+v %v", c, err)
 	}
-	if err := q.Removed(b.ID, "s1", ""); !errors.Is(err, ErrNotFound) {
+	if err := q.Removed(b.ID, s1, ""); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("removed by another runner: %v", err)
 	}
-	if err := q.Removed(a.ID, "s1", "busy"); err != nil {
+	if err := q.Removed(a.ID, s1, "busy"); err != nil {
 		t.Fatal(err)
 	}
-	if err := q.Removed(a.ID, "s1", ""); err != nil {
+	if err := q.Removed(a.ID, s1, ""); err != nil {
 		t.Fatalf("removed again: %v", err)
 	}
 	if _, _, _, c, _ := q.Take(a.ID, lease); c != nil {
@@ -501,7 +502,7 @@ func TestSessionAffinityAndClose(t *testing.T) {
 	if len(list) != 1 || list[0].Removed == nil || list[0].RemovalError != "busy" {
 		t.Fatalf("sessions: %+v", list)
 	}
-	if _, err := q.CloseSession("team_other", "s1"); !errors.Is(err, ErrNotFound) {
+	if _, err := q.CloseSession("team_other", s1); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("another team's close: %v", err)
 	}
 }

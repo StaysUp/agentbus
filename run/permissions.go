@@ -1,4 +1,4 @@
-package api
+package run
 
 // permissions.toml, in the data folder, says what a turn may do without a
 // person to ask: folders it may read beyond its own, commands it may run, and
@@ -51,12 +51,12 @@ type Permissions struct {
 
 // permissions reads the service's permissions.toml for one turn, with ~ as
 // the service's home folder.
-func (a *API) permissions() (Permissions, error) {
-	if a.cfg.Permissions == "" {
+func (e *Engine) permissions() (Permissions, error) {
+	if e.cfg.Permissions == "" {
 		return Permissions{}, nil
 	}
 	home, _ := os.UserHomeDir()
-	return loadPermissions(a.cfg.Permissions, home)
+	return loadPermissions(e.cfg.Permissions, home)
 }
 
 // loadPermissions reads the file at path, with ~ in a folder read as home.

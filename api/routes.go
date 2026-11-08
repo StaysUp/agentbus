@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -170,12 +171,15 @@ var routes = append([]route{
 			"Without session, agent, folder and prompt are required and the turn opens a new session. " +
 			"With session, prompt is required and the turn continues that session in its own agent and folder; " +
 			"an agent or folder sent that differs from the session's is refused with 400. " +
-			"The turn's turn.started, with the prompt, is stored before the reply.",
+			"The turn's turn.started, with the prompt, is stored before the reply.\n\n" +
+			"Every turn runs as a job: this makes a turn job and answers once a runner has started its turn. " +
+			"The turn id is the id of the job's attempt. A turn no runner starts within 30 seconds answers 202 with queued true, " +
+			"its job and its session, and no turn: the job runs when a runner is free.",
 		body: TurnRequest{},
-		replies: []reply{ok(202, Started{}, "The agent has started."), turnRefused,
-			fail(404, "Starting turns is turned off in this service, or the session sent has no events."),
-			fail(409, "A turn is already running in the session sent, or it cannot be continued from here."),
-			tooMany, turnFailed, stopping},
+		replies: []reply{ok(202, Started{}, "The agent has started, or the turn's job is queued."), turnRefused,
+			fail(404, "This service keeps no job queue, or the session sent has no events."),
+			fail(409, "A turn is already running in the session sent, it cannot be continued from here, or the idempotency key names another turn."),
+			fail(http.StatusTooManyRequests, "Too many jobs are waiting; wait for some to end."), turnFailed, stopping},
 		turns: true,
 		serve: plain((*API).run)},
 	{method: "GET", path: "/api/v0/turns", op: "listTurns",
@@ -224,13 +228,14 @@ var routes = append([]route{
 		tag:     "Turns",
 		summary: "Stop a turn",
 		doc: "Stop a running turn: its agent and every process it started end, as when the service stops.\n\n" +
-			"The service sends SIGTERM to the turn's whole process tree, then SIGKILL after 5 seconds to what still runs. " +
+			"A stop cancels the turn's job; its runner hears it within 2 seconds. " +
+			"The runner sends SIGTERM to the turn's whole process tree, then SIGKILL after 5 seconds to what still runs. " +
 			"The reply comes at once; the turn's session.closed, with stopped true, comes once the tree has ended. " +
 			"The session's next turn continues after it, and the model is told that the person stopped it. " +
 			"A second stop while it is stopping gets 202 again and sends nothing more. Takes the main token or the turns token; a turn token gets 403. No body is read.",
 		replies: []reply{ok(202, Stopping{}, "The turn is stopping."),
-			fail(404, "Starting turns is turned off in this service, or no event carries this turn id."),
-			fail(409, "The turn is not running: it has ended, or this service did not start it."),
+			fail(404, "This service keeps no job queue, or no job or event carries this turn id."),
+			fail(409, "The turn is not running: its job has ended, or it is not a job of this service."),
 			storeFailed},
 		turns: true,
 		serve: (*API).stopTurn},
@@ -304,7 +309,7 @@ const turnsRefused = "the turns token may only start, stop and read turns; this 
 // route serves a request that has passed the Host, CORS and token checks. g is
 // the grant of a turn token, nil for the main token and the turns token;
 // turnsOnly is true for the turns token.
-func (a *API) route(w http.ResponseWriter, r *http.Request, g *grant, turnsOnly bool) {
+func (a *API) route(w http.ResponseWriter, r *http.Request, g *run.Grant, turnsOnly bool) {
 	var allow []string
 	for i := range routes {
 		rt := &routes[i]

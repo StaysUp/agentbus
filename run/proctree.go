@@ -1,4 +1,4 @@
-package api
+package run
 
 import (
 	"errors"
@@ -58,7 +58,7 @@ type proc struct {
 const procPoll = 200 * time.Millisecond
 
 // errNoProcTable: this platform's process table cannot be read.
-var errNoProcTable = errors.New("api: the process table cannot be read here")
+var errNoProcTable = errors.New("run: the process table cannot be read here")
 
 // procTable reads the process table: readProcs, or a stand-in in tests.
 var procTable = readProcs

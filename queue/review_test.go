@@ -121,6 +121,7 @@ func TestReviewJobs(t *testing.T) {
 	q, _ := open(t)
 	a, b := runner(t, q, 4), runner(t, q, 4)
 	author, _, _ := q.Create(DefaultTeam, KindTurn, "", Spec{Agent: "claude", Repo: "/r", Base: "main", Prompt: "Bump the version."}, Links{})
+	s1 := author.Session // the session the queue named for the first job
 	if _, _, err := q.Review(DefaultTeam, author.ID, "claude", "sonnet", "", false); !errors.Is(err, ErrNotReviewable) {
 		t.Fatalf("a queued job: %v", err)
 	}
@@ -128,13 +129,13 @@ func TestReviewJobs(t *testing.T) {
 	if _, _, err := q.Start(a.ID, att.ID, 1, lease); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := q.End(a.ID, att.ID, 1, Finish{Status: Finished, Result: authorResult(), Session: "s1",
+	if _, err := q.End(a.ID, att.ID, 1, Finish{Status: Finished, Result: authorResult(), Session: s1,
 		Workspace: &Workspace{Kind: WorkspaceWorktree, Folder: "/w/job_a", Repo: "/r", Base: "main"}}); err != nil {
 		t.Fatal(err)
 	}
 	rev, created, err := q.Review(DefaultTeam, author.ID, "claude", "sonnet", "rev-1", false)
 	if err != nil || !created || rev.Kind != KindReview || !rev.Spec.ReadOnly || rev.Spec.Folder != "/w/job_a" ||
-		rev.Spec.Session != "" || rev.Session != "s1" || rev.Links.ReviewsJob != author.ID || rev.Verdict != nil ||
+		rev.Spec.Session != "" || rev.Session != s1 || rev.Links.ReviewsJob != author.ID || rev.Verdict != nil ||
 		!strings.Contains(rev.Spec.Prompt, "Bump the version.") || rev.Spec.Model != "sonnet" {
 		t.Fatalf("review: %+v %v %v", rev, created, err)
 	}
@@ -157,7 +158,7 @@ func TestReviewJobs(t *testing.T) {
 		}
 		held[j.ID] = at
 	}
-	if _, err := q.CloseSession(DefaultTeam, "s1"); !errors.Is(err, ErrSessionBusy) {
+	if _, err := q.CloseSession(DefaultTeam, s1); !errors.Is(err, ErrSessionBusy) {
 		t.Fatalf("close while reviews run: %v", err)
 	}
 	end := func(id string, f Finish) Job {
@@ -198,15 +199,15 @@ func TestReviewJobs(t *testing.T) {
 		want int
 	}{
 		{Filter{Reviews: author.ID}, 3},
-		{Filter{Session: "s1"}, 4},
-		{Filter{Session: "s1", Kind: KindTurn}, 1},
+		{Filter{Session: s1}, 4},
+		{Filter{Session: s1, Kind: KindTurn}, 1},
 		{Filter{Kind: KindReview, State: Failed}, 1},
 	} {
 		if got, _ := q.List(DefaultTeam, c.f, 10); len(got) != c.want {
 			t.Errorf("%+v: %d, want %d", c.f, len(got), c.want)
 		}
 	}
-	if _, err := q.CloseSession(DefaultTeam, "s1"); err != nil {
+	if _, err := q.CloseSession(DefaultTeam, s1); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := q.Review(DefaultTeam, author.ID, "claude", "", "", false); !errors.Is(err, ErrSessionClosed) {

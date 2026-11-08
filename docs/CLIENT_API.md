@@ -89,7 +89,9 @@ The client API shares the gateway's address: `agentbus up` starts one service on
 
 ### The turns token: start, stop and read turns, nothing else
 
-A job queue or a runner should not hold the main token. It uses the **turns token** instead.
+A program that only starts and follows turns should not hold the main token. It uses the
+**turns token** instead. The runners of the job queue do not use it: they take the enrollment
+token and their own runner tokens ([The runner protocol](#the-runner-protocol)).
 
 - `agentbus up` makes it on first start, beside `token`: the file `turns_token` in the data folder,
   mode 0600, `abq_` and 64 hex characters. It stays the same across restarts.
@@ -148,7 +150,13 @@ already has (`ANTHROPIC_BASE_URL` for claude). `GET /api/v0/turns` without `sess
 
 `$AGENTBUS_HOME` if set, otherwise `$XDG_DATA_HOME/agentbus`, otherwise `~/.local/share/agentbus`.
 It holds `events.db` (the store: events, and since this version every model request's body, see
-`GET /api/v0/calls/<exchange>/context`), `token`, `turns_token` (above), `permissions.toml` (below), `logs/` (below), and `events.db.lock`, which one service holds while it runs, so a second `agentbus up` on the same folder refuses to start. No version in the name.
+`GET /api/v0/calls/<exchange>/context`), `jobs.db` (the job queue: jobs, attempts, runners and
+workspaces, in a file of its own so the record knows nothing about jobs), `token`, `turns_token`
+(above), `enroll_token` (adds a runner, [The runner protocol](#the-runner-protocol)),
+`runner.json` (the built-in runner's id and token, mode 0600), `worktrees/` (one git worktree per
+session that asked for one), `permissions.toml` (below), `logs/` (below), and `events.db.lock`,
+which one service holds while it runs, so a second `agentbus up` on the same folder refuses to
+start. No version in the name.
 
 ### permissions.toml
 
@@ -351,8 +359,10 @@ session filter does.
 
 ### `POST /api/v0/turns` — start a turn
 
-**One endpoint starts every turn.** Without `session`, the turn opens a new
-session; with `session`, it is the next turn of that session (below). A program reads the work from
+**One endpoint starts a turn.** Without `session`, the turn opens a new
+session; with `session`, it is the next turn of that session (below). **Every turn runs as a
+job** ([Jobs](#jobs)): this makes a turn job in the queue and answers once a runner has started
+its turn. The jobs API does the same with more choices: a worktree, a review, a cancel. A program reads the work from
 the event stream, or from `GET /api/v0/turns/<turn>/events`. It was `POST /api/v0/runs` until
 2026-11-05, renamed with no alias: the turn is the one resource, and a run is only the
 process that does it.
@@ -361,12 +371,21 @@ process that does it.
 {"agent":"codex","folder":"/Users/ana/Sites/x","prompt":"Review this diff: …","model":"gpt-5.5","read_only":true,"idempotency_key":"job-42"}
 ```
 
-The reply is **202** `{"id":"abc","turn":"t_5d0c19a2e7b3f481","base_url":"http://127.0.0.1:8787/s/abc/t/t_5d0c19a2e7b3f481"}`,
-sent as soon as the agent has started. `id` is the session, `turn` the new turn. The agent's work
-arrives later, as events of that session, **every one carrying `turn`** (below).
+The reply is **202** `{"id":"abc","turn":"t_5d0c19a2e7b3f481","base_url":"http://127.0.0.1:8787/s/abc/t/t_5d0c19a2e7b3f481","job":"job_1f…"}`,
+sent as soon as the agent has started. `id` is the session, `turn` the new turn, `job` the turn
+job that runs it. The agent's work arrives later, as events of that session, **every one carrying
+`turn`** (below).
 
-- **The run is the turn.** The service makes the turn id, `t_` and 16 random
-  hex characters (the same shape as the gateway's hashed ids), and puts it in the agent's base URL,
+- **The turn is the job's attempt**: `turn` is the attempt's id. The queue names the session when
+  the job is made.
+- **A turn no runner starts within 30 seconds** answers **202** with `"queued":true`, the `job`
+  and the session `id`, and no `turn` or `base_url`. The job stays queued and runs when a runner
+  is free; its turn then shows in the session. A retry with the same `idempotency_key` names the
+  turn once it has started.
+
+- **The run is the turn.** The queue makes the turn id when a runner takes the job: the attempt's
+  id, `t_` and 16 random hex characters (the same shape as the gateway's hashed ids). The runner
+  puts it in the agent's base URL,
   `<service>/s/<session>/t/<turn>`. The gateway reads it from every request on that URL, so each
   model call the agent makes, and every event read from it, carries that turn, however its
   conversation looks: a one-shot agent's whole loop is one turn, even when it compacts mid-turn.
@@ -446,29 +465,31 @@ arrives later, as events of that session, **every one carrying `turn`** (below).
   `session.closed` (with no `exit_code`, and `unsettled: true`) for each: that process can no
   longer report their exit, nor confirm that their calls were stored.
   **The service never watches process ids**: a process id can be reused by an unrelated process.
-- **At most 4 turns running at once**, unless `agentbus up -max-runs <n>` sets another number.
-  One more gets 429.
+- **At most 4 turns running at once**, unless `agentbus up -max-runs <n>` sets another number
+  (1 to 64): it is the built-in runner's capacity. One more waits in the queue.
+- **A turn while the session's last turn job has not ended gets 409** `a turn is already running
+  in this session`. The jobs API queues a next turn instead.
 - **`idempotency_key` makes a retry safe.** It is optional: 1 to 128 characters of `A-Z`, `a-z`,
   `0-9` and `. _ : -`. A client whose request timed out sends the same body again.
-  - The first request with a key stores it on the turn's `turn.started`, as `idempotency_key`, with
-    `request_hash`: the SHA-256 of the request's fields.
+  - It is the turn job's key. The turn's `turn.started` carries it as `idempotency_key`.
   - A later request with the same key and the same fields answers **202** with that turn's `id`,
-    `turn` and `base_url`, plus `"existing":true`. It starts nothing, even after the turn has
-    ended. Requests sent at once with one key wait for each other, so only one turn starts.
+    `turn` and `base_url`, plus `"existing":true`. It makes no job and starts nothing, even after
+    the turn has ended. Requests sent at once with one key make one job.
   - The same key with other fields (`session`, `agent`, `folder`, `prompt`, `model` or
     `read_only`) gets **409**.
-  - A request that started nothing, such as a 400 or a 429, stores no key, so a retry starts the
-    turn. A turn whose `turn.started` was stored but whose agent then would not start keeps the
-    key: a retry names that failed turn.
+  - A request refused before it is queued (a 400 from the checks below) uses no key. A job whose
+    turn the runner could not start keeps it: a retry gets the same refusal.
   - Keys are compared across the whole service, not per token. Use a new key for each new turn.
 - **When the service stops**, it sends each running child SIGTERM, then SIGKILL after 5 seconds,
   and stores each `session.closed` before the store closes. One turn is stopped the same way with
   [`POST /api/v0/turns/<id>/stop`](#post-apiv0turnsidstop--stop-a-turn). A run that started while the service
   was stopping gets 503.
 - **The token never reaches the child**: not in its environment, its arguments or a log.
-- Refused with **400** and fixed wording:
+- Refused with **400** and fixed wording. The first four are checked before anything is queued;
+  the rest by the runner, whose refusal comes back with its status:
   - an agent other than `claude` or `codex`
-  - a folder that is not absolute, not an existing directory, or over 4096 bytes
+  - a folder that is not absolute, or over 4096 bytes; the runner refuses one that is not an
+    existing directory on its machine
   - an empty prompt, one over 256 KiB, or one holding a NUL byte (no argument can carry one)
   - a model that does not match `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`. A model is passed only as the
     value of `--model`, never as a flag of its own.
@@ -737,6 +758,9 @@ Three fields are added to every turn row, here and in the list:
 Stops one running turn, the way the service stops every turn when it shuts down. The reply is
 **202** `{"id":"abc","turn":"t_5d0c19a2e7b3f481"}` (`id` is the session), sent at once.
 
+- **A stop cancels the turn's job.** The runner hears it on its next heartbeat, within 2 seconds,
+  and stops the turn. The job ends `cancelled`.
+
 - **What ends:** the turn's agent and every process it started. The service sends SIGTERM to the
   agent's process group and to every process its tree counts (a tool in a process group or session
   of its own included), then SIGKILL after 5 seconds to whatever still runs. Processes outside the
@@ -755,10 +779,10 @@ Stops one running turn, the way the service stops every turn when it shuts down.
   the stop is on its `session.closed` and in the turn list.
 - **Twice:** a stop while the turn is already stopping gets **202** again and sends nothing more.
   Two stops at once both get 202; the turn is stopped once.
-- **409** when the turn is not running: it has ended (its agent's process has exited, even if its
-  `session.closed` is not stored yet), or this service did not start it (a turn of traffic pointed
-  at the gateway by hand, or one the previous service process started).
-- **404** when no stored event carries the turn id, and when starting turns is turned off.
+- **409** when the turn's job has ended, or the turn is not a job of this service (a turn of
+  traffic pointed at the gateway by hand, or one from before the job queue).
+- **404** when no job and no stored event carries the turn id, and when the service keeps no job
+  queue.
 - **The main token or the turns token.** A turn token gets **403**, its own turn included.
 - No body is read.
 
@@ -944,6 +968,107 @@ for the call's kept reply.
 ### `/api/v0/actions` — reserved
 
 Refusing, holding and starting a review are planned for a later version.
+
+## Jobs
+
+Every turn runs as a job. A job is a requested turn: its `kind` is `turn` or `review`. A runner
+takes it from the queue and runs it as an attempt. **The attempt is the turn**: the attempt id is
+the turn id, `t_` and 16 hex characters, and there is no second id to match. A turn job names its
+session when it is made, so `session` is on the job from the start.
+
+`POST /api/v0/turns` is the short way to start one turn: it makes a turn job and answers with its
+turn. The jobs API is the whole way: worktrees, reviews, cancel, and the list.
+
+- **States:** `queued`, `taken`, `running`, then `finished`, `failed` or `cancelled`. A failed job
+  says why in `reason`: `setup` (the turn did not start; `result.refused` and `result.status` say
+  why), `agent` (the agent exited with a failure), `runner_lost` (its runner stopped answering
+  while the turn ran) or `runner_stopped` (its runner shut down).
+- **A session's turn jobs run one at a time**, in the order they were made. A next turn waits for
+  the one before it. Reviews never wait.
+- **No automatic retry once a job is running.** A lease lost before the turn started puts the job
+  back in the queue; a lease lost while it runs fails it with `runner_lost`.
+- **The job's result** holds how the turn ended (`state`, `exit_code`, `stopped`, `reply`,
+  `model_calls`, `cost_usd`), the session it ran in, and `changes`: every file the job added,
+  modified or deleted in its workspace, untracked and git-ignored files included, each with size
+  and SHA-256. In a git workspace each file also says `tracked`, `untracked` or `ignored`, with the
+  commit HEAD named before and after, and a unified diff of the tracked files.
+
+### Workspaces
+
+- **A session's first job names its workspace.** Either `repo` and `base` (a branch, tag or
+  commit): the runner makes a git worktree of the repo at that base, under `worktrees/` in its data
+  folder, and the turn runs there. Or `folder`, used as it is.
+- **Later jobs name `session` only.** They go to the runner that holds the session's workspace.
+- **A worktree is removed only when its workspace is closed**, never when a job ends:
+  `POST /api/v0/workspaces/<session>/close`. A folder the job named is never removed.
+
+### Reviews
+
+- **Ask for one:** `POST /api/v0/jobs/<id>/review` with `{"agent":"claude","model":"sonnet"}`.
+  `model`, `idempotency_key` and `include_reply` are optional. The reviewed job must be a turn job
+  that has ended, in a workspace that is not closed. Several reviews of one job may run at once.
+- **Where it runs:** read-only, in the reviewed job's workspace, on the runner that holds it, in a
+  session of its own. The reviewer sees the files as the author left them.
+- **Its prompt** is built by the queue and kept in the review job's `spec.prompt`: the author's
+  task, the changed files, the diff, and the content of small untracked text files. It asks for a
+  review that ends with this block:
+
+  ```json
+  {"verdict":"pass","findings":[{"severity":"P2","file":"path/to/file","line":12,"summary":"what is wrong and why"}]}
+  ```
+
+  The author's reply is left out unless `include_reply` is true: a reviewer handed the author's
+  conclusion tends to confirm it.
+- **The verdict** is read from the reviewer's whole last reply when the review finishes: `pass` or
+  `fail` as the reviewer wrote it, with any P1 making it `fail`; `unknown` when the reply has no
+  block of that shape (never a pass); `null` while it runs, and for a review that failed or was
+  cancelled.
+
+### Endpoints
+
+All take the main token. The turns token and turn tokens get 403.
+
+| Call | What it does |
+|---|---|
+| `POST /api/v0/jobs` | Make a job: `kind`, `spec`, and optionally `idempotency_key` and `links`. 201, or 200 for a retry with the same key and fields. Other fields under the key get 409. |
+| `GET /api/v0/jobs?state=&kind=&session=&reviews=&limit=` | Jobs, newest first, with their attempts. `reviews=<job>` keeps the reviews of that job. |
+| `GET /api/v0/jobs/<id>` | One job, with its attempts. |
+| `POST /api/v0/jobs/<id>/review` | Make a review job of this job. 201, or 200 for a retry. 409 when it cannot be reviewed. |
+| `POST /api/v0/jobs/<id>/cancel` | A queued job ends at once. A running one stops on its runner's next heartbeat, within 2 seconds. |
+| `GET /api/v0/attempts/<id>/events` | Every event the runner reported for the attempt. |
+| `GET /api/v0/workspaces` | Each session's workspace: its runner, folder, and closed and removed times. |
+| `POST /api/v0/workspaces/<session>/close` | Close a workspace. 409 while a job of it has not ended. Its runner then removes a worktree it made. |
+
+```sh
+T=$(cat ~/.local/share/agentbus/token)
+curl -s http://127.0.0.1:8787/api/v0/jobs -H "Authorization: Bearer $T" \
+  -d '{"kind":"turn","idempotency_key":"job-1","spec":{"agent":"claude","repo":"'"$PWD"'","base":"main","prompt":"Say hello.","model":"haiku"}}'
+# The next turn of that session, in the same worktree:
+curl -s http://127.0.0.1:8787/api/v0/jobs -H "Authorization: Bearer $T" \
+  -d '{"kind":"turn","spec":{"session":"<session of the first job>","prompt":"Now add a test."}}'
+# A review of the first job:
+curl -s http://127.0.0.1:8787/api/v0/jobs/<job id>/review -H "Authorization: Bearer $T" -d '{"agent":"claude","model":"sonnet"}'
+```
+
+### The runner protocol
+
+A runner pulls work and is never called, so it works behind NAT. These calls take the enrollment
+token (`enroll_token` in the data folder) or the runner's own token, never the main token. The
+cockpit never calls them.
+
+| Call | What it does |
+|---|---|
+| `POST /api/v0/runners` | Enroll with name, labels, capacity and protocol 1. Returns the runner and its token, once. |
+| `POST /api/v0/runners/<id>/take` | Long poll, up to 30 s: a job with its new attempt and lease, or a cleanup. 204 when there is nothing. |
+| `POST /api/v0/runners/<id>/heartbeat` | Idle heartbeat with `capacity`. |
+| `POST /api/v0/runners/<id>/removed` | Report a closed workspace removed, or `error`. |
+| `POST /api/v0/attempts/<id>/start` | Taken to running. `cancel` says the job was stopped. |
+| `POST /api/v0/attempts/<id>/heartbeat` | Renew the 30 s lease. Sent every 2 s. `cancel` says stop. |
+| `POST /api/v0/attempts/<id>/events` | A batch numbered from `offset`. A repeat stores nothing new; a gap gets 409 with `next`. |
+| `POST /api/v0/attempts/<id>/finish` | `status`, `reason`, `result`, `last_seq`. The same finish again gets the same answer. |
+
+Every call after take names its attempt id and number. A call for an attempt that is not current
+gets 409 with `stale: true`, and the runner stops that turn.
 
 ## What changes in the event
 

@@ -34,7 +34,7 @@ entry, and run the tests: `api/docs_test.go` checks that `/docs` serves the file
 ### BurntSushi/toml v1.5.0
 
 - What: reads `permissions.toml` in the data folder at the start of every turn
-  (`api/permissions.go`), with the line of a parse error for the reply.
+  (`run/permissions.go`), with the line of a parse error for the reply.
 - Source: https://github.com/BurntSushi/toml
 - License: MIT, Copyright (c) 2013 TOML authors.
 

@@ -18,8 +18,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/staysup/agentbus/api"
 	"github.com/staysup/agentbus/event"
+	engine "github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -393,7 +393,7 @@ func TestStoredReplyCarriesCost(t *testing.T) {
 // permissions.toml is made once, mode 0600, with the starter's empty lists,
 // and an existing file is never written again.
 func TestMakePermissions(t *testing.T) {
-	path := filepath.Join(t.TempDir(), api.PermissionsFile)
+	path := filepath.Join(t.TempDir(), engine.PermissionsFile)
 	if err := makePermissions(path); err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +404,7 @@ func TestMakePermissions(t *testing.T) {
 	if info.Mode().Perm() != 0o600 {
 		t.Errorf("mode %v, want 0600", info.Mode().Perm())
 	}
-	if b, _ := os.ReadFile(path); string(b) != api.PermissionsStarter {
+	if b, _ := os.ReadFile(path); string(b) != engine.PermissionsStarter {
 		t.Errorf("starter %q", b)
 	}
 	const mine = "allow = [\"go test\"]\n"

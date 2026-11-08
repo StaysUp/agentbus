@@ -25,21 +25,10 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/jobs"
+	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 )
-
-// ReplayPlan is how a new claude turn continues its session by own replay.
-type ReplayPlan struct {
-	// Turn is the earlier turn whose history is replayed: the session's
-	// newest. Empty when the session cannot be continued by replay.
-	Turn string
-	// Failed, with Turn, says how that turn ended without finishing, as the
-	// history's note tells the model. Empty when it finished.
-	Failed string
-	// Refused, without Turn, says why the session cannot be continued by
-	// replay, naming the turn.
-	Refused string
-}
 
 // Config is what the API needs.
 type Config struct {
@@ -77,32 +66,16 @@ type Config struct {
 	// Now is the clock. Nil means time.Now.
 	Now func() time.Time
 
-	// Wire says how a run reaches each agent's binary. Nil turns runs off:
-	// POST /api/v0/turns gets 404.
-	Wire Wire
-	// ReplayBase turns on own replay for claude and codex: it plans how a
-	// new turn of agent's session continues it (replay.Replayer.Base). Nil
-	// turns own replay off, and both continue by the vendor's resume
-	// (Continuity).
-	ReplayBase func(agent, session string) (ReplayPlan, error)
-	// Settle, when set, is called after a turn's child exits and before its
-	// session.closed is stored. It returns once the gateway has written every
-	// model call of the turn (gateway.Settle), so a reader that sees the
-	// session closed sees all of the turn's calls: own replay picks the
-	// turn's last reply from them. It reports false when that could not be
-	// confirmed; session.closed then carries unsettled, and own replay will
-	// not continue from that turn. Nil stores session.closed at once.
-	Settle func(session, turn string) bool
-	// MaxRuns bounds the turns running at once, service-wide (agentbus up
-	// -max-runs). Past it POST /api/v0/turns answers 429. Zero means
-	// DefaultMaxRuns.
-	MaxRuns int
-	// RunGrace is how long StopRuns waits after SIGTERM before SIGKILL. Zero
-	// means 5 seconds.
-	RunGrace time.Duration
-	// Permissions is the path of permissions.toml (permissions.go), read at
-	// the start of every turn. Empty gives every turn empty lists.
-	Permissions string
+	// Queue is the job queue: POST /api/v0/turns makes a turn job in it,
+	// and a stop cancels the job. Nil turns starting turns off: POST
+	// /api/v0/turns answers 404.
+	Queue *queue.Queue
+	// TurnWait bounds how long POST /api/v0/turns waits for a runner to start
+	// the turn. Zero means DefaultTurnWait.
+	TurnWait time.Duration
+	// Engine is this process's own turn engine, when it runs turns: its live
+	// turns' own tokens are accepted here. Nil accepts none.
+	Engine *run.Engine
 
 	// LookPath finds an agent's binary for GET /api/v0/agents, the same
 	// lookup runs use. Environ is the environment its --version and status
@@ -110,19 +83,9 @@ type Config struct {
 	LookPath func(string) (string, error)
 	Environ  func() []string
 
-	// Logf writes one line to the service log: a run's child starting and
-	// exiting. Nil writes nothing. It is never
-	// given a token, a header, a body, a prompt or the child's output.
-	Logf func(format string, args ...any)
 	// Jobs serves the job queue's routes (api/jobs.go): package jobs. Nil
 	// answers them 404.
 	Jobs http.Handler
-
-	// RunLog keeps a run's child output, once per child exit: a header line
-	// and the last RunOutputMax bytes of its stdout and stderr together. Nil
-	// discards it. That output is the agent's own and may hold the person's
-	// data, so it goes only here: never into an event, a reply or Logf.
-	RunLog func(session string, data []byte)
 }
 
 // API is the client API's http.Handler.
@@ -137,29 +100,13 @@ type API struct {
 	// streams admits at most MaxStreams at once.
 	streams chan struct{}
 
-	runs runs
-
-	// keys serialises turn starts that share an idempotency key (runs.go).
-	keys keyLocks
-
-	// turnTokens are the live turns' tokens (tokens.go).
-	turnTokens turnTokens
-
-	// turnRules are the live turns' forbid entries, for the gateway (guard.go).
-	turnRules turnRules
-
 	agents agentCache
 
 	// spec is the OpenAPI description, built from the route table.
 	spec []byte
 }
 
-// New returns the API. It closes every run's child the service's previous
-// process left open: that process can no longer report their exit.
-// SetSettle sets Config.Settle, for a gateway made after the API (it needs
-// the API's TurnSink). Call it before serving.
-func (a *API) SetSettle(f func(session, turn string) bool) { a.cfg.Settle = f }
-
+// New returns the API.
 func New(cfg Config) (*API, error) {
 	if cfg.Store == nil {
 		return nil, errors.New("api: no store")
@@ -179,18 +126,6 @@ func New(cfg Config) (*API, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	if cfg.RunGrace == 0 {
-		cfg.RunGrace = 5 * time.Second
-	}
-	if cfg.Logf == nil {
-		cfg.Logf = func(string, ...any) {}
-	}
-	if cfg.MaxRuns == 0 {
-		cfg.MaxRuns = DefaultMaxRuns
-	}
-	if cfg.MaxRuns < 0 {
-		return nil, errors.New("api: MaxRuns below zero")
-	}
 	desc, err := spec()
 	if err != nil {
 		return nil, err
@@ -198,15 +133,11 @@ func New(cfg Config) (*API, error) {
 	a := &API{cfg: cfg, token: sha256.Sum256([]byte(cfg.Token)), spec: desc,
 		hosts:   [3]string{"127.0.0.1:" + cfg.Port, "localhost:" + cfg.Port, "[::1]:" + cfg.Port},
 		streams: make(chan struct{}, MaxStreams)}
-	a.runs.max = cfg.MaxRuns
 	if cfg.TurnsToken != "" {
 		if cfg.TurnsToken == cfg.Token {
 			return nil, errors.New("api: the turns token is the main token")
 		}
 		a.turnsToken, a.hasTurnsToken = sha256.Sum256([]byte(cfg.TurnsToken)), true
-	}
-	if _, err := cfg.Store.CloseStaleHolds(cfg.Now().UTC(), newEventID); err != nil {
-		return nil, err
 	}
 	return a, nil
 }
@@ -246,8 +177,8 @@ func bodyLimit(r *http.Request) int64 {
 	return MaxBody
 }
 
-// MaxFolder bounds a run's folder, in bytes.
-const MaxFolder = 4096
+// MaxFolder bounds a turn's folder, in bytes.
+const MaxFolder = run.MaxFolder
 
 // MaxStreams bounds the event streams open at once, service-wide. Each holds a
 // store subscription, a timer and a connection; past the bound a stream gets 429.
@@ -341,7 +272,7 @@ const (
 
 // authorized checks the bearer token: the main token, the turns token, or a
 // live turn token and what it may read.
-func (a *API) authorized(r *http.Request) (who int, g grant, ok bool) {
+func (a *API) authorized(r *http.Request) (who int, g run.Grant, ok bool) {
 	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok {
 		return 0, g, false
@@ -354,7 +285,10 @@ func (a *API) authorized(r *http.Request) (who int, g grant, ok bool) {
 	if a.hasTurnsToken && subtle.ConstantTimeCompare(sum[:], a.turnsToken[:]) == 1 {
 		return byTurns, g, true
 	}
-	g, ok = a.turnTokens.lookup(got)
+	if a.cfg.Engine == nil {
+		return byTurn, g, false
+	}
+	g, ok = a.cfg.Engine.TokenGrant(got)
 	return byTurn, g, ok
 }
 
