@@ -1076,7 +1076,11 @@ func ExitCode(ps *os.ProcessState, err error) int {
 // arrive after its child exited, or after a restart, is still named. A
 // session no turn started, such as one pointed at the gateway by hand, has no
 // session.opened and keeps them empty.
-func (e *Engine) TurnSink(next event.Sink) event.Sink { return turnSink{e.cfg.Store, next} }
+func (e *Engine) TurnSink(next event.Sink) event.Sink { return TurnSink(e.cfg.Store, next) }
+
+// TurnSink is the engine's TurnSink for a service that runs no turns itself,
+// such as a server: the record's sessions are named the same way.
+func TurnSink(st *store.Store, next event.Sink) event.Sink { return turnSink{st, next} }
 
 type turnSink struct {
 	st   *store.Store

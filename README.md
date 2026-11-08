@@ -217,6 +217,39 @@ In the cockpit: start a session with New worktree, open the turn, pick a reviewe
 and press Review. If it fails, press Fix, then Send, then Review again. With curl, see
 [Jobs](docs/CLIENT_API.md#jobs).
 
+## Modes
+
+One program, three ways to run it:
+
+| Command | What runs | For |
+|---|---|---|
+| `agentbus up` | The API, the job queue, the record, the gateway and a runner, in one process | One person on one machine. The default. |
+| `agentbus server` | The API, the job queue, the record and the gateway, with no runner | A central queue that runners on other machines pull from. |
+| `agentbus runner -server <url>` | A runner, with its own gateway and record | Any machine that should run jobs for a server. |
+
+A runner pulls work and is never called, so it works behind NAT. It always talks to the queue
+through the runner protocol over HTTP, the built-in one in `agentbus up` included.
+
+```sh
+# On the central machine:
+agentbus server -listen 0.0.0.0
+# On each runner machine, with the server's enroll_token file copied over (mode 0600):
+agentbus runner -server http://central:8787 -enroll-token-file ./enroll_token
+```
+
+The runner's data folder is its own (`AGENTBUS_HOME`, as for `agentbus up`): a runner on the same
+machine as its server needs another one. Its own service listens on a free loopback port, for its
+agents only.
+
+Where agents send model calls is the one setting per mode, `-gateway` on `agentbus runner`:
+
+- `local` (the default): the runner's own gateway, on its machine. The agent signs in as the person
+  on that machine, and the turn's record stays there. The job's result, with the reply, the cost
+  and the changed files, goes to the server.
+- `server`: the server's gateway, so the record is central and runners hold no secrets. **Not yet
+  built**: it needs API keys added by the gateway, and the server's gateway to take calls from
+  other machines.
+
 ## Docs
 
 The running service describes its own API. None of these need the token or the internet:

@@ -10,6 +10,13 @@ the OpenAPI 3.1 description at `GET /api/v0/openapi.json`, and an interactive pa
 client SDKs: call the endpoints directly, or generate a client from the description. The contract in
 words is `docs/CLIENT_API.md` in the repository.
 
+## Modes
+
+`agentbus up` runs everything in one process: the API, the job queue, the record, the gateway and a
+runner. `agentbus server` is the same with no runner. `agentbus runner -server <url>` takes jobs
+from a server and runs them on its machine, with its own record and gateway; its own API has no
+job routes. This file describes the API of `up` and `server`.
+
 ## Address and token
 
 - The service listens on `http://127.0.0.1:8787` by default. `agentbus up -listen 0.0.0.0`

@@ -1,9 +1,11 @@
 // Command agentbus runs the framework on this machine.
 //
 //	agentbus up [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-max-runs 4]
+//	agentbus server [-listen 127.0.0.1:8787]
+//	agentbus runner -server URL
 //	agentbus version
 //
-// up starts one service on one address, 127.0.0.1:8787 unless -listen says
+// modes.go says what each mode runs. up starts one service on one address, 127.0.0.1:8787 unless -listen says
 // another, such as 0.0.0.0:8787 in a container. /api and /s/<session>/api go
 // to the client API, which needs the token in the data folder. Vendor paths go
 // to that vendor's gateway, which forwards them and stores their events:
@@ -18,7 +20,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -67,26 +68,8 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		fmt.Fprintln(stdout, versionLine(debug.ReadBuildInfo()))
 		return 0
 	}
-	if len(args) == 0 || args[0] != "up" {
-		fmt.Fprintln(stderr, "usage: agentbus up [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false] [-max-runs 4]")
-		fmt.Fprintln(stderr, "       agentbus version")
-		return 2
-	}
-	fl := flag.NewFlagSet("up", flag.ContinueOnError)
-	fl.SetOutput(stderr)
-	listen := fl.String("listen", "127.0.0.1:8787", "address to listen on: an IP, with or without a port (8787 if none); 0.0.0.0 is reachable from the network, with the token guarding the API")
-	origin := fl.String("origin", "", "lock the API to this one browser origin, such as http://localhost:5173; without it any origin may call the API, and the token still guards every call")
-	replayOn := fl.Bool("replay", true, "continue claude and codex sessions by own replay (the gateway sends the earlier turn's history); false uses the vendor's resume")
-	maxRuns := fl.Int("max-runs", engine.DefaultMaxRuns, "how many turns the built-in runner runs at once, 1 to 64; more wait in the queue")
-	if err := fl.Parse(args[1:]); err != nil {
-		return 2
-	}
-	if *maxRuns < 1 || *maxRuns > jobs.MaxCapacity {
-		fmt.Fprintln(stderr, "agentbus up: -max-runs must be 1 to 64")
-		return 2
-	}
-	if fl.NArg() > 0 {
-		fmt.Fprintf(stderr, "agentbus up: unexpected argument %q\n", fl.Arg(0))
+	if len(args) == 0 {
+		fmt.Fprintln(stderr, usage)
 		return 2
 	}
 
@@ -100,13 +83,20 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		own.Print(err)
 		return 1
 	}
-	up, _ := url.Parse(upstream)
-	cg, _ := url.Parse(chatgpt)
-	svc, err := start(config{listen: *listen, origin: *origin, home: home, upstream: up, chatgpt: cg, logf: own.Printf,
-		noReplay: !*replayOn, maxRuns: *maxRuns})
+	c, ok := parse(args, home, stderr)
+	if !ok {
+		return 2
+	}
+	c.home, c.logf = home, own.Printf
+	c.upstream, _ = url.Parse(upstream)
+	c.chatgpt, _ = url.Parse(chatgpt)
+	svc, err := start(c)
 	if err != nil {
 		own.Print(err)
 		return 1
+	}
+	if c.mode == modeRunner {
+		own.Printf("runner taking jobs from %s; its agents' gateway on http://%s, data folder %s", c.server, svc.addr, home)
 	}
 	if svc.loopback {
 		own.Printf("listening on http://%s, data folder %s", svc.addr, home)
@@ -151,6 +141,12 @@ type config struct {
 	// For tests: how often a runner heartbeats, and how long POST
 	// /api/v0/turns waits for a turn to start. Zero means the defaults.
 	heartbeat, turnWait time.Duration
+
+	// mode is up (the zero value), server or runner (modes.go).
+	mode string
+	// A runner's: the server's URL, its enroll_token file, the runner's
+	// name, and where its agents send model calls.
+	server, enrollFile, runnerName, gatewayMode string
 }
 
 type service struct {
@@ -208,11 +204,19 @@ func start(c config) (*service, error) {
 	if err := makePermissions(permissions); err != nil {
 		return nil, err
 	}
-	// The enrollment token adds a runner. It stays in the data folder: the
-	// built-in runner reads it, and a runner on another machine is given it.
-	enrollToken, err := loadToken(filepath.Join(c.home, "enroll_token"), enrollTokenPrefix)
-	if err != nil {
-		return nil, err
+	// The enrollment token adds a runner. A service with a queue keeps it in
+	// its data folder: the built-in runner reads it, and a runner on
+	// another machine is given a copy. A runner reads the server's copy.
+	var enrollToken string
+	switch {
+	case c.hasQueue():
+		if enrollToken, err = loadToken(filepath.Join(c.home, "enroll_token"), enrollTokenPrefix); err != nil {
+			return nil, err
+		}
+	case c.mode == modeRunner:
+		if enrollToken, err = readTokenFile(c.enrollFile); err != nil {
+			return nil, err
+		}
 	}
 	st, err := store.Open(filepath.Join(c.home, "events.db"))
 	if err != nil {
@@ -221,16 +225,25 @@ func start(c config) (*service, error) {
 	// The job queue, in its own file beside the record: the record knows
 	// nothing about jobs. Opened after the store, which refuses a second
 	// service on this folder.
-	q, err := queue.Open(filepath.Join(c.home, "jobs.db"), nil)
-	if err != nil {
-		st.Close()
-		return nil, err
+	var q *queue.Queue
+	var jobsAPI http.Handler // nil, not a nil *jobs.Server, without a queue
+	closeQ := func() {
+		if q != nil {
+			q.Close()
+		}
 	}
-	js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollToken, Heartbeat: c.heartbeat})
-	if err != nil {
-		q.Close()
-		st.Close()
-		return nil, err
+	if c.hasQueue() {
+		if q, err = queue.Open(filepath.Join(c.home, "jobs.db"), nil); err != nil {
+			st.Close()
+			return nil, err
+		}
+		js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollToken, Heartbeat: c.heartbeat})
+		if err != nil {
+			closeQ()
+			st.Close()
+			return nil, err
+		}
+		jobsAPI = js
 	}
 	// The logs are opened after the store, which refuses a second service on
 	// this folder, so two services never write one log.
@@ -238,18 +251,18 @@ func start(c config) (*service, error) {
 	runLogs := filepath.Join(logs, "runs")
 	if err := logfile.Dir(logs); err != nil {
 		st.Close()
-		q.Close()
+		closeQ()
 		return nil, fmt.Errorf("log folder %s could not be made: %w", logs, err)
 	}
 	if err := logfile.Dir(runLogs); err != nil {
 		st.Close()
-		q.Close()
+		closeQ()
 		return nil, fmt.Errorf("log folder %s could not be made: %w", runLogs, err)
 	}
 	svcLog, err := logfile.Open(filepath.Join(logs, "service.log"), c.logMax, nil)
 	if err != nil {
 		st.Close()
-		q.Close()
+		closeQ()
 		return nil, fmt.Errorf("the service log could not be opened: %w", err)
 	}
 	st.OnError = func(err error) {
@@ -260,7 +273,7 @@ func start(c config) (*service, error) {
 	if err != nil {
 		svcLog.Close()
 		st.Close()
-		q.Close()
+		closeQ()
 		return nil, fmt.Errorf("-listen %s: %w", c.listen, err)
 	}
 	addr := ln.Addr().String()
@@ -298,60 +311,68 @@ func start(c config) (*service, error) {
 		}
 	}
 	baseURL := "http://" + agentAddr(ln.Addr())
-	// The engine starts each turn's agent. Only the built-in runner calls it,
-	// for the jobs it takes from the queue.
-	eng, err := engine.New(engine.Config{Store: st, BaseURL: baseURL, MaxRuns: c.maxRuns, ReplayBase: replayBase,
-		Permissions: permissions, Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace, Logf: svcLog.Printf,
-		RunLog: func(session string, data []byte) {
-			// The session id is the service's own hex, so it is a plain
-			// file name.
-			if err := logfile.AppendTail(filepath.Join(runLogs, session+".log"), data, engine.RunOutputMax); err != nil {
-				svcLog.Printf("runlog.error session=%s", session)
-			}
-		}})
-	if err != nil {
-		ln.Close()
-		svcLog.Close()
-		st.Close()
-		q.Close()
-		return nil, err
+	// The engine starts each turn's agent, on this machine. Only a runner
+	// calls it, for the jobs it takes from the queue: the built-in one of up,
+	// or this process's own in runner mode. A server runs no turns.
+	var eng *engine.Engine
+	if c.hasEngine() {
+		eng, err = engine.New(engine.Config{Store: st, BaseURL: baseURL, MaxRuns: c.maxRuns, ReplayBase: replayBase,
+			Permissions: permissions, Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace, Logf: svcLog.Printf,
+			RunLog: func(session string, data []byte) {
+				// The session id is the service's own hex, so it is a plain
+				// file name.
+				if err := logfile.AppendTail(filepath.Join(runLogs, session+".log"), data, engine.RunOutputMax); err != nil {
+					svcLog.Printf("runlog.error session=%s", session)
+				}
+			}})
+		if err != nil {
+			ln.Close()
+			svcLog.Close()
+			st.Close()
+			closeQ()
+			return nil, err
+		}
 	}
 	a, err := api.New(api.Config{Store: st, Token: token, TurnsToken: turnsToken, Port: port, AnyHost: !loopback,
 		BaseURL: baseURL, Origin: c.origin, LookPath: c.lookPath, Environ: c.environ, Build: build(debug.ReadBuildInfo()),
-		Queue: q, Jobs: js, Engine: eng, TurnWait: c.turnWait})
+		Queue: q, Jobs: jobsAPI, Engine: eng, TurnWait: c.turnWait})
 	if err != nil {
 		ln.Close()
 		svcLog.Close()
 		st.Close()
-		q.Close()
+		closeQ()
 		return nil, err
 	}
 	// Every model.responded is priced, and every turn.started of a run's
 	// session gets the run's agent and folder, before it is stored.
-	sink := cost.Sink{Table: cost.Default(), Next: eng.TurnSink(st)}
+	sink := cost.Sink{Table: cost.Default(), Next: engine.TurnSink(st, st)}
 	anth := gateway.New(c.upstream, anthropic.Adapter{}, sink)
 	oai := gateway.New(c.chatgpt, openai.Adapter{}, sink)
 	// A turn's session.closed waits for the gateway to write all of the
 	// turn's calls: their events and replies are written off the reply's
 	// path and can land after the child has exited.
-	eng.SetSettle(func(session, turn string) bool {
-		settled := true
-		for _, g := range []*gateway.Gateway{anth, oai} {
-			if !g.Settle(session, turn, settleTimeout) {
-				svcLog.Printf("settle.unconfirmed session=%s turn=%s", session, turn)
-				settled = false
+	if eng != nil {
+		eng.SetSettle(func(session, turn string) bool {
+			settled := true
+			for _, g := range []*gateway.Gateway{anth, oai} {
+				if !g.Settle(session, turn, settleTimeout) {
+					svcLog.Printf("settle.unconfirmed session=%s turn=%s", session, turn)
+					settled = false
+				}
 			}
-		}
-		return settled
-	})
+			return settled
+		})
+	}
 	// Every model request's body is kept as pieces, for a call's context
 	// view, and every reply an adapter can rebuild, for own replay.
 	keep := keeper{st: st, logf: svcLog.Printf}
 	anth.KeepBodies(keep)
 	oai.KeepBodies(keep)
 	// forbid in permissions.toml, applied to each run turn's replies.
-	anth.SetGuard(eng)
-	oai.SetGuard(eng)
+	if eng != nil {
+		anth.SetGuard(eng)
+		oai.SetGuard(eng)
+	}
 	if claudeReplay != nil {
 		anth.SetRewriter(claudeReplay)
 		oai.SetRewriter(codexReplay)
@@ -364,12 +385,21 @@ func start(c config) (*service, error) {
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          log.New(io.Discard, "", 0),
 	}
-	svcLog.Printf("service.start listen=%s pid=%d", addr, os.Getpid())
+	svcLog.Printf("service.start mode=%s listen=%s pid=%d", c.modeName(), addr, os.Getpid())
 	go func() { s.done <- s.srv.Serve(ln) }()
-	s.sweep(svcLog)
-	// The built-in runner takes jobs through the runner protocol over
-	// loopback, as a runner on another machine would.
-	if err := s.startRunner(c, baseURL, enrollToken, svcLog); err != nil {
+	if q != nil {
+		s.sweep(svcLog)
+	}
+	// The runner takes jobs through the runner protocol over HTTP: the
+	// built-in one from this service on loopback, as a runner on another
+	// machine does from its server.
+	switch {
+	case c.mode == modeRunner:
+		err = s.startRunner(c, strings.TrimSuffix(c.server, "/"), enrollToken, svcLog)
+	case eng != nil:
+		err = s.startRunner(c, baseURL, enrollToken, svcLog)
+	}
+	if err != nil {
 		s.stop()
 		return nil, err
 	}
@@ -403,7 +433,10 @@ func (s *service) sweep(svcLog *logfile.Log) {
 // startRunner enrolls the built-in runner and starts it.
 func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfile.Log) error {
 	capacity := s.eng.MaxRuns()
-	name, _ := os.Hostname()
+	name := c.runnerName
+	if name == "" {
+		name, _ = os.Hostname()
+	}
 	if name == "" {
 		name = "built-in"
 	}
@@ -413,7 +446,7 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 		Workdir: filepath.Join(c.home, "worktrees"), StateFile: filepath.Join(c.home, "runner.json")})
 	if err != nil {
 		cancel()
-		return fmt.Errorf("the built-in runner could not enroll: %w", err)
+		return fmt.Errorf("the runner could not enroll with %s: %w", self, err)
 	}
 	svcLog.Printf("runner.start id=%s capacity=%d", rn.ID(), capacity)
 	s.stopRunner = cancel
@@ -544,7 +577,9 @@ func (s *service) shutdown() {
 		<-s.runnerDone
 	}
 	// Turns next: each stores its session.closed, and new ones are refused.
-	s.eng.StopAll()
+	if s.eng != nil {
+		s.eng.StopAll()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = s.srv.Shutdown(ctx) // streams never go idle, so this usually times out
@@ -556,7 +591,9 @@ func (s *service) shutdown() {
 		s.stopSweep()
 		<-s.sweepDone
 	}
-	_ = s.queue.Close()
+	if s.queue != nil {
+		_ = s.queue.Close()
+	}
 	_ = s.store.Close()
 	s.log.Printf("service.stop")
 	_ = s.log.Close()

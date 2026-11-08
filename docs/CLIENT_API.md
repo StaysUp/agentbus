@@ -17,6 +17,18 @@ uses the same API.
 The client API shares the gateway's address: `agentbus up` starts one service on
 `127.0.0.1:8787`. `-listen` takes another IP and port, such as `0.0.0.0:8787` in a container.
 
+One program runs three ways. The API is the same in each; what is behind it differs:
+
+| Command | Behind the API | Jobs |
+|---|---|---|
+| `agentbus up` | the job queue, the record, the gateway and a built-in runner | made and run here |
+| `agentbus server` | the job queue, the record and the gateway | made here, run by runners on other machines |
+| `agentbus runner -server <url>` | its own record and gateway, for its agents only | taken from the server; this API has no job routes (404) |
+
+A runner's turn is recorded by the runner's own service. The server gets the job's result: how the
+turn ended, its reply, its cost and the files it changed. Sending the runner's record to the server
+comes later.
+
 | Path | Who calls it | Sign-in |
 |---|---|---|
 | `/s/<session>/v1/...` and `/v1/...` | the agents | the vendor's, passed through untouched |
@@ -1052,7 +1064,8 @@ curl -s http://127.0.0.1:8787/api/v0/jobs/<job id>/review -H "Authorization: Bea
 
 ### The runner protocol
 
-A runner pulls work and is never called, so it works behind NAT. These calls take the enrollment
+`agentbus runner -server <url>` is a runner; so is the one built into `agentbus up`. Both speak this
+protocol over HTTP. A runner pulls work and is never called, so it works behind NAT. These calls take the enrollment
 token (`enroll_token` in the data folder) or the runner's own token, never the main token. The
 cockpit never calls them.
 
