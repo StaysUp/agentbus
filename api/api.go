@@ -126,6 +126,9 @@ type API struct {
 	// turnTokens are the live turns' tokens (tokens.go).
 	turnTokens turnTokens
 
+	// turnRules are the live turns' forbid entries, for the gateway (guard.go).
+	turnRules turnRules
+
 	agents agentCache
 
 	// spec is the OpenAPI description, built from the route table.

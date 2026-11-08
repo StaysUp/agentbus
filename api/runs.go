@@ -134,6 +134,8 @@ func turnArgs(agent, hint, resumeID, model string, readOnly bool, perm Permissio
 		}
 		// forbid: never run, even when allow or the person's settings
 		// approve it; a deny wins over an allow (checked live, 2026-11-07).
+		// The gateway's guard refuses them too, in the shapes this rule
+		// misses, such as git -C repo push (gateway/guard.go).
 		if len(perm.Forbid) > 0 {
 			a = append(a, "--disallowedTools", bashRules(perm.Forbid))
 		}
@@ -168,13 +170,12 @@ func turnArgs(agent, hint, resumeID, model string, readOnly bool, perm Permissio
 		if !readOnly {
 			a = append(a, codexNetwork()...)
 		}
-		// permissions.toml gives codex nothing yet. read_folders: codex's
+		// permissions.toml gives codex no flags. read_folders: codex's
 		// sandbox reads every folder already, in read-only and in
 		// workspace-write, and its --add-dir makes a folder writable, which
 		// read_folders never means (codex-cli 0.164.0, 2026-11-07, checked
-		// with codex sandbox). allow and forbid: codex has no per-command
-		// flag; forbid for codex will come from the gateway guard, a later
-		// step.
+		// with codex sandbox). allow: codex has no per-command flag. forbid
+		// reaches codex through the gateway's guard (gateway/guard.go).
 		if resumeID != "" {
 			a = append(a, "resume", "--json")
 		}
@@ -570,9 +571,11 @@ type turn struct {
 func (a *API) startTurn(w http.ResponseWriter, t turn) {
 	started := false
 	var tok string // the turn's own token, once minted
+	var turnID string
 	defer func() {
 		if !started {
 			a.turnTokens.revoke(tok)
+			a.turnRules.clear(t.session, turnID)
 			a.runs.release(nil, t.session)
 		}
 	}()
@@ -587,7 +590,10 @@ func (a *API) startTurn(w http.ResponseWriter, t turn) {
 			err.Error()+". Fix the file, or remove it for empty lists, and send the turn again.")
 		return
 	}
-	turnID := "t_" + randomHex(8)
+	turnID = "t_" + randomHex(8)
+	// The gateway refuses a command of this turn that forbid names, for
+	// claude and codex alike (gateway/guard.go).
+	a.turnRules.set(t.session, turnID, perm.Forbid)
 	baseURL := a.cfg.BaseURL + "/s/" + t.session + "/t/" + turnID
 	l, err := a.cfg.Wire(t.agent, baseURL)
 	switch {
@@ -697,6 +703,7 @@ func (a *API) startTurn(w http.ResponseWriter, t turn) {
 		// its output is collected and before the turn's session.closed is
 		// stored: nothing of the turn may read after it.
 		a.turnTokens.revoke(tok)
+		a.turnRules.clear(t.session, turnID)
 		// From here a stop is refused: the child has exited. stopped says a
 		// stop came before that.
 		stopped, killAt := lt.exit()

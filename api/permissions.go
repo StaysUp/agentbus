@@ -31,8 +31,10 @@ const PermissionsStarter = `# What AgentBus turns may do without asking. Read at
 # read_folders: folders claude may read and search beyond its own folder. Reads only in the
 # default and acceptEdits modes; under your own "auto" mode, Claude Code may still write there.
 # allow: commands claude may run without asking (a command and its arguments).
-# forbid: commands claude may never run.
-# codex can read every folder already, and has no command lists yet.
+# forbid: commands claude and codex may never run. The gateway refuses them.
+# It reads the command text, so it cannot see a command built at run time or
+# run from a script. For a hard rule, also leave out what the command needs.
+# codex can read every folder already, and has no allow list yet.
 
 read_folders = []   # e.g. ["~/.agents", "~/Sites/agentbus-notes"]
 allow = []          # e.g. ["go test", "make test", "git commit"]

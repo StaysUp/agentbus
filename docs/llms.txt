@@ -22,9 +22,13 @@ words is `docs/CLIENT_API.md` in the repository.
   Every turn reads it when it starts. claude gets one `--allowedTools` with
   `Read(//<folder>/**),Grep(//<folder>/**),Glob(//<folder>/**)` per folder (reading only) and
   `Bash(<cmd>:*)` per allowed command, and `--disallowedTools Bash(<cmd>:*),…`. A `read_only` turn
-  ignores `allow`. codex gets nothing from it yet: its sandbox reads every folder, and a forbidden
-  command is not stopped until the gateway guard lands. A broken file answers 400 and nothing is
-  stored. A missing file is empty lists.
+  ignores `allow`. `forbid` applies to claude and codex through the gateway: a shell command in a
+  model reply that matches an entry is refused before the agent can run it, and a `tool.refused`
+  event is stored. The command is parsed as shell and each simple command in it is matched alone, and git's global options are skipped,
+  so `git -C repo push` matches `git push`. It reads text only: a command built at run time or run
+  from a script is not seen, so a hard rule also needs the agent to lack what the command needs
+  (no push credentials). codex gets nothing from `read_folders` and `allow`. A broken file
+  answers 400 and nothing is stored. A missing file is empty lists.
 - Never put the token in a URL. In a browser, read the stream with `fetch`, not `EventSource`.
 - A browser page from any origin may call the API: CORS answers `Access-Control-Allow-Origin: *`
   and allows the `Authorization` header. No cookies are used; the token is the guard.
@@ -288,6 +292,7 @@ fields depend on the kind. Ignore kinds and fields you do not know: v0 may add b
 | `events.dropped` | events were lost; those sessions' costs are incomplete | `dropped`, `sessions`, `all_sessions` |
 | `schema.unexpected` | the vendor sent a shape the adapter does not know | `unexpected` (`where`, `value` or `field`) |
 | `replay.failed` | a replayed turn's request could not be given the earlier turn's history; the gateway refused it and the turn fails | `error` |
+| `tool.refused` | the gateway refused a tool call because its command matched a `forbid` entry; the agent did not run it | `tool_id`, `tool_name`, `tool_input`, `rule`, `text` (what the model is told) |
 | `x.<program>.<name>` | a program's own event | `text`, `data`, `turn`; `vendor` is `program` |
 
 - `usage` is absent when the vendor sent none. Absent is not zero.

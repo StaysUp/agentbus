@@ -37,3 +37,10 @@ entry, and run the tests: `api/docs_test.go` checks that `/docs` serves the file
   (`api/permissions.go`), with the line of a parse error for the reply.
 - Source: https://github.com/BurntSushi/toml
 - License: MIT, Copyright (c) 2013 TOML authors.
+
+### mvdan.cc/sh v3.14.1
+
+- What: parses each shell command a model asks to run, so the gateway's guard can match every
+  simple command in it against `forbid` (`gateway/command.go`, its `syntax` package only).
+- Source: https://github.com/mvdan/sh
+- License: BSD 3-Clause, Copyright (c) 2016, Daniel Martí.

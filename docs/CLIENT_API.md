@@ -164,10 +164,12 @@ What each list becomes:
 |---|---|---|
 | `read_folders` | `--allowedTools Read(//<folder>/**),Grep(//<folder>/**),Glob(//<folder>/**),…` | nothing: codex's sandbox reads every folder already |
 | `allow` | `--allowedTools Bash(<cmd>:*),…` | nothing yet |
-| `forbid` | `--disallowedTools Bash(<cmd>:*),…` | nothing yet |
+| `forbid` | the gateway's guard, and `--disallowedTools Bash(<cmd>:*),…` | the gateway's guard |
 
 - `read_folders` grants reading only. It is not `--add-dir`: that makes a working folder, which
   under the person's `acceptEdits` mode a turn could also write to (Claude Code 2.1.319).
+- That holds in Claude Code's default and `acceptEdits` modes. Under the person's own `auto`
+  mode, Claude Code may still write in a `read_folders` folder. AgentBus does not change the mode.
 - All of `--allowedTools` is one comma-joined value.
 - A `read_only` turn stays read-only: `allow` does not widen it. `read_folders` and `forbid` still
   apply.
@@ -175,19 +177,63 @@ What each list becomes:
 - The flags are in the turn's header line in `logs/runs/<session>.log` (below), so a turn shows
   what it was given.
 
+**How the gateway's guard works.** It applies `forbid` to every model reply of a turn started
+through `POST /api/v0/turns`, for claude and codex.
+
+- It reads each shell call: claude's `Bash` tool, and codex's `exec` tool, a JavaScript program
+  whose `tools.exec_command({cmd: "…"})` calls each hold a command (codex-cli 0.164.0). A
+  function tool with a `cmd` or `command` argument is read the same way.
+- It parses the command as shell (with `mvdan.cc/sh`) and matches every simple command in it
+  alone: in pipelines, `&&` and `||` chains, subshells, functions, loops, `$(…)` and backquotes.
+  A command matches an entry when its words start with the entry's words. The program matches by
+  its base name, so `/usr/bin/git push` matches `git push`. For git, global options such as
+  `-C <path>`, `-c k=v` and `--git-dir=…` are skipped first, so `git -C repo push origin main`
+  matches `git push` and `git log --grep push` does not. Redirections are not words, so
+  `git push>/tmp/log` is a push.
+- Looked through: `sudo`, `env` (with `-S "…"`), `xargs`, `nice`, `time`, `VAR=value` in front;
+  `sh -c "…"` and `bash -e -c "…"` with any options before the script; `eval`; a here-document
+  or a here-string fed to a shell. Comments and the text of a here-document fed to another
+  program are not commands.
+- A command the parser cannot read is refused when any run of its words reads as an entry. That
+  errs on the side of refusing.
+- In codex's script, every `cmd: "…"` string counts, even one the script only stores. That errs
+  on the side of refusing.
+- A matching call is renamed in the reply to `AgentBusRefused_<name>`, so the agent has no such
+  tool and does not run it. On the turn's next request the gateway puts the real name back and
+  replaces that call's output with: `Refused by the AgentBus gateway: the forbid rule "git push"
+  in permissions.toml matched this command. The command did not run.`
+- A call is held from its first event to its last, and nothing else is held. codex runs a call as
+  soon as it ends, not at the end of the reply.
+- Streamed and unstreamed replies are both guarded. Claude Code sends an unstreamed request after
+  a stream sits idle for 300 seconds.
+- Every refusal is stored as a `tool.refused` event with `tool_id`, `tool_name`, `tool_input` and
+  `rule`. The call's `tool.requested` is still stored, and its `tool.completed` carries the
+  refusal text.
+- Measured with Claude Code 2.1.319 on sonnet and codex-cli 0.164.0 (2026-11-08): both models
+  accepted the refusal and did not try another way, even when told to.
+
 **The limits, plainly:**
 
-- **codex cannot be stopped from a forbidden command yet.** It has no per-command flag. A guard in
-  the gateway will do it in a later step.
+- **The guard reads text. It is not a sandbox.** It cannot see a command built while the agent
+  runs (`"git " + "push"`), one run from a script the agent wrote earlier, or one run by an agent
+  whose model calls do not pass through AgentBus. For a hard rule, also take away what the
+  command needs: for "never push", give the agent no push credentials, or a remote it can only
+  read.
+- A reply the vendor compresses is not guarded. The gateway asks for none, and Anthropic and
+  OpenAI send none.
+- Nothing asks a person yet. A call is refused or let through. Holding a call while a person
+  decides is the next step: it needs keep-alive events, since each agent gives up on a reply idle
+  for 300 seconds.
+- codex has no `allow`: it has no per-command flag.
 - codex's own `--add-dir` makes a folder writable, which `read_folders` never means, so it is not
   used (codex-cli 0.164.0).
 - `read_folders` approves claude's Read, Grep and Glob tools only. A shell command that reads
   there, such as `cat`, is still refused: Claude Code limits those to its working folders, and
   `allow` cannot change that (Claude Code 2.1.319). Only the person's own settings can add a
   working folder.
-- `forbid` stops claude's shell from running the command. It does not stop the same thing done
-  another way, such as reading `.env` with the Read tool.
-- Nothing asks a person yet. A command on neither list is refused when claude's settings would ask.
+- `forbid` names shell commands. It does not stop the same thing done another way, such as
+  reading `.env` with the Read tool.
+- A command on neither list is refused when claude's settings would ask.
 
 **The store keeps full request bodies.** A model request carries everything the agent sent: file
 contents, tool output, the memory files in its system prompt. Much of it already reached the store
@@ -860,6 +906,7 @@ Refusing, holding and starting a review are planned for a later version.
 | `recovered_from` on `turn.started` | on a replayed turn: the session's previous turn, which did not finish (interrupted, its last model call failed, or it never reached the model). This turn continues after it, and the model is told what happened. Absent when the previous turn finished. A cockpit can show "continued after an interrupted turn" |
 | `recovered_reason` on `turn.started` | with `recovered_from`: one sentence on how that turn ended, the words the model's note uses, such as `its last model request failed with status 529; its agent process exited with code 1` |
 | `replayed` on `model.requested` | how many messages of the earlier turn's history the gateway put in front of this request. Omitted when none |
+| kind `tool.refused` | the gateway refused a tool call of a run's turn, because its command matched a `forbid` entry of `permissions.toml`. `tool_id`, `tool_name`, `tool_input` as the model wrote them; `rule` is the entry; `text` is what the model is told in place of the output. The agent did not run the call. Show it as a warning |
 | kind `replay.failed` | a model request of a replayed turn could not be given the earlier turn's history; `error` says why. The gateway answered the agent 400 and sent nothing to the vendor, so the turn fails rather than run without its past. Show it as an error |
 | kinds `x.<program>.<name>` | a program's own event (`POST /api/v0/events`); `vendor` is `"program"` |
 | `data` | only on a program's own event: the JSON object it sent |

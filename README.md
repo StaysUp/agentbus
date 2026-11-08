@@ -226,7 +226,7 @@ folder says what turns may do:
 ```toml
 read_folders = ["~/.agents"]           # claude may Read, Grep and Glob there
 allow = ["go test", "make test"]       # claude gets --allowedTools Bash(go test:*),...
-forbid = ["git push", "git checkout"]  # claude gets --disallowedTools Bash(git push:*),...
+forbid = ["git push", "git checkout"]  # the gateway refuses these, for claude and codex
 ```
 
 `agentbus up` makes it with empty lists, which change nothing. Every turn reads it when it starts,
@@ -235,8 +235,17 @@ so an edit applies to the next turn. A broken file stops the turn with the line 
 "auto" mode, claude may still write there.
 A `read_only` turn stays read-only.
 
-codex gets nothing from it yet. Its sandbox can read every folder already. It cannot be stopped from
-a forbidden command until the gateway guard lands. Details: [docs/CLIENT_API.md](docs/CLIENT_API.md#permissionstoml).
+`forbid` works for claude and codex. The gateway reads each model reply. When a shell command in
+it matches an entry, the agent never gets that call, and the model is told a rule refused it. Each
+command in a chain is checked on its own, so `cd repo && git -C repo push` matches `git push`.
+Every refusal is stored as a `tool.refused` event. claude also gets `--disallowedTools`.
+
+The guard reads the command text. It cannot see a command built while the agent runs, or one run
+from a script the agent wrote earlier. For a hard rule, also take away what the command needs. For
+"never push", give the agent no push credentials.
+
+codex gets nothing from `read_folders` and `allow`. Its sandbox can read every folder already.
+Details: [docs/CLIENT_API.md](docs/CLIENT_API.md#permissionstoml).
 
 ## How it works
 

@@ -285,6 +285,9 @@ func start(c config) (*service, error) {
 	keep := keeper{st: st, logf: svcLog.Printf}
 	anth.KeepBodies(keep)
 	oai.KeepBodies(keep)
+	// forbid in permissions.toml, applied to each run turn's replies.
+	anth.SetGuard(a)
+	oai.SetGuard(a)
 	if claudeReplay != nil {
 		anth.SetRewriter(claudeReplay)
 		oai.SetRewriter(codexReplay)

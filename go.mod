@@ -8,6 +8,7 @@ require (
 	github.com/klauspost/compress v1.18.0
 	golang.org/x/sys v0.48.0
 	modernc.org/sqlite v1.60.1
+	mvdan.cc/sh/v3 v3.14.1
 )
 
 require (
@@ -16,7 +17,6 @@ require (
 	github.com/go-openapi/swag/jsonname v0.25.5 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gorilla/mux v1.8.0 // indirect
-	github.com/kr/pretty v0.3.1 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/oasdiff/yaml v0.1.1 // indirect

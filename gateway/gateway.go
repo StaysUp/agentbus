@@ -56,6 +56,8 @@ type Gateway struct {
 	queue   *queue
 	bodies  *bodyQueue // nil unless KeepBodies was called
 	rewrite Rewriter   // nil unless SetRewriter was called
+	guard   Guard      // nil unless SetGuard was called
+	refused refusals   // which rule refused each call (guard.go)
 
 	// open counts each run turn's exchanges not yet fully written: their
 	// events delivered to the sink and their reply handed to the keeper.
@@ -176,6 +178,9 @@ type exchange struct {
 	// probe: the adapter marked the request as the harness's own check, so
 	// every event of the exchange carries Probe.
 	probe bool
+	// forbid: the run turn's forbid entries, which the guard applies to the
+	// reply (guard.go).
+	forbid []string
 
 	// unknowns keeps each schema.unexpected shape once per exchange, and at
 	// most adapter.MaxUnexpected, across the request and the reply.
@@ -395,6 +400,18 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if runTurn == "" {
 			ex.turn = turnID(session, g.adapter.TurnBasis(plain))
 		}
+		// A call the guard refused earlier goes back to the model under its
+		// real name, with the refusal as its output (guard.go). The vendor
+		// then gets the body plain, as after a rewrite.
+		if fixed, ok := g.fixHistory(g.adapter.Vendor(), plain); ok {
+			plain = fixed
+			r.Body = io.NopCloser(bytes.NewReader(plain))
+			r.ContentLength = int64(len(plain))
+			r.Header.Del("Content-Encoding")
+		}
+		if g.guard != nil && runTurn != "" {
+			ex.forbid = g.guard.Forbid(session, runTurn)
+		}
 		var replayed int
 		if g.rewrite != nil && runTurn != "" {
 			rw := g.rewrite.Rewrite(session, runTurn, plain)
@@ -461,7 +478,17 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 		return nil
 	}
 	status, header := resp.StatusCode, resp.Header.Clone()
-	resp.Body = &tee{rc: resp.Body, done: func(raw []byte, cut bool) {
+	// The guard reads the reply as the vendor sent it. The vendor is asked
+	// for no encoding (Accept-Encoding is dropped); a reply compressed anyway
+	// is not guarded.
+	guarded := false
+	if len(ex.forbid) > 0 && !ex.probe && status == http.StatusOK {
+		switch strings.ToLower(strings.TrimSpace(header.Get("Content-Encoding"))) {
+		case "", "identity":
+			guarded = true
+		}
+	}
+	start := func(raw []byte, cut bool) {
 		g.mu.Lock()
 		defer g.mu.Unlock()
 		if g.closed {
@@ -474,7 +501,45 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 			defer g.finishing.Done()
 			g.finish(ex, status, header, raw, cut)
 		}()
-	}}
+	}
+	// A guarded reply's exchange finishes once the tee has the whole copy and
+	// the guard has emitted its refusals, whichever comes last: the tee sees
+	// the end of the reply before the guard reads it, and Settle must not
+	// report the turn whole while a tool.refused is still to come.
+	finish, guardEnd := start, func() {}
+	if guarded {
+		var (
+			mu      sync.Mutex
+			waiting = 2
+			rawCopy []byte
+			wasCut  bool
+		)
+		arrive := func() {
+			mu.Lock()
+			waiting--
+			last := waiting == 0
+			mu.Unlock()
+			if last {
+				start(rawCopy, wasCut)
+			}
+		}
+		finish = func(raw []byte, cut bool) {
+			mu.Lock()
+			rawCopy, wasCut = raw, cut
+			mu.Unlock()
+			arrive()
+		}
+		var once sync.Once
+		guardEnd = func() { once.Do(arrive) }
+	}
+	resp.Body = &tee{rc: resp.Body, done: finish}
+	if guarded {
+		// The agent gets the reply with each refused call renamed; the
+		// adapter reads the tee, so it sees the calls as the model wrote them.
+		resp.Body = g.guardReply(ex, ex.forbid, resp.Body, guardEnd)
+		resp.Header.Del("Content-Length")
+		resp.ContentLength = -1
+	}
 	return nil
 }
 

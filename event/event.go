@@ -43,6 +43,11 @@ const (
 	// earlier turn's history, so the gateway refused it rather than send it
 	// without that history. Error says why.
 	ReplayFailed Kind = "replay.failed"
+
+	// ToolRefused: the gateway refused a tool call of a run's turn, because
+	// its command matched a forbid entry of permissions.toml. The agent did
+	// not run it. Rule names the entry.
+	ToolRefused Kind = "tool.refused"
 )
 
 // KindInfo says what one framework kind means and which fields it always
@@ -69,6 +74,7 @@ var Kinds = []KindInfo{
 	{SessionClosed, "A run's child exited: hold, exit_code, resume_id, turn, stopped when the person stopped the turn, and unsettled when the gateway could not confirm all of the turn's calls were stored. Also stored at start, with unsettled, for a child the previous service left running.", []string{"session"}},
 	{SchemaUnexpected, "The vendor sent a shape the adapter does not know: unexpected, as names only. Show it as a quiet warning.", []string{"unexpected"}},
 	{ReplayFailed, "A model request of a replayed turn (a turn.started with replay_from) could not be given the earlier turn's history: error says why, such as the harness's request layout not being one the gateway knows. The gateway refused that request with 400 and did not send it to the vendor, so the turn fails rather than continue without its history. Show it as an error.", []string{"error"}},
+	{ToolRefused, "The gateway refused a tool call before the agent could run it, because its command matched a forbid entry of permissions.toml: tool_id, tool_name, tool_input, rule (the entry), and text (what the model is told in place of the output). The call's tool.requested is still stored, and its tool.completed carries that text. Show it as a warning.", []string{"tool_id", "rule"}},
 }
 
 // Unexpected names one unknown shape: where on the wire, and the unknown value
@@ -161,6 +167,8 @@ type Event struct {
 	ToolInput  json.RawMessage `json:"tool_input,omitempty" doc:"On tool.requested: the tool's input, as the model sent it."`
 	ToolError  *bool           `json:"tool_error,omitempty"`
 	ToolOutput string          `json:"tool_output,omitempty"`
+	// Rule, only on tool.refused: the forbid entry that matched.
+	Rule string `json:"rule,omitempty" doc:"On tool.refused: the forbid entry of permissions.toml that matched, such as git push."`
 
 	Dropped  int      `json:"dropped,omitempty" doc:"On events.dropped: how many events were lost. Never 0."`
 	Sessions []string `json:"sessions,omitempty" doc:"On events.dropped: every session that lost events."`
