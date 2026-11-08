@@ -599,3 +599,22 @@ func TestSessionTurnsOneAtATime(t *testing.T) {
 		t.Fatalf("took %s, want the review", j.ID)
 	}
 }
+
+// HasKey knows a key once a job was made with it, per team, and never knows
+// an empty key.
+func TestHasKey(t *testing.T) {
+	q, _ := open(t)
+	if ok, err := q.HasKey(DefaultTeam, "k1"); err != nil || ok {
+		t.Fatalf("before: %v %v", ok, err)
+	}
+	job(t, q, "k1")
+	if ok, err := q.HasKey(DefaultTeam, "k1"); err != nil || !ok {
+		t.Fatalf("after: %v %v", ok, err)
+	}
+	if ok, err := q.HasKey("team_other", "k1"); err != nil || ok {
+		t.Fatalf("another team: %v %v", ok, err)
+	}
+	if ok, err := q.HasKey(DefaultTeam, ""); err != nil || ok {
+		t.Fatalf("empty key: %v %v", ok, err)
+	}
+}

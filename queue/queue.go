@@ -503,6 +503,19 @@ func (q *Queue) Create(team, kind, key string, spec Spec, links Links) (job Job,
 	return q.create(team, kind, key, spec, links, spec.Session, false)
 }
 
+// HasKey reports whether a job was already made with this idempotency key.
+// An empty key is never known.
+func (q *Queue) HasKey(team, key string) (bool, error) {
+	if key == "" {
+		return false, nil
+	}
+	var n int
+	if err := q.db.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND idem_key = ?`, team, key).Scan(&n); err != nil {
+		return false, fmt.Errorf("queue: read key: %w", err)
+	}
+	return n > 0, nil
+}
+
 // CreateTurn makes a turn job. With exclusive, a session that has a turn job
 // whose turn has not started yet (queued, taken, or running before its turn
 // started) gets ErrSessionBusy, in the same transaction, so two requests at

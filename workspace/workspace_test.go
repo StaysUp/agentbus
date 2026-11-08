@@ -202,3 +202,77 @@ func TestManyFilesFit(t *testing.T) {
 		}
 	}
 }
+
+// A changed symlink is listed, but its target's content is never read into
+// the result: a link to a file outside the workspace cannot carry it out.
+func TestSymlinkContentNotFollowed(t *testing.T) {
+	dir, outside := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(outside, "private.txt"), "outside secret")
+	before, err := Take(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "private.txt"), filepath.Join(dir, "link.txt")); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(dir, "plain.txt"), "kept")
+	after, err := Take(dir, before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := byPath(Diff(dir, before, after))
+	l, ok := m["link.txt"]
+	if !ok || l.Change != "added" {
+		t.Fatalf("the link is not listed as added: %+v", m)
+	}
+	if l.Content != nil {
+		t.Fatalf("the link's target was read into the result: %q", *l.Content)
+	}
+	if p := m["plain.txt"]; p.Content == nil || *p.Content != "kept" {
+		t.Fatalf("a plain file's content is missing: %+v", p)
+	}
+}
+
+// A folder swapped for a symlink to an outside folder after the first
+// snapshot does not carry the outside files' content into the result either.
+func TestSymlinkedFolderContentNotFollowed(t *testing.T) {
+	dir, outside := t.TempDir(), t.TempDir()
+	write(t, filepath.Join(dir, "sub", "notes.txt"), "inside")
+	write(t, filepath.Join(outside, "notes.txt"), "outside secret")
+	before, err := Take(dir, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(filepath.Join(dir, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(dir, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	after, err := Take(dir, before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := Diff(dir, before, after)
+	// Whatever the snapshot lists, no file of the result may hold the outside text.
+	for _, f := range c.Files {
+		if f.Content != nil && strings.Contains(*f.Content, "outside") {
+			t.Fatalf("%s carried outside content: %q", f.Path, *f.Content)
+		}
+	}
+	// The reader itself refuses the path through the linked folder.
+	b, ok := readInside(mustRoot(t, dir), "sub/notes.txt", 1<<20)
+	if ok {
+		t.Fatalf("read through a symlinked folder: %q", b)
+	}
+}
+
+func mustRoot(t *testing.T, dir string) *os.Root {
+	t.Helper()
+	r, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { r.Close() })
+	return r
+}

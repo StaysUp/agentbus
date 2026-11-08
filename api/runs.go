@@ -129,9 +129,18 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 				"; leave folder out to use the session's")
 			return
 		}
+		// A retry of the request that started the running turn (same key)
+		// goes on to the queue, which returns that turn; anything else waits.
 		if c.Open {
-			writeError(w, http.StatusConflict, turnRunning)
-			return
+			known, err := a.cfg.Queue.HasKey(queue.DefaultTeam, body.IdempotencyKey)
+			if err != nil {
+				a.internal(w)
+				return
+			}
+			if !known {
+				writeError(w, http.StatusConflict, turnRunning)
+				return
+			}
 		}
 		spec.Session = body.Session
 	} else {

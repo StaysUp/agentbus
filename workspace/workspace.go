@@ -249,6 +249,12 @@ func Diff(root string, before, after *Snapshot) Changes {
 		c.Diff, c.DiffTruncated = trackedDiff(root, before.tree, after.tree, c.Files)
 	}
 	budget := MaxContents
+	// Contents are read through the workspace root, which refuses any path
+	// that leaves it, through a symlinked file or a symlinked folder alike.
+	rt, rootErr := os.OpenRoot(root)
+	if rootErr == nil {
+		defer rt.Close()
+	}
 	for i := range c.Files {
 		f := &c.Files[i]
 		if f.Change == "deleted" || f.Git == "tracked" || f.Size > MaxContent {
@@ -258,7 +264,11 @@ func Diff(root string, before, after *Snapshot) Changes {
 			c.ContentLeftOut = true
 			continue
 		}
-		if b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(f.Path))); err == nil && isText(b) && len(b) <= budget {
+		if rootErr != nil {
+			c.ContentLeftOut = true
+			continue
+		}
+		if b, ok := readInside(rt, f.Path, budget); ok && isText(b) {
 			t := string(b)
 			f.Content = &t
 			budget -= len(b)
@@ -448,4 +458,27 @@ func RemoveWorktree(workdir, repo, dir string) error {
 	}
 	_, err = git(repo, nil, "worktree", "remove", "--force", dir)
 	return err
+}
+
+// readInside reads a regular file of the workspace, at most max bytes, through
+// rt, so no symlink can take the read outside the workspace. A symlink itself,
+// a folder, or anything larger than max is not read.
+func readInside(rt *os.Root, rel string, max int) ([]byte, bool) {
+	name := filepath.FromSlash(rel)
+	if fi, err := rt.Lstat(name); err != nil || !fi.Mode().IsRegular() {
+		return nil, false
+	}
+	f, err := rt.Open(name)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() || fi.Size() > int64(max) {
+		return nil, false
+	}
+	b, err := io.ReadAll(io.LimitReader(f, int64(max)+1))
+	if err != nil || len(b) > max {
+		return nil, false
+	}
+	return b, true
 }

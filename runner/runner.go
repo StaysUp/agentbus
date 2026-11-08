@@ -346,8 +346,12 @@ func (at *attempt) addChanges(f *queue.Finish) {
 	} else {
 		c = workspace.Diff(at.folder, at.before, after)
 	}
-	res["changes"] = c
 	res["folder"] = at.folder
+	// The whole finish must fit the jobs API's body limit, so the changes get
+	// what the rest leaves, less a margin for the fields added after this.
+	f.Result = mustJSON(res)
+	c.Fit(jobs.MaxBody - len(mustJSON(f)) - finishMargin)
+	res["changes"] = c
 	f.Result = mustJSON(res)
 	at.event("workspace.changes", map[string]any{"count": c.Count, "kind": c.Kind})
 	// A review runs in another session's workspace: it never claims one.
@@ -659,6 +663,10 @@ func (r *Runner) lastReply(session, turnID string) string {
 	}
 	return last
 }
+
+// finishMargin is room in a finish body for what is set after the changes
+// are sized: the session, its workspace and the last event sequence.
+const finishMargin = 16 << 10
 
 func mustJSON(v any) json.RawMessage {
 	b, _ := json.Marshal(v)
