@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"golang.org/x/sys/unix"
 )
 
 // overlayOK skips a test where this process cannot mount an overlay.
@@ -176,4 +178,32 @@ func TestOverlayRemount(t *testing.T) {
 		t.Fatal("not mounted again with the turn's edit")
 	}
 	b.Close(again)
+}
+
+// A folder removed and made again is marked opaque under user., as every
+// mount takes userxattr. A trusted. mark, or user. marked "x" (Linux 6.7
+// and later: a folder holding xattr whiteouts), is not opaque.
+func TestOpaqueMark(t *testing.T) {
+	dir := t.TempDir()
+	if opaque(dir) {
+		t.Fatal("a plain folder reads as opaque")
+	}
+	if err := unix.Lsetxattr(dir, "user.overlay.opaque", []byte("y"), 0); err != nil {
+		t.Skipf("this disk takes no user. xattrs: %v", err)
+	}
+	if !opaque(dir) {
+		t.Fatal("user.overlay.opaque=y not read as opaque")
+	}
+	other := t.TempDir()
+	unix.Lsetxattr(other, "user.overlay.opaque", []byte("x"), 0)
+	if opaque(other) {
+		t.Fatal(`opaque "x" read as opaque`)
+	}
+	root := t.TempDir()
+	if err := unix.Lsetxattr(root, "trusted.overlay.opaque", []byte("y"), 0); err != nil {
+		t.Skipf("trusted. xattrs need root: %v", err)
+	}
+	if opaque(root) {
+		t.Fatal("a trusted. mark read as opaque")
+	}
 }

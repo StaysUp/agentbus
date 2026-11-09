@@ -327,10 +327,12 @@ func (overlayBackend) learn(s *Space, rel string, f workspace.File) (string, boo
 	return learnFrom(filepath.Join(s.lowerDir(), filepath.FromSlash(rel)), f, s.objectDir())
 }
 
-// opaque says whether the upper folder p hides what the layers below hold.
+// opaque says whether the upper folder p hides what the snapshot holds
+// there. Every mount takes userxattr (overlayOptions), so the mark is under
+// user., whether the runner is root or in a user namespace.
 func opaque(p string) bool {
 	b := make([]byte, 4)
-	n, err := unix.Lgetxattr(p, "trusted.overlay.opaque", b)
+	n, err := unix.Lgetxattr(p, "user.overlay.opaque", b)
 	return err == nil && n == 1 && b[0] == 'y'
 }
 
@@ -352,8 +354,12 @@ func mountSpace(s *Space) error {
 
 // overlayOptions keep the upper layer plain: a renamed folder is copied, not
 // redirected, and a changed file is copied whole, so the upper layer alone
-// says what changed.
-const overlayOptions = "redirect_dir=off,index=off,metacopy=off"
+// says what changed. userxattr keeps overlay's own marks (an opaque folder)
+// under user., which a mount in a user namespace needs, so a root mount
+// takes it too: one name to read. redirect_dir=nofollow makes no redirect
+// and follows none; off conflicts with userxattr, since a kernel may build
+// off as follow.
+const overlayOptions = "userxattr,redirect_dir=nofollow,index=off,metacopy=off"
 
 // mountIn mounts an overlay at target with opts, whose paths are relative
 // to dir. The working folder is the thread's own (CLONE_FS), and the thread
@@ -435,7 +441,9 @@ func probe(workdir string) string {
 			return "the workdir cannot be written"
 		}
 	}
-	if err := os.WriteFile(filepath.Join(dir, "l", "f"), []byte("f"), 0o600); err != nil {
+	if os.WriteFile(filepath.Join(dir, "l", "f"), []byte("f"), 0o600) != nil ||
+		os.MkdirAll(filepath.Join(dir, "l", "d"), 0o700) != nil ||
+		os.WriteFile(filepath.Join(dir, "l", "d", "g"), []byte("g"), 0o600) != nil {
 		return "the workdir cannot be written"
 	}
 	err := mountIn(dir, m, "lowerdir=l,upperdir=u,workdir=w,"+overlayOptions)
@@ -464,6 +472,10 @@ func probe(workdir string) string {
 	}
 	if fi, err := os.Lstat(filepath.Join(dir, "u", "f")); err != nil || !isWhiteout(fi) {
 		return "an overlay mounted but a removal did not leave a whiteout"
+	}
+	if os.RemoveAll(filepath.Join(m, "d")) != nil || os.Mkdir(filepath.Join(m, "d"), 0o700) != nil ||
+		!opaque(filepath.Join(dir, "u", "d")) {
+		return "an overlay mounted but a folder removed and made again was not marked opaque"
 	}
 	return ""
 }
