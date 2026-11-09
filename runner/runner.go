@@ -469,6 +469,10 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 		at.finish(ctx, queue.Finish{Status: queue.Cancelled})
 		return
 	}
+	if job.Kind == queue.KindApply {
+		at.finish(ctx, r.apply(at))
+		return
+	}
 	if refused := r.prepare(at); refused != nil {
 		at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup, Result: mustJSON(refused)})
 		return
@@ -496,6 +500,76 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	at.flush(ctx)
 	r.follow(ctx, at, turn)
 }
+
+// apply puts the changes of the turn an apply job names into the person's
+// folder, through its session's isolation backend. A conflict finishes as
+// failed with reason conflict and each file; nothing is written then.
+func (r *Runner) apply(at *attempt) queue.Finish {
+	sp := at.job.Spec
+	refuse := func(msg string, written []string) queue.Finish {
+		res := queue.Result{Refused: msg, Status: http.StatusConflict}
+		if len(written) > 0 {
+			res.Apply = &queue.ApplyResult{Files: written}
+		}
+		return applyFinish(queue.Failed, queue.ReasonSetup, res)
+	}
+	if at.job.Workspace == nil {
+		return refuse(applyNoCopy, nil)
+	}
+	s, err := isolation.Load(r.cfg.Workdir, at.job.Workspace.Folder)
+	if err != nil {
+		return refuse(applyNoCopy, nil)
+	}
+	b, ok := isolation.Get(s.Backend)
+	if !ok {
+		return refuse(applyNoCopy, nil)
+	}
+	done, err := b.Apply(s, sp.ApplyFrom, sp.ApplyTo)
+	var cf *isolation.Conflict
+	switch {
+	case errors.As(err, &cf):
+		msg := cf.Error()
+		if len(msg) > maxApplyMessage {
+			msg = fmt.Sprintf("apply refused: %d file(s) in your folder changed since the checkpoint; conflicts lists them", len(cf.Files))
+		}
+		res := queue.Result{Refused: msg, Status: http.StatusConflict, Apply: &queue.ApplyResult{Files: []string{}}}
+		for _, f := range cf.Files {
+			res.Apply.Conflicts = append(res.Apply.Conflicts, queue.ApplyConflict{Path: f.Path, Why: f.Why})
+		}
+		at.event("workspace.apply_refused", map[string]any{"turn": at.job.Links.AppliesTurn, "conflicts": len(cf.Files)})
+		return applyFinish(queue.Failed, queue.ReasonConflict, res)
+	case errors.Is(err, isolation.ErrNoCheckpoint):
+		return refuse("the turn's checkpoints are no longer kept, so its changes cannot be applied", nil)
+	case errors.Is(err, isolation.ErrNoSource):
+		return refuse("this session's copy was made from a repo and a base, not from a folder of yours, so there is nowhere to apply", nil)
+	case errors.Is(err, isolation.ErrTruncated):
+		return refuse("the folder has more files than a checkpoint holds, so the turn cannot be applied", nil)
+	case err != nil:
+		// The backend's words go to the service log only: they can name
+		// paths on this runner.
+		r.cfg.Logf("the apply of turn %s could not be written: %s", at.job.Links.AppliesTurn, err)
+		return refuse("the changes could not all be written to your folder; files lists those that were", done.Files)
+	}
+	at.event("workspace.applied", map[string]any{"turn": at.job.Links.AppliesTurn, "files": len(done.Files)})
+	return applyFinish(queue.Finished, "", queue.Result{Apply: &queue.ApplyResult{Files: done.Files, Pruned: done.Pruned}})
+}
+
+// maxApplyMessage bounds a refusal's message; past it, the message gives the
+// count and conflicts lists the files.
+const maxApplyMessage = 4 << 10
+
+// applyFinish is an apply job's finish, its result sized so the finish fits
+// the jobs API's body limit.
+func applyFinish(status, reason string, res queue.Result) queue.Finish {
+	if res.Apply != nil {
+		res.Apply.Count = len(res.Apply.Files)
+		res.Apply.Fit(jobs.MaxBody - finishMargin - len(res.Refused) - 1024)
+	}
+	return queue.Finish{Status: status, Reason: reason, Result: mustJSON(res)}
+}
+
+// applyNoCopy: the session keeps no isolated copy on this runner.
+const applyNoCopy = "this session keeps no isolated copy, so there is nothing to apply"
 
 // request is the turn the attempt runs. Its id is the attempt's. A turn
 // job's first turn opens the session the queue named for it; a review opens

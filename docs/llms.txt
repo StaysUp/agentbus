@@ -46,7 +46,7 @@ job routes. This file describes the API of `up` and `server`.
   folder's own files (`permissions.toml`, `instructions.md`, `agents.json`, the tokens): claude gets
   a deny rule on each. `[limits]`: `max_depth` (2), `max_jobs_per_turn` (10), `max_jobs_per_tree`
   (30), `max_cost_usd_per_tree` (0, off). `[agent_api]`: `scope` (`"tree"` or `"session"`), and
-  `read`, `list_agents`, `start`, `continue`, `review`, `cancel`, `rename`, each true unless set false. A
+  `read`, `list_agents`, `start`, `continue`, `review`, `cancel`, `rename`, `apply`, each true unless set false. A
   broken file answers 400 and nothing is stored; a turn token's requests get 503 then. A missing
   file is every default.
 - `instructions.md` in the data folder is the text every turn gets as its agent's own instruction
@@ -111,13 +111,16 @@ and folder, the changed files, a review's verdict, and the agent's final reply.
 
 1. List the agents: `GET /api/v0/agents`. Use an agent's `id`.
 2. Start a turn on one: `POST /api/v0/turns` with `agent` and `prompt`. Leave `folder` out: the
-   new session works in the person's folder, in a git worktree of its own, so several agents can
-   work on the same task without touching each other's files. To fan out ("run all 3 on this"),
+   new session works on its own copy of the person's folder, so several agents can work on the
+   same task without touching each other's files or the person's. To fan out ("run all 3 on this"),
    start one turn per agent; each result comes back on its own.
 3. Continue a session you started: `POST /api/v0/turns` with that `session` and `prompt`.
 4. Ask for a review of a turn's work once its job has ended: `POST /api/v0/jobs/{job}/review` with
    `agent` (the job id is in the reply of step 2, as `job`).
 5. Cancel work you asked for: `POST /api/v0/jobs/{job}/cancel`.
+6. See what a turn did: `GET /api/v0/turns/{turn}/diff`. Put its changes in the person's folder:
+   `POST /api/v0/turns/{turn}/apply`. A 409 lists each file that changed there since the turn
+   started, with why, and nothing is written: read it, then make another turn that resolves it.
 
 Use `agentbus-api METHOD PATH [BODY]`, which is on your PATH. It sends your token for you, so the
 command holds no variable and needs no approval. curl with the header works too, where your tools
@@ -200,7 +203,7 @@ curl -s -H "Authorization: Bearer $TOKEN" "$B/api/v0/sessions/abc/events?store=s
 
 Start a turn. Every turn runs as a job: this makes a turn job and answers once a runner has started
 its turn (the reply also names the `job`). Without `session`: a saved agent (its id from `GET /api/v0/agents`; a new data folder has `claude` and `codex`) with a prompt in a folder, in a new
-session. The agent's harness, access and model start it; `model` sent here wins. A new session whose folder is in a git repo with a commit runs in its own git worktree of that repo at the folder's HEAD (in the same folder inside it); send `"isolate": false` to use the folder as it is. With `session`: the next turn of a session the snapshot marks `resumable`, in its own folder
+session. The agent's harness, access and model start it; `model` sent here wins. A new session works on its own copy of its folder, as the `isolation` setting of `permissions.toml` says (`copy`, the default; `git`, a git worktree in a repo; `none`), starting from the folder exactly as it is; nothing reaches the folder until a turn is applied (`POST /api/v0/turns/{id}/apply`). Send `"isolate": false` to use the folder as it is. With `session`: the next turn of a session the snapshot marks `resumable`, in its own folder
 (send none, or the session's own; a different one is refused with 400). It runs on the session's
 latest agent, or on the saved agent `agent` names: any message may go to any agent, and later
 turns stay on it. A switch takes the agent's model; naming the session's own latest agent keeps
@@ -304,6 +307,41 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" "$B/api/v0/turns/t_91ee…/sto
 # {"id":"abc","turn":"t_91ee…"}
 ```
 
+### GET /api/v0/turns/{id}/diff
+
+Everything the record holds about what one turn did, in one answer. `files`: each file it added,
+modified or deleted, with size and SHA-256, and in an isolated copy each small text file's own
+unified diff (`diff`); `diff_left_out` marks a file whose content changed and has no diff here
+(binary, over 256 KiB, past the 512 KiB budget, or its earlier content no longer kept). `files` is
+null while the turn runs. `model_calls`: count, usage, cost, calls per model, and each call with
+its `exchange`. `tools`: each tool call with its input (up to 4 KiB), error and any refusal.
+`commands`: the shell commands it asked to run, as the gateway reads them. Also the agent,
+started, ended, `duration_ms`, and `apply`: whether its changes were applied (`state` none, queued,
+running, applied, refused or failed). A turn token reads it for a turn in its scope.
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" $B/api/v0/turns/t_9f2c01ab4d5e6f70/diff
+# {"turn":"t_…","files":{"isolated":true,"from":"base","to":"t_…","count":1,"changes":[{"path":"a.txt","change":"modified","diff":"--- a/a.txt\n+++ b/a.txt\n@@ …"}]},"model_calls":{"count":3,…},"commands":["go test ./..."],"apply":{"state":"none"}}
+```
+
+### POST /api/v0/turns/{id}/apply
+
+Put one turn's file changes into the person's folder: the folder its session's copy was made from.
+No body. 200 with `state: "applied"` and `files` written. If any file there is neither as it was at
+the turn's start nor already as the turn left it, nothing is written: 409 with `state: "refused"`,
+`error`, and `conflicts` (`path` and `why` for each). Applying the same turn again is a no-op: 200
+with `already: true`. A refused apply may be asked for again. 202 when the runner has not finished
+within 30 seconds; the turn's diff shows how it ended. 400 for a turn that cannot be applied (still
+running, or not in an isolated copy, or its session closed). A turn token may apply a turn in its
+scope unless `apply = false` in `[agent_api]`; a read-only turn may not.
+
+```sh
+curl -s -X POST -H "Authorization: Bearer $TOKEN" $B/api/v0/turns/t_9f2c01ab4d5e6f70/apply
+# {"state":"applied","turn":"t_…","session":"abc","job":"job_…","files":["a.txt"],"pruned":true}
+agentbus-api POST /api/v0/turns/t_9f2c01ab4d5e6f70/apply
+# 409 {"state":"refused","conflicts":[{"path":"a.txt","why":"changed in your folder since the checkpoint"}],…}
+```
+
 ### GET /api/v0/turns/{id}/events
 
 One turn's stored events, oldest first, paged like a session's events. `events.dropped` names
@@ -396,9 +434,10 @@ curl -s -H "Authorization: Bearer $TOKEN" $B/api/v0/version
 
 ### Jobs: POST /api/v0/jobs, GET /api/v0/jobs, POST /api/v0/jobs/{id}/review
 
-A job is a requested turn, of kind `turn` or `review`. A runner takes it and runs it; its attempt
+A job is a requested turn, of kind `turn` or `review`, or an `apply` that
+`POST /api/v0/turns/{id}/apply` makes. A runner takes it and runs it; its attempt
 is its turn (the attempt id is the turn id, and `turn_started` says the turn started). A session's
-first turn job names `agent` and `folder`, or `repo` and `base` for a git worktree of its own; a
+first turn job names `agent` and `folder` (with `isolate: true` for a copy), or `repo` and `base` for a git worktree of its own; a
 later one names `session` only, waits for the one before it, and keeps the session's model when it names none. Each job's `result` lists the files
 it changed. A review job runs read-only in the reviewed job's workspace, in a session of its own,
 and ends with `verdict` (`pass`, `fail` or `unknown`) and `findings`; any P1 makes it `fail`.

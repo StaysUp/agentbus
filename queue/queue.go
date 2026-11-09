@@ -52,6 +52,9 @@ const (
 const (
 	KindTurn   = "turn"
 	KindReview = "review"
+	// KindApply puts one turn's changes into the person's folder, on the
+	// runner that holds the turn's session (apply.go). It starts no turn.
+	KindApply = "apply"
 )
 
 // Failure reasons.
@@ -60,6 +63,7 @@ const (
 	ReasonAgent      = "agent"       // the agent's turn ended in failure
 	ReasonRunnerLost = "runner_lost" // the runner's lease expired while running
 	ReasonTimeout    = "timeout"
+	ReasonConflict   = "conflict" // an apply refused: files changed in the person's folder
 )
 
 // DefaultTeam is the one team every job and runner belongs to for now. The id
@@ -225,6 +229,10 @@ type Spec struct {
 	// the runner to use only if the turn switches agent: a turn that names
 	// the session's own latest agent keeps the session's model.
 	AgentModel string `json:"agent_model,omitempty"`
+	// ApplyFrom and ApplyTo, for an apply job: the checkpoints of the turn
+	// whose changes it applies.
+	ApplyFrom string `json:"apply_from,omitempty"`
+	ApplyTo   string `json:"apply_to,omitempty"`
 }
 
 // asked is spec as the request named it, for the idempotency hash: the
@@ -260,6 +268,10 @@ type Links struct {
 	// ResultOf: this turn job delivers that job's result. AgentBus started
 	// it, not the person.
 	ResultOf *ResultOf `json:"result_of,omitempty"`
+	// AppliesTurn and AppliesJob: for an apply job, the turn whose changes
+	// it applies, and that turn's job.
+	AppliesTurn string `json:"applies_turn,omitempty"`
+	AppliesJob  string `json:"applies_job,omitempty"`
 }
 
 // Job is one requested turn.

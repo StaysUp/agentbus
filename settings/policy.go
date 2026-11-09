@@ -93,6 +93,7 @@ continue = true      # continue a session its tree started (never its own or the
 review = true        # ask for a review of a job in its scope
 cancel = true        # cancel jobs and stop turns its tree asked for
 rename = true        # rename sessions in its scope
+apply = true         # apply a turn's changes to the person's folder, for a turn in its scope
 `
 
 // Edit values: where a turn may edit files without asking.
@@ -160,6 +161,7 @@ type AgentAPI struct {
 	Review     *bool  `toml:"review" json:"review,omitempty" doc:"Ask for a review of a job in its scope. Absent in a PUT: true."`
 	Cancel     *bool  `toml:"cancel" json:"cancel,omitempty" doc:"Cancel jobs and stop turns its tree asked for. Absent in a PUT: true."`
 	Rename     *bool  `toml:"rename" json:"rename,omitempty" doc:"Rename sessions in its scope. Absent in a PUT: true."`
+	Apply      *bool  `toml:"apply" json:"apply,omitempty" doc:"Apply a turn's changes to the person's folder, for a turn of a session in its scope. Absent in a PUT: true."`
 }
 
 // DefaultPolicy is the policy of a missing or empty file.
@@ -202,7 +204,7 @@ func (p *Policy) fill() {
 		p.AgentAPI.Scope = ScopeTree
 	}
 	for _, b := range []**bool{&p.AgentAPI.Read, &p.AgentAPI.ListAgents, &p.AgentAPI.Start,
-		&p.AgentAPI.Continue, &p.AgentAPI.Review, &p.AgentAPI.Cancel, &p.AgentAPI.Rename} {
+		&p.AgentAPI.Continue, &p.AgentAPI.Review, &p.AgentAPI.Cancel, &p.AgentAPI.Rename, &p.AgentAPI.Apply} {
 		if *b == nil {
 			on := true
 			*b = &on
@@ -330,6 +332,7 @@ func FormatPolicy(p Policy) []byte {
 		"agent_api.scope": p.AgentAPI.Scope, "agent_api.read": *p.AgentAPI.Read, "agent_api.list_agents": *p.AgentAPI.ListAgents,
 		"agent_api.start": *p.AgentAPI.Start, "agent_api.continue": *p.AgentAPI.Continue, "agent_api.review": *p.AgentAPI.Review,
 		"agent_api.cancel": *p.AgentAPI.Cancel, "agent_api.rename": *p.AgentAPI.Rename,
+		"agent_api.apply": *p.AgentAPI.Apply,
 	}
 	var out bytes.Buffer
 	section := ""

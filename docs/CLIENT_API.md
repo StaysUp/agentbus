@@ -150,15 +150,17 @@ to the asking session as a later turn** (see "Results come back as the next turn
 | `POST /api/v0/jobs/<id>/review` | a job of a session in the tree |
 | `POST /api/v0/jobs/<id>/cancel`, `POST /api/v0/turns/<id>/stop` | only work the tree asked for |
 | `PATCH /api/v0/sessions/<id>` (rename) | a session in the tree |
+| `GET /api/v0/turns/<id>/diff` | a turn of a session in the tree; without `session`, its own |
+| `POST /api/v0/turns/<id>/apply` | a turn whose job ran in a session in the tree, its own session included |
 
 The writes are refused for a **read-only** turn (`read_only: true`): its token only reads.
 
 Each row is also a switch of `[agent_api]`, read for every request: `read` (the reads of the first
-five rows), `list_agents`, `start` (a new session), `continue` (with `session`), `review`,
-`cancel` and `rename`. Each is on unless the file says `false`; a call switched off gets **403** naming the
+five rows, and the diff), `list_agents`, `start` (a new session), `continue` (with `session`), `review`,
+`cancel`, `rename` and `apply`. Each is on unless the file says `false`; a call switched off gets **403** naming the
 switch. `scope = "session"` keeps the token to its own session: it reads only that session's turns,
 calls and jobs, reviews only its jobs, cancels only what its own turns asked for, renames only its
-own session, and continues no session. A `permissions.toml` that cannot be used refuses every turn token's request with **503**.
+own session, applies only its own session's turns, and continues no session. A `permissions.toml` that cannot be used refuses every turn token's request with **503**.
 
 **What a turn token never does**, each a **403** with a plain reason, whatever `[agent_api]` says:
 read or change the settings (every `/api/v0/settings` route takes the main token), save, edit or remove agents, see or make a token (no reply holds one), make a
@@ -262,6 +264,7 @@ continue = true
 review = true
 cancel = true
 rename = true
+apply = true
 ```
 
 - `agentbus up` makes the file when it is missing, mode 0600, with empty lists, every other value
@@ -1027,6 +1030,92 @@ Stops one running turn, the way the service stops every turn when it shuts down.
   asked for; any other turn, its own included, gets **403**.
 - No body is read.
 
+### `GET /api/v0/turns/<id>/diff?session=<id>` — what one turn did
+
+```json
+{"turn":"t_5d0c19a2e7b3f481","session":"abc","agent":"claude","agent_id":"claude","model":"claude-haiku-4-5",
+ "state":"finished","started":"2026-11-09T09:12:03Z","ended":"2026-11-09T09:12:41Z","duration_ms":38000,
+ "job":"job_7f…",
+ "files":{"isolated":true,"from":"base","to":"t_5d0c19a2e7b3f481","kind":"snapshot","count":2,
+   "changes":[
+     {"path":"a.txt","change":"modified","size":12,"sha256":"…",
+      "diff":"--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+2\n"},
+     {"path":"logo.png","change":"added","size":5120,"sha256":"…","diff_left_out":true}]},
+ "model_calls":{"count":3,"usage":{"input_tokens":1200,"output_tokens":540,"cache_read_tokens":0,"cache_write_tokens":0},
+   "cost_usd":0.01,"cost_complete":true,"models":[{"model":"claude-haiku-4-5","calls":3}],
+   "calls":[{"exchange":"x-9f2c01ab-1","model":"claude-haiku-4-5","status":200,"usage":{…},"cost_usd":0.003,"latency_ms":900}]},
+ "tools":{"count":2,"calls":[{"id":"toolu_1","name":"Bash","input":{"command":"go test ./..."},"commands":["go test ./..."],"error":false},
+   {"id":"toolu_2","name":"Edit","input":{…}}]},
+ "commands":["go test ./..."],
+ "apply":{"state":"none"}}
+```
+
+Everything the record holds about one turn, in one answer, for the cockpit and for a reviewer.
+
+- **`files`** comes from the turn's job result: each file it added, modified or deleted, with size
+  and SHA-256. In an isolated copy each changed text file has its own unified `diff`, from the
+  turn's start checkpoint to its end one, made when the turn ended. A file's earlier content is the
+  checkpoint's saved copy, or for the first turn the person's folder while that file is still as it
+  was. **`diff_left_out: true`** marks a file whose content changed and has no diff here: binary, a
+  link, over 256 KiB, past the 512 KiB budget of all diffs together, or its earlier content no
+  longer kept. In a git work tree `git_diff` is git's own diff of the tracked files. `files` is
+  `null` while the turn runs, and for a turn no job of this service ran. `files.isolated` says
+  whether `POST /api/v0/turns/<id>/apply` can apply it.
+- **`model_calls`**: the count, usage and cost as `GET /api/v0/turns/<id>` has them, calls per
+  model, and each call (at most 500) with its `exchange`, for `GET /api/v0/calls/<exchange>/context`.
+- **`tools`**: each tool call (at most 1000), with its input when it is at most 4 KiB
+  (`input_left_out` past that), the shell commands it runs, `error` from its `tool.completed`, and
+  `refused_rule` when the gateway's guard refused it.
+- **`commands`**: every shell command the agent asked to run, in order, read the way the guard reads
+  them (Claude Code's `Bash`, codex's `exec` and `exec_command`). A command built at run time, or
+  run from a script, is not seen. Network calls and processes are not recorded yet; a VM backend
+  will add them.
+- **`apply`**: the turn's latest apply, as `POST /api/v0/turns/<id>/apply` answers it, or
+  `{"state":"none"}`.
+- **404** when no `turn.started` carries the id. The main token, the turns token, or a turn token
+  for a turn of its request tree.
+
+### `POST /api/v0/turns/<id>/apply` — apply a turn's changes to your folder
+
+```json
+{"state":"applied","turn":"t_5d0c19a2e7b3f481","session":"abc","job":"job_8a…","files":["a.txt","logo.png"],"pruned":true}
+```
+
+Puts one turn's file changes into the person's folder: the folder the session's copy was made
+from. The runner that holds the session writes each file the turn added or changed, by rename, and
+removes each one it deleted. No body is read.
+
+- **Refused on a conflict, with nothing written.** Before it writes anything, the runner checks
+  every file the turn changed. A file in the folder that is neither as it was at the turn's start
+  nor already as the turn left it refuses the whole apply: **409**
+  `{"state":"refused","error":"apply refused: 1 file(s) in your folder changed since the checkpoint: a.txt","conflicts":[{"path":"a.txt","why":"changed in your folder since the checkpoint"}],…}`.
+  `why` is one of `changed in your folder since the checkpoint`, `added in your folder since the
+  checkpoint`, `removed from your folder since the checkpoint`, or `is a folder or cannot be read in
+  your folder`. An agent reads it and makes another turn that resolves it, then applies that one.
+- **Applying twice is a no-op.** The same turn again answers **200** with `already: true` and the
+  files the first apply wrote; nothing more is written. A refused apply may be asked for again: it
+  is a new apply job. The runner records each apply it did, before it removes any checkpoint, so an
+  apply whose answer was lost answers the same when asked again.
+- **A big apply** lists at most what fits the answer: `count` is every file written, and
+  `truncated: true` says `files` (or `conflicts`) holds fewer.
+- **Order.** Turns may be applied in any order; each is checked against the folder as it is.
+  A runner runs one apply at a time, so two sessions of one folder (or of a folder and one inside
+  it) never both pass the check and write over each other.
+  Applying the oldest unapplied turn of a session also removes the checkpoints before its end
+  (`pruned: true`).
+- **It waits up to 30 seconds** for the runner. Past that it answers **202** with `state` `queued`
+  or `running`; `GET /api/v0/turns/<id>/diff` shows how it ended, and calling apply again waits for
+  the same job.
+- **400** for a turn that cannot be applied: its job has not ended, it is not the job's last
+  attempt, it did not run in an isolated copy (`isolation = "none"`, or `isolate: false`), or its
+  session was closed. **404** when no job of this service ran the turn. **409** with `state`
+  `refused` and `error` also when the runner keeps no copy for the session, or the turn's
+  checkpoints are gone; with `state` `failed` when the apply job did not finish (its runner went
+  away): ask again, and a file it already wrote counts as applied.
+- **A turn token** may apply a turn whose job ran in a session of its request tree, its own session
+  included (`scope = "session"`: its own session only), unless `apply = false` in `[agent_api]`. A
+  read-only turn's token gets 403.
+
 ### `GET /api/v0/turns/<id>/events?store=<store>&after=<seq>&limit=<n>`
 
 One turn's stored events, oldest first, paged as `GET /api/v0/sessions/<id>/events` is: the same
@@ -1299,7 +1388,9 @@ curl -s -X PUT -H "Authorization: Bearer $(cat ~/.local/share/agentbus/token)" -
 
 ## Jobs
 
-Every turn runs as a job. A job is a requested turn: its `kind` is `turn` or `review`. A runner
+Every turn runs as a job. A job is a requested turn: its `kind` is `turn` or `review`. A third kind,
+`apply`, puts one turn's changes into the person's folder ([Isolation](#isolation)); only
+`POST /api/v0/turns/<id>/apply` makes one. A runner
 takes it from the queue and runs it as an attempt. **The attempt is the turn**: the attempt id is
 the turn id, `t_` and 16 hex characters, and there is no second id to match. A turn job names its
 session when it is made, so `session` is on the job from the start.
@@ -1308,8 +1399,8 @@ session when it is made, so `session` is on the job from the start.
 turn. The jobs API is the whole way: worktrees, reviews, cancel, and the list.
 
 - **States:** `queued`, `taken`, `running`, then `finished`, `failed` or `cancelled`. A failed job
-  says why in `reason`: `setup` (the turn did not start; `result.refused` and `result.status` say
-  why), `agent` (the agent exited with a failure), `runner_lost` (its runner stopped answering
+  says why in `reason`: `setup` (the turn did not start, or an apply was refused; `result.refused` and `result.status` say
+  why), `conflict` (an apply: a file in the person's folder changed since the turn's start; `result.apply.conflicts` lists each), `agent` (the agent exited with a failure), `runner_lost` (its runner stopped answering
   while the turn ran) or `runner_stopped` (its runner shut down).
 - **A session's turn jobs run one at a time**, in the order they were made. A next turn waits for
   the one before it. Reviews never wait.
@@ -1373,11 +1464,16 @@ file's hash and keeps its own copy of each file that changed, so one turn's chan
 after later turns changed the same file again. A job's `changes` name the two checkpoints in `from`
 and `to`. The first checkpoint is `base`: the folder as the session began.
 
-Applying a turn puts its changed files into the person's folder. It is refused, with the reason
-and each file, when a file there is neither as it was at the turn's start nor already as the turn
-left it, and then nothing is written. Applying from the oldest checkpoint kept also removes what
-the checkpoints up to it kept. Closing the workspace removes the copy and all its checkpoints. The
-API for a turn's diff and apply is next; today the adapter is in package `isolation`.
+Applying a turn (`POST /api/v0/turns/<id>/apply`) puts its changed files into the person's folder.
+It is refused, with the reason and each file, when a file there is neither as it was at the turn's
+start nor already as the turn left it, and then nothing is written. Applying from the oldest
+checkpoint kept also removes what the checkpoints up to it kept. Closing the workspace removes the
+copy and all its checkpoints. `GET /api/v0/turns/<id>/diff` shows a turn's changes, each small
+text file with its own unified diff, read from the turn's checkpoints when it ended.
+
+An apply is a job of kind `apply`, which the runner holding the session runs through its isolation
+backend. It starts no turn, waits for no turn of the session, and fails with reason `conflict` when
+a file refused it. A session with an apply that has not ended cannot be closed.
 
 **A known limit: a disk without copy-on-write.** On ext4, and on a folder shared into a container
 from another disk, `copy` copies every byte, so a big folder (a `node_modules`, a build output)

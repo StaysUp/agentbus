@@ -262,6 +262,42 @@ var routes = slices.Concat([]route{
 		turn:  askedTurn,
 		turns: true,
 		serve: (*API).stopTurn},
+	{method: "GET", path: "/api/v0/turns/{id}/diff", op: "turnDiff",
+		idDoc:   "A turn id, as POST /api/v0/turns named it. Another shape gets 404.",
+		tag:     "Turns",
+		summary: "Get a turn's diff",
+		doc: "Everything the record holds about what one turn did, in one answer: the files it changed, its model calls, its tool calls and the commands it ran, its agent and its timing, and whether its changes were applied.\n\n" +
+			"files comes from the turn's job: each changed file with its change (added, modified or deleted), size and SHA-256, and, in an isolated copy, its own unified diff for small text files. " +
+			"A file with no diff whose content changed says diff_left_out. files is null while the turn runs, and for a turn no job of this service ran. " +
+			"Commands are what the gateway's guard reads from the agent's shell tool calls; network calls and processes are not recorded yet. " +
+			"The same turn id can be in two sessions; without session the newest is answered.",
+		query: []param{
+			{name: "session", doc: "Only this session's turn of that id."}},
+		replies: []reply{ok(200, TurnDiff{}, "The turn's diff."), badRequest,
+			fail(404, "No turn.started carries this turn id."), storeFailed},
+		turn:  treeSessionQuery,
+		turns: true,
+		serve: (*API).turnDiff},
+	{method: "POST", path: "/api/v0/turns/{id}/apply", op: "applyTurn",
+		idDoc:   "A turn id, as POST /api/v0/turns named it. Another shape gets 404.",
+		tag:     "Turns",
+		summary: "Apply a turn's changes",
+		doc: "Put one turn's file changes into the person's folder: the folder its isolated copy was made from. No body is read.\n\n" +
+			"The runner that holds the turn's session writes each file the turn added or changed, and removes each one it deleted. " +
+			"Before it writes anything it checks every file in the folder: one that is neither as it was at the turn's start nor already as the turn left it refuses the whole apply, " +
+			"with 409, state refused, and each file in conflicts with why. Nothing is written then, so the agent can read why and make another turn. " +
+			"Applying the same turn again is a no-op: 200 with already true and the files the first apply wrote. " +
+			"An apply that was refused may be asked for again. " +
+			"The reply waits up to 30 seconds for the runner; past that it is 202 with state queued or running, and GET /api/v0/turns/{id}/diff shows how it ended. " +
+			"A turn token may apply a turn of a session in its scope, unless apply is false in [agent_api] of permissions.toml; a read-only turn's token may not.",
+		replies: []reply{ok(200, ApplyState{}, "Applied: files lists what was written. already true: applied before, and nothing more was written."),
+			ok(202, ApplyState{}, "The runner has not finished the apply yet."),
+			badRequest,
+			fail(404, "This service keeps no job queue, or no job ran this turn."),
+			ok(409, ApplyState{}, "Refused or failed: error says why, and conflicts names each file in your folder that changed. Nothing was written on a conflict."),
+			tooMany, storeFailed},
+		turn:  applyTurnTok,
+		serve: (*API).applyTurn},
 	{method: "GET", path: "/api/v0/agents", op: "listAgents",
 		tag:     "Agents",
 		summary: "List agents",

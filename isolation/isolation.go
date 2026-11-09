@@ -67,6 +67,8 @@ type Backend interface {
 	// already as it is at to refuses the whole apply with a *Conflict, and
 	// nothing is written. Applying from the oldest checkpoint kept also
 	// removes what the checkpoints up to to kept: to becomes the oldest.
+	// An apply already done is recorded: the same from and to again answer
+	// as it did and write nothing, even once its checkpoints were pruned.
 	Apply(s *Space, from, to string) (Applied, error)
 	// Close removes the copy and everything the space kept.
 	Close(s *Space) error

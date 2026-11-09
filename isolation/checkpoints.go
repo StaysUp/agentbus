@@ -47,6 +47,12 @@ type header struct {
 // locks keeps one change of a space at a time, in this process.
 var locks sync.Map // state folder -> *sync.Mutex
 
+// applyMu keeps one apply at a time in this process, whatever folder it
+// writes to: two sessions copied from one folder, or from a folder and one
+// inside it, must not both pass the conflict check and then write over each
+// other. An apply is short, so one lock for all of them costs little.
+var applyMu sync.Mutex
+
 func lock(s *Space) func() {
 	m, _ := locks.LoadOrStore(s.state(), &sync.Mutex{})
 	mu := m.(*sync.Mutex)
@@ -292,7 +298,8 @@ func pair(s *Space, list []header, from, to string) (a, b *workspace.Snapshot, h
 }
 
 // diff is Backend.Diff. A file's content comes from its saved copy, so the
-// diff of an older checkpoint shows that checkpoint, not the folder now.
+// diff of an older checkpoint shows that checkpoint, not the folder now. Each
+// changed text file also gets its own unified diff (addFileDiffs).
 func diff(s *Space, from, to string) (workspace.Changes, error) {
 	unlock := lock(s)
 	defer unlock()
@@ -318,6 +325,7 @@ func diff(s *Space, from, to string) (workspace.Changes, error) {
 		return readRegular(objects, f.Hash, max)
 	}
 	c := workspace.DiffRead(s.Dir, a, b, read)
+	addFileDiffs(s, objects, a, b, &c)
 	c.From, c.To = ha.Checkpoint.Name, hb.Checkpoint.Name
 	return c, nil
 }
@@ -352,8 +360,19 @@ func apply(s *Space, from, to string) (Applied, error) {
 	if s.Source == "" {
 		return Applied{}, ErrNoSource
 	}
+	if !checkpointName.MatchString(from) || !checkpointName.MatchString(to) {
+		return Applied{}, ErrBadName
+	}
 	unlock := lock(s)
 	defer unlock()
+	// The check and the writes are one step for the person's folder.
+	applyMu.Lock()
+	defer applyMu.Unlock()
+	// An apply already done answers as it did, even once its checkpoints
+	// were pruned: a caller that lost the answer may ask again.
+	if done, ok := readApplied(s, from, to); ok {
+		return done, nil
+	}
 	list, err := headers(s)
 	if err != nil {
 		return Applied{}, err
@@ -423,13 +442,53 @@ func apply(s *Space, from, to string) (Applied, error) {
 		out.Files = append(out.Files, o.rel)
 	}
 	sort.Strings(out.Files)
-	if len(list) > 0 && list[0].Checkpoint.Name == from && hb.Checkpoint.Seq > list[0].Checkpoint.Seq {
+	prunes := len(list) > 0 && list[0].Checkpoint.Name == from && hb.Checkpoint.Seq > list[0].Checkpoint.Seq
+	out.Pruned = prunes
+	// The record is written before the prune, so a retry after a lost
+	// answer finds it rather than a missing checkpoint.
+	if err := writeApplied(s, from, to, out); err != nil {
+		return out, err
+	}
+	if prunes {
 		if err := prune(s, list, hb); err != nil {
 			return out, err
 		}
-		out.Pruned = true
 	}
 	return out, nil
+}
+
+// appliedFile is where the apply from one checkpoint to another is recorded.
+func appliedFile(s *Space, from, to string) string {
+	sum := sha256.Sum256([]byte(from + "\x00" + to))
+	return filepath.Join(s.state(), "applied", hex.EncodeToString(sum[:])+".json")
+}
+
+// readApplied is the recorded apply from from to to, if one was done.
+func readApplied(s *Space, from, to string) (Applied, bool) {
+	b, err := os.ReadFile(appliedFile(s, from, to))
+	if err != nil {
+		return Applied{}, false
+	}
+	var r struct {
+		From, To string
+		Applied  Applied
+	}
+	if json.Unmarshal(b, &r) != nil || r.From != from || r.To != to {
+		return Applied{}, false
+	}
+	return r.Applied, true
+}
+
+func writeApplied(s *Space, from, to string, done Applied) error {
+	p := appliedFile(s, from, to)
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		return err
+	}
+	b, _ := json.Marshal(struct {
+		From, To string
+		Applied  Applied
+	}{from, to, done})
+	return writeFileAtomic(p, b)
 }
 
 // hashIn hashes the file name of rt as workspace.Take does. A missing file

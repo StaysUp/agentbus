@@ -292,6 +292,12 @@ type Change struct {
 	// Content: the whole file at the end, when it is small UTF-8 text and
 	// the diff does not show it (untracked, ignored, or a plain folder).
 	Content *string `json:"content,omitempty"`
+	// Diff, in an isolated session: this file's unified diff from the
+	// turn's start to its end, when both sides are small text and its
+	// earlier content is kept. DiffLeftOut: the content changed and no diff
+	// is here (binary, a link, too big, past the budget, or not kept).
+	Diff        *string `json:"diff,omitempty"`
+	DiffLeftOut bool    `json:"diff_left_out,omitempty"`
 }
 
 // Changes is what a job changed in its workspace.
@@ -403,8 +409,9 @@ func diff(root string, before, after *Snapshot, read func(rel string, max int) (
 }
 
 // Fit shrinks c until its JSON is at most max bytes: first the files'
-// content goes, then the diff, then files from the end of the list. What was
-// left out is marked: ContentLeftOut, DiffTruncated, Truncated. Count stays
+// content goes, then each file's own diff, then the diff, then files from the
+// end of the list. What was left out is marked: ContentLeftOut, DiffLeftOut,
+// DiffTruncated, Truncated. Count stays
 // the whole count.
 func (c *Changes) Fit(max int) {
 	size := func() int { b, _ := json.Marshal(c); return len(b) }
@@ -414,6 +421,14 @@ func (c *Changes) Fit(max int) {
 	for i := range c.Files {
 		if c.Files[i].Content != nil {
 			c.Files[i].Content, c.ContentLeftOut = nil, true
+		}
+	}
+	if size() <= max {
+		return
+	}
+	for i := range c.Files {
+		if c.Files[i].Diff != nil {
+			c.Files[i].Diff, c.Files[i].DiffLeftOut = nil, true
 		}
 	}
 	if size() <= max {

@@ -218,6 +218,31 @@ func commandsOf(vendor string, item map[string]any) []string {
 	return nil
 }
 
+// ToolCommands are the shell commands of a stored tool.requested, read the
+// way the guard reads a call: vendor, tool name and input as the record holds
+// them. A tool that runs no shell command gives none.
+func ToolCommands(vendor, name string, input json.RawMessage) []string {
+	item := map[string]any{"name": name}
+	var in any
+	if decodeJSON(input, &in) != nil {
+		return nil
+	}
+	if vendor == "anthropic" {
+		item["input"] = in
+		return commandsOf(vendor, item)
+	}
+	switch v := in.(type) {
+	case string:
+		// A custom tool's free text, kept as a JSON string (codex's exec).
+		item["type"], item["input"] = "custom_tool_call", v
+	case map[string]any:
+		item["type"], item["arguments"] = "function_call", string(input)
+	default:
+		return nil
+	}
+	return commandsOf(vendor, item)
+}
+
 // commandValue is a command given as a string or as a list of words, the
 // list joined back into a quoted command line.
 func commandValue(v any) string {

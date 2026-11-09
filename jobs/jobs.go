@@ -505,9 +505,9 @@ func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch f.Kind {
-	case "", queue.KindTurn, queue.KindReview:
+	case "", queue.KindTurn, queue.KindReview, queue.KindApply:
 	default:
-		fail(w, http.StatusBadRequest, "kind must be turn or review")
+		fail(w, http.StatusBadRequest, "kind must be turn, review or apply")
 		return
 	}
 	if len(f.Session) > 128 || len(f.Reviews) > 128 {

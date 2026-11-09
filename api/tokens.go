@@ -75,6 +75,9 @@ const (
 	// renameSession: {id} is a session in the token's scope, to rename. Not
 	// for a read-only turn.
 	renameSession
+	// applyTurnTok: {id} is a turn of a job of a session in the token's
+	// scope, whose changes to apply. Not for a read-only turn.
+	applyTurnTok
 )
 
 // Refusals a turn token gets. Fixed wording: they never quote the request.
@@ -84,7 +87,7 @@ const (
 		"and asks for work with POST /api/v0/turns and POST /api/v0/jobs/{id}/review"
 	turnSessionRefused  = "a turn token reads only its own session and the sessions its request tree started"
 	turnCallRefused     = "a turn token reads only the calls of its own session and the sessions its request tree started"
-	turnReadOnly        = "this turn is read-only, so its token only reads; it cannot start, continue, review, cancel or stop work, or rename sessions"
+	turnReadOnly        = "this turn is read-only, so its token only reads; it cannot start, continue, review, cancel or stop work, rename sessions or apply changes"
 	turnContinueRefused = "a turn token continues only sessions its request tree started, never its own or the person's; " +
 		"results come back to your session as later turns"
 	turnFolderRefused  = "a turn token starts sessions only in its own session's folder, or a folder inside it"
@@ -181,7 +184,7 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 		return nil, false
 	}
 	switch rt.turn {
-	case askTurn, askReview, askedJob, askedTurn, renameSession:
+	case askTurn, askReview, askedJob, askedTurn, renameSession, applyTurnTok:
 		if g.ReadOnly {
 			return refuse(turnReadOnly)
 		}
@@ -198,6 +201,8 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 		return refuse(turnSwitchedOff("cancel jobs or stop turns", "cancel"))
 	case rt.turn == renameSession && !*api.Rename:
 		return refuse(turnSwitchedOff("rename sessions", "rename"))
+	case rt.turn == applyTurnTok && !*api.Apply:
+		return refuse(turnSwitchedOff("apply a turn's changes", "apply"))
 	}
 	// start and continue are told apart by the body: askChecks.
 	inScope := func(session string) (bool, error) { return a.inScope(g, api.Scope, session) }
@@ -248,7 +253,7 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 		} else if !ok {
 			return refuse(turnSessionRefused)
 		}
-	case treeAttempt:
+	case treeAttempt, applyTurnTok:
 		if a.cfg.Queue == nil {
 			return failed(queue.ErrNotFound)
 		}
