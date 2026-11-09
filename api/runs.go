@@ -51,7 +51,7 @@ type TurnRequest struct {
 	Folder   string `json:"folder,omitempty" doc:"An absolute path to an existing directory on the runner's machine. Required without session. With session it is the session's own; if sent it must match."`
 	Isolate  *bool  `json:"isolate,omitempty" doc:"True unless false, for a new session. True: when folder is in a git repo with a commit, the session runs in a new git worktree of that repo at its current HEAD, in the same folder inside it; otherwise in folder as it is. Uncommitted changes in folder are not in the worktree. False: always folder as it is. Not sent with session."`
 	Prompt   string `json:"prompt" doc:"From 1 byte to 256 KiB, no NUL byte. Always passed after --."`
-	Model    string `json:"model,omitempty" doc:"Passed only as the value of --model. Absent with agent: the saved agent's model. A session's next turn with no agent and no model keeps the model of the session's latest turn, from its turn.started."`
+	Model    string `json:"model,omitempty" doc:"Passed only as the value of --model. Absent with agent: the saved agent's model, for a new session or a turn that switches agent; a next turn that names the session's own latest agent keeps the session's model. A session's next turn with no agent and no model keeps the model of the session's latest turn, from its turn.started."`
 	ReadOnly *bool  `json:"read_only,omitempty" doc:"False unless true. True: claude gets Read, Grep and Glob only; codex runs with --sandbox read-only. False: claude keeps its own tools and permission settings, plus the edit rule of permissions.toml (by default it edits its session's folder without asking); with edit = \"session\" codex runs with --sandbox workspace-write and network access on, so it can edit the folder and reach the network, and with edit = \"none\" read-only. Read-only codex has no network."`
 	// IdempotencyKey makes a retry safe: a client whose request timed out
 	// sends it again with the same key and gets the same turn.
@@ -141,8 +141,11 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			spec.Agent, spec.AgentID, spec.Access, spec.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
-			if spec.Model == "" && ag.Model != "" {
-				spec.Model, spec.ModelFromAgent = ag.Model, true
+			// The agent's model is used only if the turn switches agent,
+			// which the runner knows when the turn starts: the session's
+			// latest turn may change while this one waits in the queue.
+			if spec.Model == "" {
+				spec.AgentModel = ag.Model
 			}
 		}
 		if c.Known && body.Folder != "" && filepath.Clean(body.Folder) != filepath.Clean(c.Folder) {

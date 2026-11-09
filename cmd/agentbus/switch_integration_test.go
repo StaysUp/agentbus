@@ -141,9 +141,15 @@ func TestSwitchAgentPerMessage(t *testing.T) {
 	if !strings.Contains(strings.Join(r.Args, " "), "--model haiku") || ts["model"] != "haiku" {
 		t.Errorf("turn 6 args %q, started %v", r.Args, ts)
 	}
+	// Naming the session's own agent changes nothing: it keeps the model.
 	r, _ = next(7, map[string]any{"agent": "claude", "prompt": "seventh"})
+	if !strings.Contains(strings.Join(r.Args, " "), "--model haiku") {
+		t.Errorf("turn 7 args %q, want the session's model kept", r.Args)
+	}
+	// A switch to an agent with no model runs on the harness's default.
+	r, _ = next(8, map[string]any{"agent": "codex", "prompt": "eighth"})
 	if strings.Contains(strings.Join(r.Args, " "), "--model") {
-		t.Errorf("turn 7 args %q, want the default model", r.Args)
+		t.Errorf("turn 8 args %q, want the default model", r.Args)
 	}
 
 	// The record: each turn its agent; the session its first and latest.
@@ -153,11 +159,11 @@ func TestSwitchAgentPerMessage(t *testing.T) {
 			Agent   string `json:"agent"`
 		} `json:"turns"`
 	}
-	if code := callAPI(t, svc, tok, "GET", "/api/v0/turns?session="+session, nil, &list); code != http.StatusOK || len(list.Turns) != 7 ||
-		list.Turns[3].AgentID != "codex" || list.Turns[5].AgentID != "claude" || list.Turns[6].AgentID != ds {
+	if code := callAPI(t, svc, tok, "GET", "/api/v0/turns?session="+session, nil, &list); code != http.StatusOK || len(list.Turns) != 8 ||
+		list.Turns[0].AgentID != "codex" || list.Turns[4].AgentID != "codex" || list.Turns[6].AgentID != "claude" || list.Turns[7].AgentID != ds {
 		t.Errorf("turns %d %+v", code, list.Turns)
 	}
-	if s := snapSession(t, svc, tok, session); s["agent"] != "claude" || s["first_agent"] != "claude" {
+	if s := snapSession(t, svc, tok, session); s["agent"] != "codex" || s["first_agent"] != "claude" {
 		t.Errorf("session agent %v first %v", s["agent"], s["first_agent"])
 	}
 }

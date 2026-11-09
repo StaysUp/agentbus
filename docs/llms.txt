@@ -180,7 +180,8 @@ its turn (the reply also names the `job`). Without `session`: a saved agent (its
 session. The agent's harness, access and model start it; `model` sent here wins. A new session whose folder is in a git repo with a commit runs in its own git worktree of that repo at the folder's HEAD (in the same folder inside it); send `"isolate": false` to use the folder as it is. With `session`: the next turn of a session the snapshot marks `resumable`, in its own folder
 (send none, or the session's own; a different one is refused with 400). It runs on the session's
 latest agent, or on the saved agent `agent` names: any message may go to any agent, and later
-turns stay on it. On the same harness the conversation continues by own replay; on another harness
+turns stay on it. A switch takes the agent's model; naming the session's own latest agent keeps
+the session's model, decided when the turn starts. On the same harness the conversation continues by own replay; on another harness
 (or codex on OpenRouter) the agent gets the earlier turns as plain text before the person's words,
 and its `turn.started` has `continuity: "transcript"` with that text in `context`. Answers 202
 as soon as it starts, with the session `id` and the new `turn` id. Every event of the turn carries

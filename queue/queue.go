@@ -218,6 +218,11 @@ type Spec struct {
 	// ModelFromAgent: Model came from the saved agent, not the request. It
 	// is never stored; it only keeps the request's hash what was asked.
 	ModelFromAgent bool `json:"-"`
+	// AgentModel: a session's next turn that names a saved agent and no
+	// model gets that agent's model here, filled by the control plane, for
+	// the runner to use only if the turn switches agent: a turn that names
+	// the session's own latest agent keeps the session's model.
+	AgentModel string `json:"agent_model,omitempty"`
 }
 
 // asked is spec as the request named it, for the idempotency hash: the
@@ -229,7 +234,7 @@ func (spec Spec) asked() Spec {
 	if a.AgentID != "" {
 		a.Agent = a.AgentID
 	}
-	a.AgentID, a.Access, a.KeyEnv = "", "", ""
+	a.AgentID, a.Access, a.KeyEnv, a.AgentModel = "", "", "", ""
 	if a.ModelFromAgent {
 		a.Model = ""
 	}

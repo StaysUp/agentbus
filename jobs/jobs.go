@@ -306,7 +306,13 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 			ag = agents.Agent{ID: b.Spec.Agent, Harness: b.Spec.Agent}
 		}
 		b.Spec.Agent, b.Spec.AgentID, b.Spec.Access, b.Spec.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
-		if b.Spec.Model == "" && ag.Model != "" {
+		switch {
+		case b.Spec.Model != "":
+		case b.Spec.Session != "":
+			// A session's next turn: the runner uses the agent's model only
+			// if the turn switches agent (run.Request.AgentModel).
+			b.Spec.AgentModel = ag.Model
+		case ag.Model != "":
 			b.Spec.Model, b.Spec.ModelFromAgent = ag.Model, true
 		}
 	}

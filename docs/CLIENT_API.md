@@ -805,7 +805,10 @@ carrying the new turn id, since the agent's base URL names both.
   own (compared after removing a trailing `/` and the like), or the turn is refused with 400.
 - **Switching agent.** `agent` names a saved agent: this turn runs on it, with its access and its
   model unless `model` is sent, in the session's folder (its worktree, for an isolated session).
-  Later turns that name no agent stay on it: the session's agent is its latest turn's. Each turn's
+  Later turns that name no agent stay on it: the session's agent is its latest turn's. Naming the
+  agent the session's latest turn ran on is the same as naming none: the turn keeps the session's
+  model. This is decided when the turn starts, so a turn queued behind a switch is compared with
+  the turn just before it. Each turn's
   `turn.started` and `session.opened` carry the agent that ran it (`agent`, `agent_id`, `access`).
   How the switched turn reaches the earlier ones:
   - **On the same harness** as the session's latest turn (Claude Code to Claude Code, on a
@@ -1234,8 +1237,9 @@ turn. The jobs API is the whole way: worktrees, reviews, cancel, and the list.
   no agent and no model runs on the agent and the model of the session's latest turn, as the record
   holds them when the turn starts (`agent`, `agent_id` and `model` on its `turn.started`), so a Fix
   after a review runs on the model the author used. Its `spec.model` stays empty; the turn's
-  `turn.started` shows the model. A job that names a model keeps its own. A job that names an agent
-  gets that agent's model, or its default.
+  `turn.started` shows the model. A job that names a model keeps its own. A job that names another
+  agent than the latest turn's gets that agent's model, or its default; one that names the latest
+  turn's own agent keeps the session's model. The agent's model travels in `spec.agent_model`.
 - **No automatic retry once a job is running.** A lease lost before the turn started puts the job
   back in the queue; a lease lost while it runs fails it with `runner_lost`.
 - **The job's result** holds how the turn ended (`state`, `exit_code`, `stopped`, `reply`,

@@ -253,6 +253,10 @@ type Request struct {
 	// on another agent, in the session's folder; left out, the turn runs on
 	// the agent of the session's latest turn, read from the record.
 	AgentID, Access, KeyEnv string
+	// AgentModel is the saved agent's model, for a next turn that names an
+	// agent and no Model: used when the turn switches agent. A turn that
+	// names the session's own latest agent keeps the session's model.
+	AgentModel string
 	// Origin, when set, is stored on turn.started: who started the turn
 	// when the person did not.
 	Origin *event.Origin
@@ -391,8 +395,14 @@ func (e *Engine) next(req Request) (*Turn, error) {
 	// turn ran with, read from the same event as its agent, so the two never
 	// disagree, whichever turns started.
 	agent, agentID, access, keyEnv, model := c.Agent, c.AgentID, c.Access, c.KeyEnv, req.Model
-	if req.Agent == "" && model == "" {
-		model = c.Model
+	// Naming the session's own latest agent is the same as naming none: the
+	// session keeps its model. Only a switch takes the named agent's model.
+	if model == "" {
+		if req.Agent == "" || (req.AgentID != "" && req.AgentID == c.AgentID) {
+			model = c.Model
+		} else {
+			model = req.AgentModel
+		}
 	}
 	if req.Agent != "" {
 		if !KnownAgent(req.Agent) {

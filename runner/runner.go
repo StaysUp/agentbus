@@ -494,7 +494,7 @@ func (r *Runner) request(at *attempt) run.Request {
 	case sp.Session != "":
 		// A next turn may name another agent: it runs on that one.
 		req.Session = sp.Session
-		req.Agent, req.AgentID, req.Access, req.KeyEnv = sp.Agent, sp.AgentID, sp.Access, sp.KeyEnv
+		req.Agent, req.AgentID, req.Access, req.KeyEnv, req.AgentModel = sp.Agent, sp.AgentID, sp.Access, sp.KeyEnv, sp.AgentModel
 	default:
 		req.Agent, req.Folder = sp.Agent, at.folder
 		req.AgentID, req.Access, req.KeyEnv = sp.AgentID, sp.Access, sp.KeyEnv
