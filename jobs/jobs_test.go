@@ -6,12 +6,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/settings"
 )
 
 const (
@@ -295,5 +298,45 @@ func TestReviewRoute(t *testing.T) {
 	}
 	if got := send(t, srv, mainTok, "GET", "/api/v0/jobs?kind=build", nil, nil); got != 400 {
 		t.Errorf("bad kind: %d", got)
+	}
+}
+
+// A runner reads the server's settings with its own token, fresh on each
+// call: a hand edit on the server is in the next read. Another runner's id,
+// or no runner token, is refused, and a broken file is 503 with why.
+func TestRunnerSettings(t *testing.T) {
+	q, err := queue.Open(filepath.Join(t.TempDir(), "jobs.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	s, err := New(Config{Queue: q, Token: mainTok, EnrollToken: enrollTok, Settings: settings.NewFiles(dir)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(s)
+	t.Cleanup(func() { srv.Close(); q.Close() })
+	a, b := enroll(t, srv, 1), enroll(t, srv, 1)
+	path := "/api/v0/runners/" + a.Runner.ID + "/settings"
+	var got settings.RunnerSettings
+	if code := send(t, srv, a.Token, "GET", path, nil, &got); code != 200 || got.Instructions != settings.DefaultInstructions || got.Permissions.Edit != settings.EditSession {
+		t.Fatalf("no files: %d %+v", code, got)
+	}
+	if err := os.WriteFile(filepath.Join(dir, settings.PolicyFile), []byte("forbid = [\"git push\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := send(t, srv, a.Token, "GET", path, nil, &got); code != 200 || !slices.Equal(got.Permissions.Forbid, []string{"git push"}) {
+		t.Fatalf("after a hand edit: %d %+v", code, got)
+	}
+	for _, tok := range []string{b.Token, mainTok, enrollTok} {
+		if code := send(t, srv, tok, "GET", path, nil, nil); code != 404 && code != 401 {
+			t.Errorf("another token: %d", code)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, settings.PolicyFile), []byte("forbid = git\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if code := send(t, srv, a.Token, "GET", path, nil, nil); code != 503 {
+		t.Fatalf("a broken file: %d", code)
 	}
 }

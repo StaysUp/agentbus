@@ -10,6 +10,7 @@ import (
 
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/settings"
 )
 
 // jobsRoute hands a request to Config.Jobs.
@@ -140,6 +141,16 @@ var jobRoutes = []route{
 		body:    jobs.RunnerBeat{},
 		replies: []reply{ok(200, queue.Runner{}, "The runner."), badRequest, noAttempt, storeFailed},
 		self:    true, serve: jobsRoute},
+	{method: "GET", path: "/api/v0/runners/{id}/settings", op: "runnerSettings",
+		idDoc:   "The runner's id. Another shape gets 404.",
+		tag:     "Runners",
+		summary: "Read a turn's settings",
+		doc: "The policy and the instructions, read fresh, as GET /api/v0/settings/permissions and /instructions send them. " +
+			"A runner reads them before each turn it starts, so every runner follows the server's settings, never its own files. " +
+			"When they cannot be had, the runner refuses the turn and the job fails with the reason.",
+		replies: []reply{ok(200, settings.RunnerSettings{}, "The settings."), noAttempt,
+			fail(http.StatusServiceUnavailable, "The server's settings cannot be used: error says why."), storeFailed},
+		self: true, serve: jobsRoute},
 	{method: "POST", path: "/api/v0/runners/{id}/removed", op: "runnerRemoved",
 		idDoc:   "The runner's id. Another shape gets 404.",
 		tag:     "Runners",

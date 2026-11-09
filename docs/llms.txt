@@ -52,6 +52,12 @@ job routes. This file describes the API of `up` and `server`.
 - `instructions.md` in the data folder is the text every turn gets as its agent's own instruction
   (`--append-system-prompt`, `developer_instructions`), with `{session}` replaced by the session id.
   Missing: the default text. Empty: none.
+- Settings through the API, main token only: `GET`/`PUT /api/v0/settings/permissions` (the policy
+  as JSON) and `GET`/`PUT /api/v0/settings/instructions` (`{"text": "..."}`). A `PUT` sends
+  `If-Match` with the `ETag` of a `GET`, or `*`; a stale one gets 412, none 428. A turn token gets
+  403 on all four: an agent never reads or changes its own policy. A runner started with
+  `agentbus runner -server <url>` reads the server's policy and instructions before each turn; when
+  the server cannot be reached the turn does not start and the job fails with that reason.
 - The turns token, the file `turns_token` in the data folder (`abq_` and 64 hex characters), may
   only start, stop and read turns: `POST /api/v0/turns`, `GET /api/v0/turns`,
   `GET /api/v0/turns/{id}`, `GET /api/v0/turns/{id}/events` and `POST /api/v0/turns/{id}/stop`.

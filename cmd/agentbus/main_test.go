@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/event"
-	engine "github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -387,40 +386,6 @@ func TestStoredReplyCarriesCost(t *testing.T) {
 			t.Fatal("no model.responded stored")
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-// permissions.toml and instructions.md are made once, mode 0600, with the
-// starter text, and an existing file is never written again.
-func TestMakeStarter(t *testing.T) {
-	for _, tc := range []struct{ file, text string }{
-		{engine.PermissionsFile, engine.PermissionsStarter},
-		{engine.InstructionsFile, engine.DefaultInstructions},
-	} {
-		path := filepath.Join(t.TempDir(), tc.file)
-		if err := makeStarter(path, tc.text, "x"); err != nil {
-			t.Fatal(err)
-		}
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if info.Mode().Perm() != 0o600 {
-			t.Errorf("%s: mode %v, want 0600", tc.file, info.Mode().Perm())
-		}
-		if b, _ := os.ReadFile(path); string(b) != tc.text {
-			t.Errorf("%s: starter %q", tc.file, b)
-		}
-		const mine = "allow = [\"go test\"]\n"
-		if err := os.WriteFile(path, []byte(mine), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := makeStarter(path, tc.text, "x"); err != nil {
-			t.Fatal(err)
-		}
-		if b, _ := os.ReadFile(path); string(b) != mine {
-			t.Errorf("%s: an existing file was written: %q", tc.file, b)
-		}
 	}
 }
 

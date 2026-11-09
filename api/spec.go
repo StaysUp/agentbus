@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/staysup/agentbus/agents"
+	"net/http"
 	"reflect"
 	"strconv"
 	"strings"
@@ -26,7 +27,7 @@ import (
 	"github.com/staysup/agentbus/body"
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/harness"
-	"github.com/staysup/agentbus/run"
+	"github.com/staysup/agentbus/settings"
 )
 
 const specIntro = "agentbus runs on your machine, between your coding agents and their vendors. " +
@@ -81,7 +82,7 @@ var turnTokenDoc = map[int]string{
 // askCaps names the caps on asked work. A request past one gets 403 saying which.
 var askCaps = fmt.Sprintf("[limits] in permissions.toml: by default at most %d levels below the person's turn, %d jobs asked by one turn, "+
 	"%d in one request tree, and no cost cap (max_cost_usd_per_tree). [agent_api] there can turn each kind of call off, "+
-	"and narrow the scope to the token's own session.", run.DefaultMaxDepth, run.DefaultMaxJobsPerTurn, run.DefaultMaxJobsPerTree)
+	"and narrow the scope to the token's own session.", settings.DefaultMaxDepth, settings.DefaultMaxJobsPerTurn, settings.DefaultMaxJobsPerTree)
 
 // spec is the description as served, built on first use. New builds it, so a
 // table or type it cannot describe stops the service from starting.
@@ -428,6 +429,11 @@ func describe() (*openapi3.T, error) {
 			op.Parameters = append(op.Parameters, &openapi3.ParameterRef{Value: openapi3.NewQueryParameter(q.name).
 				WithDescription(q.doc).WithSchema(s)})
 		}
+		if rt.versioned && rt.method != http.MethodGet {
+			op.Parameters = append(op.Parameters, &openapi3.ParameterRef{Value: openapi3.NewHeaderParameter("If-Match").WithRequired(true).
+				WithDescription("The ETag of your GET, as it came, or * to replace whatever is there.").
+				WithSchema(&openapi3.Schema{Type: &openapi3.Types{"string"}})})
+		}
 		if rt.body != nil {
 			ref, err := c.ref(rt.body)
 			if err != nil {
@@ -456,6 +462,11 @@ func describe() (*openapi3.T, error) {
 					return nil, err
 				}
 				resp = &openapi3.ResponseRef{Value: openapi3.NewResponse().WithDescription(r.doc).WithJSONSchemaRef(ref)}
+			}
+			if rt.versioned && (r.status == http.StatusOK || r.status == http.StatusServiceUnavailable) {
+				resp.Value.Headers = openapi3.Headers{"ETag": &openapi3.HeaderRef{Value: &openapi3.Header{Parameter: openapi3.Parameter{
+					Description: "The setting's version, quoted. Send it in If-Match to change the setting.",
+					Schema:      &openapi3.SchemaRef{Value: &openapi3.Schema{Type: &openapi3.Types{"string"}}}}}}}
 			}
 			if op.Responses.Value(strconv.Itoa(r.status)) != nil {
 				return nil, fmt.Errorf("api: %s %s lists %d twice", rt.method, rt.path, r.status)

@@ -170,6 +170,10 @@ func saveState(path string, st state) error {
 // ID is the runner's id.
 func (r *Runner) ID() string { return r.id }
 
+// Token is the runner's own token, for the settings it reads from the server
+// (settings.Remote). It is never logged.
+func (r *Runner) Token() string { return r.token }
+
 // Run takes and runs jobs, Capacity at once, until ctx ends. A job still
 // running then has its turn stopped and is finished as failed with reason
 // runner_stopped.

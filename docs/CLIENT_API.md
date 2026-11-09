@@ -69,7 +69,8 @@ comes later.
   origin does not have. So with no `-origin`:
   - an `OPTIONS` preflight to an `/api/` path from any origin is answered `204` **without a token**,
     with `Access-Control-Allow-Origin: *`, `Access-Control-Allow-Methods: GET, POST`,
-    `Access-Control-Allow-Headers: Authorization, Content-Type`. A preflight carries no token, so
+    `Access-Control-Allow-Headers: Authorization, Content-Type, If-Match` (`If-Match` for a settings
+    `PUT`; a settings reply exposes `ETag`). A preflight carries no token, so
     requiring one would stop every browser request before it starts. `Authorization` is named
     because `*` in `Allow-Headers` does not cover it.
   - the real request still needs the token. A missing or wrong one gets 401.
@@ -160,7 +161,7 @@ calls and jobs, reviews only its jobs, cancels only what its own turns asked for
 own session, and continues no session. A `permissions.toml` that cannot be used refuses every turn token's request with **503**.
 
 **What a turn token never does**, each a **403** with a plain reason, whatever `[agent_api]` says:
-change policy (no route writes `permissions.toml` or `instructions.md`), save, edit or remove agents, see or make a token (no reply holds one), make a
+read or change the settings (every `/api/v0/settings` route takes the main token), save, edit or remove agents, see or make a token (no reply holds one), make a
 job with `POST /api/v0/jobs` (it starts work with `POST /api/v0/turns`), close a workspace, write a
 program event, read the snapshot `GET /api/v0/sessions`, the stream `GET /api/v0/events` or
 `GET /api/v0/workspaces`, read `GET /api/v0/version`, and read or write any session outside its
@@ -265,6 +266,10 @@ rename = true
 
 - `agentbus up` makes the file when it is missing, mode 0600, with empty lists, every other value
   written out at its default, and a comment on each. It never writes an existing file.
+- **The API reads and writes it too**: `GET` and `PUT /api/v0/settings/permissions`
+  ([Settings](#settings)). Edit the file by hand or through the API, whichever you like.
+- **A runner on another machine reads the server's policy**, never its own file
+  ([The runner protocol](#the-runner-protocol)).
 - **Every turn reads it when it starts, and the API reads it for every request a turn token
   sends.** An edit applies to the next turn and the next request. No restart.
 - A key left out reads as its default, so an older file with the three lists only keeps working.
@@ -273,8 +278,9 @@ rename = true
   with the line when there is one, and nothing is stored. A turn never runs without the policy.
   A file that cannot be read, or a link to a file that is gone, stops the turn the same way. An
   unknown key or a value out of range is broken too.
-- `read_folders`: absolute paths, or starting with `~/`. Each must be an existing folder. No
-  comma, parenthesis or glob character (`*?[]{}`).
+- `read_folders`: absolute paths, or starting with `~/`. Each must be an existing folder on the
+  machine that runs the turn, where `~` is that machine's home. No comma, parenthesis or glob
+  character (`*?[]{}`).
 - `allow` and `forbid`: a command and its first arguments, such as `go test`. No comma,
   parenthesis or star, no two spaces in a row, no leading `-`.
 - `edit`: where a turn may create and change files without asking. `"session"` (the default) is
@@ -589,8 +595,9 @@ job that runs it. The agent's work arrives later, as events of that session, **e
   `{session}` replaced by the session id. `agentbus up` writes the file when it is missing, with the
   default text below; it never writes an existing file. A missing file gives the default, an empty
   file gives no instructions, and a file over 64 KiB, not UTF-8 or holding a NUL byte stops the
-  turn with 400, as a broken `permissions.toml` does. Keep the text the same within a session:
-  own replay and the prompt cache rely on it. The default is four lines:
+  turn with 400, as a broken `permissions.toml` does. `GET` and `PUT /api/v0/settings/instructions`
+  read and write it ([Settings](#settings)); a runner on another machine uses the server's. Keep the
+  text the same within a session: own replay and the prompt cache rely on it. The default is four lines:
 
   ```
   Your session's earlier turns are stored by AgentBus. To look something up, run:
@@ -1251,6 +1258,44 @@ for the call's kept reply.
 
 Refusing, holding and starting a review are planned for a later version.
 
+## Settings
+
+The policy ([permissions.toml](#permissionstoml)) and the instructions every turn gets
+(`instructions.md`, under [POST /api/v0/turns](#post-apiv0turns--start-a-turn)), read and written through the API. Behind the routes is a
+settings store: today the two files in the data folder, so a hand edit and an API write are the
+same thing. Only the main token may call them. A turn token and the turns token get **403**.
+
+| Route | What it does |
+|---|---|
+| `GET /api/v0/settings/permissions` | The policy as JSON, every value filled. Folders are as written, `~` and all. |
+| `PUT /api/v0/settings/permissions` | Replace the policy whole. A key left out takes its default. |
+| `GET /api/v0/settings/instructions` | `{"text": "..."}`, before `{session}` is filled in. Without the file, the default text. |
+| `PUT /api/v0/settings/instructions` | Replace the text. At most 64 KiB of UTF-8, no NUL. |
+
+- **Versions.** Every reply sends `ETag`, the setting's version. A `PUT` must send it back in
+  `If-Match`, or `*` to replace whatever is there. Without `If-Match`: **428**. When the setting
+  changed since your read, by the API or by hand: **412**, and nothing is written. GET it again and
+  apply your change to what is there now.
+- **Errors name the field**: `edit must be "session" or "none"`, `[limits] max_depth must be 0 or
+  more`, `forbid has the wrong type: …`, `unknown key "allowed"`. Those are **400**.
+- **A file that cannot be used** answers a `GET` with **503**, the problem, and the `ETag` of what is
+  there, so a `PUT` with that `If-Match` can replace it.
+- **A `PUT` of the policy rewrites the file** in the starter's layout, with its comments and your
+  values. Comments of your own in the file are not kept. A folder is checked for shape here, and
+  for being there when a turn runs.
+- The next turn runs under what you wrote, and a turn token's next request too. No restart.
+- On a runner (`agentbus runner`), the settings are the server's: a `GET` reads them, a `PUT` gets
+  **409**. Change them on the server.
+
+```sh
+curl -s -D - -H "Authorization: Bearer $(cat ~/.local/share/agentbus/token)" \
+  http://127.0.0.1:8787/api/v0/settings/permissions
+# ETag: "3f1c…"
+# {"read_folders":[],"allow":[],"forbid":[],"edit":"session","subagents":true,"limits":{…},"agent_api":{…}}
+curl -s -X PUT -H "Authorization: Bearer $(cat ~/.local/share/agentbus/token)" -H 'If-Match: "3f1c…"' \
+  -d '{"forbid":["git push"]}' http://127.0.0.1:8787/api/v0/settings/permissions
+```
+
 ## Jobs
 
 Every turn runs as a job. A job is a requested turn: its `kind` is `turn` or `review`. A runner
@@ -1368,6 +1413,7 @@ cockpit never calls them.
 | `POST /api/v0/runners/<id>/take` | Long poll, up to 30 s: a job with its new attempt and lease, or a cleanup. 204 when there is nothing. |
 | `POST /api/v0/runners/<id>/heartbeat` | Idle heartbeat with `capacity`. |
 | `POST /api/v0/runners/<id>/removed` | Report a closed workspace removed, or `error`. |
+| `GET /api/v0/runners/<id>/settings` | The policy and the instructions, read fresh, for the turn it is about to start. |
 | `POST /api/v0/attempts/<id>/start` | Taken to running. `cancel` says the job was stopped. |
 | `POST /api/v0/attempts/<id>/heartbeat` | Renew the 30 s lease. Sent every 2 s. `cancel` says stop. |
 | `POST /api/v0/attempts/<id>/events` | A batch numbered from `offset`. A repeat stores nothing new; a gap gets 409 with `next`. |
@@ -1375,6 +1421,19 @@ cockpit never calls them.
 
 Every call after take names its attempt id and number. A call for an attempt that is not current
 gets 409 with `stale: true`, and the runner stops that turn.
+
+**A runner follows the server's settings.** Before each turn, `agentbus runner -server <url>` reads
+the policy and the instructions from the server (`GET /api/v0/runners/<id>/settings`, with its own
+token), never from its own data folder. So a `forbid` rule set on the server holds on every runner
+from the next turn. Folders in `read_folders` must exist on the runner, with `~` the runner's home.
+
+**When the server's settings cannot be had, the turn does not start.** That is a server that
+cannot be reached, a server whose files are broken, or a server too old to serve the route. The job
+fails with reason `setup`, and its result says why, such as `the server's settings cannot be used,
+so the turn did not start: the server could not be reached`. A runner never falls back to a policy
+it read before: a `forbid` rule just added on the server must hold, and an old copy would miss it.
+A server that cannot be reached cannot hand out jobs either, so this costs at most the jobs a
+runner held when the server went away.
 
 ## Who writes each kind
 
@@ -1579,6 +1638,12 @@ Invalid API key · Please run /login
 gets a new version path, and the old one stays for a while.
 
 **What 0.2 changed for a 0.1 client:**
+
+- The settings have routes: `GET` and `PUT /api/v0/settings/permissions` and
+  `/api/v0/settings/instructions` ([Settings](#settings)). A `PUT` needs `If-Match`. A turn token
+  can call none of them.
+- A runner on another machine reads the policy and the instructions from its server
+  (`GET /api/v0/runners/<id>/settings`), not from its own data folder.
 
 - `GET /api/v0/agents` lists the saved agents ([Agents](#agents)). What it listed before, the
   harnesses this service finds, is `GET /api/v0/harnesses`, with each harness's access and models

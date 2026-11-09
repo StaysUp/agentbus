@@ -12,6 +12,7 @@ import (
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/runner"
+	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -45,7 +46,12 @@ func stackEnv(t *testing.T, s stack) *env {
 	if s.maxRuns == 0 {
 		s.maxRuns = run.DefaultMaxRuns
 	}
-	eng, err := run.New(run.Config{Store: st, BaseURL: base, Wire: s.wire, MaxRuns: s.maxRuns, Permissions: s.permissions,
+	// permissions is a permissions.toml path: its folder is the settings'.
+	var cfgStore settings.Store
+	if s.permissions != "" {
+		cfgStore = settings.NewFiles(filepath.Dir(s.permissions))
+	}
+	eng, err := run.New(run.Config{Store: st, BaseURL: base, Wire: s.wire, MaxRuns: s.maxRuns, Settings: cfgStore,
 		RunGrace: s.grace})
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +66,7 @@ func stackEnv(t *testing.T, s stack) *env {
 		t.Fatal(err)
 	}
 	cfg := Config{Store: st, Token: token, Port: port, BaseURL: base, Queue: q, Jobs: js, Engine: eng, TurnWait: s.turnWait,
-		Permissions: s.permissions}
+		Settings: cfgStore}
 	if s.turnsToken {
 		cfg.TurnsToken = turnsTok
 	}

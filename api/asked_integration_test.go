@@ -15,6 +15,7 @@ import (
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
+	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -260,11 +261,11 @@ func TestAskCaps(t *testing.T) {
 	if code != 403 || !strings.Contains(out, "levels") || !strings.Contains(out, "[limits]") {
 		t.Errorf("depth 3: %d %s", code, out)
 	}
-	for i := 1; i < run.DefaultMaxJobsPerTurn; i++ {
+	for i := 1; i < settings.DefaultMaxJobsPerTurn; i++ {
 		ask(t, e, tok, `{"agent":"claude","prompt":"quick"}`)
 	}
 	code, out = as(t, e, tok, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"quick"}`)
-	if code != 403 || !strings.Contains(out, fmt.Sprint(run.DefaultMaxJobsPerTurn)) {
+	if code != 403 || !strings.Contains(out, fmt.Sprint(settings.DefaultMaxJobsPerTurn)) {
 		t.Errorf("past the per-turn cap: %d %s", code, out)
 	}
 
@@ -289,7 +290,7 @@ func TestAskCaps(t *testing.T) {
 // it, and a broken file refuses every turn token's request. No setting opens
 // the routes that change agents or tokens.
 func TestAskPolicyFromPermissions(t *testing.T) {
-	perm := filepath.Join(t.TempDir(), run.PermissionsFile)
+	perm := filepath.Join(t.TempDir(), settings.PolicyFile)
 	write := func(s string) {
 		t.Helper()
 		if err := os.WriteFile(perm, []byte(s), 0o600); err != nil {
@@ -347,6 +348,11 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 		{"POST", "/api/v0/agents", `{"name":"x","harness":"claude","access":"subscription"}`},
 		{"PUT", "/api/v0/agents/a_x", `{"name":"x","harness":"claude","access":"subscription"}`},
 		{"DELETE", "/api/v0/agents/a_x", ""},
+		// The settings: a turn token neither reads nor writes them.
+		{"GET", "/api/v0/settings/permissions", ""},
+		{"PUT", "/api/v0/settings/permissions", `{"forbid":[]}`},
+		{"GET", "/api/v0/settings/instructions", ""},
+		{"PUT", "/api/v0/settings/instructions", `{"text":"x"}`},
 	} {
 		if code, out := as(t, e, tok, r[0], r[1], r[2]); code != 403 || !strings.Contains(out, "main token") {
 			t.Errorf("%s %s: %d %s, want 403", r[0], r[1], code, out)

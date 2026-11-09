@@ -9,6 +9,7 @@ package api
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 
 	"github.com/staysup/agentbus/run"
@@ -44,8 +45,11 @@ type route struct {
 	// self routes check their own token: the runner protocol, which takes
 	// the enrollment token or a runner's own token (package jobs). ServeHTTP
 	// hands them to Config.Jobs before its own token check.
-	self  bool
-	serve func(a *API, w http.ResponseWriter, r *http.Request, id string)
+	self bool
+	// versioned routes send the setting's version in ETag, and a write takes
+	// it back in If-Match (settings.go).
+	versioned bool
+	serve     func(a *API, w http.ResponseWriter, r *http.Request, id string)
 }
 
 // param is one query parameter.
@@ -119,10 +123,11 @@ var tags = []struct{ name, doc string }{
 	{"Events", "The live stream of every event, and a program's own events."},
 	{"Calls", "What one model call sent to the vendor, piece by piece, and the reply it got."},
 	{"Service", "What this service can start, and this description."},
+	{"Settings", "The policy and the instructions every turn gets: permissions.toml and instructions.md in the data folder. The main token only."},
 	{"Runners", "The protocol a runner uses to take jobs and report them. The cockpit never calls it."},
 }
 
-var routes = append([]route{
+var routes = slices.Concat([]route{
 	{method: "GET", path: "/api/v0/sessions", op: "listSessions",
 		tag:     "Sessions",
 		summary: "List sessions",
@@ -341,7 +346,7 @@ var routes = append([]route{
 		doc:     "This description.",
 		replies: []reply{ok(200, map[string]any{}, "This document.")},
 		public:  true},
-}, jobRoutes...)
+}, jobRoutes, settingsRoutes)
 
 // match reports whether p is rt's path, and the id in it.
 func (rt *route) match(p string) (id string, ok bool) {

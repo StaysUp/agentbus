@@ -7,8 +7,9 @@ package api
 // and reads their results. Each result comes back to its session as a later
 // turn (queue.Deliver).
 //
-// What a turn token must never do: change policy (permissions.toml, which no
-// route writes), change or remove saved agents, see or make tokens (none is
+// What a turn token must never do: read or change the settings (the policy
+// and the instructions: every /api/v0/settings route is main-token only),
+// change or remove saved agents, see or make tokens (none is
 // ever in a reply), close workspaces, write program events, or read or write
 // sessions outside its request tree. A read-only turn's token only reads.
 // Its own session and the person's session, the tree's root, are never
@@ -36,6 +37,7 @@ import (
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
+	"github.com/staysup/agentbus/settings"
 )
 
 // What a turn token may do on a route.
@@ -95,7 +97,16 @@ func turnSwitchedOff(what, key string) string {
 	return "a turn token may not " + what + " here: " + key + " is false in [agent_api] of permissions.toml"
 }
 
-const turnPolicyBroken = "the permissions file permissions.toml in the data folder cannot be used, so a turn token's requests are refused; fix the file"
+// turnPolicyBroken is the refusal when the policy cannot be used. It names
+// where the policy is, never what is wrong with it.
+func turnPolicyBroken(err error) string {
+	where := "the permissions"
+	var se *settings.Error
+	if errors.As(err, &se) {
+		where = se.Where
+	}
+	return where + " cannot be used, so a turn token's requests are refused; fix it"
+}
 
 // grantKey carries a turn token's grant from route to its handler.
 type grantKey struct{}
@@ -103,7 +114,7 @@ type grantKey struct{}
 // turnCall is a turn token's grant with the policy read for its request.
 type turnCall struct {
 	g    run.Grant
-	perm run.Permissions
+	perm settings.Policy
 }
 
 // grantOf is the grant of the turn token r was sent with, or nil.
@@ -117,16 +128,31 @@ func grantOf(r *http.Request) *run.Grant {
 
 // policyOf is the permissions.toml read for r's turn token. Only a request
 // grantOf answers for has one.
-func policyOf(r *http.Request) run.Permissions {
+func policyOf(r *http.Request) settings.Policy {
 	c, _ := r.Context().Value(grantKey{}).(*turnCall)
 	if c == nil {
-		return run.DefaultPermissions()
+		return settings.DefaultPolicy()
 	}
 	return c.perm
 }
 
+// policy is the policy for one turn token's request. Where this service runs
+// turns, its folders must be folders here, as a turn's are: a policy a turn
+// could not start under refuses its token's requests too.
+func (a *API) policy() (settings.Policy, error) {
+	if a.cfg.Settings == nil {
+		return settings.DefaultPolicy(), nil
+	}
+	p, _, err := a.cfg.Settings.Policy()
+	if err != nil || a.cfg.Engine == nil {
+		return p, err
+	}
+	home, _ := os.UserHomeDir()
+	return p.Resolve(home)
+}
+
 // queueLimits are [limits] as the queue takes them.
-func queueLimits(p run.Permissions) queue.Limits {
+func queueLimits(p settings.Policy) queue.Limits {
 	return queue.Limits{MaxDepth: *p.Limits.MaxDepth, MaxPerTurn: *p.Limits.MaxJobsPerTurn, MaxPerTree: *p.Limits.MaxJobsPerTree}
 }
 
@@ -149,9 +175,9 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 	// The policy is read for every request, so an edit applies at once. A
 	// file that cannot be used refuses every turn token's request: a token
 	// never runs without the policy the person wrote.
-	perm, err := run.LoadPermissions(a.cfg.Permissions)
+	perm, err := a.policy()
 	if err != nil {
-		writeError(w, http.StatusServiceUnavailable, turnPolicyBroken)
+		writeError(w, http.StatusServiceUnavailable, turnPolicyBroken(err))
 		return nil, false
 	}
 	switch rt.turn {
@@ -250,7 +276,7 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 			return failed(err)
 		}
 		if j.Links.Asker == nil || j.Links.Chain == nil || j.Links.Chain.Root != g.Root ||
-			(api.Scope == run.ScopeSession && j.Links.Asker.Session != g.Session) {
+			(api.Scope == settings.ScopeSession && j.Links.Asker.Session != g.Session) {
 			return refuse(turnAskedRefused)
 		}
 	case askTurn, anyRead:
@@ -312,7 +338,7 @@ func (a *API) queueJob(id string) (queue.Job, error) {
 // inScope says session is in reach of g under [agent_api] scope: its own
 // session alone for "session", its request tree for "tree".
 func (a *API) inScope(g run.Grant, scope, session string) (bool, error) {
-	if scope == run.ScopeSession {
+	if scope == settings.ScopeSession {
 		return session != "" && session == g.Session, nil
 	}
 	return a.inTree(g, session)
@@ -322,7 +348,7 @@ func (a *API) inScope(g run.Grant, scope, session string) (bool, error) {
 // max_cost_usd_per_tree, or "" while it may: the cost of every model call in
 // the tree's sessions so far. 0 is off. A retry whose idempotency key already
 // made a job is not new work, so it passes, and gets its job as before.
-func (a *API) overBudget(g run.Grant, perm run.Permissions, key string) (string, error) {
+func (a *API) overBudget(g run.Grant, perm settings.Policy, key string) (string, error) {
 	max := *perm.Limits.MaxCostUSDPerTree
 	if max <= 0 || a.cfg.Queue == nil {
 		return "", nil
@@ -363,7 +389,7 @@ func (a *API) inTree(g run.Grant, session string) (bool, error) {
 // askChecks checks a turn token's POST /api/v0/turns body and fills what the
 // token decides: for a new session its folder, and the links of the work. It
 // says why not, and has then answered.
-func (a *API) askChecks(w http.ResponseWriter, g run.Grant, perm run.Permissions, body *TurnRequest, continues bool) (queue.Links, bool) {
+func (a *API) askChecks(w http.ResponseWriter, g run.Grant, perm settings.Policy, body *TurnRequest, continues bool) (queue.Links, bool) {
 	refuse := func(msg string) (queue.Links, bool) {
 		writeError(w, http.StatusForbidden, msg)
 		return queue.Links{}, false
@@ -382,7 +408,7 @@ func (a *API) askChecks(w http.ResponseWriter, g run.Grant, perm run.Permissions
 		return refuse(msg)
 	}
 	if continues {
-		if body.Session == g.Session || body.Session == g.Root || api.Scope == run.ScopeSession {
+		if body.Session == g.Session || body.Session == g.Root || api.Scope == settings.ScopeSession {
 			return refuse(turnContinueRefused)
 		}
 		root, err := a.cfg.Queue.SessionRoot(queue.DefaultTeam, body.Session)

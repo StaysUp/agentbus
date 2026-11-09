@@ -59,12 +59,16 @@ may hold other projects' Go code. Go's own tools skip folders that start with `_
 - **One program, one flow.** `agentbus up`, `server` and `runner` are modes of one binary. Every
   turn is a job, and every runner, the built-in one too, takes jobs through the runner protocol
   over HTTP. A runner starts a turn through `run/`, never through the API.
-- **The package rule is tested** (`cmd/agentbus/layers_test.go`): `harness/` imports nothing of
-  the module, so every package may use it; `gateway/`, `adapter/`,
+- **The package rule is tested** (`cmd/agentbus/layers_test.go`): `harness/` and `settings/`
+  import nothing of the module, so every package may use them; `gateway/`, `adapter/`,
   `event/`, `cost/`, `replay/`, `store/`, `body/` and `logfile/` import nothing from `run/`,
   `workspace/`, `queue/`, `jobs/` or `runner/`; `run/` imports nothing from the queue side;
   `agents/` (the saved agents) may use `run/`, never the queue side or `workspace/`;
   `queue/` may use `run/` and `workspace/`, never the reverse.
+- **Settings go through `settings.Store`.** The policy, the instructions and the data folder's
+  protected files are read and written through the store, never by a path. `settings.Files` is
+  the data folder's files; `settings.Remote` is a runner's, read from its server. A database store
+  is one more implementation.
 - **Fix the root cause.** No defensive backstops on top of a fix.
 - **A live run beats a fixture.** Vendors change their wire formats. Check a change against a real
   agent when it touches an adapter or the gateway.

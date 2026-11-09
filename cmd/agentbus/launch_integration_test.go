@@ -25,6 +25,7 @@ import (
 
 	"github.com/staysup/agentbus/event"
 	engine "github.com/staysup/agentbus/run"
+	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -229,7 +230,7 @@ func runLaunchCase(t *testing.T, self string, c launchCase) string {
 	var logs, replayAsked []string
 	lastTurn := map[string]string{}
 	cfg := engine.Config{Store: st, BaseURL: "http://127.0.0.1:8787", Wire: runWire(getenv, func() []string { return environ }, lookPath),
-		Permissions: permPath, Instructions: instrPath, APIDir: filepath.Join(data, "bin"),
+		Settings: settings.NewFiles(data), APIDir: filepath.Join(data, "bin"),
 		Protect: []string{permPath, instrPath, filepath.Join(data, "agents.json")},
 		Logf: func(f string, a ...any) {
 			l := fmt.Sprintf(f, a...)

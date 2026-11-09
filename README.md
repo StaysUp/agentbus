@@ -238,7 +238,8 @@ agentbus runner -server http://central:8787 -enroll-token-file ./enroll_token
 ```
 
 The runner's data folder is its own (`AGENTBUS_HOME`, as for `agentbus up`): a runner on the same
-machine as its server needs another one. Its own service listens on a free loopback port, for its
+machine as its server needs another one. Its policy and instructions are the server's, read before
+each turn ([Permissions](#permissions)). Its own service listens on a free loopback port, for its
 agents only. `-capacity` sets how many jobs it runs at once, 1 to 64, and defaults to `4`, as
 `-max-runs` does for `agentbus up`.
 
@@ -312,6 +313,15 @@ leave out reads as its default, so an older file keeps working. Every turn reads
 starts, and the API reads it for every request a turn's token sends, so an edit applies at once.
 A broken file stops the turn with the line and the problem.
 
+**Through the API.** `GET /api/v0/settings/permissions` reads the policy as JSON, and `PUT` writes
+it back. A `PUT` sends the `ETag` of its `GET` in `If-Match`, so it never undoes a hand edit made in
+between: that gets 412. Only the main token may do this. A turn's own token can never read or
+change the policy. Details: [docs/CLIENT_API.md](docs/CLIENT_API.md#settings).
+
+**On a runner.** `agentbus runner -server <url>` reads the server's policy before each turn, not a
+file of its own, so one policy holds on every machine. If it cannot reach the server, the turn
+does not start and the job fails with that reason. It never runs on an older copy.
+
 **Edits.** With `edit = "session"`, a turn edits files in its own session folder (its worktree)
 without asking: claude gets `Edit(//<folder>/**)`, codex runs with `--sandbox workspace-write`.
 `"none"` edits nothing: claude is denied Edit, Write and NotebookEdit, whatever your own Claude
@@ -352,7 +362,8 @@ text of `instructions.md` in the data folder. `agentbus up` writes it with the d
 search the session's earlier turns and ask other agents with `agentbus-api`. Edit it to change what
 every agent is told; `{session}` becomes the session id. An empty file gives no instructions, and a
 missing one the default. Each turn reads it when it starts. Keep it the same within a session, so
-the prompt cache holds.
+the prompt cache holds. `GET` and `PUT /api/v0/settings/instructions` read and write it through the
+API, and a runner on another machine uses its server's.
 
 ## How it works
 

@@ -38,6 +38,7 @@ import (
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/logfile"
+	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -137,13 +138,9 @@ type Config struct {
 	// RunGrace is how long a stop waits after SIGTERM before SIGKILL. Zero
 	// means 5 seconds.
 	RunGrace time.Duration
-	// Permissions is the path of permissions.toml, read at the start of every
-	// turn. Empty gives every turn the defaults.
-	Permissions string
-	// Instructions is the path of instructions.md, the text every turn gets
-	// as an instruction of its agent's own, read at the start of every turn.
-	// Empty, or a missing file, gives DefaultInstructions.
-	Instructions string
+	// Settings hold the policy and the instructions every turn gets, read at
+	// the start of every turn. Nil gives every turn the defaults.
+	Settings settings.Store
 	// Protect are files no turn may edit: the data folder's policy,
 	// instructions, saved agents and tokens.
 	Protect []string
@@ -228,6 +225,18 @@ type Refusal struct {
 func (r *Refusal) Error() string { return r.Msg }
 
 func refuse(status int, msg string) *Refusal { return &Refusal{status, msg} }
+
+// unusable is the refusal of a turn whose setting cannot be used, with the
+// log line that says why. reason names the setting in the log.
+func (e *Engine) unusable(agent, reason string, err error) *Refusal {
+	var se *settings.Error
+	if !errors.As(err, &se) {
+		e.cfg.Logf("run.refused agent=%s reason=%s", agent, reason)
+		return refuse(http.StatusInternalServerError, "the settings could not be read, so the turn did not start")
+	}
+	e.cfg.Logf("run.refused agent=%s reason=%s error=%q", agent, reason, se.Why)
+	return refuse(http.StatusBadRequest, se.Where+" cannot be used, so the turn did not start: "+se.Why+". "+se.Fix+", and send the turn again.")
+}
 
 var storeFailed = refuse(http.StatusInternalServerError, "the store could not be read or written")
 
@@ -591,21 +600,17 @@ func (e *Engine) start(t turn) (*Turn, error) {
 			e.runs.release(nil, t.session)
 		}
 	}()
-	// The person's permissions.toml, read for every turn, before anything is
-	// stored. A broken file stops the turn: it never runs without the policy.
-	perm, err := e.permissions()
+	// The person's policy, read for every turn, before anything is stored.
+	// A policy that cannot be used stops the turn: it never runs without it.
+	perm, err := e.policy()
 	if err != nil {
-		e.cfg.Logf("run.refused agent=%s reason=permissions_file error=%q", t.harness, err.Error())
-		return nil, refuse(http.StatusBadRequest, "the permissions file "+PermissionsFile+" in the data folder cannot be used, so the turn did not start: "+
-			err.Error()+". Fix the file, or remove it for the defaults, and send the turn again.")
+		return nil, e.unusable(t.harness, "permissions_file", err)
 	}
-	// The instructions every turn gets, from instructions.md, read for every
-	// turn too. A file that cannot be used stops the turn, as the policy does.
+	// The instructions every turn gets, read for every turn too. Text that
+	// cannot be used stops the turn, as the policy does.
 	hint, err := e.instructions(t.session)
 	if err != nil {
-		e.cfg.Logf("run.refused agent=%s reason=instructions_file error=%q", t.harness, err.Error())
-		return nil, refuse(http.StatusBadRequest, "the instructions file "+InstructionsFile+" in the data folder cannot be used, so the turn did not start: "+
-			err.Error()+". Fix the file, or remove it for the default text, and send the turn again.")
+		return nil, e.unusable(t.harness, "instructions_file", err)
 	}
 	// The gateway refuses a command of this turn that forbid names, for
 	// claude and codex alike (gateway/guard.go).
@@ -844,7 +849,7 @@ func (e *Engine) StopAll() {
 // prompt is always last, after "--", so it is never read as a flag. hint, when
 // not empty, goes in as an instruction of the agent's own, never inside the
 // prompt (historyHint). perm is the person's permissions.toml (permissions.go).
-func turnArgs(h harness.Harness, hint, resumeID, model string, w Writes, perm Permissions, prompt string) []string {
+func turnArgs(h harness.Harness, hint, resumeID, model string, w Writes, perm settings.Policy, prompt string) []string {
 	return h.Args(harness.Turn{Hint: hint, ResumeID: resumeID, Model: model, Writes: w,
 		ReadFolders: perm.ReadFolders, Allow: perm.Allow, Forbid: perm.Forbid,
 		NoSubagents: perm.Subagents != nil && !*perm.Subagents, Prompt: prompt})
@@ -855,7 +860,7 @@ func turnArgs(h harness.Harness, hint, resumeID, model string, w Writes, perm Pe
 // it unless the person approves it, which a turn cannot (Claude Code
 // 2.1.319, 2026-11-09). What the call may do is the turn token's to say
 // (api/tokens.go). forbid still wins over it.
-func withAPI(perm Permissions, api, readOnly bool) Permissions {
+func withAPI(perm settings.Policy, api, readOnly bool) settings.Policy {
 	if !api || readOnly {
 		return perm
 	}
@@ -864,7 +869,7 @@ func withAPI(perm Permissions, api, readOnly bool) Permissions {
 }
 
 // APIClient is the name of the API client on a turn's PATH (Config.APIDir).
-const APIClient = "agentbus-api"
+const APIClient = settings.APIClient
 
 // OutputGrace is how long a run waits for its child's output after the child
 // exits, for a process the child left behind that keeps it open.

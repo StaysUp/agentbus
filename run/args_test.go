@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/staysup/agentbus/harness"
+	"github.com/staysup/agentbus/settings"
 )
 
 func TestIDScanner(t *testing.T) {
@@ -70,11 +71,11 @@ func TestInstructionsDefault(t *testing.T) {
 		t.Errorf("instructions name a variable:\n%s", got)
 	}
 	for _, resume := range []string{"", "r-1"} {
-		a := turnArgs(hn("claude"), got, resume, "", Writes{}, Permissions{}, "hi")
+		a := turnArgs(hn("claude"), got, resume, "", Writes{}, settings.Policy{}, "hi")
 		if i := slices.Index(a, "--append-system-prompt"); i < 0 || a[i+1] != want || a[len(a)-1] != "hi" {
 			t.Errorf("claude resume %q: %q", resume, a)
 		}
-		a = turnArgs(hn("codex"), got, resume, "", Writes{}, Permissions{}, "hi")
+		a = turnArgs(hn("codex"), got, resume, "", Writes{}, settings.Policy{}, "hi")
 		if i := slices.Index(a, "developer_instructions="+quoteTOML(want)); i < 1 || a[i-1] != "-c" || a[len(a)-1] != "hi" {
 			t.Errorf("codex resume %q: %q", resume, a)
 		}
@@ -85,8 +86,8 @@ func TestInstructionsDefault(t *testing.T) {
 // empty file gives none; a missing one the default; one that cannot be used
 // is an error that names no path.
 func TestInstructionsFile(t *testing.T) {
-	path := filepath.Join(t.TempDir(), InstructionsFile)
-	e := &Engine{cfg: Config{Instructions: path}}
+	path := filepath.Join(t.TempDir(), settings.InstructionsFile)
+	e := &Engine{cfg: Config{Settings: settings.NewFiles(filepath.Dir(path))}}
 	if got, err := e.instructions("s1"); err != nil || !strings.Contains(got, "/api/v0/sessions/s1/search") {
 		t.Fatalf("missing: %q %v", got, err)
 	}
@@ -103,7 +104,7 @@ func TestInstructionsFile(t *testing.T) {
 		}
 	}
 	for _, tc := range []struct{ file, want string }{
-		{strings.Repeat("a", MaxInstructions+1), "over 64 KiB"},
+		{strings.Repeat("a", settings.MaxInstructions+1), "over 64 KiB"},
 		{"a\x00b", "NUL"},
 		{"a\xffb", "UTF-8"},
 	} {
@@ -135,7 +136,7 @@ func TestTurnEnv(t *testing.T) {
 // A turn that may write may run "<path> api" without asking; a read-only one
 // gets nothing new, and the person's own lists are not changed.
 func TestWithAPI(t *testing.T) {
-	own := Permissions{Allow: []string{"go test"}, Forbid: []string{"git push"}}
+	own := settings.Policy{Allow: []string{"go test"}, Forbid: []string{"git push"}}
 	p := withAPI(own, true, false)
 	a := turnArgs(hn("claude"), "", "", "", Writes{}, p, "hi")
 	if got := strings.Join(a, " "); !strings.Contains(got, "Bash(go test:*),Bash(agentbus-api:*)") || !strings.Contains(got, "--disallowedTools Bash(git push:*)") {

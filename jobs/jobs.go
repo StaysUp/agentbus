@@ -28,6 +28,7 @@ import (
 
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
+	"github.com/staysup/agentbus/settings"
 )
 
 // The protocol's timings.
@@ -60,6 +61,9 @@ type Config struct {
 	// Agents are the saved agents a job's spec.agent names. Nil takes
 	// spec.agent as a harness name, as before saved agents.
 	Agents *agents.Store
+	// Settings are the policy and the instructions a runner reads for each
+	// turn (GET /api/v0/runners/{id}/settings). Nil sends the defaults.
+	Settings settings.Store
 }
 
 // Server is the http.Handler.
@@ -96,6 +100,7 @@ func New(cfg Config) (*Server, error) {
 	s.mux.HandleFunc("POST /api/v0/runners/{id}/removed", s.runner(s.removed))
 	s.mux.HandleFunc("POST /api/v0/runners/{id}/heartbeat", s.runner(s.runnerBeat))
 	s.mux.HandleFunc("POST /api/v0/runners", s.enroll)
+	s.mux.HandleFunc("GET /api/v0/runners/{id}/settings", s.runner(s.runnerSettings))
 	s.mux.HandleFunc("POST /api/v0/runners/{id}/take", s.runner(s.take))
 	s.mux.HandleFunc("POST /api/v0/attempts/{id}/start", s.runner(s.start))
 	s.mux.HandleFunc("POST /api/v0/attempts/{id}/heartbeat", s.runner(s.heartbeat))
@@ -437,6 +442,32 @@ func (s *Server) runnerBeat(w http.ResponseWriter, r *http.Request, rn queue.Run
 		return
 	}
 	writeJSON(w, http.StatusOK, got)
+}
+
+// runnerSettings sends a runner the policy and the instructions, read fresh,
+// for the turn it is about to start: every runner follows the server's.
+func (s *Server) runnerSettings(w http.ResponseWriter, r *http.Request, rn queue.Runner) {
+	if r.PathValue("id") != rn.ID {
+		fail(w, http.StatusNotFound, "no such runner for this token")
+		return
+	}
+	snap := settings.RunnerSettings{Permissions: settings.DefaultPolicy(), Instructions: settings.DefaultInstructions}
+	if st := s.cfg.Settings; st != nil {
+		var err error
+		if snap.Permissions, snap.PermissionsVersion, err = st.Policy(); err == nil {
+			snap.Instructions, snap.InstructionsVersion, err = st.Instructions()
+		}
+		var se *settings.Error
+		if errors.As(err, &se) {
+			fail(w, http.StatusServiceUnavailable, se.Error())
+			return
+		}
+		if err != nil {
+			fail(w, http.StatusInternalServerError, "the settings could not be read")
+			return
+		}
+	}
+	writeJSON(w, http.StatusOK, snap)
 }
 
 func (s *Server) removed(w http.ResponseWriter, r *http.Request, rn queue.Runner) {

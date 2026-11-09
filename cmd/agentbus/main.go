@@ -51,6 +51,7 @@ import (
 	"github.com/staysup/agentbus/replay"
 	engine "github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/runner"
+	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -177,7 +178,8 @@ type service struct {
 	eng      *engine.Engine
 	store    *store.Store
 	queue    *queue.Queue
-	log      *logfile.Log // logs/service.log
+	remote   *settings.Remote // a runner's settings: the server's
+	log      *logfile.Log     // logs/service.log
 	done     chan error
 	once     sync.Once
 
@@ -218,21 +220,25 @@ func start(c config) (*service, error) {
 	if err != nil {
 		return nil, err
 	}
-	permissions := filepath.Join(c.home, engine.PermissionsFile)
-	if err := makeStarter(permissions, engine.PermissionsStarter, "permissions"); err != nil {
-		return nil, err
-	}
-	instructions := filepath.Join(c.home, engine.InstructionsFile)
-	if err := makeStarter(instructions, engine.DefaultInstructions, "instructions"); err != nil {
-		return nil, err
+	// The settings: the policy and the instructions every turn gets. up and
+	// server keep them as files in the data folder, written with every
+	// default when missing. A runner reads the server's, through the runner
+	// protocol, so every runner follows one policy.
+	var cfgStore settings.Store
+	var remote *settings.Remote
+	if c.mode == modeRunner {
+		remote = &settings.Remote{Server: strings.TrimSuffix(c.server, "/"), Local: c.home}
+		cfgStore = remote
+	} else {
+		files := settings.NewFiles(c.home)
+		if err := files.Init(); err != nil {
+			return nil, err
+		}
+		cfgStore = files
 	}
 	// The data folder's own files, which no turn may edit: a turn that could
 	// would raise its own limits, or read a token.
-	var protect []string
-	for _, f := range []string{engine.PermissionsFile, engine.InstructionsFile, agents.FileName, "token", "turns_token",
-		"enroll_token", "events.db", "jobs.db", "runner.json", filepath.Join("bin", engine.APIClient)} {
-		protect = append(protect, filepath.Join(c.home, f))
-	}
+	protect := cfgStore.Protected()
 	// The enrollment token adds a runner. A service with a queue keeps it in
 	// its data folder: the built-in runner reads it, and a runner on
 	// another machine is given a copy. A runner reads the server's copy.
@@ -273,7 +279,7 @@ func start(c config) (*service, error) {
 			st.Close()
 			return nil, err
 		}
-		js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollToken, Heartbeat: c.heartbeat, Agents: saved})
+		js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollToken, Heartbeat: c.heartbeat, Agents: saved, Settings: cfgStore})
 		if err != nil {
 			closeQ()
 			st.Close()
@@ -367,7 +373,7 @@ func start(c config) (*service, error) {
 			}
 		}
 		eng, err = engine.New(engine.Config{Store: st, BaseURL: baseURL, MaxRuns: c.maxRuns, ReplayBase: replayBase, AgentName: agentName,
-			Permissions: permissions, Instructions: instructions, Protect: protect, APIDir: apiLink(c.home, c.self, svcLog), Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace, Logf: svcLog.Printf,
+			Settings: cfgStore, Protect: protect, APIDir: apiLink(c.home, c.self, svcLog), Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace, Logf: svcLog.Printf,
 			RunLog: func(session string, data []byte) {
 				// The session id is the service's own hex, so it is a plain
 				// file name.
@@ -385,7 +391,7 @@ func start(c config) (*service, error) {
 	}
 	a, err := api.New(api.Config{Store: st, Token: token, TurnsToken: turnsToken, Port: port, AnyHost: !loopback,
 		BaseURL: baseURL, Origin: c.origin, LookPath: c.lookPath, Environ: c.environ, Build: build(debug.ReadBuildInfo()),
-		Queue: q, Jobs: jobsAPI, Engine: eng, TurnWait: c.turnWait, Agents: saved, Permissions: permissions})
+		Queue: q, Jobs: jobsAPI, Engine: eng, TurnWait: c.turnWait, Agents: saved, Settings: cfgStore})
 	if err != nil {
 		ln.Close()
 		svcLog.Close()
@@ -442,7 +448,7 @@ func start(c config) (*service, error) {
 	}
 	host, _, _ := net.SplitHostPort(c.listen)
 	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: gws, api: a, eng: eng, store: st,
-		queue: q, log: svcLog, done: make(chan error, 1)}
+		queue: q, remote: remote, log: svcLog, done: make(chan error, 1)}
 	s.srv = &http.Server{
 		Handler:           logRequests(svcLog, route(a, vendors{anth, oai, orAnth, orOAI}, !loopback)),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -529,6 +535,9 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 	if err != nil {
 		cancel()
 		return fmt.Errorf("the runner could not enroll with %s: %w", self, err)
+	}
+	if s.remote != nil {
+		s.remote.Enrolled(rn.ID(), rn.Token())
 	}
 	svcLog.Printf("runner.start id=%s capacity=%d", rn.ID(), capacity)
 	s.stopRunner = cancel
@@ -756,28 +765,6 @@ func loadToken(path, prefix string) (string, error) {
 		return "", fmt.Errorf("the token file %s is empty; delete it to make a new one", path)
 	}
 	return tok, nil
-}
-
-// makeStarter writes text to path, with mode 0600, when there is no file
-// there: the starter permissions.toml, with every default written out, and
-// instructions.md, with the default text. An existing file is never written:
-// it is the person's. Each turn reads both (package run).
-func makeStarter(path, text, name string) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if errors.Is(err, fs.ErrExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("the %s file %s could not be made", name, path)
-	}
-	if _, err := f.WriteString(text); err != nil {
-		f.Close()
-		return fmt.Errorf("the %s file %s could not be written", name, path)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("the %s file %s could not be written", name, path)
-	}
-	return nil
 }
 
 // defaultPort is the port -listen uses when it names an IP alone.

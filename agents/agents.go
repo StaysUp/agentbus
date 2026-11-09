@@ -26,10 +26,11 @@ import (
 
 	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/run"
+	"github.com/staysup/agentbus/settings"
 )
 
 // FileName is the file in the data folder that holds the agents.
-const FileName = "agents.json"
+const FileName = settings.AgentsFile
 
 // Access kinds (harness.Subscription and the rest).
 const (

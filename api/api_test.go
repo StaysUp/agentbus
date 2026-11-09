@@ -203,7 +203,7 @@ func TestPreflightOnlyForAllowedOrigin(t *testing.T) {
 	if resp.StatusCode/100 != 2 ||
 		resp.Header.Get("Access-Control-Allow-Origin") != origin ||
 		resp.Header.Get("Access-Control-Allow-Methods") != "GET, POST, PUT, PATCH, DELETE" ||
-		resp.Header.Get("Access-Control-Allow-Headers") != "Authorization, Content-Type" {
+		resp.Header.Get("Access-Control-Allow-Headers") != "Authorization, Content-Type, If-Match" {
 		t.Fatalf("allowed preflight: %d %v", resp.StatusCode, resp.Header)
 	}
 	for _, o := range []string{"http://evil.example", "http://localhost:5174", "null"} {
@@ -227,7 +227,7 @@ func TestAnyOriginWithoutConfiguredOrigin(t *testing.T) {
 		resp, _ := do(t, r)
 		if resp.StatusCode != 204 || resp.Header.Get("Access-Control-Allow-Origin") != "*" ||
 			resp.Header.Get("Access-Control-Allow-Methods") != "GET, POST, PUT, PATCH, DELETE" ||
-			resp.Header.Get("Access-Control-Allow-Headers") != "Authorization, Content-Type" ||
+			resp.Header.Get("Access-Control-Allow-Headers") != "Authorization, Content-Type, If-Match" ||
 			resp.Header.Get("Access-Control-Allow-Credentials") != "" {
 			t.Errorf("preflight from %q: %d %v", o, resp.StatusCode, resp.Header)
 		}

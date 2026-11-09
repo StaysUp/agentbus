@@ -28,6 +28,7 @@ import (
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
+	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -92,10 +93,12 @@ type Config struct {
 	// answers them 404.
 	Jobs http.Handler
 
-	// Permissions is the path of permissions.toml. Its [agent_api] says what
-	// a turn token may call and its [limits] cap the work turns ask for,
-	// read for every request a turn token sends. Empty: the defaults.
-	Permissions string
+	// Settings hold the policy and the instructions. The policy's
+	// [agent_api] says what a turn token may call and its [limits] cap the
+	// work turns ask for, read for every request a turn token sends. The
+	// settings routes read and write them (settings.go). Nil: the defaults,
+	// and the settings routes answer 404.
+	Settings settings.Store
 }
 
 // API is the client API's http.Handler.
@@ -180,6 +183,8 @@ func bodyLimit(r *http.Request) int64 {
 		return MaxRunBody
 	case p == "/api/v0/events":
 		return MaxEventBody
+	case strings.HasPrefix(p, "/api/v0/settings/"):
+		return MaxSettingsBody
 	case strings.HasPrefix(p, "/api/v0/jobs") || strings.HasPrefix(p, "/api/v0/attempts") || strings.HasPrefix(p, "/api/v0/runners"):
 		// A job carries a prompt, and a finish a result with the reply.
 		return jobs.MaxBody
@@ -248,7 +253,7 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h := w.Header()
 		h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE")
 		// Named, not "*": the wildcard never covers Authorization.
-		h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+		h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, If-Match")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
