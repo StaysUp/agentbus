@@ -25,6 +25,7 @@ import (
 
 	"github.com/staysup/agentbus/body"
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/run"
 )
 
@@ -107,7 +108,7 @@ var constraints = map[string]func(*openapi3.Schema){
 
 	"AgentRequest":         closed,
 	"AgentRequest.name":    func(s *openapi3.Schema) { minLength(1)(s); maxLength(agents.MaxName)(s) },
-	"AgentRequest.harness": func(s *openapi3.Schema) { s.Enum = []any{agents.Claude, agents.Codex} },
+	"AgentRequest.harness": func(s *openapi3.Schema) { s.Enum = harnessEnum() },
 	"AgentRequest.access":  func(s *openapi3.Schema) { s.Enum = []any{agents.Subscription, agents.OpenRouter} },
 	"AgentRequest.model":   pattern(runModel.String()),
 	"AgentRequest.key_env": pattern(agents.KeyEnvShape()),
@@ -524,4 +525,13 @@ func buildSpec() ([]byte, error) {
 		return nil, err
 	}
 	return out.Bytes(), nil
+}
+
+// harnessEnum is the harnesses an agent can be saved on.
+func harnessEnum() []any {
+	var out []any
+	for _, n := range harness.Names() {
+		out = append(out, n)
+	}
+	return out
 }

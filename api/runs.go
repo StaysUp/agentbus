@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
@@ -244,7 +245,7 @@ func (a *API) turnAgent(w http.ResponseWriter, id, key string) (agents.Agent, bo
 func (a *API) resolveAgent(id string) (agents.Agent, error) {
 	if a.cfg.Agents == nil {
 		if !run.KnownHarness(id) {
-			return agents.Agent{}, errors.New("agent must be claude or codex")
+			return agents.Agent{}, errors.New("agent must be " + harness.NameList())
 		}
 		return agents.Agent{Harness: id, Access: agents.Subscription}, nil
 	}

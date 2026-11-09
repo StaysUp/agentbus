@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -54,9 +55,10 @@ func mustURL(s string) *url.URL {
 	return u
 }
 
-// codexWire is the measured codex wiring (codex-cli 0.164.0).
+// codex's wire is the measured codex wiring (codex-cli 0.164.0).
 func TestCodexWire(t *testing.T) {
-	env, args := codexWire("http://127.0.0.1:8787/s/abc")
+	h, _ := harness.Get("codex")
+	env, args := h.Wire("http://127.0.0.1:8787/s/abc")
 	if env != nil || strings.Join(args, " ") != `-c openai_base_url="http://127.0.0.1:8787/s/abc/backend-api/codex"` {
 		t.Fatalf("env %v, args %v", env, args)
 	}

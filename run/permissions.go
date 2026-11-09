@@ -18,6 +18,8 @@ import (
 	"strings"
 
 	"github.com/BurntSushi/toml"
+
+	"github.com/staysup/agentbus/harness"
 )
 
 // PermissionsFile is the file's name in the data folder.
@@ -323,50 +325,16 @@ func permissionCommand(c string) error {
 
 func isControl(r rune) bool { return r < 0x20 || r == 0x7f }
 
-// readRules is Claude Code's rules that let Read, Grep and Glob reach each
-// folder and everything under it without asking: Read(//<folder>/**), with
-// "//" marking an absolute path. They grant reading only. --add-dir is not
-// used: it makes the folder a working folder, which under the person's
-// acceptEdits mode lets a turn write there too (Claude Code 2.1.319,
-// 2026-11-07, checked live, found in review). A Read rule alone does not
-// cover Grep, so each tool gets its own.
-func readRules(folders []string) []string {
-	var rules []string
-	for _, f := range folders {
-		p := "/" + strings.TrimSuffix(f, "/") + "/**"
-		rules = append(rules, "Read("+p+")", "Grep("+p+")", "Glob("+p+")")
-	}
-	return rules
-}
+// Writes is what one turn may change (harness.Writes).
+type Writes = harness.Writes
 
-// bashRules is Claude Code's rule for each command: Bash(<command>:*), the
-// command with any arguments after it, comma-joined into one value.
-func bashRules(cmds []string) string {
-	rules := make([]string, len(cmds))
-	for i, c := range cmds {
-		rules[i] = "Bash(" + c + ":*)"
-	}
-	return strings.Join(rules, ",")
-}
-
-// Writes is what one turn may change. Nothing when ReadOnly. Otherwise the
-// files under each folder of Edit, never the files of Protect.
-type Writes struct {
-	ReadOnly bool
-	// Edit is the turn's folder, and its real path when that differs, when
-	// edit = "session". Empty: the turn edits nothing without asking.
-	Edit []string
-	// Protect are the data folder's own files: the policy, the
-	// instructions, the saved agents and the tokens. No turn edits them.
-	Protect []string
-}
-
-// writesFor is what a turn of agent may change in folder under perm. A
-// folder that cannot be written into a Claude Code rule gets no edit rule.
-// codex has no way to keep one file of its folder out of its sandbox, so a
-// folder holding a protected file runs codex read-only. why says, for the
-// service log, why edits were left out.
-func writesFor(agent, folder string, readOnly bool, perm Permissions, protect []string) (w Writes, why string) {
+// writesFor is what a turn of h may change in folder under perm. The harness
+// decides which edit folders its flags can hold (harness.Harness.Edit): a
+// folder Claude Code's rules cannot hold gets no edit rule, and codex, which
+// cannot keep one file of its folder out of its sandbox, runs read-only in a
+// folder holding a protected file. why says, for the service log, why edits
+// were left out.
+func writesFor(h harness.Harness, folder string, readOnly bool, perm Permissions, protect []string) (w Writes, why string) {
 	w.ReadOnly = readOnly
 	if readOnly {
 		return w, ""
@@ -377,34 +345,8 @@ func writesFor(agent, folder string, readOnly bool, perm Permissions, protect []
 	if perm.Edit != EditSession {
 		return w, ""
 	}
-	edit := appendReal(nil, folder)
-	if agent == "codex" {
-		// codex's sandbox takes its folder as it is, so any name works;
-		// what it cannot do is keep a protected file inside it read-only.
-		for _, p := range w.Protect {
-			for _, f := range edit {
-				if p == f || strings.HasPrefix(p, strings.TrimSuffix(f, "/")+"/") {
-					return w, "data_folder_inside"
-				}
-			}
-		}
-		w.Edit = edit
-		return w, ""
-	}
-	// Claude Code's rules hold paths; a name that cannot go in one gets no
-	// edit rule, and a protected file that cannot be denied leaves edits out.
-	for _, f := range edit {
-		if !ruleSafe(f) {
-			return w, "folder_shape"
-		}
-	}
-	for _, p := range w.Protect {
-		if !ruleSafe(p) {
-			return w, "protected_file_shape"
-		}
-	}
-	w.Edit = edit
-	return w, ""
+	w.Edit, why = h.Edit(appendReal(nil, folder), w.Protect)
+	return w, why
 }
 
 // appendReal appends p, absolute and clean, and its real path when that
@@ -426,29 +368,4 @@ func appendReal(list []string, p string) []string {
 		list = append(list, r)
 	}
 	return list
-}
-
-// ruleSafe says p can go inside a Claude Code rule as it is: a comma or a
-// parenthesis would end the rule, and a glob character would widen it.
-func ruleSafe(p string) bool {
-	return !strings.ContainsAny(p, ",()*?[]{}") && !strings.ContainsFunc(p, isControl)
-}
-
-// editRules is Claude Code's rule that lets the tools that edit files change
-// anything under each folder without asking: Edit(//<folder>/**).
-func editRules(folders []string) []string {
-	var rules []string
-	for _, f := range folders {
-		rules = append(rules, "Edit(/"+strings.TrimSuffix(f, "/")+"/**)")
-	}
-	return rules
-}
-
-// protectRules is the deny rule for each protected file: Edit(//<file>).
-func protectRules(files []string) []string {
-	var rules []string
-	for _, f := range files {
-		rules = append(rules, "Edit(/"+f+")")
-	}
-	return rules
 }

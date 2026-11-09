@@ -9,6 +9,12 @@ import (
 	"time"
 )
 
+// The harnesses the tests save agents on.
+const (
+	Claude = "claude"
+	Codex  = "codex"
+)
+
 func fixed() time.Time { return time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC) }
 
 func TestOpenSeedsDefaultsOnce(t *testing.T) {

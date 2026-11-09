@@ -44,6 +44,7 @@ import (
 	"github.com/staysup/agentbus/body"
 	"github.com/staysup/agentbus/cost"
 	"github.com/staysup/agentbus/gateway"
+	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/logfile"
 	"github.com/staysup/agentbus/queue"
@@ -330,8 +331,9 @@ func start(c config) (*service, error) {
 	if !c.noReplay {
 		claudeReplay, codexReplay = replay.New(st), replay.NewCodex(st)
 		replayBase = func(agent, session string) (engine.ReplayPlan, error) {
+			// Each harness names the history format own replay uses for it.
 			r := claudeReplay
-			if agent == "codex" {
+			if h, ok := harness.Get(agent); ok && h.Info().Replay == harness.FormatOpenAI {
 				r = codexReplay
 			}
 			p, err := r.Base(session)
