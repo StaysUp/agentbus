@@ -196,8 +196,8 @@ func (e *GapError) Error() string { return fmt.Sprintf("queue: events must start
 
 // Spec is what a turn job asks for. It is frozen when the job is made. A
 // session's first job names its workspace: Repo and Base (a git worktree the
-// runner makes), or Folder (used as it is, or with Isolate a worktree of the
-// git repo it is in, at its HEAD). A later job names Session, and may name an
+// runner makes), or Folder (used as it is, or with Isolate an isolated copy
+// of it, as the isolation setting says: package isolation). A later job names Session, and may name an
 // agent: its turn then runs on that agent, in the session's workspace.
 //
 // Harness is the harness, the program that runs the turn, such as claude; its
@@ -294,6 +294,7 @@ type Job struct {
 // Workspace kinds.
 const (
 	WorkspaceWorktree = "worktree" // a git worktree the runner made, and removes on close
+	WorkspaceCopy     = "copy"     // a copy of the job's folder the runner made, and removes on close
 	WorkspaceFolder   = "folder"   // a folder the job named, never removed
 )
 
@@ -1271,7 +1272,7 @@ func (q *Queue) End(runnerID, attemptID string, number int, f Finish) (Job, erro
 		// finish naming the same session changes nothing.
 		if j.Kind == KindTurn && f.Session != "" && f.Session == j.Session && f.Workspace != nil && j.Spec.Session == "" {
 			w := f.Workspace
-			if w.Kind != WorkspaceWorktree && w.Kind != WorkspaceFolder {
+			if w.Kind != WorkspaceWorktree && w.Kind != WorkspaceCopy && w.Kind != WorkspaceFolder {
 				return ErrBadState
 			}
 			if _, err := tx.Exec(`INSERT INTO sessions(id, team, runner, kind, folder, repo, base, created) VALUES(?,?,?,?,?,?,?,?)

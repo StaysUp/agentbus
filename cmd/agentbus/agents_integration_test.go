@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -219,60 +220,139 @@ func gitRun(t *testing.T, dir string, args ...string) {
 	}
 }
 
-// A new session in a folder of a git repo runs in its own worktree of that
-// repo at HEAD, in the same folder inside it; isolate false, or a folder
-// outside git, runs in the folder itself.
-func TestNewSessionIsolatedInAWorktree(t *testing.T) {
-	home := t.TempDir()
-	svc := runService(t, home, nil, 0)
-	tok := readToken(t, home)
+// isolationSetting writes the isolation setting into home's permissions
+// file, before the service starts.
+func isolationSetting(t *testing.T, home, value string) {
+	t.Helper()
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, "permissions.toml"), []byte("isolation = \""+value+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A new session runs in its own copy of its folder, made as the isolation
+// setting says, exactly as the folder is now, uncommitted edits included:
+// copy (the default) copies any folder; git makes a worktree of a repo at
+// HEAD, in the same folder inside it, and copies a folder outside git;
+// isolate false, or the setting none, runs in the folder itself.
+func TestNewSessionIsolated(t *testing.T) {
 	repo := t.TempDir()
 	gitRun(t, repo, "init", "-q")
 	os.MkdirAll(filepath.Join(repo, "sub"), 0o700)
 	os.WriteFile(filepath.Join(repo, "sub", "a.txt"), []byte("v1"), 0o600)
 	gitRun(t, repo, "add", ".")
 	gitRun(t, repo, "commit", "-q", "-m", "one")
+	os.WriteFile(filepath.Join(repo, "sub", "a.txt"), []byte("uncommitted"), 0o600)
 	plain := t.TempDir()
+	os.WriteFile(filepath.Join(plain, "a.txt"), []byte("uncommitted"), 0o600)
 	real := func(p string) string { r, _ := filepath.EvalSymlinks(p); return r }
 
-	for _, tc := range []struct {
-		name    string
-		folder  string
-		isolate any
-		want    func(job string) string
-	}{
-		{"repo subfolder", filepath.Join(repo, "sub"), nil, func(job string) string {
-			return filepath.Join(home, "worktrees", job, "sub")
-		}},
-		{"isolate false", filepath.Join(repo, "sub"), false, func(string) string { return filepath.Join(repo, "sub") }},
-		{"not a repo", plain, nil, func(string) string { return plain }},
-	} {
-		report := filepath.Join(t.TempDir(), "report")
-		t.Setenv("AGENTBUS_FAKE_OUT", report)
-		body := map[string]any{"agent": "claude", "folder": tc.folder, "prompt": "hi"}
-		if tc.isolate != nil {
-			body["isolate"] = tc.isolate
+	for _, setting := range []string{"", "git", "none"} {
+		home := t.TempDir()
+		if setting != "" {
+			isolationSetting(t, home, setting)
 		}
-		code, out, raw := postRun(t, svc, tok, body)
-		if code != http.StatusAccepted {
-			t.Fatalf("%s: %d %s", tc.name, code, raw)
+		svc := runService(t, home, nil, 0)
+		tok := readToken(t, home)
+		copied := func(job string) string { return filepath.Join(home, "worktrees", job) }
+		inRepo := copied
+		if setting == "git" {
+			inRepo = func(job string) string { return filepath.Join(home, "worktrees", job, "sub") }
 		}
-		waitClosed(t, svc.store, out["id"].(string))
-		r := readReport(t, report)
-		if real(r.Cwd) != real(tc.want(out["job"].(string))) {
-			t.Errorf("%s: ran in %s, want %s", tc.name, r.Cwd, tc.want(out["job"].(string)))
+		mine := func(f string) func(string) string { return func(string) string { return f } }
+		if setting == "none" {
+			copied, inRepo = mine(plain), mine(filepath.Join(repo, "sub"))
 		}
-		if tc.name == "repo subfolder" {
-			if b, err := os.ReadFile(filepath.Join(r.Cwd, "a.txt")); err != nil || string(b) != "v1" {
-				t.Errorf("the worktree does not hold the repo's HEAD: %q %v", b, err)
+		for _, tc := range []struct {
+			name    string
+			folder  string
+			isolate any
+			want    func(job string) string
+		}{
+			{"repo subfolder", filepath.Join(repo, "sub"), nil, inRepo},
+			{"isolate false", filepath.Join(repo, "sub"), false, mine(filepath.Join(repo, "sub"))},
+			{"not a repo", plain, nil, copied},
+		} {
+			name := "setting " + strconv.Quote(setting) + ", " + tc.name
+			report := filepath.Join(t.TempDir(), "report")
+			t.Setenv("AGENTBUS_FAKE_OUT", report)
+			body := map[string]any{"agent": "claude", "folder": tc.folder, "prompt": "hi"}
+			if tc.isolate != nil {
+				body["isolate"] = tc.isolate
+			}
+			code, out, raw := postRun(t, svc, tok, body)
+			if code != http.StatusAccepted {
+				t.Fatalf("%s: %d %s", name, code, raw)
+			}
+			waitClosed(t, svc.store, out["id"].(string))
+			r := readReport(t, report)
+			if real(r.Cwd) != real(tc.want(out["job"].(string))) {
+				t.Errorf("%s: ran in %s, want %s", name, r.Cwd, tc.want(out["job"].(string)))
+			}
+			if b, err := os.ReadFile(filepath.Join(r.Cwd, "a.txt")); err != nil || string(b) != "uncommitted" {
+				t.Errorf("%s: the session does not start from the folder as it is: %q %v", name, b, err)
 			}
 		}
+		svc.stop()
 	}
 	// isolate with session is refused: a session keeps its workspace.
-	code, out, _ := postRun(t, svc, tok, map[string]any{"session": "abc", "prompt": "hi", "isolate": true})
+	home := t.TempDir()
+	svc := runService(t, home, nil, 0)
+	code, out, _ := postRun(t, svc, readToken(t, home), map[string]any{"session": "abc", "prompt": "hi", "isolate": true})
 	if code != http.StatusBadRequest || !strings.Contains(out["error"].(string), "isolate is for a new session") {
 		t.Errorf("isolate with session: %d %v", code, out)
 	}
+}
+
+// A copied session keeps its copy across turns; the job's result names the
+// checkpoints each turn ran between; closing the workspace removes the copy
+// and its record; the person's folder is never changed.
+func TestCopiedSessionKeptAcrossTurnsAndRemovedOnClose(t *testing.T) {
+	home := t.TempDir()
+	svc := runService(t, home, nil, 0)
+	tok := readToken(t, home)
+	folder := t.TempDir()
+	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("v1"), 0o600)
+	real := func(p string) string { r, _ := filepath.EvalSymlinks(p); return r }
+	t.Setenv("AGENTBUS_FAKE_STDOUT", `{"type":"result","session_id":"sess-1"}`+"\n")
+	var j queue.Job
+	if code := callAPI(t, svc, tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn",
+		"spec": map[string]any{"agent": "claude", "folder": folder, "isolate": true, "prompt": "one"}}, &j); code != http.StatusCreated {
+		t.Fatalf("make job: %d", code)
+	}
+	j = waitJob(t, svc, tok, j.ID)
+	want := filepath.Join(home, "worktrees", j.ID)
+	if j.State != queue.Finished || j.Workspace == nil || j.Workspace.Kind != queue.WorkspaceCopy || real(j.Workspace.Folder) != real(want) {
+		t.Fatalf("first job %s, workspace %+v, want a copy at %s", j.State, j.Workspace, want)
+	}
+	// The second turn writes a file in the copy, through the fake agent.
+	t.Setenv("AGENTBUS_FAKE_MARK", filepath.Join(want, "made.txt"))
+	var next queue.Job
+	if code := callAPI(t, svc, tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn",
+		"spec": map[string]any{"session": j.Session, "prompt": "two"}}, &next); code != http.StatusCreated {
+		t.Fatalf("next job: %d", code)
+	}
+	if next = waitJob(t, svc, tok, next.ID); next.State != queue.Finished {
+		t.Fatalf("next job %s %s %s", next.State, next.Reason, next.Result)
+	}
+	res, err := queue.ReadResult(next.Result)
+	if err != nil || res.Changes == nil || res.Changes.Count != 1 || res.Changes.Files[0].Path != "made.txt" ||
+		res.Changes.From != "base" || res.Changes.To != next.Attempt {
+		t.Fatalf("second turn's changes %+v %v", res.Changes, err)
+	}
+	if _, err := os.Stat(filepath.Join(folder, "made.txt")); err == nil {
+		t.Fatal("the turn changed the person's folder")
+	}
+	if code := callAPI(t, svc, tok, "POST", "/api/v0/workspaces/"+j.Session+"/close", nil, nil); code/100 != 2 {
+		t.Fatalf("close: %d", code)
+	}
+	waitFor(t, "the copy removed", func() bool {
+		_, err1 := os.Stat(want)
+		_, err2 := os.Stat(filepath.Join(home, "worktrees", ".isolation", j.ID))
+		return os.IsNotExist(err1) && os.IsNotExist(err2)
+	})
 }
 
 // The saved agents outlast a restart, and a removed default still lets a
@@ -324,6 +404,7 @@ func TestSavedAgentsKeptAndDefaultsSeeded(t *testing.T) {
 // closing the workspace removes the whole worktree.
 func TestIsolatedSubfolderKeptAcrossTurnsAndReview(t *testing.T) {
 	home := t.TempDir()
+	isolationSetting(t, home, "git")
 	svc := runService(t, home, nil, 0)
 	tok := readToken(t, home)
 	repo := t.TempDir()
@@ -438,6 +519,7 @@ func TestRetryAfterAgentEditGetsTheSameTurn(t *testing.T) {
 // refused with why, and no worktree is left behind.
 func TestIsolatedFolderNotInCommitRefused(t *testing.T) {
 	home := t.TempDir()
+	isolationSetting(t, home, "git")
 	svc := runService(t, home, nil, 0)
 	tok := readToken(t, home)
 	repo := t.TempDir()
@@ -507,6 +589,7 @@ func TestReviewBySavedAgent(t *testing.T) {
 // outside its worktree.
 func TestIsolatedSymlinkOutRefused(t *testing.T) {
 	home := t.TempDir()
+	isolationSetting(t, home, "git")
 	svc := runService(t, home, nil, 0)
 	tok := readToken(t, home)
 	repo, outside := t.TempDir(), t.TempDir()

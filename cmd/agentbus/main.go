@@ -179,6 +179,7 @@ type service struct {
 	store    *store.Store
 	queue    *queue.Queue
 	remote   *settings.Remote // a runner's settings: the server's
+	settings settings.Store   // the settings the built-in runner reads
 	log      *logfile.Log     // logs/service.log
 	done     chan error
 	once     sync.Once
@@ -448,7 +449,7 @@ func start(c config) (*service, error) {
 	}
 	host, _, _ := net.SplitHostPort(c.listen)
 	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: gws, api: a, eng: eng, store: st,
-		queue: q, remote: remote, log: svcLog, done: make(chan error, 1)}
+		queue: q, remote: remote, settings: cfgStore, log: svcLog, done: make(chan error, 1)}
 	s.srv = &http.Server{
 		Handler:           logRequests(svcLog, route(a, vendors{anth, oai, orAnth, orOAI}, !loopback)),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -531,7 +532,7 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 	ctx, cancel := context.WithCancel(context.Background())
 	rn, err := runner.Enroll(ctx, runner.Config{Queue: self, EnrollToken: enrollToken, Name: name, Capacity: capacity,
 		Engine: s.eng, Store: s.store, Logf: svcLog.Printf,
-		Workdir: filepath.Join(c.home, "worktrees"), StateFile: filepath.Join(c.home, "runner.json")})
+		Workdir: filepath.Join(c.home, "worktrees"), StateFile: filepath.Join(c.home, "runner.json"), Settings: s.settings})
 	if err != nil {
 		cancel()
 		return fmt.Errorf("the runner could not enroll with %s: %w", self, err)

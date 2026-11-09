@@ -48,7 +48,7 @@ func TestTurnSinkNamesTurnsAfterChildExits(t *testing.T) {
 	var ids []string
 	for i := 0; i < 3; i++ {
 		resp, body := do(t, e.req(t, "POST", "/api/v0/turns",
-			strings.NewReader(`{"agent":"codex","folder":"`+folder+`","prompt":"hi"}`)))
+			strings.NewReader(`{"agent":"codex","folder":"`+folder+`","isolate":false,"prompt":"hi"}`)))
 		if resp.StatusCode != http.StatusAccepted {
 			t.Fatalf("%d %s", resp.StatusCode, body)
 		}

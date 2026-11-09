@@ -17,7 +17,9 @@ const module = "github.com/staysup/agentbus"
 // module; the gateway and the record know
 // nothing about jobs; run, which starts one turn, knows nothing about queues
 // or saved agents; agents, the saved agents, may use run and nothing of the
-// queue side; the queue may use run and workspace, never the reverse.
+// queue side; isolation, the session's copies, may use workspace and
+// nothing of the turn or queue side; the queue may use run and workspace,
+// never the reverse.
 // Checked over every import, direct or not.
 func TestPackageLayers(t *testing.T) {
 	jobSide := []string{"queue", "jobs", "runner"}
@@ -25,15 +27,17 @@ func TestPackageLayers(t *testing.T) {
 		pkgs      []string // these packages, and every subpackage
 		mayNotUse []string
 	}{
-		{[]string{"harness"}, append([]string{"run", "agents", "workspace", "api", "gateway", "adapter", "event",
+		{[]string{"harness"}, append([]string{"run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
 			"cost", "replay", "store", "body", "logfile", "settings", "cmd"}, jobSide...)},
-		{[]string{"settings"}, append([]string{"harness", "run", "agents", "workspace", "api", "gateway", "adapter", "event",
+		{[]string{"settings"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
 			"cost", "replay", "store", "body", "logfile", "cmd"}, jobSide...)},
 		{[]string{"gateway", "adapter", "event", "cost", "replay", "store", "body", "logfile"},
-			append([]string{"run", "agents", "workspace", "api"}, jobSide...)},
-		{[]string{"run"}, append([]string{"agents", "workspace", "api"}, jobSide...)},
-		{[]string{"agents"}, append([]string{"workspace", "api"}, jobSide...)},
-		{[]string{"workspace"}, append([]string{"run", "agents", "api"}, jobSide...)},
+			append([]string{"run", "agents", "workspace", "isolation", "api"}, jobSide...)},
+		{[]string{"run"}, append([]string{"agents", "workspace", "isolation", "api"}, jobSide...)},
+		{[]string{"agents"}, append([]string{"workspace", "isolation", "api"}, jobSide...)},
+		{[]string{"workspace"}, append([]string{"run", "agents", "isolation", "api"}, jobSide...)},
+		{[]string{"isolation"}, append([]string{"run", "agents", "api", "gateway", "adapter", "event", "cost", "replay",
+			"store", "body", "logfile", "harness", "settings"}, jobSide...)},
 		{[]string{"queue"}, []string{"jobs", "runner", "api"}},
 		{[]string{"jobs"}, []string{"runner", "api"}},
 		{[]string{"runner"}, []string{"api"}},

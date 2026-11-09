@@ -162,8 +162,10 @@ curl -s http://127.0.0.1:8787/api/v0/turns \
 ```
 
 Use your own token path if the data folder is elsewhere. `folder` must be an absolute path to a
-folder that exists. In a git repo with a commit, the agent works in its own git worktree of it, at
-its current HEAD, under the data folder; send `"isolate":false` to work in the folder itself. `model` is passed to the agent as `--model`; a small
+folder that exists. The agent works in its own copy of it, made exactly as the folder is now,
+under the data folder, so your folder is not changed; send `"isolate":false` to work in the folder
+itself. `isolation` in `permissions.toml` picks how the copy is made: `copy` (the default), `git`
+(a worktree, in a repo) or `none`. `model` is passed to the agent as `--model`; a small
 model keeps this first turn cheap. `read_only` gives the agent read tools only. For codex, use
 `"agent":"codex"` and one of its models, or leave `model` out.
 
@@ -269,7 +271,7 @@ Everything stays on your machine, in the data folder: `events.db` (a SQLite file
 `jobs.db` (the job queue), `token`, `turns_token`, `enroll_token`, `runner.json`,
 `permissions.toml`, `instructions.md`, `agents.json`, `worktrees/` and `logs/`. `turns_token` is a second token for a program that
 only starts, stops and reads turns. `enroll_token` adds a runner; the built-in runner reads it, and
-keeps its identity in `runner.json`. `worktrees/` holds the git worktrees jobs run in. Nothing is sent anywhere except the model calls themselves, to the vendor your agent
+keeps its identity in `runner.json`. `worktrees/` holds the copies and git worktrees sessions run in. Nothing is sent anywhere except the model calls themselves, to the vendor your agent
 already uses.
 
 `events.db` holds each turn's model requests and replies, so it holds whatever your agent read or
@@ -322,7 +324,7 @@ change the policy. Details: [docs/CLIENT_API.md](docs/CLIENT_API.md#settings).
 file of its own, so one policy holds on every machine. If it cannot reach the server, the turn
 does not start and the job fails with that reason. It never runs on an older copy.
 
-**Edits.** With `edit = "session"`, a turn edits files in its own session folder (its worktree)
+**Edits.** With `edit = "session"`, a turn edits files in its own session folder (its copy)
 without asking: claude gets `Edit(//<folder>/**)`, codex runs with `--sandbox workspace-write`.
 `"none"` edits nothing: claude is denied Edit, Write and NotebookEdit, whatever your own Claude
 Code settings allow, and codex runs read-only, with no network. A `read_only` turn never
@@ -387,7 +389,8 @@ API, and a runner on another machine uses its server's.
 | `queue/` | Jobs, attempts, runners and reviews, in `jobs.db` beside the record |
 | `jobs/` | The jobs API and the runner protocol |
 | `runner/` | Takes jobs through the runner protocol and runs each one with `run/` |
-| `workspace/` | Git worktrees, and what a job changed |
+| `isolation/` | A session's own copy of its folder: checkpoint, diff, apply, close |
+| `workspace/` | What a job changed, and git worktrees |
 | `gateway/` | The pass-through proxy that feeds adapters |
 | `adapter/` | One adapter per API format: Anthropic, OpenAI |
 | `event/` | The vendor-neutral events |

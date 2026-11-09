@@ -211,7 +211,7 @@ When a turn or review a turn asked for ends (finished, failed or cancelled), Age
 next turn of the **asking session**, on that session's own agent, after the turn running there now.
 Its prompt is the result, and it starts `[AgentBus] This message is from AgentBus, not from the
 person`. It names the agent, the job and its state, the session and turn the work ran in, its folder
-(each new session gets its own worktree, so results of a fan-out can be compared), the changed files
+(each new session gets its own isolated copy, so results of a fan-out can be compared), the changed files
 (count and paths, at most 50), a review's verdict and findings, and the work's final reply (at most
 8 KiB). Each result is its own turn; three asked turns bring three.
 
@@ -228,8 +228,8 @@ It holds `events.db` (the store: events, and since this version every model requ
 `GET /api/v0/calls/<exchange>/context`), `jobs.db` (the job queue: jobs, attempts, runners and
 workspaces, in a file of its own so the record knows nothing about jobs), `token`, `turns_token`
 (above), `enroll_token` (adds a runner, [The runner protocol](#the-runner-protocol)),
-`runner.json` (the built-in runner's id and token, mode 0600), `worktrees/` (one git worktree per
-session that asked for one), `permissions.toml` (below), `instructions.md` (below), `agents.json`
+`runner.json` (the built-in runner's id and token, mode 0600), `worktrees/` (each isolated
+session's copy or git worktree, and in `worktrees/.isolation/` its checkpoints), `permissions.toml` (below), `instructions.md` (below), `agents.json`
 (the saved agents), `bin/agentbus-api` (below), `logs/` (below), and `events.db.lock`,
 which one service holds while it runs, so a second `agentbus up` on the same folder refuses to
 start. No version in the name.
@@ -283,9 +283,12 @@ rename = true
   character (`*?[]{}`).
 - `allow` and `forbid`: a command and its first arguments, such as `go test`. No comma,
   parenthesis or star, no two spaces in a row, no leading `-`.
+- `isolation`: where a new session's turns run. `"copy"` (the default) is a copy of its folder,
+  `"git"` a git worktree in a repo and a copy elsewhere, `"none"` the folder itself. See
+  [Isolation](#isolation).
 - `edit`: where a turn may create and change files without asking. `"session"` (the default) is
-  the turn's own session folder: its worktree, or the folder itself when it is not in a git repo.
-  `"none"` is nowhere. A read-only turn never edits, and `forbid` still wins.
+  the turn's own session folder: its isolated copy, or the folder itself when the session is not
+  isolated. `"none"` is nowhere. A read-only turn never edits, and `forbid` still wins.
 - **No turn edits the data folder's own files**: `permissions.toml`, `instructions.md`,
   `agents.json`, `token`, `turns_token`, `enroll_token`, `events.db`, `jobs.db`, `runner.json` and
   `bin/agentbus-api`. claude gets a deny rule on each, which wins over `edit` and over the person's
@@ -530,13 +533,11 @@ process that does it.
   the two agents a new data folder starts with, so a 0.1 client that sends them gets the same
   turn as before. When the person has removed one of those two, the name still starts that harness
   on its own subscription.
-- **Isolation is automatic.** A new session whose `folder` is in a git repo with a commit runs in a
-  new git worktree of that repo, at the folder's current HEAD, in the same folder inside it, under
-  `worktrees/` in the data folder. The session's `folder` in its events is that worktree folder.
-  Uncommitted changes in the folder are not in the worktree. A folder that is not in the repo's
-  last commit (new and untracked) is refused with 400 and why, and no worktree is left behind.
-  A folder outside git, or in a repo
-  with no commit, is used as it is. `"isolate": false` always uses the folder as it is.
+- **Isolation is automatic.** A new session runs in its own copy of `folder`, made as the
+  `isolation` setting says ([Isolation](#isolation)), under `worktrees/` in the data folder. It
+  starts from the folder exactly as it is, uncommitted edits included, and nothing the turns do
+  reaches the folder. The session's `folder` in its events is the copy's folder.
+  `"isolate": false`, or the setting `"none"`, uses the folder as it is.
   `isolate` with `session` is refused: a session keeps its workspace.
 
 The reply is **202** `{"id":"abc","turn":"t_5d0c19a2e7b3f481","base_url":"http://127.0.0.1:8787/s/abc/t/t_5d0c19a2e7b3f481","job":"job_1f…"}`,
@@ -1325,15 +1326,15 @@ turn. The jobs API is the whole way: worktrees, reviews, cancel, and the list.
   `model_calls`, `cost_usd`), the session it ran in, and `changes`: every file the job added,
   modified or deleted in its workspace, untracked and git-ignored files included, each with size
   and SHA-256. In a git workspace each file also says `tracked`, `untracked` or `ignored`, with the
-  commit HEAD named before and after, and a unified diff of the tracked files.
+  commit HEAD named before and after, and a unified diff of the tracked files. In an isolated
+  session, `from` and `to` name the checkpoints the changes are between ([Isolation](#isolation)).
 
 ### Workspaces
 
 - **A session's first job names its workspace.** Either `repo` and `base` (a branch, tag or
   commit): the runner makes a git worktree of the repo at that base, under `worktrees/` in its data
   folder, and the turn runs there. Or `folder`, used as it is. Or `folder` with `isolate: true`:
-  when the folder is in a git repo with a commit, the runner makes a worktree of that repo at its
-  HEAD and the turn runs in the same folder inside it; otherwise the folder is used as it is.
+  the runner makes the isolated copy the `isolation` setting names ([Isolation](#isolation)).
   `POST /api/v0/turns` sends `isolate: true` unless told otherwise; the jobs API takes it as sent.
 - **`spec.agent` is a saved agent's id**, as for `POST /api/v0/turns`. The control plane fills
   `spec.agent` with its harness, and `spec.agent_id`, `spec.access`, `spec.key_env` and, when none
@@ -1341,12 +1342,46 @@ turn. The jobs API is the whole way: worktrees, reviews, cancel, and the list.
 - **Later jobs name `session`**, and may name `agent`: the turn then runs on that saved agent, in
   the session's workspace, as for `POST /api/v0/turns` (switching agent). They go to the runner that
   holds the session's workspace.
-- **A workspace's `folder` is where its turns run.** For an isolated folder in a repo's
-  subfolder, that is the same subfolder inside the worktree; later turns and reviews use it.
+- **A workspace's `folder` is where its turns run.** Its `kind` is `copy`, `worktree` or `folder`
+  (used as it is). For a git worktree of a repo's subfolder, `folder` is the same subfolder inside
+  the worktree; later turns and reviews use it.
 - **A retry keeps what was frozen.** The idempotency key is matched against the request as sent,
   the saved agent by its id, so a retry after the agent was edited gets the first job.
-- **A worktree is removed only when its workspace is closed**, never when a job ends:
+- **A copy or worktree is removed only when its workspace is closed**, never when a job ends:
   `POST /api/v0/workspaces/<session>/close`. A folder the job named is never removed.
+
+### Isolation
+
+A new session's turns run in an isolated copy of its folder, so nothing they do reaches the
+person's folder until a change is applied. The `isolation` setting in `permissions.toml` picks how
+the copy is made:
+
+- **`copy`** (the default): a copy of the folder, whatever it is. On macOS (APFS) it is one
+  copy-on-write clone, which takes no space until a file changes; on Linux each file is a reflink
+  where the disk has them (btrfs, xfs) and a plain copy where it does not. A `.git` folder at the
+  top is copied with it, so git works in the copy and a commit there stays there. A `.git` file at
+  the top (a linked worktree's) is left out, since it names the person's own repo.
+- **`git`**: in a git repo with a commit, a detached git worktree at HEAD, with the folder's
+  uncommitted edits (changed, removed and untracked files) carried in. Ignored files are not, which
+  keeps a big build folder out. The turn runs in the same subfolder inside it. A subfolder the
+  last commit does not have is refused with 400. Outside git, a copy.
+- **`none`**: the folder itself.
+
+Each turn starts from a checkpoint and ends with one, named by the turn's id (the start one adds
+`.start`, and is the last turn's end when nothing changed in between). A checkpoint records every
+file's hash and keeps its own copy of each file that changed, so one turn's changes can be applied
+after later turns changed the same file again. A job's `changes` name the two checkpoints in `from`
+and `to`. The first checkpoint is `base`: the folder as the session began.
+
+Applying a turn puts its changed files into the person's folder. It is refused, with the reason
+and each file, when a file there is neither as it was at the turn's start nor already as the turn
+left it, and then nothing is written. Applying from the oldest checkpoint kept also removes what
+the checkpoints up to it kept. Closing the workspace removes the copy and all its checkpoints. The
+API for a turn's diff and apply is next; today the adapter is in package `isolation`.
+
+**A known limit: a disk without copy-on-write.** On ext4, and on a folder shared into a container
+from another disk, `copy` copies every byte, so a big folder (a `node_modules`, a build output)
+is slow to start and takes its full size again. Use `git` there for a repo, or `none`.
 
 ### Reviews
 
@@ -1651,7 +1686,8 @@ gets a new version path, and the old one stays for a while.
   preflight now allows `PUT` and `DELETE`.
 - `agent` in `POST /api/v0/turns` and `spec.agent` in `POST /api/v0/jobs` name a saved agent. The
   seeded `claude` and `codex` keep 0.1's turns working unchanged.
-- `POST /api/v0/turns` isolates a new session in a git worktree when its folder is in a git repo
-  with a commit. Send `"isolate": false` for 0.1's behaviour.
+- `POST /api/v0/turns` isolates a new session in its own copy of its folder, made as the new
+  `isolation` setting says (default `copy`), uncommitted edits included. Send `"isolate": false`
+  for 0.1's behaviour. A workspace's `kind` may be `copy`. A job's `changes` carry `from` and `to`.
 - `model` takes OpenRouter's names: `^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`.
 - `turn.started` and `session.opened` of a run carry `agent_id`, `access` and `key_env`.

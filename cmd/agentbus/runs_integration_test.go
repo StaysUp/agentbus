@@ -131,7 +131,8 @@ func TestRunSetsBaseURLInChildOnlyAndClosesWithExitCode(t *testing.T) {
 	t.Setenv("AGENTBUS_FAKE_EXIT", "3")
 	folder := t.TempDir()
 
-	code, out, raw := postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": folder,
+	// isolate false: the turn runs in folder itself, which events name.
+	code, out, raw := postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": folder, "isolate": false,
 		"prompt": "--dangerously-skip-permissions hello", "model": "haiku"})
 	if code != http.StatusAccepted {
 		t.Fatalf("status %d: %s", code, raw)
@@ -454,7 +455,7 @@ func TestRunTurnCarriesAgentAndFolder(t *testing.T) {
 	t.Setenv("AGENTBUS_FAKE_WAIT", release)
 	t.Setenv("AGENTBUS_FAKE_EXIT", "0")
 	folder := t.TempDir()
-	code, out, raw := postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": folder, "prompt": "hi"})
+	code, out, raw := postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": folder, "isolate": false, "prompt": "hi"})
 	if code != http.StatusAccepted {
 		t.Fatalf("run %d %s", code, raw)
 	}
@@ -468,7 +469,7 @@ func TestRunTurnCarriesAgentAndFolder(t *testing.T) {
 
 	// A run whose child makes one model call through the gateway.
 	t.Setenv("AGENTBUS_FAKE_CALL", "1")
-	code, out, raw = postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": folder, "prompt": "hi"})
+	code, out, raw = postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": folder, "isolate": false, "prompt": "hi"})
 	if code != http.StatusAccepted {
 		t.Fatalf("run %d %s", code, raw)
 	}

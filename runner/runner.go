@@ -15,15 +15,16 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/isolation"
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
+	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 	"github.com/staysup/agentbus/workspace"
 )
@@ -41,8 +42,11 @@ type Config struct {
 	Engine *run.Engine
 	Store  *store.Store
 
-	// Workdir holds the git worktrees this runner makes, one per session.
+	// Workdir holds the isolated copies this runner makes, one per session
+	// (package isolation).
 	Workdir string
+	// Settings say which isolation a new session gets. Nil: the defaults.
+	Settings settings.Store
 	// StateFile keeps the runner's id and token across restarts, so a
 	// session's later jobs still find the runner that holds its worktree.
 	// Empty enrolls a new runner on every start.
@@ -213,9 +217,9 @@ func (r *Runner) loop(ctx context.Context) {
 	}
 }
 
-// clean removes a closed session's worktree, if this runner made it, and
-// tells the control plane. A folder the job named is never removed. A
-// removal that fails is reported with its reason, and the worktree stays.
+// clean removes a closed session's copy or worktree, if this runner made it,
+// and tells the control plane. A folder the job named is never removed. A
+// removal that fails is reported with its reason, and the copy stays.
 func (r *Runner) clean(ctx context.Context, w queue.Workspace) {
 	r.cleanMu.Lock()
 	defer r.cleanMu.Unlock()
@@ -226,9 +230,9 @@ func (r *Runner) clean(ctx context.Context, w queue.Workspace) {
 		return
 	}
 	msg := ""
-	if w.Kind == queue.WorkspaceWorktree {
-		if err := workspace.RemoveWorktree(r.cfg.Workdir, w.Repo, w.Folder); err != nil {
-			msg = "the worktree could not be removed: " + err.Error()
+	if w.Kind == queue.WorkspaceWorktree || w.Kind == queue.WorkspaceCopy {
+		if err := r.remove(w); err != nil {
+			msg = "the " + w.Kind + " could not be removed: " + err.Error()
 		}
 	}
 	status, err := call(context.WithoutCancel(ctx), r.short, r.cfg.Queue+"/api/v0/runners/"+r.id+"/removed", r.token,
@@ -240,6 +244,20 @@ func (r *Runner) clean(ctx context.Context, w queue.Workspace) {
 		}
 		r.cleaned[w.Session] = true
 	}
+}
+
+// remove removes the copy or worktree of w through its isolation backend. A
+// worktree made before the backends kept a record has none, and is removed
+// as a worktree.
+func (r *Runner) remove(w queue.Workspace) error {
+	s, err := isolation.Load(r.cfg.Workdir, w.Folder)
+	switch {
+	case err == nil:
+		return isolation.Close(s)
+	case w.Kind == queue.WorkspaceWorktree:
+		return workspace.RemoveWorktree(r.cfg.Workdir, w.Repo, w.Folder)
+	}
+	return nil // a copy with no record: nothing of it is left
 }
 
 // attempt is one attempt in progress: its events not yet sent, and what its
@@ -258,10 +276,14 @@ type attempt struct {
 	cancelOnce, staleOnce sync.Once
 
 	// The workspace, once known: its folder, and for a session's first job
-	// the workspace to record. before is its snapshot at the job's start;
-	// session is the turn's session once it started.
+	// the workspace to record. In an isolated session, space is its copy and
+	// start the checkpoint the turn starts from; otherwise before is the
+	// folder's snapshot at the job's start. session is the turn's session
+	// once it started.
 	folder  string
 	ws      *queue.Workspace
+	space   *isolation.Space
+	start   string
 	before  *workspace.Snapshot
 	session string
 }
@@ -334,15 +356,13 @@ func (at *attempt) finish(ctx context.Context, f queue.Finish) {
 // for a session's first job the session and its workspace, so the session's
 // later jobs come to this runner.
 func (at *attempt) addChanges(f *queue.Finish) {
-	if at.before == nil {
+	if at.before == nil && at.space == nil {
 		return
 	}
 	res, _ := queue.ReadResult(f.Result)
-	var c workspace.Changes
-	if after, err := workspace.Take(at.folder, at.before); err != nil {
+	c, ok := at.changes()
+	if !ok {
 		c = workspace.Changes{Kind: "snapshot", Files: []workspace.Change{}, Error: "the workspace could not be read at the end"}
-	} else {
-		c = workspace.Diff(at.folder, at.before, after)
 	}
 	res.Folder, res.Changes = at.folder, nil
 	// The whole finish must fit the jobs API's body limit, so the changes get
@@ -356,6 +376,26 @@ func (at *attempt) addChanges(f *queue.Finish) {
 	if at.ws != nil && at.session != "" && at.job.Kind == queue.KindTurn {
 		f.Session, f.Workspace = at.session, at.ws
 	}
+}
+
+// changes is what the job changed: in an isolated session, from the turn's
+// start checkpoint to a checkpoint taken now, named by the turn; otherwise
+// from the folder's snapshot at the start.
+func (at *attempt) changes() (workspace.Changes, bool) {
+	if at.space != nil {
+		b, _ := isolation.Get(at.space.Backend)
+		end, err := b.Checkpoint(at.space, at.a.ID)
+		if err != nil {
+			return workspace.Changes{}, false
+		}
+		c, err := b.Diff(at.space, at.start, end.Name)
+		return c, err == nil
+	}
+	after, err := workspace.Take(at.folder, at.before)
+	if err != nil {
+		return workspace.Changes{}, false
+	}
+	return workspace.Diff(at.folder, at.before, after), true
 }
 
 // heartbeats renews the lease every heartbeat interval until done closes, on
@@ -440,12 +480,12 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 		if errors.As(err, &rf) {
 			res.Refused, res.Status = rf.Msg, rf.Status
 		}
-		// No turn started, so no session owns a worktree made for it.
-		if at.ws != nil && at.ws.Kind == queue.WorkspaceWorktree {
-			if err := workspace.RemoveWorktree(r.cfg.Workdir, at.ws.Repo, at.ws.Folder); err == nil {
+		// No turn started, so no session owns a copy made for it.
+		if at.ws != nil && at.space != nil {
+			if err := isolation.Close(at.space); err == nil {
 				at.event("workspace.removed", map[string]any{"folder": at.ws.Folder})
 			}
-			at.before = nil
+			at.space, at.before = nil, nil
 		}
 		at.event("turn.refused", map[string]any{"status": res.Status})
 		at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup, Result: mustJSON(res)})
@@ -492,70 +532,43 @@ func (r *Runner) request(at *attempt) run.Request {
 	return req
 }
 
-// prepare finds or makes the job's workspace and takes its snapshot: a
-// worktree of the job's repo at its base (a session's first job), the job's
-// folder, or the folder of the session it continues. A folder with Isolate
-// that is in a git repo with a commit gets a worktree of that repo at its
-// HEAD, and the turn runs in the same folder inside it. It answers why the job
-// cannot run, or nil.
+// prepare finds or makes the job's workspace and records where its turn
+// starts. A session's first job gets an isolated copy (package isolation): a
+// worktree of the job's repo at its base, or, for a folder with Isolate, the
+// copy the isolation setting names. A folder without Isolate, or with the
+// setting none, is used as it is. A later job runs in its session's
+// workspace. It answers why the job cannot run, or nil.
 func (r *Runner) prepare(at *attempt) *queue.Result {
 	sp := at.job.Spec
-	if sp.Folder != "" && sp.Isolate {
-		if repo, rel, head, ok := workspace.RepoOf(sp.Folder); ok {
-			if r.cfg.Workdir == "" {
-				return &queue.Result{Refused: "this runner has no workdir for worktrees"}
-			}
-			dir := filepath.Join(r.cfg.Workdir, at.job.ID)
-			if err := workspace.MakeWorktree(repo, head, dir); err != nil {
-				return r.noWorktree(at, err)
-			}
-			// A refusal after this point removes the worktree: nothing
-			// records it yet, so nothing else would.
-			undo := func(res *queue.Result) *queue.Result {
-				if err := workspace.RemoveWorktree(r.cfg.Workdir, repo, dir); err != nil {
-					r.cfg.Logf("worktree %s for job %s could not be removed after a refused setup", dir, at.job.ID)
-				}
-				return res
-			}
-			// The folder must be a real folder inside the new worktree: one
-			// the commit records as a symlink could lead anywhere.
-			if !insideDir(dir, filepath.Join(dir, rel)) {
-				return undo(&queue.Result{Refused: "the folder is not in its repo's last commit, so it cannot get its own worktree; " +
-					"commit it, or start the session with isolate false to use the folder as it is", Status: http.StatusBadRequest})
-			}
-			// The workspace is the folder the turn runs in, inside the
-			// worktree: later turns, their snapshots and a review use it.
-			// Removal finds the worktree from it (workspace.RemoveWorktree).
-			at.folder = filepath.Join(dir, rel)
-			at.ws = &queue.Workspace{Kind: queue.WorkspaceWorktree, Folder: at.folder, Repo: repo, Base: head}
-			if res := r.snapshot(at); res != nil {
-				at.ws = nil
-				return undo(res)
-			}
-			at.event("workspace.ready", map[string]any{"kind": "worktree", "folder": at.folder, "base": head, "from": sp.Folder})
-			return nil
-		}
-	}
 	switch {
 	case sp.Repo != "":
-		if r.cfg.Workdir == "" {
-			return &queue.Result{Refused: "this runner has no workdir for worktrees"}
-		}
-		dir := filepath.Join(r.cfg.Workdir, at.job.ID)
-		if err := workspace.MakeWorktree(sp.Repo, sp.Base, dir); err != nil {
-			return r.noWorktree(at, err)
-		}
-		at.folder = dir
-		at.ws = &queue.Workspace{Kind: queue.WorkspaceWorktree, Folder: dir, Repo: sp.Repo, Base: sp.Base}
-		at.event("workspace.ready", map[string]any{"kind": "worktree", "folder": dir, "base": sp.Base})
+		b, _ := isolation.Get(isolation.Git)
+		return r.isolate(at, b, isolation.Request{Repo: sp.Repo, Base: sp.Base})
 	case sp.Folder != "":
 		if info, err := os.Stat(sp.Folder); err != nil || !info.IsDir() {
 			return nil // the engine refuses it, in its own words
+		}
+		if sp.Isolate {
+			p, err := r.policy()
+			if err != nil {
+				return &queue.Result{Refused: "the permissions cannot be read, so the turn did not start; fix them and send the turn again"}
+			}
+			if b, ok := isolation.For(p.Isolation, sp.Folder); ok {
+				return r.isolate(at, b, isolation.Request{Folder: sp.Folder})
+			}
 		}
 		at.folder = sp.Folder
 		at.ws = &queue.Workspace{Kind: queue.WorkspaceFolder, Folder: sp.Folder}
 	case at.job.Workspace != nil:
 		at.folder = at.job.Workspace.Folder
+		if k := at.job.Workspace.Kind; k == queue.WorkspaceWorktree || k == queue.WorkspaceCopy {
+			// A worktree made before the backends kept a record has none:
+			// its turns are diffed from a snapshot, as before.
+			if s, err := isolation.Load(r.cfg.Workdir, at.folder); err == nil {
+				at.space = s
+				return r.checkpointStart(at)
+			}
+		}
 	default:
 		// A session the queue holds no workspace for: the record knows its
 		// folder.
@@ -566,26 +579,78 @@ func (r *Runner) prepare(at *attempt) *queue.Result {
 	return r.snapshot(at)
 }
 
-// insideDir says whether folder is a folder at or below dir once every
-// symlink in both is resolved.
-func insideDir(dir, folder string) bool {
-	d, err1 := filepath.EvalSymlinks(dir)
-	f, err2 := filepath.EvalSymlinks(folder)
-	if err1 != nil || err2 != nil {
-		return false
+// policy is the settings' policy, or the defaults with no settings.
+func (r *Runner) policy() (settings.Policy, error) {
+	if r.cfg.Settings == nil {
+		return settings.DefaultPolicy(), nil
 	}
-	if info, err := os.Stat(f); err != nil || !info.IsDir() {
-		return false
-	}
-	rel, err := filepath.Rel(d, f)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+	p, _, err := r.cfg.Settings.Policy()
+	return p, err
 }
 
-// noWorktree is the refusal of a job whose worktree could not be made. git's
-// own words go to the service log only: they can name paths on this runner.
-func (r *Runner) noWorktree(at *attempt, err error) *queue.Result {
-	r.cfg.Logf("worktree for job %s could not be made: %s", at.job.ID, err)
-	return &queue.Result{Refused: "the worktree could not be made"}
+// isolate opens a session's first job's copy with b, and its turn starts
+// from the copy's first checkpoint.
+func (r *Runner) isolate(at *attempt, b isolation.Backend, req isolation.Request) *queue.Result {
+	if r.cfg.Workdir == "" {
+		return &queue.Result{Refused: "this runner has no workdir for isolated copies"}
+	}
+	req.ID, req.Workdir = at.job.ID, r.cfg.Workdir
+	s, err := b.Open(req)
+	var rf *isolation.Refusal
+	switch {
+	case errors.As(err, &rf):
+		return &queue.Result{Refused: rf.Msg, Status: http.StatusBadRequest}
+	case err != nil:
+		// The backend's own words go to the service log only: they can name
+		// paths on this runner.
+		r.cfg.Logf("the %s for job %s could not be made: %s", b.Name(), at.job.ID, err)
+		if b.Name() == isolation.Git {
+			return &queue.Result{Refused: "the worktree could not be made"}
+		}
+		return &queue.Result{Refused: "the copy of the folder could not be made"}
+	}
+	kind := queue.WorkspaceCopy
+	if s.Backend == isolation.Git {
+		kind = queue.WorkspaceWorktree
+	}
+	at.space, at.folder = s, s.Dir
+	at.ws = &queue.Workspace{Kind: kind, Folder: s.Dir, Repo: s.Repo, Base: s.Base}
+	if res := r.checkpointStart(at); res != nil {
+		// Nothing records the copy yet, so nothing else would remove it.
+		if err := isolation.Close(s); err != nil {
+			r.cfg.Logf("the %s for job %s could not be removed after a refused setup", b.Name(), at.job.ID)
+		}
+		at.space, at.ws = nil, nil
+		return res
+	}
+	ready := map[string]any{"kind": kind, "folder": s.Dir}
+	if s.Base != "" {
+		ready["base"] = s.Base
+	}
+	if s.Source != "" {
+		ready["from"] = s.Source
+	}
+	if s.Method != "" {
+		ready["method"] = s.Method
+	}
+	at.event("workspace.ready", ready)
+	return nil
+}
+
+// checkpointStart takes the checkpoint the turn starts from. Nothing changed
+// since the last turn ended, as is usual, costs a walk of the folder and
+// records nothing.
+func (r *Runner) checkpointStart(at *attempt) *queue.Result {
+	b, ok := isolation.Get(at.space.Backend)
+	if !ok {
+		return &queue.Result{Refused: "the workspace could not be read"}
+	}
+	c, err := b.Checkpoint(at.space, at.a.ID+".start")
+	if err != nil {
+		return &queue.Result{Refused: "the workspace could not be read"}
+	}
+	at.start = c.Name
+	return nil
 }
 
 // snapshot takes the attempt's snapshot of its folder before the turn.

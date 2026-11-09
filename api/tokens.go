@@ -88,7 +88,7 @@ const (
 	turnContinueRefused = "a turn token continues only sessions its request tree started, never its own or the person's; " +
 		"results come back to your session as later turns"
 	turnFolderRefused  = "a turn token starts sessions only in its own session's folder, or a folder inside it"
-	turnIsolateRefused = "a session a turn token starts always gets its own worktree when its folder is in a git repo; leave isolate out"
+	turnIsolateRefused = "a session a turn token starts always gets its own isolated copy of its folder; leave isolate out"
 	turnAskedRefused   = "a turn token cancels and stops only work its request tree asked for"
 )
 

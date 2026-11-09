@@ -1,7 +1,6 @@
-// Package workspace is the folder a session's turns run in. A session's first job
-// names a git repo and a base, and the runner makes a git worktree for it
-// under Config.Workdir; or it names a folder, used as it is. A worktree is
-// removed only when its session is closed, never when a job ends.
+// Package workspace is the folder a session's turns run in, and what a job
+// changed there. Package isolation makes a session's own copy, with the git
+// worktree functions here; a folder used as it is needs nothing.
 //
 // Changed files: the runner takes a Snapshot of the whole workspace before a
 // job's turn starts and again when the job ends, and records the difference
@@ -143,6 +142,116 @@ func gitTree(root, head string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// File is one file of a Snapshot. Hash is the SHA-256 of its content, or of
+// "link:" and its target for a symbolic link.
+type File struct {
+	Size    int64       `json:"size"`
+	Mode    fs.FileMode `json:"mode"`
+	ModTime int64       `json:"mtime"`
+	Hash    string      `json:"sha256"`
+}
+
+// File is the file at rel, a slash-separated path from the root.
+func (s *Snapshot) File(rel string) (File, bool) {
+	e, ok := s.files[rel]
+	return File{Size: e.size, Mode: e.mode, ModTime: e.modTime, Hash: e.hash}, ok
+}
+
+// Paths are the snapshot's files, sorted.
+func (s *Snapshot) Paths() []string {
+	out := make([]string, 0, len(s.files))
+	for p := range s.files {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Set records f at rel, such as the hash of a copy taken after the walk.
+func (s *Snapshot) Set(rel string, f File) {
+	s.files[rel] = entry{size: f.Size, mode: f.Mode, modTime: f.ModTime, hash: f.Hash}
+}
+
+// Delete leaves rel out of the snapshot.
+func (s *Snapshot) Delete(rel string) { delete(s.files, rel) }
+
+// Len is the number of files.
+func (s *Snapshot) Len() int { return len(s.files) }
+
+// Head is the commit HEAD named, in a git work tree; else "".
+func (s *Snapshot) Head() string { return s.head }
+
+// Truncated: the walk stopped at MaxSnapshotFiles, so files are missing.
+func (s *Snapshot) Truncated() bool { return s.truncated }
+
+// Changed are the paths whose file differs between s and o, by hash or
+// mode, or that only one of them has, sorted.
+func (s *Snapshot) Changed(o *Snapshot) []string {
+	var out []string
+	for p, e := range s.files {
+		if f, ok := o.files[p]; !ok || f.hash != e.hash || f.mode != e.mode {
+			out = append(out, p)
+		}
+	}
+	for p := range o.files {
+		if _, ok := s.files[p]; !ok {
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// snapshotJSON is a Snapshot as it is kept on disk.
+type snapshotJSON struct {
+	Files     map[string]File `json:"files"`
+	Truncated bool            `json:"truncated,omitempty"`
+	Git       bool            `json:"git,omitempty"`
+	Head      string          `json:"head,omitempty"`
+	Tree      string          `json:"tree,omitempty"`
+}
+
+func (s *Snapshot) MarshalJSON() ([]byte, error) {
+	j := snapshotJSON{Files: make(map[string]File, len(s.files)), Truncated: s.truncated, Git: s.git, Head: s.head, Tree: s.tree}
+	for p := range s.files {
+		j.Files[p], _ = s.File(p)
+	}
+	return json.Marshal(j)
+}
+
+func (s *Snapshot) UnmarshalJSON(b []byte) error {
+	var j snapshotJSON
+	if err := json.Unmarshal(b, &j); err != nil {
+		return err
+	}
+	*s = Snapshot{files: make(map[string]entry, len(j.Files)), truncated: j.Truncated, git: j.Git, head: j.Head, tree: j.Tree}
+	for p, f := range j.Files {
+		s.Set(p, f)
+	}
+	return nil
+}
+
+// HashOf hashes the file at p as Take does, without following a symbolic
+// link. A missing file is fs.ErrNotExist; a folder or a device is an error.
+func HashOf(p string) (string, fs.FileMode, error) {
+	info, err := os.Lstat(p)
+	if err != nil {
+		return "", 0, err
+	}
+	switch {
+	case info.Mode()&fs.ModeSymlink != 0:
+		target, err := os.Readlink(p)
+		if err != nil {
+			return "", 0, err
+		}
+		return hashBytes([]byte("link:" + target)), info.Mode(), nil
+	case info.Mode().IsRegular():
+		h, err := hashFile(p)
+		return h, info.Mode(), err
+	}
+	return "", info.Mode(), errors.New("not a file")
+}
+
 func prevEntry(prev *Snapshot, rel string) (entry, bool) {
 	if prev == nil {
 		return entry{}, false
@@ -210,6 +319,11 @@ type Changes struct {
 	// ContentLeftOut: some small text files have no content here, to keep
 	// the result small.
 	ContentLeftOut bool `json:"content_left_out,omitempty"`
+	// From and To, in an isolated session: the checkpoints the changes are
+	// between (package isolation). The same name twice: the turn changed
+	// nothing.
+	From string `json:"from,omitempty"`
+	To   string `json:"to,omitempty"`
 }
 
 // Limits of what a result carries for a review.
@@ -223,6 +337,27 @@ const (
 
 // Diff lists the changes from before to after, sorted by path.
 func Diff(root string, before, after *Snapshot) Changes {
+	// Contents are read through the workspace root, which refuses any path
+	// that leaves it, through a symlinked file or a symlinked folder alike.
+	rt, rootErr := os.OpenRoot(root)
+	if rootErr == nil {
+		defer rt.Close()
+	}
+	var read func(string, int) ([]byte, bool)
+	if rootErr == nil {
+		read = func(rel string, max int) ([]byte, bool) { return readInside(rt, rel, max) }
+	}
+	return diff(root, before, after, read)
+}
+
+// DiffRead is Diff with each changed file's content at the end read by
+// read, such as from a checkpoint's own copy of it, rather than from root.
+// read answers at most max bytes, or false.
+func DiffRead(root string, before, after *Snapshot, read func(rel string, max int) ([]byte, bool)) Changes {
+	return diff(root, before, after, read)
+}
+
+func diff(root string, before, after *Snapshot, read func(rel string, max int) ([]byte, bool)) Changes {
 	c := Changes{Kind: "snapshot", Files: []Change{}, Truncated: before.truncated || after.truncated}
 	for p, e := range after.files {
 		old, ok := before.files[p]
@@ -249,26 +384,16 @@ func Diff(root string, before, after *Snapshot) Changes {
 		c.Diff, c.DiffTruncated = trackedDiff(root, before.tree, after.tree, c.Files)
 	}
 	budget := MaxContents
-	// Contents are read through the workspace root, which refuses any path
-	// that leaves it, through a symlinked file or a symlinked folder alike.
-	rt, rootErr := os.OpenRoot(root)
-	if rootErr == nil {
-		defer rt.Close()
-	}
 	for i := range c.Files {
 		f := &c.Files[i]
 		if f.Change == "deleted" || f.Git == "tracked" || f.Size > MaxContent {
 			continue
 		}
-		if f.Size > int64(budget) {
+		if f.Size > int64(budget) || read == nil {
 			c.ContentLeftOut = true
 			continue
 		}
-		if rootErr != nil {
-			c.ContentLeftOut = true
-			continue
-		}
-		if b, ok := readInside(rt, f.Path, budget); ok && isText(b) {
+		if b, ok := read(f.Path, budget); ok && isText(b) {
 			t := string(b)
 			f.Content = &t
 			budget -= len(b)

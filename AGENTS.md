@@ -64,7 +64,11 @@ may hold other projects' Go code. Go's own tools skip folders that start with `_
   `event/`, `cost/`, `replay/`, `store/`, `body/` and `logfile/` import nothing from `run/`,
   `workspace/`, `queue/`, `jobs/` or `runner/`; `run/` imports nothing from the queue side;
   `agents/` (the saved agents) may use `run/`, never the queue side or `workspace/`;
+  `isolation/` (a session's copies) may use `workspace/` only, and the runner uses it;
   `queue/` may use `run/` and `workspace/`, never the reverse.
+- **Isolation goes through `isolation.Backend`.** A session's copy is opened, checkpointed,
+  diffed, applied and closed by its backend, never by git calls or file copies elsewhere. A new
+  backend (a VM) is one more entry in its registry; nothing above it changes.
 - **Settings go through `settings.Store`.** The policy, the instructions and the data folder's
   protected files are read and written through the store, never by a path. `settings.Files` is
   the data folder's files; `settings.Remote` is a runner's, read from its server. A database store
