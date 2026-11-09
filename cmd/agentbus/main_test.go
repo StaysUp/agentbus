@@ -390,32 +390,37 @@ func TestStoredReplyCarriesCost(t *testing.T) {
 	}
 }
 
-// permissions.toml is made once, mode 0600, with the starter's empty lists,
-// and an existing file is never written again.
-func TestMakePermissions(t *testing.T) {
-	path := filepath.Join(t.TempDir(), engine.PermissionsFile)
-	if err := makePermissions(path); err != nil {
-		t.Fatal(err)
-	}
-	info, err := os.Stat(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Errorf("mode %v, want 0600", info.Mode().Perm())
-	}
-	if b, _ := os.ReadFile(path); string(b) != engine.PermissionsStarter {
-		t.Errorf("starter %q", b)
-	}
-	const mine = "allow = [\"go test\"]\n"
-	if err := os.WriteFile(path, []byte(mine), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := makePermissions(path); err != nil {
-		t.Fatal(err)
-	}
-	if b, _ := os.ReadFile(path); string(b) != mine {
-		t.Errorf("an existing file was written: %q", b)
+// permissions.toml and instructions.md are made once, mode 0600, with the
+// starter text, and an existing file is never written again.
+func TestMakeStarter(t *testing.T) {
+	for _, tc := range []struct{ file, text string }{
+		{engine.PermissionsFile, engine.PermissionsStarter},
+		{engine.InstructionsFile, engine.DefaultInstructions},
+	} {
+		path := filepath.Join(t.TempDir(), tc.file)
+		if err := makeStarter(path, tc.text, "x"); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("%s: mode %v, want 0600", tc.file, info.Mode().Perm())
+		}
+		if b, _ := os.ReadFile(path); string(b) != tc.text {
+			t.Errorf("%s: starter %q", tc.file, b)
+		}
+		const mine = "allow = [\"go test\"]\n"
+		if err := os.WriteFile(path, []byte(mine), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := makeStarter(path, tc.text, "x"); err != nil {
+			t.Fatal(err)
+		}
+		if b, _ := os.ReadFile(path); string(b) != mine {
+			t.Errorf("%s: an existing file was written: %q", tc.file, b)
+		}
 	}
 }
 

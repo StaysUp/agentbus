@@ -546,7 +546,7 @@ func (q *Queue) runner(where string, arg string) (Runner, error) {
 // the same fields returns the first job and created false; other fields under
 // the same key get ErrKeyConflict.
 func (q *Queue) Create(team, kind, key string, spec Spec, links Links) (job Job, created bool, err error) {
-	return q.create(team, kind, key, spec, links, spec.Session)
+	return q.create(team, kind, key, spec, links, Limits{}, spec.Session)
 }
 
 // HasKey reports whether a job was already made with this idempotency key.
@@ -620,7 +620,7 @@ func (q *Queue) TurnsAhead(team, id string) ([]Job, error) {
 // turn, the reviewed job's session for a review. A turn job that opens a new
 // session gets its id here. A session whose turn runs is never refused: Take
 // starts its turn jobs one at a time, in the order they were made.
-func (q *Queue) create(team, kind, key string, spec Spec, links Links, session string) (job Job, created bool, err error) {
+func (q *Queue) create(team, kind, key string, spec Spec, links Links, lim Limits, session string) (job Job, created bool, err error) {
 	hash := hashOf(struct {
 		Kind  string `json:"kind"`
 		Spec  Spec   `json:"spec"`
@@ -651,7 +651,7 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, session s
 				return ErrSessionClosed
 			}
 		}
-		if err := checkAsked(tx, team, links); err != nil {
+		if err := checkAsked(tx, team, links, lim); err != nil {
 			return err
 		}
 		if kind == KindTurn && session == "" {
@@ -1425,11 +1425,11 @@ func (q *Queue) Review(team, id, agent, model, key string, includeReply bool) (J
 // ReviewAs is Review with the reviewer as a saved agent: as names its
 // harness in Agent, and its AgentID, Access, KeyEnv and Model.
 func (q *Queue) ReviewAs(team, id string, as Spec, key string, includeReply bool) (Job, bool, error) {
-	return q.review(team, id, as, key, includeReply, Links{})
+	return q.review(team, id, as, key, includeReply, Links{}, Limits{})
 }
 
 // review is ReviewAs with links; ReviewsJob is set here.
-func (q *Queue) review(team, id string, as Spec, key string, includeReply bool, links Links) (Job, bool, error) {
+func (q *Queue) review(team, id string, as Spec, key string, includeReply bool, links Links, lim Limits) (Job, bool, error) {
 	j, err := q.Get(team, id)
 	if err != nil {
 		return Job{}, false, err
@@ -1450,5 +1450,5 @@ func (q *Queue) review(team, id string, as Spec, key string, includeReply bool, 
 	spec := Spec{Agent: as.Agent, AgentID: as.AgentID, Access: as.Access, KeyEnv: as.KeyEnv, Model: as.Model,
 		ModelFromAgent: as.ModelFromAgent, Folder: j.Workspace.Folder, ReadOnly: true, Prompt: prompt}
 	links.ReviewsJob = j.ID
-	return q.create(team, KindReview, key, spec, links, j.Session)
+	return q.create(team, KindReview, key, spec, links, lim, j.Session)
 }

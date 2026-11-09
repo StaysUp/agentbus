@@ -25,7 +25,7 @@ import (
 
 	"github.com/staysup/agentbus/body"
 	"github.com/staysup/agentbus/event"
-	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/run"
 )
 
 const specIntro = "agentbus runs on your machine, between your coding agents and their vendors. " +
@@ -77,10 +77,10 @@ var turnTokenDoc = map[int]string{
 	anyRead:   "A turn token may call this too.",
 }
 
-// askCaps names the temporary caps on asked work, until permissions.toml has
-// [limits]. A request past one gets 403 saying which.
-var askCaps = fmt.Sprintf("at most %d levels below the person's turn, %d jobs asked by one turn, %d in one request tree. "+
-	"They are temporary, until permissions.toml has [limits].", queue.MaxDepth, queue.MaxAskedPerTurn, queue.MaxAskedPerRoot)
+// askCaps names the caps on asked work. A request past one gets 403 saying which.
+var askCaps = fmt.Sprintf("[limits] in permissions.toml: by default at most %d levels below the person's turn, %d jobs asked by one turn, "+
+	"%d in one request tree, and no cost cap (max_cost_usd_per_tree). [agent_api] there can turn each kind of call off, "+
+	"and narrow the scope to the token's own session.", run.DefaultMaxDepth, run.DefaultMaxJobsPerTurn, run.DefaultMaxJobsPerTree)
 
 // spec is the description as served, built on first use. New builds it, so a
 // table or type it cannot describe stops the service from starting.

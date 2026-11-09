@@ -43,8 +43,8 @@ func TestSessionAcrossAgents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if x := session(t, snap, "s"); x.Agent != "codex" || x.FirstAgent != "claude" {
-		t.Errorf("session agent %q first %q, want codex and claude", x.Agent, x.FirstAgent)
+	if x := session(t, snap, "s"); x.Agent != "codex" || x.FirstAgent != "claude" || x.FirstAgentID != "a_haiku" {
+		t.Errorf("session agent %q first %q (%q), want codex and claude (a_haiku)", x.Agent, x.FirstAgent, x.FirstAgentID)
 	}
 
 	tr, err := s.Transcript("s")

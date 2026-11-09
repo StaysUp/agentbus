@@ -129,7 +129,9 @@ and codex alike:
 The main token never reaches a child. An `AGENTBUS_URL` or `AGENTBUS_TOKEN` in the service's own
 environment is replaced.
 
-**A turn token works inside its request tree.** The tree is the person's session (its root) and
+**A turn token works inside its request tree**, by default. `[agent_api]` in
+[permissions.toml](#permissionstoml) can narrow it to the turn's own session, and turn each kind of
+call below off. The tree is the person's session (its root) and
 every session that work asked for from it started, at any depth. With the token an agent reads the
 tree, and asks other agents: it starts turns on any saved agent, continues the sessions it started,
 asks for reviews, and reads their results. A turn never waits for that work. **Each result comes back
@@ -149,21 +151,35 @@ to the asking session as a later turn** (see "Results come back as the next turn
 
 The writes are refused for a **read-only** turn (`read_only: true`): its token only reads.
 
-**What a turn token never does**, each a **403** with a plain reason: change policy (no route writes
-`permissions.toml`), save, edit or remove agents, see or make a token (no reply holds one), make a
+Each row is also a switch of `[agent_api]`, read for every request: `read` (the reads of the first
+five rows), `list_agents`, `start` (a new session), `continue` (with `session`), `review` and
+`cancel`. Each is on unless the file says `false`; a call switched off gets **403** naming the
+switch. `scope = "session"` keeps the token to its own session: it reads only that session's turns,
+calls and jobs, reviews only its jobs, cancels only what its own turns asked for, and continues no
+session. A `permissions.toml` that cannot be used refuses every turn token's request with **503**.
+
+**What a turn token never does**, each a **403** with a plain reason, whatever `[agent_api]` says:
+change policy (no route writes `permissions.toml` or `instructions.md`), save, edit or remove agents, see or make a token (no reply holds one), make a
 job with `POST /api/v0/jobs` (it starts work with `POST /api/v0/turns`), close a workspace, write a
 program event, read the snapshot `GET /api/v0/sessions`, the stream `GET /api/v0/events` or
 `GET /api/v0/workspaces`, read `GET /api/v0/version`, and read or write any session outside its
 tree. The description and the docs need no token at all.
 
-**The caps on asked work, for now.** Until `permissions.toml` has a `[limits]` section, three fixed
-caps keep a chain of agents from running away. Past one, the request gets **403** saying which:
+**The caps on asked work** are `[limits]` in [permissions.toml](#permissionstoml), read for every
+request, so a change applies to the next one. They keep a chain of agents from running away. Past
+one, the request gets **403** saying which and naming its key:
 
-- **Depth 2.** Work the person's turn asks for is at depth 1, work that work asks for at depth 2,
-  and nothing deeper. A delivered result has the depth of the work it carries, so a result of
-  depth-1 work may ask once more, and a result of depth-2 work may not.
-- **10 jobs per turn**: turns and reviews one turn asks for, ever.
-- **30 jobs per tree**: everything asked for from one person's session, at every depth.
+- **`max_depth`, default 2.** Work the person's turn asks for is at depth 1, work that work asks for
+  at depth 2, and nothing deeper. A delivered result has the depth of the work it carries, so a
+  result of depth-1 work may ask once more, and a result of depth-2 work may not.
+- **`max_jobs_per_turn`, default 10**: turns and reviews one turn asks for, ever.
+- **`max_jobs_per_tree`, default 30**: everything asked for from one person's session, at every
+  depth.
+- **`max_cost_usd_per_tree`, default 0 (off)**: once the model calls of every session in the tree
+  have cost this many US dollars in all (`cost_usd`, from the built-in price table), the tree asks
+  for nothing more. Work already running finishes, and its results are still delivered.
+
+0 for one of the first three refuses all asked work of that kind.
 
 **Asking works where the service runs its turns itself (`agentbus up`).** With `agentbus server`
 and a separate `agentbus runner`, a turn's token reaches the runner's own address, which keeps no
@@ -211,32 +227,68 @@ It holds `events.db` (the store: events, and since this version every model requ
 workspaces, in a file of its own so the record knows nothing about jobs), `token`, `turns_token`
 (above), `enroll_token` (adds a runner, [The runner protocol](#the-runner-protocol)),
 `runner.json` (the built-in runner's id and token, mode 0600), `worktrees/` (one git worktree per
-session that asked for one), `permissions.toml` (below), `logs/` (below), and `events.db.lock`,
+session that asked for one), `permissions.toml` (below), `instructions.md` (below), `agents.json`
+(the saved agents), `bin/agentbus-api` (below), `logs/` (below), and `events.db.lock`,
 which one service holds while it runs, so a second `agentbus up` on the same folder refuses to
 start. No version in the name.
 
 ### permissions.toml
 
-What a turn may do without a person to ask. A turn has no one to click "allow", so without this
-file a claude turn is refused anything its settings would ask about, such as running `go test`.
+What a turn may do without a person to ask, and what its token may ask for. A turn has no one to
+click "allow", so without this file a claude turn is refused anything its settings would ask about,
+such as running `go test`.
 
 ```toml
 read_folders = ["~/.agents", "~/Sites/agentbus-notes"]
 allow = ["go test", "make test", "git commit"]
 forbid = ["git push", "git checkout"]
+edit = "session"
+
+[limits]
+max_depth = 2
+max_jobs_per_turn = 10
+max_jobs_per_tree = 30
+max_cost_usd_per_tree = 0.0
+
+[agent_api]
+scope = "tree"
+read = true
+list_agents = true
+start = true
+continue = true
+review = true
+cancel = true
 ```
 
-- `agentbus up` makes the file when it is missing, mode 0600, with empty lists and examples in
-  comments. It never writes an existing file.
-- **Every turn reads it when it starts.** An edit applies to the next turn. No restart.
-- Empty lists change nothing. A missing file is empty lists.
+- `agentbus up` makes the file when it is missing, mode 0600, with empty lists, every other value
+  written out at its default, and a comment on each. It never writes an existing file.
+- **Every turn reads it when it starts, and the API reads it for every request a turn token
+  sends.** An edit applies to the next turn and the next request. No restart.
+- A key left out reads as its default, so an older file with the three lists only keeps working.
+  A missing file is every default.
 - **A broken file stops the turn.** The answer is 400, it names `permissions.toml` and the problem,
   with the line when there is one, and nothing is stored. A turn never runs without the policy.
-  A file that cannot be read, or a link to a file that is gone, stops the turn the same way.
+  A file that cannot be read, or a link to a file that is gone, stops the turn the same way. An
+  unknown key or a value out of range is broken too.
 - `read_folders`: absolute paths, or starting with `~/`. Each must be an existing folder. No
   comma, parenthesis or glob character (`*?[]{}`).
 - `allow` and `forbid`: a command and its first arguments, such as `go test`. No comma,
   parenthesis or star, no two spaces in a row, no leading `-`.
+- `edit`: where a turn may create and change files without asking. `"session"` (the default) is
+  the turn's own session folder: its worktree, or the folder itself when it is not in a git repo.
+  `"none"` is nowhere. A read-only turn never edits, and `forbid` still wins.
+- **No turn edits the data folder's own files**: `permissions.toml`, `instructions.md`,
+  `agents.json`, `token`, `turns_token`, `enroll_token`, `events.db`, `jobs.db`, `runner.json` and
+  `bin/agentbus-api`. claude gets a deny rule on each, which wins over `edit` and over the person's
+  own settings. codex has no way to keep one file of its folder out of its sandbox, so a codex
+  turn whose folder holds the data folder runs read-only, and the service log says
+  `run.edit … left_out=data_folder_inside`. This covers the tools that edit files. A command in
+  `allow` that runs any code, such as `python3`, `node` or `sh`, can still write these files: allow
+  only commands you would let change your policy.
+- `[limits]`: the caps on work agents ask for (above, "The caps on asked work"). Whole numbers
+  from 0 for the first three; dollars from 0 for the cost, where 0 is off.
+- `[agent_api]`: what a turn's token may call (above, "Turn tokens"). `scope` is `"tree"` or
+  `"session"`; the others are `true` or `false`.
 
 What each list becomes:
 
@@ -245,6 +297,8 @@ What each list becomes:
 | `read_folders` | `--allowedTools Read(//<folder>/**),Grep(//<folder>/**),Glob(//<folder>/**),…` | nothing: codex's sandbox reads every folder already |
 | `allow` | `--allowedTools Bash(<cmd>:*),…` | nothing yet |
 | `forbid` | the gateway's guard, and `--disallowedTools Bash(<cmd>:*),…` | the gateway's guard |
+| `edit = "session"` | `--allowedTools Edit(//<folder>/**)`, and `--disallowedTools Edit(//<file>),…` for the data folder's files | `--sandbox workspace-write -c sandbox_workspace_write.network_access=true` |
+| `edit = "none"` | `--disallowedTools Edit,Write,NotebookEdit`: a deny, so the person's own settings (an `acceptEdits` mode, an Edit allow rule) cannot approve an edit either | `--sandbox read-only`, which has no network |
 
 - `read_folders` grants reading only. It is not `--add-dir`: that makes a working folder, which
   under the person's `acceptEdits` mode a turn could also write to (Claude Code 2.1.319).
@@ -496,8 +550,13 @@ job that runs it. The agent's work arrives later, as events of that session, **e
 - **What runs**, with the prompt always last, after `--`, so it is never read as a flag:
   - claude: `claude -p --output-format json --append-system-prompt <hint> [--model M] -- <prompt>`
   - codex: `codex -c openai_base_url=… exec --skip-git-repo-check --json --sandbox <mode> -c developer_instructions=<hint> [-c sandbox_workspace_write.network_access=true] [--model M] -- <prompt>`
-- **The hint tells the agent its history is there, and that it can ask other agents.** It is four
-  lines, with the session id filled in, the same on every turn of the session:
+- **The instructions tell the agent its history is there, and that it can ask other agents.** They
+  are the text of `instructions.md` in the data folder, read when each turn starts, with
+  `{session}` replaced by the session id. `agentbus up` writes the file when it is missing, with the
+  default text below; it never writes an existing file. A missing file gives the default, an empty
+  file gives no instructions, and a file over 64 KiB, not UTF-8 or holding a NUL byte stops the
+  turn with 400, as a broken `permissions.toml` does. Keep the text the same within a session:
+  own replay and the prompt cache rely on it. The default is four lines:
 
   ```
   Your session's earlier turns are stored by AgentBus. To look something up, run:
@@ -512,8 +571,8 @@ job that runs it. The agent's work arrives later, as events of that session, **e
   variable: Claude Code refuses a command with a variable in it unless the person approves it, and a
   turn has no one to ask. The name never changes when the program moves, so a session's earlier
   calls still work. A claude turn that may write gets `Bash(agentbus-api:*)` in `--allowedTools`;
-  `forbid` in `permissions.toml` still wins. When the link cannot be made, the hint names `curl`
-  with `$AGENTBUS_TOKEN` instead.
+  `forbid` in `permissions.toml` still wins. When the link cannot be made, the service log says
+  `api_client.link_failed`, and the instructions still name `agentbus-api`.
 
   It goes through the agent's own instruction flag, never into the prompt: claude adds it at the
   end of its system prompt, codex puts it in its developer message (as a TOML string, the way `-c`
@@ -536,7 +595,9 @@ job that runs it. The agent's work arrives later, as events of that session, **e
   - With `read_only` false or absent, claude keeps its own permission handling. No flag bypasses
     it, so a headless run is refused anything its settings would ask the person about, except
     what `permissions.toml` allows ([The data folder](#the-data-folder)).
-  - With `read_only` false or absent, codex gets `--sandbox workspace-write -c
+  - With `read_only` false or absent and `edit = "session"` (the default), claude gets
+    `Edit(//<folder>/**)` in `--allowedTools`, so it edits its own folder without asking.
+  - With `read_only` false or absent and `edit = "session"`, codex gets `--sandbox workspace-write -c
     sandbox_workspace_write.network_access=true`: it can edit the folder (and its temporary
     folders) and reach the network, as Claude Code can under typical settings, so it can call the
     service with its turn token. The sandbox is always named, because `codex exec` on its own runs
@@ -777,7 +838,7 @@ carrying the new turn id, since the agent's base URL names both.
   - **404** `no such session`: the store has no events for it.
   - A turn sent while one runs is not refused: it is queued behind it (above). Only a hold the
     record shows open with no job of this service behind it (a turn this service did not start)
-    gets **409** `a turn is already running in this session`, once the queued turn's runner tries it.
+    gets **409** `a turn is already running in this session`, at once, before any job is made.
   - **409** `this session cannot be continued from here`: it has no `resume_id` (with replay off,
     or by the fallback above), such as a session pointed at the gateway by hand, or one whose agent
     is not `claude` or `codex`. With own replay, the version adds `: ` and the reason the newest

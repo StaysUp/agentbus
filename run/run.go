@@ -141,15 +141,23 @@ type Config struct {
 	// means 5 seconds.
 	RunGrace time.Duration
 	// Permissions is the path of permissions.toml, read at the start of every
-	// turn. Empty gives every turn empty lists.
+	// turn. Empty gives every turn the defaults.
 	Permissions string
+	// Instructions is the path of instructions.md, the text every turn gets
+	// as an instruction of its agent's own, read at the start of every turn.
+	// Empty, or a missing file, gives DefaultInstructions.
+	Instructions string
+	// Protect are files no turn may edit: the data folder's policy,
+	// instructions, saved agents and tokens.
+	Protect []string
 	// APIDir is a folder that holds agentbus-api, the API client a turn's
 	// agent calls (cmd/agentbus, apicall.go). It goes first on each turn's
 	// PATH, and the turn's instructions name agentbus-api: it reads
 	// AGENTBUS_URL and AGENTBUS_TOKEN itself, so the command holds no
 	// variable, and a claude turn that may write may run it without asking.
 	// The name stays the same when the program moves, so a session's earlier
-	// calls still work. Empty names curl.
+	// calls still work. Empty puts nothing on PATH: the instructions still
+	// name agentbus-api, and the service log says why it is missing.
 	APIDir string
 	// AgentName names a saved agent by its id in the transcript a turn on
 	// another harness gets; "" or a nil func names it by harness and model.
@@ -291,7 +299,7 @@ func missingAgent(agent string) string {
 
 // KnownAgent says a turn can start agent.
 func KnownAgent(agent string) bool {
-	_, ok := turnArgs(agent, "", "", "", false, Permissions{}, "")
+	_, ok := turnArgs(agent, "", "", "", Writes{}, Permissions{}, "")
 	return ok
 }
 
@@ -569,7 +577,15 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	if err != nil {
 		e.cfg.Logf("run.refused agent=%s reason=permissions_file error=%q", t.agent, err.Error())
 		return nil, refuse(http.StatusBadRequest, "the permissions file "+PermissionsFile+" in the data folder cannot be used, so the turn did not start: "+
-			err.Error()+". Fix the file, or remove it for empty lists, and send the turn again.")
+			err.Error()+". Fix the file, or remove it for the defaults, and send the turn again.")
+	}
+	// The instructions every turn gets, from instructions.md, read for every
+	// turn too. A file that cannot be used stops the turn, as the policy does.
+	hint, err := e.instructions(t.session)
+	if err != nil {
+		e.cfg.Logf("run.refused agent=%s reason=instructions_file error=%q", t.agent, err.Error())
+		return nil, refuse(http.StatusBadRequest, "the instructions file "+InstructionsFile+" in the data folder cannot be used, so the turn did not start: "+
+			err.Error()+". Fix the file, or remove it for the default text, and send the turn again.")
 	}
 	// The gateway refuses a command of this turn that forbid names, for
 	// claude and codex alike (gateway/guard.go).
@@ -607,13 +623,16 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	}
 	cmd := exec.Command(l.Path)
 	cmd.Env = turnEnv(l.Env, os.Environ(), e.cfg.BaseURL, tok, e.cfg.APIDir)
-	hint := historyHint(t.session, e.cfg.APIDir != "")
 	perm = withAPI(perm, e.cfg.APIDir != "", t.readOnly)
-	if t.agent == "codex" && codexOwnInstructions(cmd.Env, t.folder) {
+	if t.agent == "codex" && hint != "" && codexOwnInstructions(cmd.Env, t.folder) {
 		hint = ""
 		e.cfg.Logf("run.hint session=%s turn=%s left_out=codex_developer_instructions_set", t.session, t.id)
 	}
-	args, _ := turnArgs(t.agent, hint, t.resumeID, t.model, t.readOnly, perm, t.context+t.prompt)
+	w, why := writesFor(t.agent, t.folder, t.readOnly, perm, e.cfg.Protect)
+	if why != "" {
+		e.cfg.Logf("run.edit session=%s turn=%s left_out=%s", t.session, t.id, why)
+	}
+	args, _ := turnArgs(t.agent, hint, t.resumeID, t.model, w, perm, t.context+t.prompt)
 	all := append(append([]string{}, l.Args...), args...)
 	cmd.Args = append([]string{l.Path}, all...)
 	cmd.Dir = t.folder
@@ -799,7 +818,8 @@ func (e *Engine) StopAll() {
 // not empty, goes in as an instruction of the agent's own, never inside the
 // prompt (historyHint). perm is the person's permissions.toml (permissions.go).
 // ok is false for an agent a turn cannot start.
-func turnArgs(agent, hint, resumeID, model string, readOnly bool, perm Permissions, prompt string) (args []string, ok bool) {
+func turnArgs(agent, hint, resumeID, model string, w Writes, perm Permissions, prompt string) (args []string, ok bool) {
+	readOnly := w.ReadOnly
 	switch agent {
 	case "claude":
 		// --output-format json prints one result object with the session_id.
@@ -828,6 +848,11 @@ func turnArgs(agent, hint, resumeID, model string, readOnly bool, perm Permissio
 			// no --mcp-config loads no MCP server at all.
 			a = append(a, "--strict-mcp-config")
 		} else {
+			// edit: Edit(<folder>/**) lets Edit and Write change files there
+			// without asking; one Edit rule covers every built-in tool that
+			// edits files. Without it a -p turn cannot edit at all: nobody
+			// is there to approve.
+			allowed = append(allowed, editRules(w.Edit)...)
 			// allow: each command runs without asking, as Bash(<cmd>:*)
 			// (Claude Code 2.1.319, 2026-11-07, checked live with a rule
 			// that has a space in it).
@@ -841,9 +866,24 @@ func turnArgs(agent, hint, resumeID, model string, readOnly bool, perm Permissio
 		// forbid: never run, even when allow or the person's settings
 		// approve it; a deny wins over an allow (checked live, 2026-11-07).
 		// The gateway's guard refuses them too, in the shapes this rule
-		// misses, such as git -C repo push (gateway/guard.go).
+		// misses, such as git -C repo push (gateway/guard.go). The data
+		// folder's own files are never edited: a deny on each, which wins
+		// over the edit rule and the person's settings alike.
+		var denied []string
 		if len(perm.Forbid) > 0 {
-			a = append(a, "--disallowedTools", bashRules(perm.Forbid))
+			denied = append(denied, bashRules(perm.Forbid))
+		}
+		if !readOnly {
+			denied = append(denied, protectRules(w.Protect)...)
+			// No edit rule: a deny on every tool that edits files, so the
+			// person's own settings (an acceptEdits mode, an Edit allow
+			// rule) cannot approve one either. A deny wins over any allow.
+			if len(w.Edit) == 0 {
+				denied = append(denied, "Edit", "Write", "NotebookEdit")
+			}
+		}
+		if len(denied) > 0 {
+			a = append(a, "--disallowedTools", strings.Join(denied, ","))
 		}
 		if model != "" {
 			a = append(a, "--model", model)
@@ -863,7 +903,11 @@ func turnArgs(agent, hint, resumeID, model string, readOnly bool, perm Permissio
 		// own. Given to exec before resume it reaches the resumed turn: the
 		// turn's recorded sandbox policy follows it (codex-cli 0.164.0,
 		// 2026-11-05).
-		a = append(a, "--sandbox", codexSandbox(readOnly))
+		// workspace-write only with an edit rule: edit = "none", or a
+		// folder codex could not be kept out of the data folder's files
+		// in, runs read-only (writesFor).
+		write := !readOnly && len(w.Edit) > 0
+		a = append(a, "--sandbox", codexSandbox(!write))
 		// The hint as codex's developer_instructions, which codex puts in a
 		// developer message of the context before the prompt; own replay
 		// keeps it from the session's first turn.
@@ -873,7 +917,7 @@ func turnArgs(agent, hint, resumeID, model string, readOnly bool, perm Permissio
 		// A turn that may write may also reach the network, as Claude Code
 		// can under typical settings: the person's decision, 2026-11-06. Per
 		// turn, on the command line; ~/.codex/config.toml is never edited.
-		if !readOnly {
+		if write {
 			a = append(a, codexNetwork()...)
 		}
 		// permissions.toml gives codex no flags. read_folders: codex's
@@ -896,28 +940,6 @@ func turnArgs(agent, hint, resumeID, model string, readOnly bool, perm Permissio
 		return append(a, prompt), true
 	}
 	return nil, false
-}
-
-// historyHint tells the agent that its session's earlier turns are stored and
-// how to search them with its turn token (tokens.go). It names the session
-// and nothing that changes between turns, so it is the same text on every
-// turn of a session.
-func historyHint(session string, api bool) string {
-	if api {
-		api := APIClient
-		return "Your session's earlier turns are stored by AgentBus. To look something up, run:\n" +
-			api + ` GET "/api/v0/sessions/` + session + `/search?q=<text>"` + "\n" +
-			`with <text> URL-encoded. Each hit's "read" is a path you can GET the same way, for the whole of what matched.` + "\n" +
-			`You can also ask other agents with the same command: start a turn on any saved agent, continue one, or ask for a review. ` +
-			`Do not wait for them: each result comes back to you as a later turn. ` +
-			`How: ` + api + ` GET /docs/llms.txt, section "Ask other agents".`
-	}
-	return "Your session's earlier turns are stored by AgentBus. To look something up, run:\n" +
-		`curl -s -H "Authorization: Bearer $AGENTBUS_TOKEN" "$AGENTBUS_URL/api/v0/sessions/` + session + `/search?q=<text>"` + "\n" +
-		`with <text> URL-encoded. Each hit's "read" is a path under $AGENTBUS_URL that returns the whole of what matched, with the same header.` + "\n" +
-		`You can also ask other agents through the same API and header: start a turn on any saved agent, continue one, or ask for a review. ` +
-		`Do not wait for them: each result comes back to you as a later turn. ` +
-		`How: $AGENTBUS_URL/docs/llms.txt, section "Ask other agents". Never print $AGENTBUS_TOKEN.`
 }
 
 // withAPI is perm with the agent's way to the API allowed without asking,

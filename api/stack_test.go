@@ -59,7 +59,8 @@ func stackEnv(t *testing.T, s stack) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cfg := Config{Store: st, Token: token, Port: port, BaseURL: base, Queue: q, Jobs: js, Engine: eng, TurnWait: s.turnWait}
+	cfg := Config{Store: st, Token: token, Port: port, BaseURL: base, Queue: q, Jobs: js, Engine: eng, TurnWait: s.turnWait,
+		Permissions: s.permissions}
 	if s.turnsToken {
 		cfg.TurnsToken = turnsTok
 	}

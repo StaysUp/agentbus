@@ -91,6 +91,11 @@ type Config struct {
 	// Jobs serves the job queue's routes (api/jobs.go): package jobs. Nil
 	// answers them 404.
 	Jobs http.Handler
+
+	// Permissions is the path of permissions.toml. Its [agent_api] says what
+	// a turn token may call and its [limits] cap the work turns ask for,
+	// read for every request a turn token sends. Empty: the defaults.
+	Permissions string
 }
 
 // API is the client API's http.Handler.

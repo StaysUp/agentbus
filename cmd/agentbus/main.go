@@ -218,8 +218,19 @@ func start(c config) (*service, error) {
 		return nil, err
 	}
 	permissions := filepath.Join(c.home, engine.PermissionsFile)
-	if err := makePermissions(permissions); err != nil {
+	if err := makeStarter(permissions, engine.PermissionsStarter, "permissions"); err != nil {
 		return nil, err
+	}
+	instructions := filepath.Join(c.home, engine.InstructionsFile)
+	if err := makeStarter(instructions, engine.DefaultInstructions, "instructions"); err != nil {
+		return nil, err
+	}
+	// The data folder's own files, which no turn may edit: a turn that could
+	// would raise its own limits, or read a token.
+	var protect []string
+	for _, f := range []string{engine.PermissionsFile, engine.InstructionsFile, agents.FileName, "token", "turns_token",
+		"enroll_token", "events.db", "jobs.db", "runner.json", filepath.Join("bin", engine.APIClient)} {
+		protect = append(protect, filepath.Join(c.home, f))
 	}
 	// The enrollment token adds a runner. A service with a queue keeps it in
 	// its data folder: the built-in runner reads it, and a runner on
@@ -354,7 +365,7 @@ func start(c config) (*service, error) {
 			}
 		}
 		eng, err = engine.New(engine.Config{Store: st, BaseURL: baseURL, MaxRuns: c.maxRuns, ReplayBase: replayBase, AgentName: agentName,
-			Permissions: permissions, APIDir: apiLink(c.home, c.self, svcLog), Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace, Logf: svcLog.Printf,
+			Permissions: permissions, Instructions: instructions, Protect: protect, APIDir: apiLink(c.home, c.self, svcLog), Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace, Logf: svcLog.Printf,
 			RunLog: func(session string, data []byte) {
 				// The session id is the service's own hex, so it is a plain
 				// file name.
@@ -372,7 +383,7 @@ func start(c config) (*service, error) {
 	}
 	a, err := api.New(api.Config{Store: st, Token: token, TurnsToken: turnsToken, Port: port, AnyHost: !loopback,
 		BaseURL: baseURL, Origin: c.origin, LookPath: c.lookPath, Environ: c.environ, Build: build(debug.ReadBuildInfo()),
-		Queue: q, Jobs: jobsAPI, Engine: eng, TurnWait: c.turnWait, Agents: saved})
+		Queue: q, Jobs: jobsAPI, Engine: eng, TurnWait: c.turnWait, Agents: saved, Permissions: permissions})
 	if err != nil {
 		ln.Close()
 		svcLog.Close()
@@ -745,23 +756,24 @@ func loadToken(path, prefix string) (string, error) {
 	return tok, nil
 }
 
-// makePermissions writes the starter permissions.toml, with empty lists and
-// examples in comments, when there is none, with mode 0600. An existing file
-// is never written: it is the person's. Each turn reads it (engine.Permissions).
-func makePermissions(path string) error {
+// makeStarter writes text to path, with mode 0600, when there is no file
+// there: the starter permissions.toml, with every default written out, and
+// instructions.md, with the default text. An existing file is never written:
+// it is the person's. Each turn reads both (package run).
+func makeStarter(path, text, name string) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if errors.Is(err, fs.ErrExist) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("the permissions file %s could not be made", path)
+		return fmt.Errorf("the %s file %s could not be made", name, path)
 	}
-	if _, err := f.WriteString(engine.PermissionsStarter); err != nil {
+	if _, err := f.WriteString(text); err != nil {
 		f.Close()
-		return fmt.Errorf("the permissions file %s could not be written", path)
+		return fmt.Errorf("the %s file %s could not be written", name, path)
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("the permissions file %s could not be written", path)
+		return fmt.Errorf("the %s file %s could not be written", name, path)
 	}
 	return nil
 }

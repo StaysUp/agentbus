@@ -265,7 +265,7 @@ The contract in words is [docs/CLIENT_API.md](docs/CLIENT_API.md).
 
 Everything stays on your machine, in the data folder: `events.db` (a SQLite file, the record),
 `jobs.db` (the job queue), `token`, `turns_token`, `enroll_token`, `runner.json`,
-`permissions.toml`, `worktrees/` and `logs/`. `turns_token` is a second token for a program that
+`permissions.toml`, `instructions.md`, `agents.json`, `worktrees/` and `logs/`. `turns_token` is a second token for a program that
 only starts, stops and reads turns. `enroll_token` adds a runner; the built-in runner reads it, and
 keeps its identity in `runner.json`. `worktrees/` holds the git worktrees jobs run in. Nothing is sent anywhere except the model calls themselves, to the vendor your agent
 already uses.
@@ -286,10 +286,40 @@ folder says what turns may do:
 read_folders = ["~/.agents"]           # claude may Read, Grep and Glob there
 allow = ["go test", "make test"]       # claude gets --allowedTools Bash(go test:*),...
 forbid = ["git push", "git checkout"]  # the gateway refuses these, for claude and codex
+edit = "session"                       # where a turn may edit files: "session" or "none"
+
+[limits]                     # work agents ask other agents for
+max_depth = 2                # levels of asking below your turn
+max_jobs_per_turn = 10       # jobs one turn may ask for
+max_jobs_per_tree = 30       # jobs everything started from one of your sessions may ask for
+max_cost_usd_per_tree = 0.0  # dollars that work may cost before asking stops; 0 is off
+
+[agent_api]                  # what a turn's own token may do
+scope = "tree"               # "tree": its request tree; "session": its own session only
+read = true                  # read sessions, turns, calls and jobs
+list_agents = true           # list saved agents and harnesses
+start = true                 # start a session on a saved agent
+continue = true              # continue a session its tree started
+review = true                # ask for a review
+cancel = true                # cancel what it asked for
 ```
 
-`agentbus up` makes it with empty lists, which change nothing. Every turn reads it when it starts,
-so an edit applies to the next turn. A broken file stops the turn with the line and the problem.
+`agentbus up` makes it with empty lists and every other value at its default, as above. A key you
+leave out reads as its default, so an older file keeps working. Every turn reads the file when it
+starts, and the API reads it for every request a turn's token sends, so an edit applies at once.
+A broken file stops the turn with the line and the problem.
+
+**Edits.** With `edit = "session"`, a turn edits files in its own session folder (its worktree)
+without asking: claude gets `Edit(//<folder>/**)`, codex runs with `--sandbox workspace-write`.
+`"none"` edits nothing: claude is denied Edit, Write and NotebookEdit, whatever your own Claude
+Code settings allow, and codex runs read-only, with no network. A `read_only` turn never
+edits. No turn may edit the data folder's own files (this file, `instructions.md`, `agents.json`,
+the tokens): a turn that could would raise its own limits. That rule is not a setting. It covers
+the tools that edit files: a command in `allow` that runs any code (`python3`, `node`, `sh`) can
+still write them, so allow only commands you would let change your policy.
+
+**Limits.** A request past a limit is refused, and the refusal names the limit.
+
 `read_folders` grants reads only in the default and acceptEdits modes. Under your own Claude Code
 "auto" mode, claude may still write there.
 A `read_only` turn stays read-only.
@@ -306,11 +336,22 @@ from a script the agent wrote earlier. For a hard rule, also take away what the 
 codex gets nothing from `read_folders` and `allow`. Its sandbox can read every folder already.
 Details: [docs/CLIENT_API.md](docs/CLIENT_API.md#permissionstoml).
 
+## Instructions
+
+Every turn gets the same short instructions, as an instruction of its agent's own (Claude Code's
+`--append-system-prompt`, codex's `developer_instructions`), never inside your prompt. They are the
+text of `instructions.md` in the data folder. `agentbus up` writes it with the default: how to
+search the session's earlier turns and ask other agents with `agentbus-api`. Edit it to change what
+every agent is told; `{session}` becomes the session id. An empty file gives no instructions, and a
+missing one the default. Each turn reads it when it starts. Keep it the same within a session, so
+the prompt cache holds.
+
 ## How it works
 
-- **The agent changes one setting**, its API address. It also gets three lines of instructions
-  (Claude Code's `--append-system-prompt`, codex's `developer_instructions`) saying how to search
-  its session's earlier turns with the turn's own read-only token. Your prompt is never changed.
+- **The agent changes one setting**, its API address. It also gets the instructions in
+  `instructions.md` (Claude Code's `--append-system-prompt`, codex's `developer_instructions`),
+  saying how to search its session's earlier turns and ask other agents with the turn's own token.
+  Your prompt is never changed.
 - **Traffic passes through.** Requests go to the vendor with their headers, so the agent's own
   sign-in is used. Headers are never stored. The one change: a turn that continues a session gets
   the earlier turns' history put in front of its requests. For codex, the earlier turn's thread id

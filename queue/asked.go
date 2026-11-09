@@ -6,8 +6,8 @@ package queue
 // ends, Deliver starts a new turn in the asking session whose prompt is the
 // result: a turn continuing a turn ("mail"). The asking turn never waits.
 //
-// The caps here are temporary, until permissions.toml has its [limits]
-// section: they keep a chain of agents asking agents from running away.
+// The caps, [limits] in permissions.toml, keep a chain of agents asking
+// agents from running away.
 
 import (
 	"database/sql"
@@ -42,17 +42,19 @@ type ResultOf struct {
 	Agent   string `json:"agent,omitempty"`   // the saved agent, or harness, that did it
 }
 
-// The temporary caps on asked work, until permissions.toml has [limits].
-const (
+// Limits are the caps on asked work: [limits] in permissions.toml, read for
+// each request by the API, which passes them here. A negative value is never
+// sent; 0 refuses all asked work of that kind.
+type Limits struct {
 	// MaxDepth: work may be asked for at most this many levels below the
 	// person's turn.
-	MaxDepth = 2
-	// MaxAskedPerTurn: jobs one turn may ask for.
-	MaxAskedPerTurn = 10
-	// MaxAskedPerRoot: jobs a whole request tree may ask for, over every
-	// level: everything that started from one person's session.
-	MaxAskedPerRoot = 30
-)
+	MaxDepth int
+	// MaxPerTurn: jobs one turn may ask for.
+	MaxPerTurn int
+	// MaxPerTree: jobs a whole request tree may ask for, over every level:
+	// everything that started from one person's session.
+	MaxPerTree int
+}
 
 // LimitError is a cap on asked work that was reached. Its text says which,
 // in fixed wording.
@@ -60,43 +62,42 @@ type LimitError struct{ Msg string }
 
 func (e *LimitError) Error() string { return e.Msg }
 
-const limitsLater = " (a temporary cap, until permissions.toml has [limits])"
-
 // checkAsked refuses a new asked job that would pass a cap. It runs in the
 // job's own transaction, so requests at once cannot all pass.
-func checkAsked(tx *sql.Tx, team string, links Links) error {
+func checkAsked(tx *sql.Tx, team string, links Links, lim Limits) error {
 	if links.Asker == nil {
 		return nil
 	}
 	if links.Chain == nil || links.Chain.Depth < 1 {
 		return ErrBadState
 	}
-	if links.Chain.Depth > MaxDepth {
-		return &LimitError{fmt.Sprintf("work may be asked for at most %d levels below the person's turn, and this would be level %d", MaxDepth, links.Chain.Depth) + limitsLater}
+	if links.Chain.Depth > lim.MaxDepth {
+		return &LimitError{fmt.Sprintf("work may be asked for at most %d levels below the person's turn, and this would be level %d (max_depth in [limits] of permissions.toml)", lim.MaxDepth, links.Chain.Depth)}
 	}
 	var n int
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND json_extract(links, '$.asker.session') = ?
 		AND json_extract(links, '$.asker.turn') = ?`, team, links.Asker.Session, links.Asker.Turn).Scan(&n); err != nil {
 		return fmt.Errorf("queue: count asked: %w", err)
 	}
-	if n >= MaxAskedPerTurn {
-		return &LimitError{fmt.Sprintf("one turn may ask for at most %d jobs, and this turn has asked for %d", MaxAskedPerTurn, n) + limitsLater}
+	if n >= lim.MaxPerTurn {
+		return &LimitError{fmt.Sprintf("one turn may ask for at most %d jobs, and this turn has asked for %d (max_jobs_per_turn in [limits] of permissions.toml)", lim.MaxPerTurn, n)}
 	}
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND json_extract(links, '$.asker.session') IS NOT NULL
 		AND json_extract(links, '$.chain.root') = ?`, team, links.Chain.Root).Scan(&n); err != nil {
 		return fmt.Errorf("queue: count asked: %w", err)
 	}
-	if n >= MaxAskedPerRoot {
-		return &LimitError{fmt.Sprintf("work started from one session may ask for at most %d jobs in all, and %d have been asked for", MaxAskedPerRoot, n) + limitsLater}
+	if n >= lim.MaxPerTree {
+		return &LimitError{fmt.Sprintf("work started from one session may ask for at most %d jobs in all, and %d have been asked for (max_jobs_per_tree in [limits] of permissions.toml)", lim.MaxPerTree, n)}
 	}
 	return nil
 }
 
 // CreateTurnLinked makes a turn job, with links: for a turn an agent asked
-// for, its Asker and Chain. The caps are checked in the same transaction. A
-// turn of a session whose turn runs waits behind it in the queue.
-func (q *Queue) CreateTurnLinked(team, key string, spec Spec, links Links) (Job, bool, error) {
-	return q.create(team, KindTurn, key, spec, links, spec.Session)
+// for, its Asker and Chain, held to lim. The caps are checked in the same
+// transaction. A turn of a session whose turn runs waits behind it in the
+// queue.
+func (q *Queue) CreateTurnLinked(team, key string, spec Spec, links Links, lim Limits) (Job, bool, error) {
+	return q.create(team, KindTurn, key, spec, links, lim, spec.Session)
 }
 
 // SessionRoot is the root of the request tree a session was started in: the
@@ -120,6 +121,30 @@ func (q *Queue) SessionRoot(team, session string) (string, error) {
 	return root.String, nil
 }
 
+// TreeSessions are the sessions work in root's request tree ran in: each
+// asked turn's session, and each asked review's own session once its turn
+// has started. root itself is not among them unless work ran there.
+func (q *Queue) TreeSessions(team, root string) ([]string, error) {
+	rows, err := q.db.Query(`SELECT DISTINCT session FROM jobs WHERE team = ? AND kind = 'turn' AND session IS NOT NULL
+		AND json_extract(links, '$.chain.root') = ?
+		UNION SELECT DISTINCT json_extract(e.data, '$.session') FROM jobs j JOIN attempts a ON a.job = j.id
+		JOIN attempt_events e ON e.attempt = a.id WHERE j.team = ? AND j.kind = 'review' AND e.kind = 'turn.created'
+		AND json_extract(j.links, '$.chain.root') = ? AND json_extract(e.data, '$.session') IS NOT NULL`, team, root, team, root)
+	if err != nil {
+		return nil, fmt.Errorf("queue: list tree sessions: %w", err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, fmt.Errorf("queue: list tree sessions: %w", err)
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
 // SessionFolders are the folders a session was started in: asked, the
 // folder its first turn job named, and ws, its workspace's folder (a
 // worktree inside asked, or asked itself). Either may be "".
@@ -141,8 +166,8 @@ func (q *Queue) SessionFolders(team, session string) (asked, ws string, err erro
 
 // ReviewLinked is ReviewAs with links: for a review an agent asked for, its
 // Asker and Chain. The caps are checked in the same transaction.
-func (q *Queue) ReviewLinked(team, id string, as Spec, key string, includeReply bool, links Links) (Job, bool, error) {
-	return q.review(team, id, as, key, includeReply, links)
+func (q *Queue) ReviewLinked(team, id string, as Spec, key string, includeReply bool, links Links, lim Limits) (Job, bool, error) {
+	return q.review(team, id, as, key, includeReply, links, lim)
 }
 
 // Deliver starts the next turn of each asking session whose asked work has
@@ -183,7 +208,7 @@ func (q *Queue) Deliver(team string, name func(id string) string) (int, error) {
 		if j.Links.Chain != nil {
 			links.Chain = &Chain{Root: j.Links.Chain.Root, Depth: j.Links.Chain.Depth}
 		}
-		d, _, err := q.create(team, KindTurn, ResultKey(j.ID), spec, links, spec.Session)
+		d, _, err := q.create(team, KindTurn, ResultKey(j.ID), spec, links, Limits{}, spec.Session)
 		why := ""
 		switch {
 		case err == nil:

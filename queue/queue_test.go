@@ -591,7 +591,7 @@ func TestTurnsAhead(t *testing.T) {
 	first := job(t, q, "")
 	mk := func() Job {
 		c.add(time.Millisecond)
-		j, _, err := q.CreateTurnLinked(DefaultTeam, "", Spec{Session: first.Session, Prompt: "next"}, Links{})
+		j, _, err := q.CreateTurnLinked(DefaultTeam, "", Spec{Session: first.Session, Prompt: "next"}, Links{}, Limits{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -637,7 +637,7 @@ func TestTurnsAhead(t *testing.T) {
 func TestTurnWaitsBehindReviewInItsSession(t *testing.T) {
 	q, c := open(t)
 	r := runner(t, q, 4)
-	rv, _, err := q.create(DefaultTeam, KindReview, "", Spec{Agent: "codex", Prompt: "review"}, Links{}, "reviewed")
+	rv, _, err := q.create(DefaultTeam, KindReview, "", Spec{Agent: "codex", Prompt: "review"}, Links{}, Limits{}, "reviewed")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -656,7 +656,7 @@ func TestTurnWaitsBehindReviewInItsSession(t *testing.T) {
 		t.Fatalf("while the review runs: %v %v", busy, err)
 	}
 	c.add(time.Millisecond)
-	next, _, err := q.CreateTurnLinked(DefaultTeam, "", Spec{Session: "rev1", Prompt: "and this?"}, Links{})
+	next, _, err := q.CreateTurnLinked(DefaultTeam, "", Spec{Session: "rev1", Prompt: "and this?"}, Links{}, Limits{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -12,8 +12,13 @@ func asked(session, turn, root string, depth int) Links {
 	return Links{Asker: &Asker{Session: session, Turn: turn}, Chain: &Chain{Root: root, Depth: depth}}
 }
 
+// The default caps, as permissions.toml writes them.
+const MaxDepth, MaxAskedPerTurn, MaxAskedPerRoot = 2, 10, 30
+
+var testLimits = Limits{MaxDepth: MaxDepth, MaxPerTurn: MaxAskedPerTurn, MaxPerTree: MaxAskedPerRoot}
+
 func askTurn(q *Queue, l Links, key string) (Job, error) {
-	j, _, err := q.CreateTurnLinked(DefaultTeam, key, Spec{Agent: "claude", Folder: "/x", Isolate: true, Prompt: "hi"}, l)
+	j, _, err := q.CreateTurnLinked(DefaultTeam, key, Spec{Agent: "claude", Folder: "/x", Isolate: true, Prompt: "hi"}, l, testLimits)
 	return j, err
 }
 
@@ -244,7 +249,7 @@ func TestSessionRootOfReview(t *testing.T) {
 		Session: j.Session, Workspace: &Workspace{Kind: WorkspaceFolder, Folder: "/x"}}); err != nil {
 		t.Fatal(err)
 	}
-	rv, _, err := q.ReviewLinked(DefaultTeam, j.ID, Spec{Agent: "codex"}, "", false, asked(j.Session, "t_1", j.Session, 1))
+	rv, _, err := q.ReviewLinked(DefaultTeam, j.ID, Spec{Agent: "codex"}, "", false, asked(j.Session, "t_1", j.Session, 1), testLimits)
 	if err != nil {
 		t.Fatal(err)
 	}

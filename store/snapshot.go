@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -30,7 +31,8 @@ type Session struct {
 	Turns   int       `json:"turns"`
 	// FirstAgent stays put when a later turn runs on another harness, so a
 	// list grouped by it keeps the session in one place.
-	FirstAgent string `json:"first_agent,omitempty" doc:"The agent (harness) of the session's first turn.started or run that names one. A later turn may run on another agent; agent is then that one's, and first_agent stays. Absent for a session no run started."`
+	FirstAgent   string `json:"first_agent,omitempty" doc:"The agent (harness) of the session's first turn.started or run that names one. A later turn may run on another agent; agent is then that one's, and first_agent stays. Absent for a session no run started."`
+	FirstAgentID string `json:"first_agent_id,omitempty" doc:"The saved agent's id from the same event as first_agent: the saved agent the session started on. Absent when that turn named a harness alone, or no run started the session."`
 	// Usage sums the model.responded events that carried usage. It is nil when
 	// none did: absent usage is unknown, never zero.
 	Usage *event.Usage `json:"usage" doc:"Sums the replies that carried usage. Null when none did: unknown, never zero."`
@@ -134,21 +136,23 @@ func (s *Store) Snapshot() (Snapshot, error) {
 	}
 	rows.Close()
 
-	// The first that names an agent gives first_agent.
-	rows, err = s.r.Query(`SELECT session, json_extract(data, '$.agent'), MIN(seq)
+	// The first that names an agent gives first_agent, and its saved agent
+	// first_agent_id: SQLite takes the bare columns from the row MIN(seq)
+	// picked, so both come from one event.
+	rows, err = s.r.Query(`SELECT session, json_extract(data, '$.agent'), COALESCE(json_extract(data, '$.agent_id'), ''), MIN(seq)
 		FROM events WHERE seq <= ? AND `+agentFrom+` AND COALESCE(json_extract(data, '$.agent'), '') <> '' GROUP BY session`, hi)
 	if err != nil {
 		return snap, fmt.Errorf("store: snapshot: %w", err)
 	}
 	for rows.Next() {
-		var id, agent string
+		var id, agent, agentID string
 		var seq int64
-		if err := rows.Scan(&id, &agent, &seq); err != nil {
+		if err := rows.Scan(&id, &agent, &agentID, &seq); err != nil {
 			rows.Close()
 			return snap, fmt.Errorf("store: snapshot: %w", err)
 		}
 		if x := byID[id]; x != nil {
-			x.FirstAgent = agent
+			x.FirstAgent, x.FirstAgentID = agent, agentID
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -290,4 +294,28 @@ func decodeList(s string) []string {
 		return nil
 	}
 	return out
+}
+
+// CostOf sums cost_usd over the model.responded events of the sessions
+// named, each counted once.
+func (s *Store) CostOf(sessions []string) (float64, error) {
+	seen := map[string]bool{}
+	var args []any
+	for _, id := range sessions {
+		if id == "" || seen[id] {
+			continue
+		}
+		seen[id] = true
+		args = append(args, id)
+	}
+	if len(args) == 0 {
+		return 0, nil
+	}
+	var cost float64
+	err := s.r.QueryRow(`SELECT COALESCE(SUM(json_extract(data, '$.cost_usd')), 0) FROM events
+		WHERE kind = 'model.responded' AND session IN (?`+strings.Repeat(",?", len(args)-1)+`)`, args...).Scan(&cost)
+	if err != nil {
+		return 0, fmt.Errorf("store: sum cost: %w", err)
+	}
+	return cost, nil
 }

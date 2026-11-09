@@ -52,7 +52,7 @@ type TurnRequest struct {
 	Isolate  *bool  `json:"isolate,omitempty" doc:"True unless false, for a new session. True: when folder is in a git repo with a commit, the session runs in a new git worktree of that repo at its current HEAD, in the same folder inside it; otherwise in folder as it is. Uncommitted changes in folder are not in the worktree. False: always folder as it is. Not sent with session."`
 	Prompt   string `json:"prompt" doc:"From 1 byte to 256 KiB, no NUL byte. Always passed after --."`
 	Model    string `json:"model,omitempty" doc:"Passed only as the value of --model. Absent with agent: the saved agent's model. A session's next turn with no agent and no model keeps the model of the session's latest turn, from its turn.started."`
-	ReadOnly *bool  `json:"read_only,omitempty" doc:"False unless true. True: claude gets Read, Grep and Glob only; codex runs with --sandbox read-only. False: claude keeps its own tools and permission settings; codex runs with --sandbox workspace-write and network access on, so it can edit the folder and reach the network. Read-only codex has no network."`
+	ReadOnly *bool  `json:"read_only,omitempty" doc:"False unless true. True: claude gets Read, Grep and Glob only; codex runs with --sandbox read-only. False: claude keeps its own tools and permission settings, plus the edit rule of permissions.toml (by default it edits its session's folder without asking); with edit = \"session\" codex runs with --sandbox workspace-write and network access on, so it can edit the folder and reach the network, and with edit = \"none\" read-only. Read-only codex has no network."`
 	// IdempotencyKey makes a retry safe: a client whose request timed out
 	// sends it again with the same key and gets the same turn.
 	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"Optional, 1 to 128 characters of A-Z, a-z, 0-9 and . _ : -. It is the turn job's key. A retry with the same key and the same fields answers 202 with the turn the key first started, existing true, and starts nothing. The same key with other fields gets 409. A request refused with 400 used no key."`
@@ -109,7 +109,7 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 	var links queue.Links
 	if g := grantOf(r); g != nil {
 		var ok bool
-		if links, ok = a.askChecks(w, *g, &body, sent.Session != nil); !ok {
+		if links, ok = a.askChecks(w, *g, policyOf(r), &body, sent.Session != nil); !ok {
 			return
 		}
 	}
@@ -195,7 +195,7 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 	}
 	// Never refused for a busy session: the job waits behind the session's
 	// turns that have not ended, as a delivered result does.
-	job, created, err := a.cfg.Queue.CreateTurnLinked(queue.DefaultTeam, body.IdempotencyKey, spec, links)
+	job, created, err := a.cfg.Queue.CreateTurnLinked(queue.DefaultTeam, body.IdempotencyKey, spec, links, queueLimits(policyOf(r)))
 	var limit *queue.LimitError
 	switch {
 	case errors.As(err, &limit):

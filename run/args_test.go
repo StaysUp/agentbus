@@ -44,25 +44,34 @@ func TestIDScanner(t *testing.T) {
 	}
 }
 
-// Every turn of a session gets the same hint, naming that session, through
-// the agent's own instruction flag and never inside the prompt: own replay and
-// the vendor's prompt cache need the text the same on every turn.
-func TestHistoryHint(t *testing.T) {
+// Every turn of a session gets the same instructions, naming that session,
+// through the agent's own instruction flag and never inside the prompt: own
+// replay and the vendor's prompt cache need the text the same on every turn.
+// The default is the text turns had before the file existed.
+func TestInstructionsDefault(t *testing.T) {
+	e := &Engine{}
+	got, err := e.instructions("abc")
+	if err != nil {
+		t.Fatal(err)
+	}
 	const want = "Your session's earlier turns are stored by AgentBus. To look something up, run:\n" +
-		`curl -s -H "Authorization: Bearer $AGENTBUS_TOKEN" "$AGENTBUS_URL/api/v0/sessions/abc/search?q=<text>"` + "\n" +
-		`with <text> URL-encoded. Each hit's "read" is a path under $AGENTBUS_URL that returns the whole of what matched, with the same header.` + "\n" +
-		`You can also ask other agents through the same API and header: start a turn on any saved agent, continue one, or ask for a review. ` +
+		`agentbus-api GET "/api/v0/sessions/abc/search?q=<text>"` + "\n" +
+		`with <text> URL-encoded. Each hit's "read" is a path you can GET the same way, for the whole of what matched.` + "\n" +
+		`You can also ask other agents with the same command: start a turn on any saved agent, continue one, or ask for a review. ` +
 		`Do not wait for them: each result comes back to you as a later turn. ` +
-		`How: $AGENTBUS_URL/docs/llms.txt, section "Ask other agents". Never print $AGENTBUS_TOKEN.`
-	if got := historyHint("abc", false); got != want {
-		t.Fatalf("hint\n got %q\nwant %q", got, want)
+		`How: agentbus-api GET /docs/llms.txt, section "Ask other agents".`
+	if got != want {
+		t.Fatalf("instructions\n got %q\nwant %q", got, want)
+	}
+	if strings.Contains(got, "$") {
+		t.Errorf("instructions name a variable:\n%s", got)
 	}
 	for _, resume := range []string{"", "r-1"} {
-		a, _ := turnArgs("claude", historyHint("abc", false), resume, "", false, Permissions{}, "hi")
+		a, _ := turnArgs("claude", got, resume, "", Writes{}, Permissions{}, "hi")
 		if i := slices.Index(a, "--append-system-prompt"); i < 0 || a[i+1] != want || a[len(a)-1] != "hi" {
 			t.Errorf("claude resume %q: %q", resume, a)
 		}
-		a, _ = turnArgs("codex", historyHint("abc", false), resume, "", false, Permissions{}, "hi")
+		a, _ = turnArgs("codex", got, resume, "", Writes{}, Permissions{}, "hi")
 		if i := slices.Index(a, "developer_instructions="+tomlString(want)); i < 1 || a[i-1] != "-c" || a[len(a)-1] != "hi" {
 			t.Errorf("codex resume %q: %q", resume, a)
 		}
@@ -70,6 +79,50 @@ func TestHistoryHint(t *testing.T) {
 	// A TOML basic string: quoted, with JSON's escapes, which TOML shares.
 	if got := tomlString("a\"b\\c\n<d>"); got != `"a\"b\\c\n`+"\\u003cd\\u003e\"" {
 		t.Errorf("tomlString %s", got)
+	}
+}
+
+// instructions.md is the text: {session} filled in, trailing space cut; an
+// empty file gives none; a missing one the default; one that cannot be used
+// is an error that names no path.
+func TestInstructionsFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), InstructionsFile)
+	e := &Engine{cfg: Config{Instructions: path}}
+	if got, err := e.instructions("s1"); err != nil || !strings.Contains(got, "/api/v0/sessions/s1/search") {
+		t.Fatalf("missing: %q %v", got, err)
+	}
+	for _, tc := range []struct{ file, want string }{
+		{"Be brief. Session {session}.\n\n", "Be brief. Session s1."},
+		{"", ""},
+		{"  \n", ""},
+	} {
+		if err := os.WriteFile(path, []byte(tc.file), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if got, err := e.instructions("s1"); err != nil || got != tc.want {
+			t.Errorf("%q: %q %v, want %q", tc.file, got, err, tc.want)
+		}
+	}
+	for _, tc := range []struct{ file, want string }{
+		{strings.Repeat("a", MaxInstructions+1), "over 64 KiB"},
+		{"a\x00b", "NUL"},
+		{"a\xffb", "UTF-8"},
+	} {
+		if err := os.WriteFile(path, []byte(tc.file), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.instructions("s1"); err == nil || !strings.Contains(err.Error(), tc.want) || strings.Contains(err.Error(), path) {
+			t.Errorf("%.20q: %v, want %q", tc.file, err, tc.want)
+		}
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(path+".gone", path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.instructions("s1"); err == nil || !strings.Contains(err.Error(), "link") {
+		t.Errorf("a dangling link: %v", err)
 	}
 }
 
@@ -136,7 +189,7 @@ func TestCodexOwnInstructions(t *testing.T) {
 	if !codexOwnInstructions([]string{"HOME=" + t.TempDir()}, link) {
 		t.Error("a symlinked folder's real parents not read")
 	}
-	if a, _ := turnArgs("codex", "", "", "", false, Permissions{}, "hi"); slices.ContainsFunc(a, func(s string) bool { return strings.HasPrefix(s, "developer_instructions=") }) {
+	if a, _ := turnArgs("codex", "", "", "", Writes{}, Permissions{}, "hi"); slices.ContainsFunc(a, func(s string) bool { return strings.HasPrefix(s, "developer_instructions=") }) {
 		t.Errorf("no hint, yet %q", a)
 	}
 }
@@ -148,26 +201,12 @@ func TestTurnEnv(t *testing.T) {
 	}
 }
 
-// With the API client on PATH, the hint names agentbus-api, which holds no
-// variable and stays the same when the program moves.
-func TestHistoryHintAPI(t *testing.T) {
-	h := historyHint("abc", true)
-	for _, want := range []string{`agentbus-api GET "/api/v0/sessions/abc/search?q=<text>"`, "agentbus-api GET /docs/llms.txt", "ask other agents"} {
-		if !strings.Contains(h, want) {
-			t.Errorf("hint lacks %q:\n%s", want, h)
-		}
-	}
-	if strings.Contains(h, "$") {
-		t.Errorf("hint names a variable:\n%s", h)
-	}
-}
-
 // A turn that may write may run "<path> api" without asking; a read-only one
 // gets nothing new, and the person's own lists are not changed.
 func TestWithAPI(t *testing.T) {
 	own := Permissions{Allow: []string{"go test"}, Forbid: []string{"git push"}}
 	p := withAPI(own, true, false)
-	a, _ := turnArgs("claude", "", "", "", false, p, "hi")
+	a, _ := turnArgs("claude", "", "", "", Writes{}, p, "hi")
 	if got := strings.Join(a, " "); !strings.Contains(got, "Bash(go test:*),Bash(agentbus-api:*)") || !strings.Contains(got, "--disallowedTools Bash(git push:*)") {
 		t.Errorf("args: %s", got)
 	}

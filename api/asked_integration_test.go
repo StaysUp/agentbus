@@ -25,6 +25,12 @@ import (
 // <dir>/delivered-<pid> and ends at once. Every turn prints a resume id.
 func askEnv(t *testing.T) (*env, string) {
 	t.Helper()
+	return askEnvWith(t, "")
+}
+
+// askEnvWith is askEnv with permissions.toml at perm ("" for none).
+func askEnvWith(t *testing.T, perm string) (*env, string) {
+	t.Helper()
 	dir := t.TempDir()
 	script := `for a; do p="$a"; done; echo '{"type":"result","session_id":"sid-'$$'"}'; ` +
 		`case "$p" in "[AgentBus]"*) printf '%s' "$p" > "$D/delivered-$$"; exit 0;; quick|"Review a change"*) exit 0;; esac; ` +
@@ -34,7 +40,7 @@ func askEnv(t *testing.T) (*env, string) {
 		return run.Launch{Path: "/bin/sh", Args: []string{"-c", script, "sh"},
 			Env: []string{"PATH=/usr/bin:/bin", "D=" + dir, "ANTHROPIC_BASE_URL=" + baseURL}}, nil
 	}
-	return stackEnv(t, stack{wire: wire, maxRuns: 16}), dir
+	return stackEnv(t, stack{wire: wire, maxRuns: 16, permissions: perm}), dir
 }
 
 // tokenOf waits for the turn with this prompt and returns its token.
@@ -254,11 +260,11 @@ func TestAskCaps(t *testing.T) {
 	if code != 403 || !strings.Contains(out, "levels") || !strings.Contains(out, "[limits]") {
 		t.Errorf("depth 3: %d %s", code, out)
 	}
-	for i := 1; i < queue.MaxAskedPerTurn; i++ {
+	for i := 1; i < run.DefaultMaxJobsPerTurn; i++ {
 		ask(t, e, tok, `{"agent":"claude","prompt":"quick"}`)
 	}
 	code, out = as(t, e, tok, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"quick"}`)
-	if code != 403 || !strings.Contains(out, fmt.Sprint(queue.MaxAskedPerTurn)) {
+	if code != 403 || !strings.Contains(out, fmt.Sprint(run.DefaultMaxJobsPerTurn)) {
 		t.Errorf("past the per-turn cap: %d %s", code, out)
 	}
 
@@ -268,6 +274,94 @@ func TestAskCaps(t *testing.T) {
 		t.Errorf("read-only turn asking: %d %s", code, out)
 	}
 	for _, p := range []string{"root", "d1", "d2", "ro"} {
+		release(dir, p)
+	}
+}
+
+// permissions.toml decides what a turn token may do, read for each request:
+// a cap changed in the file applies to the next request, each [agent_api]
+// switch refuses its kind of call and says which, scope "session" keeps the
+// token in its own session, a cost cap stops asking once the tree has spent
+// it, and a broken file refuses every turn token's request. No setting opens
+// the routes that change agents or tokens.
+func TestAskPolicyFromPermissions(t *testing.T) {
+	perm := filepath.Join(t.TempDir(), run.PermissionsFile)
+	write := func(s string) {
+		t.Helper()
+		if err := os.WriteFile(perm, []byte(s), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("[limits]\nmax_jobs_per_turn = 2\n")
+	e, dir := askEnvWith(t, perm)
+	folder := t.TempDir()
+	root := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"root"}`)
+	tok := tokenOf(t, dir, "root")
+	ask(t, e, tok, `{"agent":"claude","prompt":"quick"}`)
+	ask(t, e, tok, `{"agent":"claude","prompt":"child"}`)
+	code, out := as(t, e, tok, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"quick"}`)
+	if code != 403 || !strings.Contains(out, "at most 2 jobs") || !strings.Contains(out, "max_jobs_per_turn") {
+		t.Fatalf("past max_jobs_per_turn = 2: %d %s", code, out)
+	}
+	// The file is read again for the next request.
+	write("[limits]\nmax_jobs_per_turn = 3\n")
+	ask(t, e, tok, `{"agent":"claude","prompt":"quick"}`)
+
+	child := tokenOf(t, dir, "child")
+	for _, tc := range []struct {
+		name, file, method, path, body, want string
+		tok                                  string
+	}{
+		{"start off", "[agent_api]\nstart = false\n", "POST", "/api/v0/turns", `{"agent":"claude","prompt":"quick"}`, "start is false", tok},
+		{"read off", "[agent_api]\nread = false\n", "GET", "/api/v0/sessions/" + root.ID + "/search?q=x", "", "read is false", tok},
+		{"list_agents off", "[agent_api]\nlist_agents = false\n", "GET", "/api/v0/harnesses", "", "list_agents is false", tok},
+		{"cancel off", "[agent_api]\ncancel = false\n", "POST", "/api/v0/jobs/job_x/cancel", "", "cancel is false", tok},
+		{"review off", "[agent_api]\nreview = false\n", "POST", "/api/v0/jobs/job_x/review", `{}`, "review is false", tok},
+		// scope = "session": the child's token reads its own session only,
+		// not the person's.
+		{"scope session", "[agent_api]\nscope = \"session\"\n", "GET", "/api/v0/sessions/" + root.ID + "/search?q=x", "", "only its own session", child},
+		{"scope session, by query", "[agent_api]\nscope = \"session\"\n", "GET", "/api/v0/turns?session=" + root.ID, "", "only its own session", child},
+		{"scope session, events by query", "[agent_api]\nscope = \"session\"\n", "GET", "/api/v0/turns/" + root.Turn + "/events?session=" + root.ID, "", "only its own session", child},
+		{"broken file", "[agent_api]\nscope = all\n", "GET", "/api/v0/harnesses", "", "cannot be used", tok},
+	} {
+		write(tc.file)
+		code, out := as(t, e, tc.tok, tc.method, tc.path, tc.body)
+		if (code != 403 && code != 503) || !strings.Contains(out, tc.want) {
+			t.Errorf("%s: %d %s, want a refusal with %q", tc.name, code, out, tc.want)
+		}
+	}
+	// Every switch on, the routes that change agents stay closed to a turn
+	// token: they take the main token, always.
+	write("")
+	for _, r := range [][3]string{
+		{"POST", "/api/v0/agents", `{"name":"x","harness":"claude","access":"subscription"}`},
+		{"PUT", "/api/v0/agents/a_x", `{"name":"x","harness":"claude","access":"subscription"}`},
+		{"DELETE", "/api/v0/agents/a_x", ""},
+	} {
+		if code, out := as(t, e, tok, r[0], r[1], r[2]); code != 403 || !strings.Contains(out, "main token") {
+			t.Errorf("%s %s: %d %s, want 403", r[0], r[1], code, out)
+		}
+	}
+	// A cost cap: once the tree has spent it, asking stops; 0 is off. A
+	// retry of a request already made still gets its job.
+	const keyed = `{"agent":"claude","prompt":"quick","idempotency_key":"k-cost"}`
+	first := ask(t, e, child, keyed)
+	cost := 0.30
+	if _, _, err := e.store.Append(event.Event{ID: "evt_cost", Kind: event.ModelResponded, Time: time.Now().UTC(),
+		Session: root.ID, Turn: root.Turn, Exchange: "x-cost", Status: 200, CostUSD: &cost}); err != nil {
+		t.Fatal(err)
+	}
+	write("[limits]\nmax_cost_usd_per_tree = 0.25\n")
+	code, out = as(t, e, child, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"quick"}`)
+	if code != 403 || !strings.Contains(out, "max_cost_usd_per_tree") || !strings.Contains(out, "$0.30") {
+		t.Errorf("past the cost cap: %d %s", code, out)
+	}
+	if again := ask(t, e, child, keyed); !again.Existing || again.Job != first.Job {
+		t.Errorf("a retry past the cost cap: %+v, want job %s again", again, first.Job)
+	}
+	write("[limits]\nmax_cost_usd_per_tree = 0\n")
+	ask(t, e, child, `{"agent":"claude","prompt":"quick"}`)
+	for _, p := range []string{"root", "child"} {
 		release(dir, p)
 	}
 }

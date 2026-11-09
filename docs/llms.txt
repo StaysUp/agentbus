@@ -25,17 +25,30 @@ job routes. This file describes the API of `up` and `server`.
 - `GET /` redirects to `/docs`.
 - The token is the file `token` in the data folder: `$AGENTBUS_HOME`, else
   `$XDG_DATA_HOME/agentbus`, else `~/.local/share/agentbus`.
-- `permissions.toml` in the data folder has three lists: `read_folders`, `allow` and `forbid`.
-  Every turn reads it when it starts. claude gets one `--allowedTools` with
-  `Read(//<folder>/**),Grep(//<folder>/**),Glob(//<folder>/**)` per folder (reading only) and
-  `Bash(<cmd>:*)` per allowed command, and `--disallowedTools Bash(<cmd>:*),…`. A `read_only` turn
-  ignores `allow`. `forbid` applies to claude and codex through the gateway: a shell command in a
-  model reply that matches an entry is refused before the agent can run it, and a `tool.refused`
-  event is stored. The command is parsed as shell and each simple command in it is matched alone, and git's global options are skipped,
-  so `git -C repo push` matches `git push`. It reads text only: a command built at run time or run
-  from a script is not seen, so a hard rule also needs the agent to lack what the command needs
-  (no push credentials). codex gets nothing from `read_folders` and `allow`. A broken file
-  answers 400 and nothing is stored. A missing file is empty lists.
+- `permissions.toml` in the data folder has three lists: `read_folders`, `allow` and `forbid`, the
+  `edit` rule, `[limits]` and `[agent_api]`. A key left out reads as its default. Every turn reads
+  it when it starts; the API reads it for each request a turn token sends. claude gets one
+  `--allowedTools` with `Read(//<folder>/**),Grep(//<folder>/**),Glob(//<folder>/**)` per folder
+  (reading only) and `Bash(<cmd>:*)` per allowed command, and `--disallowedTools Bash(<cmd>:*),…`. A
+  `read_only` turn ignores `allow`. `forbid` applies to claude and codex through the gateway: a
+  shell command in a model reply that matches an entry is refused before the agent can run it, and a
+  `tool.refused` event is stored. The command is parsed as shell and each simple command in it is
+  matched alone, and git's global options are skipped, so `git -C repo push` matches `git push`. It
+  reads text only: a command built at run time or run from a script is not seen, so a hard rule
+  also needs the agent to lack what the command needs (no push credentials). codex gets nothing from
+  `read_folders` and `allow`. `edit = "session"` (default) lets a turn edit its own session folder
+  without asking: claude gets `Edit(//<folder>/**)`, codex `--sandbox workspace-write` with network;
+  `edit = "none"` gives claude `--disallowedTools Edit,Write,NotebookEdit`, which wins over the
+  person's own settings, and codex `--sandbox read-only`. No turn edits the data
+  folder's own files (`permissions.toml`, `instructions.md`, `agents.json`, the tokens): claude gets
+  a deny rule on each. `[limits]`: `max_depth` (2), `max_jobs_per_turn` (10), `max_jobs_per_tree`
+  (30), `max_cost_usd_per_tree` (0, off). `[agent_api]`: `scope` (`"tree"` or `"session"`), and
+  `read`, `list_agents`, `start`, `continue`, `review`, `cancel`, each true unless set false. A
+  broken file answers 400 and nothing is stored; a turn token's requests get 503 then. A missing
+  file is every default.
+- `instructions.md` in the data folder is the text every turn gets as its agent's own instruction
+  (`--append-system-prompt`, `developer_instructions`), with `{session}` replaced by the session id.
+  Missing: the default text. Empty: none.
 - The turns token, the file `turns_token` in the data folder (`abq_` and 64 hex characters), may
   only start, stop and read turns: `POST /api/v0/turns`, `GET /api/v0/turns`,
   `GET /api/v0/turns/{id}`, `GET /api/v0/turns/{id}/events` and `POST /api/v0/turns/{id}/stop`.
@@ -110,9 +123,12 @@ agentbus-api POST /api/v0/jobs/job_…/review '{"agent":"claude"}'
 
 Refused with 403, with the reason: a read-only turn asking for anything; a `folder` outside your
 own; `isolate: false`; continuing your own session or the person's; changing agents or policy;
-anything about tokens; making a job with `POST /api/v0/jobs`; any session outside your tree. Caps
-for now (temporary, until `permissions.toml` has `[limits]`): work goes at most 2 levels below the
-person's turn, one turn asks for at most 10 jobs, and one person's session for at most 30 in all.
+anything about tokens; making a job with `POST /api/v0/jobs`; any session outside your tree; a call
+the person switched off in `[agent_api]` of `permissions.toml` (the refusal names the switch).
+Limits, `[limits]` there, by default: work goes at most 2 levels below the person's turn
+(`max_depth`), one turn asks for at most 10 jobs (`max_jobs_per_turn`), one person's session for at
+most 30 in all (`max_jobs_per_tree`), and no cost cap (`max_cost_usd_per_tree`). The refusal names
+the limit reached.
 
 ## Starting up: snapshot, then stream
 
@@ -170,7 +186,8 @@ and its `turn.started` has `continuity: "transcript"` with that text in `context
 as soon as it starts, with the session `id` and the new `turn` id. Every event of the turn carries
 that id in `turn`, and its `turn.started` (with the prompt) is stored before the reply. `read_only`
 is false unless true. True gives claude Read, Grep and Glob only, and codex `--sandbox read-only`.
-False leaves claude its own tools and settings, and gives codex `--sandbox workspace-write` with
+False leaves claude its own tools and settings plus the `edit` rule of `permissions.toml` (by default
+`Edit(//<folder>/**)`), and, with `edit = "session"`, gives codex `--sandbox workspace-write` with
 network on (`-c sandbox_workspace_write.network_access=true`): it can edit the folder and reach the
 network, so it can call this API with its turn token. Read-only codex has no writes and no network. 404 for an unknown session, 409 when the session
 cannot be continued. A turn sent while the session's turn runs, or while others wait, is queued

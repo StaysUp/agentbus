@@ -226,11 +226,11 @@ func TestRunWithSessionRunsNextTurnInSameSession(t *testing.T) {
 		want                  string // BASE is the session's base URL, ID the first resume id
 	}{
 		{"claude", claudeResultA, idA, nil, "haiku",
-			"-p --output-format json --append-system-prompt HINT --resume ID --model haiku -- --next"},
+			"-p --output-format json --append-system-prompt HINT --resume ID --allowedTools EDIT --disallowedTools PROTECT --model haiku -- --next"},
 		{"claude", claudeResultA, idA, true, "haiku",
 			"-p --output-format json --append-system-prompt HINT --resume ID --tools Read,Grep,Glob --allowedTools Read,Grep,Glob --strict-mcp-config --model haiku -- --next"},
 		{"claude", claudeResultA, idA, false, "",
-			"-p --output-format json --append-system-prompt HINT --resume ID -- --next"},
+			"-p --output-format json --append-system-prompt HINT --resume ID --allowedTools EDIT --disallowedTools PROTECT -- --next"},
 		{"codex", codexEventsA, codexIDA, nil, "",
 			`-c openai_base_url="BASE/backend-api/codex" exec --skip-git-repo-check --sandbox workspace-write -c developer_instructions=HINT -c sandbox_workspace_write.network_access=true resume --json -- ID --next`},
 		{"codex", codexEventsA, codexIDA, true, "",
