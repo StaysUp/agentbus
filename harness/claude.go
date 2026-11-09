@@ -137,6 +137,14 @@ func (claude) Args(t Turn) []string {
 			denied = append(denied, "Edit", "Write", "NotebookEdit")
 		}
 	}
+	// subagents = false: a deny on each tool that starts a subagent. Task
+	// is its name in Claude Code 2.1.319 (2026-11-09, read from the tool
+	// list a haiku turn prints, and gone from it with this deny); Agent is
+	// its name in newer versions. Workflow runs scripts that start
+	// subagents.
+	if t.NoSubagents {
+		denied = append(denied, "Task", "Agent", "Workflow")
+	}
 	if len(denied) > 0 {
 		a = append(a, "--disallowedTools", strings.Join(denied, ","))
 	}

@@ -26,8 +26,9 @@ job routes. This file describes the API of `up` and `server`.
 - The token is the file `token` in the data folder: `$AGENTBUS_HOME`, else
   `$XDG_DATA_HOME/agentbus`, else `~/.local/share/agentbus`.
 - `permissions.toml` in the data folder has three lists: `read_folders`, `allow` and `forbid`, the
-  `edit` rule, `[limits]` and `[agent_api]`. A key left out reads as its default. Every turn reads
-  it when it starts; the API reads it for each request a turn token sends. claude gets one
+  `edit` rule, the `subagents` switch, `[limits]` and `[agent_api]`. A key left out reads as its
+  default. Every turn reads it when it starts; the API reads it for each request a turn token
+  sends. claude gets one
   `--allowedTools` with `Read(//<folder>/**),Grep(//<folder>/**),Glob(//<folder>/**)` per folder
   (reading only) and `Bash(<cmd>:*)` per allowed command, and `--disallowedTools Bash(<cmd>:*),…`. A
   `read_only` turn ignores `allow`. `forbid` applies to claude and codex through the gateway: a
@@ -39,7 +40,9 @@ job routes. This file describes the API of `up` and `server`.
   `read_folders` and `allow`. `edit = "session"` (default) lets a turn edit its own session folder
   without asking: claude gets `Edit(//<folder>/**)`, codex `--sandbox workspace-write` with network;
   `edit = "none"` gives claude `--disallowedTools Edit,Write,NotebookEdit`, which wins over the
-  person's own settings, and codex `--sandbox read-only`. No turn edits the data
+  person's own settings, and codex `--sandbox read-only`. `subagents = false` (default true) stops
+  a turn starting the agent's own subagents: claude gets `--disallowedTools Task,Agent,Workflow`,
+  codex `--disable multi_agent --disable multi_agent_v2`; no settings file is edited. No turn edits the data
   folder's own files (`permissions.toml`, `instructions.md`, `agents.json`, the tokens): claude gets
   a deny rule on each. `[limits]`: `max_depth` (2), `max_jobs_per_turn` (10), `max_jobs_per_tree`
   (30), `max_cost_usd_per_tree` (0, off). `[agent_api]`: `scope` (`"tree"` or `"session"`), and

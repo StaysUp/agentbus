@@ -16,7 +16,7 @@ import (
 func samePolicy(p, q Permissions) bool {
 	l, m := p.Limits, q.Limits
 	a, b := p.AgentAPI, q.AgentAPI
-	return p.Edit == q.Edit && *l.MaxDepth == *m.MaxDepth && *l.MaxJobsPerTurn == *m.MaxJobsPerTurn &&
+	return p.Edit == q.Edit && *p.Subagents == *q.Subagents && *l.MaxDepth == *m.MaxDepth && *l.MaxJobsPerTurn == *m.MaxJobsPerTurn &&
 		*l.MaxJobsPerTree == *m.MaxJobsPerTree && *l.MaxCostUSDPerTree == *m.MaxCostUSDPerTree && a.Scope == b.Scope &&
 		*a.Read == *b.Read && *a.ListAgents == *b.ListAgents && *a.Start == *b.Start && *a.Continue == *b.Continue &&
 		*a.Review == *b.Review && *a.Cancel == *b.Cancel
@@ -45,6 +45,9 @@ func TestLoadPermissions(t *testing.T) {
 		*def.Limits.MaxCostUSDPerTree != 0 || def.AgentAPI.Scope != ScopeTree || !*def.AgentAPI.Start || !*def.AgentAPI.Cancel {
 		t.Fatalf("defaults: %+v %+v", def.Limits, def.AgentAPI)
 	}
+	if !*def.Subagents {
+		t.Fatal("subagents are off by default")
+	}
 	// The starter parses, with empty lists, and writes out every default.
 	writePerm(t, path, PermissionsStarter)
 	if p, err := loadPermissions(path, home); err != nil || len(p.ReadFolders)+len(p.Allow)+len(p.Forbid) != 0 || !samePolicy(p, def) {
@@ -60,6 +63,10 @@ func TestLoadPermissions(t *testing.T) {
 	if p, err := loadPermissions(path, home); err != nil || p.Edit != EditNone || *p.Limits.MaxDepth != 0 || *p.Limits.MaxJobsPerTurn != 10 ||
 		*p.Limits.MaxCostUSDPerTree != 0.25 || p.AgentAPI.Scope != ScopeSession || *p.AgentAPI.Start || !*p.AgentAPI.Continue {
 		t.Fatalf("set values: %+v %v", p, err)
+	}
+	writePerm(t, path, "subagents = false\n")
+	if p, err := loadPermissions(path, home); err != nil || *p.Subagents || p.Edit != EditSession {
+		t.Fatalf("subagents = false: %+v %v", p, err)
 	}
 	// ~ is the home folder; a folder comes back absolute and clean.
 	writePerm(t, path, "read_folders = [\"~\", \"~/notes/a/\", \""+dir+"/.\"]\n"+
@@ -110,6 +117,7 @@ func TestLoadPermissions(t *testing.T) {
 		{"cost negative", "[limits]\nmax_cost_usd_per_tree = -0.5\n", "max_cost_usd_per_tree must be 0"},
 		{"unknown limit", "[limits]\nmax_rounds = 2\n", `unknown key "limits.max_rounds"`},
 		{"scope unknown", "[agent_api]\nscope = \"all\"\n", `scope must be "tree" or "session"`},
+		{"subagents not a bool", "subagents = \"no\"\n", "subagents is true or false"},
 		{"switch not a bool", "[agent_api]\nstart = \"no\"\n", "wrong type"},
 		{"unknown switch", "[agent_api]\nwrite_permissions = true\n", `unknown key "agent_api.write_permissions"`},
 	} {

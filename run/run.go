@@ -846,7 +846,8 @@ func (e *Engine) StopAll() {
 // prompt (historyHint). perm is the person's permissions.toml (permissions.go).
 func turnArgs(h harness.Harness, hint, resumeID, model string, w Writes, perm Permissions, prompt string) []string {
 	return h.Args(harness.Turn{Hint: hint, ResumeID: resumeID, Model: model, Writes: w,
-		ReadFolders: perm.ReadFolders, Allow: perm.Allow, Forbid: perm.Forbid, Prompt: prompt})
+		ReadFolders: perm.ReadFolders, Allow: perm.Allow, Forbid: perm.Forbid,
+		NoSubagents: perm.Subagents != nil && !*perm.Subagents, Prompt: prompt})
 }
 
 // withAPI is perm with the agent's way to the API allowed without asking,

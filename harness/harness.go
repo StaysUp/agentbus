@@ -120,6 +120,10 @@ type Turn struct {
 	Writes   Writes
 	// The lists of permissions.toml.
 	ReadFolders, Allow, Forbid []string
+	// NoSubagents turns the harness's own subagents off for the turn, on
+	// its command line (permissions.toml subagents = false). Its own config
+	// files are never edited.
+	NoSubagents bool
 	// Prompt is always last, after "--", so it is never read as a flag.
 	Prompt string
 }

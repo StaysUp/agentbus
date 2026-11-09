@@ -133,6 +133,14 @@ func (codex) Args(t Turn) []string {
 	// read_folders never means (codex-cli 0.164.0, 2026-11-07, checked
 	// with codex sandbox). allow: codex has no per-command flag. forbid
 	// reaches codex through the gateway's guard (gateway/guard.go).
+	// subagents = false: both of codex's multi-agent features off for this
+	// run. multi_agent is on by default, multi_agent_v2 off, and either
+	// lets a turn spawn agents (codex-cli 0.167.0, 2026-11-09, `codex
+	// features list`). Before resume, it reaches the resumed turn as
+	// --sandbox does.
+	if t.NoSubagents {
+		a = append(a, "--disable", "multi_agent", "--disable", "multi_agent_v2")
+	}
 	if t.ResumeID != "" {
 		a = append(a, "resume", "--json")
 	}

@@ -108,6 +108,10 @@ func TestLaunchGolden(t *testing.T) {
 			launchCase{name: h + " openrouter replay", replay: true, env: []string{"OPENROUTER_API_KEY=test-key"},
 				turns: []engine.Request{with(first(h), func(r *engine.Request) { or(r); r.Model = "m/x" }), next("t_2")}},
 			launchCase{name: h + " access unknown", turns: []engine.Request{with(first(h), func(r *engine.Request) { r.Access = "api" })}},
+			launchCase{name: h + " subagents off, then resume", perm: "subagents = false\n", turns: []engine.Request{first(h), next("t_2")}},
+			launchCase{name: h + " subagents off, read-only, with lists", perm: lists + "subagents = false\n",
+				turns: []engine.Request{with(first(h), func(r *engine.Request) { r.ReadOnly = true })}},
+			launchCase{name: h + " subagents on, said", perm: "subagents = true\n", turns: []engine.Request{first(h)}},
 		)
 	}
 	cases = append(cases,

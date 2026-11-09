@@ -58,6 +58,12 @@ forbid = []         # e.g. ["git push", "git checkout"]
 # can still write them: allow only commands you would let change this file.
 edit = "session"
 
+# subagents: whether a turn may start the agent's own subagents. false turns
+# them off on the command line: claude is denied its Task, Agent and Workflow
+# tools; codex runs with its multi_agent features disabled. Your own settings
+# files are never changed.
+subagents = true
+
 # Work agents ask other agents for. A request tree is the person's session and
 # every session work asked for from it, at any depth. A limit reached refuses
 # the request and says which limit.
@@ -102,6 +108,7 @@ type Permissions struct {
 	Allow       []string `toml:"allow"`
 	Forbid      []string `toml:"forbid"`
 	Edit        string   `toml:"edit"`
+	Subagents   *bool    `toml:"subagents"`
 	Limits      Limits   `toml:"limits"`
 	AgentAPI    AgentAPI `toml:"agent_api"`
 }
@@ -145,6 +152,10 @@ func DefaultPermissions() Permissions {
 func (p *Permissions) fill() {
 	if p.Edit == "" {
 		p.Edit = EditSession
+	}
+	if p.Subagents == nil {
+		on := true
+		p.Subagents = &on
 	}
 	setInt := func(v **int, d int) {
 		if *v == nil {
@@ -236,10 +247,10 @@ func loadPermissions(path, home string) (Permissions, error) {
 		// Not a parse error: a value of the wrong type, such as a string
 		// where a list belongs.
 		return Permissions{}, errors.New("a value has the wrong type: read_folders, allow and forbid are lists of strings, such as [\"go test\"]; " +
-			"edit and scope are strings; the [limits] are numbers; the [agent_api] switches are true or false")
+			"edit and scope are strings; subagents is true or false; the [limits] are numbers; the [agent_api] switches are true or false")
 	}
 	if extra := md.Undecoded(); len(extra) > 0 {
-		return Permissions{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, [limits] and [agent_api] (see the README)", strconv.Quote(extra[0].String()))
+		return Permissions{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, subagents, [limits] and [agent_api] (see the README)", strconv.Quote(extra[0].String()))
 	}
 	if err := p.check(); err != nil {
 		return Permissions{}, err

@@ -413,6 +413,98 @@ replay_base claude
 === claude access unknown
 --- turn t_1 harness="claude" access="api" model="" read_only=false
 refused 400 access must be subscription or openrouter
+=== claude subagents off, then resume
+--- turn t_1 harness="claude" access="" model="" read_only=false
+arg "-p"
+arg "--output-format"
+arg "json"
+arg "--append-system-prompt"
+arg "Your session's earlier turns are stored by AgentBus. To look something up, run:\nagentbus-api GET \"/api/v0/sessions/s1/search?q=<text>\"\nwith <text> URL-encoded. Each hit's \"read\" is a path you can GET the same way, for the whole of what matched.\nYou can also ask other agents with the same command: start a turn on any saved agent, continue one, or ask for a review. Do not wait for them: each result comes back to you as a later turn. How: agentbus-api GET /docs/llms.txt, section \"Ask other agents\"."
+arg "--allowedTools"
+arg "Edit(/<folder>/**),Bash(agentbus-api:*)"
+arg "--disallowedTools"
+arg "Edit(/<data>/permissions.toml),Edit(/<data>/instructions.md),Edit(/<data>/agents.json),Task,Agent,Workflow"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="claude" continuity="" replay_from="" model="" context=""
+session.closed resume_id="sid-0"
+--- turn t_2 harness="" access="" model="" read_only=false
+arg "-p"
+arg "--output-format"
+arg "json"
+arg "--append-system-prompt"
+arg "Your session's earlier turns are stored by AgentBus. To look something up, run:\nagentbus-api GET \"/api/v0/sessions/s1/search?q=<text>\"\nwith <text> URL-encoded. Each hit's \"read\" is a path you can GET the same way, for the whole of what matched.\nYou can also ask other agents with the same command: start a turn on any saved agent, continue one, or ask for a review. Do not wait for them: each result comes back to you as a later turn. How: agentbus-api GET /docs/llms.txt, section \"Ask other agents\"."
+arg "--resume"
+arg "sid-0"
+arg "--allowedTools"
+arg "Edit(/<folder>/**),Bash(agentbus-api:*)"
+arg "--disallowedTools"
+arg "Edit(/<data>/permissions.toml),Edit(/<data>/instructions.md),Edit(/<data>/agents.json),Task,Agent,Workflow"
+arg "--"
+arg "next t_2"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_2"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="claude" continuity="resume" replay_from="" model="" context=""
+session.closed resume_id="sid-1"
+=== claude subagents off, read-only, with lists
+--- turn t_1 harness="claude" access="" model="" read_only=true
+arg "-p"
+arg "--output-format"
+arg "json"
+arg "--append-system-prompt"
+arg "Your session's earlier turns are stored by AgentBus. To look something up, run:\nagentbus-api GET \"/api/v0/sessions/s1/search?q=<text>\"\nwith <text> URL-encoded. Each hit's \"read\" is a path you can GET the same way, for the whole of what matched.\nYou can also ask other agents with the same command: start a turn on any saved agent, continue one, or ask for a review. Do not wait for them: each result comes back to you as a later turn. How: agentbus-api GET /docs/llms.txt, section \"Ask other agents\"."
+arg "--tools"
+arg "Read,Grep,Glob"
+arg "--allowedTools"
+arg "Read,Grep,Glob,Read(/<readfolder>/**),Grep(/<readfolder>/**),Glob(/<readfolder>/**)"
+arg "--strict-mcp-config"
+arg "--disallowedTools"
+arg "Bash(git push:*),Bash(rm -rf:*),Task,Agent,Workflow"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="claude" continuity="" replay_from="" model="" context=""
+session.closed resume_id="sid-0"
+=== claude subagents on, said
+--- turn t_1 harness="claude" access="" model="" read_only=false
+arg "-p"
+arg "--output-format"
+arg "json"
+arg "--append-system-prompt"
+arg "Your session's earlier turns are stored by AgentBus. To look something up, run:\nagentbus-api GET \"/api/v0/sessions/s1/search?q=<text>\"\nwith <text> URL-encoded. Each hit's \"read\" is a path you can GET the same way, for the whole of what matched.\nYou can also ask other agents with the same command: start a turn on any saved agent, continue one, or ask for a review. Do not wait for them: each result comes back to you as a later turn. How: agentbus-api GET /docs/llms.txt, section \"Ask other agents\"."
+arg "--allowedTools"
+arg "Edit(/<folder>/**),Bash(agentbus-api:*)"
+arg "--disallowedTools"
+arg "Edit(/<data>/permissions.toml),Edit(/<data>/instructions.md),Edit(/<data>/agents.json)"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="claude" continuity="" replay_from="" model="" context=""
+session.closed resume_id="sid-0"
 === codex subscription, then resume
 --- turn t_1 harness="codex" access="" model="" read_only=false
 arg "-c"
@@ -837,6 +929,109 @@ session.closed resume_id="tid-1"
 === codex access unknown
 --- turn t_1 harness="codex" access="api" model="" read_only=false
 refused 400 access must be subscription or openrouter
+=== codex subagents off, then resume
+--- turn t_1 harness="codex" access="" model="" read_only=false
+arg "-c"
+arg "openai_base_url=\"http://127.0.0.1:8787/s/s1/t/t_1/backend-api/codex\""
+arg "exec"
+arg "--skip-git-repo-check"
+arg "--json"
+arg "--sandbox"
+arg "workspace-write"
+arg "-c"
+arg "developer_instructions=\"Your session's earlier turns are stored by AgentBus. To look something up, run:\\nagentbus-api GET \\\"/api/v0/sessions/s1/search?q=\\u003ctext\\u003e\\\"\\nwith \\u003ctext\\u003e URL-encoded. Each hit's \\\"read\\\" is a path you can GET the same way, for the whole of what matched.\\nYou can also ask other agents with the same command: start a turn on any saved agent, continue one, or ask for a review. Do not wait for them: each result comes back to you as a later turn. How: agentbus-api GET /docs/llms.txt, section \\\"Ask other agents\\\".\""
+arg "-c"
+arg "sandbox_workspace_write.network_access=true"
+arg "--disable"
+arg "multi_agent"
+arg "--disable"
+arg "multi_agent_v2"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="codex" continuity="" replay_from="" model="" context=""
+session.closed resume_id="tid-0"
+--- turn t_2 harness="" access="" model="" read_only=false
+arg "-c"
+arg "openai_base_url=\"http://127.0.0.1:8787/s/s1/t/t_2/backend-api/codex\""
+arg "exec"
+arg "--skip-git-repo-check"
+arg "--sandbox"
+arg "workspace-write"
+arg "-c"
+arg "developer_instructions=\"Your session's earlier turns are stored by AgentBus. To look something up, run:\\nagentbus-api GET \\\"/api/v0/sessions/s1/search?q=\\u003ctext\\u003e\\\"\\nwith \\u003ctext\\u003e URL-encoded. Each hit's \\\"read\\\" is a path you can GET the same way, for the whole of what matched.\\nYou can also ask other agents with the same command: start a turn on any saved agent, continue one, or ask for a review. Do not wait for them: each result comes back to you as a later turn. How: agentbus-api GET /docs/llms.txt, section \\\"Ask other agents\\\".\""
+arg "-c"
+arg "sandbox_workspace_write.network_access=true"
+arg "--disable"
+arg "multi_agent"
+arg "--disable"
+arg "multi_agent_v2"
+arg "resume"
+arg "--json"
+arg "--"
+arg "tid-0"
+arg "next t_2"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="codex" continuity="resume" replay_from="" model="" context=""
+session.closed resume_id="tid-1"
+=== codex subagents off, read-only, with lists
+--- turn t_1 harness="codex" access="" model="" read_only=true
+arg "-c"
+arg "openai_base_url=\"http://127.0.0.1:8787/s/s1/t/t_1/backend-api/codex\""
+arg "exec"
+arg "--skip-git-repo-check"
+arg "--json"
+arg "--sandbox"
+arg "read-only"
+arg "-c"
+arg "developer_instructions=\"Your session's earlier turns are stored by AgentBus. To look something up, run:\\nagentbus-api GET \\\"/api/v0/sessions/s1/search?q=\\u003ctext\\u003e\\\"\\nwith \\u003ctext\\u003e URL-encoded. Each hit's \\\"read\\\" is a path you can GET the same way, for the whole of what matched.\\nYou can also ask other agents with the same command: start a turn on any saved agent, continue one, or ask for a review. Do not wait for them: each result comes back to you as a later turn. How: agentbus-api GET /docs/llms.txt, section \\\"Ask other agents\\\".\""
+arg "--disable"
+arg "multi_agent"
+arg "--disable"
+arg "multi_agent_v2"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="codex" continuity="" replay_from="" model="" context=""
+session.closed resume_id="tid-0"
+=== codex subagents on, said
+--- turn t_1 harness="codex" access="" model="" read_only=false
+arg "-c"
+arg "openai_base_url=\"http://127.0.0.1:8787/s/s1/t/t_1/backend-api/codex\""
+arg "exec"
+arg "--skip-git-repo-check"
+arg "--json"
+arg "--sandbox"
+arg "workspace-write"
+arg "-c"
+arg "developer_instructions=\"Your session's earlier turns are stored by AgentBus. To look something up, run:\\nagentbus-api GET \\\"/api/v0/sessions/s1/search?q=\\u003ctext\\u003e\\\"\\nwith \\u003ctext\\u003e URL-encoded. Each hit's \\\"read\\\" is a path you can GET the same way, for the whole of what matched.\\nYou can also ask other agents with the same command: start a turn on any saved agent, continue one, or ask for a review. Do not wait for them: each result comes back to you as a later turn. How: agentbus-api GET /docs/llms.txt, section \\\"Ask other agents\\\".\""
+arg "-c"
+arg "sandbox_workspace_write.network_access=true"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="codex" continuity="" replay_from="" model="" context=""
+session.closed resume_id="tid-0"
 === switch claude to codex, replay
 --- turn t_1 harness="claude" access="" model="" read_only=false
 arg "-p"
