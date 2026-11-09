@@ -330,7 +330,20 @@ func start(c config) (*service, error) {
 	// or this process's own in runner mode. A server runs no turns.
 	var eng *engine.Engine
 	if c.hasEngine() {
-		eng, err = engine.New(engine.Config{Store: st, BaseURL: baseURL, MaxRuns: c.maxRuns, ReplayBase: replayBase,
+		// A turn on another harness than its session's latest names the
+		// earlier turns' agents by their saved names, where this process
+		// keeps them.
+		var agentName func(string) string
+		if saved != nil {
+			agentName = func(id string) string {
+				a, err := saved.Get(id)
+				if err != nil {
+					return ""
+				}
+				return a.Name
+			}
+		}
+		eng, err = engine.New(engine.Config{Store: st, BaseURL: baseURL, MaxRuns: c.maxRuns, ReplayBase: replayBase, AgentName: agentName,
 			Permissions: permissions, Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace, Logf: svcLog.Printf,
 			RunLog: func(session string, data []byte) {
 				// The session id is the service's own hex, so it is a plain

@@ -321,6 +321,9 @@ Sessions are newest activity first. Every field is computed from stored events u
   them. Both name the same run, and the latest of the two is read. A session pointed at the gateway
   by hand, with no run, has both empty. Stores from before 2026-11-05 may hold a
   `session.registered` with them instead, which still counts.
+- `first_agent` is the agent of the session's first `turn.started` or run that names one. It stays
+  when a later turn runs on another agent, so a list grouped by it keeps a session in one place.
+  Absent for a session no run started.
 - `open`: true while a run's child for this session is running: a `session.opened` whose `hold`
   has no `session.closed` yet (below). A session no run started is never open.
 - `resumable`: the session has a `resume_id` (on a run's `session.closed`, below) and is not
@@ -568,8 +571,9 @@ sent as soon as the agent has started. The turn's work arrives as events of the 
 carrying the new turn id, since the agent's base URL names both.
 
 - It starts the session's agent again, in the session's folder, both read as `GET
-  /api/v0/sessions` reads them (the latest turn or run that names them). How the new turn reaches
-  the earlier ones depends on the agent:
+  /api/v0/sessions` reads them (the latest turn or run that names them), unless the body names
+  another agent (switching agent, below). How the new turn reaches the earlier ones depends on the
+  agent:
   - **claude: own replay** (the default). The child starts fresh, with no `--resume`:
     `claude -p --output-format json [read-only flags] [--model M] -- <prompt>`. The turn's
     `turn.started` names the earlier turn it continues in `replay_from`. On every model request of
@@ -675,12 +679,35 @@ carrying the new turn id, since the agent's base URL names both.
     were kept, continues by `codex … exec … --sandbox <mode> [-c …network_access=true] resume --json [--model M] -- <resume_id> <prompt>`.
     `codex exec resume` takes no `--sandbox` of its own; given before `resume` it reaches the
     resumed turn (measured on codex-cli 0.164.0, 2026-11-05, from the turn's recorded sandbox policy).
-- Fields: `session` and `prompt` (required), `read_only` (false unless true), `model` (optional).
-  **`model` is not remembered**: a turn without one runs on the agent's default model, so a cockpit
-  that chose a model for the run sends it again.
-- `agent` and `folder` come from the session, so leave them out. If the body sends one, it must be
-  the session's own (a folder is compared after removing a trailing `/` and the like), or the turn
-  is refused with 400. The service never picks one of two.
+- Fields: `session` and `prompt` (required), `agent`, `read_only` (false unless true), `model`
+  (optional). A turn with no `agent` and no `model` runs on the model of the session's latest
+  turn, which its `turn.started` names in `model` (absent for the harness's default).
+- `folder` comes from the session, so leave it out. If the body sends one, it must be the session's
+  own (compared after removing a trailing `/` and the like), or the turn is refused with 400.
+- **Switching agent.** `agent` names a saved agent: this turn runs on it, with its access and its
+  model unless `model` is sent, in the session's folder (its worktree, for an isolated session).
+  Later turns that name no agent stay on it: the session's agent is its latest turn's. Each turn's
+  `turn.started` and `session.opened` carry the agent that ran it (`agent`, `agent_id`, `access`).
+  How the switched turn reaches the earlier ones:
+  - **On the same harness** as the session's latest turn (Claude Code to Claude Code, on a
+    subscription or on OpenRouter): by own replay, as above. When the request's model differs
+    from the model of the history's last request, the history is laid out for it: thinking blocks
+    go (their signatures belong to the model that made them), and so do a system message's
+    `tool_addition` and `tool_removal` blocks and its fields other than `role` and `content`, such
+    as `output_config`. OpenRouter refused each of those on a DeepSeek model (Claude Code 2.1.319,
+    2026-11-09). For codex, reasoning items go.
+  - **On another harness**, or with codex on OpenRouter (its requests lack the item kinds the
+    codex format reads, codex-cli 0.167.0): the history is in a layout the new agent cannot take,
+    so the child starts fresh with the earlier turns as plain text in front of the person's words.
+    That text gives each turn's number, its agent (the saved agent's name, else the harness) and
+    model, the person's message and the text of the reply to its last model call, oldest first;
+    tool calls are left out. It is at most 48 KiB, each message cut to 4 KiB and each reply to
+    8 KiB, newest turns kept; the prompt and the text together stay within 256 KiB. The turn's
+    `turn.started` has `continuity: "transcript"`, the person's words in `text` and the earlier
+    turns' text in `context`; the agent's prompt was `context` then `text`. The next turn on the
+    same harness continues it by replay as usual. A vendor `resume_id` from before such a turn is never
+    resumed: it lacks the turns since, and may be the other vendor's. With replay off, a turn whose
+    newest `resume_id` is from before one gets the text instead.
 - Each turn is a run: `session.opened` when the child starts, `session.closed` with `exit_code` and
   the new `resume_id` when it exits (the vendor can change it). `session.closed` is stored only
   once the gateway has written all of the turn's model calls (their events and kept replies, which
@@ -702,8 +729,8 @@ carrying the new turn id, since the agent's base URL names both.
     interrupted or failed is never a reason. With replay off, a session that was continued by
     replay is refused too (above).
   - **400** with fixed wording: a `session` not shaped `^[A-Za-z0-9_-]{1,64}$`, which includes
-    `""` and `null` (only a body without `session` starts a new session); an `agent` or
-    `folder` that is not the session's own; and, as runs, an empty prompt, one over 256 KiB or
+    `""` and `null` (only a body without `session` starts a new session); a `folder` that is not
+    the session's own; an `agent` that is not a saved agent (as for a new session); and, as runs, an empty prompt, one over 256 KiB or
     holding a NUL; a bad model; a body that is not one JSON object with only these fields, or over
     2 MiB; the service's own environment sends the agent elsewhere; the agent's program is not on
     the service's `PATH` (nothing is stored; wording as for runs, above).
@@ -743,7 +770,9 @@ the sessions snapshot.
   from the turn's `turn.started`. `prompt_truncated: true` says it was cut; it is absent when not.
   **The whole prompt is that `turn.started`'s `text`**, the first event of
   `GET /api/v0/turns/<id>/events`. A list of many 256 KiB prompts would otherwise be hundreds of MB. `agent` and `folder` come from the same `turn.started`, empty for a
-  turn not started through `POST /api/v0/turns`.
+  turn not started through `POST /api/v0/turns`, and so does `agent_id`, the saved agent that ran
+  the turn (absent for a turn started by harness name alone). Turns of one session may name
+  different agents.
 - `reply`, `model` and `model_calls` let a list show a turn without reading its events. The turn's
   last model call is its `model.requested` with the highest seq. `reply` is the `text` of that
   call's `model.responded` (the one with the same `exchange`), cut to 500 characters by the same
@@ -1080,9 +1109,12 @@ turn. The jobs API is the whole way: worktrees, reviews, cancel, and the list.
   while the turn ran) or `runner_stopped` (its runner shut down).
 - **A session's turn jobs run one at a time**, in the order they were made. A next turn waits for
   the one before it. Reviews never wait.
-- **A session's next turn keeps the session's model.** A turn job of a session that names no model
-  gets the model of the session's newest turn job that named one, so a Fix after a review runs on
-  the model the author used. Its `spec.model` shows it. A job that names a model keeps its own.
+- **A session's next turn keeps the session's agent and model.** A turn job of a session that names
+  no agent and no model runs on the agent and the model of the session's latest turn, as the record
+  holds them when the turn starts (`agent`, `agent_id` and `model` on its `turn.started`), so a Fix
+  after a review runs on the model the author used. Its `spec.model` stays empty; the turn's
+  `turn.started` shows the model. A job that names a model keeps its own. A job that names an agent
+  gets that agent's model, or its default.
 - **No automatic retry once a job is running.** A lease lost before the turn started puts the job
   back in the queue; a lease lost while it runs fails it with `runner_lost`.
 - **The job's result** holds how the turn ended (`state`, `exit_code`, `stopped`, `reply`,
@@ -1102,7 +1134,9 @@ turn. The jobs API is the whole way: worktrees, reviews, cancel, and the list.
 - **`spec.agent` is a saved agent's id**, as for `POST /api/v0/turns`. The control plane fills
   `spec.agent` with its harness, and `spec.agent_id`, `spec.access`, `spec.key_env` and, when none
   is sent, `spec.model` from it. A caller never sends those three: they are refused.
-- **Later jobs name `session` only.** They go to the runner that holds the session's workspace.
+- **Later jobs name `session`**, and may name `agent`: the turn then runs on that saved agent, in
+  the session's workspace, as for `POST /api/v0/turns` (switching agent). They go to the runner that
+  holds the session's workspace.
 - **A workspace's `folder` is where its turns run.** For an isolated folder in a repo's
   subfolder, that is the same subfolder inside the worktree; later turns and reviews use it.
 - **A retry keeps what was frozen.** The idempotency key is matched against the request as sent,
@@ -1195,7 +1229,8 @@ gets 409 with `stale: true`, and the runner stops that turn.
 | `resume_id` on `session.closed` | when the child's stdout named the vendor's session: claude's `session_id`, codex's `thread_id`. What a next turn continues |
 | `stopped` on `session.closed` | the person stopped the turn with `POST /api/v0/turns/<id>/stop` while its agent ran. The next turn continues after it and is told so. Omitted when false |
 | `unsettled` on `session.closed` | the gateway could not confirm that every model call of the turn was stored (it gave up after 30 seconds, or a queue was full), or the service closed the turn at start because the previous service stopped without its usual shutdown. Own replay does not continue from such a turn. Omitted when false |
-| `continuity` on `turn.started` | on a session's next turn: `replay` (own replay, with `replay_from`) or `resume` (the vendor's `resume_id`). Absent on a first turn |
+| `continuity` on `turn.started` | on a session's next turn: `replay` (own replay, with `replay_from`), `resume` (the vendor's `resume_id`) or `transcript` (another harness: the earlier turns as text, in `context`). Absent on a first turn |
+| `context` on `turn.started` | with `continuity: "transcript"`: the earlier turns as plain text. The agent's prompt was `context` then `text`; `text` stays the person's words |
 | `replay_from` on `turn.started` | the session's earlier turn whose history the gateway replays in front of every model request of this turn (own replay, claude and codex). Absent on a first turn and on a turn continued by the vendor's resume |
 | `recovered_from` on `turn.started` | on a replayed turn: the session's previous turn, which did not finish (interrupted, its last model call failed, or it never reached the model). This turn continues after it, and the model is told what happened. Absent when the previous turn finished. A cockpit can show "continued after an interrupted turn" |
 | `recovered_reason` on `turn.started` | with `recovered_from`: one sentence on how that turn ended, the words the model's note uses, such as `its last model request failed with status 529; its agent process exited with code 1` |

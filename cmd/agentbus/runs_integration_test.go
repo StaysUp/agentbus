@@ -284,7 +284,7 @@ func TestRunRefusals(t *testing.T) {
 		badFolder = "folder must be an absolute path to an existing directory, at most 4096 bytes"
 		badPrompt = "prompt must be from 1 byte to 256 KiB, with no NUL byte"
 		badModel  = "model must match ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
-		badBody   = "the body must be one JSON object with prompt, agent and folder (or session), and optionally model, read_only, isolate and idempotency_key, at most 2 MiB"
+		badBody   = "the body must be one JSON object with prompt, agent and folder (or session, and optionally agent), and optionally model, read_only, isolate and idempotency_key, at most 2 MiB"
 	)
 	for _, tc := range []struct {
 		name string

@@ -143,6 +143,9 @@ type Config struct {
 	// Permissions is the path of permissions.toml, read at the start of every
 	// turn. Empty gives every turn empty lists.
 	Permissions string
+	// AgentName names a saved agent by its id in the transcript a turn on
+	// another harness gets; "" or a nil func names it by harness and model.
+	AgentName func(id string) string
 	// Now is the clock. Nil means time.Now.
 	Now func() time.Time
 	// Logf writes one line to the service log: a child starting and exiting.
@@ -228,8 +231,11 @@ type Request struct {
 	Prompt, Model  string
 	ReadOnly       bool
 	IdempotencyKey string // stored on turn.started, as the caller's key
-	// AgentID, Access and KeyEnv, for a new session: the saved agent and how
-	// it reaches its model (Access). A next turn reads them from the record.
+	// AgentID, Access and KeyEnv: the saved agent and how it reaches its
+	// model (Access). A new session needs Agent; for a next turn they are
+	// optional. Set with Session, Agent (the harness) and these run this turn
+	// on another agent, in the session's folder; left out, the turn runs on
+	// the agent of the session's latest turn, read from the record.
 	AgentID, Access, KeyEnv string
 }
 
@@ -355,12 +361,39 @@ func (e *Engine) next(req Request) (*Turn, error) {
 	if !KnownAgent(c.Agent) {
 		return fail(refuse(http.StatusConflict, "this session cannot be continued from here"))
 	}
+	// The turn runs on the agent it names, or on the agent of the session's
+	// latest turn. The folder is always the session's.
+	// The model too: a turn that names neither keeps the model the latest
+	// turn ran with, read from the same event as its agent, so the two never
+	// disagree, whichever turns started.
+	agent, agentID, access, keyEnv, model := c.Agent, c.AgentID, c.Access, c.KeyEnv, req.Model
+	if req.Agent == "" && model == "" {
+		model = c.Model
+	}
+	if req.Agent != "" {
+		if !KnownAgent(req.Agent) {
+			return fail(refuse(http.StatusBadRequest, "agent must be claude or codex"))
+		}
+		if req.Access != "" && req.Access != "subscription" && req.Access != "openrouter" {
+			return fail(refuse(http.StatusBadRequest, "access must be subscription or openrouter"))
+		}
+		agent, agentID, access, keyEnv = req.Agent, req.AgentID, req.Access, req.KeyEnv
+	}
 	// How the turn reaches the session's earlier turns depends on the agent
 	// (Continuity): by own replay, the child starts fresh and the gateway
 	// puts the earlier turn's history in front of its requests; by resume,
-	// the vendor's own resume_id.
-	var from, recovered, recoveredWhy string
-	continuity := e.Continuity(c.Agent)
+	// the vendor's own resume_id. A turn on another harness than the latest
+	// turn's cannot read that turn's history, which is in the other vendor's
+	// format, nor can a turn of codex on OpenRouter give or take one
+	// (replayLayout): it starts fresh with the earlier turns as plain text.
+	var from, recovered, recoveredWhy, context string
+	continuity := e.Continuity(agent)
+	if agent != c.Agent || (continuity == ByReplay && !(replayLayout(agent, access) && replayLayout(c.Agent, c.Access))) {
+		continuity = ByTranscript
+		if context, err = e.transcript(session, len(req.Prompt)); err != nil {
+			return fail(storeFailed)
+		}
+	}
 	if continuity == ByReplay {
 		plan, err := e.cfg.ReplayBase(c.Agent, session)
 		if err != nil {
@@ -389,6 +422,16 @@ func (e *Engine) next(req Request) (*Turn, error) {
 			continuity = ByResume
 		}
 	}
+	// A vendor's resume_id names the conversation of the turn that gave it.
+	// One from before a switch to another harness (the turns since left
+	// none) lacks the turns since, and may be the other vendor's: the turn
+	// gets the earlier turns as text instead.
+	if continuity == ByResume && c.ResumeID != "" && c.ResumeStale {
+		continuity = ByTranscript
+		if context, err = e.transcript(session, len(req.Prompt)); err != nil {
+			return fail(storeFailed)
+		}
+	}
 	if continuity == ByResume && c.ResumeID == "" {
 		return fail(refuse(http.StatusConflict, "this session cannot be continued from here"))
 	}
@@ -405,22 +448,20 @@ func (e *Engine) next(req Request) (*Turn, error) {
 			return fail(refuse(http.StatusConflict, replayOnly))
 		}
 	}
-	// The session decides its agent and folder. One sent that differs is
-	// refused, never quietly replaced.
-	if req.Agent != "" && req.Agent != c.Agent {
-		return fail(refuse(http.StatusBadRequest, "agent "+strconv.Quote(req.Agent)+" is not this session's agent "+
-			strconv.Quote(c.Agent)+"; leave agent out to use the session's"))
-	}
+	// The session decides its folder. One sent that differs is refused,
+	// never quietly replaced.
 	if req.Folder != "" && filepath.Clean(req.Folder) != filepath.Clean(c.Folder) {
 		return fail(refuse(http.StatusBadRequest, "folder is not this session's folder "+strconv.Quote(c.Folder)+
 			"; leave folder out to use the session's"))
 	}
-	t := turn{agent: c.Agent, folder: c.Folder, session: session, id: req.Turn, resumeID: c.ResumeID, replayFrom: from,
-		recoveredFrom: recovered, recoveredWhy: recoveredWhy, continuity: continuity, model: req.Model,
-		readOnly: req.ReadOnly, prompt: req.Prompt, key: req.IdempotencyKey,
-		agentID: c.AgentID, access: c.Access, keyEnv: c.KeyEnv}
-	if from != "" {
-		t.resumeID = "" // a fresh child: the history comes from the gateway
+	t := turn{agent: agent, folder: c.Folder, session: session, id: req.Turn, resumeID: c.ResumeID, replayFrom: from,
+		recoveredFrom: recovered, recoveredWhy: recoveredWhy, continuity: continuity, model: model,
+		readOnly: req.ReadOnly, prompt: req.Prompt, context: context, key: req.IdempotencyKey,
+		agentID: agentID, access: access, keyEnv: keyEnv}
+	if from != "" || continuity == ByTranscript {
+		// A fresh child: the history comes from the gateway, or from the
+		// transcript in its prompt.
+		t.resumeID = ""
 	}
 	return e.start(t)
 }
@@ -434,6 +475,11 @@ const (
 	ByReplay = "replay"
 	// ByResume: the vendor's own resume, from the session's resume_id.
 	ByResume = "resume"
+	// ByTranscript: the turn runs on another harness than the session's
+	// latest turn. The child starts fresh, and its prompt is the earlier
+	// turns as plain text (transcript.go), then the person's words. The
+	// turn's turn.started keeps that text in context.
+	ByTranscript = "transcript"
 )
 
 // Continuity says how agent's next turns continue a session. claude and codex
@@ -446,6 +492,16 @@ func (e *Engine) Continuity(agent string) string {
 		return ByReplay
 	}
 	return ByResume
+}
+
+// replayLayout says own replay knows the requests agent sends with access:
+// claude with either access, codex on its subscription. codex on OpenRouter
+// sends its input items without the content kinds codex puts on them for
+// chatgpt.com, which is how the codex format finds the prompt and the
+// context (codex-cli 0.167.0, 2026-11-09), so its turns neither give nor take
+// a replayed history: a turn after one, or on one, gets the transcript.
+func replayLayout(agent, access string) bool {
+	return agent == "claude" || access != "openrouter"
 }
 
 const turnRunning = "a turn is already running in this session"
@@ -465,6 +521,7 @@ type turn struct {
 	model                  string
 	readOnly               bool
 	prompt                 string
+	context                string // ByTranscript: the earlier turns as text, put before prompt
 	key                    string // the caller's idempotency key, or ""
 	agentID, access        string // the saved agent and how it reaches its model
 	keyEnv                 string // for openrouter: the name of the key's variable
@@ -532,7 +589,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		hint = ""
 		e.cfg.Logf("run.hint session=%s turn=%s left_out=codex_developer_instructions_set", t.session, t.id)
 	}
-	args, _ := turnArgs(t.agent, hint, t.resumeID, t.model, t.readOnly, perm, t.prompt)
+	args, _ := turnArgs(t.agent, hint, t.resumeID, t.model, t.readOnly, perm, t.context+t.prompt)
 	all := append(append([]string{}, l.Args...), args...)
 	cmd.Args = append([]string{l.Path}, all...)
 	cmd.Dir = t.folder
@@ -552,7 +609,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	// folder, and a store that cannot write starts nothing.
 	if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.SessionOpened,
 		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Hold: holdID, Agent: t.agent, Folder: t.folder,
-		AgentID: t.agentID, Access: t.access, KeyEnv: t.keyEnv}); err != nil {
+		AgentID: t.agentID, Access: t.access, KeyEnv: t.keyEnv, Model: t.model}); err != nil {
 		return nil, storeFailed
 	}
 	// session.opened is stored, so on any failure below the hold must close,
@@ -568,7 +625,8 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.TurnStarted,
 		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Text: t.prompt, Agent: t.agent, Folder: t.folder,
 		ReplayFrom: t.replayFrom, Continuity: t.continuity, RecoveredFrom: t.recoveredFrom,
-		RecoveredReason: t.recoveredWhy, IdempotencyKey: t.key, AgentID: t.agentID, Access: t.access, KeyEnv: t.keyEnv}); err != nil {
+		RecoveredReason: t.recoveredWhy, IdempotencyKey: t.key, AgentID: t.agentID, Access: t.access, KeyEnv: t.keyEnv,
+		Context: t.context, Model: t.model}); err != nil {
 		closeHold()
 		return nil, storeFailed
 	}
@@ -594,7 +652,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	started = true
 	begun := e.cfg.Now()
 	kind := "run"
-	if t.resumeID != "" || t.replayFrom != "" {
+	if t.continuity != "" {
 		kind = "message"
 	}
 	e.cfg.Logf("%s.start session=%s agent=%s turn=%s hold=%s pid=%d", kind, t.session, t.agent, t.id, holdID, cmd.Process.Pid)

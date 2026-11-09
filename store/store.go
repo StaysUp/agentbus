@@ -350,12 +350,21 @@ type Continuation struct {
 	// saved agent, how it reaches its model, and the name of its key's
 	// variable. Empty for a session started by harness name alone.
 	AgentID, Access, KeyEnv string
+	// Model is the model the same event's run was started with: "" for the
+	// harness's default. A next turn that names no agent and no model keeps
+	// it.
+	Model string
+	// ResumeStale: a turn that got the earlier turns as text (continuity
+	// transcript) started after the session.closed that gave ResumeID. That
+	// id names a conversation from before the switch, without the turns
+	// since, and maybe another vendor's.
+	ResumeStale bool
 }
 
 // Continuation reads what the session's next turn needs, as of now.
 func (s *Store) Continuation(id string) (Continuation, error) {
 	var c Continuation
-	var agent, folder, resume, agentID, access, keyEnv sql.NullString
+	var agent, folder, resume, agentID, access, keyEnv, model sql.NullString
 	err := s.r.QueryRow(`WITH latest AS (SELECT data FROM events
 				WHERE session = ?1 AND `+agentFrom+` ORDER BY seq DESC LIMIT 1)
 		SELECT
@@ -365,14 +374,20 @@ func (s *Store) Continuation(id string) (Continuation, error) {
 			(SELECT json_extract(data, '$.agent_id') FROM latest),
 			(SELECT json_extract(data, '$.access') FROM latest),
 			(SELECT json_extract(data, '$.key_env') FROM latest),
+			(SELECT json_extract(data, '$.model') FROM latest),
 			(SELECT json_extract(data, '$.resume_id') FROM events
 				WHERE session = ?1 AND kind = 'session.closed' AND json_extract(data, '$.resume_id') IS NOT NULL
-				ORDER BY seq DESC LIMIT 1)`, id).Scan(&c.Known, &agent, &folder, &agentID, &access, &keyEnv, &resume)
+				ORDER BY seq DESC LIMIT 1),
+			EXISTS(SELECT 1 FROM events t WHERE t.session = ?1 AND t.kind = 'turn.started'
+				AND json_extract(t.data, '$.continuity') = 'transcript'
+				AND t.seq > (SELECT seq FROM events WHERE session = ?1 AND kind = 'session.closed'
+					AND json_extract(data, '$.resume_id') IS NOT NULL ORDER BY seq DESC LIMIT 1))`,
+		id).Scan(&c.Known, &agent, &folder, &agentID, &access, &keyEnv, &model, &resume, &c.ResumeStale)
 	if err != nil {
 		return c, fmt.Errorf("store: read session: %w", err)
 	}
 	c.Agent, c.Folder, c.ResumeID = agent.String, folder.String, resume.String
-	c.AgentID, c.Access, c.KeyEnv = agentID.String, access.String, keyEnv.String
+	c.AgentID, c.Access, c.KeyEnv, c.Model = agentID.String, access.String, keyEnv.String, model.String
 	holds, err := s.OpenHolds(s.Last())
 	if err != nil {
 		return c, err

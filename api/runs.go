@@ -41,17 +41,17 @@ const DefaultTurnWait = 30 * time.Second
 
 var runModel = run.ModelShape
 
-const badRun = "the body must be one JSON object with prompt, agent and folder (or session), and optionally model, read_only, isolate and idempotency_key, at most 2 MiB"
+const badRun = "the body must be one JSON object with prompt, agent and folder (or session, and optionally agent), and optionally model, read_only, isolate and idempotency_key, at most 2 MiB"
 
 // TurnRequest is the body of POST /api/v0/turns. omitempty marks a field as
 // optional in the API's description.
 type TurnRequest struct {
 	Session  string `json:"session,omitempty" doc:"A session the snapshot calls resumable: this turn is its next one. Absent: a new session."`
-	Agent    string `json:"agent,omitempty" doc:"A saved agent's id, from GET /api/v0/agents: its harness, access and model start the turn. claude and codex also name that harness on its own subscription when no saved agent has that id. Required without session. With session it is the session's own; if sent it must match its agent id or harness."`
+	Agent    string `json:"agent,omitempty" doc:"A saved agent's id, from GET /api/v0/agents: its harness, access and model run the turn. claude and codex also name that harness on its own subscription when no saved agent has that id. Required without session. With session it is optional: absent, the turn runs on the agent of the session's latest turn; sent, this turn runs on that agent, in the session's folder, and later turns that name none keep it. On the same harness as the latest turn the conversation continues by own replay; on another harness the turn gets the earlier turns as plain text (continuity transcript)."`
 	Folder   string `json:"folder,omitempty" doc:"An absolute path to an existing directory on the runner's machine. Required without session. With session it is the session's own; if sent it must match."`
 	Isolate  *bool  `json:"isolate,omitempty" doc:"True unless false, for a new session. True: when folder is in a git repo with a commit, the session runs in a new git worktree of that repo at its current HEAD, in the same folder inside it; otherwise in folder as it is. Uncommitted changes in folder are not in the worktree. False: always folder as it is. Not sent with session."`
 	Prompt   string `json:"prompt" doc:"From 1 byte to 256 KiB, no NUL byte. Always passed after --."`
-	Model    string `json:"model,omitempty" doc:"Passed only as the value of --model. Absent on a new session: the saved agent's model. A session's next turn with no model keeps the model of the session's newest turn that named one."`
+	Model    string `json:"model,omitempty" doc:"Passed only as the value of --model. Absent with agent: the saved agent's model. A session's next turn with no agent and no model keeps the model of the session's latest turn, from its turn.started."`
 	ReadOnly *bool  `json:"read_only,omitempty" doc:"False unless true. True: claude gets Read, Grep and Glob only; codex runs with --sandbox read-only. False: claude keeps its own tools and permission settings; codex runs with --sandbox workspace-write and network access on, so it can edit the folder and reach the network. Read-only codex has no network."`
 	// IdempotencyKey makes a retry safe: a client whose request timed out
 	// sends it again with the same key and gets the same turn.
@@ -113,9 +113,9 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, msg)
 			return
 		}
-		// The session decides its agent and folder. One sent that differs
-		// is refused, never quietly replaced. The record of this service
-		// knows the sessions its own runner ran.
+		// The session decides its folder. One sent that differs is refused,
+		// never quietly replaced. The record of this service knows the
+		// sessions its own runner ran. An agent sent runs this turn: a switch.
 		c, err := a.cfg.Store.Continuation(body.Session)
 		if err != nil {
 			a.internal(w)
@@ -125,10 +125,15 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "isolate is for a new session; a session keeps its own workspace")
 			return
 		}
-		if c.Known && body.Agent != "" && body.Agent != c.Agent && body.Agent != c.AgentID {
-			writeError(w, http.StatusBadRequest, "agent "+strconv.Quote(body.Agent)+" is not this session's agent "+
-				strconv.Quote(c.Agent)+"; leave agent out to use the session's")
-			return
+		if body.Agent != "" {
+			ag, ok := a.turnAgent(w, body.Agent, body.IdempotencyKey)
+			if !ok {
+				return
+			}
+			spec.Agent, spec.AgentID, spec.Access, spec.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
+			if spec.Model == "" && ag.Model != "" {
+				spec.Model, spec.ModelFromAgent = ag.Model, true
+			}
 		}
 		if c.Known && body.Folder != "" && filepath.Clean(body.Folder) != filepath.Clean(c.Folder) {
 			writeError(w, http.StatusBadRequest, "folder is not this session's folder "+strconv.Quote(c.Folder)+
@@ -150,24 +155,9 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		}
 		spec.Session = body.Session
 	} else {
-		ag, msg := a.resolveAgent(body.Agent)
-		if msg != "" {
-			// A retry of a request whose agent was removed since: the
-			// queue matches the key against the request as asked, the
-			// agent by its id, and answers with the first job.
-			known := false
-			if body.IdempotencyKey != "" && sessionID.MatchString(body.Agent) {
-				var err error
-				if known, err = a.cfg.Queue.HasKey(queue.DefaultTeam, body.IdempotencyKey); err != nil {
-					a.internal(w)
-					return
-				}
-			}
-			if !known {
-				writeError(w, http.StatusBadRequest, msg)
-				return
-			}
-			ag = agents.Agent{ID: body.Agent, Harness: body.Agent}
+		ag, ok := a.turnAgent(w, body.Agent, body.IdempotencyKey)
+		if !ok {
+			return
 		}
 		if len(body.Folder) > run.MaxFolder || !filepath.IsAbs(body.Folder) {
 			writeError(w, http.StatusBadRequest, "folder must be an absolute path to an existing directory, at most 4096 bytes")
@@ -208,8 +198,31 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 	a.awaitTurn(w, r.Context(), job, !created)
 }
 
-// resolveAgent is the saved agent a new session's turn names, or why it
-// cannot start. Without saved agents only claude and codex are known, each
+// turnAgent is the saved agent a turn names, or false once it has answered
+// why the turn cannot start. A retry of a request whose agent was removed
+// since gets a stand-in: the queue matches the key against the request as
+// asked, the agent by its id, and answers with the first job.
+func (a *API) turnAgent(w http.ResponseWriter, id, key string) (agents.Agent, bool) {
+	ag, msg := a.resolveAgent(id)
+	if msg == "" {
+		return ag, true
+	}
+	known := false
+	if key != "" && sessionID.MatchString(id) {
+		var err error
+		if known, err = a.cfg.Queue.HasKey(queue.DefaultTeam, key); err != nil {
+			a.internal(w)
+			return agents.Agent{}, false
+		}
+	}
+	if !known {
+		writeError(w, http.StatusBadRequest, msg)
+		return agents.Agent{}, false
+	}
+	return agents.Agent{ID: id, Harness: id}, true
+}
+
+// resolveAgent is the saved agent a turn names, or why it cannot start. Without saved agents only claude and codex are known, each
 // on its own subscription.
 func (a *API) resolveAgent(id string) (agents.Agent, string) {
 	if a.cfg.Agents == nil {

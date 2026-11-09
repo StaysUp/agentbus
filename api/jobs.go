@@ -41,8 +41,9 @@ var jobRoutes = []route{
 			"agent is a saved agent's id (GET /api/v0/agents); the control plane fills agent_id, access and key_env from it, and model when none is sent. " +
 			"A caller never sends those three. With isolate true, a folder in a git repo with a commit gets a worktree of that repo at its HEAD; " +
 			"another folder is used as it is. " +
-			"A later turn job names session only, and runs in that session's workspace. " +
-			"A later turn job with no model keeps the model of the session's newest turn job that named one. " +
+			"A later turn job names session, and runs in that session's workspace. It may name agent too: its turn then runs on that saved agent, " +
+			"with that agent's model when none is sent, and later turn jobs that name none keep it. " +
+			"A later turn job with no agent and no model runs on the agent and model of the session's latest turn, as its turn.started names them when the turn starts. " +
 			"A retry with the same idempotency_key and fields answers 200 with the same job.",
 		body: jobs.JobRequest{},
 		replies: []reply{ok(201, queue.Job{}, "The job, queued."), ok(200, queue.Job{}, "A retry: the job the key first made."),

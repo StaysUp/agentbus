@@ -188,7 +188,8 @@ func (e *GapError) Error() string { return fmt.Sprintf("queue: events must start
 // Spec is what a turn job asks for. It is frozen when the job is made. A
 // session's first job names its workspace: Repo and Base (a git worktree the
 // runner makes), or Folder (used as it is, or with Isolate a worktree of the
-// git repo it is in, at its HEAD). A later job names Session only.
+// git repo it is in, at its HEAD). A later job names Session, and may name an
+// agent: its turn then runs on that agent, in the session's workspace.
 //
 // Agent is the harness. AgentID, Access and KeyEnv come from the saved agent
 // the job was made for; the API fills them, never the caller.
@@ -600,18 +601,6 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, session s
 		}
 		if kind == KindTurn && session == "" {
 			session = NewID("") // the new session its first turn opens
-		}
-		// A session's next turn that names no model keeps the session's: the
-		// model of its newest turn job that named one. The request's hash is
-		// taken before, so a retry of the same request still matches.
-		if kind == KindTurn && spec.Session != "" && spec.Model == "" {
-			var model sql.NullString
-			err := tx.QueryRow(`SELECT json_extract(spec, '$.model') FROM jobs WHERE team = ? AND session = ? AND kind = 'turn'
-				AND COALESCE(json_extract(spec, '$.model'), '') != '' ORDER BY created DESC, id DESC LIMIT 1`, team, session).Scan(&model)
-			if err != nil && !errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("queue: read session model: %w", err)
-			}
-			spec.Model = model.String
 		}
 		var open int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND state IN ('queued','taken','running')`, team).Scan(&open); err != nil {

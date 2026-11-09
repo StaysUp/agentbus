@@ -375,7 +375,7 @@ func TestRunWithSessionRefusals(t *testing.T) {
 
 	// Body refusals, as runs.
 	const badPrompt = "prompt must be from 1 byte to 256 KiB, with no NUL byte"
-	const badBody = "the body must be one JSON object with prompt, agent and folder (or session), and optionally model, read_only, isolate and idempotency_key, at most 2 MiB"
+	const badBody = "the body must be one JSON object with prompt, agent and folder (or session, and optionally agent), and optionally model, read_only, isolate and idempotency_key, at most 2 MiB"
 	folder := closedFolder(t, svc, id)
 	for _, tc := range []struct {
 		name string
@@ -388,12 +388,12 @@ func TestRunWithSessionRefusals(t *testing.T) {
 		{"over 256 KiB", `{"prompt":"` + strings.Repeat("a", 256<<10+1) + `"}`, badPrompt},
 		{"model as flag", `{"prompt":"a","model":"--x"}`, "model must match ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"},
 		{"unknown field", `{"prompt":"a","bogus":1}`, badBody},
-		{"another agent", `{"prompt":"a","agent":"codex"}`,
-			`agent "codex" is not this session's agent "claude"; leave agent out to use the session's`},
+		{"an agent not saved", `{"prompt":"a","agent":"nobody"}`,
+			`agent "nobody" is not a saved agent; GET /api/v0/agents lists them`},
 		{"another folder", `{"prompt":"a","folder":"/"}`,
 			"folder is not this session's folder " + strconv.Quote(folder) + "; leave folder out to use the session's"},
-		{"another agent, same folder", `{"prompt":"a","agent":"codex","folder":` + jsonOf(folder) + `}`,
-			`agent "codex" is not this session's agent "claude"; leave agent out to use the session's`},
+		{"another agent, another folder", `{"prompt":"a","agent":"codex","folder":"/"}`,
+			"folder is not this session's folder " + strconv.Quote(folder) + "; leave folder out to use the session's"},
 	} {
 		before := svc.store.Last()
 		code, out, raw := postAPI(t, svc, tok, "/api/v0/turns", []byte(`{"session":"`+id+`",`+strings.TrimPrefix(tc.body, "{")))

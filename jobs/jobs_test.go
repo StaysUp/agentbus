@@ -203,7 +203,7 @@ func TestCreateJob(t *testing.T) {
 }
 
 // A first job names agent with folder, or with repo and base; a later job
-// names session only. A base can never be read as a flag.
+// names session, and may name agent. A base can never be read as a flag.
 func TestSpecShapes(t *testing.T) {
 	srv := newServer(t)
 	for _, c := range []struct {
@@ -223,7 +223,9 @@ func TestSpecShapes(t *testing.T) {
 		{queue.Spec{Agent: "claude", Folder: "/f", Repo: "/r", Base: "main", Prompt: "x"}, 400},
 		{queue.Spec{Agent: "claude", Base: "main", Prompt: "x"}, 400},
 		{queue.Spec{Session: "s1", Folder: "/f", Prompt: "x"}, 400},
-		{queue.Spec{Session: "s1", Agent: "claude", Prompt: "x"}, 400},
+		{queue.Spec{Session: "s1", Agent: "claude", Prompt: "x"}, 201},
+		{queue.Spec{Session: "s1", Isolate: true, Prompt: "x"}, 400},
+		{queue.Spec{Session: "s1", Repo: "/r", Base: "main", Prompt: "x"}, 400},
 	} {
 		if got := send(t, srv, mainTok, "POST", "/api/v0/jobs", JobRequest{Kind: "turn", Spec: c.spec}, nil); got != c.want {
 			t.Errorf("%+v: %d, want %d", c.spec, got, c.want)

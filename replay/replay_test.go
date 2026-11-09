@@ -18,6 +18,7 @@ import (
 
 type fakeTurn struct {
 	prompt, from string
+	transcript   bool
 	exchanges    []store.Call // newest first
 	incomplete   bool
 	closed       bool
@@ -35,9 +36,9 @@ func newSource() *fakeSource {
 	return &fakeSource{turns: map[string]fakeTurn{}, calls: map[string]store.CallContext{}, replies: map[string]body.Reply{}}
 }
 
-func (f *fakeSource) TurnStart(_, turn string) (string, string, bool, error) {
+func (f *fakeSource) TurnStart(_, turn string) (string, string, bool, bool, error) {
 	t, ok := f.turns[turn]
-	return t.prompt, t.from, ok, nil
+	return t.prompt, t.from, t.transcript, ok, nil
 }
 func (f *fakeSource) SessionTurns(string) ([]string, error) { return f.order, nil }
 func (f *fakeSource) TurnCalls(_, turn string) ([]store.Call, error) {

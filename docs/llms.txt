@@ -126,8 +126,12 @@ curl -s -H "Authorization: Bearer $TOKEN" "$B/api/v0/sessions/abc/events?store=s
 
 Start a turn. Every turn runs as a job: this makes a turn job and answers once a runner has started
 its turn (the reply also names the `job`). Without `session`: a saved agent (its id from `GET /api/v0/agents`; a new data folder has `claude` and `codex`) with a prompt in a folder, in a new
-session. The agent's harness, access and model start it; `model` sent here wins. A new session whose folder is in a git repo with a commit runs in its own git worktree of that repo at the folder's HEAD (in the same folder inside it); send `"isolate": false` to use the folder as it is. With `session`: the next turn of a session the snapshot marks `resumable`, in its own agent
-and folder (send neither, or the session's own; a different one is refused with 400). Answers 202
+session. The agent's harness, access and model start it; `model` sent here wins. A new session whose folder is in a git repo with a commit runs in its own git worktree of that repo at the folder's HEAD (in the same folder inside it); send `"isolate": false` to use the folder as it is. With `session`: the next turn of a session the snapshot marks `resumable`, in its own folder
+(send none, or the session's own; a different one is refused with 400). It runs on the session's
+latest agent, or on the saved agent `agent` names: any message may go to any agent, and later
+turns stay on it. On the same harness the conversation continues by own replay; on another harness
+(or codex on OpenRouter) the agent gets the earlier turns as plain text before the person's words,
+and its `turn.started` has `continuity: "transcript"` with that text in `context`. Answers 202
 as soon as it starts, with the session `id` and the new `turn` id. Every event of the turn carries
 that id in `turn`, and its `turn.started` (with the prompt) is stored before the reply. `read_only`
 is false unless true. True gives claude Read, Grep and Glob only, and codex `--sandbox read-only`.
@@ -163,7 +167,7 @@ cannot be continued gives the reason, naming the turn (such as one that may be m
 whose last request was compacted). `agentbus up -replay=false` puts both on the vendor's resume (a
 session already continued by replay is then refused with 409), and a session from before replies
 were kept continues by the vendor's resume. A next turn's `turn.started` says which it used in
-`continuity` (`replay` or `resume`).
+`continuity` (`replay`, `resume` or `transcript`).
 
 ```sh
 curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
@@ -349,7 +353,7 @@ fields depend on the kind. Ignore kinds and fields you do not know: v0 may add b
 
 | kind | what happened | main fields |
 |---|---|---|
-| `turn.started` | a person's message started a turn | `turn`, `text`, `agent`, `folder` (empty when the turn was not started through `POST /api/v0/turns`), `replay_from` (the earlier turn a replayed turn continues), `continuity` (`replay` or `resume`, on a next turn), `recovered_from` and `recovered_reason` (the previous turn did not finish and how it ended; this turn continues after it) |
+| `turn.started` | a person's message started a turn | `turn`, `text`, `agent`, `folder` (empty when the turn was not started through `POST /api/v0/turns`), `replay_from` (the earlier turn a replayed turn continues), `continuity` (`replay`, `resume` or `transcript`, on a next turn), `context` (with `transcript`: the earlier turns as text, put before `text` in the agent's prompt), `agent_id` (the saved agent that ran the turn), `recovered_from` and `recovered_reason` (the previous turn did not finish and how it ended; this turn continues after it) |
 | `model.requested` | the harness sent a request to the model | `model`, `tools_offered`, `replayed` (history messages the gateway put in front) |
 | `model.responded` | the model replied | `status`, `text`, `stop_reason`, `usage`, `cost_usd`, `cost_complete`, `error` |
 | `tool.requested` | the model asked for a tool | `tool_id`, `tool_name`, `tool_input` |

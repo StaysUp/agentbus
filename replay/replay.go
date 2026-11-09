@@ -49,7 +49,7 @@ import (
 
 // Source is what a Replayer reads: the store.
 type Source interface {
-	TurnStart(session, turn string) (prompt, replayFrom string, found bool, err error)
+	TurnStart(session, turn string) (prompt, replayFrom string, transcript, found bool, err error)
 	SessionTurns(session string) ([]string, error)
 	TurnCalls(session, turn string) ([]store.Call, error)
 	TurnIncomplete(session, turn string) (bool, error)
@@ -125,6 +125,10 @@ type format interface {
 	// build is the request with the history in front, and the header edit
 	// that goes with it, if any.
 	build(req request, h *history, prompt string) ([]byte, func(http.Header), error)
+	// otherModel lays out a history for a request to another model than the
+	// one that made it, as after the person switched agents: what belongs to
+	// the model or the process that made it goes, the conversation stays.
+	otherModel(msgs []json.RawMessage) ([]json.RawMessage, error)
 }
 
 // request is one model request as the splice reads it.
@@ -150,7 +154,10 @@ const notFinished = "Not finished: the turn was interrupted before this tool's r
 
 type turnInfo struct {
 	turn, prompt, from string
-	found              bool
+	// transcript: the turn got the earlier turns as text in its prompt, so
+	// no earlier history stands behind it (another harness's, perhaps).
+	transcript bool
+	found      bool
 }
 
 // history is a finished turn's conversation, laid out as an earlier part of a
@@ -167,6 +174,8 @@ type history struct {
 	// failed, when set, says how the turn ended without finishing: the
 	// history then ends with a note saying so (endUnfinished).
 	failed string
+	// model is the model the turn's last request asked for, or "".
+	model string
 }
 
 // memoMax bounds each memo. Past it the memo starts over: an entry is only a
@@ -264,11 +273,11 @@ func (r *Replayer) turn(session, turn string) (turnInfo, error) {
 	if ok {
 		return ti, nil
 	}
-	p, from, found, err := r.src.TurnStart(session, turn)
+	p, from, transcript, found, err := r.src.TurnStart(session, turn)
 	if err != nil {
 		return ti, err
 	}
-	ti = turnInfo{turn: turn, prompt: p, from: from, found: found}
+	ti = turnInfo{turn: turn, prompt: p, from: from, transcript: transcript, found: found}
 	// A turn's turn.started is stored before its child starts and never
 	// changes, so a turn not found yet is not kept: a later read may find it.
 	if found {
@@ -415,7 +424,7 @@ func (r *Replayer) history(session, turn string, keep bool) (*history, error) {
 			return nil, &missing{why: "turn " + turn + "'s last main-thread reply " + x + " is not stored", kind: pendingCall}
 		}
 	}
-	h = &history{}
+	h = &history{model: body.Label(newest.c.Request, "model")}
 	r.f.carry(h, newest.c)
 	for _, m := range newest.msgs {
 		hm, err := r.f.asHistory(m)
@@ -486,9 +495,12 @@ func (r *Replayer) notReached(session, turn string, ti turnInfo, keep bool) (*hi
 	if err != nil {
 		return nil, err
 	}
+	// The previous turn's history comes first, except behind a turn that
+	// got the earlier turns as text: its prompt already holds them, and the
+	// turn before it may be another harness's, in another format.
 	prev := ""
 	for i, t := range turns {
-		if t == turn && i+1 < len(turns) {
+		if t == turn && i+1 < len(turns) && !ti.transcript {
 			prev = turns[i+1]
 		}
 	}
@@ -499,7 +511,7 @@ func (r *Replayer) notReached(session, turn string, ti turnInfo, keep bool) (*hi
 			return nil, err
 		}
 		h.messages = append(h.messages, ph.messages...)
-		h.prior, h.thread = ph.prior, ph.thread
+		h.prior, h.thread, h.model = ph.prior, ph.thread, ph.model
 	}
 	why := "it ended before the model was called"
 	switch {
@@ -851,11 +863,35 @@ func (r *Replayer) splice(session string, ti turnInfo, data []byte) (out []byte,
 		}
 		return nil, nil, 0, false, errors.New("the store could not be read")
 	}
+	// A request to another model than the history's, as after a switch of
+	// agent on the same harness: the history is laid out for it.
+	if m := requestModel(req.fields); h.model != "" && m != "" && m != h.model {
+		msgs, err := r.f.otherModel(h.messages)
+		if err != nil {
+			return nil, nil, 0, false, errors.New("the history of turn " + ti.from + " cannot be laid out for another model: " + err.Error())
+		}
+		other := *h
+		other.messages = msgs
+		h = &other
+	}
 	out, hdr, err = r.f.build(req, h, ti.prompt)
 	if err != nil {
 		return nil, nil, 0, false, err
 	}
 	return out, hdr, len(h.messages), false, nil
+}
+
+// requestModel is a request's model field, or "".
+func requestModel(fields []body.Field) string {
+	for _, f := range fields {
+		if f.Key == "model" {
+			var s string
+			if json.Unmarshal(f.Value, &s) == nil {
+				return s
+			}
+		}
+	}
+	return ""
 }
 
 // claude is Claude Code's format: Anthropic Messages.
@@ -1044,6 +1080,81 @@ func (claude) build(req request, h *history, prompt string) ([]byte, func(http.H
 		}
 	}
 	return body.Object(fields), nil, nil
+}
+
+// otherModel: thinking blocks go, since their signatures belong to the model
+// that made them. So does what a system message sets for the earlier
+// process: its tool_addition and tool_removal blocks, which announce that
+// process's deferred tools, and every field but role and content, such as
+// output_config with its reasoning effort. A process on another model may
+// set neither. Claude Code on a subscription sets both, and OpenRouter
+// refused each on deepseek/deepseek-v4.1-flash: "Mid-conversation tool
+// changes (tool_addition/tool_removal system blocks) are not supported" and
+// "Mid-conversation reasoning effort (configuration_update) is not
+// supported" (2.1.319, 2026-11-09). The new process's own first system
+// message sets its own again. A message left with nothing goes; a system
+// message left with text only becomes a plain string, as asHistory lays it
+// out.
+func (claude) otherModel(msgs []json.RawMessage) ([]json.RawMessage, error) {
+	out := make([]json.RawMessage, 0, len(msgs))
+	for _, m := range msgs {
+		var drop map[string]bool
+		switch role(m) {
+		case "assistant":
+			drop = map[string]bool{"thinking": true, "redacted_thinking": true}
+		case "system":
+			drop = map[string]bool{"tool_addition": true, "tool_removal": true}
+		default:
+			out = append(out, m)
+			continue
+		}
+		all, err := body.Fields(m)
+		if err != nil {
+			return nil, err
+		}
+		fields := all[:0:0]
+		for _, f := range all {
+			if role(m) != "system" || f.Key == "role" || f.Key == "content" {
+				fields = append(fields, f)
+			}
+		}
+		keep := true
+		for i, f := range fields {
+			if f.Key != "content" {
+				continue
+			}
+			blocks, ok := body.Elements(f.Value)
+			if !ok {
+				break // a string: nothing to drop
+			}
+			var left []json.RawMessage
+			for _, b := range blocks {
+				if !drop[body.Label(b, "type")] {
+					left = append(left, b)
+				}
+			}
+			switch {
+			case len(left) == len(blocks):
+			case len(left) == 0:
+				keep = false
+			case role(m) == "system" && allText(left):
+				var sb strings.Builder
+				for _, b := range left {
+					var s string
+					if json.Unmarshal(field(b, "text"), &s) == nil {
+						sb.WriteString(s)
+					}
+				}
+				fields[i].Value = jsonString(sb.String())
+			default:
+				fields[i].Value = joinArray(left)
+			}
+		}
+		if keep {
+			out = append(out, body.Object(fields))
+		}
+	}
+	return out, nil
 }
 
 // hasSystem reports whether any of msgs is a role-system message.

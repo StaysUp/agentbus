@@ -28,6 +28,9 @@ type Session struct {
 	Last    time.Time `json:"last"`
 	Open    bool      `json:"open" doc:"A run's child for this session is running: a session.opened without its session.closed."`
 	Turns   int       `json:"turns"`
+	// FirstAgent stays put when a later turn runs on another harness, so a
+	// list grouped by it keeps the session in one place.
+	FirstAgent string `json:"first_agent,omitempty" doc:"The agent (harness) of the session's first turn.started or run that names one. A later turn may run on another agent; agent is then that one's, and first_agent stays. Absent for a session no run started."`
 	// Usage sums the model.responded events that carried usage. It is nil when
 	// none did: absent usage is unknown, never zero.
 	Usage *event.Usage `json:"usage" doc:"Sums the replies that carried usage. Null when none did: unknown, never zero."`
@@ -123,6 +126,29 @@ func (s *Store) Snapshot() (Snapshot, error) {
 		}
 		if x := byID[id]; x != nil {
 			x.Agent, x.Folder = agent.String, folder.String
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return snap, fmt.Errorf("store: snapshot: %w", err)
+	}
+	rows.Close()
+
+	// The first that names an agent gives first_agent.
+	rows, err = s.r.Query(`SELECT session, json_extract(data, '$.agent'), MIN(seq)
+		FROM events WHERE seq <= ? AND `+agentFrom+` AND COALESCE(json_extract(data, '$.agent'), '') <> '' GROUP BY session`, hi)
+	if err != nil {
+		return snap, fmt.Errorf("store: snapshot: %w", err)
+	}
+	for rows.Next() {
+		var id, agent string
+		var seq int64
+		if err := rows.Scan(&id, &agent, &seq); err != nil {
+			rows.Close()
+			return snap, fmt.Errorf("store: snapshot: %w", err)
+		}
+		if x := byID[id]; x != nil {
+			x.FirstAgent = agent
 		}
 	}
 	if err := rows.Err(); err != nil {

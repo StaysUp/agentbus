@@ -105,6 +105,18 @@ func (codex) carry(h *history, c store.CallContext) {
 	h.thread, _ = openai.ThreadID(top)
 }
 
+// otherModel: reasoning items go. Their encrypted content is readable only by
+// the provider and model that made it.
+func (codex) otherModel(items []json.RawMessage) ([]json.RawMessage, error) {
+	out := make([]json.RawMessage, 0, len(items))
+	for _, m := range items {
+		if body.Label(m, "type") != "reasoning" {
+			out = append(out, m)
+		}
+	}
+	return out, nil
+}
+
 // asHistory: an input item goes back as it was sent.
 func (codex) asHistory(m json.RawMessage) (json.RawMessage, error) {
 	if body.Label(m, "type") == "" && body.Label(m, "role") == "" {

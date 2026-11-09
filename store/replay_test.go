@@ -68,11 +68,11 @@ func TestReplayQueries(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	p, from, ok, err := s.TurnStart("s", "t2")
-	if err != nil || !ok || p != "second" || from != "t1" {
+	p, from, tr, ok, err := s.TurnStart("s", "t2")
+	if err != nil || !ok || p != "second" || from != "t1" || tr {
 		t.Errorf("turn start %q %q %v %v", p, from, ok, err)
 	}
-	if _, _, ok, _ := s.TurnStart("s", "t9"); ok {
+	if _, _, _, ok, _ := s.TurnStart("s", "t9"); ok {
 		t.Error("another session's turn found")
 	}
 	if got, err := s.SessionTurns("s"); err != nil || !reflect.DeepEqual(got, []string{"t2", "t1"}) {

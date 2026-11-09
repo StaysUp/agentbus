@@ -257,7 +257,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, msg)
 		return
 	}
-	if s.cfg.Agents != nil && b.Spec.Session == "" {
+	if s.cfg.Agents != nil && (b.Spec.Session == "" || b.Spec.Agent != "") {
 		ag, err := s.cfg.Agents.Resolve(b.Spec.Agent)
 		if err != nil {
 			// A retry of a request whose agent was removed since: the
@@ -323,11 +323,11 @@ func baseShape(b string) bool {
 
 // checkSpec says what is wrong with a job's spec, or "". A session's first
 // job names agent and a workspace: folder, or repo and base. A later job
-// names session only.
+// names session, and may name agent: its turn runs on that agent.
 func checkSpec(sp queue.Spec) string {
 	if sp.Session != "" {
-		if sp.Agent != "" || sp.Folder != "" || sp.Repo != "" || sp.Base != "" || sp.Isolate {
-			return "spec with session takes no agent, folder, isolate, repo or base: they are the session's"
+		if sp.Folder != "" || sp.Repo != "" || sp.Base != "" || sp.Isolate {
+			return "spec with session takes no folder, isolate, repo or base: they are the session's"
 		}
 		return ""
 	}

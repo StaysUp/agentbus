@@ -143,7 +143,7 @@ type Event struct {
 	Client   string    `json:"client,omitempty" doc:"The harness, from its User-Agent, such as claude-cli/2.1.318."`
 	Turn     string    `json:"turn,omitempty" doc:"The turn this event belongs to. A turn started by POST /api/v0/turns: the id its reply named, on every event of it. Traffic no run started: a hash of the conversation up to the person's message."`
 
-	Model        string   `json:"model,omitempty"`
+	Model        string   `json:"model,omitempty" doc:"On model.requested: the model asked for. On a run's turn.started and session.opened: the model the run was started with, absent for the harness's default; a session's next turn that names no agent and no model keeps it."`
 	Text         string   `json:"text,omitempty" doc:"The person's words on turn.started, the reply on model.responded, a program's text."`
 	ToolsOffered []string `json:"tools_offered,omitempty" doc:"On model.requested: the tools the harness offered."`
 	StopReason   string   `json:"stop_reason,omitempty" doc:"The vendor's own word for how the reply ended."`
@@ -211,8 +211,12 @@ type Event struct {
 	// (POST /api/v0/turns/{id}/stop) while its child ran.
 	Stopped bool `json:"stopped,omitempty" doc:"On a run's session.closed: the person stopped the turn with POST /api/v0/turns/{id}/stop while its child ran. The session's next turn continues after it, told that the person stopped it."`
 	// Continuity, only on a next turn's turn.started: how it reaches the
-	// session's earlier turns, "replay" or "resume".
-	Continuity string `json:"continuity,omitempty" doc:"On the turn.started of a session's next turn started by POST /api/v0/turns: replay (own replay, see replay_from) or resume (the vendor's resume_id). Absent on a first turn."`
+	// session's earlier turns, "replay", "resume" or "transcript".
+	Continuity string `json:"continuity,omitempty" doc:"On the turn.started of a session's next turn started by POST /api/v0/turns: replay (own replay, see replay_from), resume (the vendor's resume_id) or transcript (the turn's harness differs from the previous turn's, so it got the earlier turns as plain text, see context). Absent on a first turn."`
+	// Context, only on the turn.started of a turn whose continuity is
+	// transcript: the earlier turns as plain text. The agent's prompt was
+	// Context followed by Text; Text stays the person's own words.
+	Context string `json:"context,omitempty" doc:"On a turn.started whose continuity is transcript: the session's earlier turns as plain text, each person's message and the agent's final reply, oldest first. The agent got context followed by text as its prompt; text is the person's own words."`
 	// RecoveredFrom and RecoveredReason, only on a next turn's turn.started:
 	// the turn before it did not finish (it was interrupted, its last model
 	// call failed, or it never reached the model), and this turn continues
