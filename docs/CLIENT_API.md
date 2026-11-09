@@ -1062,7 +1062,9 @@ Everything the record holds about one turn, in one answer, for the cockpit and f
   checkpoint's saved copy, or for the first turn the person's folder while that file is still as it
   was. **`diff_left_out: true`** marks a file whose content changed and has no diff here: binary, a
   link, over 256 KiB, past the 512 KiB budget of all diffs together, or its earlier content no
-  longer kept. In a git work tree `git_diff` is git's own diff of the tracked files. `files` is
+  longer kept. A turn in a folder used as it is (`none`, or `isolate: false`) is checkpointed the
+  same way, in the folder itself: `from` and `to` are absent, `isolated` is false, and a modified
+  file has no diff, since its earlier content is not kept. Nothing here comes from git. `files` is
   `null` while the turn runs, and for a turn no job of this service ran. `files.isolated` says
   whether `POST /api/v0/turns/<id>/apply` can apply it.
 - **`model_calls`**: the count, usage and cost as `GET /api/v0/turns/<id>` has them, calls per
@@ -1419,10 +1421,11 @@ turn. The jobs API is the whole way: worktrees, reviews, cancel, and the list.
   back in the queue; a lease lost while it runs fails it with `runner_lost`.
 - **The job's result** holds how the turn ended (`state`, `exit_code`, `stopped`, `reply`,
   `model_calls`, `cost_usd`), the session it ran in, and `changes`: every file the job added,
-  modified or deleted in its workspace, untracked and git-ignored files included, each with size
-  and SHA-256. In a git workspace each file also says `tracked`, `untracked` or `ignored`, with the
-  commit HEAD named before and after, and a unified diff of the tracked files. In an isolated
-  session, `from` and `to` name the checkpoints the changes are between ([Isolation](#isolation)).
+  modified or deleted in its workspace, files git ignores included, each with size and SHA-256, a
+  small text file's content, and its own unified diff where its earlier content is kept. They are
+  the diff of the turn's start and end checkpoints, the same `GET /api/v0/turns/<id>/diff` shows.
+  In an isolated session, `from` and `to` name those checkpoints ([Isolation](#isolation)). A
+  folder used as it is is checkpointed for the one job only, and has no `from` and `to`.
 
 ### Workspaces
 
@@ -1500,7 +1503,10 @@ namespace and which step allows it.
   uncommitted edits (changed, removed and untracked files) carried in. Ignored files are not, which
   keeps a big build folder out. The turn runs in the same subfolder inside it. A subfolder the
   last commit does not have is refused with 400. Outside git, a copy.
-- **`none`**: the folder itself.
+- **`none`**: the folder itself. Each job's changes still come from checkpoints, taken of the
+  folder at the turn's start and end and removed when the job ends. Nothing can be applied.
+- **Git runs only for `git`** (and for a job that names `repo` and `base`). Every diff, of every
+  backend, compares the checkpoints' SHA-256s; `.git` is never part of a checkpoint.
 
 **Shared dependency folders (`share_read_only`, off by default).** On macOS a clone costs per
 file, so a 50,000-file `node_modules` is most of a copy's cost. `share_read_only = ["node_modules"]`
@@ -1568,7 +1574,7 @@ runner's data folder on xfs or btrfs, use `git` for a repo, or `none`.
 - **Where it runs:** read-only, in the reviewed job's workspace, on the runner that holds it, in a
   session of its own. The reviewer sees the files as the author left them.
 - **Its prompt** is built by the queue and kept in the review job's `spec.prompt`: the author's
-  task, the changed files, the diff, and the content of small untracked text files. It asks for a
+  task, the changed files, each file's diff, and the content of small text files that have no diff. It asks for a
   review that ends with this block:
 
   ```json
@@ -1866,3 +1872,7 @@ gets a new version path, and the old one stays for a while.
   for 0.1's behaviour. A workspace's `kind` may be `copy`. A job's `changes` carry `from` and `to`.
 - `model` takes OpenRouter's names: `^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`.
 - `turn.started` and `session.opened` of a run carry `agent_id`, `access` and `key_env`.
+- A job's `changes`, and `files` in `GET /api/v0/turns/<id>/diff`, come from the turn's
+  checkpoints whatever the isolation, and git is never asked. Gone: `git_diff`,
+  `git_diff_truncated`, `head_before`, `head_after` and each file's `git` label. `kind` is always
+  `snapshot`. Each changed text file has its own `diff` instead, where its earlier content is kept.

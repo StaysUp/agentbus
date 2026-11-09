@@ -336,8 +336,8 @@ func TestCopyTreeByFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Logf("method %s", method)
-	a, _ := workspace.Take(src, nil)
-	b, _ := workspace.Take(dst, nil)
+	a, _ := workspace.Walk(src, nil, nil)
+	b, _ := workspace.Walk(dst, nil, nil)
 	if ch := a.Changed(b); len(ch) != 0 {
 		t.Fatalf("the copy differs: %v", ch)
 	}

@@ -149,7 +149,7 @@ func snapshot(s *Space, start time.Time) error {
 	if err != nil {
 		return err
 	}
-	// The Base leaves .git out, as workspace.Take does.
+	// The Base leaves .git out, as workspace.Walk does.
 	files.Delete(".git")
 	files.DeleteUnder(".git")
 	t := s.trees()
@@ -246,15 +246,8 @@ func (overlayBackend) take(s *Space, t *trees, prev *treeState, save workspace.H
 	if err != nil {
 		return treeState{}, 0, err
 	}
-	// Git's own state is read through the mount, as Walk reads it.
-	gitState := func(st treeState) treeState {
-		g := workspace.Empty()
-		g.ReadGit(s.Dir)
-		st.Git, st.Head, st.GitTree = g.GitState()
-		return st
-	}
 	if prev == nil {
-		return gitState(rec.Tree), rec.Files, nil
+		return rec.Tree, rec.Files, nil
 	}
 	taken := time.Now().UnixNano()
 	ed := t.edit(rec.Tree.Root, rec.Files)
@@ -313,7 +306,7 @@ func (overlayBackend) take(s *Space, t *trees, prev *treeState, save workspace.H
 		return treeState{}, 0, err
 	}
 	root, n := ed.finish()
-	return gitState(treeState{Root: root, Taken: taken, Truncated: rec.Tree.Truncated}), n, nil
+	return treeState{Root: root, Taken: taken, Truncated: rec.Tree.Truncated}, n, nil
 }
 
 // learn reads rel's Base content from the snapshot: it never changes, so it

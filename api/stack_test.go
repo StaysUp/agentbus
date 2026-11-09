@@ -78,7 +78,7 @@ func stackEnv(t *testing.T, s stack) *env {
 	srv.Start()
 	ctx, cancel := context.WithCancel(context.Background())
 	rn, err := runner.Enroll(ctx, runner.Config{Queue: base, EnrollToken: enrollTok, Name: "test", Capacity: s.maxRuns,
-		Engine: eng, Store: st, Workdir: filepath.Join(dir, "worktrees"), Logf: t.Logf})
+		Engine: eng, Store: st, Workdir: filepath.Join(dir, "worktrees"), Settings: cfgStore, Logf: t.Logf})
 	if err != nil {
 		t.Fatal(err)
 	}

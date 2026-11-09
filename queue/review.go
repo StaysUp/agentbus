@@ -151,43 +151,39 @@ func ReviewPrompt(j Job, includeReply bool) (string, error) {
 		b.WriteString("\n## The author's reply (first 500 characters)\n\n")
 		b.WriteString(quoteBlock(r.Reply))
 	}
-	fmt.Fprintf(&b, "\n## What changed\n\n%d file(s) changed in this folder during the author's job", c.Count)
-	if c.Kind == "git" {
-		b.WriteString(", against the folder's state when the job started")
-		if c.HeadBefore != c.HeadAfter {
-			fmt.Fprintf(&b, ". The job also moved HEAD from %s to %s", c.HeadBefore, c.HeadAfter)
-		}
-	}
-	b.WriteString(".\n")
+	fmt.Fprintf(&b, "\n## What changed\n\n%d file(s) changed in this folder during the author's job, "+
+		"against the folder's state when the job started.\n", c.Count)
 	if c.Partial {
 		b.WriteString("The author's turn may not have ended when this was recorded, so the list may be incomplete.\n")
 	}
 	b.WriteString("\n")
 	for _, f := range c.Files {
-		label := f.Change
-		if f.Git != "" {
-			label += ", " + f.Git
-		}
-		fmt.Fprintf(&b, "- %s (%s, %d bytes)\n", f.Path, label, f.Size)
+		fmt.Fprintf(&b, "- %s (%s, %d bytes)\n", f.Path, f.Change, f.Size)
 	}
 	if c.Truncated {
 		b.WriteString("- (more files changed; the list stops here)\n")
 	}
-	if c.Diff != "" {
-		b.WriteString("\n## The diff of the tracked files\n\n")
-		b.WriteString(fenced(c.Diff, "diff"))
-		if c.DiffTruncated {
-			b.WriteString("(the diff is cut here; read the files for the rest)\n")
+	var diffs, contents strings.Builder
+	left := false
+	for _, f := range c.Files {
+		switch {
+		case f.Diff != nil:
+			diffs.WriteString(fenced(*f.Diff, "diff"))
+		case f.Content != nil:
+			fmt.Fprintf(&contents, "\n### %s\n\n%s", f.Path, fenced(*f.Content, ""))
+		case f.DiffLeftOut:
+			left = true
 		}
 	}
-	var contents strings.Builder
-	for _, f := range c.Files {
-		if f.Content != nil {
-			fmt.Fprintf(&contents, "\n### %s\n\n%s", f.Path, fenced(*f.Content, ""))
+	if diffs.Len() > 0 {
+		b.WriteString("\n## The diff of each file\n\n")
+		b.WriteString(diffs.String())
+		if left {
+			b.WriteString("(some files have no diff here: binary, too big, or their earlier content is not kept; read them)\n")
 		}
 	}
 	if contents.Len() > 0 {
-		b.WriteString("\n## Small files the diff does not show, as they are now\n")
+		b.WriteString("\n## Small files with no diff here, as they are now\n")
 		b.WriteString(contents.String())
 	}
 	tail := "\n## What to do\n\nReview this change. Read the files you need. Report each problem with a severity: " +

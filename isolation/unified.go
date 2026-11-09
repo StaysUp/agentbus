@@ -27,12 +27,14 @@ const (
 )
 
 // addFileDiffs gives each changed text file of c its own unified diff, from
-// its content at a to its content at b. A file's earlier content is its
-// saved copy, or the person's folder when the file there is still as it was
-// at a (the base checkpoint saves nothing). A file with no diff that has a
-// change of content is marked DiffLeftOut: binary, a link, too big, past the
-// budget, or its earlier content is not kept.
-func addFileDiffs(s *Space, objects *os.Root, a, b *workspace.Snapshot, c *workspace.Changes) {
+// its content at a to its content at b. A file's content at either side is
+// read by end: its saved copy, or the space's folder while the file there is
+// still as it was then. Its earlier content may also be the person's folder,
+// when the file there is still as it was at a (the base checkpoint saves
+// nothing). A file with no diff that has a change of content is marked
+// DiffLeftOut: binary, a link, too big, past the budget, or its earlier
+// content is not kept.
+func addFileDiffs(s *Space, end func(rel string, f workspace.File, max int) ([]byte, bool), a, b *workspace.Snapshot, c *workspace.Changes) {
 	var source *os.Root
 	if s.Source != "" {
 		if rt, err := os.OpenRoot(s.Source); err == nil {
@@ -40,16 +42,11 @@ func addFileDiffs(s *Space, objects *os.Root, a, b *workspace.Snapshot, c *works
 			defer rt.Close()
 		}
 	}
-	read := func(f workspace.File) ([]byte, bool) {
+	read := func(rel string, f workspace.File) ([]byte, bool) {
 		if f.Mode&fs.ModeSymlink != 0 || f.Size > MaxFileDiff {
 			return nil, false
 		}
-		if objects != nil {
-			if body, ok := readRegular(objects, f.Hash, MaxFileDiff); ok {
-				return body, true
-			}
-		}
-		return nil, false
+		return end(rel, f, MaxFileDiff)
 	}
 	budget := MaxFileDiffs
 	for i := range c.Files {
@@ -58,14 +55,14 @@ func addFileDiffs(s *Space, objects *os.Root, a, b *workspace.Snapshot, c *works
 		ok := true
 		if ch.Change != "added" {
 			fa, _ := a.File(ch.Path)
-			old, ok = read(fa)
-			if !ok && source != nil && fa.Mode&fs.ModeSymlink == 0 && fa.Size <= MaxFileDiff {
-				old, ok = readMatching(source, ch.Path, fa.Hash)
+			old, ok = read(ch.Path, fa)
+			if !ok && source != nil && fa.Mode&fs.ModeSymlink == 0 && fa.Size <= MaxFileDiff && fa.Hash != "" {
+				old, ok = readMatching(source, ch.Path, fa.Hash, MaxFileDiff)
 			}
 		}
 		if ok && ch.Change != "deleted" {
 			fb, _ := b.File(ch.Path)
-			cur, ok = read(fb)
+			cur, ok = read(ch.Path, fb)
 		}
 		if ok && (!isText(old) || !isText(cur)) {
 			ok = false
@@ -87,9 +84,10 @@ func addFileDiffs(s *Space, objects *os.Root, a, b *workspace.Snapshot, c *works
 	}
 }
 
-// readMatching reads rel of rt when its content still has hash.
-func readMatching(rt *os.Root, rel, hash string) ([]byte, bool) {
-	body, ok := readRegular(rt, filepath.FromSlash(rel), MaxFileDiff)
+// readMatching reads rel of rt, at most max bytes, when its content still
+// has hash.
+func readMatching(rt *os.Root, rel, hash string, max int) ([]byte, bool) {
+	body, ok := readRegular(rt, filepath.FromSlash(rel), max)
 	if !ok {
 		return nil, false
 	}

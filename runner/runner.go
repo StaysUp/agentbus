@@ -255,7 +255,7 @@ func (r *Runner) remove(w queue.Workspace) error {
 	case err == nil:
 		return isolation.Close(s)
 	case w.Kind == queue.WorkspaceWorktree:
-		return workspace.RemoveWorktree(r.cfg.Workdir, w.Repo, w.Folder)
+		return isolation.RemoveWorktree(r.cfg.Workdir, w.Repo, w.Folder)
 	}
 	return nil // a copy with no record: nothing of it is left
 }
@@ -276,15 +276,15 @@ type attempt struct {
 	cancelOnce, staleOnce sync.Once
 
 	// The workspace, once known: its folder, and for a session's first job
-	// the workspace to record. In an isolated session, space is its copy and
-	// start the checkpoint the turn starts from; otherwise before is the
-	// folder's snapshot at the job's start. session is the turn's session
-	// once it started.
+	// the workspace to record. In an isolated session, space is its copy;
+	// for a folder used as it is, watch checkpoints it for this job only
+	// (isolation.None). start is the checkpoint the turn starts from, in
+	// either. session is the turn's session once it started.
 	folder  string
 	ws      *queue.Workspace
 	space   *isolation.Space
+	watch   *isolation.Space
 	start   string
-	before  *workspace.Snapshot
 	session string
 }
 
@@ -356,13 +356,13 @@ func (at *attempt) finish(ctx context.Context, f queue.Finish) {
 // for a session's first job the session and its workspace, so the session's
 // later jobs come to this runner.
 func (at *attempt) addChanges(f *queue.Finish) {
-	if at.before == nil && at.space == nil {
+	if at.watch == nil && at.space == nil {
 		return
 	}
 	res, _ := queue.ReadResult(f.Result)
 	c, ok := at.changes()
 	if !ok {
-		c = workspace.Changes{Kind: "snapshot", Files: []workspace.Change{}, Error: "the workspace could not be read at the end"}
+		c = workspace.Changes{Kind: workspace.KindSnapshot, Files: []workspace.Change{}, Error: "the workspace could not be read at the end"}
 	}
 	res.Folder, res.Changes = at.folder, nil
 	// The whole finish must fit the jobs API's body limit, so the changes get
@@ -378,24 +378,36 @@ func (at *attempt) addChanges(f *queue.Finish) {
 	}
 }
 
-// changes is what the job changed: in an isolated session, from the turn's
-// start checkpoint to a checkpoint taken now, named by the turn; otherwise
-// from the folder's snapshot at the start.
+// changes is what the job changed: from the turn's start checkpoint to a
+// checkpoint taken now, named by the turn, in the session's copy or in the
+// folder used as it is. It is the same diff GET /turns/{id}/diff shows.
 func (at *attempt) changes() (workspace.Changes, bool) {
-	if at.space != nil {
-		b, _ := isolation.Get(at.space.Backend)
-		end, err := b.Checkpoint(at.space, at.a.ID)
-		if err != nil {
-			return workspace.Changes{}, false
-		}
-		c, err := b.Diff(at.space, at.start, end.Name)
-		return c, err == nil
+	s := at.space
+	if s == nil {
+		s = at.watch
 	}
-	after, err := workspace.Take(at.folder, at.before)
+	b, ok := isolation.Get(s.Backend)
+	if !ok {
+		return workspace.Changes{}, false
+	}
+	end, err := b.Checkpoint(s, at.a.ID)
 	if err != nil {
 		return workspace.Changes{}, false
 	}
-	return workspace.Diff(at.folder, at.before, after), true
+	c, err := b.Diff(s, at.start, end.Name)
+	return c, err == nil
+}
+
+// unwatch removes the record of a folder used as it is, once the job is
+// done with it. The folder itself is never touched.
+func (at *attempt) unwatch() {
+	if at.watch == nil {
+		return
+	}
+	if err := isolation.Close(at.watch); err != nil {
+		at.r.cfg.Logf("job %s: the checkpoints of its folder could not be removed", at.job.ID)
+	}
+	at.watch = nil
 }
 
 // heartbeats renews the lease every heartbeat interval until done closes, on
@@ -473,7 +485,9 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 		at.finish(ctx, r.apply(at))
 		return
 	}
-	if refused := r.prepare(at); refused != nil {
+	refused := r.prepare(at)
+	defer at.unwatch()
+	if refused != nil {
 		at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup, Result: mustJSON(refused)})
 		return
 	}
@@ -489,7 +503,7 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 			if err := isolation.Close(at.space); err == nil {
 				at.event("workspace.removed", map[string]any{"folder": at.ws.Folder})
 			}
-			at.space, at.before = nil, nil
+			at.space = nil
 		}
 		at.event("turn.refused", map[string]any{"status": res.Status})
 		at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup, Result: mustJSON(res)})
@@ -637,7 +651,7 @@ func (r *Runner) prepare(at *attempt) *queue.Result {
 		at.folder = at.job.Workspace.Folder
 		if k := at.job.Workspace.Kind; k == queue.WorkspaceWorktree || k == queue.WorkspaceCopy {
 			// A worktree made before the backends kept a record has none:
-			// its turns are diffed from a snapshot, as before.
+			// it is checkpointed as a folder used as it is.
 			if s, err := isolation.Load(r.cfg.Workdir, at.folder); err == nil {
 				at.space = s
 				return r.checkpointStart(at)
@@ -650,7 +664,7 @@ func (r *Runner) prepare(at *attempt) *queue.Result {
 			at.folder = c.Folder
 		}
 	}
-	return r.snapshot(at)
+	return r.watchFolder(at)
 }
 
 // policy is the settings' policy, or the defaults with no settings.
@@ -734,16 +748,18 @@ func (r *Runner) checkpointStart(at *attempt) *queue.Result {
 	return nil
 }
 
-// snapshot takes the attempt's snapshot of its folder before the turn.
-func (r *Runner) snapshot(at *attempt) *queue.Result {
+// watchFolder checkpoints the folder the job uses as it is, before the turn,
+// so its changes come from checkpoints as an isolated turn's do.
+func (r *Runner) watchFolder(at *attempt) *queue.Result {
 	if at.folder == "" {
 		return nil // no folder to watch: the engine still runs the turn, or refuses it
 	}
-	b, err := workspace.Take(at.folder, nil)
+	b, _ := isolation.Get(isolation.None)
+	s, err := b.Open(isolation.Request{ID: at.a.ID, Workdir: r.cfg.Workdir, Folder: at.folder})
 	if err != nil {
 		return &queue.Result{Refused: "the workspace could not be read"}
 	}
-	at.before = b
+	at.watch, at.start = s, isolation.Base
 	return nil
 }
 

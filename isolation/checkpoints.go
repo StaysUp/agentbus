@@ -12,8 +12,8 @@ package isolation
 // folders whose trees differ. A checkpoint saves each file that changed
 // since the one before it, so a later Apply can write the file as it was at
 // that checkpoint even after later turns changed it again. The Base
-// checkpoint saves nothing: it is the person's folder as it was, and Apply
-// only compares against it. Saving is a copy-on-write clone where the disk
+// checkpoint saves nothing (but git's, git.go): it is the person's folder as
+// it was, and Apply only compares against it. Saving is a copy-on-write clone where the disk
 // has one. A checkpoint from before the trees, with every file in its own
 // <seq>-<name>.snap.json, is turned into a tree when first read (migrate).
 
@@ -53,20 +53,17 @@ type header struct {
 }
 
 // treeState is a checkpoint's files: the tree of its top folder, and what a
-// Snapshot of it says besides its files.
+// Snapshot of it says besides its files. A checkpoint from an earlier build
+// may also hold git's state (git, head, git_tree): it is no longer read.
 type treeState struct {
 	Root      string `json:"root"`
 	Taken     int64  `json:"taken,omitempty"`
 	Truncated bool   `json:"truncated,omitempty"`
-	Git       bool   `json:"git,omitempty"`
-	Head      string `json:"head,omitempty"`
-	GitTree   string `json:"git_tree,omitempty"`
 }
 
 // stateOf is snap's state but its files, with root.
 func stateOf(snap *workspace.Snapshot, root string) treeState {
-	g, head, tree := snap.GitState()
-	return treeState{Root: root, Taken: snap.Taken(), Truncated: snap.Truncated(), Git: g, Head: head, GitTree: tree}
+	return treeState{Root: root, Taken: snap.Taken(), Truncated: snap.Truncated()}
 }
 
 // snapshot is an empty Snapshot with st's state, to fill with Set.
@@ -76,7 +73,6 @@ func (st treeState) snapshot() *workspace.Snapshot {
 	if st.Truncated {
 		snap.SetTruncated()
 	}
-	snap.SetGitState(st.Git, st.Head, st.GitTree)
 	return snap
 }
 
@@ -244,7 +240,8 @@ type keeper interface {
 	// the count of its files: prev is the latest checkpoint, or nil for the
 	// Base. A file whose size, modification time and mode match prev's
 	// keeps prev's hash; any other is passed to save, which saves it and
-	// answers its hash. The Base may leave hashes empty (not hashed).
+	// answers its hash. The Base may leave hashes empty (not hashed), and
+	// saves only what it passes to save.
 	take(s *Space, t *trees, prev *treeState, save workspace.Hasher) (treeState, int, error)
 	// learn hashes rel as the Base holds it, f, when that content can still
 	// be read as it was; save it too when it is small. ok is false when it
@@ -293,20 +290,19 @@ func checkpoint(s *Space, name string, k keeper) (Checkpoint, error) {
 		return Checkpoint{}, err
 	}
 	var prev *treeState
-	var saved []string
-	var save workspace.Hasher
 	if len(list) > 0 {
 		prev = list[len(list)-1].Tree
-		if err := os.MkdirAll(s.objectDir(), 0o700); err != nil {
-			return Checkpoint{}, err
+	}
+	if err := os.MkdirAll(s.objectDir(), 0o700); err != nil {
+		return Checkpoint{}, err
+	}
+	var saved []string
+	save := func(_, p string, _ fs.FileInfo) (string, error) {
+		h, err := saveObject(p, s.objectDir())
+		if err == nil {
+			saved = append(saved, h)
 		}
-		save = func(_, p string, _ fs.FileInfo) (string, error) {
-			h, err := saveObject(p, s.objectDir())
-			if err == nil {
-				saved = append(saved, h)
-			}
-			return h, err
-		}
+		return h, err
 	}
 	cur, files, err := k.take(s, t, prev, save)
 	if err != nil {
@@ -332,7 +328,7 @@ func checkpoint(s *Space, name string, k keeper) (Checkpoint, error) {
 				left++
 			}
 		}
-		if left == 0 && cur.Head == prev.Head {
+		if left == 0 {
 			// What was learned stays: its saved Base content is the old
 			// side of the file's diff once it changes.
 			dropUnlisted(s, list, saved, learned)
@@ -530,7 +526,7 @@ func saveObject(src, objects string) (string, error) {
 	return "", errors.New("isolation: not a file")
 }
 
-// linkHash is a symbolic link's hash, as workspace.Take makes it.
+// linkHash is a symbolic link's hash, as workspace.Walk makes it.
 func linkHash(target string) string {
 	sum := sha256.Sum256([]byte("link:" + target))
 	return hex.EncodeToString(sum[:])
@@ -593,17 +589,43 @@ func diff(s *Space, from, to string) (workspace.Changes, error) {
 	} else {
 		defer objects.Close()
 	}
+	dir, err := os.OpenRoot(s.Dir)
+	if err != nil {
+		dir = nil
+	} else {
+		defer dir.Close()
+	}
+	end := func(rel string, f workspace.File, max int) ([]byte, bool) { return readEnd(objects, dir, rel, f, max) }
 	read := func(rel string, max int) ([]byte, bool) {
 		f, ok := b.File(rel)
-		if !ok || objects == nil {
+		if !ok {
 			return nil, false
 		}
-		return readRegular(objects, f.Hash, max)
+		return end(rel, f, max)
 	}
-	c := workspace.DiffRead(s.Dir, a, b, read)
-	addFileDiffs(s, objects, a, b, &c)
+	c := workspace.Diff(a, b, read)
+	addFileDiffs(s, end, a, b, &c)
 	c.From, c.To = ha.Checkpoint.Name, hb.Checkpoint.Name
 	return c, nil
+}
+
+// readEnd reads the file rel as a checkpoint holds it, f, at most max
+// bytes: its saved copy, or the file in the space's folder while it still
+// has f's hash. A folder used as it is (none) saves nothing, so there it is
+// always read from the folder.
+func readEnd(objects, dir *os.Root, rel string, f workspace.File, max int) ([]byte, bool) {
+	if f.Mode&fs.ModeSymlink != 0 || f.Hash == "" {
+		return nil, false
+	}
+	if objects != nil {
+		if body, ok := readRegular(objects, f.Hash, max); ok {
+			return body, true
+		}
+	}
+	if dir != nil {
+		return readMatching(dir, rel, f.Hash, max)
+	}
+	return nil, false
 }
 
 // readRegular reads a regular file of rt, at most max bytes.
@@ -781,7 +803,7 @@ func sameStat(rt *os.Root, name string, f workspace.File) bool {
 	return err == nil && fi.Mode() == f.Mode && fi.Size() == f.Size && fi.ModTime().UnixNano() == f.ModTime
 }
 
-// hashIn hashes the file name of rt as workspace.Take does. A missing file
+// hashIn hashes the file name of rt as workspace.Walk does. A missing file
 // is not an error: exists is false.
 func hashIn(rt *os.Root, name string) (hash string, mode fs.FileMode, exists bool, err error) {
 	fi, err := rt.Lstat(name)

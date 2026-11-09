@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/staysup/agentbus/isolation"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/settings"
@@ -178,5 +180,75 @@ func TestTurnDiffAndApply(t *testing.T) {
 	waitEnded(t, e, third.Job)
 	if code, out := as(t, e, token, "POST", "/api/v0/turns/t_0000000000000000/apply", ""); code != 404 {
 		t.Errorf("apply of an unknown turn: %d %s", code, out)
+	}
+}
+
+// A turn's changes have one source, its checkpoints, whatever the isolation
+// setting: the job's result holds what the backend's Diff of the turn's
+// start and end checkpoints answers, and GET /turns/{id}/diff shows the
+// same. In a folder used as it is (none), the folder changes in place and
+// the changes cannot be applied. None of it runs git: git here is a program
+// that only notes it was run, first on the runner's PATH.
+func TestTurnChangesAreTheCheckpointDiff(t *testing.T) {
+	bin := t.TempDir()
+	mark := filepath.Join(t.TempDir(), "git-ran")
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\necho \"$@\" >> "+mark+"\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	for _, setting := range []string{settings.IsolationCopy, settings.IsolationOverlay, settings.IsolationNone} {
+		t.Run(setting, func(t *testing.T) {
+			perm := filepath.Join(t.TempDir(), settings.PolicyFile)
+			if err := os.WriteFile(perm, []byte("isolation = \""+setting+"\"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			e, _ := diffEnv(t, perm)
+			folder := t.TempDir()
+			for p, c := range map[string]string{"a.txt": "one\ntwo\n", "gone.txt": "bye\n"} {
+				if err := os.WriteFile(filepath.Join(folder, p), []byte(c), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			first := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"edit1"}`)
+			waitEnded(t, e, first.Job)
+			second := startTurn(t, e, `{"session":"`+first.ID+`","prompt":"edit2"}`)
+			waitEnded(t, e, second.Job)
+			for _, c := range []struct {
+				st    Started
+				count int
+			}{{first, 3}, {second, 1}} {
+				j := waitEnded(t, e, c.st.Job)
+				res, err := queue.ReadResult(j.Result)
+				if err != nil || res.Changes == nil || res.Changes.Count != c.count {
+					t.Fatalf("turn %s: result %s", c.st.Turn, j.Result)
+				}
+				if d := diffOf(t, e, c.st.Turn); !reflect.DeepEqual(d.Files, turnFiles(*res.Changes)) {
+					t.Fatalf("turn %s: the diff %+v is not the result's %+v", c.st.Turn, d.Files, res.Changes)
+				}
+				if setting == settings.IsolationNone {
+					if res.Changes.From != "" || res.Changes.To != "" || res.Folder != folder {
+						t.Fatalf("turn %s in the folder: %+v in %s", c.st.Turn, res.Changes, res.Folder)
+					}
+					continue
+				}
+				// The copy is at <workdir>/<id>: the backend diffs the turn's
+				// checkpoints again, and answers what the result holds.
+				s, err := isolation.Load(filepath.Dir(res.Folder), res.Folder)
+				if err != nil {
+					t.Fatal(err)
+				}
+				b, _ := isolation.Get(s.Backend)
+				want, err := b.Diff(s, res.Changes.From, res.Changes.To)
+				if err != nil || res.Changes.To != c.st.Turn || !reflect.DeepEqual(want, *res.Changes) {
+					t.Fatalf("turn %s: the result %+v is not the checkpoints' diff %+v (%v)", c.st.Turn, res.Changes, want, err)
+				}
+			}
+			if b, err := os.ReadFile(filepath.Join(folder, "a.txt")); setting == settings.IsolationNone && string(b) != "one\nthree\n" {
+				t.Fatalf("the folder used as it is has a.txt %q, %v", b, err)
+			}
+		})
+	}
+	if b, err := os.ReadFile(mark); err == nil {
+		t.Fatalf("git ran: %s", b)
 	}
 }

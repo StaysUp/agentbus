@@ -13,6 +13,11 @@ import (
 	"github.com/staysup/agentbus/workspace"
 )
 
+// This file is the one place AgentBus runs git: the git backend, used only
+// when the isolation setting is git, and the removal of a worktree made
+// before the backends kept a record. Every other backend, and every diff,
+// reads the folder's files only.
+
 // gitBackend makes a detached git worktree of the folder's repo at its HEAD,
 // and runs turns in the same folder inside it. The folder's uncommitted
 // edits are carried in, tracked and untracked files alike, so the session
@@ -40,7 +45,7 @@ func (gitBackend) Open(r Request) (*Space, error) {
 	s := &Space{ID: r.ID, Backend: Git, Root: root, Dir: root, Workdir: r.Workdir}
 	rel := "."
 	if r.Folder != "" {
-		repo, in, head, ok := workspace.RepoOf(r.Folder)
+		repo, in, head, ok := repoOf(r.Folder)
 		if !ok {
 			return nil, &Refusal{"the folder is not in a git repo with a commit"}
 		}
@@ -56,7 +61,7 @@ func (gitBackend) Open(r Request) (*Space, error) {
 	if err := removeState(s); err != nil {
 		return nil, err
 	}
-	if err := workspace.MakeWorktree(s.Repo, s.Base, root); err != nil {
+	if err := makeWorktree(s.Repo, s.Base, root); err != nil {
 		return nil, err
 	}
 	undo := func(err error) (*Space, error) {
@@ -88,10 +93,18 @@ func (b gitBackend) Checkpoint(s *Space, name string) (Checkpoint, error) {
 }
 
 // take walks the worktree. Git wrote every file of it just now, so no time
-// in it says the file is as in the person's folder: the Base hashes all.
+// in it says the file is as in the person's folder: the Base hashes all. It
+// also saves each file small enough for a diff, since no other copy of its
+// content is kept that a diff could read without git.
 func (gitBackend) take(s *Space, t *trees, prev *treeState, save workspace.Hasher) (treeState, int, error) {
 	if prev == nil {
-		snap, err := workspace.Take(s.Dir, nil)
+		keep := func(rel, p string, info fs.FileInfo) (string, error) {
+			if info.Mode().IsRegular() && info.Size() <= MaxFileDiff {
+				return save(rel, p, info)
+			}
+			return workspace.Hash(rel, p, info)
+		}
+		snap, err := workspace.Walk(s.Dir, nil, keep)
 		if err != nil {
 			return treeState{}, 0, err
 		}
@@ -112,7 +125,7 @@ func (gitBackend) Close(s *Space) error {
 	if s.Root != filepath.Join(s.Workdir, s.ID) {
 		return ErrOutside
 	}
-	if err := workspace.RemoveWorktree(s.Workdir, s.Repo, s.Root); err != nil {
+	if err := RemoveWorktree(s.Workdir, s.Repo, s.Root); err != nil {
 		return err
 	}
 	return removeState(s)
@@ -217,12 +230,102 @@ func insideDir(dir, folder string) bool {
 // gitOut runs git in dir, without taking the repo's optional locks, and
 // answers its stdout. Its own words are not passed on: they can name paths.
 func gitOut(dir string, args ...string) ([]byte, error) {
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0")
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
+	out, err := git(dir, args...)
+	if err != nil {
 		return nil, errors.New("isolation: git status failed")
 	}
+	return out, nil
+}
+
+// git runs git in dir with args, and answers its stdout, or an error with
+// the start of git's own words.
+func git(dir string, args ...string) ([]byte, error) {
+	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0")
+	var out, errb bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errb
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(errb.String())
+		if len(msg) > 500 {
+			msg = msg[:500]
+		}
+		if msg == "" {
+			msg = "git failed"
+		}
+		return out.Bytes(), errors.New(msg)
+	}
 	return out.Bytes(), nil
+}
+
+// gitTop says whether dir is the top of a git work tree.
+func gitTop(dir string) bool {
+	top, err := git(dir, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return false
+	}
+	real, err1 := filepath.EvalSymlinks(strings.TrimSpace(string(top)))
+	want, err2 := filepath.EvalSymlinks(dir)
+	return err1 == nil && err2 == nil && real == want
+}
+
+// repoOf says whether folder is in a git work tree whose HEAD names a commit:
+// the top of that tree, folder's path inside it ("." at the top) and the
+// commit. A folder outside git, or in a repo with no commit yet, answers
+// false.
+func repoOf(folder string) (repo, rel, head string, ok bool) {
+	top, err := git(folder, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return "", "", "", false
+	}
+	repo = strings.TrimSpace(string(top))
+	realTop, err1 := filepath.EvalSymlinks(repo)
+	realDir, err2 := filepath.EvalSymlinks(folder)
+	if err1 != nil || err2 != nil {
+		return "", "", "", false
+	}
+	rel, err = filepath.Rel(realTop, realDir)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+		return "", "", "", false
+	}
+	out, err := git(folder, "rev-parse", "--verify", "-q", "HEAD^{commit}")
+	if err != nil {
+		return "", "", "", false
+	}
+	return realTop, rel, strings.TrimSpace(string(out)), true
+}
+
+// makeWorktree adds a detached git worktree of repo at base, in dir. A dir
+// that is already a worktree, from an earlier attempt of the same job, is
+// used as it is.
+func makeWorktree(repo, base, dir string) error {
+	if gitTop(dir) {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
+		return errors.New("the worktree folder could not be made")
+	}
+	// base never starts with a dash (the control plane checks it), and dir
+	// is the runner's own absolute path.
+	_, err := git(repo, "worktree", "add", "--detach", dir, base)
+	return err
+}
+
+// RemoveWorktree removes a worktree the runner made, with whatever is in it:
+// the git backend's, or one made before the backends kept a record. dir is
+// the worktree, or a folder inside it: a runner makes each worktree one
+// level under workdir, so that level is the worktree. It refuses a folder
+// outside workdir: a runner removes only its own.
+func RemoveWorktree(workdir, repo, dir string) error {
+	rel, err := filepath.Rel(workdir, dir)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") || filepath.IsAbs(rel) {
+		return errors.New("the worktree is not under this runner's workdir")
+	}
+	top, _, _ := strings.Cut(rel, string(filepath.Separator))
+	dir = filepath.Join(workdir, top)
+	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
+		_, _ = git(repo, "worktree", "prune")
+		return nil
+	}
+	_, err = git(repo, "worktree", "remove", "--force", dir)
+	return err
 }

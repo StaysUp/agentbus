@@ -213,8 +213,8 @@ reads the jobs from the same address with the same token.
 - **A job can run in its own git worktree.** Name a `repo` and a `base` (a branch, tag or commit),
   and the runner makes a worktree for the session. Your own checkout is not touched. The work
   stays in the worktree until you close it. Nothing is committed or pushed.
-- **Every job records what it changed**: each file added, modified or deleted, untracked and
-  git-ignored files too, not only `git diff`.
+- **Every job records what it changed**: each file added, modified or deleted, files git ignores
+  too, with each text file's own diff. It is the diff of the turn's checkpoints; git is not asked.
 - **Review is another job.** It runs read-only in the author's workspace, with another agent and
   model, and ends with a verdict (pass, fail or unknown) and its findings. Any P1 makes it fail.
 - **Fix is the session's next turn**, in the same workspace, with the findings as its prompt.

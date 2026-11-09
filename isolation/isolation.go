@@ -7,12 +7,15 @@
 // checkpoints (Close). One backend owns the whole lifecycle of a Space, so
 // nothing above this package makes, finds or removes copies by itself.
 //
-// Three backends today. copy copies the folder: a copy-on-write clone where
-// the disk has one (APFS on macOS, a reflink on Linux), a plain copy
+// Three backends make copies. copy copies the folder: a copy-on-write clone
+// where the disk has one (APFS on macOS, a reflink on Linux), a plain copy
 // otherwise. overlay (Linux) mounts an overlayfs over the session's own
 // read-only snapshot of the folder (overlay_linux.go). git makes a git
 // worktree of the folder's repo at its HEAD and carries the folder's
-// uncommitted edits into it. All start from the folder exactly as it is now,
+// uncommitted edits into it; it is the only code that runs git (git.go). A
+// fourth, none, makes no copy: it checkpoints a folder used as it is for one
+// job, so that every job's changes come from checkpoints (none.go). All start
+// from the folder exactly as it is now,
 // and all keep checkpoints the same way: a manifest of every file's size,
 // modification time, mode and hash, and a copy of each file a checkpoint saw
 // change, so a checkpoint can be applied after later turns changed the file
@@ -49,6 +52,7 @@ const (
 	Copy    = "copy"
 	Git     = "git"
 	Overlay = "overlay"
+	None    = "none"
 	Auto    = "auto"
 )
 
@@ -126,6 +130,8 @@ type Space struct {
 	Workdir string `json:"-"`
 	// start: when Open began making the copy (baseHasher).
 	start time.Time
+	// temp, for none: Workdir is a temporary folder of this space's own.
+	temp bool
 }
 
 // Checkpoint is one recorded state of a space.
@@ -181,7 +187,7 @@ var (
 	ErrOutside      = errors.New("isolation: the folder is not under this runner's workdir")
 )
 
-var registry = map[string]Backend{Copy: copyBackend{}, Git: gitBackend{}, Overlay: overlayBackend{}}
+var registry = map[string]Backend{Copy: copyBackend{}, Git: gitBackend{}, Overlay: overlayBackend{}, None: noneBackend{}}
 
 // Get is the backend of that name.
 func Get(name string) (Backend, bool) {
@@ -211,7 +217,7 @@ func Names() []string {
 //
 // A fallback is not an error: the space's Fallback says why. none, or a
 // setting it does not know, is false: the session works in the folder
-// itself.
+// itself, and each of its jobs is checkpointed there by the None backend.
 func For(setting, folder string) (Backend, bool) {
 	switch setting {
 	case "", Auto:
@@ -224,7 +230,7 @@ func For(setting, folder string) (Backend, bool) {
 	case Copy:
 		return registry[Copy], true
 	case Git:
-		if _, _, _, ok := workspace.RepoOf(folder); ok {
+		if _, _, _, ok := repoOf(folder); ok {
 			return registry[Git], true
 		}
 		return registry[Copy], true

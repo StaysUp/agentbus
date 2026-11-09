@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/isolation"
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
@@ -300,8 +301,8 @@ func TestShutdownStopsTurns(t *testing.T) {
 }
 
 // A session's first job names a repo and a base: the runner makes a worktree,
-// the turn runs in it, and the job's result lists what changed, ignored files
-// included. The session's next job runs in the same worktree on the same
+// the turn runs in it, and the job's result lists what changed between the
+// turn's checkpoints, files git ignores included. The session's next job runs in the same worktree on the same
 // runner, and waits while the first one runs. Closing the session removes the
 // worktree; a job's end never does.
 func TestWorktreeSession(t *testing.T) {
@@ -337,8 +338,8 @@ func TestWorktreeSession(t *testing.T) {
 		t.Fatalf("folder %q, turn ran in %q, want %q", res.Folder, w.runs()[0].Cwd, wantDir)
 	}
 	m := byPath(res.Changes)
-	if res.Changes.Kind != "git" || res.Changes.Count != 2 || m["app.txt"].Git != "tracked" || m["app.txt"].Change != "modified" ||
-		m["test.log"].Git != "ignored" || m["test.log"].Change != "added" {
+	if res.Changes.Kind != "snapshot" || res.Changes.Count != 2 || m["app.txt"].Change != "modified" || m["app.txt"].Diff == nil ||
+		m["test.log"].Change != "added" || res.Changes.From != isolation.Base || res.Changes.To != got.Attempts[0].ID {
 		t.Fatalf("changes %+v", res.Changes)
 	}
 	if got.Workspace == nil || got.Workspace.Kind != queue.WorkspaceWorktree || got.Workspace.Runner != w.r.ID() {

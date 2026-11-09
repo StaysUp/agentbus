@@ -45,16 +45,12 @@ type TurnFiles struct {
 	Isolated bool   `json:"isolated" doc:"The turn ran in an isolated copy, between two checkpoints: POST /api/v0/turns/{id}/apply can put its changes in the person's folder."`
 	From     string `json:"from,omitempty" doc:"The checkpoint the turn started from. In an isolated copy only."`
 	To       string `json:"to,omitempty" doc:"The checkpoint the turn ended with. The same as from: the turn changed nothing."`
-	Kind     string `json:"kind" doc:"git (a git work tree) or snapshot (a plain folder)."`
+	Kind     string `json:"kind" doc:"Always snapshot: the files were compared by their SHA-256."`
 	// Count is every change; Changes holds at most workspace.MaxChanges.
 	Count          int          `json:"count" doc:"Every file the turn added, modified or deleted."`
 	Truncated      bool         `json:"truncated,omitempty" doc:"changes holds fewer files than count."`
 	Changes        []FileChange `json:"changes" doc:"Each changed file, sorted by path."`
-	GitDiff        string       `json:"git_diff,omitempty" doc:"In a git work tree: git's unified diff of the tracked files."`
-	GitDiffCut     bool         `json:"git_diff_truncated,omitempty" doc:"git_diff was cut to its cap."`
 	ContentLeftOut bool         `json:"content_left_out,omitempty" doc:"Some small text files have no content here, to keep the result small."`
-	HeadBefore     string       `json:"head_before,omitempty" doc:"In a git work tree: the commit HEAD named at the turn's start."`
-	HeadAfter      string       `json:"head_after,omitempty" doc:"In a git work tree: the commit HEAD named at the turn's end."`
 	Error          string       `json:"error,omitempty" doc:"The workspace could not be read at the end of the turn."`
 }
 
@@ -64,8 +60,7 @@ type FileChange struct {
 	Change      string  `json:"change" doc:"added, modified or deleted."`
 	Size        int64   `json:"size" doc:"The file at the end; for a deleted file, at the start."`
 	SHA256      string  `json:"sha256"`
-	Git         string  `json:"git,omitempty" doc:"In a git work tree: tracked, untracked or ignored."`
-	Diff        *string `json:"diff,omitempty" doc:"The file's unified diff, from the turn's start to its end. In an isolated copy, for small text files."`
+	Diff        *string `json:"diff,omitempty" doc:"The file's unified diff, from the turn's start to its end, for small text files whose earlier content is kept."`
 	DiffLeftOut bool    `json:"diff_left_out,omitempty" doc:"The content changed and no diff is here: a binary file, a link, a file over 256 KiB, past the 512 KiB budget of all diffs, or its earlier content is no longer kept."`
 	Content     *string `json:"content,omitempty" doc:"The whole file at the end, when it is small UTF-8 text."`
 }
@@ -201,10 +196,9 @@ func (a *API) turnDiff(w http.ResponseWriter, r *http.Request, id string) {
 // turnFiles is a job result's changes as the diff shows them.
 func turnFiles(c workspace.Changes) *TurnFiles {
 	f := &TurnFiles{Isolated: c.From != "" && c.To != "", From: c.From, To: c.To, Kind: c.Kind, Count: c.Count,
-		Truncated: c.Truncated, Changes: make([]FileChange, len(c.Files)), GitDiff: c.Diff, GitDiffCut: c.DiffTruncated,
-		ContentLeftOut: c.ContentLeftOut, HeadBefore: c.HeadBefore, HeadAfter: c.HeadAfter, Error: c.Error}
+		Truncated: c.Truncated, Changes: make([]FileChange, len(c.Files)), ContentLeftOut: c.ContentLeftOut, Error: c.Error}
 	for i, ch := range c.Files {
-		f.Changes[i] = FileChange{Path: ch.Path, Change: ch.Change, Size: ch.Size, SHA256: ch.SHA256, Git: ch.Git,
+		f.Changes[i] = FileChange{Path: ch.Path, Change: ch.Change, Size: ch.Size, SHA256: ch.SHA256,
 			Diff: ch.Diff, DiffLeftOut: ch.DiffLeftOut, Content: ch.Content}
 	}
 	return f

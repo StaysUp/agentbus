@@ -77,15 +77,15 @@ func TestGitRoundTrip(t *testing.T) {
 	}
 }
 
-// A worktree at the repo's top is a git work tree, so its diff is git's:
-// tracked files labelled and a unified diff.
+// A worktree's diff is the checkpoints', as any copy's: each file with its
+// own unified diff, and nothing from git.
 func TestGitDiffAtTheTop(t *testing.T) {
 	r := repo(t)
 	b, s := open(t, Git, r)
 	fixture(t, s.Dir, map[string]string{"top.txt": "t2"})
 	b.Checkpoint(s, "t1")
 	c, err := b.Diff(s, Base, "t1")
-	if err != nil || c.Kind != "git" || c.Count != 1 || c.Files[0].Git != "tracked" || !strings.Contains(c.Diff, "+t2") {
+	if err != nil || c.Kind != "snapshot" || c.Count != 1 || c.Files[0].Diff == nil || !strings.Contains(*c.Files[0].Diff, "+t2") {
 		t.Fatalf("diff %+v %v", c, err)
 	}
 	b.Close(s)
@@ -107,7 +107,7 @@ func TestCopyOfARepo(t *testing.T) {
 	}
 	end, _ := b.Checkpoint(s, "t1")
 	c, _ := b.Diff(s, Base, end.Name)
-	if c.Kind != "git" || c.HeadBefore == c.HeadAfter {
+	if c.Kind != "snapshot" || c.Count != 1 || c.Files[0].Path != "top.txt" {
 		t.Fatalf("diff %+v", c)
 	}
 	b.Close(s)
@@ -160,20 +160,59 @@ func TestForTheSetting(t *testing.T) {
 	}
 }
 
-// A copy of a repo, by any fast backend, reports git's own state: a
-// commit made in the copy is a change of HEAD.
-func TestFastBackendsSeeGit(t *testing.T) {
+// .git is never part of a checkpoint: a commit in a copy that changes no
+// file of the work is no change.
+func TestFastBackendsLeaveGitOut(t *testing.T) {
 	for _, name := range fast(t) {
 		t.Run(name, func(t *testing.T) {
 			r := repo(t)
 			b, s := open(t, name, r)
 			gitRun(t, s.Dir, "commit", "-q", "--allow-empty", "-m", "two")
-			b.Checkpoint(s, "t1")
-			c, err := b.Diff(s, Base, "t1")
-			if err != nil || c.Kind != "git" || c.HeadBefore == "" || c.HeadBefore == c.HeadAfter {
+			end, _ := b.Checkpoint(s, "t1")
+			c, err := b.Diff(s, Base, end.Name)
+			if err != nil || end.Name != Base || c.Count != 0 {
 				t.Fatalf("diff %+v %v", c, err)
 			}
 			Close(s)
 		})
+	}
+}
+
+// No backend but git runs git, in a repo or not: here git is a program that
+// only notes it was run, first on the PATH.
+func TestOnlyGitRunsGit(t *testing.T) {
+	r := repo(t)
+	bin := t.TempDir()
+	mark := filepath.Join(t.TempDir(), "ran")
+	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\necho \"$@\" >> "+mark+"\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	for _, name := range append(fast(t), None) {
+		t.Run(name, func(t *testing.T) {
+			b, s := open(t, name, r)
+			fixture(t, s.Dir, map[string]string{"top.txt": "t2", "new.txt": "n"})
+			end, err := b.Checkpoint(s, "t1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c, err := b.Diff(s, Base, end.Name); err != nil || c.Count != 2 {
+				t.Fatalf("diff %+v %v", c, err)
+			}
+			if err := Close(s); err != nil {
+				t.Fatal(err)
+			}
+			if name == None {
+				// The folder was used as it is: put it back for the next.
+				fixture(t, r, map[string]string{"top.txt": "t"})
+				os.Remove(filepath.Join(r, "new.txt"))
+			}
+		})
+	}
+	for _, setting := range []string{"", Auto, Overlay, Copy, None} {
+		For(setting, r)
+	}
+	if b, err := os.ReadFile(mark); err == nil {
+		t.Fatalf("git ran: %s", b)
 	}
 }
