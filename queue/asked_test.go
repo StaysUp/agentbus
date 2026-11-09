@@ -18,7 +18,7 @@ const MaxDepth, MaxAskedPerTurn, MaxAskedPerRoot = 2, 10, 30
 var testLimits = Limits{MaxDepth: MaxDepth, MaxPerTurn: MaxAskedPerTurn, MaxPerTree: MaxAskedPerRoot}
 
 func askTurn(q *Queue, l Links, key string) (Job, error) {
-	j, _, err := q.CreateTurnLinked(DefaultTeam, key, Spec{Agent: "claude", Folder: "/x", Isolate: true, Prompt: "hi"}, l, testLimits)
+	j, _, err := q.CreateTurnLinked(DefaultTeam, key, Spec{Harness: "claude", Folder: "/x", Isolate: true, Prompt: "hi"}, l, testLimits)
 	return j, err
 }
 
@@ -142,7 +142,7 @@ func TestDeliver(t *testing.T) {
 	if d == nil {
 		t.Fatal("no delivery")
 	}
-	if d.State != Queued || d.Spec.Session != parent.Session || d.Spec.Agent != "" || d.Links.ResultOf.Job != child.ID ||
+	if d.State != Queued || d.Spec.Session != parent.Session || d.Spec.Harness != "" || d.Links.ResultOf.Job != child.ID ||
 		d.Links.ResultOf.Session != child.Session || d.Links.ResultOf.Turn != ca.ID || d.Links.ResultOf.Agent != "claude" ||
 		d.Links.Chain == nil || d.Links.Chain.Depth != 1 || d.Links.Asker != nil {
 		t.Fatalf("delivery: %+v %+v", d, d.Links)
@@ -249,7 +249,7 @@ func TestSessionRootOfReview(t *testing.T) {
 		Session: j.Session, Workspace: &Workspace{Kind: WorkspaceFolder, Folder: "/x"}}); err != nil {
 		t.Fatal(err)
 	}
-	rv, _, err := q.ReviewLinked(DefaultTeam, j.ID, Spec{Agent: "codex"}, "", false, asked(j.Session, "t_1", j.Session, 1), testLimits)
+	rv, _, err := q.ReviewLinked(DefaultTeam, j.ID, Spec{Harness: "codex"}, "", false, asked(j.Session, "t_1", j.Session, 1), testLimits)
 	if err != nil {
 		t.Fatal(err)
 	}

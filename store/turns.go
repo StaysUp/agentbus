@@ -32,7 +32,7 @@ type TurnList struct {
 type Turn struct {
 	ID      string `json:"id"`
 	Session string `json:"session"`
-	Agent   string `json:"agent" doc:"From the turn's turn.started. Empty for a turn no run started."`
+	Harness string `json:"agent" doc:"From the turn's turn.started. Empty for a turn no run started."`
 	AgentID string `json:"agent_id,omitempty" doc:"From the turn's turn.started: the saved agent that ran it, as GET /api/v0/agents names it. Turns of one session may name different agents. Absent for a turn started by harness name alone, or no run started."`
 	Folder  string `json:"folder" doc:"From the turn's turn.started. Empty for a turn no run started."`
 	// Prompt is a preview: the list holds many turns, and one prompt can be
@@ -193,7 +193,7 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 		var tm, promptLen, replyLen int64
 		var head, replyHead []byte
 		var origin string
-		if err := rows.Scan(&t.StartedSeq, &t.Session, &t.ID, &tm, &t.Agent, &t.AgentID, &t.Folder, &t.IdempotencyKey, &origin,
+		if err := rows.Scan(&t.StartedSeq, &t.Session, &t.ID, &tm, &t.Harness, &t.AgentID, &t.Folder, &t.IdempotencyKey, &origin,
 			&head, &promptLen, &t.ModelCalls, &t.Model, &replyHead, &replyLen); err != nil {
 			rows.Close()
 			return list, fmt.Errorf("store: read turns: %w", err)

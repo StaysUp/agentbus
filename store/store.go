@@ -336,17 +336,17 @@ func (s *Store) Page(after int64, f Filter, limit, maxBytes int) (recs []Record,
 	return recs, false, nil
 }
 
-// Continuation is what a session's next turn needs: the agent and folder of
+// Continuation is what a session's next turn needs: the harness and folder of
 // its latest turn or run that names them (agentFrom), the resume_id from its
 // latest session.closed that carries one, and whether a run's child for it is
 // still running.
 type Continuation struct {
-	Known    bool // the store has events of the session
-	Agent    string
+	Known    bool   // the store has events of the session
+	Harness  string // the harness, such as claude
 	Folder   string
 	ResumeID string
 	Open     bool
-	// AgentID, Access and KeyEnv come from the same event as Agent: the
+	// AgentID, Access and KeyEnv come from the same event as Harness: the
 	// saved agent, how it reaches its model, and the name of its key's
 	// variable. Empty for a session started by harness name alone.
 	AgentID, Access, KeyEnv string
@@ -386,7 +386,7 @@ func (s *Store) Continuation(id string) (Continuation, error) {
 	if err != nil {
 		return c, fmt.Errorf("store: read session: %w", err)
 	}
-	c.Agent, c.Folder, c.ResumeID = agent.String, folder.String, resume.String
+	c.Harness, c.Folder, c.ResumeID = agent.String, folder.String, resume.String
 	c.AgentID, c.Access, c.KeyEnv, c.Model = agentID.String, access.String, keyEnv.String, model.String
 	holds, err := s.OpenHolds(s.Last())
 	if err != nil {

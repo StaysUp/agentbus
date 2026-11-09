@@ -252,10 +252,7 @@ func hashLinks(l Links) Links {
 // resultSession is the session asked work ran in: a turn's own, or for a
 // review the session of its own turn, from its result.
 func resultSession(j Job) string {
-	var r struct {
-		Session string `json:"session"`
-	}
-	_ = json.Unmarshal(j.Result, &r)
+	r, _ := ReadResult(j.Result)
 	if r.Session != "" {
 		return r.Session
 	}
@@ -270,7 +267,7 @@ func agentName(sp Spec) string {
 	if sp.AgentID != "" {
 		return sp.AgentID
 	}
-	return sp.Agent
+	return sp.Harness
 }
 
 // MaxResultReply bounds the reply a delivered result quotes, in bytes.
@@ -293,23 +290,7 @@ const MaxResultPrompt = 32 << 10
 // or a review's verdict and findings. It says that AgentBus wrote it, not the
 // person. name gives a saved agent's name; nil names it by id.
 func ResultPrompt(j Job, name func(id string) string) string {
-	var r struct {
-		State     string `json:"state"`
-		Error     string `json:"error"`
-		Refused   string `json:"refused"`
-		Reply     string `json:"reply"`
-		ReplyText string `json:"reply_text"`
-		Folder    string `json:"folder"`
-		Changes   *struct {
-			Count     int  `json:"count"`
-			Truncated bool `json:"truncated"`
-			Files     []struct {
-				Path   string `json:"path"`
-				Change string `json:"change"`
-			} `json:"files"`
-		} `json:"changes"`
-	}
-	_ = json.Unmarshal(j.Result, &r)
+	r, _ := ReadResult(j.Result)
 	var b strings.Builder
 	what := "the turn you asked for"
 	if j.Kind == KindReview {

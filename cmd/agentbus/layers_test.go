@@ -1,7 +1,9 @@
 package main
 
 import (
+	"errors"
 	gobuild "go/build"
+	"io/fs"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -11,9 +13,10 @@ import (
 const module = "github.com/staysup/agentbus"
 
 // The package rule of one program: the gateway and the record know nothing
-// about jobs; run, which starts one turn, knows nothing about queues; the
-// queue may use run and workspace, never the reverse. Checked over every
-// import, direct or not.
+// about jobs; run, which starts one turn, knows nothing about queues or
+// saved agents; agents, the saved agents, may use run and nothing of the
+// queue side; the queue may use run and workspace, never the reverse.
+// Checked over every import, direct or not.
 func TestPackageLayers(t *testing.T) {
 	jobSide := []string{"queue", "jobs", "runner"}
 	for _, c := range []struct {
@@ -21,9 +24,10 @@ func TestPackageLayers(t *testing.T) {
 		mayNotUse []string
 	}{
 		{[]string{"gateway", "adapter", "event", "cost", "replay", "store", "body", "logfile"},
-			append([]string{"run", "workspace", "api"}, jobSide...)},
-		{[]string{"run"}, append([]string{"workspace", "api"}, jobSide...)},
-		{[]string{"workspace"}, append([]string{"run", "api"}, jobSide...)},
+			append([]string{"run", "agents", "workspace", "api"}, jobSide...)},
+		{[]string{"run"}, append([]string{"agents", "workspace", "api"}, jobSide...)},
+		{[]string{"agents"}, append([]string{"workspace", "api"}, jobSide...)},
+		{[]string{"workspace"}, append([]string{"run", "agents", "api"}, jobSide...)},
 		{[]string{"queue"}, []string{"jobs", "runner", "api"}},
 		{[]string{"jobs"}, []string{"runner", "api"}},
 		{[]string{"runner"}, []string{"api"}},
@@ -67,22 +71,27 @@ func root(t *testing.T) string {
 	return dir
 }
 
-// packagesUnder lists the module's packages at dir and below it.
+// packagesUnder lists the module's packages at dir and at every depth below
+// it. Folders Go's own tools skip (_ or . first, and testdata) are skipped.
 func packagesUnder(t *testing.T, dir string) []string {
 	t.Helper()
 	var out []string
-	matches, _ := filepath.Glob(filepath.Join(root(t), dir, "*.go"))
-	if len(matches) > 0 {
-		out = append(out, module+"/"+dir)
-	}
-	subs, _ := filepath.Glob(filepath.Join(root(t), dir, "*", "*.go"))
-	seen := map[string]bool{}
-	for _, f := range subs {
-		rel, _ := filepath.Rel(root(t), filepath.Dir(f))
-		if p := module + "/" + filepath.ToSlash(rel); !seen[p] {
-			seen[p] = true
-			out = append(out, p)
+	top := filepath.Join(root(t), dir)
+	err := filepath.WalkDir(top, func(path string, d fs.DirEntry, err error) error {
+		if err != nil || !d.IsDir() {
+			return err
 		}
+		if name := d.Name(); path != top && (strings.HasPrefix(name, "_") || strings.HasPrefix(name, ".") || name == "testdata") {
+			return filepath.SkipDir
+		}
+		if matches, _ := filepath.Glob(filepath.Join(path, "*.go")); len(matches) > 0 {
+			rel, _ := filepath.Rel(root(t), path)
+			out = append(out, module+"/"+filepath.ToSlash(rel))
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		t.Fatal(err)
 	}
 	return out
 }

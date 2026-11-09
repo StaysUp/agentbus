@@ -137,7 +137,7 @@ func TestRunTurnIDOnEveryEvent(t *testing.T) {
 		t.Fatalf("GET /turns?session: store %q seq %d, %d turns", list.Store, list.Seq, len(list.Turns))
 	}
 	if a, b := list.Turns[0], list.Turns[1]; a.ID != second || b.ID != turn || a.Session != session ||
-		a.Prompt != "second words" || b.Prompt != "first words" || a.Agent != "claude" ||
+		a.Prompt != "second words" || b.Prompt != "first words" || a.Harness != "claude" ||
 		a.State != store.TurnFinished || b.State != store.TurnFinished || a.Ended == nil {
 		t.Fatalf("turns %+v", list.Turns)
 	}

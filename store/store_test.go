@@ -239,7 +239,7 @@ func TestOpenCountsHoldsByID(t *testing.T) {
 	s := newStore(t)
 	open := func() bool { snap, _ := s.Snapshot(); return session(t, snap, "s").Open }
 	opened := hold(event.SessionOpened, "s", "h1")
-	opened.Agent, opened.Folder = "claude", "/x"
+	opened.Harness, opened.Folder = "claude", "/x"
 	mustAppend(t, s, opened)
 	if !open() {
 		t.Fatal("open hold h1, session closed")
@@ -256,8 +256,8 @@ func TestOpenCountsHoldsByID(t *testing.T) {
 		t.Fatal("every hold closed, session still open")
 	}
 	snap, _ := s.Snapshot()
-	if x := session(t, snap, "s"); x.Agent != "claude" || x.Folder != "/x" {
-		t.Fatalf("agent %q folder %q", x.Agent, x.Folder)
+	if x := session(t, snap, "s"); x.Harness != "claude" || x.Folder != "/x" {
+		t.Fatalf("agent %q folder %q", x.Harness, x.Folder)
 	}
 }
 
@@ -277,7 +277,7 @@ func TestOpenOnlyWhileARunsChildRuns(t *testing.T) {
 
 func agentEvent(kind event.Kind, session, agent, folder string) event.Event {
 	e := ev(kind, session)
-	e.Agent, e.Folder = agent, folder
+	e.Harness, e.Folder = agent, folder
 	if kind == event.TurnStarted {
 		e.Turn = e.ID
 	}
@@ -300,10 +300,10 @@ func TestAgentAndFolderFromTurns(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if c.Agent != x.Agent || c.Folder != x.Folder {
-			t.Fatalf("%s: the snapshot says %q %q, the next turn would use %q %q", id, x.Agent, x.Folder, c.Agent, c.Folder)
+		if c.Harness != x.Harness || c.Folder != x.Folder {
+			t.Fatalf("%s: the snapshot says %q %q, the next turn would use %q %q", id, x.Harness, x.Folder, c.Harness, c.Folder)
 		}
-		return x.Agent, x.Folder
+		return x.Harness, x.Folder
 	}
 
 	// A run's child started and has not reached a model call yet.

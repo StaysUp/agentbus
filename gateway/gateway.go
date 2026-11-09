@@ -867,7 +867,7 @@ func size(e event.Event) int {
 	n := 512 + len(e.ID) + len(e.Session) + len(e.Exchange) + len(e.Vendor) + len(e.Client) +
 		len(e.Turn) + len(e.Model) + len(e.Text) + len(e.StopReason) + len(e.Error) +
 		len(e.ToolID) + len(e.ToolName) + len(e.ToolInput) + len(e.ToolOutput) +
-		len(e.Agent) + len(e.Folder) + len(e.Hold) + len(e.ReplayFrom) + len(e.Continuity) +
+		len(e.Harness) + len(e.Folder) + len(e.Hold) + len(e.ReplayFrom) + len(e.Continuity) +
 		len(e.RecoveredFrom) + len(e.RecoveredReason) + len(e.Context)
 	for _, s := range e.Sessions {
 		n += 16 + len(s)

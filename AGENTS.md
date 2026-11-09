@@ -62,6 +62,7 @@ may hold other projects' Go code. Go's own tools skip folders that start with `_
 - **The package rule is tested** (`cmd/agentbus/layers_test.go`): `gateway/`, `adapter/`,
   `event/`, `cost/`, `replay/`, `store/`, `body/` and `logfile/` import nothing from `run/`,
   `workspace/`, `queue/`, `jobs/` or `runner/`; `run/` imports nothing from the queue side;
+  `agents/` (the saved agents) may use `run/`, never the queue side or `workspace/`;
   `queue/` may use `run/` and `workspace/`, never the reverse.
 - **Fix the root cause.** No defensive backstops on top of a fix.
 - **A live run beats a fixture.** Vendors change their wire formats. Check a change against a real

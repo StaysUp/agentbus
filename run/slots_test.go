@@ -20,7 +20,7 @@ func TestMaxRuns(t *testing.T) {
 			t.Fatalf("take %d: %d", i, code)
 		}
 	}
-	if code, msg := rs.take("a"); code != http.StatusConflict || msg != turnRunning {
+	if code, msg := rs.take("a"); code != http.StatusConflict || msg != TurnRunning {
 		t.Fatalf("a busy session: %d %q", code, msg)
 	}
 	code, msg := rs.take("c")

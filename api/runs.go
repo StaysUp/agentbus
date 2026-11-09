@@ -25,9 +25,6 @@ import (
 	"github.com/staysup/agentbus/store"
 )
 
-// DefaultMaxRuns bounds the turns running at once when nothing else says.
-const DefaultMaxRuns = run.DefaultMaxRuns
-
 // MaxRunBody bounds a turn's request body. A 256 KiB prompt can take six
 // bytes per byte once JSON-escaped.
 const MaxRunBody = 2 << 20
@@ -140,7 +137,7 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 			if !ok {
 				return
 			}
-			spec.Agent, spec.AgentID, spec.Access, spec.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
+			spec.Harness, spec.AgentID, spec.Access, spec.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
 			// The agent's model is used only if the turn switches agent,
 			// which the runner knows when the turn starts: the session's
 			// latest turn may change while this one waits in the queue.
@@ -171,7 +168,7 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			if !busy && !known {
-				writeError(w, http.StatusConflict, turnRunning)
+				writeError(w, http.StatusConflict, run.TurnRunning)
 				return
 			}
 		}
@@ -189,7 +186,7 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, msg)
 			return
 		}
-		spec.Agent, spec.AgentID, spec.Access, spec.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
+		spec.Harness, spec.AgentID, spec.Access, spec.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
 		if spec.Model == "" && ag.Model != "" {
 			spec.Model, spec.ModelFromAgent = ag.Model, true
 		}
@@ -225,48 +222,43 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 // since gets a stand-in: the queue matches the key against the request as
 // asked, the agent by its id, and answers with the first job.
 func (a *API) turnAgent(w http.ResponseWriter, id, key string) (agents.Agent, bool) {
-	ag, msg := a.resolveAgent(id)
-	if msg == "" {
-		return ag, true
-	}
-	known := false
+	var retried func() (bool, error)
 	if key != "" && sessionID.MatchString(id) {
-		var err error
-		if known, err = a.cfg.Queue.HasKey(queue.DefaultTeam, key); err != nil {
-			a.internal(w)
-			return agents.Agent{}, false
-		}
+		retried = func() (bool, error) { return a.cfg.Queue.HasKey(queue.DefaultTeam, key) }
 	}
-	if !known {
-		writeError(w, http.StatusBadRequest, msg)
+	ag, why, err := agents.Lookup(id, a.resolveAgent, retried)
+	switch {
+	case err != nil:
+		a.internal(w)
+		return agents.Agent{}, false
+	case why != nil:
+		writeError(w, http.StatusBadRequest, why.Error())
 		return agents.Agent{}, false
 	}
-	return agents.Agent{ID: id, Harness: id}, true
+	return ag, true
 }
 
-// resolveAgent is the saved agent a turn names, or why it cannot start. Without saved agents only claude and codex are known, each
-// on its own subscription.
-func (a *API) resolveAgent(id string) (agents.Agent, string) {
+// resolveAgent is the saved agent a turn names, or why it cannot start, in
+// fixed words fit for the caller. Without saved agents only claude and codex
+// are known, each on its own subscription.
+func (a *API) resolveAgent(id string) (agents.Agent, error) {
 	if a.cfg.Agents == nil {
-		if !run.KnownAgent(id) {
-			return agents.Agent{}, "agent must be claude or codex"
+		if !run.KnownHarness(id) {
+			return agents.Agent{}, errors.New("agent must be claude or codex")
 		}
-		return agents.Agent{Harness: id, Access: agents.Subscription}, ""
+		return agents.Agent{Harness: id, Access: agents.Subscription}, nil
 	}
 	if !sessionID.MatchString(id) {
-		return agents.Agent{}, "agent must be a saved agent's id; GET /api/v0/agents lists them"
+		return agents.Agent{}, errors.New("agent must be a saved agent's id; GET /api/v0/agents lists them")
 	}
 	ag, err := a.cfg.Agents.Resolve(id)
 	if err != nil {
-		return agents.Agent{}, "agent " + strconv.Quote(id) + " is not a saved agent; GET /api/v0/agents lists them"
+		return agents.Agent{}, errors.New("agent " + strconv.Quote(id) + " is not a saved agent; GET /api/v0/agents lists them")
 	}
-	return ag, ""
+	return ag, nil
 }
 
-const (
-	turnRunning = "a turn is already running in this session"
-	noTurns     = "this service starts no turns: it keeps no job queue"
-)
+const noTurns = "this service starts no turns: it keeps no job queue"
 
 // awaitTurn answers once the job's turn has started: 202 with the turn. A job
 // that ended before its turn started answers why, with the status the runner
@@ -349,11 +341,7 @@ func startedTurn(j queue.Job) string {
 // notStarted answers for a job that ended before its turn started: the
 // refusal the runner recorded, with its status.
 func (a *API) notStarted(w http.ResponseWriter, j queue.Job) {
-	var res struct {
-		Refused string `json:"refused"`
-		Status  int    `json:"status"`
-	}
-	_ = json.Unmarshal(j.Result, &res)
+	res, _ := queue.ReadResult(j.Result)
 	switch {
 	case j.State == queue.Failed && j.Reason == queue.ReasonSetup && res.Refused != "":
 		status := res.Status

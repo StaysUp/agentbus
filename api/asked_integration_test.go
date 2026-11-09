@@ -206,8 +206,8 @@ func TestAskFanOutAndDeliver(t *testing.T) {
 			t.Errorf("result of %s: %+v\n%s", c.Job, tn.Origin, tn.Prompt)
 		}
 		// On the parent's own agent.
-		if tn.Agent != "claude" {
-			t.Errorf("result of %s ran on %s", c.Job, tn.Agent)
+		if tn.Harness != "claude" {
+			t.Errorf("result of %s ran on %s", c.Job, tn.Harness)
 		}
 	}
 

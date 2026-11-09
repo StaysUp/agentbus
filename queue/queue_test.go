@@ -45,7 +45,7 @@ func runner(t *testing.T, q *Queue, capacity int) Runner {
 
 func job(t *testing.T, q *Queue, key string) Job {
 	t.Helper()
-	j, _, err := q.Create(DefaultTeam, KindTurn, key, Spec{Agent: "claude", Folder: "/x", Prompt: "hi"}, Links{})
+	j, _, err := q.Create(DefaultTeam, KindTurn, key, Spec{Harness: "claude", Folder: "/x", Prompt: "hi"}, Links{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,14 +397,14 @@ func TestEventsIdempotent(t *testing.T) {
 func TestCreateIdempotent(t *testing.T) {
 	q, _ := open(t)
 	one := job(t, q, "k1")
-	two, created, err := q.Create(DefaultTeam, KindTurn, "k1", Spec{Agent: "claude", Folder: "/x", Prompt: "hi"}, Links{})
+	two, created, err := q.Create(DefaultTeam, KindTurn, "k1", Spec{Harness: "claude", Folder: "/x", Prompt: "hi"}, Links{})
 	if err != nil || created || two.ID != one.ID {
 		t.Fatalf("retry: %+v %v %v", two, created, err)
 	}
-	if _, _, err := q.Create(DefaultTeam, KindTurn, "k1", Spec{Agent: "claude", Folder: "/x", Prompt: "other"}, Links{}); !errors.Is(err, ErrKeyConflict) {
+	if _, _, err := q.Create(DefaultTeam, KindTurn, "k1", Spec{Harness: "claude", Folder: "/x", Prompt: "other"}, Links{}); !errors.Is(err, ErrKeyConflict) {
 		t.Fatalf("other fields: %v", err)
 	}
-	if _, _, err := q.Create(DefaultTeam, KindReview, "k1", Spec{Agent: "claude", Folder: "/x", Prompt: "hi"}, Links{}); !errors.Is(err, ErrKeyConflict) {
+	if _, _, err := q.Create(DefaultTeam, KindReview, "k1", Spec{Harness: "claude", Folder: "/x", Prompt: "hi"}, Links{}); !errors.Is(err, ErrKeyConflict) {
 		t.Fatalf("other kind: %v", err)
 	}
 	list, err := q.List(DefaultTeam, Filter{}, 10)
@@ -436,7 +436,7 @@ func TestEventsAfterLeaseNotCurrent(t *testing.T) {
 func TestSessionAffinityAndClose(t *testing.T) {
 	q, _ := open(t)
 	a, b := runner(t, q, 2), runner(t, q, 2)
-	first, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Agent: "claude", Repo: "/r", Base: "main", Prompt: "one"}, Links{})
+	first, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Harness: "claude", Repo: "/r", Base: "main", Prompt: "one"}, Links{})
 	s1 := first.Session // the session the queue named for the first job
 	if err != nil {
 		t.Fatal(err)
@@ -637,7 +637,7 @@ func TestTurnsAhead(t *testing.T) {
 func TestTurnWaitsBehindReviewInItsSession(t *testing.T) {
 	q, c := open(t)
 	r := runner(t, q, 4)
-	rv, _, err := q.create(DefaultTeam, KindReview, "", Spec{Agent: "codex", Prompt: "review"}, Links{}, Limits{}, "reviewed")
+	rv, _, err := q.create(DefaultTeam, KindReview, "", Spec{Harness: "codex", Prompt: "review"}, Links{}, Limits{}, "reviewed")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -38,7 +38,7 @@ func resumableEnv(t *testing.T, wire run.Wire) *env {
 		code := 0
 		now := time.Now().UTC()
 		for _, e := range []event.Event{
-			{ID: "evt_2", Kind: event.SessionOpened, Time: now, Session: "s1", Hold: "hold_1", Agent: "claude", Folder: folder},
+			{ID: "evt_2", Kind: event.SessionOpened, Time: now, Session: "s1", Hold: "hold_1", Harness: "claude", Folder: folder},
 			{ID: "evt_3", Kind: event.SessionClosed, Time: now, Session: "s1", Hold: "hold_1", ExitCode: &code, ResumeID: "abc-1"},
 		} {
 			if _, _, err := st.Append(e); err != nil {

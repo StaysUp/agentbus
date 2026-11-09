@@ -127,7 +127,7 @@ func TestReviewPrompt(t *testing.T) {
 func TestReviewJobs(t *testing.T) {
 	q, _ := open(t)
 	a, b := runner(t, q, 4), runner(t, q, 4)
-	author, _, _ := q.Create(DefaultTeam, KindTurn, "", Spec{Agent: "claude", Repo: "/r", Base: "main", Prompt: "Bump the version."}, Links{})
+	author, _, _ := q.Create(DefaultTeam, KindTurn, "", Spec{Harness: "claude", Repo: "/r", Base: "main", Prompt: "Bump the version."}, Links{})
 	s1 := author.Session // the session the queue named for the first job
 	if _, _, err := q.Review(DefaultTeam, author.ID, "claude", "sonnet", "", false); !errors.Is(err, ErrNotReviewable) {
 		t.Fatalf("a queued job: %v", err)

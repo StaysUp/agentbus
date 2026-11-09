@@ -34,7 +34,7 @@ type Config struct {
 	EnrollToken string
 	Name        string
 	Labels      []string
-	Capacity    int // jobs at once; 0 means DefaultCapacity
+	Capacity    int // jobs at once; 0 means run.DefaultMaxRuns
 
 	// Engine starts and stops the turns, and Store is the record it writes:
 	// a turn's end and its reply are read from it.
@@ -54,9 +54,6 @@ type Config struct {
 	HTTP     *http.Client
 	Logf     func(format string, args ...any)
 }
-
-// DefaultCapacity is how many jobs a runner runs at once by default.
-const DefaultCapacity = 3
 
 // ReasonRunnerStopped: the runner was shut down while the job ran, and
 // stopped its turn.
@@ -84,7 +81,7 @@ type state struct {
 // Enroll adds the runner to the control plane.
 func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 	if cfg.Capacity == 0 {
-		cfg.Capacity = DefaultCapacity
+		cfg.Capacity = run.DefaultMaxRuns
 	}
 	if cfg.StopWait == 0 {
 		cfg.StopWait = time.Minute
@@ -336,22 +333,19 @@ func (at *attempt) addChanges(f *queue.Finish) {
 	if at.before == nil {
 		return
 	}
-	res := map[string]any{}
-	if len(f.Result) > 0 {
-		_ = json.Unmarshal(f.Result, &res)
-	}
+	res, _ := queue.ReadResult(f.Result)
 	var c workspace.Changes
 	if after, err := workspace.Take(at.folder, at.before); err != nil {
 		c = workspace.Changes{Kind: "snapshot", Files: []workspace.Change{}, Error: "the workspace could not be read at the end"}
 	} else {
 		c = workspace.Diff(at.folder, at.before, after)
 	}
-	res["folder"] = at.folder
+	res.Folder, res.Changes = at.folder, nil
 	// The whole finish must fit the jobs API's body limit, so the changes get
 	// what the rest leaves, less a margin for the fields added after this.
 	f.Result = mustJSON(res)
 	c.Fit(jobs.MaxBody - len(mustJSON(f)) - finishMargin)
-	res["changes"] = c
+	res.Changes = &c
 	f.Result = mustJSON(res)
 	at.event("workspace.changes", map[string]any{"count": c.Count, "kind": c.Kind})
 	// A review runs in another session's workspace: it never claims one.
@@ -401,30 +395,6 @@ func (at *attempt) heartbeats(ctx context.Context, done <-chan struct{}) {
 	}
 }
 
-// Result is what a finished job's result holds: how its turn ended. The turn
-// is the attempt: its id is the attempt's.
-type Result struct {
-	// Session is the session the turn ran in. For a turn job it is the job's
-	// own session; a review runs in a session of its own.
-	Session    string   `json:"session,omitempty"`
-	State      string   `json:"state,omitempty"`
-	ExitCode   *int     `json:"exit_code,omitempty"`
-	Stopped    bool     `json:"stopped,omitempty"`
-	Unsettled  bool     `json:"unsettled,omitempty"`
-	Error      string   `json:"error,omitempty"`
-	Reply      string   `json:"reply,omitempty"`
-	ModelCalls int      `json:"model_calls,omitempty"`
-	CostUSD    *float64 `json:"cost_usd,omitempty"`
-	// Refused: why the turn did not start, and the status that says what
-	// kind (run.Refusal).
-	Refused string `json:"refused,omitempty"`
-	Status  int    `json:"status,omitempty"`
-	// ReplyText, for a review job and asked work: the whole text of the turn's last reply,
-	// at most MaxReplyText bytes. The queue reads the verdict from it. Reply
-	// is only its first 500 characters.
-	ReplyText string `json:"reply_text,omitempty"`
-}
-
 func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	at := &attempt{r: r, job: job, a: a, next: 1, until: time.Now().Add(r.lease),
 		cancel: make(chan struct{}), stale: make(chan struct{})}
@@ -461,7 +431,7 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	}
 	turn, err := r.cfg.Engine.Start(r.request(at))
 	if err != nil {
-		res := Result{Refused: "the turn could not be started", Status: http.StatusInternalServerError}
+		res := queue.Result{Refused: "the turn could not be started", Status: http.StatusInternalServerError}
 		var rf *run.Refusal
 		if errors.As(err, &rf) {
 			res.Refused, res.Status = rf.Msg, rf.Status
@@ -494,9 +464,9 @@ func (r *Runner) request(at *attempt) run.Request {
 	case sp.Session != "":
 		// A next turn may name another agent: it runs on that one.
 		req.Session = sp.Session
-		req.Agent, req.AgentID, req.Access, req.KeyEnv, req.AgentModel = sp.Agent, sp.AgentID, sp.Access, sp.KeyEnv, sp.AgentModel
+		req.Harness, req.AgentID, req.Access, req.KeyEnv, req.AgentModel = sp.Harness, sp.AgentID, sp.Access, sp.KeyEnv, sp.AgentModel
 	default:
-		req.Agent, req.Folder = sp.Agent, at.folder
+		req.Harness, req.Folder = sp.Harness, at.folder
 		req.AgentID, req.Access, req.KeyEnv = sp.AgentID, sp.Access, sp.KeyEnv
 		if at.job.Kind == queue.KindTurn {
 			req.NewSession = at.job.Session
@@ -524,20 +494,20 @@ func (r *Runner) request(at *attempt) run.Request {
 // that is in a git repo with a commit gets a worktree of that repo at its
 // HEAD, and the turn runs in the same folder inside it. It answers why the job
 // cannot run, or nil.
-func (r *Runner) prepare(at *attempt) *Result {
+func (r *Runner) prepare(at *attempt) *queue.Result {
 	sp := at.job.Spec
 	if sp.Folder != "" && sp.Isolate {
 		if repo, rel, head, ok := workspace.RepoOf(sp.Folder); ok {
 			if r.cfg.Workdir == "" {
-				return &Result{Refused: "this runner has no workdir for worktrees"}
+				return &queue.Result{Refused: "this runner has no workdir for worktrees"}
 			}
 			dir := filepath.Join(r.cfg.Workdir, at.job.ID)
 			if err := workspace.MakeWorktree(repo, head, dir); err != nil {
-				return &Result{Refused: "the worktree could not be made: " + err.Error()}
+				return r.noWorktree(at, err)
 			}
 			// A refusal after this point removes the worktree: nothing
 			// records it yet, so nothing else would.
-			undo := func(res *Result) *Result {
+			undo := func(res *queue.Result) *queue.Result {
 				if err := workspace.RemoveWorktree(r.cfg.Workdir, repo, dir); err != nil {
 					r.cfg.Logf("worktree %s for job %s could not be removed after a refused setup", dir, at.job.ID)
 				}
@@ -546,7 +516,7 @@ func (r *Runner) prepare(at *attempt) *Result {
 			// The folder must be a real folder inside the new worktree: one
 			// the commit records as a symlink could lead anywhere.
 			if !insideDir(dir, filepath.Join(dir, rel)) {
-				return undo(&Result{Refused: "the folder is not in its repo's last commit, so it cannot get its own worktree; " +
+				return undo(&queue.Result{Refused: "the folder is not in its repo's last commit, so it cannot get its own worktree; " +
 					"commit it, or start the session with isolate false to use the folder as it is", Status: http.StatusBadRequest})
 			}
 			// The workspace is the folder the turn runs in, inside the
@@ -565,11 +535,11 @@ func (r *Runner) prepare(at *attempt) *Result {
 	switch {
 	case sp.Repo != "":
 		if r.cfg.Workdir == "" {
-			return &Result{Refused: "this runner has no workdir for worktrees"}
+			return &queue.Result{Refused: "this runner has no workdir for worktrees"}
 		}
 		dir := filepath.Join(r.cfg.Workdir, at.job.ID)
 		if err := workspace.MakeWorktree(sp.Repo, sp.Base, dir); err != nil {
-			return &Result{Refused: "the worktree could not be made: " + err.Error()}
+			return r.noWorktree(at, err)
 		}
 		at.folder = dir
 		at.ws = &queue.Workspace{Kind: queue.WorkspaceWorktree, Folder: dir, Repo: sp.Repo, Base: sp.Base}
@@ -607,14 +577,21 @@ func insideDir(dir, folder string) bool {
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
 }
 
+// noWorktree is the refusal of a job whose worktree could not be made. git's
+// own words go to the service log only: they can name paths on this runner.
+func (r *Runner) noWorktree(at *attempt, err error) *queue.Result {
+	r.cfg.Logf("worktree for job %s could not be made: %s", at.job.ID, err)
+	return &queue.Result{Refused: "the worktree could not be made"}
+}
+
 // snapshot takes the attempt's snapshot of its folder before the turn.
-func (r *Runner) snapshot(at *attempt) *Result {
+func (r *Runner) snapshot(at *attempt) *queue.Result {
 	if at.folder == "" {
 		return nil // no folder to watch: the engine still runs the turn, or refuses it
 	}
 	b, err := workspace.Take(at.folder, nil)
 	if err != nil {
-		return &Result{Refused: "the workspace could not be read"}
+		return &queue.Result{Refused: "the workspace could not be read"}
 	}
 	at.before = b
 	return nil
@@ -663,7 +640,7 @@ wait:
 			// its session.closed waits on something. The job ends now and
 			// says so; the turn ends on its own.
 			at.event("turn.unended", map[string]any{"turn": turn.ID})
-			res := Result{Session: turn.Session, Error: "the turn was stopped and had not ended in time"}
+			res := queue.Result{Session: turn.Session, Error: "the turn was stopped and had not ended in time"}
 			f := queue.Finish{Status: queue.Failed, Reason: ReasonRunnerStopped, Result: mustJSON(res)}
 			if cancelled && !shutdown {
 				f = queue.Finish{Status: queue.Cancelled, Result: mustJSON(res)}
@@ -673,7 +650,7 @@ wait:
 		}
 	}
 	end := turn.Ended()
-	res := Result{Session: turn.Session, ExitCode: &end.ExitCode, Stopped: end.Stopped, Unsettled: end.Unsettled, State: "failed"}
+	res := queue.Result{Session: turn.Session, ExitCode: &end.ExitCode, Stopped: end.Stopped, Unsettled: end.Unsettled, State: "failed"}
 	if end.ExitCode == 0 {
 		res.State = "finished"
 	}
