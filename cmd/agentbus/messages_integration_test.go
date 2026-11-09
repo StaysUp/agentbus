@@ -342,22 +342,23 @@ func TestRunWithSessionRefusals(t *testing.T) {
 	if snapSession(t, svc, tok, id)["resumable"].(bool) {
 		t.Error("resumable while a turn runs")
 	}
+	// A message sent while it runs is queued behind it, and runs next.
 	before = svc.store.Last()
-	if code, out, raw := postMessage(t, svc, tok, id, map[string]any{"prompt": "three"}); code != http.StatusConflict ||
-		out["error"] != "a turn is already running in this session" {
-		t.Errorf("while running: %d %s, want 409 already running", code, raw)
+	if code, out, raw := postMessage(t, svc, tok, id, map[string]any{"prompt": "three"}); code != http.StatusAccepted ||
+		out["queued"] != true || out["ahead"] != float64(1) || out["turn"] != "" {
+		t.Errorf("while running: %d %s, want 202 queued with ahead 1", code, raw)
 	}
 	if svc.store.Last() != before {
-		t.Error("a refused turn stored events")
+		t.Error("a queued turn stored events before its turn started")
 	}
 	os.WriteFile(release, nil, 0o600)
-	waitClosedN(t, svc, id, 2)
+	waitClosedN(t, svc, id, 3)
 	if !snapSession(t, svc, tok, id)["resumable"].(bool) {
 		t.Error("not resumable after the turn closed")
 	}
 
-	// The first run of a session is still running: already running, not
-	// "cannot be continued".
+	// The first run of a session is still running: the message is queued,
+	// not refused as "cannot be continued".
 	release2 := filepath.Join(t.TempDir(), "release")
 	t.Setenv("AGENTBUS_FAKE_WAIT", release2)
 	code, out, raw := postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": t.TempDir(), "prompt": "one"})
@@ -365,12 +366,12 @@ func TestRunWithSessionRefusals(t *testing.T) {
 		t.Fatalf("run %d %s", code, raw)
 	}
 	running := out["id"].(string)
-	if code, out, raw := postMessage(t, svc, tok, running, map[string]any{"prompt": "x"}); code != http.StatusConflict ||
-		out["error"] != "a turn is already running in this session" {
-		t.Errorf("first run running: %d %s, want 409 already running", code, raw)
+	if code, out, raw := postMessage(t, svc, tok, running, map[string]any{"prompt": "x"}); code != http.StatusAccepted ||
+		out["queued"] != true {
+		t.Errorf("first run running: %d %s, want 202 queued", code, raw)
 	}
 	os.WriteFile(release2, nil, 0o600)
-	waitClosed(t, svc.store, running)
+	waitClosedN(t, svc, running, 2)
 	t.Setenv("AGENTBUS_FAKE_WAIT", "")
 
 	// Body refusals, as runs.
@@ -437,7 +438,7 @@ func TestRunWithSessionRefusals(t *testing.T) {
 		"folder": folder + "/"}); code != http.StatusAccepted {
 		t.Fatalf("own agent and folder sent: %d %s, want 202", code, raw)
 	}
-	waitClosedN(t, svc, id, 3)
+	waitClosedN(t, svc, id, 4)
 }
 
 // closedFolder is the folder of session's first session.opened.
@@ -452,7 +453,8 @@ func closedFolder(t *testing.T, svc *service, session string) string {
 	return ""
 }
 
-// Two next turns sent at once: exactly one starts.
+// Two next turns sent at once: one starts, the other is queued behind it,
+// and both run, one after the other.
 func TestRunWithSessionOneTurnAtATime(t *testing.T) {
 	home := t.TempDir()
 	svc := runService(t, home, nil, 0)
@@ -462,21 +464,28 @@ func TestRunWithSessionOneTurnAtATime(t *testing.T) {
 	t.Setenv("AGENTBUS_FAKE_WAIT", release)
 	var wg sync.WaitGroup
 	codes := make([]int, 2)
+	queued := make([]bool, 2)
 	for i := range codes {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			codes[i], _, _ = postMessage(t, svc, tok, id, map[string]any{"prompt": "two"})
+			var out map[string]any
+			codes[i], out, _ = postMessage(t, svc, tok, id, map[string]any{"prompt": "two"})
+			queued[i] = out["queued"] == true
 		}(i)
 	}
 	wg.Wait()
-	if !(codes[0] == 202 && codes[1] == 409 || codes[0] == 409 && codes[1] == 202) {
-		t.Fatalf("codes %v, want one 202 and one 409", codes)
+	if codes[0] != 202 || codes[1] != 202 || queued[0] == queued[1] {
+		t.Fatalf("codes %v queued %v, want both 202 and one queued", codes, queued)
+	}
+	// One turn runs at a time: only one session.opened is open now.
+	if n := len(closedEvents(runEvents(t, svc.store, id))); n != 1 {
+		t.Fatalf("%d session.closed while the second runs, want 1", n)
 	}
 	os.WriteFile(release, nil, 0o600)
-	waitClosedN(t, svc, id, 2)
+	waitClosedN(t, svc, id, 3)
 	time.Sleep(50 * time.Millisecond)
-	if n := len(closedEvents(runEvents(t, svc.store, id))); n != 2 {
-		t.Fatalf("%d session.closed, want 2", n)
+	if n := len(closedEvents(runEvents(t, svc.store, id))); n != 3 {
+		t.Fatalf("%d session.closed, want 3", n)
 	}
 }

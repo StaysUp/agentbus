@@ -175,13 +175,15 @@ var routes = append([]route{
 			"The turn's turn.started, with the prompt, is stored before the reply.\n\n" +
 			"Every turn runs as a job: this makes a turn job and answers once a runner has started its turn. " +
 			"The turn id is the id of the job's attempt. A turn no runner starts within 30 seconds answers 202 with queued true, " +
-			"its job and its session, and no turn: the job runs when a runner is free.",
+			"its job and its session, and no turn: the job runs when a runner is free.\n\n" +
+			"A session whose turn runs, or has turns waiting, is never refused: the new turn queues behind them and runs next, in order. " +
+			"It answers 202 at once with queued true and ahead, how many of the session's turns are before it.",
 		body: TurnRequest{},
 		turn: askTurn,
-		replies: []reply{ok(202, Started{}, "The agent has started, or the turn's job is queued."), turnRefused,
+		replies: []reply{ok(202, Started{}, "The agent has started, or the turn's job is queued: behind the session's earlier turns, or waiting for a runner."), turnRefused,
 			fail(403, "A turn token's request is refused: error says why, such as a cap on asked work."),
 			fail(404, "This service keeps no job queue, or the session sent has no events."),
-			fail(409, "A turn is already running in the session sent, it cannot be continued from here, or the idempotency key names another turn."),
+			fail(409, "The session sent cannot be continued from here, its workspace is closed, or the idempotency key names another turn. A session whose turn is running is not refused: the new turn waits behind it (queued)."),
 			fail(http.StatusTooManyRequests, "Too many jobs are waiting; wait for some to end."), turnFailed, stopping},
 		turns: true,
 		serve: plain((*API).run)},

@@ -583,3 +583,94 @@ func TestHasKey(t *testing.T) {
 		t.Fatalf("empty key: %v %v", ok, err)
 	}
 }
+
+// A session's turn jobs wait behind the ones made before them that have not
+// ended, and TurnsAhead lists those, oldest first; a cancelled one leaves.
+func TestTurnsAhead(t *testing.T) {
+	q, c := open(t)
+	first := job(t, q, "")
+	mk := func() Job {
+		c.add(time.Millisecond)
+		j, _, err := q.CreateTurnLinked(DefaultTeam, "", Spec{Session: first.Session, Prompt: "next"}, Links{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return j
+	}
+	second, third := mk(), mk()
+	ids := func(j Job) []string {
+		t.Helper()
+		list, err := q.TurnsAhead(DefaultTeam, j.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, a := range list {
+			out = append(out, a.ID)
+		}
+		return out
+	}
+	if got := ids(first); len(got) != 0 {
+		t.Fatalf("ahead of the first: %v", got)
+	}
+	if got := ids(third); len(got) != 2 || got[0] != first.ID || got[1] != second.ID {
+		t.Fatalf("ahead of the third: %v, want %s %s", got, first.ID, second.ID)
+	}
+	if _, err := q.Cancel(DefaultTeam, second.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(third); len(got) != 1 || got[0] != first.ID {
+		t.Fatalf("ahead after a cancel: %v", got)
+	}
+	// One at a time: the runner takes the first, and not the third beside it.
+	r := runner(t, q, 4)
+	if j, _ := take(t, q, r); j.ID != first.ID {
+		t.Fatalf("took %s, want the first", j.ID)
+	}
+	if _, ok, err := takeAny(q, r); ok || err != nil {
+		t.Fatalf("took a second turn of the session beside the first: %v %v", ok, err)
+	}
+}
+
+// A review runs its turn in a session of its own. A turn sent to that
+// session waits behind the review, and is not taken beside it.
+func TestTurnWaitsBehindReviewInItsSession(t *testing.T) {
+	q, c := open(t)
+	r := runner(t, q, 4)
+	rv, _, err := q.create(DefaultTeam, KindReview, "", Spec{Agent: "codex", Prompt: "review"}, Links{}, "reviewed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ra := take(t, q, r)
+	if _, _, err := q.Start(r.ID, ra.ID, ra.Number, lease); err != nil {
+		t.Fatal(err)
+	}
+	if busy, err := q.SessionHasWork(DefaultTeam, "rev1"); err != nil || busy {
+		t.Fatalf("before its turn started: %v %v", busy, err)
+	}
+	if _, _, err := q.AddEvents(r.ID, ra.ID, ra.Number, 1, []AttemptEvent{{Seq: 1, Time: time.Now(), Kind: "turn.created",
+		Data: json.RawMessage(`{"session":"rev1","turn":"` + ra.ID + `"}`)}}); err != nil {
+		t.Fatal(err)
+	}
+	if busy, err := q.SessionHasWork(DefaultTeam, "rev1"); err != nil || !busy {
+		t.Fatalf("while the review runs: %v %v", busy, err)
+	}
+	c.add(time.Millisecond)
+	next, _, err := q.CreateTurnLinked(DefaultTeam, "", Spec{Session: "rev1", Prompt: "and this?"}, Links{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ahead, err := q.TurnsAhead(DefaultTeam, next.ID)
+	if err != nil || len(ahead) != 1 || ahead[0].ID != rv.ID {
+		t.Fatalf("ahead %v %v, want the review", ahead, err)
+	}
+	if _, ok, err := takeAny(q, r); ok || err != nil {
+		t.Fatalf("took the turn beside the review: %v %v", ok, err)
+	}
+	if _, err := q.End(r.ID, ra.ID, ra.Number, Finish{Status: Finished, Result: json.RawMessage(`{"session":"rev1","reply_text":"x"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	if j, _ := take(t, q, r); j.ID != next.ID {
+		t.Fatalf("took %s, want the waiting turn", j.ID)
+	}
+}

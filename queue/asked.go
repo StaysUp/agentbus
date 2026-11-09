@@ -92,10 +92,11 @@ func checkAsked(tx *sql.Tx, team string, links Links) error {
 	return nil
 }
 
-// CreateTurnLinked is CreateTurn with links: for a turn an agent asked for,
-// its Asker and Chain. The caps are checked in the same transaction.
-func (q *Queue) CreateTurnLinked(team, key string, spec Spec, links Links, exclusive bool) (Job, bool, error) {
-	return q.create(team, KindTurn, key, spec, links, spec.Session, exclusive)
+// CreateTurnLinked makes a turn job, with links: for a turn an agent asked
+// for, its Asker and Chain. The caps are checked in the same transaction. A
+// turn of a session whose turn runs waits behind it in the queue.
+func (q *Queue) CreateTurnLinked(team, key string, spec Spec, links Links) (Job, bool, error) {
+	return q.create(team, KindTurn, key, spec, links, spec.Session)
 }
 
 // SessionRoot is the root of the request tree a session was started in: the
@@ -182,7 +183,7 @@ func (q *Queue) Deliver(team string, name func(id string) string) (int, error) {
 		if j.Links.Chain != nil {
 			links.Chain = &Chain{Root: j.Links.Chain.Root, Depth: j.Links.Chain.Depth}
 		}
-		d, _, err := q.create(team, KindTurn, ResultKey(j.ID), spec, links, spec.Session, false)
+		d, _, err := q.create(team, KindTurn, ResultKey(j.ID), spec, links, spec.Session)
 		why := ""
 		switch {
 		case err == nil:

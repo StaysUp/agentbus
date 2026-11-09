@@ -13,7 +13,7 @@ func asked(session, turn, root string, depth int) Links {
 }
 
 func askTurn(q *Queue, l Links, key string) (Job, error) {
-	j, _, err := q.CreateTurnLinked(DefaultTeam, key, Spec{Agent: "claude", Folder: "/x", Isolate: true, Prompt: "hi"}, l, false)
+	j, _, err := q.CreateTurnLinked(DefaultTeam, key, Spec{Agent: "claude", Folder: "/x", Isolate: true, Prompt: "hi"}, l)
 	return j, err
 }
 

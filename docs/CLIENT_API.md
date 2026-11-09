@@ -566,8 +566,12 @@ job that runs it. The agent's work arrives later, as events of that session, **e
   **The service never watches process ids**: a process id can be reused by an unrelated process.
 - **At most 4 turns running at once**, unless `agentbus up -max-runs <n>` sets another number
   (1 to 64): it is the built-in runner's capacity. One more waits in the queue.
-- **A turn while the session's last turn job has not ended gets 409** `a turn is already running
-  in this session`. The jobs API queues a next turn instead.
+- **Every turn queues.** A turn sent while the session has a turn running, or turns still waiting
+  (a person's message or a delivered result), is never refused: its job waits behind them and runs
+  next, one at a time, in the order they were sent. The reply comes at once: **202** with
+  `"queued":true`, the `job`, the session `id`, `ahead` (how many of the session's turns are before
+  it) and no `turn`. Its `turn.started` is stored when it starts; `GET /api/v0/jobs/<id>` follows it
+  meanwhile, and `POST /api/v0/jobs/<id>/cancel` takes it back out.
 - **`idempotency_key` makes a retry safe.** It is optional: 1 to 128 characters of `A-Z`, `a-z`,
   `0-9` and `. _ : -`. A client whose request timed out sends the same body again.
   - It is the turn job's key. The turn's `turn.started` carries it as `idempotency_key`.
@@ -771,8 +775,9 @@ carrying the new turn id, since the agent's base URL names both.
   shared with runs, same stopping behaviour, same token rule.
 - Refused:
   - **404** `no such session`: the store has no events for it.
-  - **409** `a turn is already running in this session`: one of its holds is open, or a run or
-    turn of it is starting.
+  - A turn sent while one runs is not refused: it is queued behind it (above). Only a hold the
+    record shows open with no job of this service behind it (a turn this service did not start)
+    gets **409** `a turn is already running in this session`, once the queued turn's runner tries it.
   - **409** `this session cannot be continued from here`: it has no `resume_id` (with replay off,
     or by the fallback above), such as a session pointed at the gateway by hand, or one whose agent
     is not `claude` or `codex`. With own replay, the version adds `: ` and the reason the newest

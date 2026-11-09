@@ -184,7 +184,8 @@ var (
 	// ErrNotReviewable: the job is not a turn that ended with its changed
 	// files recorded in a known workspace.
 	ErrNotReviewable = errors.New("queue: the job cannot be reviewed")
-	// ErrSessionBusy: the session has a job that has not ended.
+	// ErrSessionBusy: the session has a job that has not ended, so it cannot
+	// be closed.
 	ErrSessionBusy = errors.New("queue: the session has a job that has not ended")
 )
 
@@ -545,7 +546,7 @@ func (q *Queue) runner(where string, arg string) (Runner, error) {
 // the same fields returns the first job and created false; other fields under
 // the same key get ErrKeyConflict.
 func (q *Queue) Create(team, kind, key string, spec Spec, links Links) (job Job, created bool, err error) {
-	return q.create(team, kind, key, spec, links, spec.Session, false)
+	return q.create(team, kind, key, spec, links, spec.Session)
 }
 
 // HasKey reports whether a job was already made with this idempotency key.
@@ -561,20 +562,65 @@ func (q *Queue) HasKey(team, key string) (bool, error) {
 	return n > 0, nil
 }
 
-// CreateTurn makes a turn job. With exclusive, a session that has a turn job
-// whose turn has not started yet (queued, taken, or running before its turn
-// started) gets ErrSessionBusy, in the same transaction, so two requests at
-// once cannot both pass. A job whose turn has started is not counted: whether
-// that turn still runs is the record's to say, and a job made now waits in
-// the queue until the one before it ends.
-func (q *Queue) CreateTurn(team, key string, spec Spec, exclusive bool) (job Job, created bool, err error) {
-	return q.create(team, KindTurn, key, spec, Links{}, spec.Session, exclusive)
+// reviewIn says review job o runs its turn in session j.session: a review
+// runs in a session of its own, which its runner names in the attempt's
+// turn.created event. A turn job sent to that session waits behind it.
+const reviewIn = `o.kind = 'review' AND EXISTS (SELECT 1 FROM attempts a JOIN attempt_events e ON e.attempt = a.id
+	WHERE a.job = o.id AND e.kind = 'turn.created' AND json_extract(e.data, '$.session') = j.session)`
+
+// SessionHasWork says the session has a job that has not ended: a turn job
+// of it, or a review whose turn runs in it.
+func (q *Queue) SessionHasWork(team, session string) (bool, error) {
+	var n int
+	err := q.db.QueryRow(`SELECT COUNT(*) FROM jobs o, (SELECT ? AS session) j WHERE o.team = ? AND o.ended IS NULL
+		AND ((o.kind = 'turn' AND o.session = j.session) OR (`+reviewIn+`))`, session, team).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("queue: read session work: %w", err)
+	}
+	return n > 0, nil
+}
+
+// TurnsAhead are the jobs the turn job waits behind, oldest first: its
+// session's turn jobs that have not ended and were made before it, and a
+// review whose turn runs in its session. None for a job of no session.
+func (q *Queue) TurnsAhead(team, id string) ([]Job, error) {
+	rows, err := q.db.Query(`SELECT o.id FROM jobs o JOIN jobs j ON j.id = ? AND j.team = ?
+		WHERE o.team = j.team AND o.ended IS NULL AND o.id != j.id AND j.session IS NOT NULL
+		AND ((o.kind = 'turn' AND o.session = j.session AND (o.created < j.created OR (o.created = j.created AND o.id < j.id)))
+			OR (`+reviewIn+`))
+		ORDER BY o.created, o.id`, id, team)
+	if err != nil {
+		return nil, fmt.Errorf("queue: list turns ahead: %w", err)
+	}
+	var ids []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("queue: list turns ahead: %w", err)
+		}
+		ids = append(ids, s)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queue: list turns ahead: %w", err)
+	}
+	jobs := make([]Job, 0, len(ids))
+	for _, s := range ids {
+		j, err := q.Get(team, s)
+		if err != nil {
+			return nil, err
+		}
+		jobs = append(jobs, j)
+	}
+	return jobs, nil
 }
 
 // create is Create with the session the job is tied to: spec.Session for a
 // turn, the reviewed job's session for a review. A turn job that opens a new
-// session gets its id here.
-func (q *Queue) create(team, kind, key string, spec Spec, links Links, session string, exclusive bool) (job Job, created bool, err error) {
+// session gets its id here. A session whose turn runs is never refused: Take
+// starts its turn jobs one at a time, in the order they were made.
+func (q *Queue) create(team, kind, key string, spec Spec, links Links, session string) (job Job, created bool, err error) {
 	hash := hashOf(struct {
 		Kind  string `json:"kind"`
 		Spec  Spec   `json:"spec"`
@@ -603,17 +649,6 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, session s
 			}
 			if closed.Valid {
 				return ErrSessionClosed
-			}
-		}
-		if exclusive && session != "" {
-			var busy int
-			if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs j WHERE team = ? AND session = ? AND kind = 'turn'
-				AND (state IN ('queued','taken') OR (state = 'running' AND NOT EXISTS (SELECT 1 FROM attempt_events e
-					WHERE e.attempt = j.attempt AND e.kind = 'turn.created')))`, team, session).Scan(&busy); err != nil {
-				return fmt.Errorf("queue: count jobs: %w", err)
-			}
-			if busy > 0 {
-				return ErrSessionBusy
 			}
 		}
 		if err := checkAsked(tx, team, links); err != nil {
@@ -877,7 +912,7 @@ func (q *Queue) Take(runnerID string, lease time.Duration) (job Job, att Attempt
 			AND (session IS NULL OR NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team)
 				OR EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team AND s.runner = ? AND s.closed IS NULL))
 			AND (j.kind != 'turn' OR j.session IS NULL OR NOT EXISTS (SELECT 1 FROM jobs o WHERE o.team = j.team
-				AND o.session = j.session AND o.kind = 'turn' AND o.state IN ('taken','running')))
+				AND o.state IN ('taken','running') AND ((o.session = j.session AND o.kind = 'turn') OR (`+reviewIn+`))))
 			ORDER BY created, id LIMIT 1`, team, runnerID).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
@@ -1415,5 +1450,5 @@ func (q *Queue) review(team, id string, as Spec, key string, includeReply bool, 
 	spec := Spec{Agent: as.Agent, AgentID: as.AgentID, Access: as.Access, KeyEnv: as.KeyEnv, Model: as.Model,
 		ModelFromAgent: as.ModelFromAgent, Folder: j.Workspace.Folder, ReadOnly: true, Prompt: prompt}
 	links.ReviewsJob = j.ID
-	return q.create(team, KindReview, key, spec, links, j.Session, false)
+	return q.create(team, KindReview, key, spec, links, j.Session)
 }

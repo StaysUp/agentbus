@@ -5,10 +5,12 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 )
@@ -52,15 +54,17 @@ func postNext(t *testing.T, e *env) (int, string) {
 	return resp.StatusCode, body
 }
 
-// A turn counts as running from the moment it is accepted, before its child
-// starts and its session.opened is stored: a second turn sent in that window
-// is refused, not started beside it.
-func TestNextTurnRefusedWhileAnotherIsStarting(t *testing.T) {
+// A turn sent while the session's turn is starting is queued behind it, not
+// refused and not started beside it: the reply says queued at once, with one
+// turn ahead, and the job runs once the first has ended.
+func TestNextTurnQueuesWhileAnotherIsStarting(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
-	// Only the first caller waits, so a second turn that is wrongly let
-	// through answers 400 at once instead of hanging the test.
+	// Only the first caller waits; the queued one is refused at once (its
+	// binary is not found) when its turn comes.
 	var once sync.Once
+	var starts atomic.Int32
 	e := resumableEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) {
+		starts.Add(1)
 		first := false
 		once.Do(func() { first = true; close(entered) })
 		if first {
@@ -68,24 +72,48 @@ func TestNextTurnRefusedWhileAnotherIsStarting(t *testing.T) {
 		}
 		return run.Launch{}, run.ErrNotFound
 	})
-	// Runs before the server closes, so a failure below cannot leave the
-	// first request waiting.
 	var releaseOnce sync.Once
 	free := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(free)
 	first := make(chan int)
 	go func() { code, _ := postNext(t, e); first <- code }()
 	<-entered
-	if code, body := postNext(t, e); code != http.StatusConflict || !strings.Contains(body, "a turn is already running in this session") {
-		t.Fatalf("second turn while the first starts: %d %s, want 409", code, body)
+	code, body := postNext(t, e)
+	var out Started
+	if err := json.Unmarshal([]byte(body), &out); err != nil || code != http.StatusAccepted || !out.Queued || out.Ahead != 1 || out.Turn != "" || out.Job == "" {
+		t.Fatalf("second turn while the first starts: %d %s, want 202 queued with ahead 1", code, body)
+	}
+	if n := starts.Load(); n != 1 {
+		t.Fatalf("%d starts while the first runs, want 1", n)
 	}
 	free()
 	if code := <-first; code != http.StatusBadRequest {
 		t.Fatalf("first turn: %d, want 400 (its binary was not found)", code)
 	}
-	// The slot and the session are free again.
+	// The queued job runs next, and is refused the same way.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		j, err := e.q.Get(queue.DefaultTeam, out.Job)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if j.Ended != nil {
+			if j.State != queue.Failed || j.Reason != queue.ReasonSetup {
+				t.Fatalf("queued job ended %s %s, want failed setup", j.State, j.Reason)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("queued job still %s", j.State)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if n := starts.Load(); n != 2 {
+		t.Fatalf("%d starts, want 2", n)
+	}
+	// Nothing is ahead now: a third turn waits for its own start.
 	if code, body := postNext(t, e); code != http.StatusBadRequest {
-		t.Fatalf("after the first ended: %d %s, want 400 again", code, body)
+		t.Fatalf("after both ended: %d %s, want 400 again", code, body)
 	}
 }
 

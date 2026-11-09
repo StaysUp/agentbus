@@ -172,8 +172,10 @@ that id in `turn`, and its `turn.started` (with the prompt) is stored before the
 is false unless true. True gives claude Read, Grep and Glob only, and codex `--sandbox read-only`.
 False leaves claude its own tools and settings, and gives codex `--sandbox workspace-write` with
 network on (`-c sandbox_workspace_write.network_access=true`): it can edit the folder and reach the
-network, so it can call this API with its turn token. Read-only codex has no writes and no network. 404 for an unknown session, 409 when a turn is already running or the session
-cannot be continued. At most 4 turns running at once, or the number `agentbus up -max-runs <n>` sets;
+network, so it can call this API with its turn token. Read-only codex has no writes and no network. 404 for an unknown session, 409 when the session
+cannot be continued. A turn sent while the session's turn runs, or while others wait, is queued
+behind them and runs next, in order: 202 at once with `"queued":true`, its `job`, and `ahead`, how
+many of the session's turns are before it. At most 4 turns running at once, or the number `agentbus up -max-runs <n>` sets;
 a turn no runner starts within 30 seconds answers 202 with `"queued":true`, its `job` and session `id`, and no `turn`: it runs later.
 `idempotency_key` (optional, 1 to 128 of `A-Za-z0-9._:-`) makes a retry safe: the same key with
 the same fields answers 202 with the same turn and `"existing":true`, and starts nothing; the same

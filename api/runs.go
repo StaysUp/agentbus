@@ -67,7 +67,8 @@ type Started struct {
 	// made this turn's job.
 	Existing bool   `json:"existing,omitempty" doc:"True when idempotency_key had already made this turn's job, so nothing new was made."`
 	Job      string `json:"job" doc:"The turn job that runs the turn. GET /api/v0/jobs/{id} reads it."`
-	Queued   bool   `json:"queued,omitempty" doc:"True when no runner started the turn within 30 seconds. The job stays queued and runs when a runner is free; the turn then shows in the session. turn and base_url are empty."`
+	Queued   bool   `json:"queued,omitempty" doc:"True when the turn has not started: it waits behind the session's earlier turns (ahead says how many), or no runner started it within 30 seconds. The job stays queued and runs next, in order; the turn then shows in the session. turn and base_url are empty."`
+	Ahead    int    `json:"ahead,omitempty" doc:"With queued: how many turns of the session, running or waiting, are before this one. Absent when the turn waits only for a runner."`
 }
 
 // idempotencyKey is the shape of TurnRequest.IdempotencyKey.
@@ -149,15 +150,24 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 				"; leave folder out to use the session's")
 			return
 		}
-		// A retry of the request that started the running turn (same key)
-		// goes on to the queue, which returns that turn; anything else waits.
+		// A session whose turn runs takes the next one too: its job waits in
+		// the queue behind the turns before it and runs next, in order. A
+		// session the record shows open with no job of this queue behind it
+		// (a turn this service did not start) cannot be waited for, so it is
+		// refused, before the key is used; a retry of a known key goes on to
+		// the queue, which returns its job.
 		if c.Open {
+			busy, err := a.cfg.Queue.SessionHasWork(queue.DefaultTeam, body.Session)
+			if err != nil {
+				a.internal(w)
+				return
+			}
 			known, err := a.cfg.Queue.HasKey(queue.DefaultTeam, body.IdempotencyKey)
 			if err != nil {
 				a.internal(w)
 				return
 			}
-			if !known {
+			if !busy && !known {
 				writeError(w, http.StatusConflict, turnRunning)
 				return
 			}
@@ -183,10 +193,9 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		spec.Folder = body.Folder
 		spec.Isolate = body.Isolate == nil || *body.Isolate
 	}
-	// Refused at once while the session's turn runs, as before the queue: the
-	// record shows it open, or a turn job of it has not started its turn. The
-	// jobs API queues a next turn instead.
-	job, created, err := a.cfg.Queue.CreateTurnLinked(queue.DefaultTeam, body.IdempotencyKey, spec, links, true)
+	// Never refused for a busy session: the job waits behind the session's
+	// turns that have not ended, as a delivered result does.
+	job, created, err := a.cfg.Queue.CreateTurnLinked(queue.DefaultTeam, body.IdempotencyKey, spec, links)
 	var limit *queue.LimitError
 	switch {
 	case errors.As(err, &limit):
@@ -194,9 +203,6 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		return
 	case errors.Is(err, queue.ErrKeyConflict):
 		writeError(w, http.StatusConflict, "idempotency_key already started a turn with other fields; send a new key for a new turn")
-		return
-	case errors.Is(err, queue.ErrSessionBusy):
-		writeError(w, http.StatusConflict, turnRunning)
 		return
 	case errors.Is(err, queue.ErrSessionClosed):
 		writeError(w, http.StatusConflict, "this session's workspace is closed; it takes no more turns")
@@ -262,11 +268,23 @@ const (
 // awaitTurn answers once the job's turn has started: 202 with the turn. A job
 // that ended before its turn started answers why, with the status the runner
 // was refused with. A job no runner took within TurnWait answers 202 with
-// queued: it stays queued.
+// queued: it stays queued. A job that waits behind its session's earlier
+// turns answers queued at once, with how many are ahead.
 func (a *API) awaitTurn(w http.ResponseWriter, ctx context.Context, job queue.Job, existing bool) {
 	wait := a.cfg.TurnWait
 	if wait == 0 {
 		wait = DefaultTurnWait
+	}
+	if job.State == queue.Queued && job.Session != "" {
+		ahead, err := a.turnsAhead(job.ID)
+		if err != nil {
+			a.internal(w)
+			return
+		}
+		if ahead > 0 {
+			writeJSON(w, http.StatusAccepted, Started{ID: job.Session, Existing: existing, Job: job.ID, Queued: true, Ahead: ahead})
+			return
+		}
 	}
 	deadline := time.NewTimer(wait)
 	defer deadline.Stop()
@@ -279,7 +297,7 @@ func (a *API) awaitTurn(w http.ResponseWriter, ctx context.Context, job queue.Jo
 			return
 		}
 		if turn := startedTurn(j); turn != "" {
-			writeJSON(w, http.StatusAccepted, Started{a.cfg.BaseURL + "/s/" + j.Session + "/t/" + turn, j.Session, turn, existing, j.ID, false})
+			writeJSON(w, http.StatusAccepted, Started{BaseURL: a.cfg.BaseURL + "/s/" + j.Session + "/t/" + turn, ID: j.Session, Turn: turn, Existing: existing, Job: j.ID})
 			return
 		}
 		if j.Ended != nil {
@@ -295,6 +313,24 @@ func (a *API) awaitTurn(w http.ResponseWriter, ctx context.Context, job queue.Jo
 		case <-tick.C:
 		}
 	}
+}
+
+// turnsAhead counts the turns the job waits behind: its session's earlier
+// turn jobs that have not ended, less those whose turn the record shows
+// ended, which are only finishing and free the session in a moment.
+func (a *API) turnsAhead(job string) (int, error) {
+	jobs, err := a.cfg.Queue.TurnsAhead(queue.DefaultTeam, job)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, j := range jobs {
+		if turn := startedTurn(j); turn != "" && j.Attempt == turn && a.turnEnded(turn) {
+			continue
+		}
+		n++
+	}
+	return n, nil
 }
 
 // startedTurn is the job's newest attempt whose turn has started, else "".
