@@ -152,7 +152,7 @@ var routes = append([]route{
 		query: []param{qStore, qAfter,
 			{name: "limit", doc: "Events per page. 1000 when absent.", integer: true, min: 1, max: maxLimit}},
 		replies: []reply{ok(200, Page{}, "A page."), badRequest, mismatch, storeFailed},
-		turn:    ownSessionPath,
+		turn:    treeSessionPath,
 		serve:   (*API).sessionEvents},
 	{method: "GET", path: "/api/v0/sessions/{id}/search", op: "searchSession",
 		tag:     "Sessions",
@@ -163,7 +163,7 @@ var routes = append([]route{
 			{name: "before", doc: "The next_before of the previous page. Absent: start from the newest."},
 			{name: "limit", doc: "Hits per page. 20 when absent.", integer: true, min: 1, max: maxSearchLimit}},
 		replies: []reply{ok(200, store.SearchResult{}, "A page of hits."), badRequest, storeFailed},
-		turn:    ownSessionPath,
+		turn:    treeSessionPath,
 		serve:   (*API).search},
 	{method: "POST", path: "/api/v0/turns", op: "startTurn",
 		tag:     "Turns",
@@ -177,7 +177,9 @@ var routes = append([]route{
 			"The turn id is the id of the job's attempt. A turn no runner starts within 30 seconds answers 202 with queued true, " +
 			"its job and its session, and no turn: the job runs when a runner is free.",
 		body: TurnRequest{},
+		turn: askTurn,
 		replies: []reply{ok(202, Started{}, "The agent has started, or the turn's job is queued."), turnRefused,
+			fail(403, "A turn token's request is refused: error says why, such as a cap on asked work."),
 			fail(404, "This service keeps no job queue, or the session sent has no events."),
 			fail(409, "A turn is already running in the session sent, it cannot be continued from here, or the idempotency key names another turn."),
 			fail(http.StatusTooManyRequests, "Too many jobs are waiting; wait for some to end."), turnFailed, stopping},
@@ -194,7 +196,7 @@ var routes = append([]route{
 			{name: "before", doc: "Only turns whose started_seq is below it: the next_before of the previous page.", integer: true, min: 1},
 			{name: "limit", doc: "Turns per page. 100 when absent.", integer: true, min: 1, max: maxTurnLimit}},
 		replies: []reply{ok(200, store.TurnList{}, "A page of turns."), badRequest, storeFailed},
-		turn:    ownSessionQuery,
+		turn:    treeSessionQuery,
 		turns:   true,
 		serve:   plain((*API).turns)},
 	{method: "GET", path: "/api/v0/turns/{id}", op: "getTurn",
@@ -208,7 +210,7 @@ var routes = append([]route{
 			{name: "session", doc: "Only this session's turn of that id."}},
 		replies: []reply{ok(200, OneTurn{}, "The turn."), badRequest,
 			fail(404, "No turn.started carries this turn id."), storeFailed},
-		turn:  ownSessionQuery,
+		turn:  treeSessionQuery,
 		turns: true,
 		serve: (*API).getTurn},
 	{method: "GET", path: "/api/v0/turns/{id}/events", op: "turnEvents",
@@ -221,7 +223,7 @@ var routes = append([]route{
 			{name: "session", doc: "Only this session's events of the turn. The same turn id can be in two sessions; without session both are sent."},
 			{name: "limit", doc: "Events per page. 1000 when absent.", integer: true, min: 1, max: maxLimit}},
 		replies: []reply{ok(200, Page{}, "A page."), badRequest, mismatch, storeFailed},
-		turn:    ownSessionQuery,
+		turn:    treeSessionQuery,
 		turns:   true,
 		serve:   (*API).turnEvents},
 	{method: "POST", path: "/api/v0/turns/{id}/stop", op: "stopTurn",
@@ -233,11 +235,12 @@ var routes = append([]route{
 			"The runner sends SIGTERM to the turn's whole process tree, then SIGKILL after 5 seconds to what still runs. " +
 			"The reply comes at once; the turn's session.closed, with stopped true, comes once the tree has ended. " +
 			"The session's next turn continues after it, and the model is told that the person stopped it. " +
-			"A second stop while it is stopping gets 202 again and sends nothing more. Takes the main token or the turns token; a turn token gets 403. No body is read.",
+			"A second stop while it is stopping gets 202 again and sends nothing more. Takes the main token or the turns token; a turn token may stop only a turn of work its request tree asked for. No body is read.",
 		replies: []reply{ok(202, Stopping{}, "The turn is stopping."),
 			fail(404, "This service keeps no job queue, or no job or event carries this turn id."),
 			fail(409, "The turn is not running: its job has ended, or it is not a job of this service."),
 			storeFailed},
+		turn:  askedTurn,
 		turns: true,
 		serve: (*API).stopTurn},
 	{method: "GET", path: "/api/v0/agents", op: "listAgents",
@@ -247,6 +250,7 @@ var routes = append([]route{
 			"A new data folder starts with two: claude (Claude Code) and codex (Codex), each on its own subscription with its default model. " +
 			"Before 0.2 this route listed the harnesses this service finds; that is now GET /api/v0/harnesses.",
 		replies: []reply{ok(200, AgentList{}, "The agents."), badRequest},
+		turn:    anyRead,
 		serve:   plain((*API).listSaved)},
 	{method: "POST", path: "/api/v0/agents", op: "createAgent",
 		tag:     "Agents",
@@ -264,6 +268,7 @@ var routes = append([]route{
 		summary: "Get an agent",
 		doc:     "One saved agent.",
 		replies: []reply{ok(200, SavedAgent{}, "The agent."), badRequest, fail(404, "No such agent.")},
+		turn:    anyRead,
 		serve:   (*API).getSaved},
 	{method: "PUT", path: "/api/v0/agents/{id}", op: "updateAgent",
 		idDoc:   "A saved agent's id. Another shape gets 404.",
@@ -288,6 +293,7 @@ var routes = append([]route{
 		doc: "The harnesses this service can run an agent on: whether it finds each, its version, whether it is signed in, " +
 			"and the access and models each offers, for a form that saves an agent. Probed at most once a minute.",
 		replies: []reply{ok(200, HarnessList{}, "The harnesses."), badRequest},
+		turn:    anyRead,
 		serve:   plain((*API).listHarnesses)},
 	{method: "GET", path: "/api/v0/version", op: "getVersion",
 		tag:     "Service",
@@ -304,7 +310,7 @@ var routes = append([]route{
 		query:   []param{{name: "full", doc: "false leaves out each piece's json, for sizes and labels only. true when absent."}},
 		replies: []reply{ok(200, store.CallContext{}, "The call's request."), badRequest,
 			fail(404, "No request body is stored for this call."), storeFailed},
-		turn:  ownCall,
+		turn:  treeCall,
 		serve: (*API).callContext},
 	{method: "GET", path: "/api/v0/calls/{id}/pieces/{n}", op: "callPiece",
 		idDoc:   "A model call: the exchange field of its events. Another shape gets 404.",
@@ -313,7 +319,7 @@ var routes = append([]route{
 		doc:     "One piece of a model call's request, or its reply, byte for byte.\n\n" + callPieceDoc,
 		replies: []reply{{status: 200, doc: "The piece's bytes, exactly as stored.", raw: true},
 			fail(404, "No request body is stored for this call, it has no piece n, or no reply is kept."), storeFailed},
-		turn:  ownCall,
+		turn:  treeCall,
 		serve: (*API).callPiece},
 	{method: "GET", path: "/api/v0/openapi.json", op: "openapi",
 		tag:     "Service",
@@ -365,8 +371,10 @@ func (a *API) route(w http.ResponseWriter, r *http.Request, g *run.Grant, turnsO
 			continue
 		}
 		if rt.method == r.Method {
-			if g != nil && !a.allowTurn(w, r, rt, id, *g) {
-				return
+			if g != nil {
+				if r, ok = a.allowTurn(w, r, rt, id, *g); !ok {
+					return
+				}
 			}
 			if turnsOnly && !rt.turns {
 				writeError(w, http.StatusForbidden, turnsRefused)

@@ -143,6 +143,14 @@ type Config struct {
 	// Permissions is the path of permissions.toml, read at the start of every
 	// turn. Empty gives every turn empty lists.
 	Permissions string
+	// APIDir is a folder that holds agentbus-api, the API client a turn's
+	// agent calls (cmd/agentbus, apicall.go). It goes first on each turn's
+	// PATH, and the turn's instructions name agentbus-api: it reads
+	// AGENTBUS_URL and AGENTBUS_TOKEN itself, so the command holds no
+	// variable, and a claude turn that may write may run it without asking.
+	// The name stays the same when the program moves, so a session's earlier
+	// calls still work. Empty names curl.
+	APIDir string
 	// AgentName names a saved agent by its id in the transcript a turn on
 	// another harness gets; "" or a nil func names it by harness and model.
 	AgentName func(id string) string
@@ -237,6 +245,14 @@ type Request struct {
 	// on another agent, in the session's folder; left out, the turn runs on
 	// the agent of the session's latest turn, read from the record.
 	AgentID, Access, KeyEnv string
+	// Origin, when set, is stored on turn.started: who started the turn
+	// when the person did not.
+	Origin *event.Origin
+	// Root and Depth place the turn in a request tree, for its token (Grant):
+	// Root is the session the person's turn ran in, Depth how many agents
+	// asked in a row before it. Empty Root means the turn's own session.
+	Root  string
+	Depth int
 }
 
 // Turn is a turn that started.
@@ -326,7 +342,7 @@ func (e *Engine) Start(req Request) (*Turn, error) {
 	}
 	return e.start(turn{agent: req.Agent, folder: req.Folder, session: id, id: req.Turn,
 		model: req.Model, readOnly: req.ReadOnly, prompt: req.Prompt, key: req.IdempotencyKey,
-		agentID: req.AgentID, access: req.Access, keyEnv: req.KeyEnv})
+		agentID: req.AgentID, access: req.Access, keyEnv: req.KeyEnv, origin: req.Origin, root: req.Root, depth: req.Depth})
 }
 
 // next starts the next turn of req.Session, in its own agent and folder.
@@ -457,7 +473,7 @@ func (e *Engine) next(req Request) (*Turn, error) {
 	t := turn{agent: agent, folder: c.Folder, session: session, id: req.Turn, resumeID: c.ResumeID, replayFrom: from,
 		recoveredFrom: recovered, recoveredWhy: recoveredWhy, continuity: continuity, model: model,
 		readOnly: req.ReadOnly, prompt: req.Prompt, context: context, key: req.IdempotencyKey,
-		agentID: agentID, access: access, keyEnv: keyEnv}
+		agentID: agentID, access: access, keyEnv: keyEnv, origin: req.Origin, root: req.Root, depth: req.Depth}
 	if from != "" || continuity == ByTranscript {
 		// A fresh child: the history comes from the gateway, or from the
 		// transcript in its prompt.
@@ -525,6 +541,9 @@ type turn struct {
 	key                    string // the caller's idempotency key, or ""
 	agentID, access        string // the saved agent and how it reaches its model
 	keyEnv                 string // for openrouter: the name of the key's variable
+	origin                 *event.Origin
+	root                   string // the request tree's root session; "" for this one
+	depth                  int
 }
 
 // start stores session.opened and turn.started, starts t's child in a slot
@@ -576,15 +595,20 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	case err != nil:
 		return nil, refuse(http.StatusInternalServerError, "the agent could not be started")
 	}
-	// The turn's own token: read-only, for its own session (tokens.go). It
-	// goes into the child's environment only, beside the service's address;
-	// the main token never does.
-	if tok, err = e.turnTokens.mint(t.session, t.id); err != nil {
+	// The turn's own token (api/tokens.go says what it may do). It goes into
+	// the child's environment only, beside the service's address; the main
+	// token never does.
+	root := t.root
+	if root == "" {
+		root = t.session
+	}
+	if tok, err = e.turnTokens.mint(Grant{Session: t.session, Turn: t.id, Root: root, Depth: t.depth, ReadOnly: t.readOnly}); err != nil {
 		return nil, storeFailed
 	}
 	cmd := exec.Command(l.Path)
-	cmd.Env = turnEnv(l.Env, os.Environ(), e.cfg.BaseURL, tok)
-	hint := historyHint(t.session)
+	cmd.Env = turnEnv(l.Env, os.Environ(), e.cfg.BaseURL, tok, e.cfg.APIDir)
+	hint := historyHint(t.session, e.cfg.APIDir != "")
+	perm = withAPI(perm, e.cfg.APIDir != "", t.readOnly)
 	if t.agent == "codex" && codexOwnInstructions(cmd.Env, t.folder) {
 		hint = ""
 		e.cfg.Logf("run.hint session=%s turn=%s left_out=codex_developer_instructions_set", t.session, t.id)
@@ -626,7 +650,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Text: t.prompt, Agent: t.agent, Folder: t.folder,
 		ReplayFrom: t.replayFrom, Continuity: t.continuity, RecoveredFrom: t.recoveredFrom,
 		RecoveredReason: t.recoveredWhy, IdempotencyKey: t.key, AgentID: t.agentID, Access: t.access, KeyEnv: t.keyEnv,
-		Context: t.context, Model: t.model}); err != nil {
+		Context: t.context, Model: t.model, Origin: t.origin}); err != nil {
 		closeHold()
 		return nil, storeFailed
 	}
@@ -878,11 +902,39 @@ func turnArgs(agent, hint, resumeID, model string, readOnly bool, perm Permissio
 // how to search them with its turn token (tokens.go). It names the session
 // and nothing that changes between turns, so it is the same text on every
 // turn of a session.
-func historyHint(session string) string {
+func historyHint(session string, api bool) string {
+	if api {
+		api := APIClient
+		return "Your session's earlier turns are stored by AgentBus. To look something up, run:\n" +
+			api + ` GET "/api/v0/sessions/` + session + `/search?q=<text>"` + "\n" +
+			`with <text> URL-encoded. Each hit's "read" is a path you can GET the same way, for the whole of what matched.` + "\n" +
+			`You can also ask other agents with the same command: start a turn on any saved agent, continue one, or ask for a review. ` +
+			`Do not wait for them: each result comes back to you as a later turn. ` +
+			`How: ` + api + ` GET /docs/llms.txt, section "Ask other agents".`
+	}
 	return "Your session's earlier turns are stored by AgentBus. To look something up, run:\n" +
 		`curl -s -H "Authorization: Bearer $AGENTBUS_TOKEN" "$AGENTBUS_URL/api/v0/sessions/` + session + `/search?q=<text>"` + "\n" +
-		`with <text> URL-encoded. Each hit's "read" is a path under $AGENTBUS_URL that returns the whole of what matched, with the same header.`
+		`with <text> URL-encoded. Each hit's "read" is a path under $AGENTBUS_URL that returns the whole of what matched, with the same header.` + "\n" +
+		`You can also ask other agents through the same API and header: start a turn on any saved agent, continue one, or ask for a review. ` +
+		`Do not wait for them: each result comes back to you as a later turn. ` +
+		`How: $AGENTBUS_URL/docs/llms.txt, section "Ask other agents". Never print $AGENTBUS_TOKEN.`
 }
+
+// withAPI is perm with the agent's way to the API allowed without asking,
+// for a turn that may write: Claude Code refuses a command with a variable in
+// it unless the person approves it, which a turn cannot (Claude Code
+// 2.1.319, 2026-11-09). What the call may do is the turn token's to say
+// (api/tokens.go). forbid still wins over it.
+func withAPI(perm Permissions, api, readOnly bool) Permissions {
+	if !api || readOnly {
+		return perm
+	}
+	perm.Allow = append(append([]string(nil), perm.Allow...), APIClient)
+	return perm
+}
+
+// APIClient is the name of the API client on a turn's PATH (Config.APIDir).
+const APIClient = "agentbus-api"
 
 // codexOwnInstructions says the person set codex's developer_instructions
 // themselves, in $CODEX_HOME/config.toml (~/.codex by default, read from env,

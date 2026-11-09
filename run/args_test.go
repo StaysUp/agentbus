@@ -50,16 +50,19 @@ func TestIDScanner(t *testing.T) {
 func TestHistoryHint(t *testing.T) {
 	const want = "Your session's earlier turns are stored by AgentBus. To look something up, run:\n" +
 		`curl -s -H "Authorization: Bearer $AGENTBUS_TOKEN" "$AGENTBUS_URL/api/v0/sessions/abc/search?q=<text>"` + "\n" +
-		`with <text> URL-encoded. Each hit's "read" is a path under $AGENTBUS_URL that returns the whole of what matched, with the same header.`
-	if got := historyHint("abc"); got != want {
+		`with <text> URL-encoded. Each hit's "read" is a path under $AGENTBUS_URL that returns the whole of what matched, with the same header.` + "\n" +
+		`You can also ask other agents through the same API and header: start a turn on any saved agent, continue one, or ask for a review. ` +
+		`Do not wait for them: each result comes back to you as a later turn. ` +
+		`How: $AGENTBUS_URL/docs/llms.txt, section "Ask other agents". Never print $AGENTBUS_TOKEN.`
+	if got := historyHint("abc", false); got != want {
 		t.Fatalf("hint\n got %q\nwant %q", got, want)
 	}
 	for _, resume := range []string{"", "r-1"} {
-		a, _ := turnArgs("claude", historyHint("abc"), resume, "", false, Permissions{}, "hi")
+		a, _ := turnArgs("claude", historyHint("abc", false), resume, "", false, Permissions{}, "hi")
 		if i := slices.Index(a, "--append-system-prompt"); i < 0 || a[i+1] != want || a[len(a)-1] != "hi" {
 			t.Errorf("claude resume %q: %q", resume, a)
 		}
-		a, _ = turnArgs("codex", historyHint("abc"), resume, "", false, Permissions{}, "hi")
+		a, _ = turnArgs("codex", historyHint("abc", false), resume, "", false, Permissions{}, "hi")
 		if i := slices.Index(a, "developer_instructions="+tomlString(want)); i < 1 || a[i-1] != "-c" || a[len(a)-1] != "hi" {
 			t.Errorf("codex resume %q: %q", resume, a)
 		}
@@ -139,8 +142,54 @@ func TestCodexOwnInstructions(t *testing.T) {
 }
 
 func TestTurnEnv(t *testing.T) {
-	got := turnEnv(nil, []string{"A=1", "AGENTBUS_TOKEN=main", "AGENTBUS_URL=x"}, "http://127.0.0.1:1", "abt_1")
+	got := turnEnv(nil, []string{"A=1", "AGENTBUS_TOKEN=main", "AGENTBUS_URL=x"}, "http://127.0.0.1:1", "abt_1", "")
 	if strings.Join(got, " ") != "A=1 AGENTBUS_URL=http://127.0.0.1:1 AGENTBUS_TOKEN=abt_1" {
 		t.Errorf("turnEnv: %v", got)
+	}
+}
+
+// With the API client on PATH, the hint names agentbus-api, which holds no
+// variable and stays the same when the program moves.
+func TestHistoryHintAPI(t *testing.T) {
+	h := historyHint("abc", true)
+	for _, want := range []string{`agentbus-api GET "/api/v0/sessions/abc/search?q=<text>"`, "agentbus-api GET /docs/llms.txt", "ask other agents"} {
+		if !strings.Contains(h, want) {
+			t.Errorf("hint lacks %q:\n%s", want, h)
+		}
+	}
+	if strings.Contains(h, "$") {
+		t.Errorf("hint names a variable:\n%s", h)
+	}
+}
+
+// A turn that may write may run "<path> api" without asking; a read-only one
+// gets nothing new, and the person's own lists are not changed.
+func TestWithAPI(t *testing.T) {
+	own := Permissions{Allow: []string{"go test"}, Forbid: []string{"git push"}}
+	p := withAPI(own, true, false)
+	a, _ := turnArgs("claude", "", "", "", false, p, "hi")
+	if got := strings.Join(a, " "); !strings.Contains(got, "Bash(go test:*),Bash(agentbus-api:*)") || !strings.Contains(got, "--disallowedTools Bash(git push:*)") {
+		t.Errorf("args: %s", got)
+	}
+	if len(own.Allow) != 1 {
+		t.Errorf("the person's allow list changed: %v", own.Allow)
+	}
+	if p := withAPI(own, true, true); len(p.Allow) != 1 {
+		t.Errorf("read-only: %v", p.Allow)
+	}
+	if p := withAPI(own, false, false); len(p.Allow) != 1 {
+		t.Errorf("no path: %v", p.Allow)
+	}
+}
+
+// The API client's folder goes first on PATH, or is PATH when there was none.
+func TestTurnEnvAPIDir(t *testing.T) {
+	got := turnEnv([]string{"PATH=/usr/bin:/bin", "B=2"}, nil, "u", "t", "/home/x/bin")
+	if strings.Join(got, " ") != "PATH=/home/x/bin:/usr/bin:/bin B=2 AGENTBUS_URL=u AGENTBUS_TOKEN=t" {
+		t.Errorf("with PATH: %v", got)
+	}
+	got = turnEnv([]string{"B=2"}, nil, "u", "t", "/home/x/bin")
+	if strings.Join(got, " ") != "B=2 PATH=/home/x/bin AGENTBUS_URL=u AGENTBUS_TOKEN=t" {
+		t.Errorf("without PATH: %v", got)
 	}
 }

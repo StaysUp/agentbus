@@ -56,6 +56,9 @@ type Turn struct {
 	Stopped    bool       `json:"stopped,omitempty" doc:"A run's turn: the person stopped it with POST /api/v0/turns/{id}/stop. Its state is failed unless its child still exited 0."`
 	Unsettled  bool       `json:"unsettled,omitempty" doc:"A run's turn: its session.closed says the gateway could not confirm that every model call was stored, as for a turn the service closed on restart. Own replay does not continue from it."`
 	Error      string     `json:"error,omitempty" doc:"A run's turn: why its child could not start, from its session.closed. Its state is then failed."`
+	// Origin, from the turn's turn.started: who started it when the person
+	// did not.
+	Origin *event.Origin `json:"origin,omitempty" doc:"From the turn's turn.started: who started this turn when the person did not. kind result marks a delivered result: AgentBus started the turn, and its prompt is the result of work this session asked for. kind asked marks a turn another agent's turn asked for. Absent for a turn the person started."`
 	// IdempotencyKey is the key the turn was started with, so a client that
 	// lost the reply to POST /api/v0/turns can still find its turn.
 	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"The idempotency_key POST /api/v0/turns was sent with, from the turn's turn.started."`
@@ -161,6 +164,7 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 		SELECT s.seq, s.session, s.turn, s.time,
 			COALESCE(json_extract(s.data, '$.agent'), ''), COALESCE(json_extract(s.data, '$.agent_id'), ''),
 			COALESCE(json_extract(s.data, '$.folder'), ''), COALESCE(json_extract(s.data, '$.idempotency_key'), ''),
+			COALESCE(json_extract(s.data, '$.origin'), ''),
 			substr(CAST(COALESCE(json_extract(s.data, '$.text'), '') AS BLOB), 1, ?),
 			length(CAST(COALESCE(json_extract(s.data, '$.text'), '') AS BLOB)),
 			u.calls, COALESCE(json_extract(q.data, '$.model'), ''),
@@ -188,10 +192,17 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 		var t Turn
 		var tm, promptLen, replyLen int64
 		var head, replyHead []byte
-		if err := rows.Scan(&t.StartedSeq, &t.Session, &t.ID, &tm, &t.Agent, &t.AgentID, &t.Folder, &t.IdempotencyKey,
+		var origin string
+		if err := rows.Scan(&t.StartedSeq, &t.Session, &t.ID, &tm, &t.Agent, &t.AgentID, &t.Folder, &t.IdempotencyKey, &origin,
 			&head, &promptLen, &t.ModelCalls, &t.Model, &replyHead, &replyLen); err != nil {
 			rows.Close()
 			return list, fmt.Errorf("store: read turns: %w", err)
+		}
+		if origin != "" {
+			var o event.Origin
+			if json.Unmarshal([]byte(origin), &o) == nil {
+				t.Origin = &o
+			}
 		}
 		t.Prompt, t.PromptTruncated = preview(head, promptLen)
 		t.Reply, t.ReplyTruncated = preview(replyHead, replyLen)

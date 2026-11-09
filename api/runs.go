@@ -103,6 +103,15 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "idempotency_key must match "+idempotencyKey.String())
 		return
 	}
+	// A turn token asks another agent: its checks (tokens.go) fill the new
+	// session's folder, and the job names the asking turn.
+	var links queue.Links
+	if g := grantOf(r); g != nil {
+		var ok bool
+		if links, ok = a.askChecks(w, *g, &body, sent.Session != nil); !ok {
+			return
+		}
+	}
 	spec := queue.Spec{Prompt: body.Prompt, Model: body.Model, ReadOnly: body.ReadOnly != nil && *body.ReadOnly}
 	if sent.Session != nil {
 		if !sessionID.MatchString(body.Session) {
@@ -177,8 +186,12 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 	// Refused at once while the session's turn runs, as before the queue: the
 	// record shows it open, or a turn job of it has not started its turn. The
 	// jobs API queues a next turn instead.
-	job, created, err := a.cfg.Queue.CreateTurn(queue.DefaultTeam, body.IdempotencyKey, spec, true)
+	job, created, err := a.cfg.Queue.CreateTurnLinked(queue.DefaultTeam, body.IdempotencyKey, spec, links, true)
+	var limit *queue.LimitError
 	switch {
+	case errors.As(err, &limit):
+		writeError(w, http.StatusForbidden, limit.Msg)
+		return
 	case errors.Is(err, queue.ErrKeyConflict):
 		writeError(w, http.StatusConflict, "idempotency_key already started a turn with other fields; send a new key for a new turn")
 		return

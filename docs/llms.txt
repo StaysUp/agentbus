@@ -59,17 +59,18 @@ B=http://127.0.0.1:8787
 If you are an agent that agentbus started (`POST /api/v0/turns`), your environment has:
 
 - `AGENTBUS_URL`: the service's address, such as `http://127.0.0.1:8787`.
-- `AGENTBUS_TOKEN`: a token for your turn only. It reads **your own session** and nothing else,
-  and stops working when your turn ends.
+- `AGENTBUS_TOKEN`: a token for your turn only. It stops working when your turn ends. Never print
+  it, log it or write it to a file; use the variable's name.
 
-It works on: `GET /api/v0/turns` (your session's turns; `session` defaults to yours),
-`GET /api/v0/turns/{id}/events`, `GET /api/v0/sessions/{your session}/events`,
-`GET /api/v0/sessions/{your session}/search`, and `GET /api/v0/calls/{id}/context` and
-`GET /api/v0/calls/{id}/pieces/{n}` for your session's calls. Anything else, every write
-included, answers 403. Your session id is the `<session>` in your base URL
+It reads your **request tree**: your own session, the person's session you were started from, and
+every session work in that tree started. That covers `GET /api/v0/turns` (`session` defaults to
+yours), `GET /api/v0/turns/{id}`, `GET /api/v0/turns/{id}/events`, `GET /api/v0/sessions/{id}/events`,
+`GET /api/v0/sessions/{id}/search`, `GET /api/v0/calls/{id}/context` and `/pieces/{n}`,
+`GET /api/v0/jobs?session=…`, `GET /api/v0/jobs/{id}`, and `GET /api/v0/agents` and
+`GET /api/v0/harnesses`. Your session id is the `<session>` in your base URL
 (`.../s/<session>/t/<turn>`, in `ANTHROPIC_BASE_URL` for claude), and every turn
 `GET /api/v0/turns` lists carries it. Every turn is also told this in its instructions (claude:
-`--append-system-prompt`; codex: `developer_instructions`), with its session id filled in: three
+`--append-system-prompt`; codex: `developer_instructions`), with its session id filled in: four
 lines, the same on every turn of the session, never added to the prompt. A codex turn gets none
 when the person set `developer_instructions` in codex's own config, so theirs is kept.
 
@@ -78,6 +79,40 @@ curl -s -H "Authorization: Bearer $AGENTBUS_TOKEN" "$AGENTBUS_URL/api/v0/turns"
 curl -s -H "Authorization: Bearer $AGENTBUS_TOKEN" "$AGENTBUS_URL/api/v0/sessions/abc/search?q=login"
 curl -s -H "Authorization: Bearer $AGENTBUS_TOKEN" "$AGENTBUS_URL/api/v0/calls/x-9f2c01ab-7/pieces/12"
 ```
+
+## Ask other agents
+
+With the same token you can hand work to other agents. Do not wait for it: start it, say so, and
+end your turn. **Each result comes back to your session as a later turn**, whose prompt starts
+`[AgentBus] This message is from AgentBus, not from the person`. It names the agent, its session
+and folder, the changed files, a review's verdict, and the agent's final reply.
+
+1. List the agents: `GET /api/v0/agents`. Use an agent's `id`.
+2. Start a turn on one: `POST /api/v0/turns` with `agent` and `prompt`. Leave `folder` out: the
+   new session works in the person's folder, in a git worktree of its own, so several agents can
+   work on the same task without touching each other's files. To fan out ("run all 3 on this"),
+   start one turn per agent; each result comes back on its own.
+3. Continue a session you started: `POST /api/v0/turns` with that `session` and `prompt`.
+4. Ask for a review of a turn's work once its job has ended: `POST /api/v0/jobs/{job}/review` with
+   `agent` (the job id is in the reply of step 2, as `job`).
+5. Cancel work you asked for: `POST /api/v0/jobs/{job}/cancel`.
+
+Use `agentbus-api METHOD PATH [BODY]`, which is on your PATH. It sends your token for you, so the
+command holds no variable and needs no approval. curl with the header works too, where your tools
+allow it.
+
+```sh
+agentbus-api GET /api/v0/agents
+agentbus-api POST /api/v0/turns '{"agent":"codex","prompt":"Add a test for parse() in parse_test.go"}'
+# {"id":"<session>","turn":"t_…","job":"job_…","base_url":"…"}
+agentbus-api POST /api/v0/jobs/job_…/review '{"agent":"claude"}'
+```
+
+Refused with 403, with the reason: a read-only turn asking for anything; a `folder` outside your
+own; `isolate: false`; continuing your own session or the person's; changing agents or policy;
+anything about tokens; making a job with `POST /api/v0/jobs`; any session outside your tree. Caps
+for now (temporary, until `permissions.toml` has `[limits]`): work goes at most 2 levels below the
+person's turn, one turn asks for at most 10 jobs, and one person's session for at most 30 in all.
 
 ## Starting up: snapshot, then stream
 
@@ -219,7 +254,7 @@ comes once the tree has ended, and `GET /api/v0/turns` then shows `stopped: true
 next turn continues after it, and the model is told the person stopped it (`recovered_reason`
 ends with `the person stopped this turn`). A second stop while it is stopping gets 202 again and
 sends nothing more. 409 when the turn is not running (its job ended, or it is not a job of this service),
-404 when no job or event carries the turn id. The main token or the turns token: a turn token gets 403. No body.
+404 when no job or event carries the turn id. The main token or the turns token; a turn token only for a turn its tree asked for. No body.
 
 ```sh
 curl -s -X POST -H "Authorization: Bearer $TOKEN" "$B/api/v0/turns/t_91ee…/stop"

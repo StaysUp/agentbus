@@ -229,6 +229,10 @@ type Event struct {
 	// finds this turn and a different request under it is refused.
 	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"On turn.started: the idempotency_key POST /api/v0/turns was sent with. A retry with the same key returns this turn and starts nothing."`
 	RequestHash    string `json:"request_hash,omitempty" doc:"With idempotency_key: the SHA-256, in hex, of the request's fields. A request with the same key and other fields is refused."`
+	// Origin, only on a run's turn.started: the turn was not typed by the
+	// person. Another agent's turn asked for it through the API, or AgentBus
+	// started it to deliver the result of work this session asked for.
+	Origin *Origin `json:"origin,omitempty" doc:"On a run's turn.started: who started this turn when the person did not. Absent for a turn the person started."`
 	// Replayed, only on model.requested: how many messages of the earlier
 	// turn's history the gateway put in front of this request.
 	Replayed int `json:"replayed,omitempty" doc:"On model.requested: how many messages of the earlier turn's history the gateway put in front of this request. Absent when it put none."`
@@ -239,6 +243,24 @@ type Event struct {
 
 	Unexpected *Unexpected `json:"unexpected,omitempty" doc:"On schema.unexpected: the unknown shape."`
 }
+
+// Origin says who started a turn when the person did not.
+type Origin struct {
+	Kind string `json:"kind" doc:"asked: another agent's turn started this turn through the API with its turn token. result: AgentBus started this turn to deliver the result of work this session asked for; text is that result."`
+	// For asked: the session and turn that asked. For result: the session
+	// and turn of the work whose result this is.
+	Session string `json:"session,omitempty" doc:"asked: the session of the turn that asked. result: the session the work ran in."`
+	Turn    string `json:"turn,omitempty" doc:"asked: the turn that asked. result: the work's turn."`
+	Job     string `json:"job,omitempty" doc:"result: the job whose result this is. GET /api/v0/jobs/{id} reads it."`
+	JobKind string `json:"job_kind,omitempty" doc:"result: turn or review."`
+	Agent   string `json:"agent,omitempty" doc:"result: the saved agent, or harness, that did the work."`
+}
+
+// Origin kinds.
+const (
+	OriginAsked  = "asked"
+	OriginResult = "result"
+)
 
 // Sink receives events. Implementations must be safe for concurrent use.
 type Sink interface {

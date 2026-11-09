@@ -25,6 +25,7 @@ import (
 
 	"github.com/staysup/agentbus/body"
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/queue"
 )
 
 const specIntro = "agentbus runs on your machine, between your coding agents and their vendors. " +
@@ -36,7 +37,9 @@ const specIntro = "agentbus runs on your machine, between your coding agents and
 	"- Every turn runs as a job: `POST /api/v0/turns` makes one, and the jobs API (`/api/v0/jobs`) makes, reviews and cancels them. " +
 	"The runner protocol (`/api/v0/runners`, `/api/v0/attempts`) is for runners and takes its own tokens.\n" +
 	"- A turn started by `POST /api/v0/turns` gets its own token in `$AGENTBUS_TOKEN`, and this service's address in `$AGENTBUS_URL`. " +
-	"That token reads only its own session, on the operations that say so, and stops working when the turn's child exits.\n" +
+	"With it the agent reads its session and asks other agents: it starts turns, continues the sessions it started, asks for reviews and reads their results, on the operations that say so. " +
+	"Each result comes back to the asking session as a later turn. It never changes policy or saved agents, never sees a token, " +
+	"and stops working when the turn's child exits. A read-only turn's token only reads.\n" +
 	"- The turns token, the file `turns_token` in the data folder, may only start, stop and read turns, on the operations that say so. " +
 	"A program that only starts and follows turns uses it in place of the main token.\n" +
 	"- On loopback, the default, the `Host` must be `127.0.0.1`, `localhost` or `[::1]` with the service's port, or the answer is 403. " +
@@ -58,10 +61,26 @@ const runnerTokenDoc = "Runner protocol: called by a runner, never by the cockpi
 // turnTokenDoc is what each turn-token rule adds to an operation's
 // description.
 var turnTokenDoc = map[int]string{
-	ownSessionPath:  "A turn token may call this for its own session only.",
-	ownSessionQuery: "A turn token may call this for its own session only: without session, its own is used.",
-	ownCall:         "A turn token may call this for its own session's calls only.",
+	treeSessionPath:  "A turn token may call this for a session in its request tree: its own, the person's session it started from, or one work in that tree started.",
+	treeSessionQuery: "A turn token may call this for a session in its request tree: without session, its own is used.",
+	treeCall:         "A turn token may call this for the calls of a session in its request tree.",
+	treeJob:          "A turn token may call this for a job of a session in its request tree.",
+	treeAttempt:      "A turn token may call this for an attempt of a job in its request tree.",
+	askTurn: "A turn token may call this to ask another agent, unless its turn is read-only. " +
+		"A new session must be in the turn's own folder or one inside it (the person's folder when absent), always isolated. " +
+		"A session it continues must be one its request tree started, never its own or the person's. " +
+		"The turn's result comes back to the asking session as a later turn. Caps: " + askCaps,
+	askReview: "A turn token may call this for a job of a session in its request tree, unless its turn is read-only. " +
+		"The review's result comes back to the asking session as a later turn. Caps: " + askCaps,
+	askedJob:  "A turn token may cancel only a job its request tree asked for, unless its turn is read-only.",
+	askedTurn: "A turn token may stop only a turn of a job its request tree asked for, unless its turn is read-only.",
+	anyRead:   "A turn token may call this too.",
 }
+
+// askCaps names the temporary caps on asked work, until permissions.toml has
+// [limits]. A request past one gets 403 saying which.
+var askCaps = fmt.Sprintf("at most %d levels below the person's turn, %d jobs asked by one turn, %d in one request tree. "+
+	"They are temporary, until permissions.toml has [limits].", queue.MaxDepth, queue.MaxAskedPerTurn, queue.MaxAskedPerRoot)
 
 // spec is the description as served, built on first use. New builds it, so a
 // table or type it cannot describe stops the service from starting.

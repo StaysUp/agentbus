@@ -54,6 +54,7 @@ func (c config) modeName() string {
 const usage = `usage: agentbus up     [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false] [-max-runs 4]
        agentbus server [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false]
        agentbus runner -server URL [-enroll-token-file F] [-gateway local] [-capacity 4] [-name NAME] [-listen 127.0.0.1:0] [-replay=false]
+       agentbus api METHOD PATH [BODY]   (inside a turn: calls this service with the turn's token)
        agentbus version`
 
 // parse reads a mode's command line into a config. It returns the exit code

@@ -143,6 +143,14 @@ CREATE TABLE IF NOT EXISTS attempts (
 );
 CREATE INDEX IF NOT EXISTS attempts_runner ON attempts(runner, state);
 CREATE INDEX IF NOT EXISTS attempts_lease ON attempts(state, lease_until);
+-- One row per asked job whose result was delivered (asked.go): the turn job
+-- that carries it, or why none could be made.
+CREATE TABLE IF NOT EXISTS deliveries (
+	job      TEXT PRIMARY KEY REFERENCES jobs(id),
+	delivery TEXT NOT NULL DEFAULT '',
+	error    TEXT NOT NULL DEFAULT '',
+	created  INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS attempt_events (
 	attempt TEXT NOT NULL REFERENCES attempts(id),
 	seq     INTEGER NOT NULL,
@@ -235,6 +243,15 @@ type Links struct {
 	ReviewsJob string `json:"reviews_job,omitempty"`
 	// RedoOf: the job this one does again.
 	RedoOf string `json:"redo_of,omitempty"`
+	// Asker: the turn whose agent asked for this job with its turn token
+	// (asked.go). Its result is delivered to that turn's session.
+	Asker *Asker `json:"asker,omitempty"`
+	// Chain: the request tree this job is in, for asked work and the turns
+	// that deliver its results.
+	Chain *Chain `json:"chain,omitempty"`
+	// ResultOf: this turn job delivers that job's result. AgentBus started
+	// it, not the person.
+	ResultOf *ResultOf `json:"result_of,omitempty"`
 }
 
 // Job is one requested turn.
@@ -562,7 +579,7 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, session s
 		Kind  string `json:"kind"`
 		Spec  Spec   `json:"spec"`
 		Links Links  `json:"links"`
-	}{kind, spec.asked(), links})
+	}{kind, spec.asked(), hashLinks(links)})
 	err = q.tx(func(tx *sql.Tx) error {
 		if key != "" {
 			var id, h string
@@ -598,6 +615,9 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, session s
 			if busy > 0 {
 				return ErrSessionBusy
 			}
+		}
+		if err := checkAsked(tx, team, links); err != nil {
+			return err
 		}
 		if kind == KindTurn && session == "" {
 			session = NewID("") // the new session its first turn opens
@@ -1370,6 +1390,11 @@ func (q *Queue) Review(team, id, agent, model, key string, includeReply bool) (J
 // ReviewAs is Review with the reviewer as a saved agent: as names its
 // harness in Agent, and its AgentID, Access, KeyEnv and Model.
 func (q *Queue) ReviewAs(team, id string, as Spec, key string, includeReply bool) (Job, bool, error) {
+	return q.review(team, id, as, key, includeReply, Links{})
+}
+
+// review is ReviewAs with links; ReviewsJob is set here.
+func (q *Queue) review(team, id string, as Spec, key string, includeReply bool, links Links) (Job, bool, error) {
 	j, err := q.Get(team, id)
 	if err != nil {
 		return Job{}, false, err
@@ -1389,5 +1414,6 @@ func (q *Queue) ReviewAs(team, id string, as Spec, key string, includeReply bool
 	}
 	spec := Spec{Agent: as.Agent, AgentID: as.AgentID, Access: as.Access, KeyEnv: as.KeyEnv, Model: as.Model,
 		ModelFromAgent: as.ModelFromAgent, Folder: j.Workspace.Folder, ReadOnly: true, Prompt: prompt}
-	return q.create(team, KindReview, key, spec, Links{ReviewsJob: j.ID}, j.Session, false)
+	links.ReviewsJob = j.ID
+	return q.create(team, KindReview, key, spec, links, j.Session, false)
 }

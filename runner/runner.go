@@ -419,7 +419,7 @@ type Result struct {
 	// kind (run.Refusal).
 	Refused string `json:"refused,omitempty"`
 	Status  int    `json:"status,omitempty"`
-	// ReplyText, for a review job: the whole text of the turn's last reply,
+	// ReplyText, for a review job and asked work: the whole text of the turn's last reply,
 	// at most MaxReplyText bytes. The queue reads the verdict from it. Reply
 	// is only its first 500 characters.
 	ReplyText string `json:"reply_text,omitempty"`
@@ -501,6 +501,19 @@ func (r *Runner) request(at *attempt) run.Request {
 		if at.job.Kind == queue.KindTurn {
 			req.NewSession = at.job.Session
 		}
+	}
+	// Work an agent asked for, and a delivered result, say so on their
+	// turn.started, and place the turn's token in its request tree.
+	l := at.job.Links
+	if l.Chain != nil {
+		req.Root, req.Depth = l.Chain.Root, l.Chain.Depth
+	}
+	switch {
+	case l.ResultOf != nil:
+		req.Origin = &event.Origin{Kind: event.OriginResult, Session: l.ResultOf.Session, Turn: l.ResultOf.Turn,
+			Job: l.ResultOf.Job, JobKind: l.ResultOf.Kind, Agent: l.ResultOf.Agent}
+	case l.Asker != nil:
+		req.Origin = &event.Origin{Kind: event.OriginAsked, Session: l.Asker.Session, Turn: l.Asker.Turn}
 	}
 	return req
 }
@@ -669,7 +682,9 @@ wait:
 		cost := t.CostUSD
 		res.State, res.Error, res.Reply, res.ModelCalls, res.CostUSD = t.State, t.Error, t.Reply, t.ModelCalls, &cost
 	}
-	if at.job.Kind == queue.KindReview {
+	// A review's verdict is read from its whole reply; asked work's reply is
+	// delivered to the session that asked (queue.Deliver).
+	if at.job.Kind == queue.KindReview || at.job.Links.Asker != nil {
 		res.ReplyText = r.lastReply(turn.Session, turn.ID)
 	}
 	at.event("turn.ended", map[string]any{"state": res.State, "exit_code": end.ExitCode})

@@ -12,6 +12,7 @@
 package jobs
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -144,9 +145,30 @@ func same(tok string, want [32]byte) bool {
 	return subtle.ConstantTimeCompare(sum[:], want[:]) == 1
 }
 
-// main admits the main token only.
+// admitKey marks a request package api admitted for a turn token.
+type admitKey struct{}
+
+// Admit marks a request that package api has admitted for a turn token, on a
+// route and job its checks allow, with the links work it asks for gets: the
+// asking turn and its request tree. Only code in this binary can set it.
+func Admit(ctx context.Context, l queue.Links) context.Context {
+	return context.WithValue(ctx, admitKey{}, l)
+}
+
+// admitted is the links of a request Admit marked.
+func admitted(r *http.Request) (queue.Links, bool) {
+	l, ok := r.Context().Value(admitKey{}).(queue.Links)
+	return l, ok
+}
+
+// main admits the main token, and a request package api admitted for a turn
+// token (Admit).
 func (s *Server) main(h func(http.ResponseWriter, *http.Request)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if _, ok := admitted(r); ok {
+			h(w, r)
+			return
+		}
 		tok, ok := bearer(r)
 		if !ok || !same(tok, s.token) {
 			fail(w, http.StatusUnauthorized, "the main token is required")
@@ -551,8 +573,12 @@ func (s *Server) reviewJob(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "idempotency_key must be 1 to 128 of A-Z, a-z, 0-9 and . _ : -")
 		return
 	}
-	j, created, err := s.cfg.Queue.ReviewAs(queue.DefaultTeam, r.PathValue("id"), as, b.IdempotencyKey, b.IncludeReply)
+	links, _ := admitted(r) // a review a turn asked for names that turn
+	j, created, err := s.cfg.Queue.ReviewLinked(queue.DefaultTeam, r.PathValue("id"), as, b.IdempotencyKey, b.IncludeReply, links)
+	var limit *queue.LimitError
 	switch {
+	case errors.As(err, &limit):
+		fail(w, http.StatusForbidden, limit.Msg)
 	case errors.Is(err, queue.ErrNotFound):
 		fail(w, http.StatusNotFound, "no such job")
 	case errors.Is(err, queue.ErrNotReviewable):

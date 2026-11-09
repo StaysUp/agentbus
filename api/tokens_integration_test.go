@@ -177,17 +177,25 @@ func TestTurnToken(t *testing.T) {
 		{"GET", "/api/v0/calls/x-none/pieces/0", "", 404},
 		{"GET", "/api/v0/openapi.json", "", 200},
 		{"GET", "/docs/llms.txt", "", 200},
-		// Writes, and every read that is not limited to one session.
+		// The writes it may not make, and every read beyond its request
+		// tree. Asking other agents is tested in asked_integration_test.go.
 		{"POST", "/api/v0/turns", `{"session":"` + own + `","prompt":"again"}`, 403},
-		{"POST", "/api/v0/turns", `{"agent":"claude","folder":"` + folder + `","prompt":"new"}`, 403},
+		{"POST", "/api/v0/turns", `{"session":"` + other + `","prompt":"again"}`, 403},
+		{"POST", "/api/v0/turns", `{"agent":"claude","folder":"` + t.TempDir() + `","prompt":"new"}`, 403},
 		{"POST", "/api/v0/events", `{"kind":"x.a.b","session":"` + own + `","text":"hi"}`, 403},
-		// Not even its own turn: only the main token stops a turn.
+		// Not even its own turn: it stops only work its tree asked for.
 		{"POST", "/api/v0/turns/" + s.Turn + "/stop", "", 403},
-		{"POST", "/api/v0/turns/t_other/stop", "", 403},
 		{"GET", "/api/v0/sessions", "", 403},
 		{"GET", "/api/v0/events?session=" + own, "", 403},
-		{"GET", "/api/v0/agents", "", 403},
 		{"GET", "/api/v0/version", "", 403},
+		{"POST", "/api/v0/agents", `{"harness":"claude","access":"subscription","name":"x"}`, 403},
+		{"GET", "/api/v0/workspaces", "", 403},
+		{"POST", "/api/v0/workspaces/" + own + "/close", "", 403},
+		{"POST", "/api/v0/jobs", `{"agent":"claude","folder":"` + folder + `","prompt":"x"}`, 403},
+		{"GET", "/api/v0/jobs?session=" + other, "", 403},
+		// Reads that hold no session's data.
+		{"GET", "/api/v0/agents", "", 200},
+		{"GET", "/api/v0/harnesses", "", 200},
 	} {
 		code, out := as(t, e, tok, tc.method, tc.path, tc.body)
 		if code != tc.want {

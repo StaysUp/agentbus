@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/http"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -148,9 +149,15 @@ func (lt *liveTurn) exit() (stopped bool, killAt time.Time) {
 	return lt.stopped, lt.killAt
 }
 
-// Grant is what a turn's own token may read: its own session.
+// Grant is what a turn's own token is: its session and turn, the request tree
+// it is in (Root, the session the person's turn ran in, and Depth, how many
+// agents asked in a row before it), and whether the turn is read-only. The
+// API decides from it what the token may do (api/tokens.go).
 type Grant struct {
 	Session, Turn string
+	Root          string
+	Depth         int
+	ReadOnly      bool
 }
 
 // turnTokens are the live turns' own tokens. A turn's token reads only its
@@ -164,7 +171,7 @@ type turnTokens struct {
 // turnTokenPrefix marks a turn's own token.
 const turnTokenPrefix = "abt_"
 
-func (t *turnTokens) mint(session, turn string) (string, error) {
+func (t *turnTokens) mint(g Grant) (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
@@ -175,7 +182,7 @@ func (t *turnTokens) mint(session, turn string) (string, error) {
 	if t.m == nil {
 		t.m = map[[32]byte]Grant{}
 	}
-	t.m[sha256.Sum256([]byte(tok))] = Grant{session, turn}
+	t.m[sha256.Sum256([]byte(tok))] = g
 	return tok, nil
 }
 
@@ -210,19 +217,28 @@ func (e *Engine) LiveTokens() int { return e.turnTokens.live() }
 
 // turnEnv is the child's environment: env, or the parent's when env is nil,
 // with the service's address and the turn's own token set, and any earlier
-// value of either removed.
-func turnEnv(env, parent []string, base, tok string) []string {
+// value of either removed. apiDir, when set, goes first on PATH
+// (Config.APIDir).
+func turnEnv(env, parent []string, base, tok, apiDir string) []string {
 	if env == nil {
 		env = parent
 	}
 	set := []string{"AGENTBUS_URL=" + base, "AGENTBUS_TOKEN=" + tok}
-	out := make([]string, 0, len(env)+len(set))
+	out := make([]string, 0, len(env)+len(set)+1)
+	path := false
 	for _, kv := range env {
-		k, _, _ := strings.Cut(kv, "=")
-		if k == "AGENTBUS_URL" || k == "AGENTBUS_TOKEN" {
+		k, v, _ := strings.Cut(kv, "=")
+		switch {
+		case k == "AGENTBUS_URL" || k == "AGENTBUS_TOKEN":
 			continue
+		case k == "PATH" && apiDir != "":
+			path = true
+			kv = "PATH=" + apiDir + string(os.PathListSeparator) + v
 		}
 		out = append(out, kv)
+	}
+	if apiDir != "" && !path {
+		out = append(out, "PATH="+apiDir)
 	}
 	return append(out, set...)
 }

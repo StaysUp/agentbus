@@ -117,7 +117,7 @@ token and their own runner tokens ([The runner protocol](#the-runner-protocol)).
 - Like the main token, it never reaches a turn's child and is never written to an event, a log
   or an error.
 
-### The turn token: what a turn may read of its own session
+### The turn token: what a turn may read, and how it asks other agents
 
 Every turn started by `POST /api/v0/turns` gets two variables in its child's environment, for claude
 and codex alike:
@@ -129,20 +129,45 @@ and codex alike:
 The main token never reaches a child. An `AGENTBUS_URL` or `AGENTBUS_TOKEN` in the service's own
 environment is replaced.
 
-**A turn token reads its own session and nothing else.** It works on these operations only:
+**A turn token works inside its request tree.** The tree is the person's session (its root) and
+every session that work asked for from it started, at any depth. With the token an agent reads the
+tree, and asks other agents: it starts turns on any saved agent, continues the sessions it started,
+asks for reviews, and reads their results. A turn never waits for that work. **Each result comes back
+to the asking session as a later turn** (see "Results come back as the next turn" below).
 
 | Operation | Limit |
 |---|---|
-| `GET /api/v0/turns?session=<own>` | without `session`, its own is used; another gets 403 |
-| `GET /api/v0/turns/<id>/events` | the same `session` rule: only its own session's events of that turn |
-| `GET /api/v0/sessions/<own>/events` | another session gets 403 |
-| `GET /api/v0/sessions/<own>/search?q=…` | another session gets 403 |
-| `GET /api/v0/calls/<exchange>/context` | the call must belong to its own session, else 403 |
-| `GET /api/v0/calls/<exchange>/pieces/<n>` | the same |
+| `GET /api/v0/turns?session=<id>`, `GET /api/v0/turns/<id>`, `GET /api/v0/turns/<id>/events` | a session in the tree; without `session`, its own |
+| `GET /api/v0/sessions/<id>/events`, `GET /api/v0/sessions/<id>/search` | a session in the tree |
+| `GET /api/v0/calls/<exchange>/context`, `.../pieces/<n>` | a call of a session in the tree |
+| `GET /api/v0/jobs?session=<id>`, `GET /api/v0/jobs/<id>`, `GET /api/v0/attempts/<id>/events` | a job of a session in the tree; without `session`, its own |
+| `GET /api/v0/agents`, `GET /api/v0/agents/<id>`, `GET /api/v0/harnesses` | none |
+| `POST /api/v0/turns`, new session | `agent` and `prompt`; `folder` is the turn's own folder or one inside it (the person's folder when absent); always isolated, so `isolate: false` gets 403 |
+| `POST /api/v0/turns` with `session` | a session the tree started; never its own, never the person's (the root) |
+| `POST /api/v0/jobs/<id>/review` | a job of a session in the tree |
+| `POST /api/v0/jobs/<id>/cancel`, `POST /api/v0/turns/<id>/stop` | only work the tree asked for |
 
-Everything else gets **403** with a plain reason: every write (`POST /api/v0/turns`,
-`POST /api/v0/turns/<id>/stop`, `POST /api/v0/events`), the snapshot `GET /api/v0/sessions`, the stream `GET /api/v0/events`, and
-`/api/v0/agents` and `GET /api/v0/harnesses`. The description and the docs need no token at all.
+The writes are refused for a **read-only** turn (`read_only: true`): its token only reads.
+
+**What a turn token never does**, each a **403** with a plain reason: change policy (no route writes
+`permissions.toml`), save, edit or remove agents, see or make a token (no reply holds one), make a
+job with `POST /api/v0/jobs` (it starts work with `POST /api/v0/turns`), close a workspace, write a
+program event, read the snapshot `GET /api/v0/sessions`, the stream `GET /api/v0/events` or
+`GET /api/v0/workspaces`, read `GET /api/v0/version`, and read or write any session outside its
+tree. The description and the docs need no token at all.
+
+**The caps on asked work, for now.** Until `permissions.toml` has a `[limits]` section, three fixed
+caps keep a chain of agents from running away. Past one, the request gets **403** saying which:
+
+- **Depth 2.** Work the person's turn asks for is at depth 1, work that work asks for at depth 2,
+  and nothing deeper. A delivered result has the depth of the work it carries, so a result of
+  depth-1 work may ask once more, and a result of depth-2 work may not.
+- **10 jobs per turn**: turns and reviews one turn asks for, ever.
+- **30 jobs per tree**: everything asked for from one person's session, at every depth.
+
+**Asking works where the service runs its turns itself (`agentbus up`).** With `agentbus server`
+and a separate `agentbus runner`, a turn's token reaches the runner's own address, which keeps no
+queue and no saved agents, so asking answers 404 there for now.
 
 **It stops working when the turn's child process exits**, even if a process it left behind still
 holds its output open, and before the turn's `session.closed` is
@@ -154,10 +179,29 @@ From inside a turn, with plain `curl`:
 ```sh
 curl -s -H "Authorization: Bearer $AGENTBUS_TOKEN" "$AGENTBUS_URL/api/v0/turns"
 curl -s -H "Authorization: Bearer $AGENTBUS_TOKEN" "$AGENTBUS_URL/api/v0/sessions/<session>/search?q=login"
+curl -s -H "Authorization: Bearer $AGENTBUS_TOKEN" "$AGENTBUS_URL/api/v0/agents"
+curl -s -X POST -H "Authorization: Bearer $AGENTBUS_TOKEN" -H "Content-Type: application/json" \
+  -d '{"agent":"deepseek","prompt":"Add a test for parse()"}' "$AGENTBUS_URL/api/v0/turns"
 ```
 
 The session id is in the turn's own base URL, `<service>/s/<session>/t/<turn>`, which the agent
 already has (`ANTHROPIC_BASE_URL` for claude). `GET /api/v0/turns` without `session` also names it.
+
+### Results come back as the next turn
+
+When a turn or review a turn asked for ends (finished, failed or cancelled), AgentBus starts the
+next turn of the **asking session**, on that session's own agent, after the turn running there now.
+Its prompt is the result, and it starts `[AgentBus] This message is from AgentBus, not from the
+person`. It names the agent, the job and its state, the session and turn the work ran in, its folder
+(each new session gets its own worktree, so results of a fan-out can be compared), the changed files
+(count and paths, at most 50), a review's verdict and findings, and the work's final reply (at most
+8 KiB). Each result is its own turn; three asked turns bring three.
+
+Such a turn's `turn.started`, and its row in `GET /api/v0/turns`, carry `origin`:
+`{"kind":"result","job":…,"job_kind":"turn"|"review","session":…,"turn":…,"agent":…}`. A turn
+another turn asked for carries `{"kind":"asked","session":…,"turn":…}`, naming who asked. A turn the
+person started has no `origin`. The service checks for ended work every second. On the job,
+`links.asker`, `links.chain` and `links.result_of` say the same.
 
 ## The data folder
 
@@ -452,14 +496,24 @@ job that runs it. The agent's work arrives later, as events of that session, **e
 - **What runs**, with the prompt always last, after `--`, so it is never read as a flag:
   - claude: `claude -p --output-format json --append-system-prompt <hint> [--model M] -- <prompt>`
   - codex: `codex -c openai_base_url=… exec --skip-git-repo-check --json --sandbox <mode> -c developer_instructions=<hint> [-c sandbox_workspace_write.network_access=true] [--model M] -- <prompt>`
-- **The hint tells the agent its history is there.** It is three lines, with the session id filled
-  in, the same on every turn of the session:
+- **The hint tells the agent its history is there, and that it can ask other agents.** It is four
+  lines, with the session id filled in, the same on every turn of the session:
 
   ```
   Your session's earlier turns are stored by AgentBus. To look something up, run:
-  curl -s -H "Authorization: Bearer $AGENTBUS_TOKEN" "$AGENTBUS_URL/api/v0/sessions/<session>/search?q=<text>"
-  with <text> URL-encoded. Each hit's "read" is a path under $AGENTBUS_URL that returns the whole of what matched, with the same header.
+  agentbus-api GET "/api/v0/sessions/<session>/search?q=<text>"
+  with <text> URL-encoded. Each hit's "read" is a path you can GET the same way, for the whole of what matched.
+  You can also ask other agents with the same command: start a turn on any saved agent, continue one, or ask for a review. Do not wait for them: each result comes back to you as a later turn. How: agentbus-api GET /docs/llms.txt, section "Ask other agents".
   ```
+
+  `agentbus-api METHOD PATH [BODY]` is the API client. It is a link to the running program, kept
+  at `<data folder>/bin/agentbus-api` and made at every start, and that folder goes first on each
+  turn's `PATH`. It reads `AGENTBUS_URL` and `AGENTBUS_TOKEN` itself, so the command holds no
+  variable: Claude Code refuses a command with a variable in it unless the person approves it, and a
+  turn has no one to ask. The name never changes when the program moves, so a session's earlier
+  calls still work. A claude turn that may write gets `Bash(agentbus-api:*)` in `--allowedTools`;
+  `forbid` in `permissions.toml` still wins. When the link cannot be made, the hint names `curl`
+  with `$AGENTBUS_TOKEN` instead.
 
   It goes through the agent's own instruction flag, never into the prompt: claude adds it at the
   end of its system prompt, codex puts it in its developer message (as a TOML string, the way `-c`
@@ -818,7 +872,7 @@ say how it ended. To follow it live, stream `GET /api/v0/events` from `store` an
 - The same turn id can be in two sessions (only in traffic pointed at the gateway by hand).
   `session=<id>` picks that session's turn; without it the newest is answered.
 - **404** when no `turn.started` carries the id.
-- A turn token may read its own session's turns only, as on `GET /api/v0/turns`.
+- A turn token may read the turns of its request tree only, as on `GET /api/v0/turns`.
 
 Three fields are added to every turn row, here and in the list:
 
@@ -858,7 +912,8 @@ Stops one running turn, the way the service stops every turn when it shuts down.
   traffic pointed at the gateway by hand, or one from before the job queue).
 - **404** when no job and no stored event carries the turn id, and when the service keeps no job
   queue.
-- **The main token or the turns token.** A turn token gets **403**, its own turn included.
+- **The main token or the turns token.** A turn token may stop only a turn of work its request tree
+  asked for; any other turn, its own included, gets **403**.
 - No body is read.
 
 ### `GET /api/v0/turns/<id>/events?store=<store>&after=<seq>&limit=<n>`
@@ -1170,7 +1225,9 @@ turn. The jobs API is the whole way: worktrees, reviews, cancel, and the list.
 
 ### Endpoints
 
-All take the main token. The turns token and turn tokens get 403.
+All take the main token. The turns token gets 403. A turn token may read the jobs of its request
+tree, ask for a review of one, and cancel work the tree asked for (see "The turn token" above);
+the rest get 403.
 
 | Call | What it does |
 |---|---|

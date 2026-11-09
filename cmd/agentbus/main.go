@@ -65,6 +65,10 @@ const (
 )
 
 func main() {
+	// Run as agentbus-api (the link apiLink makes), it is the API client.
+	if filepath.Base(os.Args[0]) == engine.APIClient {
+		os.Exit(apiCall(os.Args[1:], os.Getenv, os.Stdin, os.Stdout, os.Stderr))
+	}
 	os.Exit(run(os.Args[1:], os.Getenv, os.Stdout, os.Stderr))
 }
 
@@ -76,6 +80,9 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	if len(args) == 0 {
 		fmt.Fprintln(stderr, usage)
 		return 2
+	}
+	if args[0] == "api" {
+		return apiCall(args[1:], getenv, os.Stdin, stdout, stderr)
 	}
 
 	// net/http writes some of its own messages to the global logger, and they
@@ -92,7 +99,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	if !ok {
 		return 2
 	}
-	c.home, c.logf = home, own.Printf
+	c.home, c.logf, c.self = home, own.Printf, self()
 	c.upstream, _ = url.Parse(upstream)
 	c.chatgpt, _ = url.Parse(chatgpt)
 	svc, err := start(c)
@@ -131,6 +138,9 @@ type config struct {
 	// openrouter is OpenRouter's API; nil means openrouter above.
 	openrouter *url.URL
 	logf       func(string, ...any)
+	// self is this program's path, which agentbus-api links to
+	// (apiLink). Empty tells turns to use curl.
+	self string
 
 	// For runs. Nil means the process's own: os.Getenv, os.Environ and
 	// exec.LookPath. Zero runGrace means the API's default.
@@ -344,7 +354,7 @@ func start(c config) (*service, error) {
 			}
 		}
 		eng, err = engine.New(engine.Config{Store: st, BaseURL: baseURL, MaxRuns: c.maxRuns, ReplayBase: replayBase, AgentName: agentName,
-			Permissions: permissions, Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace, Logf: svcLog.Printf,
+			Permissions: permissions, APIDir: apiLink(c.home, c.self, svcLog), Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace, Logf: svcLog.Printf,
 			RunLog: func(session string, data []byte) {
 				// The session id is the service's own hex, so it is a plain
 				// file name.
@@ -428,7 +438,18 @@ func start(c config) (*service, error) {
 	svcLog.Printf("service.start mode=%s listen=%s pid=%d", c.modeName(), addr, os.Getpid())
 	go func() { s.done <- s.srv.Serve(ln) }()
 	if q != nil {
-		s.sweep(svcLog)
+		// A delivered result names the saved agent that did the work.
+		name := func(id string) string {
+			if saved == nil {
+				return ""
+			}
+			a, err := saved.Get(id)
+			if err != nil {
+				return ""
+			}
+			return a.Name
+		}
+		s.sweep(svcLog, name)
 	}
 	// The runner takes jobs through the runner protocol over HTTP: the
 	// built-in one from this service on loopback, as a runner on another
@@ -446,8 +467,9 @@ func start(c config) (*service, error) {
 	return s, nil
 }
 
-// sweep settles expired leases every second until the service stops.
-func (s *service) sweep(svcLog *logfile.Log) {
+// sweep settles expired leases, and delivers the results of asked work, every
+// second until the service stops.
+func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 	stop := make(chan struct{})
 	s.stopSweep = sync.OnceFunc(func() { close(stop) })
 	s.sweepDone = make(chan struct{})
@@ -464,6 +486,13 @@ func (s *service) sweep(svcLog *logfile.Log) {
 					svcLog.Printf("queue.sweep_failed")
 				} else if n > 0 {
 					svcLog.Printf("queue.leases_expired n=%d", n)
+				}
+				// Asked work that ended: its result becomes the asking
+				// session's next turn (queue.Deliver).
+				if n, err := s.queue.Deliver(queue.DefaultTeam, name); err != nil {
+					svcLog.Printf("queue.deliver_failed")
+				} else if n > 0 {
+					svcLog.Printf("queue.results_delivered n=%d", n)
 				}
 			}
 		}
