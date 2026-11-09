@@ -138,16 +138,38 @@ func (copyBackend) Close(s *Space) error {
 // take walks the copy. Its Base records each file by size, modification
 // time and mode, and hashes only links and files written just before the
 // copy was made (baseHasher): the clone kept every file's time and mode, so
-// a file unchanged in the person's folder still has them there.
-func (copyBackend) take(s *Space, prev *workspace.Snapshot, save workspace.Hasher) (*workspace.Snapshot, error) {
+// a file unchanged in the person's folder still has them there. A later
+// checkpoint walks it again against prev's files, and writes the trees of
+// the folders whose files changed.
+func (copyBackend) take(s *Space, t *trees, prev *treeState, save workspace.Hasher) (treeState, int, error) {
 	if prev == nil {
 		start := s.start
 		if start.IsZero() {
 			start = time.Now()
 		}
-		return workspace.Walk(s.Dir, nil, baseHasher(start))
+		snap, err := workspace.Walk(s.Dir, nil, baseHasher(start))
+		if err != nil {
+			return treeState{}, 0, err
+		}
+		return t.fromSnapshot(nil, nil, snap)
 	}
-	return workspace.Walk(s.Dir, prev, save)
+	return walkAgainst(s, t, prev, save)
+}
+
+// walkAgainst walks the space's folder with prev's files, so only a file
+// whose size, time or mode changed is passed to save, and records it as a
+// tree edited from prev's.
+func walkAgainst(s *Space, t *trees, prev *treeState, save workspace.Hasher) (treeState, int, error) {
+	old, err := t.flatten(prev.Root)
+	if err != nil {
+		return treeState{}, 0, err
+	}
+	old.SetTaken(time.Unix(0, prev.Taken))
+	snap, err := workspace.Walk(s.Dir, old, save)
+	if err != nil {
+		return treeState{}, 0, err
+	}
+	return t.fromSnapshot(prev, old, snap)
 }
 
 // learn reads the Base content of rel from the person's folder, where the

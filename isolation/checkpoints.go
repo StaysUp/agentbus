@@ -1,16 +1,21 @@
 package isolation
 
-// Checkpoints as the copy and git backends keep them, in the space's record:
+// Checkpoints as every backend keeps them, in the space's record:
 //
-//	checkpoints/<seq>-<name>.json       the checkpoint, and the files it saved
-//	checkpoints/<seq>-<name>.snap.json  every file's size, mode and hash
-//	objects/<sha256>                    a saved file, by the hash of its content
+//	checkpoints/<seq>-<name>.json  the checkpoint: its tree, and the files it saved
+//	trees/<sha256>                 a folder's tree (tree.go)
+//	objects/<sha256>               a saved file, by the hash of its content
 //
-// A checkpoint saves each file that changed since the one before it, so a
-// later Apply can write the file as it was at that checkpoint even after
-// later turns changed it again. The Base checkpoint saves nothing: it is the
-// person's folder as it was, and Apply only compares against it. Saving is a
-// copy-on-write clone where the disk has one.
+// A checkpoint is a Merkle tree of the space's files: each file by its size,
+// modification time, mode and hash, each folder by the hash of its tree. It
+// writes only the trees that changed, and Diff and Apply walk only the
+// folders whose trees differ. A checkpoint saves each file that changed
+// since the one before it, so a later Apply can write the file as it was at
+// that checkpoint even after later turns changed it again. The Base
+// checkpoint saves nothing: it is the person's folder as it was, and Apply
+// only compares against it. Saving is a copy-on-write clone where the disk
+// has one. A checkpoint from before the trees, with every file in its own
+// <seq>-<name>.snap.json, is turned into a tree when first read (migrate).
 
 import (
 	"crypto/sha256"
@@ -41,8 +46,42 @@ type header struct {
 	Checkpoint Checkpoint `json:"checkpoint"`
 	// Saved are the hashes of the files this checkpoint saved.
 	Saved []string `json:"saved,omitempty"`
-	file  string
+	// Tree is the checkpoint's files; nil in a checkpoint from before the
+	// trees, until migrate makes it.
+	Tree *treeState `json:"tree,omitempty"`
+	file string
 }
+
+// treeState is a checkpoint's files: the tree of its top folder, and what a
+// Snapshot of it says besides its files.
+type treeState struct {
+	Root      string `json:"root"`
+	Taken     int64  `json:"taken,omitempty"`
+	Truncated bool   `json:"truncated,omitempty"`
+	Git       bool   `json:"git,omitempty"`
+	Head      string `json:"head,omitempty"`
+	GitTree   string `json:"git_tree,omitempty"`
+}
+
+// stateOf is snap's state but its files, with root.
+func stateOf(snap *workspace.Snapshot, root string) treeState {
+	g, head, tree := snap.GitState()
+	return treeState{Root: root, Taken: snap.Taken(), Truncated: snap.Truncated(), Git: g, Head: head, GitTree: tree}
+}
+
+// snapshot is an empty Snapshot with st's state, to fill with Set.
+func (st treeState) snapshot() *workspace.Snapshot {
+	snap := workspace.Empty()
+	snap.SetTaken(time.Unix(0, st.Taken))
+	if st.Truncated {
+		snap.SetTruncated()
+	}
+	snap.SetGitState(st.Git, st.Head, st.GitTree)
+	return snap
+}
+
+// racy is workspace.Snapshot.Racy for a checkpoint taken at taken.
+func racy(taken, mtime int64) bool { return taken != 0 && mtime >= taken-int64(workspace.Racy) }
 
 // locks keeps one change of a space at a time, in this process.
 var locks sync.Map // state folder -> *sync.Mutex
@@ -102,23 +141,88 @@ func find(list []header, name string) (header, bool) {
 	return header{}, false
 }
 
-func readSnapshot(s *Space, h header) (*workspace.Snapshot, error) {
-	b, err := os.ReadFile(filepath.Join(s.checkpointDir(), h.file+".snap.json"))
-	if err != nil {
-		return nil, errors.New("isolation: a checkpoint's files could not be read")
+// migrate turns each checkpoint of list from before the trees into a tree,
+// in list too: its .snap.json becomes trees, and its header names the top
+// one. The lock is held.
+func migrate(s *Space, t *trees, list []header) error {
+	for i := range list {
+		h := &list[i]
+		if h.Tree != nil {
+			continue
+		}
+		snapFile := filepath.Join(s.checkpointDir(), h.file+".snap.json")
+		b, err := os.ReadFile(snapFile)
+		if err != nil {
+			return errTree
+		}
+		var snap workspace.Snapshot
+		if err := json.Unmarshal(b, &snap); err != nil {
+			return errTree
+		}
+		st, n, err := t.fromSnapshot(nil, nil, &snap)
+		if err != nil {
+			return err
+		}
+		if err := t.flush(); err != nil {
+			return err
+		}
+		h.Tree, h.Checkpoint.Files = &st, n
+		hb, _ := json.Marshal(h)
+		if err := writeFileAtomic(filepath.Join(s.checkpointDir(), h.file+".json"), hb); err != nil {
+			return err
+		}
+		os.Remove(snapFile)
 	}
-	var snap workspace.Snapshot
-	if err := json.Unmarshal(b, &snap); err != nil {
-		return nil, errors.New("isolation: a checkpoint's files could not be read")
+	return nil
+}
+
+// fromSnapshot records cur as a tree: the tree of prev with each file gone
+// removed, then each file that differs from old (prev's files) set. With no
+// prev, every file of cur.
+func (t *trees) fromSnapshot(prev *treeState, old, cur *workspace.Snapshot) (treeState, int, error) {
+	root, count := emptyTree, 0
+	if prev != nil {
+		root, count = prev.Root, -1
 	}
-	// A file still unhashed here is as the Base had it: a hash learned for
-	// it since is its hash here too.
-	for rel, f := range readLearned(s) {
-		if cur, ok := snap.File(rel); ok && cur.Hash == "" && cur.Size == f.Size && cur.ModTime == f.ModTime && cur.Mode == f.Mode {
-			snap.Set(rel, f)
+	ed := t.edit(root, count)
+	// Removals first: a file made where a folder was, or a folder where a
+	// file was, must not be taken out again with the old one.
+	if old != nil {
+		for _, rel := range old.Paths() {
+			if _, ok := cur.File(rel); !ok {
+				if err := ed.remove(rel); err != nil {
+					return treeState{}, 0, err
+				}
+			}
 		}
 	}
-	return &snap, nil
+	for _, rel := range cur.Paths() {
+		f, _ := cur.File(rel)
+		if old != nil {
+			if o, ok := old.File(rel); ok && o == f {
+				continue
+			}
+		}
+		if err := ed.set(rel, f); err != nil {
+			return treeState{}, 0, err
+		}
+	}
+	h, n := ed.finish()
+	if n < 0 {
+		n = old.Len() // nothing edited: prev's files
+	}
+	return stateOf(cur, h), n, nil
+}
+
+// learnedFix gives a file not hashed the hash learned for its Base content
+// since, when it still has the size, time and mode the Base saw.
+func learnedFix(learned map[string]workspace.File) func(string, workspace.File) workspace.File {
+	return func(rel string, f workspace.File) workspace.File {
+		if l, ok := learned[rel]; ok && f.Hash == "" && f.Size == l.Size && f.ModTime == l.ModTime && f.Mode == l.Mode {
+			return l
+		}
+		return f
+	}
 }
 
 // checkpoints is Backend.Checkpoints.
@@ -136,11 +240,12 @@ func checkpoints(s *Space) ([]Checkpoint, error) {
 
 // keeper is how a backend reads its space's files for a checkpoint.
 type keeper interface {
-	// take is the space's files now: prev is the latest checkpoint, or nil
-	// for the Base. A file whose size, modification time and mode match
-	// prev's keeps prev's hash; any other is passed to save, which saves it
-	// and answers its hash. The Base may leave hashes empty (not hashed).
-	take(s *Space, prev *workspace.Snapshot, save workspace.Hasher) (*workspace.Snapshot, error)
+	// take records the space's files now as a tree in t, and answers it and
+	// the count of its files: prev is the latest checkpoint, or nil for the
+	// Base. A file whose size, modification time and mode match prev's
+	// keeps prev's hash; any other is passed to save, which saves it and
+	// answers its hash. The Base may leave hashes empty (not hashed).
+	take(s *Space, t *trees, prev *treeState, save workspace.Hasher) (treeState, int, error)
 	// learn hashes rel as the Base holds it, f, when that content can still
 	// be read as it was; save it too when it is small. ok is false when it
 	// cannot be read as it was.
@@ -183,13 +288,15 @@ func checkpoint(s *Space, name string, k keeper) (Checkpoint, error) {
 	if h, ok := find(list, name); ok {
 		return h.Checkpoint, nil
 	}
-	var prev *workspace.Snapshot
+	t := s.trees()
+	if err := migrate(s, t, list); err != nil {
+		return Checkpoint{}, err
+	}
+	var prev *treeState
 	var saved []string
 	var save workspace.Hasher
 	if len(list) > 0 {
-		if prev, err = readSnapshot(s, list[len(list)-1]); err != nil {
-			return Checkpoint{}, err
-		}
+		prev = list[len(list)-1].Tree
 		if err := os.MkdirAll(s.objectDir(), 0o700); err != nil {
 			return Checkpoint{}, err
 		}
@@ -201,16 +308,31 @@ func checkpoint(s *Space, name string, k keeper) (Checkpoint, error) {
 			return h, err
 		}
 	}
-	snap, err := k.take(s, prev, save)
+	cur, files, err := k.take(s, t, prev, save)
 	if err != nil {
 		return Checkpoint{}, err
 	}
 	if prev != nil {
-		learned, err := learnBase(s, k, prev, snap)
+		changed, err := t.diff(prev.Root, cur.Root, nil)
 		if err != nil {
 			return Checkpoint{}, err
 		}
-		if len(snap.Changed(prev)) == 0 && snap.Head() == prev.Head() {
+		learned, err := learnBase(s, k, changed)
+		if err != nil {
+			return Checkpoint{}, err
+		}
+		fix := learnedFix(readLearned(s))
+		left := 0
+		for _, d := range changed {
+			if !d.inA || !d.inB {
+				left++
+				continue
+			}
+			if a, b := fix(d.rel, d.a), fix(d.rel, d.b); a.Hash != b.Hash || a.Mode != b.Mode {
+				left++
+			}
+		}
+		if left == 0 && cur.Head == prev.Head {
 			// What was learned stays: its saved Base content is the old
 			// side of the file's diff once it changes.
 			dropUnlisted(s, list, saved, learned)
@@ -218,56 +340,55 @@ func checkpoint(s *Space, name string, k keeper) (Checkpoint, error) {
 		}
 		saved = append(saved, learned...)
 	}
+	if err := t.flush(); err != nil {
+		return Checkpoint{}, err
+	}
 	seq := 1
 	if len(list) > 0 {
 		seq = list[len(list)-1].Checkpoint.Seq + 1
 	}
-	h := header{Checkpoint: Checkpoint{Name: name, Seq: seq, Time: time.Now().UTC(), Files: snap.Len()}, Saved: dedupe(saved)}
+	h := header{Checkpoint: Checkpoint{Name: name, Seq: seq, Time: time.Now().UTC(), Files: files}, Saved: dedupe(saved), Tree: &cur}
 	if err := os.MkdirAll(s.checkpointDir(), 0o700); err != nil {
 		return Checkpoint{}, err
 	}
-	file := fmt.Sprintf("%08d-%s", seq, name)
-	sb, _ := json.Marshal(snap)
-	if err := writeFileAtomic(filepath.Join(s.checkpointDir(), file+".snap.json"), sb); err != nil {
-		return Checkpoint{}, err
-	}
-	// The header is written last: a checkpoint exists once it does.
+	// The header is the checkpoint: it exists once it is written.
 	hb, _ := json.Marshal(h)
-	if err := writeFileAtomic(filepath.Join(s.checkpointDir(), file+".json"), hb); err != nil {
+	if err := writeFileAtomic(filepath.Join(s.checkpointDir(), fmt.Sprintf("%08d-%s", seq, name)+".json"), hb); err != nil {
 		return Checkpoint{}, err
 	}
 	return h.Checkpoint, nil
 }
 
-// learnBase hashes the Base content of each file that changed since prev and
-// that prev holds unhashed, where it is needed: a file of the same size (it
-// may be only touched), or a small one (its diff shows the Base content).
-// Each hash learned is set in prev and kept in the space's learned record,
-// which readSnapshot reads into every checkpoint holding the file unhashed.
-// A big file whose size changed stays unhashed: it changed, and reading it
-// would cost a read of the whole file. It answers the saved files it made.
-func learnBase(s *Space, k keeper, prev, snap *workspace.Snapshot) ([]string, error) {
+// learnBase hashes the Base content of each file in changed that the
+// earlier side holds unhashed, where it is needed: a file of the same size
+// (it may be only touched), or a small one (its diff shows the Base
+// content). Each hash learned is kept in the space's learned record, which
+// learnedFix lays over every checkpoint holding the file unhashed. A big
+// file whose size changed stays unhashed: it changed, and reading it would
+// cost a read of the whole file. It answers the saved files it made.
+func learnBase(s *Space, k keeper, changed []fileDiff) ([]string, error) {
 	var saved []string
 	var learned map[string]workspace.File
-	for _, rel := range snap.Changed(prev) {
-		p, ok := prev.File(rel)
-		if !ok || p.Hash != "" || !p.Mode.IsRegular() {
+	for _, d := range changed {
+		p := d.a
+		if !d.inA || p.Hash != "" || !p.Mode.IsRegular() {
 			continue
 		}
-		cur, inCur := snap.File(rel)
-		if p.Size > MaxFileDiff && !(inCur && cur.Size == p.Size) {
-			continue
-		}
-		h, kept, ok := k.learn(s, rel, p)
-		if !ok {
+		if p.Size > MaxFileDiff && !(d.inB && d.b.Size == p.Size) {
 			continue
 		}
 		if learned == nil {
 			learned = readLearned(s)
 		}
+		if l, ok := learned[d.rel]; ok && l.Size == p.Size && l.ModTime == p.ModTime && l.Mode == p.Mode {
+			continue // learned before
+		}
+		h, kept, ok := k.learn(s, d.rel, p)
+		if !ok {
+			continue
+		}
 		p.Hash = h
-		prev.Set(rel, p)
-		learned[rel] = p
+		learned[d.rel] = p
 		if kept {
 			saved = append(saved, h)
 		}
@@ -415,7 +536,10 @@ func linkHash(target string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// pair reads the checkpoints from and to, from no later than to.
+// pair reads the checkpoints from and to, from no later than to, as two
+// Snapshots that hold only the files that differ between them, each with
+// the hash learned for it since: all Diff and Apply look at. list is
+// migrated first.
 func pair(s *Space, list []header, from, to string) (a, b *workspace.Snapshot, ha, hb header, err error) {
 	var ok bool
 	if ha, ok = find(list, from); !ok {
@@ -427,11 +551,24 @@ func pair(s *Space, list []header, from, to string) (a, b *workspace.Snapshot, h
 	if ha.Checkpoint.Seq > hb.Checkpoint.Seq {
 		return nil, nil, ha, hb, ErrOrder
 	}
-	if a, err = readSnapshot(s, ha); err != nil {
+	t := s.trees()
+	if err := migrate(s, t, list); err != nil {
 		return nil, nil, ha, hb, err
 	}
-	if b, err = readSnapshot(s, hb); err != nil {
+	ha, _ = find(list, from)
+	hb, _ = find(list, to)
+	changed, err := t.diff(ha.Tree.Root, hb.Tree.Root, learnedFix(readLearned(s)))
+	if err != nil {
 		return nil, nil, ha, hb, err
+	}
+	a, b = ha.Tree.snapshot(), hb.Tree.snapshot()
+	for _, d := range changed {
+		if d.inA {
+			a.Set(d.rel, d.a)
+		}
+		if d.inB {
+			b.Set(d.rel, d.b)
+		}
 	}
 	return a, b, ha, hb, nil
 }

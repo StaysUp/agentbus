@@ -37,6 +37,26 @@ func fast(t *testing.T) []string {
 	return out
 }
 
+// readSnapshot is every file of the checkpoint h, each with the hash
+// learned for it since.
+func readSnapshot(s *Space, h header) (*workspace.Snapshot, error) {
+	tr := s.trees()
+	list := []header{h}
+	if err := migrate(s, tr, list); err != nil {
+		return nil, err
+	}
+	snap, err := tr.flatten(list[0].Tree.Root)
+	if err != nil {
+		return nil, err
+	}
+	fix := learnedFix(readLearned(s))
+	for _, rel := range snap.Paths() {
+		f, _ := snap.File(rel)
+		snap.Set(rel, fix(rel, f))
+	}
+	return snap, nil
+}
+
 func base(t *testing.T, s *Space) *workspace.Snapshot {
 	t.Helper()
 	list, err := headers(s)

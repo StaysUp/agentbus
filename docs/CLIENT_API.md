@@ -1519,6 +1519,13 @@ file's size, modification time, mode and hash, and keeps its own copy of each fi
 the same file again. A job's `changes` name the two checkpoints in `from` and `to`. The first
 checkpoint is `base`: the folder as the session began.
 
+Checkpoints are a Merkle tree, kept by the session and used by every method: each folder is
+recorded by the hash of its files and of its folders' records, and a checkpoint is the hash of the
+top folder. A checkpoint after a few edits writes only the records of the folders on those files'
+paths; a diff, and the conflict check of an apply, walk only the folders whose hashes differ
+between the two checkpoints. With `overlay` a checkpoint does not walk the folder at all: the
+session's upper folder already names every changed path.
+
 What is read, and when. `base` reads no file: it records each file's size, modification time and
 mode, and hashes only links and files written in the two seconds before the copy was made. A later
 checkpoint hashes a file only when its size, time or mode changed, once, from its saved copy; an

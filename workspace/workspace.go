@@ -220,6 +220,17 @@ func (s *Snapshot) racy(mtime int64) bool {
 // SetTaken sets when s was taken, as Walk does when it begins.
 func (s *Snapshot) SetTaken(t time.Time) { s.taken = t.UnixNano() }
 
+// Taken is when s was taken, in Unix nanoseconds; 0 if not known.
+func (s *Snapshot) Taken() int64 { return s.taken }
+
+// GitState is what ReadGit recorded: whether the root is the top of a git
+// work tree, its HEAD, and the tree of its files.
+func (s *Snapshot) GitState() (git bool, head, tree string) { return s.git, s.head, s.tree }
+
+// SetGitState records what GitState answers, for a snapshot rebuilt from a
+// record.
+func (s *Snapshot) SetGitState(git bool, head, tree string) { s.git, s.head, s.tree = git, head, tree }
+
 // SetTruncated marks s as missing files past MaxSnapshotFiles.
 func (s *Snapshot) SetTruncated() { s.truncated = true }
 

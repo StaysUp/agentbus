@@ -89,11 +89,15 @@ func (b gitBackend) Checkpoint(s *Space, name string) (Checkpoint, error) {
 
 // take walks the worktree. Git wrote every file of it just now, so no time
 // in it says the file is as in the person's folder: the Base hashes all.
-func (gitBackend) take(s *Space, prev *workspace.Snapshot, save workspace.Hasher) (*workspace.Snapshot, error) {
+func (gitBackend) take(s *Space, t *trees, prev *treeState, save workspace.Hasher) (treeState, int, error) {
 	if prev == nil {
-		return workspace.Take(s.Dir, nil)
+		snap, err := workspace.Take(s.Dir, nil)
+		if err != nil {
+			return treeState{}, 0, err
+		}
+		return t.fromSnapshot(nil, nil, snap)
 	}
-	return workspace.Walk(s.Dir, prev, save)
+	return walkAgainst(s, t, prev, save)
 }
 
 // learn is never needed: the Base hashed every file.

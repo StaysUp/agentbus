@@ -53,6 +53,11 @@ func TestOverlayInUserNamespace(t *testing.T) {
 	if err != nil && cmd.ProcessState == nil {
 		t.Skipf("no user namespace here: %v", err)
 	}
+	if err == nil && strings.Contains(string(out), "needs root or CAP_SYS_ADMIN") {
+		// Made, but with no capabilities: AppArmor's restriction, as on
+		// Ubuntu 24.04 without a profile for this binary.
+		t.Skip("the user namespace here has no capabilities")
+	}
 	if err != nil || !strings.Contains(string(out), "--- PASS: TestOverlayRoundTrip") {
 		t.Fatalf("the round trip in a user namespace: %v\n%s", err, out)
 	}

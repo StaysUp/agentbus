@@ -9,7 +9,7 @@ package isolation
 //	.isolation/<id>/l/          the snapshot: a copy of the person's folder as
 //	                            it was when the session began (a reflink per
 //	                            file where the disk has them)
-//	.isolation/<id>/lower.json  the snapshot's files and folders (lowerRec)
+//	.isolation/<id>/lower.json  the snapshot's files, as a tree (lowerRec)
 //	.isolation/<id>/u, <id>/w   the upper layer and overlay's work folder
 //
 // The person's live folder is never the lower layer: a write there would
@@ -17,9 +17,10 @@ package isolation
 // removes all it made and touches no other.
 //
 // A checkpoint walks the upper layer only: every change since the copy was
-// made is there, a removed file as a whiteout. The checkpoint's record is a
-// manifest and saved files, as the copy backend keeps them, so Diff and
-// Apply are the same code. Nothing is unmounted at a checkpoint, so a
+// made is there, a removed file as a whiteout. It is the snapshot's tree
+// with those paths edited, so it writes only the trees of the folders on
+// them, and no file of the snapshot is read. Its record is as the copy
+// backend keeps it, so Diff and Apply are the same code. Nothing is unmounted at a checkpoint, so a
 // process the agent left running cannot stop one.
 
 import (
@@ -51,11 +52,11 @@ type overlayBackend struct{}
 
 func (overlayBackend) Name() string { return Overlay }
 
-// lowerRec is the snapshot's record: its files as the Base sees them, and
-// every folder it holds with its mode.
+// lowerRec is the snapshot's record: its files as the Base sees them, .git
+// left out, as a tree in the space's trees.
 type lowerRec struct {
-	Files *workspace.Snapshot    `json:"files"`
-	Dirs  map[string]fs.FileMode `json:"dirs"`
+	Tree  treeState `json:"tree"`
+	Files int       `json:"files"`
 }
 
 func storeDir(workdir string) string { return filepath.Join(workdir, stateFolder) }
@@ -144,11 +145,22 @@ func snapshot(s *Space, start time.Time) error {
 			return err
 		}
 	}
-	files, dirs, err := scan(dir, baseHasher(start))
+	files, err := scan(dir, baseHasher(start))
 	if err != nil {
 		return err
 	}
-	b, _ := json.Marshal(lowerRec{Files: files, Dirs: dirs})
+	// The Base leaves .git out, as workspace.Take does.
+	files.Delete(".git")
+	files.DeleteUnder(".git")
+	t := s.trees()
+	st, n, err := t.fromSnapshot(nil, nil, files)
+	if err != nil {
+		return err
+	}
+	if err := t.flush(); err != nil {
+		return err
+	}
+	b, _ := json.Marshal(lowerRec{Tree: st, Files: n})
 	return writeFileAtomic(filepath.Join(s.state(), "lower.json"), b)
 }
 
@@ -159,7 +171,7 @@ func readLower(s *Space) (*lowerRec, error) {
 		return nil, errors.New("isolation: the copy's snapshot could not be read")
 	}
 	var rec lowerRec
-	if err := json.Unmarshal(b, &rec); err != nil || rec.Files == nil {
+	if err := json.Unmarshal(b, &rec); err != nil || rec.Tree.Root == "" {
 		return nil, errors.New("isolation: the copy's snapshot could not be read")
 	}
 	return &rec, nil
@@ -226,27 +238,27 @@ func removeOldLayers(workdir string) error {
 	return removeAll(dir)
 }
 
-// take is the copy's files: the Base is the snapshot's own record, and a
-// later checkpoint is that record with the upper layer laid over it.
-func (overlayBackend) take(s *Space, prev *workspace.Snapshot, save workspace.Hasher) (*workspace.Snapshot, error) {
+// take is the copy's files: the Base is the snapshot's own tree, and a
+// later checkpoint is that tree with each path the upper layer holds laid
+// over it.
+func (overlayBackend) take(s *Space, t *trees, prev *treeState, save workspace.Hasher) (treeState, int, error) {
 	rec, err := readLower(s)
 	if err != nil {
-		return nil, err
+		return treeState{}, 0, err
 	}
-	// The Base leaves .git out, as workspace.Take does.
-	view := rec.Files
-	view.Delete(".git")
-	view.DeleteUnder(".git")
 	// Git's own state is read through the mount, as Walk reads it.
-	if prev == nil {
-		view.ReadGit(s.Dir)
-		return view, nil
+	gitState := func(st treeState) treeState {
+		g := workspace.Empty()
+		g.ReadGit(s.Dir)
+		st.Git, st.Head, st.GitTree = g.GitState()
+		return st
 	}
-	view.SetTaken(time.Now())
-	defer view.ReadGit(s.Dir)
-	dirs := rec.Dirs
+	if prev == nil {
+		return gitState(rec.Tree), rec.Files, nil
+	}
+	taken := time.Now().UnixNano()
+	ed := t.edit(rec.Tree.Root, rec.Files)
 	upper := filepath.Join(s.state(), "u")
-	fromUpper := map[string]bool{}
 	err = filepath.WalkDir(upper, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			if p == upper {
@@ -272,54 +284,36 @@ func (overlayBackend) take(s *Space, prev *workspace.Snapshot, save workspace.Ha
 		mode := info.Mode()
 		switch {
 		case d.IsDir():
-			// A folder made over a removed one hides all the lower held.
+			// A folder made over a removed one hides all the snapshot held
+			// there; any folder hides a file of that name.
 			if opaque(p) {
-				view.DeleteUnder(rel)
+				return ed.remove(rel)
 			}
-			view.Delete(rel)
+			return ed.removeFile(rel)
 		case mode.IsRegular() || mode&fs.ModeSymlink != 0:
-			if _, ok := dirs[rel]; ok {
-				view.DeleteUnder(rel)
-			}
 			f := workspace.File{Size: info.Size(), Mode: mode, ModTime: info.ModTime().UnixNano()}
-			if old, ok := prev.File(rel); ok && old.Size == f.Size && old.ModTime == f.ModTime && old.Mode == f.Mode && !prev.Racy(old.ModTime) {
+			if old, ok := t.lookup(prev.Root, rel); ok && old.Size == f.Size && old.ModTime == f.ModTime && old.Mode == f.Mode && !racy(prev.Taken, old.ModTime) {
 				f.Hash = old.Hash
 			} else {
 				h, err := save(rel, p, info)
 				if err != nil {
-					view.Delete(rel)
-					return nil
+					return ed.remove(rel)
 				}
 				f.Hash = h
 			}
-			view.Set(rel, f)
-			fromUpper[rel] = true
+			return ed.set(rel, f)
 		default:
-			// A whiteout (a removed file), or a device, a socket or a pipe
-			// the turn made: either hides what the lower held there, and
-			// neither is a file of the work.
-			view.Delete(rel)
-			if _, ok := dirs[rel]; ok {
-				view.DeleteUnder(rel)
-			}
+			// A whiteout (a removed file or folder), or a device, a socket
+			// or a pipe the turn made: either hides what the snapshot held
+			// there, and neither is a file of the work.
+			return ed.remove(rel)
 		}
-		return nil
 	})
 	if err != nil {
-		return nil, err
+		return treeState{}, 0, err
 	}
-	// A file the turns never wrote keeps the hash an earlier checkpoint
-	// learned for it.
-	for _, rel := range view.Paths() {
-		if fromUpper[rel] {
-			continue
-		}
-		f, _ := view.File(rel)
-		if old, ok := prev.File(rel); ok && f.Hash == "" && old.Size == f.Size && old.ModTime == f.ModTime && old.Mode == f.Mode {
-			view.Set(rel, old)
-		}
-	}
-	return view, nil
+	root, n := ed.finish()
+	return gitState(treeState{Root: root, Taken: taken, Truncated: rec.Tree.Truncated}), n, nil
 }
 
 // learn reads rel's Base content from the snapshot: it never changes, so it
@@ -505,25 +499,20 @@ func isWhiteout(fi fs.FileInfo) bool {
 }
 
 // scan is a folder's files, by size, modification time, mode and what hash
-// answers, and its folders, .git's included. A .git file at the top is left
-// out, as the copy backend leaves it out.
-func scan(root string, hash workspace.Hasher) (*workspace.Snapshot, map[string]fs.FileMode, error) {
+// answers, .git's included. A .git file at the top is left out, as the copy
+// backend leaves it out.
+func scan(root string, hash workspace.Hasher) (*workspace.Snapshot, error) {
 	files := workspace.Empty()
-	dirs := map[string]fs.FileMode{}
 	list, truncated, err := workspace.List(root, false, workspace.MaxSnapshotFiles)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	if truncated {
 		files.SetTruncated()
 	}
 	for _, it := range list {
 		info := it.Info
-		if info.IsDir() {
-			dirs[it.Rel] = info.Mode()
-			continue
-		}
-		if it.Rel == ".git" || (info.Mode()&fs.ModeSymlink == 0 && !info.Mode().IsRegular()) {
+		if info.IsDir() || it.Rel == ".git" || (info.Mode()&fs.ModeSymlink == 0 && !info.Mode().IsRegular()) {
 			continue
 		}
 		h, err := hash(it.Rel, it.Path, info)
@@ -532,5 +521,5 @@ func scan(root string, hash workspace.Hasher) (*workspace.Snapshot, map[string]f
 		}
 		files.Set(it.Rel, workspace.File{Size: info.Size(), Mode: info.Mode(), ModTime: info.ModTime().UnixNano(), Hash: h})
 	}
-	return files, dirs, nil
+	return files, nil
 }
