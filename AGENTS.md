@@ -21,6 +21,16 @@ A source build prints `agentbus dev` and the commit Go read from git, with `, mo
 tree had changes. Release builds set the version and commit through the ldflags in
 `.goreleaser.yaml` (`main.version`, `main.commit`).
 
+Releases build with `CGO_ENABLED=0`; a plain `go build` with gcc installed uses cgo. Both must run
+`up` and `runner` in their own user namespace on Linux. The namespace child must clear its ambient
+capabilities on every thread before it starts an agent. Go's `AllThreadsSyscall` cannot do that in a
+cgo build, so `cmd/agentbus/userns_cgo_linux.go` clears them in a C constructor, before Go starts a
+second thread, and `clearAmbient` reads every thread's set back in both builds.
+
+Overlay mounts belong to the runner that made them. A runner unmounts every overlay in its workdir
+when it stops, and again when it starts (what a crash left); a session's next turn mounts its copy
+again. A test that opens a copy must close it, or stop its runner, or the temp folder cannot go.
+
 ## Tests and the gate
 
 ```sh

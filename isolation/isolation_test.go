@@ -43,6 +43,8 @@ func open(t *testing.T, name, folder string) (Backend, *Space) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	// An overlay copy left mounted would keep its temp folder from going.
+	t.Cleanup(func() { b.Close(s) })
 	return b, s
 }
 

@@ -66,6 +66,11 @@ cd agentbus
 go install ./cmd/agentbus
 ```
 
+On Linux, a build with cgo (the default where gcc is installed) and one without it (`CGO_ENABLED=0`, as
+releases are built) both run `agentbus up` in a user namespace of their own, where a session's copy
+can be an overlay mount without root. The service's first log line says whether it got one, and why
+not.
+
 Both Go routes put `agentbus` in `$(go env GOPATH)/bin`. That folder must be on your `PATH`:
 
 ```sh

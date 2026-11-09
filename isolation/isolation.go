@@ -316,6 +316,17 @@ func Load(workdir, dir string) (*Space, error) {
 	return &s, nil
 }
 
+// Remount mounts s's copy again where its backend mounts one (overlay) and
+// it is not mounted, as after a runner restarted. A job that reads the
+// copy without a checkpoint, such as a review of a session's work, needs
+// it.
+func Remount(s *Space) error {
+	if s.Backend != Overlay {
+		return nil
+	}
+	return remount(s)
+}
+
 // Close removes s with its own backend.
 func Close(s *Space) error {
 	b, ok := Get(s.Backend)

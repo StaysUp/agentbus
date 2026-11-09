@@ -27,6 +27,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -189,8 +190,8 @@ func usernsInside(home string, logf func(string, ...any)) (int, bool) {
 	}
 	// The ambient capabilities let this process mount; the agents it starts
 	// must not inherit them. Every thread holds its own set.
-	if _, _, e := syscall.AllThreadsSyscall6(unix.SYS_PRCTL, unix.PR_CAP_AMBIENT, unix.PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0, 0); e != 0 {
-		return refuse("the capabilities could not be cleared before agents start (" + e.Error() + "; a build with cgo cannot)")
+	if err := clearAmbient(); err != nil {
+		return refuse("the capabilities could not be cleared before agents start: " + err.Error())
 	}
 	if home == "" {
 		return refuse("the data folder could not be found")
@@ -206,6 +207,45 @@ func usernsInside(home string, logf func(string, ...any)) (int, bool) {
 	report.Close()
 	logf("running in its own user and mount namespace as uid %d, so a session's copy is an overlay mount; "+
 		"your own tools reach a copy at /proc/%d/root/<its path>", os.Getuid(), os.Getpid())
+	return 0, false
+}
+
+// clearAmbient clears the ambient capabilities on every thread, then reads
+// every thread's set back. A build with cgo cannot clear them from Go
+// (ENOTSUP): userns_cgo_linux.go cleared them before Go started, and the
+// read says whether it did.
+func clearAmbient() error {
+	_, _, e := syscall.AllThreadsSyscall6(unix.SYS_PRCTL, unix.PR_CAP_AMBIENT, unix.PR_CAP_AMBIENT_CLEAR_ALL, 0, 0, 0, 0)
+	if e != 0 && e != syscall.ENOTSUP {
+		return e
+	}
+	tasks, err := os.ReadDir("/proc/self/task")
+	if err != nil {
+		return err
+	}
+	for _, t := range tasks {
+		b, err := os.ReadFile(filepath.Join("/proc/self/task", t.Name(), "status"))
+		if errors.Is(err, os.ErrNotExist) {
+			continue // the thread ended
+		}
+		if err != nil {
+			return err
+		}
+		if amb, ok := capAmb(string(b)); !ok || amb != 0 {
+			return fmt.Errorf("thread %s still holds ambient capabilities %x", t.Name(), amb)
+		}
+	}
+	return nil
+}
+
+// capAmb reads the CapAmb line of a /proc status file.
+func capAmb(status string) (uint64, bool) {
+	for _, line := range strings.Split(status, "\n") {
+		if v, ok := strings.CutPrefix(line, "CapAmb:"); ok {
+			n, err := strconv.ParseUint(strings.TrimSpace(v), 16, 64)
+			return n, err == nil
+		}
+	}
 	return 0, false
 }
 

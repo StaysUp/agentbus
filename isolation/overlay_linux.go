@@ -324,9 +324,19 @@ func opaque(p string) bool {
 	return err == nil && n == 1 && b[0] == 'y'
 }
 
+func remount(s *Space) error { return mountSpace(s) }
+
+// mountMu makes the check and the mount in mountSpace one step: two jobs
+// of one session, such as two reviews after a restart, would otherwise
+// both mount its layers, and the second mount of an upper layer in use
+// fails.
+var mountMu sync.Mutex
+
 // mountSpace mounts s's snapshot and upper layer at s.Root, unless they are.
 // Paths are relative to the store, so the options stay short.
 func mountSpace(s *Space) error {
+	mountMu.Lock()
+	defer mountMu.Unlock()
 	if mounted(s.Root) {
 		return nil
 	}
@@ -398,6 +408,80 @@ func unmountAll(p string) error {
 	}
 	return nil
 }
+
+// Unmount unmounts every overlay mounted under workdir, and answers how
+// many. A service calls it when it stops, so a runner that ends leaves no
+// mount behind, and when it starts, for what one that did not stop cleanly
+// left. Each session's files stay: its next turn mounts its copy again.
+func Unmount(workdir string) (int, error) {
+	real, err := filepath.EvalSymlinks(workdir)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	points, err := overlayMounts()
+	if err != nil {
+		return 0, err
+	}
+	probe := filepath.Join(storeDir(real), ".probe", "m")
+	n, seen := 0, map[string]bool{}
+	var first error
+	for _, p := range points {
+		if seen[p] || !(p == probe || (filepath.Dir(p) == real && spaceName.MatchString(filepath.Base(p)))) {
+			continue
+		}
+		seen[p] = true
+		if err := unmountAll(p); err != nil {
+			if first == nil {
+				first = fmt.Errorf("isolation: %s could not be unmounted: %w", p, err)
+			}
+			continue
+		}
+		n++
+	}
+	return n, first
+}
+
+// overlayMounts are the mount points of this process's overlay mounts,
+// from /proc/self/mountinfo.
+func overlayMounts() ([]string, error) {
+	b, err := os.ReadFile("/proc/self/mountinfo")
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	for _, line := range strings.Split(string(b), "\n") {
+		// id parent major:minor root point options [optional...] - type source super
+		pre, post, ok := strings.Cut(line, " - ")
+		f, g := strings.Fields(pre), strings.Fields(post)
+		if !ok || len(f) < 5 || len(g) < 1 || g[0] != "overlay" {
+			continue
+		}
+		out = append(out, unescapeMount(f[4]))
+	}
+	return out, nil
+}
+
+// unescapeMount undoes mountinfo's octal escapes (\040 for a space).
+func unescapeMount(s string) string {
+	if !strings.Contains(s, `\`) {
+		return s
+	}
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\\' && i+3 < len(s) && isOctal(s[i+1]) && isOctal(s[i+2]) && isOctal(s[i+3]) {
+			b.WriteByte((s[i+1]-'0')<<6 | (s[i+2]-'0')<<3 | (s[i+3] - '0'))
+			i += 3
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+func isOctal(c byte) bool { return c >= '0' && c <= '7' }
 
 // probes caches, per workdir, why an overlay cannot be mounted there ("":
 // it can).

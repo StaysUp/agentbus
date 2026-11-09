@@ -182,6 +182,11 @@ func (r *Runner) Token() string { return r.token }
 // running then has its turn stopped and is finished as failed with reason
 // runner_stopped.
 func (r *Runner) Run(ctx context.Context) {
+	// What a runner here left mounted, if it did not stop cleanly, is
+	// unmounted first; each session mounts its copy again when it next
+	// runs. Every mount goes when this runner stops.
+	r.unmount("start")
+	defer r.unmount("stop")
 	var wg sync.WaitGroup
 	for range r.cfg.Capacity {
 		wg.Add(1)
@@ -191,6 +196,21 @@ func (r *Runner) Run(ctx context.Context) {
 		}()
 	}
 	wg.Wait()
+}
+
+// unmount unmounts every overlay copy in the runner's workdir. A copy's
+// files stay where they are.
+func (r *Runner) unmount(when string) {
+	if r.cfg.Workdir == "" {
+		return
+	}
+	n, err := isolation.Unmount(r.cfg.Workdir)
+	if n > 0 {
+		r.cfg.Logf("isolation.unmounted n=%d when=%s", n, when)
+	}
+	if err != nil {
+		r.cfg.Logf("isolation.unmount_failed when=%s error=%q", when, err.Error())
+	}
 }
 
 func (r *Runner) loop(ctx context.Context) {
@@ -538,6 +558,13 @@ func (r *Runner) apply(at *attempt) queue.Finish {
 	if !ok {
 		return refuse(applyNoCopy, nil)
 	}
+	// The folder the copy was made from can be another session's copy:
+	// mounted again, or the changes would land under its mount point.
+	if s.Source != "" {
+		if res := r.remount(at, s.Source); res != nil {
+			return refuse(res.Refused, nil)
+		}
+	}
 	done, err := b.Apply(s, sp.ApplyFrom, sp.ApplyTo)
 	var cf *isolation.Conflict
 	switch {
@@ -633,6 +660,9 @@ func (r *Runner) prepare(at *attempt) *queue.Result {
 		b, _ := isolation.Get(isolation.Git)
 		return r.isolate(at, b, isolation.Request{Repo: sp.Repo, Base: sp.Base})
 	case sp.Folder != "":
+		if res := r.remount(at, sp.Folder); res != nil {
+			return res
+		}
 		if info, err := os.Stat(sp.Folder); err != nil || !info.IsDir() {
 			return nil // the engine refuses it, in its own words
 		}
@@ -748,11 +778,33 @@ func (r *Runner) checkpointStart(at *attempt) *queue.Result {
 	return nil
 }
 
+// remount mounts again the copy that holds folder, when folder is in a copy
+// this runner made: a review names its author's copy, and that review's
+// session, or a session that named such a folder, continues there. After a
+// restart the copy's mount is gone until then.
+func (r *Runner) remount(at *attempt, folder string) *queue.Result {
+	if r.cfg.Workdir == "" {
+		return nil
+	}
+	s, err := isolation.Load(r.cfg.Workdir, folder)
+	if err != nil {
+		return nil // not in a copy
+	}
+	if err := isolation.Remount(s); err != nil {
+		r.cfg.Logf("the copy for job %s could not be mounted again: %s", at.job.ID, err)
+		return &queue.Result{Refused: "the workspace could not be read"}
+	}
+	return nil
+}
+
 // watchFolder checkpoints the folder the job uses as it is, before the turn,
 // so its changes come from checkpoints as an isolated turn's do.
 func (r *Runner) watchFolder(at *attempt) *queue.Result {
 	if at.folder == "" {
 		return nil // no folder to watch: the engine still runs the turn, or refuses it
+	}
+	if res := r.remount(at, at.folder); res != nil {
+		return res
 	}
 	b, _ := isolation.Get(isolation.None)
 	s, err := b.Open(isolation.Request{ID: at.a.ID, Workdir: r.cfg.Workdir, Folder: at.folder})

@@ -198,6 +198,13 @@ func TestTurnChangesAreTheCheckpointDiff(t *testing.T) {
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	for _, setting := range []string{settings.IsolationCopy, settings.IsolationOverlay, settings.IsolationNone} {
 		t.Run(setting, func(t *testing.T) {
+			// Where no overlay can be mounted, the setting falls back to
+			// copy, which the copy subtest already covers.
+			if setting == settings.IsolationOverlay {
+				if why := isolation.OverlayWhy(t.TempDir()); why != "" {
+					t.Skip("no overlay can be mounted here, so the setting would fall back to copy: " + why)
+				}
+			}
 			perm := filepath.Join(t.TempDir(), settings.PolicyFile)
 			if err := os.WriteFile(perm, []byte("isolation = \""+setting+"\"\n"), 0o600); err != nil {
 				t.Fatal(err)
@@ -236,6 +243,9 @@ func TestTurnChangesAreTheCheckpointDiff(t *testing.T) {
 				s, err := isolation.Load(filepath.Dir(res.Folder), res.Folder)
 				if err != nil {
 					t.Fatal(err)
+				}
+				if s.Backend != setting || s.Fallback != "" {
+					t.Fatalf("turn %s ran in a %s copy (%s), not %s", c.st.Turn, s.Backend, s.Fallback, setting)
 				}
 				b, _ := isolation.Get(s.Backend)
 				want, err := b.Diff(s, res.Changes.From, res.Changes.To)

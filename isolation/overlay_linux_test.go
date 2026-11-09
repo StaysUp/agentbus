@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 
@@ -177,6 +178,29 @@ func TestOverlayRemount(t *testing.T) {
 	if !mounted(s.Root) || read(t, filepath.Join(s.Dir, "a.txt")) != "a2" {
 		t.Fatal("not mounted again with the turn's edit")
 	}
+	// A job that only reads the copy, such as a review, mounts it with
+	// Remount.
+	if _, err := Unmount(s.Workdir); err != nil || mounted(s.Root) {
+		t.Fatalf("not unmounted: %v", err)
+	}
+	// Jobs of one session mount it at once: each succeeds, and it is
+	// mounted once.
+	errs := make(chan error, 4)
+	for range 4 {
+		go func() { errs <- Remount(again) }()
+	}
+	for range 4 {
+		if err := <-errs; err != nil {
+			t.Fatalf("a remount at once with others: %v", err)
+		}
+	}
+	if !mounted(s.Root) || read(t, filepath.Join(s.Dir, "a.txt")) != "a2" {
+		t.Fatal("not mounted again by Remount")
+	}
+	points, _ := overlayMounts()
+	if n := len(slices.DeleteFunc(points, func(p string) bool { return p != s.Root })); n != 1 {
+		t.Fatalf("mounted %d times", n)
+	}
 	b.Close(again)
 }
 
@@ -205,5 +229,46 @@ func TestOpaqueMark(t *testing.T) {
 	}
 	if opaque(root) {
 		t.Fatal("a trusted. mark read as opaque")
+	}
+}
+
+// Unmount takes every copy in the workdir off its mount and keeps its
+// files: the session's next checkpoint mounts it again with its edits. A
+// mount outside the workdir is left alone.
+func TestUnmountKeepsTheSession(t *testing.T) {
+	overlayOK(t)
+	src := t.TempDir()
+	fixture(t, src, map[string]string{"a.txt": "a1"})
+	b, s := open(t, Overlay, src)
+	_, other := open(t, Overlay, src)
+	fixture(t, s.Dir, map[string]string{"a.txt": "a2"})
+	n, err := Unmount(s.Workdir)
+	if err != nil || n != 1 || mounted(s.Root) {
+		t.Fatalf("unmounted %d, %v; still mounted: %v", n, err, mounted(s.Root))
+	}
+	if !mounted(other.Root) {
+		t.Fatal("a mount in another workdir was unmounted")
+	}
+	if n, err := Unmount(s.Workdir); err != nil || n != 0 {
+		t.Fatalf("a second unmount: %d, %v", n, err)
+	}
+	again, err := Load(s.Workdir, s.Dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Checkpoint(again, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	if !mounted(s.Root) || read(t, filepath.Join(s.Dir, "a.txt")) != "a2" {
+		t.Fatal("not mounted again with the turn's edit")
+	}
+	b.Close(again)
+}
+
+func TestUnescapeMount(t *testing.T) {
+	for in, want := range map[string]string{`/a/b`: "/a/b", `/a\040b`: "/a b", `/a\134b`: `/a\b`, `/a\04`: `/a\04`} {
+		if got := unescapeMount(in); got != want {
+			t.Errorf("%q: %q, want %q", in, got, want)
+		}
 	}
 }
