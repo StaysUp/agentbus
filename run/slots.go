@@ -34,7 +34,7 @@ func (rs *runs) take(session string) (int, string) {
 		return http.StatusServiceUnavailable, "the service is stopping"
 	}
 	if rs.busy[session] {
-		return http.StatusConflict, turnRunning
+		return http.StatusConflict, TurnRunning
 	}
 	if rs.n >= rs.max {
 		return http.StatusTooManyRequests, strconv.Itoa(rs.max) + " runs are already running; wait for one to end and retry"

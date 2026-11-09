@@ -17,14 +17,14 @@ func TestSessionAcrossAgents(t *testing.T) {
 	s := open(t, filepath.Join(t.TempDir(), "events.db"))
 	exit0 := 0
 	for _, e := range []event.Event{
-		{ID: "1", Kind: event.SessionOpened, Session: "s", Turn: "t1", Hold: "h1", Agent: "claude", AgentID: "a_haiku", Folder: "/w"},
-		{ID: "2", Kind: event.TurnStarted, Session: "s", Turn: "t1", Text: "remember PELICAN", Agent: "claude", AgentID: "a_haiku", Folder: "/w"},
+		{ID: "1", Kind: event.SessionOpened, Session: "s", Turn: "t1", Hold: "h1", Harness: "claude", AgentID: "a_haiku", Folder: "/w"},
+		{ID: "2", Kind: event.TurnStarted, Session: "s", Turn: "t1", Text: "remember PELICAN", Harness: "claude", AgentID: "a_haiku", Folder: "/w"},
 		{ID: "3", Kind: event.ModelRequested, Session: "s", Turn: "t1", Exchange: "x-1", Model: "claude-haiku"},
 		{ID: "4", Kind: event.ModelResponded, Session: "s", Turn: "t1", Exchange: "x-1", Status: 200, Text: "OK"},
 		{ID: "5", Kind: event.SessionClosed, Session: "s", Turn: "t1", Hold: "h1", ExitCode: &exit0, ResumeID: "claude-sess"},
-		{ID: "6", Kind: event.SessionOpened, Session: "s", Turn: "t2", Hold: "h2", Agent: "codex", AgentID: "codex", Folder: "/w"},
+		{ID: "6", Kind: event.SessionOpened, Session: "s", Turn: "t2", Hold: "h2", Harness: "codex", AgentID: "codex", Folder: "/w"},
 		{ID: "7", Kind: event.TurnStarted, Session: "s", Turn: "t2", Text: "which word?", Context: "[earlier turns]\n\n",
-			Agent: "codex", AgentID: "codex", Folder: "/w", Continuity: "transcript"},
+			Harness: "codex", AgentID: "codex", Folder: "/w", Continuity: "transcript"},
 		{ID: "8", Kind: event.ModelRequested, Session: "s", Turn: "t2", Exchange: "x-2", Model: "gpt"},
 		{ID: "9", Kind: event.ModelResponded, Session: "s", Turn: "t2", Exchange: "x-2", Status: 200, Text: "PELICAN"},
 		{ID: "10", Kind: event.SessionClosed, Session: "s", Turn: "t2", Hold: "h2", ExitCode: &exit0},
@@ -43,8 +43,8 @@ func TestSessionAcrossAgents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if x := session(t, snap, "s"); x.Agent != "codex" || x.FirstAgent != "claude" || x.FirstAgentID != "a_haiku" {
-		t.Errorf("session agent %q first %q (%q), want codex and claude (a_haiku)", x.Agent, x.FirstAgent, x.FirstAgentID)
+	if x := session(t, snap, "s"); x.Harness != "codex" || x.FirstAgent != "claude" || x.FirstAgentID != "a_haiku" {
+		t.Errorf("session agent %q first %q (%q), want codex and claude (a_haiku)", x.Harness, x.FirstAgent, x.FirstAgentID)
 	}
 
 	tr, err := s.Transcript("s")
@@ -61,7 +61,7 @@ func TestSessionAcrossAgents(t *testing.T) {
 	}
 
 	c, err := s.Continuation("s")
-	if err != nil || c.Agent != "codex" || c.AgentID != "codex" || c.ResumeID != "claude-sess" || !c.ResumeStale {
+	if err != nil || c.Harness != "codex" || c.AgentID != "codex" || c.ResumeID != "claude-sess" || !c.ResumeStale {
 		t.Errorf("continuation %+v %v, want codex now and claude's resume id from before the switch", c, err)
 	}
 	// Replay before the switch does not count: the transcript turn started
@@ -76,7 +76,7 @@ func TestSessionAcrossAgents(t *testing.T) {
 		t.Errorf("used replay %v %v, want true for a replay after it", used, err)
 	}
 	// A turn after the switch that gives a resume id makes it current.
-	mustAppend(t, s, event.Event{ID: "11", Kind: event.TurnStarted, Session: "s", Turn: "t3", Text: "more", Agent: "codex", Continuity: "replay"})
+	mustAppend(t, s, event.Event{ID: "11", Kind: event.TurnStarted, Session: "s", Turn: "t3", Text: "more", Harness: "codex", Continuity: "replay"})
 	mustAppend(t, s, event.Event{ID: "12", Kind: event.SessionClosed, Session: "s", Turn: "t3", Hold: "h3", ExitCode: &exit0, ResumeID: "codex-thread"})
 	if c, err := s.Continuation("s"); err != nil || c.ResumeID != "codex-thread" || c.ResumeStale {
 		t.Errorf("continuation %+v %v, want codex's id, current", c, err)

@@ -200,10 +200,12 @@ func (e *GapError) Error() string { return fmt.Sprintf("queue: events must start
 // git repo it is in, at its HEAD). A later job names Session, and may name an
 // agent: its turn then runs on that agent, in the session's workspace.
 //
-// Agent is the harness. AgentID, Access and KeyEnv come from the saved agent
-// the job was made for; the API fills them, never the caller.
+// Harness is the harness, the program that runs the turn, such as claude; its
+// JSON name is agent, as the jobs API has always named it. AgentID, Access
+// and KeyEnv come from the saved agent the job was made for; the API fills
+// them, never the caller.
 type Spec struct {
-	Agent    string `json:"agent,omitempty"`
+	Harness  string `json:"agent,omitempty"`
 	AgentID  string `json:"agent_id,omitempty"`
 	Access   string `json:"access,omitempty"`
 	KeyEnv   string `json:"key_env,omitempty"`
@@ -232,7 +234,7 @@ type Spec struct {
 func (spec Spec) asked() Spec {
 	a := spec
 	if a.AgentID != "" {
-		a.Agent = a.AgentID
+		a.Harness = a.AgentID
 	}
 	a.AgentID, a.Access, a.KeyEnv, a.AgentModel = "", "", "", ""
 	if a.ModelFromAgent {
@@ -1248,12 +1250,7 @@ func (q *Queue) End(runnerID, attemptID string, number int, f Finish) (Job, erro
 		case j.Kind == KindReview && f.Status == Finished:
 			// The control plane reads the verdict; a runner's own is
 			// ignored. No readable verdict is unknown, never pass.
-			var rr struct {
-				ReplyText string `json:"reply_text"`
-			}
-			if f.Result != nil {
-				_ = json.Unmarshal(f.Result, &rr)
-			}
+			rr, _ := ReadResult(f.Result)
 			v, fs := ParseVerdict(rr.ReplyText)
 			verdict = v
 			if fs != nil {
@@ -1424,7 +1421,7 @@ func (q *Queue) Removed(runnerID, session, removalErr string) error {
 // ended and recorded its changed files, in a session that is not closed.
 // Several reviews of one job may run at once.
 func (q *Queue) Review(team, id, agent, model, key string, includeReply bool) (Job, bool, error) {
-	return q.ReviewAs(team, id, Spec{Agent: agent, Model: model}, key, includeReply)
+	return q.ReviewAs(team, id, Spec{Harness: agent, Model: model}, key, includeReply)
 }
 
 // ReviewAs is Review with the reviewer as a saved agent: as names its
@@ -1452,7 +1449,7 @@ func (q *Queue) review(team, id string, as Spec, key string, includeReply bool, 
 	if err != nil {
 		return Job{}, false, ErrNotReviewable
 	}
-	spec := Spec{Agent: as.Agent, AgentID: as.AgentID, Access: as.Access, KeyEnv: as.KeyEnv, Model: as.Model,
+	spec := Spec{Harness: as.Harness, AgentID: as.AgentID, Access: as.Access, KeyEnv: as.KeyEnv, Model: as.Model,
 		ModelFromAgent: as.ModelFromAgent, Folder: j.Workspace.Folder, ReadOnly: true, Prompt: prompt}
 	links.ReviewsJob = j.ID
 	return q.create(team, KindReview, key, spec, links, lim, j.Session)

@@ -41,8 +41,6 @@ const (
 	MaxWait = 30 * time.Second
 	// MaxBody bounds a request body. A prompt can be 256 KiB.
 	MaxBody = 2 << 20
-	// MaxPrompt bounds a job's prompt, as the framework does.
-	MaxPrompt = 256 << 10
 	// MaxCapacity bounds what one runner may say it can run at once.
 	MaxCapacity = 64
 	// MaxBatch bounds one events batch.
@@ -274,7 +272,7 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "idempotency_key must be 1 to 128 of A-Z, a-z, 0-9 and . _ : -")
 		return
 	}
-	if b.Spec.Prompt == "" || len(b.Spec.Prompt) > MaxPrompt || strings.IndexByte(b.Spec.Prompt, 0) >= 0 {
+	if !run.PromptOK(b.Spec.Prompt) {
 		fail(w, http.StatusBadRequest, "spec.prompt must be from 1 byte to 256 KiB, with no NUL byte")
 		return
 	}
@@ -286,26 +284,19 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, msg)
 		return
 	}
-	if s.cfg.Agents != nil && (b.Spec.Session == "" || b.Spec.Agent != "") {
-		ag, err := s.cfg.Agents.Resolve(b.Spec.Agent)
+	if s.cfg.Agents != nil && (b.Spec.Session == "" || b.Spec.Harness != "") {
+		// A retry of a request whose agent was removed since gets the first
+		// job (Spec.asked).
+		ag, why, err := agents.Lookup(b.Spec.Harness, s.cfg.Agents.Resolve, s.retried(b.IdempotencyKey))
 		if err != nil {
-			// A retry of a request whose agent was removed since: the
-			// queue matches the key against the request as asked and
-			// answers with the first job (Spec.asked).
-			known := false
-			if b.IdempotencyKey != "" {
-				if known, err = s.cfg.Queue.HasKey(queue.DefaultTeam, b.IdempotencyKey); err != nil {
-					s.internal(w)
-					return
-				}
-			}
-			if !known {
-				fail(w, http.StatusBadRequest, "spec.agent "+strconv.Quote(b.Spec.Agent)+" is not a saved agent; GET /api/v0/agents lists them")
-				return
-			}
-			ag = agents.Agent{ID: b.Spec.Agent, Harness: b.Spec.Agent}
+			s.internal(w)
+			return
 		}
-		b.Spec.Agent, b.Spec.AgentID, b.Spec.Access, b.Spec.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
+		if why != nil {
+			fail(w, http.StatusBadRequest, "spec.agent "+strconv.Quote(b.Spec.Harness)+" is not a saved agent; GET /api/v0/agents lists them")
+			return
+		}
+		b.Spec.Harness, b.Spec.AgentID, b.Spec.Access, b.Spec.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
 		switch {
 		case b.Spec.Model != "":
 		case b.Spec.Session != "":
@@ -369,7 +360,7 @@ func checkSpec(sp queue.Spec) string {
 	if sp.Isolate && sp.Folder == "" {
 		return "spec.isolate goes with spec.folder"
 	}
-	if sp.Agent == "" {
+	if sp.Harness == "" {
 		return "spec needs agent with folder, or with repo and base; or session"
 	}
 	switch {
@@ -558,26 +549,20 @@ func (s *Server) reviewJob(w http.ResponseWriter, r *http.Request) {
 	}
 	// The reviewer is a saved agent, as for a turn; without saved agents its
 	// name is the harness.
-	as := queue.Spec{Agent: b.Agent, Model: b.Model}
+	as := queue.Spec{Harness: b.Agent, Model: b.Model}
 	if s.cfg.Agents != nil {
-		ag, err := s.cfg.Agents.Resolve(b.Agent)
+		// A retry of a review whose reviewer was removed since gets the
+		// first review job, as a turn's retry does.
+		ag, why, err := agents.Lookup(b.Agent, s.cfg.Agents.Resolve, s.retried(b.IdempotencyKey))
 		if err != nil {
-			// A retry of a review whose reviewer was removed since gets the
-			// first review job, as a turn's retry does.
-			known := false
-			if b.IdempotencyKey != "" {
-				if known, err = s.cfg.Queue.HasKey(queue.DefaultTeam, b.IdempotencyKey); err != nil {
-					s.internal(w)
-					return
-				}
-			}
-			if !known {
-				fail(w, http.StatusBadRequest, "agent "+strconv.Quote(b.Agent)+" is not a saved agent; GET /api/v0/agents lists them")
-				return
-			}
-			ag = agents.Agent{ID: b.Agent, Harness: b.Agent}
+			s.internal(w)
+			return
 		}
-		as.Agent, as.AgentID, as.Access, as.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
+		if why != nil {
+			fail(w, http.StatusBadRequest, "agent "+strconv.Quote(b.Agent)+" is not a saved agent; GET /api/v0/agents lists them")
+			return
+		}
+		as.Harness, as.AgentID, as.Access, as.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
 		if as.Model == "" && ag.Model != "" {
 			as.Model, as.ModelFromAgent = ag.Model, true
 		}
@@ -859,4 +844,13 @@ func (s *Server) finish(w http.ResponseWriter, r *http.Request, rn queue.Runner)
 		return
 	}
 	writeJSON(w, http.StatusOK, j)
+}
+
+// retried says whether a request's idempotency key was used before, for
+// agents.Lookup; nil for a request without one.
+func (s *Server) retried(key string) func() (bool, error) {
+	if key == "" {
+		return nil
+	}
+	return func() (bool, error) { return s.cfg.Queue.HasKey(queue.DefaultTeam, key) }
 }

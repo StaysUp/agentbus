@@ -77,7 +77,7 @@ func enroll(t *testing.T, srv *httptest.Server, capacity int) Enrolled {
 func TestTokenScopes(t *testing.T) {
 	srv := newServer(t)
 	a, b := enroll(t, srv, 1), enroll(t, srv, 1)
-	job := JobRequest{Kind: "turn", Spec: queue.Spec{Agent: "claude", Folder: "/x", Prompt: "hi"}}
+	job := JobRequest{Kind: "turn", Spec: queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"}}
 	var j queue.Job
 	if code := send(t, srv, mainTok, "POST", "/api/v0/jobs", job, &j); code != 201 {
 		t.Fatalf("create: %d", code)
@@ -167,17 +167,17 @@ func TestTakeLongPoll(t *testing.T) {
 func TestCreateJob(t *testing.T) {
 	srv := newServer(t)
 	for _, b := range []any{
-		JobRequest{Kind: "build", Spec: queue.Spec{Agent: "claude", Folder: "/x", Prompt: "hi"}},
-		JobRequest{Kind: "turn", Spec: queue.Spec{Agent: "claude", Prompt: "hi"}},
-		JobRequest{Kind: "turn", Spec: queue.Spec{Agent: "claude", Folder: "/x"}},
-		JobRequest{Kind: "turn", IdempotencyKey: "a b", Spec: queue.Spec{Agent: "claude", Folder: "/x", Prompt: "hi"}},
+		JobRequest{Kind: "build", Spec: queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"}},
+		JobRequest{Kind: "turn", Spec: queue.Spec{Harness: "claude", Prompt: "hi"}},
+		JobRequest{Kind: "turn", Spec: queue.Spec{Harness: "claude", Folder: "/x"}},
+		JobRequest{Kind: "turn", IdempotencyKey: "a b", Spec: queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"}},
 		map[string]any{"kind": "turn", "spec": map[string]any{"prompt": "x", "session": "s"}, "extra": 1},
 	} {
 		if got := send(t, srv, mainTok, "POST", "/api/v0/jobs", b, nil); got != 400 {
 			t.Errorf("%+v: %d, want 400", b, got)
 		}
 	}
-	rev := JobRequest{Kind: "review", IdempotencyKey: "rev-1", Spec: queue.Spec{Agent: "codex", Folder: "/x", Prompt: "review"},
+	rev := JobRequest{Kind: "review", IdempotencyKey: "rev-1", Spec: queue.Spec{Harness: "codex", Folder: "/x", Prompt: "review"},
 		Links: queue.Links{ReviewsJob: "job_1"}}
 	var one, two queue.Job
 	if got := send(t, srv, mainTok, "POST", "/api/v0/jobs", rev, &one); got != 201 || !one.Spec.ReadOnly || one.Links.ReviewsJob != "job_1" {
@@ -210,20 +210,20 @@ func TestSpecShapes(t *testing.T) {
 		spec queue.Spec
 		want int
 	}{
-		{queue.Spec{Agent: "claude", Repo: "/r", Base: "main", Prompt: "x"}, 201},
-		{queue.Spec{Agent: "claude", Repo: "/r", Base: "feature/a-1", Prompt: "x"}, 201},
-		{queue.Spec{Agent: "claude", Folder: "/f", Prompt: "x"}, 201},
+		{queue.Spec{Harness: "claude", Repo: "/r", Base: "main", Prompt: "x"}, 201},
+		{queue.Spec{Harness: "claude", Repo: "/r", Base: "feature/a-1", Prompt: "x"}, 201},
+		{queue.Spec{Harness: "claude", Folder: "/f", Prompt: "x"}, 201},
 		{queue.Spec{Session: "s1", Prompt: "x"}, 201},
-		{queue.Spec{Agent: "claude", Repo: "/r", Base: "-c", Prompt: "x"}, 400},
-		{queue.Spec{Agent: "claude", Repo: "/r", Base: "a b", Prompt: "x"}, 400},
-		{queue.Spec{Agent: "claude", Repo: "/r", Base: "a..b", Prompt: "x"}, 400},
-		{queue.Spec{Agent: "claude", Repo: "/r", Prompt: "x"}, 400},
-		{queue.Spec{Agent: "claude", Repo: "rel", Base: "main", Prompt: "x"}, 400},
-		{queue.Spec{Agent: "claude", Folder: "rel", Prompt: "x"}, 400},
-		{queue.Spec{Agent: "claude", Folder: "/f", Repo: "/r", Base: "main", Prompt: "x"}, 400},
-		{queue.Spec{Agent: "claude", Base: "main", Prompt: "x"}, 400},
+		{queue.Spec{Harness: "claude", Repo: "/r", Base: "-c", Prompt: "x"}, 400},
+		{queue.Spec{Harness: "claude", Repo: "/r", Base: "a b", Prompt: "x"}, 400},
+		{queue.Spec{Harness: "claude", Repo: "/r", Base: "a..b", Prompt: "x"}, 400},
+		{queue.Spec{Harness: "claude", Repo: "/r", Prompt: "x"}, 400},
+		{queue.Spec{Harness: "claude", Repo: "rel", Base: "main", Prompt: "x"}, 400},
+		{queue.Spec{Harness: "claude", Folder: "rel", Prompt: "x"}, 400},
+		{queue.Spec{Harness: "claude", Folder: "/f", Repo: "/r", Base: "main", Prompt: "x"}, 400},
+		{queue.Spec{Harness: "claude", Base: "main", Prompt: "x"}, 400},
 		{queue.Spec{Session: "s1", Folder: "/f", Prompt: "x"}, 400},
-		{queue.Spec{Session: "s1", Agent: "claude", Prompt: "x"}, 201},
+		{queue.Spec{Session: "s1", Harness: "claude", Prompt: "x"}, 201},
 		{queue.Spec{Session: "s1", Isolate: true, Prompt: "x"}, 400},
 		{queue.Spec{Session: "s1", Repo: "/r", Base: "main", Prompt: "x"}, 400},
 	} {
@@ -270,7 +270,7 @@ func TestSessionRoutes(t *testing.T) {
 func TestReviewRoute(t *testing.T) {
 	srv := newServer(t)
 	var j queue.Job
-	send(t, srv, mainTok, "POST", "/api/v0/jobs", JobRequest{Kind: "turn", Spec: queue.Spec{Agent: "claude", Folder: "/f", Prompt: "x"}}, &j)
+	send(t, srv, mainTok, "POST", "/api/v0/jobs", JobRequest{Kind: "turn", Spec: queue.Spec{Harness: "claude", Folder: "/f", Prompt: "x"}}, &j)
 	for _, c := range []struct {
 		path string
 		body any

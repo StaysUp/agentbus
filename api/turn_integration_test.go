@@ -85,7 +85,7 @@ func TestTurnSinkNamesTurnsAfterChildExits(t *testing.T) {
 				got = &ev
 			}
 		}
-		if got == nil || got.Agent != want[0] || got.Folder != want[1] {
+		if got == nil || got.Harness != want[0] || got.Folder != want[1] {
 			t.Fatalf("%s: turn.started %+v, want agent %q folder %q", session, got, want[0], want[1])
 		}
 	}

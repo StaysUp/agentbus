@@ -280,7 +280,7 @@ func TestBrokenPermissionsRefusesTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := func() *Refusal {
-		_, err := e.Start(Request{Agent: "claude", Folder: t.TempDir(), Prompt: "hi"})
+		_, err := e.Start(Request{Harness: "claude", Folder: t.TempDir(), Prompt: "hi"})
 		var r *Refusal
 		if !errors.As(err, &r) {
 			t.Fatalf("Start: %v, want a refusal", err)
@@ -321,7 +321,7 @@ func TestUnknownAccessHoldsNoSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i, access := range []string{"bogus", "bogus", ""} {
-		_, err := e.Start(Request{Agent: "claude", Folder: t.TempDir(), Prompt: "hi", Access: access})
+		_, err := e.Start(Request{Harness: "claude", Folder: t.TempDir(), Prompt: "hi", Access: access})
 		var r *Refusal
 		if !errors.As(err, &r) {
 			t.Fatalf("%d: %v", i, err)

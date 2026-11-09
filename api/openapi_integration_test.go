@@ -31,7 +31,7 @@ func fill(t *testing.T, st *store.Store) {
 		ServerToolUse: map[string]int{"web_search_requests": 1}}
 	base := event.Event{Time: now, Session: "s1", Exchange: "x-1", Vendor: "anthropic", Client: "claude-cli/2.1.318", Turn: "t_1"}
 	evs := []event.Event{
-		{Kind: event.TurnStarted, Text: "Fix the login bug", Agent: "claude", Folder: "/Users/ana/app"},
+		{Kind: event.TurnStarted, Text: "Fix the login bug", Harness: "claude", Folder: "/Users/ana/app"},
 		{Kind: event.ModelRequested, Model: "claude-sonnet-5-5", ToolsOffered: []string{"Read", "Edit"}},
 		{Kind: event.ModelResponded, Model: "claude-sonnet-5-5", Text: "Reading it.", StopReason: "tool_use",
 			Status: 200, Usage: u, LatencyMS: &lat, CostUSD: &cost, CostComplete: &yes},
@@ -53,8 +53,8 @@ func fill(t *testing.T, st *store.Store) {
 		{ID: "e-1-91", Kind: event.EventsDropped, Time: now, Vendor: "openai", Dropped: 1, AllSessions: true},
 		// An older store's registration: nothing writes it now, readers
 		// still meet it.
-		{ID: "evt_0", Kind: event.SessionRegistered, Time: now, Session: "s1", Agent: "claude", Folder: "/Users/ana/app"},
-		{ID: "evt_4", Kind: event.SessionOpened, Time: now, Session: "s1", Hold: "hold_2", Agent: "claude", Folder: "/Users/ana/app"},
+		{ID: "evt_0", Kind: event.SessionRegistered, Time: now, Session: "s1", Harness: "claude", Folder: "/Users/ana/app"},
+		{ID: "evt_4", Kind: event.SessionOpened, Time: now, Session: "s1", Hold: "hold_2", Harness: "claude", Folder: "/Users/ana/app"},
 		{ID: "evt_5", Kind: event.SessionClosed, Time: now, Session: "s1", Hold: "hold_2", ExitCode: &code, ResumeID: "abc-2"},
 	} {
 		if _, _, err := st.Append(e); err != nil {

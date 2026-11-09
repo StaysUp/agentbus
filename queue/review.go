@@ -126,30 +126,6 @@ func isRecap(line string) bool {
 	return strings.HasPrefix(t, "recap:") || strings.HasPrefix(t, "recap ")
 }
 
-// reviewed is the part of a turn job's result a review prompt is built from:
-// what the runner recorded (runner.Result and runner.Changes).
-type reviewed struct {
-	Reply   string `json:"reply"`
-	Folder  string `json:"folder"`
-	Changes *struct {
-		Kind  string `json:"kind"`
-		Files []struct {
-			Path    string  `json:"path"`
-			Change  string  `json:"change"`
-			Size    int64   `json:"size"`
-			Git     string  `json:"git"`
-			Content *string `json:"content"`
-		} `json:"files"`
-		Count         int    `json:"count"`
-		Truncated     bool   `json:"truncated"`
-		HeadBefore    string `json:"head_before"`
-		HeadAfter     string `json:"head_after"`
-		Diff          string `json:"diff"`
-		DiffTruncated bool   `json:"diff_truncated"`
-		Partial       bool   `json:"partial"`
-	} `json:"changes"`
-}
-
 // MaxReviewPrompt bounds a review prompt, under the framework's 256 KiB.
 const MaxReviewPrompt = 240 << 10
 
@@ -162,8 +138,8 @@ const VerdictFormat = "```json\n" +
 // asks for a review in a fixed format. It carries no conclusion of the
 // author's: with includeReply false, the author's reply is left out.
 func ReviewPrompt(j Job, includeReply bool) (string, error) {
-	var r reviewed
-	if len(j.Result) == 0 || json.Unmarshal(j.Result, &r) != nil || r.Changes == nil {
+	r, err := ReadResult(j.Result)
+	if len(j.Result) == 0 || err != nil || r.Changes == nil {
 		return "", fmt.Errorf("queue: the job recorded no changed files")
 	}
 	c := r.Changes

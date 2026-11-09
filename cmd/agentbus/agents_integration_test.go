@@ -478,7 +478,7 @@ func TestReviewBySavedAgent(t *testing.T) {
 	if code := callAPI(t, svc, tok, "POST", "/api/v0/jobs/"+j.ID+"/review", map[string]any{"agent": ag["id"]}, &rev); code != http.StatusCreated {
 		t.Fatalf("review: %d", code)
 	}
-	if rev.Spec.Agent != "codex" || rev.Spec.AgentID != ag["id"] || rev.Spec.Access != "subscription" || rev.Spec.Model != "gpt-5.5" {
+	if rev.Spec.Harness != "codex" || rev.Spec.AgentID != ag["id"] || rev.Spec.Access != "subscription" || rev.Spec.Model != "gpt-5.5" {
 		t.Fatalf("review spec %+v", rev.Spec)
 	}
 	if rev = waitJob(t, svc, tok, rev.ID); rev.State != queue.Finished {

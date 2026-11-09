@@ -282,6 +282,30 @@ func (s *Store) Resolve(id string) (Agent, error) {
 	return Agent{}, err
 }
 
+// Lookup is the agent a request names, found by resolve. When resolve finds
+// none, a retry gets a stand-in, with id as both its id and its harness: the
+// queue matches the idempotency key against the request as first asked and
+// answers with the first job. retried says the request's key was used
+// before; nil means the request is no retry. why is resolve's error when the
+// request is no retry; err is retried's.
+func Lookup(id string, resolve func(string) (Agent, error), retried func() (bool, error)) (ag Agent, why, err error) {
+	ag, why = resolve(id)
+	if why == nil {
+		return ag, nil, nil
+	}
+	if retried == nil {
+		return Agent{}, why, nil
+	}
+	known, err := retried()
+	if err != nil {
+		return Agent{}, nil, err
+	}
+	if !known {
+		return Agent{}, why, nil
+	}
+	return Agent{ID: id, Harness: id}, nil, nil
+}
+
 func (a *Agent) set(f Fields) {
 	a.Name, a.Harness, a.Access, a.Model, a.KeyEnv = f.Name, f.Harness, f.Access, f.Model, f.KeyEnv
 }

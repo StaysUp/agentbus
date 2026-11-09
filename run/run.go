@@ -59,9 +59,6 @@ var ModelShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`)
 // SessionShape is the shape of a session id, and of a turn id.
 var SessionShape = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
-// Agents are the agents a turn can start.
-var Agents = []string{"claude", "codex"}
-
 // Launch is how a run reaches an agent binary: the binary's path, the child's
 // whole environment, and the arguments that go before the run's own.
 type Launch struct {
@@ -237,19 +234,20 @@ var storeFailed = refuse(http.StatusInternalServerError, "the store could not be
 // Request is one turn to start.
 type Request struct {
 	// Session continues that session. Empty starts a new one, which needs
-	// Agent and Folder.
+	// Harness and Folder.
 	Session string
 	// NewSession is the id of a new session; empty picks one.
 	NewSession string
 	// Turn is the turn's id; empty picks one, t_ and 16 hex characters.
-	Turn           string
-	Agent, Folder  string
-	Prompt, Model  string
-	ReadOnly       bool
-	IdempotencyKey string // stored on turn.started, as the caller's key
+	Turn string
+	// Harness is the program that runs the turn's loop, such as claude.
+	Harness, Folder string
+	Prompt, Model   string
+	ReadOnly        bool
+	IdempotencyKey  string // stored on turn.started, as the caller's key
 	// AgentID, Access and KeyEnv: the saved agent and how it reaches its
-	// model (Access). A new session needs Agent; for a next turn they are
-	// optional. Set with Session, Agent (the harness) and these run this turn
+	// model (Access). A new session needs Harness; for a next turn they are
+	// optional. Set with Session, Harness and these run this turn
 	// on another agent, in the session's folder; left out, the turn runs on
 	// the agent of the session's latest turn, read from the record.
 	AgentID, Access, KeyEnv string
@@ -301,21 +299,26 @@ func missingAgent(agent string) string {
 		"If it is installed, start agentbus from a shell where " + agent + " runs."
 }
 
-// KnownAgent says a turn can start agent.
-func KnownAgent(agent string) bool {
-	_, ok := turnArgs(agent, "", "", "", Writes{}, Permissions{}, "")
+// KnownHarness says a turn can start on harness.
+func KnownHarness(harness string) bool {
+	_, ok := turnArgs(harness, "", "", "", Writes{}, Permissions{}, "")
 	return ok
 }
 
 // CheckPrompt says what is wrong with a prompt and a model, or "".
 func CheckPrompt(prompt, model string) string {
-	if prompt == "" || len(prompt) > MaxPrompt || strings.IndexByte(prompt, 0) >= 0 {
+	if !PromptOK(prompt) {
 		return "prompt must be from 1 byte to 256 KiB, with no NUL byte"
 	}
 	if model != "" && !ModelShape.MatchString(model) {
 		return "model must match " + ModelShape.String()
 	}
 	return ""
+}
+
+// PromptOK says a prompt is from 1 byte to MaxPrompt, with no NUL byte.
+func PromptOK(prompt string) bool {
+	return prompt != "" && len(prompt) <= MaxPrompt && strings.IndexByte(prompt, 0) < 0
 }
 
 // Start starts a turn: a new session's first, or req.Session's next. It
@@ -333,7 +336,7 @@ func (e *Engine) Start(req Request) (*Turn, error) {
 	if req.Session != "" {
 		return e.next(req)
 	}
-	if !KnownAgent(req.Agent) {
+	if !KnownHarness(req.Harness) {
 		return nil, refuse(http.StatusBadRequest, "agent must be claude or codex")
 	}
 	if len(req.Folder) > MaxFolder || !filepath.IsAbs(req.Folder) || !isDir(req.Folder) {
@@ -352,7 +355,7 @@ func (e *Engine) Start(req Request) (*Turn, error) {
 	if code, msg := e.runs.take(id); code != 0 {
 		return nil, refuse(code, msg)
 	}
-	return e.start(turn{agent: req.Agent, folder: req.Folder, session: id, id: req.Turn,
+	return e.start(turn{harness: req.Harness, folder: req.Folder, session: id, id: req.Turn,
 		model: req.Model, readOnly: req.ReadOnly, prompt: req.Prompt, key: req.IdempotencyKey,
 		agentID: req.AgentID, access: req.Access, keyEnv: req.KeyEnv, origin: req.Origin, root: req.Root, depth: req.Depth})
 }
@@ -384,9 +387,9 @@ func (e *Engine) next(req Request) (*Turn, error) {
 		return fail(storeFailed)
 	}
 	if c.Open {
-		return fail(refuse(http.StatusConflict, turnRunning))
+		return fail(refuse(http.StatusConflict, TurnRunning))
 	}
-	if !KnownAgent(c.Agent) {
+	if !KnownHarness(c.Harness) {
 		return fail(refuse(http.StatusConflict, "this session cannot be continued from here"))
 	}
 	// The turn runs on the agent it names, or on the agent of the session's
@@ -394,24 +397,24 @@ func (e *Engine) next(req Request) (*Turn, error) {
 	// The model too: a turn that names neither keeps the model the latest
 	// turn ran with, read from the same event as its agent, so the two never
 	// disagree, whichever turns started.
-	agent, agentID, access, keyEnv, model := c.Agent, c.AgentID, c.Access, c.KeyEnv, req.Model
+	agent, agentID, access, keyEnv, model := c.Harness, c.AgentID, c.Access, c.KeyEnv, req.Model
 	// Naming the session's own latest agent is the same as naming none: the
 	// session keeps its model. Only a switch takes the named agent's model.
 	if model == "" {
-		if req.Agent == "" || (req.AgentID != "" && req.AgentID == c.AgentID) {
+		if req.Harness == "" || (req.AgentID != "" && req.AgentID == c.AgentID) {
 			model = c.Model
 		} else {
 			model = req.AgentModel
 		}
 	}
-	if req.Agent != "" {
-		if !KnownAgent(req.Agent) {
+	if req.Harness != "" {
+		if !KnownHarness(req.Harness) {
 			return fail(refuse(http.StatusBadRequest, "agent must be claude or codex"))
 		}
 		if req.Access != "" && req.Access != "subscription" && req.Access != "openrouter" {
 			return fail(refuse(http.StatusBadRequest, "access must be subscription or openrouter"))
 		}
-		agent, agentID, access, keyEnv = req.Agent, req.AgentID, req.Access, req.KeyEnv
+		agent, agentID, access, keyEnv = req.Harness, req.AgentID, req.Access, req.KeyEnv
 	}
 	// How the turn reaches the session's earlier turns depends on the agent
 	// (Continuity): by own replay, the child starts fresh and the gateway
@@ -422,14 +425,14 @@ func (e *Engine) next(req Request) (*Turn, error) {
 	// (replayLayout): it starts fresh with the earlier turns as plain text.
 	var from, recovered, recoveredWhy, context string
 	continuity := e.Continuity(agent)
-	if agent != c.Agent || (continuity == ByReplay && !(replayLayout(agent, access) && replayLayout(c.Agent, c.Access))) {
+	if agent != c.Harness || (continuity == ByReplay && !(replayLayout(agent, access) && replayLayout(c.Harness, c.Access))) {
 		continuity = ByTranscript
 		if context, err = e.transcript(session, len(req.Prompt)); err != nil {
 			return fail(storeFailed)
 		}
 	}
 	if continuity == ByReplay {
-		plan, err := e.cfg.ReplayBase(c.Agent, session)
+		plan, err := e.cfg.ReplayBase(c.Harness, session)
 		if err != nil {
 			return fail(storeFailed)
 		}
@@ -488,7 +491,7 @@ func (e *Engine) next(req Request) (*Turn, error) {
 		return fail(refuse(http.StatusBadRequest, "folder is not this session's folder "+strconv.Quote(c.Folder)+
 			"; leave folder out to use the session's"))
 	}
-	t := turn{agent: agent, folder: c.Folder, session: session, id: req.Turn, resumeID: c.ResumeID, replayFrom: from,
+	t := turn{harness: agent, folder: c.Folder, session: session, id: req.Turn, resumeID: c.ResumeID, replayFrom: from,
 		recoveredFrom: recovered, recoveredWhy: recoveredWhy, continuity: continuity, model: model,
 		readOnly: req.ReadOnly, prompt: req.Prompt, context: context, key: req.IdempotencyKey,
 		agentID: agentID, access: access, keyEnv: keyEnv, origin: req.Origin, root: req.Root, depth: req.Depth}
@@ -538,30 +541,31 @@ func replayLayout(agent, access string) bool {
 	return agent == "claude" || access != "openrouter"
 }
 
-const turnRunning = "a turn is already running in this session"
+// TurnRunning is the refusal of a turn sent to a session whose turn runs.
+const TurnRunning = "a turn is already running in this session"
 
 // replayOnly refuses a vendor resume for a session that used own replay.
 const replayOnly = "this session cannot be continued from here: it was continued by own replay, and its resume_id holds only its last turn; start agentbus with replay on (the default) to continue it"
 
 // turn is one start of an agent: a new session's first, or a session's next.
 type turn struct {
-	agent, folder, session string
-	id                     string // the turn id
-	resumeID               string // a next turn by resume: the conversation it continues; empty for a first
-	replayFrom             string // a next turn by replay: the earlier turn whose history the gateway replays
-	recoveredFrom          string // a next turn by replay after a turn that did not finish: that turn
-	recoveredWhy           string // and how it ended
-	continuity             string // a next turn: ByReplay or ByResume; empty for a first
-	model                  string
-	readOnly               bool
-	prompt                 string
-	context                string // ByTranscript: the earlier turns as text, put before prompt
-	key                    string // the caller's idempotency key, or ""
-	agentID, access        string // the saved agent and how it reaches its model
-	keyEnv                 string // for openrouter: the name of the key's variable
-	origin                 *event.Origin
-	root                   string // the request tree's root session; "" for this one
-	depth                  int
+	harness, folder, session string
+	id                       string // the turn id
+	resumeID                 string // a next turn by resume: the conversation it continues; empty for a first
+	replayFrom               string // a next turn by replay: the earlier turn whose history the gateway replays
+	recoveredFrom            string // a next turn by replay after a turn that did not finish: that turn
+	recoveredWhy             string // and how it ended
+	continuity               string // a next turn: ByReplay or ByResume; empty for a first
+	model                    string
+	readOnly                 bool
+	prompt                   string
+	context                  string // ByTranscript: the earlier turns as text, put before prompt
+	key                      string // the caller's idempotency key, or ""
+	agentID, access          string // the saved agent and how it reaches its model
+	keyEnv                   string // for openrouter: the name of the key's variable
+	origin                   *event.Origin
+	root                     string // the request tree's root session; "" for this one
+	depth                    int
 }
 
 // start stores session.opened and turn.started, starts t's child in a slot
@@ -585,7 +589,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	// stored. A broken file stops the turn: it never runs without the policy.
 	perm, err := e.permissions()
 	if err != nil {
-		e.cfg.Logf("run.refused agent=%s reason=permissions_file error=%q", t.agent, err.Error())
+		e.cfg.Logf("run.refused agent=%s reason=permissions_file error=%q", t.harness, err.Error())
 		return nil, refuse(http.StatusBadRequest, "the permissions file "+PermissionsFile+" in the data folder cannot be used, so the turn did not start: "+
 			err.Error()+". Fix the file, or remove it for the defaults, and send the turn again.")
 	}
@@ -593,7 +597,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	// turn too. A file that cannot be used stops the turn, as the policy does.
 	hint, err := e.instructions(t.session)
 	if err != nil {
-		e.cfg.Logf("run.refused agent=%s reason=instructions_file error=%q", t.agent, err.Error())
+		e.cfg.Logf("run.refused agent=%s reason=instructions_file error=%q", t.harness, err.Error())
 		return nil, refuse(http.StatusBadRequest, "the instructions file "+InstructionsFile+" in the data folder cannot be used, so the turn did not start: "+
 			err.Error()+". Fix the file, or remove it for the default text, and send the turn again.")
 	}
@@ -604,11 +608,11 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	if e.cfg.Wire == nil {
 		return nil, refuse(http.StatusNotFound, "this service starts no turns")
 	}
-	l, err := e.cfg.Wire(t.agent, baseURL, Access{Kind: t.access, KeyEnv: t.keyEnv, Model: t.model})
+	l, err := e.cfg.Wire(t.harness, baseURL, Access{Kind: t.access, KeyEnv: t.keyEnv, Model: t.model})
 	var refusal *Refusal
 	switch {
 	case errors.As(err, &refusal):
-		e.cfg.Logf("run.refused agent=%s access=%s reason=wire", t.agent, t.access)
+		e.cfg.Logf("run.refused agent=%s access=%s reason=wire", t.harness, t.access)
 		return nil, refusal
 	case errors.Is(err, ErrOwnEndpoint):
 		return nil, refuse(http.StatusBadRequest, "the service's environment already sends this agent to another endpoint; unset it and restart agentbus")
@@ -616,8 +620,8 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		// 400, as the endpoint refusal above: both are the service's own
 		// setup, which the person fixes, and nothing is stored. The reply
 		// never quotes PATH: it names the person's home folder and tools.
-		e.cfg.Logf("run.refused agent=%s program=%s reason=not_on_path", t.agent, t.agent)
-		return nil, refuse(http.StatusBadRequest, missingAgent(t.agent))
+		e.cfg.Logf("run.refused agent=%s program=%s reason=not_on_path", t.harness, t.harness)
+		return nil, refuse(http.StatusBadRequest, missingAgent(t.harness))
 	case err != nil:
 		return nil, refuse(http.StatusInternalServerError, "the agent could not be started")
 	}
@@ -634,15 +638,15 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	cmd := exec.Command(l.Path)
 	cmd.Env = turnEnv(l.Env, os.Environ(), e.cfg.BaseURL, tok, e.cfg.APIDir)
 	perm = withAPI(perm, e.cfg.APIDir != "", t.readOnly)
-	if t.agent == "codex" && hint != "" && codexOwnInstructions(cmd.Env, t.folder) {
+	if t.harness == "codex" && hint != "" && codexOwnInstructions(cmd.Env, t.folder) {
 		hint = ""
 		e.cfg.Logf("run.hint session=%s turn=%s left_out=codex_developer_instructions_set", t.session, t.id)
 	}
-	w, why := writesFor(t.agent, t.folder, t.readOnly, perm, e.cfg.Protect)
+	w, why := writesFor(t.harness, t.folder, t.readOnly, perm, e.cfg.Protect)
 	if why != "" {
 		e.cfg.Logf("run.edit session=%s turn=%s left_out=%s", t.session, t.id, why)
 	}
-	args, _ := turnArgs(t.agent, hint, t.resumeID, t.model, w, perm, t.context+t.prompt)
+	args, _ := turnArgs(t.harness, hint, t.resumeID, t.model, w, perm, t.context+t.prompt)
 	all := append(append([]string{}, l.Args...), args...)
 	cmd.Args = append([]string{l.Path}, all...)
 	cmd.Dir = t.folder
@@ -650,7 +654,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	// vendor's session id, the only thing from it that reaches an event; the
 	// work is in the events. Stdout and stderr together, their last
 	// RunOutputMax bytes, go to the run's own log and nowhere else.
-	ids := &idScanner{agent: t.agent}
+	ids := &idScanner{harness: t.harness}
 	out := &logfile.Tail{Max: RunOutputMax}
 	// Its own session, and so its own process group: stopping it reaches
 	// what it started, and the session marks its descendants for procTree,
@@ -661,22 +665,24 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	// Before the child starts, so its first model call finds the agent and
 	// folder, and a store that cannot write starts nothing.
 	if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.SessionOpened,
-		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Hold: holdID, Agent: t.agent, Folder: t.folder,
+		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Hold: holdID, Harness: t.harness, Folder: t.folder,
 		AgentID: t.agentID, Access: t.access, KeyEnv: t.keyEnv, Model: t.model}); err != nil {
 		return nil, storeFailed
 	}
 	// session.opened is stored, so on any failure below the hold must close,
 	// or the session would read open until the next restart.
 	closeHold := func() {
-		_, _, _ = e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.SessionClosed,
-			Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Hold: holdID, Error: "the agent could not be started"})
+		if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.SessionClosed,
+			Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Hold: holdID, Error: "the agent could not be started"}); err != nil {
+			e.cfg.Logf("run.unclosed session=%s turn=%s hold=%s reason=store", t.session, t.id, holdID)
+		}
 	}
 	// The turn's own turn.started, with the person's words as sent, before the
 	// child starts: the turn is listed from the moment it is started, and the
 	// turn.started the gateway reads from the child's first model call is the
 	// same (session, turn), so the store keeps this one only.
 	if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.TurnStarted,
-		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Text: t.prompt, Agent: t.agent, Folder: t.folder,
+		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Text: t.prompt, Harness: t.harness, Folder: t.folder,
 		ReplayFrom: t.replayFrom, Continuity: t.continuity, RecoveredFrom: t.recoveredFrom,
 		RecoveredReason: t.recoveredWhy, IdempotencyKey: t.key, AgentID: t.agentID, Access: t.access, KeyEnv: t.keyEnv,
 		Context: t.context, Model: t.model, Origin: t.origin}); err != nil {
@@ -708,7 +714,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	if t.continuity != "" {
 		kind = "message"
 	}
-	e.cfg.Logf("%s.start session=%s agent=%s turn=%s hold=%s pid=%d", kind, t.session, t.agent, t.id, holdID, cmd.Process.Pid)
+	e.cfg.Logf("%s.start session=%s agent=%s turn=%s hold=%s pid=%d", kind, t.session, t.harness, t.id, holdID, cmd.Process.Pid)
 	res := &Turn{Session: t.session, ID: t.id, BaseURL: baseURL, done: make(chan struct{})}
 	go func() {
 		err := cmd.Wait()
@@ -739,11 +745,14 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		copied(OutputGrace)
 		e.keepOutput(t, all[:len(all)-1], code, ended, out)
 		unsettled := e.cfg.Settle != nil && !e.cfg.Settle(t.session, t.id)
-		e.cfg.Logf("%s.exit session=%s agent=%s turn=%s hold=%s exit=%d stopped=%t duration=%s", kind, t.session, t.agent, t.id, holdID,
+		e.cfg.Logf("%s.exit session=%s agent=%s turn=%s hold=%s exit=%d stopped=%t duration=%s", kind, t.session, t.harness, t.id, holdID,
 			code, stopped, ended.Sub(begun).Round(time.Millisecond))
-		_, _, _ = e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.SessionClosed,
+		if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.SessionClosed,
 			Time: ended.UTC(), Session: t.session, Turn: t.id, Hold: holdID, ExitCode: &code, ResumeID: ids.ID(),
-			Unsettled: unsettled, Stopped: stopped})
+			Unsettled: unsettled, Stopped: stopped}); err != nil {
+			// The session reads open until the next start.
+			e.cfg.Logf("run.unclosed session=%s turn=%s hold=%s reason=store", t.session, t.id, holdID)
+		}
 		e.runs.release(cmd, t.session)
 		res.end = Ended{ExitCode: code, Stopped: stopped, Unsettled: unsettled}
 		close(res.done)
@@ -1135,7 +1144,7 @@ func (e *Engine) keepOutput(t turn, args []string, code int, ended time.Time, ou
 	}
 	b, cut := out.Bytes()
 	var buf bytes.Buffer
-	fmt.Fprintf(&buf, "=== %s agent=%s exit=%d args=[%s <prompt>]\n", ended.UTC().Format(time.RFC3339), t.agent, code,
+	fmt.Fprintf(&buf, "=== %s agent=%s exit=%d args=[%s <prompt>]\n", ended.UTC().Format(time.RFC3339), t.harness, code,
 		strings.Join(quoted, " "))
 	if cut {
 		fmt.Fprintf(&buf, "(only the last %d bytes of this turn's output are kept)\n", RunOutputMax)
@@ -1159,10 +1168,10 @@ var resumeIDShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,63}$`)
 // decoded whole as JSON, so text inside a reply cannot pose as the id. It
 // holds at most one line of MaxStdoutLine bytes, and nothing else.
 type idScanner struct {
-	agent string
-	line  []byte
-	over  bool // the current line passed MaxStdoutLine
-	id    string
+	harness string
+	line    []byte
+	over    bool // the current line passed MaxStdoutLine
+	id      string
 }
 
 func (s *idScanner) Write(p []byte) (int, error) {
@@ -1198,9 +1207,9 @@ func (s *idScanner) endLine() {
 		}
 		if json.Unmarshal(s.line, &v) == nil {
 			switch {
-			case s.agent == "claude" && v.Type == "result" && resumeIDShape.MatchString(v.SessionID):
+			case s.harness == "claude" && v.Type == "result" && resumeIDShape.MatchString(v.SessionID):
 				s.id = v.SessionID
-			case s.agent == "codex" && v.Type == "thread.started" && s.id == "" && resumeIDShape.MatchString(v.ThreadID):
+			case s.harness == "codex" && v.Type == "thread.started" && s.id == "" && resumeIDShape.MatchString(v.ThreadID):
 				s.id = v.ThreadID
 			}
 		}
@@ -1268,7 +1277,7 @@ func (s turnSink) Emit(ev event.Event) {
 	if ev.Kind == event.TurnStarted && ev.Session != "" {
 		// A failed read leaves them empty: the sink cannot return an error,
 		// and the turn itself must still be stored.
-		ev.Agent, ev.Folder, _ = s.st.RunOf(ev.Session)
+		ev.Harness, ev.Folder, _ = s.st.RunOf(ev.Session)
 	}
 	s.next.Emit(ev)
 }

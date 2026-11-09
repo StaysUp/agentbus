@@ -189,9 +189,9 @@ func waitFor(t *testing.T, what string, ok func() bool) {
 	t.Fatalf("timed out waiting for %s", what)
 }
 
-func result(t *testing.T, j queue.Job) Result {
+func result(t *testing.T, j queue.Job) queue.Result {
 	t.Helper()
-	var r Result
+	var r queue.Result
 	if err := json.Unmarshal(j.Result, &r); err != nil {
 		t.Fatalf("result %s: %v", j.Result, err)
 	}
@@ -206,7 +206,7 @@ func TestJobsRunAsTurns(t *testing.T) {
 	w := newWorld(t, 2)
 	var ids []string
 	for range 3 {
-		ids = append(ids, w.create(t, queue.Spec{Agent: "claude", Prompt: "hold", Model: "haiku"}).ID)
+		ids = append(ids, w.create(t, queue.Spec{Harness: "claude", Prompt: "hold", Model: "haiku"}).ID)
 	}
 	waitFor(t, "two turns", func() bool { return len(w.runs()) == 2 })
 	time.Sleep(200 * time.Millisecond)
@@ -247,7 +247,7 @@ func TestJobsRunAsTurns(t *testing.T) {
 // A cancel while running stops the turn, and the job ends cancelled.
 func TestCancelStopsTheTurn(t *testing.T) {
 	w := newWorld(t, 1)
-	j := w.create(t, queue.Spec{Agent: "claude", Prompt: "hold"})
+	j := w.create(t, queue.Spec{Harness: "claude", Prompt: "hold"})
 	waitFor(t, "a turn", func() bool { return len(w.runs()) == 1 })
 	if _, err := w.q.Cancel(queue.DefaultTeam, j.ID); err != nil {
 		t.Fatal(err)
@@ -275,7 +275,7 @@ func TestRefusedTurnIsSetupFailure(t *testing.T) {
 // A turn whose agent exits with a failure fails the job with reason agent.
 func TestAgentFailureFailsTheJob(t *testing.T) {
 	w := newWorld(t, 1)
-	j := w.create(t, queue.Spec{Agent: "claude", Prompt: "exit 3"})
+	j := w.create(t, queue.Spec{Harness: "claude", Prompt: "exit 3"})
 	waitFor(t, "failed", func() bool { return w.job(t, j.ID).Ended != nil })
 	got := w.job(t, j.ID)
 	if res := result(t, got); got.State != queue.Failed || got.Reason != queue.ReasonAgent || res.ExitCode == nil || *res.ExitCode != 3 {
@@ -288,7 +288,7 @@ func TestAgentFailureFailsTheJob(t *testing.T) {
 // job fails with reason runner_stopped.
 func TestShutdownStopsTurns(t *testing.T) {
 	w := newWorld(t, 1)
-	j := w.create(t, queue.Spec{Agent: "claude", Prompt: "hold"})
+	j := w.create(t, queue.Spec{Harness: "claude", Prompt: "hold"})
 	waitFor(t, "a turn", func() bool { return len(w.runs()) == 1 })
 	w.cancel()
 	<-w.done
@@ -313,7 +313,7 @@ func TestWorktreeSession(t *testing.T) {
 	mustGit(t, repo, "commit", "-q", "-m", "one")
 
 	w := newWorld(t, 2)
-	first := w.create(t, queue.Spec{Agent: "claude", Repo: repo, Base: "main", Prompt: "write app.txt v2\nwrite test.log ran\nhold"})
+	first := w.create(t, queue.Spec{Harness: "claude", Repo: repo, Base: "main", Prompt: "write app.txt v2\nwrite test.log ran\nhold"})
 	waitFor(t, "a turn", func() bool { return len(w.runs()) == 1 })
 	// The next job of the session is queued now, and waits for the first.
 	next := w.create(t, queue.Spec{Session: first.Session, Prompt: "write second.txt two"})
@@ -378,7 +378,7 @@ func TestBadBaseIsSetup(t *testing.T) {
 	repo := t.TempDir()
 	mustGit(t, repo, "init", "-q", "-b", "main")
 	w := newWorld(t, 1)
-	j := w.create(t, queue.Spec{Agent: "claude", Repo: repo, Base: "main", Prompt: "x"})
+	j := w.create(t, queue.Spec{Harness: "claude", Repo: repo, Base: "main", Prompt: "x"})
 	waitFor(t, "failed", func() bool { return w.job(t, j.ID).Ended != nil })
 	if got := w.job(t, j.ID); got.Reason != queue.ReasonSetup || !strings.Contains(string(got.Result), "worktree could not be made") {
 		t.Fatalf("%+v %s", got, got.Result)
@@ -399,7 +399,7 @@ func TestReviewRunsInTheAuthorsWorktree(t *testing.T) {
 	mustGit(t, repo, "commit", "-q", "-m", "one")
 	w := newWorld(t, 2)
 	w.release()
-	author := w.create(t, queue.Spec{Agent: "claude", Repo: repo, Base: "main", Prompt: "write app.txt v2"})
+	author := w.create(t, queue.Spec{Harness: "claude", Repo: repo, Base: "main", Prompt: "write app.txt v2"})
 	waitFor(t, "finished", func() bool { return w.job(t, author.ID).Ended != nil })
 
 	// The reviewer's reply, as the gateway would store it: written into the
@@ -449,7 +449,7 @@ func TestReviewRunsInTheAuthorsWorktree(t *testing.T) {
 // failed the job with runner_lost.
 func TestStaleAttemptStopsTheTurn(t *testing.T) {
 	w := newWorld(t, 1)
-	j := w.create(t, queue.Spec{Agent: "claude", Prompt: "hold"})
+	j := w.create(t, queue.Spec{Harness: "claude", Prompt: "hold"})
 	waitFor(t, "a turn", func() bool { return len(w.runs()) == 1 })
 	turn := w.job(t, j.ID).Attempts[0].ID
 	w.skew.Store(int64(time.Minute)) // the queue's clock passes the lease

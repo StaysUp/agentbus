@@ -27,7 +27,7 @@ func turnCost(session, turn string, cost float64, complete bool) event.Event {
 
 func runOpened(session, turn, holdID string) event.Event {
 	e := inTurn(event.SessionOpened, session, turn)
-	e.Hold, e.Agent, e.Folder = holdID, "claude", "/f"
+	e.Hold, e.Harness, e.Folder = holdID, "claude", "/f"
 	return e
 }
 
@@ -39,7 +39,7 @@ func runClosed(session, turn, holdID string, code *int) event.Event {
 
 func started(session, turn, text string) event.Event {
 	e := inTurn(event.TurnStarted, session, turn)
-	e.Text, e.Agent, e.Folder = text, "claude", "/f"
+	e.Text, e.Harness, e.Folder = text, "claude", "/f"
 	return e
 }
 
@@ -100,7 +100,7 @@ func TestTurnsStateCostAndOrder(t *testing.T) {
 	}
 	m := byID(l)
 	a := m["t_a"]
-	if a.State != TurnFinished || a.Session != "s1" || a.Prompt != "first" || a.Agent != "claude" || a.Folder != "/f" ||
+	if a.State != TurnFinished || a.Session != "s1" || a.Prompt != "first" || a.Harness != "claude" || a.Folder != "/f" ||
 		a.CostUSD != 0.75 || !a.CostComplete || a.Usage == nil || a.Usage.InputTokens != 20 || a.Outcome != "finished" ||
 		a.Ended == nil || a.ExitCode == nil || *a.ExitCode != 0 {
 		t.Errorf("finished run %+v", a)
@@ -111,7 +111,7 @@ func TestTurnsStateCostAndOrder(t *testing.T) {
 	if c := m["t_c"]; c.State != TurnRunning || c.Ended != nil || !c.CostComplete || c.Usage != nil {
 		t.Errorf("running run %+v", c)
 	}
-	if d := m["t_d"]; d.State != TurnFinished || d.Ended == nil || d.Agent != "" {
+	if d := m["t_d"]; d.State != TurnFinished || d.Ended == nil || d.Harness != "" {
 		t.Errorf("hand-pointed turn %+v", d)
 	}
 	if e := m["t_e"]; e.State != TurnFailed || e.ExitCode != nil || e.Ended == nil {

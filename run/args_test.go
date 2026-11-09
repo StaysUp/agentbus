@@ -29,7 +29,7 @@ func TestIDScanner(t *testing.T) {
 		{"an id not shaped like one", "claude", []string{`{"type":"result","session_id":"-x"}` + "\n"}, ""},
 		{"an id with a slash", "claude", []string{`{"type":"result","session_id":"a/b"}` + "\n"}, ""},
 	} {
-		s := &idScanner{agent: tc.agent}
+		s := &idScanner{harness: tc.agent}
 		for _, w := range tc.writes {
 			if n, err := s.Write([]byte(w)); n != len(w) || err != nil {
 				t.Fatalf("%s: Write %d %v", tc.name, n, err)

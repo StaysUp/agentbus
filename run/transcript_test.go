@@ -26,7 +26,7 @@ func transcriptEngine(t *testing.T, names map[string]string) (*Engine, *store.St
 func turnWith(t *testing.T, st *store.Store, n int, agentID, agent, model, prompt, reply string) {
 	t.Helper()
 	id := "t" + string(rune('0'+n))
-	evs := []event.Event{{ID: id + "a", Kind: event.TurnStarted, Session: "s", Turn: id, Text: prompt, Agent: agent, AgentID: agentID}}
+	evs := []event.Event{{ID: id + "a", Kind: event.TurnStarted, Session: "s", Turn: id, Text: prompt, Harness: agent, AgentID: agentID}}
 	if model != "" {
 		evs = append(evs, event.Event{ID: id + "b", Kind: event.ModelRequested, Session: "s", Turn: id, Exchange: "x-" + id, Model: model},
 			event.Event{ID: id + "c", Kind: event.ModelResponded, Session: "s", Turn: id, Exchange: "x-" + id, Status: 200, Text: reply})

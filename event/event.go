@@ -186,11 +186,13 @@ type Event struct {
 	// report can list, so every session counts as affected. Sessions is empty.
 	AllSessions bool `json:"all_sessions,omitempty" doc:"On events.dropped: too many sessions to list, so every session counts as affected."`
 
-	// Agent and Folder, on turn.started and session.opened: the agent a run
-	// started and the folder it started in. On turn.started they are empty for
-	// a session no run started, such as one pointed at the gateway by hand.
-	Agent  string `json:"agent,omitempty" doc:"On turn.started and session.opened: the run's agent, such as claude. Empty on a turn of a session no run started."`
-	Folder string `json:"folder,omitempty" doc:"On turn.started and session.opened: the folder the run's agent started in. Empty on a turn of a session no run started."`
+	// Harness and Folder, on turn.started and session.opened: the harness a
+	// run started, such as claude, and the folder it started in. On
+	// turn.started they are empty for a session no run started, such as one
+	// pointed at the gateway by hand. The JSON name stays agent, for the
+	// records already kept.
+	Harness string `json:"agent,omitempty" doc:"On turn.started and session.opened: the run's agent, such as claude. Empty on a turn of a session no run started."`
+	Folder  string `json:"folder,omitempty" doc:"On turn.started and session.opened: the folder the run's agent started in. Empty on a turn of a session no run started."`
 	// AgentID, Access and KeyEnv, on a run's turn.started and session.opened:
 	// the saved agent the run started, how it reaches its model, and for an
 	// OpenRouter agent the name of the variable that holds its key. Never

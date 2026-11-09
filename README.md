@@ -239,7 +239,8 @@ agentbus runner -server http://central:8787 -enroll-token-file ./enroll_token
 
 The runner's data folder is its own (`AGENTBUS_HOME`, as for `agentbus up`): a runner on the same
 machine as its server needs another one. Its own service listens on a free loopback port, for its
-agents only.
+agents only. `-capacity` sets how many jobs it runs at once, 1 to 64, and defaults to `4`, as
+`-max-runs` does for `agentbus up`.
 
 Where agents send model calls is the one setting per mode, `-gateway` on `agentbus runner`:
 

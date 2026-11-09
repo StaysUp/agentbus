@@ -23,7 +23,7 @@ type Snapshot struct {
 // Session is one session in a snapshot.
 type Session struct {
 	ID      string    `json:"id"`
-	Agent   string    `json:"agent" doc:"From the session's latest turn.started or run that names one. Empty for a session no run started."`
+	Harness string    `json:"agent" doc:"From the session's latest turn.started or run that names one. Empty for a session no run started."`
 	Client  string    `json:"client" doc:"The harness, from its latest event that named one."`
 	Folder  string    `json:"folder" doc:"From the session's latest turn.started or run that names one. Empty for a session no run started."`
 	Started time.Time `json:"started"`
@@ -131,7 +131,7 @@ func (s *Store) Snapshot() (Snapshot, error) {
 			return snap, fmt.Errorf("store: snapshot: %w", err)
 		}
 		if x := byID[id]; x != nil {
-			x.Agent, x.Folder = agent.String, folder.String
+			x.Harness, x.Folder = agent.String, folder.String
 		}
 	}
 	if err := rows.Err(); err != nil {

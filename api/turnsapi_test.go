@@ -55,13 +55,13 @@ func TestGetTurn(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	code := 0
 	appendAll(t, e.store,
-		event.Event{ID: "e1", Kind: event.SessionOpened, Time: now, Session: "s1", Turn: "t_a", Hold: "h1", Agent: "claude", Folder: "/x"},
-		event.Event{ID: "e2", Kind: event.TurnStarted, Time: now, Session: "s1", Turn: "t_a", Text: "hi", Agent: "claude", Folder: "/x", IdempotencyKey: "job-1"},
+		event.Event{ID: "e1", Kind: event.SessionOpened, Time: now, Session: "s1", Turn: "t_a", Hold: "h1", Harness: "claude", Folder: "/x"},
+		event.Event{ID: "e2", Kind: event.TurnStarted, Time: now, Session: "s1", Turn: "t_a", Text: "hi", Harness: "claude", Folder: "/x", IdempotencyKey: "job-1"},
 		event.Event{ID: "e3", Kind: event.SessionClosed, Time: now.Add(time.Second), Session: "s1", Turn: "t_a", Hold: "h1", ExitCode: &code, Unsettled: true},
-		event.Event{ID: "e4", Kind: event.SessionOpened, Time: now, Session: "s2", Turn: "t_b", Hold: "h2", Agent: "claude", Folder: "/x"},
-		event.Event{ID: "e5", Kind: event.TurnStarted, Time: now, Session: "s2", Turn: "t_b", Text: "go", Agent: "claude", Folder: "/x"},
-		event.Event{ID: "e6", Kind: event.SessionOpened, Time: now, Session: "s3", Turn: "t_c", Hold: "h3", Agent: "codex", Folder: "/x"},
-		event.Event{ID: "e7", Kind: event.TurnStarted, Time: now, Session: "s3", Turn: "t_c", Text: "no", Agent: "codex", Folder: "/x"},
+		event.Event{ID: "e4", Kind: event.SessionOpened, Time: now, Session: "s2", Turn: "t_b", Hold: "h2", Harness: "claude", Folder: "/x"},
+		event.Event{ID: "e5", Kind: event.TurnStarted, Time: now, Session: "s2", Turn: "t_b", Text: "go", Harness: "claude", Folder: "/x"},
+		event.Event{ID: "e6", Kind: event.SessionOpened, Time: now, Session: "s3", Turn: "t_c", Hold: "h3", Harness: "codex", Folder: "/x"},
+		event.Event{ID: "e7", Kind: event.TurnStarted, Time: now, Session: "s3", Turn: "t_c", Text: "no", Harness: "codex", Folder: "/x"},
 		event.Event{ID: "e8", Kind: event.SessionClosed, Time: now, Session: "s3", Turn: "t_c", Hold: "h3", Error: "the agent could not be started"},
 	)
 	get := func(path string) (int, OneTurn) {

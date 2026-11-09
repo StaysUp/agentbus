@@ -126,3 +126,33 @@ func TestOpenRefusesABrokenFile(t *testing.T) {
 		t.Fatal("a bad id was read")
 	}
 }
+
+func TestLookup(t *testing.T) {
+	saved := Agent{ID: "a1", Harness: Claude, Access: Subscription}
+	resolve := func(id string) (Agent, error) {
+		if id == saved.ID {
+			return saved, nil
+		}
+		return Agent{}, ErrNotFound
+	}
+	yes := func() (bool, error) { return true, nil }
+	no := func() (bool, error) { return false, nil }
+	broken := errors.New("store")
+	fails := func() (bool, error) { return false, broken }
+
+	if ag, why, err := Lookup("a1", resolve, fails); ag != saved || why != nil || err != nil {
+		t.Fatalf("saved agent: %+v %v %v", ag, why, err)
+	}
+	if ag, why, err := Lookup("gone", resolve, nil); ag != (Agent{}) || why != ErrNotFound || err != nil {
+		t.Fatalf("no retry: %+v %v %v", ag, why, err)
+	}
+	if ag, why, err := Lookup("gone", resolve, no); ag != (Agent{}) || why != ErrNotFound || err != nil {
+		t.Fatalf("new key: %+v %v %v", ag, why, err)
+	}
+	if ag, why, err := Lookup("gone", resolve, yes); ag != (Agent{ID: "gone", Harness: "gone"}) || why != nil || err != nil {
+		t.Fatalf("retry: %+v %v %v", ag, why, err)
+	}
+	if ag, why, err := Lookup("gone", resolve, fails); ag != (Agent{}) || why != nil || err != broken {
+		t.Fatalf("key check fails: %+v %v %v", ag, why, err)
+	}
+}
