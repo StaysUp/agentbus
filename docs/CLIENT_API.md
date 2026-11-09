@@ -1497,7 +1497,7 @@ because agents often install packages, and some tools treat a linked folder diff
 that resolves links may see files outside the project). Turn it on for sessions that only read
 their dependencies. `overlay` ignores it: its copies are mounts and share every file already.
 
-Each turn starts from a checkpoint and ends with oneEach turn starts from a checkpoint and ends with one, named by the turn's id (the start one adds
+Each turn starts from a checkpoint and ends with one, named by the turn's id (the start one adds
 `.start`, and is the last turn's end when nothing changed in between). A checkpoint records every
 file's size, modification time, mode and hash, and keeps its own copy of each file that changed
 (a clone where the disk has them), so one turn's changes can be applied after later turns changed
