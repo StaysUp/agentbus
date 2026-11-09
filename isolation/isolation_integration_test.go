@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -136,13 +137,18 @@ func TestGitRefusesAFolderNotInTheCommit(t *testing.T) {
 	}
 }
 
-// The setting: copy by default; git in a repo, copy elsewhere; none is no
-// backend.
+// The setting: auto by default, which is copy on macOS and overlay first on
+// Linux; git in a repo, copy elsewhere; none is no backend.
 func TestForTheSetting(t *testing.T) {
 	r, plain := repo(t), t.TempDir()
+	auto := Copy
+	if runtime.GOOS == "linux" {
+		auto = Overlay
+	}
 	for _, c := range []struct {
 		setting, folder, want string
-	}{{"", r, Copy}, {"copy", r, Copy}, {"git", r, Git}, {"git", filepath.Join(r, "sub"), Git}, {"git", plain, Copy}, {"none", r, ""}} {
+	}{{"", r, auto}, {"auto", r, auto}, {"overlay", r, Overlay}, {"copy", r, Copy}, {"git", r, Git},
+		{"git", filepath.Join(r, "sub"), Git}, {"git", plain, Copy}, {"none", r, ""}} {
 		b, ok := For(c.setting, c.folder)
 		got := ""
 		if ok {
@@ -151,5 +157,23 @@ func TestForTheSetting(t *testing.T) {
 		if got != c.want {
 			t.Errorf("For(%q, %s) = %q, want %q", c.setting, c.folder, got, c.want)
 		}
+	}
+}
+
+// A copy of a repo, by any fast backend, reports git's own state: a
+// commit made in the copy is a change of HEAD.
+func TestFastBackendsSeeGit(t *testing.T) {
+	for _, name := range fast(t) {
+		t.Run(name, func(t *testing.T) {
+			r := repo(t)
+			b, s := open(t, name, r)
+			gitRun(t, s.Dir, "commit", "-q", "--allow-empty", "-m", "two")
+			b.Checkpoint(s, "t1")
+			c, err := b.Diff(s, Base, "t1")
+			if err != nil || c.Kind != "git" || c.HeadBefore == "" || c.HeadBefore == c.HeadAfter {
+				t.Fatalf("diff %+v %v", c, err)
+			}
+			Close(s)
+		})
 	}
 }

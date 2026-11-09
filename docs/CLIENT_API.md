@@ -286,9 +286,13 @@ apply = true
   character (`*?[]{}`).
 - `allow` and `forbid`: a command and its first arguments, such as `go test`. No comma,
   parenthesis or star, no two spaces in a row, no leading `-`.
-- `isolation`: where a new session's turns run. `"copy"` (the default) is a copy of its folder,
-  `"git"` a git worktree in a repo and a copy elsewhere, `"none"` the folder itself. See
-  [Isolation](#isolation).
+- `isolation`: where a new session's turns run. `"auto"` (the default) is the fastest copy the
+  machine can make: `"copy"` on macOS, `"overlay"` on Linux where the runner can mount one, else
+  `"copy"`. `"overlay"` is an overlay mount on Linux, `"copy"` a copy of its folder, `"git"` a git
+  worktree in a repo and a copy elsewhere, `"none"` the folder itself. See [Isolation](#isolation).
+- `share_read_only`: folder names at the top of a session's folder, such as `"node_modules"`, that
+  a copy links to one shared read-only copy of instead of copying. One name each: no `/`, not
+  `.git`. Empty by default; a turn cannot write in them. See [Isolation](#isolation).
 - `edit`: where a turn may create and change files without asking. `"session"` (the default) is
   the turn's own session folder: its isolated copy, or the folder itself when the session is not
   isolated. `"none"` is nowhere. A read-only turn never edits, and `forbid` still wins.
@@ -1445,28 +1449,80 @@ turn. The jobs API is the whole way: worktrees, reviews, cancel, and the list.
 
 A new session's turns run in an isolated copy of its folder, so nothing they do reaches the
 person's folder until a change is applied. The `isolation` setting in `permissions.toml` picks how
-the copy is made:
+the copy is made. Every method starts from the folder exactly as it is, uncommitted edits included.
 
-- **`copy`** (the default): a copy of the folder, whatever it is. On macOS (APFS) it is one
-  copy-on-write clone, which takes no space until a file changes; on Linux each file is a reflink
-  where the disk has them (btrfs, xfs) and a plain copy where it does not. A `.git` folder at the
-  top is copied with it, so git works in the copy and a commit there stays there. A `.git` file at
-  the top (a linked worktree's) is left out, since it names the person's own repo.
+**How `auto` (the default) picks a method:**
+
+| Machine | Method | What a copy costs |
+|---|---|---|
+| macOS (APFS) | `copy`: one `clonefile(2)` of the folder | about 20 µs and 0.35 KB per file; bytes are shared |
+| Linux, runner can mount (root or `CAP_SYS_ADMIN`) | `overlay` | one mount; the folder's read-only layers are shared |
+| Linux, runner cannot mount, or the disk cannot hold an overlay | `copy`: a reflink per file (xfs, btrfs), else a plain copy (ext4) | per file; a plain copy also costs every byte |
+| Anything else | `copy` | as above |
+
+When `auto` or `overlay` falls back to `copy`, the session still runs. The runner's log and the
+job's `workspace.ready` event (`fallback`) say why, for example that the runner is not root.
+
+- **`auto`** (the default): the table above.
+- **`overlay`** (Linux): an overlayfs mount. Below it are read-only layers: a copy of the folder
+  (a reflink per file where the disk has them), made once and shared by every session copied from
+  the same folder state. A later session compares the folder with the newest layers by size,
+  modification time and mode, and puts what changed into one more small layer, so the person's
+  live folder is never a layer. Above the layers each session has an empty upper folder that takes
+  its writes. Past 16 layers the next session makes a new base layer, so a mount never stacks
+  many; the mount options are relative and short, and a mount is refused rather than cut at the
+  kernel's 4 KiB limit. Needs root or `CAP_SYS_ADMIN`: in a user namespace the mount would be
+  hidden from the agent's processes. Without it, `copy`, as `auto` does. Layers no session uses
+  are removed when a session closes. Pick an xfs or btrfs disk for the runner's data folder: there
+  the kernel copies a changed big file up by reflink; on ext4 the first write to a 1 GiB file
+  copies all of it.
+- **`copy`**: a copy of the folder, whatever it is. On macOS (APFS) it is one copy-on-write clone,
+  which takes no space until a file changes; on Linux each file is a reflink where the disk has
+  them (btrfs, xfs) and a plain copy where it does not. A `.git` folder at the top is copied with
+  it, so git works in the copy and a commit there stays there. A `.git` file at the top (a linked
+  worktree's) is left out, since it names the person's own repo.
 - **`git`**: in a git repo with a commit, a detached git worktree at HEAD, with the folder's
   uncommitted edits (changed, removed and untracked files) carried in. Ignored files are not, which
   keeps a big build folder out. The turn runs in the same subfolder inside it. A subfolder the
   last commit does not have is refused with 400. Outside git, a copy.
 - **`none`**: the folder itself.
 
-Each turn starts from a checkpoint and ends with one, named by the turn's id (the start one adds
-`.start`, and is the last turn's end when nothing changed in between). A checkpoint records every
-file's hash and keeps its own copy of each file that changed, so one turn's changes can be applied
-after later turns changed the same file again. A job's `changes` name the two checkpoints in `from`
-and `to`. The first checkpoint is `base`: the folder as the session began.
+**Shared dependency folders (`share_read_only`, off by default).** On macOS a clone costs per
+file, so a 50,000-file `node_modules` is most of a copy's cost. `share_read_only = ["node_modules"]`
+makes `copy` link each named top-level folder to one read-only copy of it, shared by every session
+made from the same state of that folder (a changed folder gets a new one). The copy then costs
+only the rest of the project. **A turn cannot write there**: `npm install`, `pip install` into a
+`.venv`, or a tool that patches a package fails with "permission denied". It is off by default
+because agents often install packages, and some tools treat a linked folder differently (a bundler
+that resolves links may see files outside the project). Turn it on for sessions that only read
+their dependencies. `overlay` ignores it: its copies are mounts and share every file already.
 
-Applying a turn (`POST /api/v0/turns/<id>/apply`) puts its changed files into the person's folder.
-It is refused, with the reason and each file, when a file there is neither as it was at the turn's
-start nor already as the turn left it, and then nothing is written. Applying from the oldest
+Each turn starts from a checkpoint and ends with oneEach turn starts from a checkpoint and ends with one, named by the turn's id (the start one adds
+`.start`, and is the last turn's end when nothing changed in between). A checkpoint records every
+file's size, modification time, mode and hash, and keeps its own copy of each file that changed
+(a clone where the disk has them), so one turn's changes can be applied after later turns changed
+the same file again. A job's `changes` name the two checkpoints in `from` and `to`. The first
+checkpoint is `base`: the folder as the session began.
+
+What is read, and when. `base` reads no file: it records each file's size, modification time and
+mode, and hashes only links and files written in the two seconds before the copy was made. A later
+checkpoint hashes a file only when its size, time or mode changed, once, from its saved copy; an
+overlay checkpoint looks at the session's upper folder only. A changed file that `base` did not
+hash has its `base` content hashed then, from the person's folder (still with the size and time
+`base` saw) or from its overlay layer, when it is small (its diff shows it) or kept its size (it
+may be only touched). So a file only touched is no change. A big file whose size changed is not
+read again, and its `sha256` as `base` had it is empty in a diff.
+
+Applying a turn (`POST /api/v0/turns/<id>/apply`) puts its changed files into the person's folder,
+each one cloned from the checkpoint's copy where the disk can (APFS `clonefileat`, Linux
+`FICLONE`), else copied. It is refused, with the reason and each file, when a file there is
+neither as it was at the turn's start nor already as the turn left it, and then nothing is
+written. How a file there is checked: when the turn's start holds the file unhashed (as `base`
+saw it), a file with the same size, modification time and mode is as it was, and is not read;
+any other is hashed. A file that differs from the start's hash, or whose size or time changed
+while the start has no hash, is a conflict, unless it already is as the turn left it. One edit
+this cannot see: a file rewritten with the same size and its old modification time put back by
+hand, as git's own index cannot. Applying from the oldest
 checkpoint kept also removes what the checkpoints up to it kept. Closing the workspace removes the
 copy and all its checkpoints. `GET /api/v0/turns/<id>/diff` shows a turn's changes, each small
 text file with its own unified diff, read from the turn's checkpoints when it ended.
@@ -1477,7 +1533,8 @@ a file refused it. A session with an apply that has not ended cannot be closed.
 
 **A known limit: a disk without copy-on-write.** On ext4, and on a folder shared into a container
 from another disk, `copy` copies every byte, so a big folder (a `node_modules`, a build output)
-is slow to start and takes its full size again. Use `git` there for a repo, or `none`.
+is slow to start and takes its full size again. `overlay` copies it once and shares it; where the
+runner cannot mount, use `git` for a repo, or `none`.
 
 ### Reviews
 

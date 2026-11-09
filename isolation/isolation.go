@@ -7,14 +7,19 @@
 // checkpoints (Close). One backend owns the whole lifecycle of a Space, so
 // nothing above this package makes, finds or removes copies by itself.
 //
-// Two backends today. copy, the default, copies the folder: a copy-on-write
-// clone where the disk has one (APFS on macOS, a reflink on Linux), a plain
-// copy otherwise. git makes a git worktree of the folder's repo at its HEAD
-// and carries the folder's uncommitted edits into it. Both start from the
-// folder exactly as it is now, and both keep checkpoints the same way: a
-// manifest of every file's hash, and a copy of each file a checkpoint saw
+// Three backends today. copy copies the folder: a copy-on-write clone where
+// the disk has one (APFS on macOS, a reflink on Linux), a plain copy
+// otherwise. overlay (Linux) mounts an overlayfs over read-only layers of the
+// folder that every copy of it shares (overlay_linux.go). git makes a git
+// worktree of the folder's repo at its HEAD and carries the folder's
+// uncommitted edits into it. All start from the folder exactly as it is now,
+// and all keep checkpoints the same way: a manifest of every file's size,
+// modification time, mode and hash, and a copy of each file a checkpoint saw
 // change, so a checkpoint can be applied after later turns changed the file
-// again. A VM backend is one more implementation of Backend.
+// again. Hashes are taken only where a file's size or time says it changed
+// (checkpoint). For picks a backend for the isolation setting; auto is the
+// fastest one this machine has. A VM backend is one more implementation of
+// Backend.
 //
 // On disk, under the runner's workdir: the copy at <workdir>/<id>, and the
 // space's own record at <workdir>/.isolation/<id>: space.json, the
@@ -28,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -35,10 +41,13 @@ import (
 	"github.com/staysup/agentbus/workspace"
 )
 
-// Backend names, as the isolation setting names them.
+// Backend names, as the isolation setting names them. Auto is not a backend
+// but a choice of one (For).
 const (
-	Copy = "copy"
-	Git  = "git"
+	Copy    = "copy"
+	Git     = "git"
+	Overlay = "overlay"
+	Auto    = "auto"
 )
 
 // Base is the name of a space's first checkpoint, taken when it is opened:
@@ -82,6 +91,10 @@ type Request struct {
 	// for git only and instead of Folder: a worktree of Repo at Base.
 	Folder     string
 	Repo, Base string
+	// Share, for copy: folders at the top of Folder, such as node_modules,
+	// that the copy links to one read-only copy shared by every session
+	// made from the same folder, instead of copying them (shared.go).
+	Share []string
 }
 
 // Space is one session's isolated copy.
@@ -99,10 +112,21 @@ type Space struct {
 	// Repo and Base, for git: the repo and the commit the worktree began at.
 	Repo string `json:"repo,omitempty"`
 	Base string `json:"base,omitempty"`
-	// Method, for copy: clone (copy-on-write), or copy (a plain copy).
+	// Method, for copy: clone (copy-on-write), reflink, or copy (a plain
+	// copy); overlay for overlay.
 	Method string `json:"method,omitempty"`
+	// Layers, for overlay: the read-only layers under the copy, the lowest
+	// first (overlay_linux.go).
+	Layers []int `json:"layers,omitempty"`
+	// Shared, for copy: the read-only shared folders the copy links to.
+	Shared []string `json:"shared,omitempty"`
+	// Fallback: why the backend asked for could not be used, and which one
+	// was, as For's choice fell back. Empty when it was used.
+	Fallback string `json:"fallback,omitempty"`
 
 	Workdir string `json:"-"`
+	// start: when Open began making the copy (baseHasher).
+	start time.Time
 }
 
 // Checkpoint is one recorded state of a space.
@@ -158,7 +182,7 @@ var (
 	ErrOutside      = errors.New("isolation: the folder is not under this runner's workdir")
 )
 
-var registry = map[string]Backend{Copy: copyBackend{}, Git: gitBackend{}}
+var registry = map[string]Backend{Copy: copyBackend{}, Git: gitBackend{}, Overlay: overlayBackend{}}
 
 // Get is the backend of that name.
 func Get(name string) (Backend, bool) {
@@ -177,13 +201,28 @@ func Names() []string {
 }
 
 // For is the backend a new session in folder gets under the isolation
-// setting: copy (also for ""), git, or none. git in a folder that is not in
-// a git repo with a commit is copy: such a folder needs no special case.
-// none, or a setting it does not know, is false: the session works in the
-// folder itself.
+// setting:
+//
+//	auto (also "")  macOS: copy, one clonefile(2) of the folder. Linux:
+//	                overlay where this runner can mount one, else copy.
+//	overlay         overlay, else copy, as auto on Linux.
+//	copy            copy: a clone (APFS), reflinks (xfs, btrfs) or a plain copy.
+//	git             a git worktree; copy in a folder outside a git repo with
+//	                a commit, which needs no special case.
+//
+// A fallback is not an error: the space's Fallback says why. none, or a
+// setting it does not know, is false: the session works in the folder
+// itself.
 func For(setting, folder string) (Backend, bool) {
 	switch setting {
-	case "", Copy:
+	case "", Auto:
+		if runtime.GOOS == "linux" {
+			return fallback{registry[Overlay], registry[Copy]}, true
+		}
+		return registry[Copy], true
+	case Overlay:
+		return fallback{registry[Overlay], registry[Copy]}, true
+	case Copy:
 		return registry[Copy], true
 	case Git:
 		if _, _, _, ok := workspace.RepoOf(folder); ok {
@@ -193,6 +232,55 @@ func For(setting, folder string) (Backend, bool) {
 	}
 	return nil, false
 }
+
+// Unavailable: a backend cannot make copies on this machine, and why, in
+// words for the person.
+type Unavailable struct{ Backend, Why string }
+
+func (u *Unavailable) Error() string { return u.Backend + " cannot be used here: " + u.Why }
+
+// fallback opens a space with first, or with then when first is
+// Unavailable. The space's own backend does everything after Open.
+type fallback struct{ first, then Backend }
+
+func (f fallback) Name() string { return f.first.Name() }
+
+func (f fallback) Open(r Request) (*Space, error) {
+	s, err := f.first.Open(r)
+	var u *Unavailable
+	if !errors.As(err, &u) {
+		return s, err
+	}
+	if s, err = f.then.Open(r); err != nil {
+		return nil, err
+	}
+	if s.Fallback == "" {
+		s.Fallback = u.Error() + "; " + f.then.Name() + " was used"
+		if err := s.save(); err != nil {
+			return nil, err
+		}
+	}
+	return s, nil
+}
+
+func (f fallback) own(s *Space) Backend {
+	if b, ok := Get(s.Backend); ok {
+		return b
+	}
+	return f.then
+}
+
+func (f fallback) Checkpoint(s *Space, name string) (Checkpoint, error) {
+	return f.own(s).Checkpoint(s, name)
+}
+func (f fallback) Checkpoints(s *Space) ([]Checkpoint, error) { return f.own(s).Checkpoints(s) }
+func (f fallback) Diff(s *Space, from, to string) (workspace.Changes, error) {
+	return f.own(s).Diff(s, from, to)
+}
+func (f fallback) Apply(s *Space, from, to string) (Applied, error) {
+	return f.own(s).Apply(s, from, to)
+}
+func (f fallback) Close(s *Space) error { return f.own(s).Close(s) }
 
 // stateFolder holds each space's record, under the workdir. Its name starts
 // with a dot, so it can never be a job id.

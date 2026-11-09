@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/staysup/agentbus/workspace"
 )
@@ -27,17 +28,8 @@ type copyBackend struct{}
 func (copyBackend) Name() string { return Copy }
 
 func (copyBackend) Open(r Request) (*Space, error) {
-	if err := checkOpen(r); err != nil {
+	if err := checkFolder(r); err != nil {
 		return nil, err
-	}
-	if r.Folder == "" || !filepath.IsAbs(r.Folder) {
-		return nil, &Refusal{"the folder must be an absolute path"}
-	}
-	if info, err := os.Stat(r.Folder); err != nil || !info.IsDir() {
-		return nil, &Refusal{"the folder is not an existing directory"}
-	}
-	if holds(r.Folder, r.Workdir) {
-		return nil, &Refusal{refusedHoldsWorkdir}
 	}
 	if s, err := Load(r.Workdir, filepath.Join(r.Workdir, r.ID)); err == nil {
 		return s, nil // a retry of the job that made it
@@ -54,7 +46,15 @@ func (copyBackend) Open(r Request) (*Space, error) {
 	if err := os.MkdirAll(r.Workdir, 0o700); err != nil {
 		return nil, err
 	}
-	method, err := cloneTree(s.Source, s.Root)
+	s.start = time.Now()
+	share := shareable(s.Source, r.Share)
+	var method string
+	var err error
+	if len(share) > 0 {
+		method, err = cloneTreeExcept(s.Source, s.Root, share)
+	} else {
+		method, err = cloneTree(s.Source, s.Root)
+	}
 	if err != nil {
 		removeAll(s.Root)
 		return nil, err
@@ -66,21 +66,52 @@ func (copyBackend) Open(r Request) (*Space, error) {
 			return nil, err
 		}
 	}
-	if err := s.save(); err != nil {
+	sharedMu.Lock()
+	if len(share) > 0 {
+		s.Shared, err = linkShared(r.Workdir, s.Source, s.Root, share)
+	}
+	if err == nil {
+		err = s.save()
+	}
+	if err != nil {
 		removeAll(s.Root)
 		removeState(s)
+		gcShared(r.Workdir)
+	}
+	sharedMu.Unlock()
+	if err != nil {
 		return nil, err
 	}
-	if _, err := checkpoint(s, Base); err != nil {
+	if _, err := checkpoint(s, Base, copyBackend{}); err != nil {
 		copyBackend{}.Close(s)
 		return nil, err
 	}
 	return s, nil
 }
 
-func (copyBackend) Checkpoint(s *Space, name string) (Checkpoint, error) { return checkpoint(s, name) }
-func (copyBackend) Checkpoints(s *Space) ([]Checkpoint, error)           { return checkpoints(s) }
-func (copyBackend) Apply(s *Space, from, to string) (Applied, error)     { return apply(s, from, to) }
+func (b copyBackend) Checkpoint(s *Space, name string) (Checkpoint, error) {
+	return checkpoint(s, name, b)
+}
+
+// checkFolder checks what a copy of r.Folder needs.
+func checkFolder(r Request) error {
+	if err := checkOpen(r); err != nil {
+		return err
+	}
+	if r.Folder == "" || !filepath.IsAbs(r.Folder) {
+		return &Refusal{"the folder must be an absolute path"}
+	}
+	if info, err := os.Stat(r.Folder); err != nil || !info.IsDir() {
+		return &Refusal{"the folder is not an existing directory"}
+	}
+	if holds(r.Folder, r.Workdir) {
+		return &Refusal{refusedHoldsWorkdir}
+	}
+	return nil
+}
+
+func (copyBackend) Checkpoints(s *Space) ([]Checkpoint, error)       { return checkpoints(s) }
+func (copyBackend) Apply(s *Space, from, to string) (Applied, error) { return apply(s, from, to) }
 
 func (copyBackend) Diff(s *Space, from, to string) (workspace.Changes, error) {
 	return diff(s, from, to)
@@ -93,7 +124,36 @@ func (copyBackend) Close(s *Space) error {
 	if err := removeAll(s.Root); err != nil {
 		return err
 	}
-	return removeState(s)
+	if err := removeState(s); err != nil {
+		return err
+	}
+	if len(s.Shared) == 0 {
+		return nil
+	}
+	sharedMu.Lock()
+	defer sharedMu.Unlock()
+	return gcShared(s.Workdir)
+}
+
+// take walks the copy. Its Base records each file by size, modification
+// time and mode, and hashes only links and files written just before the
+// copy was made (baseHasher): the clone kept every file's time and mode, so
+// a file unchanged in the person's folder still has them there.
+func (copyBackend) take(s *Space, prev *workspace.Snapshot, save workspace.Hasher) (*workspace.Snapshot, error) {
+	if prev == nil {
+		start := s.start
+		if start.IsZero() {
+			start = time.Now()
+		}
+		return workspace.Walk(s.Dir, nil, baseHasher(start))
+	}
+	return workspace.Walk(s.Dir, prev, save)
+}
+
+// learn reads the Base content of rel from the person's folder, where the
+// file still has the size, modification time and mode the Base saw.
+func (copyBackend) learn(s *Space, rel string, f workspace.File) (string, bool, bool) {
+	return learnFrom(filepath.Join(s.Source, filepath.FromSlash(rel)), f, s.objectDir())
 }
 
 // copyTree copies the folder src to dst, which must not exist: folders,

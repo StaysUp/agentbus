@@ -55,15 +55,32 @@ forbid = []         # e.g. ["git push", "git checkout"]
 edit = "session"
 
 # isolation: where a new session's turns run.
-#   "copy"  a copy of the session's folder, exactly as it is now, uncommitted
-#           edits included. Copy-on-write where the disk has it (APFS, btrfs,
-#           xfs); a plain copy elsewhere, such as ext4, is slow for a big folder.
-#   "git"   in a git repo, a git worktree at HEAD with the folder's uncommitted
-#           edits carried in (ignored files are not); elsewhere, a copy.
-#   "none"  the folder itself: turns change your files directly.
+#   "auto"     the fastest copy this machine can make: on macOS "copy" (one
+#              APFS clone of the folder); on Linux "overlay" where the runner
+#              can mount one, else "copy".
+#   "overlay"  Linux: an overlay mount over a read-only copy of the folder,
+#              shared by every session made from it. Needs root or
+#              CAP_SYS_ADMIN; without it, "copy", and the log says why.
+#   "copy"     a copy of the session's folder, exactly as it is now,
+#              uncommitted edits included. Copy-on-write where the disk has it
+#              (APFS, btrfs, xfs); a plain copy elsewhere, such as ext4, is
+#              slow for a big folder.
+#   "git"      in a git repo, a git worktree at HEAD with the folder's
+#              uncommitted edits carried in (ignored files are not);
+#              elsewhere, a copy.
+#   "none"     the folder itself: turns change your files directly.
 # Your folder is not changed until a change is applied. A session started
 # with isolate false always uses the folder itself.
-isolation = "copy"
+isolation = "auto"
+
+# share_read_only: folders at the top of a session's folder that a "copy"
+# shares instead of copying, e.g. ["node_modules"]. Every session made from
+# the folder as it is links to one read-only copy of each, which makes a copy
+# of a project with a big node_modules much faster on macOS. A turn that
+# writes there (npm install) fails with "permission denied"; leave the list
+# empty for agents that install packages. Not used by "overlay", which copies
+# nothing per session anyway.
+share_read_only = []
 
 # subagents: whether a turn may start the agent's own subagents. false turns
 # them off on the command line: claude is denied its Task, Agent and Workflow
@@ -104,9 +121,11 @@ const (
 
 // Isolation values: where a new session's turns run.
 const (
-	IsolationCopy = "copy"
-	IsolationGit  = "git"
-	IsolationNone = "none"
+	IsolationAuto    = "auto"
+	IsolationOverlay = "overlay"
+	IsolationCopy    = "copy"
+	IsolationGit     = "git"
+	IsolationNone    = "none"
 )
 
 // Scope values of [agent_api]: the sessions a turn token reaches.
@@ -127,14 +146,15 @@ const (
 // Once read from a store every value is filled: a key left out holds its
 // default, and a list is empty, never null.
 type Policy struct {
-	ReadFolders []string `toml:"read_folders" json:"read_folders" doc:"Folders claude may read and search beyond its own folder: absolute, or starting with ~/. Each must exist on the machine that runs the turn."`
-	Allow       []string `toml:"allow" json:"allow" doc:"Commands claude may run without asking: a command and its leading arguments, such as \"go test\"."`
-	Forbid      []string `toml:"forbid" json:"forbid" doc:"Commands claude and codex may never run. The gateway refuses them."`
-	Edit        string   `toml:"edit" json:"edit,omitempty" doc:"Where a turn may edit files without asking: session (its own session's folder) or none. Absent in a PUT: session."`
-	Isolation   string   `toml:"isolation" json:"isolation,omitempty" doc:"Where a new session's turns run: copy (a copy of its folder as it is now), git (a git worktree with the folder's uncommitted edits, in a repo) or none (the folder itself). Absent in a PUT: copy."`
-	Subagents   *bool    `toml:"subagents" json:"subagents,omitempty" doc:"Whether a turn may start the agent's own subagents. Absent in a PUT: true."`
-	Limits      Limits   `toml:"limits" json:"limits" doc:"The limits on work agents ask for."`
-	AgentAPI    AgentAPI `toml:"agent_api" json:"agent_api" doc:"What a turn's own token may call."`
+	ReadFolders   []string `toml:"read_folders" json:"read_folders" doc:"Folders claude may read and search beyond its own folder: absolute, or starting with ~/. Each must exist on the machine that runs the turn."`
+	Allow         []string `toml:"allow" json:"allow" doc:"Commands claude may run without asking: a command and its leading arguments, such as \"go test\"."`
+	Forbid        []string `toml:"forbid" json:"forbid" doc:"Commands claude and codex may never run. The gateway refuses them."`
+	Edit          string   `toml:"edit" json:"edit,omitempty" doc:"Where a turn may edit files without asking: session (its own session's folder) or none. Absent in a PUT: session."`
+	Isolation     string   `toml:"isolation" json:"isolation,omitempty" doc:"Where a new session's turns run: auto (copy on macOS; overlay on Linux where the runner can mount one, else copy), overlay, copy (a copy of its folder as it is now), git (a git worktree with the folder's uncommitted edits, in a repo) or none (the folder itself). Absent in a PUT: auto."`
+	ShareReadOnly []string `toml:"share_read_only" json:"share_read_only" doc:"Folders at the top of a session's folder, such as node_modules, that a copy links to one shared read-only copy of instead of copying. A turn cannot write there. Absent in a PUT: none."`
+	Subagents     *bool    `toml:"subagents" json:"subagents,omitempty" doc:"Whether a turn may start the agent's own subagents. Absent in a PUT: true."`
+	Limits        Limits   `toml:"limits" json:"limits" doc:"The limits on work agents ask for."`
+	AgentAPI      AgentAPI `toml:"agent_api" json:"agent_api" doc:"What a turn's own token may call."`
 
 	// where and fix say, in a turn's refusal, where the policy came from and
 	// what to do: set by the store that read it (Error).
@@ -173,7 +193,7 @@ func DefaultPolicy() Policy {
 
 // fill sets every value left out to its default.
 func (p *Policy) fill() {
-	for _, l := range []*[]string{&p.ReadFolders, &p.Allow, &p.Forbid} {
+	for _, l := range []*[]string{&p.ReadFolders, &p.Allow, &p.Forbid, &p.ShareReadOnly} {
 		if *l == nil {
 			*l = []string{}
 		}
@@ -182,7 +202,7 @@ func (p *Policy) fill() {
 		p.Edit = EditSession
 	}
 	if p.Isolation == "" {
-		p.Isolation = IsolationCopy
+		p.Isolation = IsolationAuto
 	}
 	if p.Subagents == nil {
 		on := true
@@ -219,8 +239,15 @@ func (p *Policy) Check() error {
 	if p.Edit != "" && p.Edit != EditSession && p.Edit != EditNone {
 		return fmt.Errorf("edit must be %q or %q", EditSession, EditNone)
 	}
-	if i := p.Isolation; i != "" && i != IsolationCopy && i != IsolationGit && i != IsolationNone {
-		return fmt.Errorf("isolation must be %q, %q or %q", IsolationCopy, IsolationGit, IsolationNone)
+	switch p.Isolation {
+	case "", IsolationAuto, IsolationOverlay, IsolationCopy, IsolationGit, IsolationNone:
+	default:
+		return fmt.Errorf("isolation must be %q, %q, %q, %q or %q", IsolationAuto, IsolationOverlay, IsolationCopy, IsolationGit, IsolationNone)
+	}
+	for _, f := range p.ShareReadOnly {
+		if f == "" || f == "." || f == ".." || f == ".git" || strings.ContainsAny(f, "/\\") || strings.ContainsFunc(f, isControl) {
+			return fmt.Errorf("share_read_only entry %s must be one folder name at the top of the session's folder, such as \"node_modules\"", strconv.Quote(f))
+		}
 	}
 	for _, l := range []struct {
 		name string
@@ -267,11 +294,11 @@ func ParsePolicy(b []byte) (Policy, error) {
 		}
 		// Not a parse error: a value of the wrong type, such as a string
 		// where a list belongs.
-		return Policy{}, errors.New("a value has the wrong type: read_folders, allow and forbid are lists of strings, such as [\"go test\"]; " +
+		return Policy{}, errors.New("a value has the wrong type: read_folders, allow, forbid and share_read_only are lists of strings, such as [\"go test\"]; " +
 			"edit, isolation and scope are strings; subagents is true or false; the [limits] are numbers; the [agent_api] switches are true or false")
 	}
 	if extra := md.Undecoded(); len(extra) > 0 {
-		return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, subagents, [limits] and [agent_api] (see the README)", strconv.Quote(extra[0].String()))
+		return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, [limits] and [agent_api] (see the README)", strconv.Quote(extra[0].String()))
 	}
 	if err := p.Check(); err != nil {
 		return Policy{}, err
@@ -296,12 +323,12 @@ func DecodePolicy(b []byte) (Policy, error) {
 		var se *json.SyntaxError
 		switch {
 		case errors.As(err, &te) && te.Field != "":
-			return Policy{}, fmt.Errorf("%s has the wrong type: read_folders, allow and forbid are lists of strings; "+
+			return Policy{}, fmt.Errorf("%s has the wrong type: read_folders, allow, forbid and share_read_only are lists of strings; "+
 				"edit, isolation and scope are strings; subagents and the agent_api switches are true or false; the limits are numbers", te.Field)
 		case errors.As(err, &se):
 			return Policy{}, errors.New("the body is not valid JSON")
 		case strings.HasPrefix(err.Error(), "json: unknown field "):
-			return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, subagents, limits and agent_api",
+			return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, limits and agent_api",
 				strings.TrimPrefix(err.Error(), "json: unknown field "))
 		}
 		return Policy{}, errors.New("the body must be one JSON object: the policy")
@@ -326,7 +353,8 @@ var starterLine = regexp.MustCompile(`^([a-z_]+) = (\S+)( +#.*)?$`)
 func FormatPolicy(p Policy) []byte {
 	p.fill()
 	values := map[string]any{
-		"read_folders": p.ReadFolders, "allow": p.Allow, "forbid": p.Forbid, "edit": p.Edit, "isolation": p.Isolation, "subagents": *p.Subagents,
+		"read_folders": p.ReadFolders, "allow": p.Allow, "forbid": p.Forbid, "edit": p.Edit, "isolation": p.Isolation,
+		"share_read_only": p.ShareReadOnly, "subagents": *p.Subagents,
 		"limits.max_depth": *p.Limits.MaxDepth, "limits.max_jobs_per_turn": *p.Limits.MaxJobsPerTurn,
 		"limits.max_jobs_per_tree": *p.Limits.MaxJobsPerTree, "limits.max_cost_usd_per_tree": *p.Limits.MaxCostUSDPerTree,
 		"agent_api.scope": p.AgentAPI.Scope, "agent_api.read": *p.AgentAPI.Read, "agent_api.list_agents": *p.AgentAPI.ListAgents,

@@ -628,7 +628,7 @@ func (r *Runner) prepare(at *attempt) *queue.Result {
 				return &queue.Result{Refused: "the permissions cannot be read, so the turn did not start; fix them and send the turn again"}
 			}
 			if b, ok := isolation.For(p.Isolation, sp.Folder); ok {
-				return r.isolate(at, b, isolation.Request{Folder: sp.Folder})
+				return r.isolate(at, b, isolation.Request{Folder: sp.Folder, Share: p.ShareReadOnly})
 			}
 		}
 		at.folder = sp.Folder
@@ -683,6 +683,10 @@ func (r *Runner) isolate(at *attempt, b isolation.Backend, req isolation.Request
 		}
 		return &queue.Result{Refused: "the copy of the folder could not be made"}
 	}
+	if s.Fallback != "" {
+		// Not an error: the session runs, in a copy made another way.
+		r.cfg.Logf("job %s: %s", at.job.ID, s.Fallback)
+	}
 	kind := queue.WorkspaceCopy
 	if s.Backend == isolation.Git {
 		kind = queue.WorkspaceWorktree
@@ -706,6 +710,9 @@ func (r *Runner) isolate(at *attempt, b isolation.Backend, req isolation.Request
 	}
 	if s.Method != "" {
 		ready["method"] = s.Method
+	}
+	if s.Fallback != "" {
+		ready["fallback"] = s.Fallback
 	}
 	at.event("workspace.ready", ready)
 	return nil

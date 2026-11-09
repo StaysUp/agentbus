@@ -77,14 +77,28 @@ func (gitBackend) Open(r Request) (*Space, error) {
 	if err := s.save(); err != nil {
 		return undo(err)
 	}
-	if _, err := checkpoint(s, Base); err != nil {
+	if _, err := checkpoint(s, Base, gitBackend{}); err != nil {
 		return undo(err)
 	}
 	return s, nil
 }
 
-func (gitBackend) Checkpoint(s *Space, name string) (Checkpoint, error) { return checkpoint(s, name) }
-func (gitBackend) Checkpoints(s *Space) ([]Checkpoint, error)           { return checkpoints(s) }
+func (b gitBackend) Checkpoint(s *Space, name string) (Checkpoint, error) {
+	return checkpoint(s, name, b)
+}
+
+// take walks the worktree. Git wrote every file of it just now, so no time
+// in it says the file is as in the person's folder: the Base hashes all.
+func (gitBackend) take(s *Space, prev *workspace.Snapshot, save workspace.Hasher) (*workspace.Snapshot, error) {
+	if prev == nil {
+		return workspace.Take(s.Dir, nil)
+	}
+	return workspace.Walk(s.Dir, prev, save)
+}
+
+// learn is never needed: the Base hashed every file.
+func (gitBackend) learn(*Space, string, workspace.File) (string, bool, bool) { return "", false, false }
+func (gitBackend) Checkpoints(s *Space) ([]Checkpoint, error)                { return checkpoints(s) }
 func (gitBackend) Diff(s *Space, from, to string) (workspace.Changes, error) {
 	return diff(s, from, to)
 }

@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 	"unicode/utf8"
 )
 
@@ -41,11 +42,18 @@ type entry struct {
 	hash    string
 }
 
+// Racy: a file whose modification time is this close to when a Snapshot
+// was taken may change again without its time changing, since a file clock
+// ticks coarsely (every few milliseconds on Linux). The next Walk hashes it
+// again rather than trust its size and time.
+const Racy = 2 * time.Second
+
 // Snapshot is a workspace's files, by slash-separated path from its root.
 type Snapshot struct {
 	files     map[string]entry
-	truncated bool // MaxSnapshotFiles was reached
-	git       bool // the root is a git work tree
+	taken     int64 // when the walk began, in Unix nanoseconds; 0 if not known
+	truncated bool  // MaxSnapshotFiles was reached
+	git       bool  // the root is a git work tree
 	head      string
 	tree      string // in git: the tree of every file but the ignored ones, for a diff
 }
@@ -54,66 +62,75 @@ type Snapshot struct {
 // prev keeps prev's hash, so the end of a job hashes only what changed. The
 // root's .git, a folder in a repo or a file in a worktree, is skipped. A
 // symbolic link is recorded by its target, never followed.
-func Take(root string, prev *Snapshot) (*Snapshot, error) {
-	s := &Snapshot{files: map[string]entry{}}
-	err := filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
+func Take(root string, prev *Snapshot) (*Snapshot, error) { return Walk(root, prev, nil) }
+
+// Hasher answers the hash of a regular file or a symbolic link that Walk
+// found, at path, rel from the root. An empty hash records the file as not
+// hashed. An error leaves the file out, as an unreadable file is left out.
+type Hasher func(rel, path string, info fs.FileInfo) (string, error)
+
+// Hash is the Hasher Take uses: a file's content, a link's target.
+func Hash(_, path string, info fs.FileInfo) (string, error) {
+	if info.Mode()&fs.ModeSymlink != 0 {
+		target, err := os.Readlink(path)
 		if err != nil {
-			if p == root {
-				return err
-			}
-			return nil // unreadable: left out
+			return "", err
 		}
-		rel, _ := filepath.Rel(root, p)
-		if rel == "." {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		if rel == ".git" {
-			if d.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if len(s.files) >= MaxSnapshotFiles {
-			s.truncated = true
-			return filepath.SkipAll
-		}
-		info, err := d.Info()
-		if err != nil {
-			return nil
-		}
-		e := entry{size: info.Size(), mode: info.Mode(), modTime: info.ModTime().UnixNano()}
-		if old, ok := prevEntry(prev, rel); ok && old.size == e.size && old.modTime == e.modTime && old.mode == e.mode {
-			e.hash = old.hash
-		} else if info.Mode()&fs.ModeSymlink != 0 {
-			target, err := os.Readlink(p)
-			if err != nil {
-				return nil
-			}
-			e.hash = hashBytes([]byte("link:" + target))
-		} else if info.Mode().IsRegular() {
-			h, err := hashFile(p)
-			if err != nil {
-				return nil
-			}
-			e.hash = h
-		} else {
-			return nil // a socket, a device: not a file of the work
-		}
-		s.files[rel] = e
-		return nil
-	})
+		return hashBytes([]byte("link:" + target)), nil
+	}
+	return hashFile(path)
+}
+
+// Walk is Take with hash called for each file whose size, modification time
+// or mode differs from prev's, or that prev does not have, or whose time was
+// within Racy of when prev was taken. A nil hash is Hash. A file prev holds
+// unchanged keeps prev's hash, even an empty one.
+func Walk(root string, prev *Snapshot, hash Hasher) (*Snapshot, error) {
+	if hash == nil {
+		hash = Hash
+	}
+	s := &Snapshot{files: map[string]entry{}, taken: time.Now().UnixNano()}
+	list, truncated, err := List(root, true, MaxSnapshotFiles)
 	if err != nil {
 		return nil, err
 	}
+	// The files past the limit are a matter of which folder was read first:
+	// a truncated snapshot is never applied.
+	s.truncated = truncated
+	for _, it := range list {
+		info := it.Info
+		if info.IsDir() || (info.Mode()&fs.ModeSymlink == 0 && !info.Mode().IsRegular()) {
+			continue // a folder; a socket, a device: not a file of the work
+		}
+		if len(s.files) >= MaxSnapshotFiles {
+			s.truncated = true
+			break
+		}
+		e := entry{size: info.Size(), mode: info.Mode(), modTime: info.ModTime().UnixNano()}
+		if old, ok := prevEntry(prev, it.Rel); ok && old.size == e.size && old.modTime == e.modTime && old.mode == e.mode && !prev.racy(old.modTime) {
+			e.hash = old.hash
+		} else {
+			h, err := hash(it.Rel, it.Path, info)
+			if err != nil {
+				continue // unreadable: left out
+			}
+			e.hash = h
+		}
+		s.files[it.Rel] = e
+	}
+	s.ReadGit(root)
+	return s, nil
+}
+
+// ReadGit records, when root is the top of a git work tree, its HEAD and
+// the tree of its files, as Walk does at its end: for a snapshot whose
+// files were found another way.
+func (s *Snapshot) ReadGit(root string) {
+	s.git, s.head, s.tree = false, "", ""
 	if head, ok := gitHead(root); ok {
 		s.git, s.head = true, head
 		s.tree, _ = gitTree(root, head)
 	}
-	return s, nil
 }
 
 // gitTree writes the tree of root's files as they are on disk, untracked
@@ -143,7 +160,9 @@ func gitTree(root, head string) (string, error) {
 }
 
 // File is one file of a Snapshot. Hash is the SHA-256 of its content, or of
-// "link:" and its target for a symbolic link.
+// "link:" and its target for a symbolic link. An empty Hash is a file not
+// hashed: package isolation records a copy's first state by size,
+// modification time and mode only.
 type File struct {
 	Size    int64       `json:"size"`
 	Mode    fs.FileMode `json:"mode"`
@@ -175,6 +194,35 @@ func (s *Snapshot) Set(rel string, f File) {
 // Delete leaves rel out of the snapshot.
 func (s *Snapshot) Delete(rel string) { delete(s.files, rel) }
 
+// DeleteUnder leaves out every file inside the folder dir.
+func (s *Snapshot) DeleteUnder(dir string) {
+	prefix := dir + "/"
+	for p := range s.files {
+		if strings.HasPrefix(p, prefix) {
+			delete(s.files, p)
+		}
+	}
+}
+
+// Empty is a snapshot with no files, to fill with Set, taken now.
+func Empty() *Snapshot { return &Snapshot{files: map[string]entry{}, taken: time.Now().UnixNano()} }
+
+// Racy says whether a file of s modified at mtime (Unix nanoseconds) may have
+// changed since without its time changing: its time is within Racy of when
+// s was taken, or after. A snapshot whose time is not known trusts every
+// time, as one written before it was recorded.
+func (s *Snapshot) Racy(mtime int64) bool { return s.racy(mtime) }
+
+func (s *Snapshot) racy(mtime int64) bool {
+	return s.taken != 0 && mtime >= s.taken-int64(Racy)
+}
+
+// SetTaken sets when s was taken, as Walk does when it begins.
+func (s *Snapshot) SetTaken(t time.Time) { s.taken = t.UnixNano() }
+
+// SetTruncated marks s as missing files past MaxSnapshotFiles.
+func (s *Snapshot) SetTruncated() { s.truncated = true }
+
 // Len is the number of files.
 func (s *Snapshot) Len() int { return len(s.files) }
 
@@ -205,6 +253,7 @@ func (s *Snapshot) Changed(o *Snapshot) []string {
 // snapshotJSON is a Snapshot as it is kept on disk.
 type snapshotJSON struct {
 	Files     map[string]File `json:"files"`
+	Taken     int64           `json:"taken,omitempty"`
 	Truncated bool            `json:"truncated,omitempty"`
 	Git       bool            `json:"git,omitempty"`
 	Head      string          `json:"head,omitempty"`
@@ -212,7 +261,7 @@ type snapshotJSON struct {
 }
 
 func (s *Snapshot) MarshalJSON() ([]byte, error) {
-	j := snapshotJSON{Files: make(map[string]File, len(s.files)), Truncated: s.truncated, Git: s.git, Head: s.head, Tree: s.tree}
+	j := snapshotJSON{Files: make(map[string]File, len(s.files)), Taken: s.taken, Truncated: s.truncated, Git: s.git, Head: s.head, Tree: s.tree}
 	for p := range s.files {
 		j.Files[p], _ = s.File(p)
 	}
@@ -224,7 +273,7 @@ func (s *Snapshot) UnmarshalJSON(b []byte) error {
 	if err := json.Unmarshal(b, &j); err != nil {
 		return err
 	}
-	*s = Snapshot{files: make(map[string]entry, len(j.Files)), truncated: j.Truncated, git: j.Git, head: j.Head, tree: j.Tree}
+	*s = Snapshot{files: make(map[string]entry, len(j.Files)), taken: j.Taken, truncated: j.Truncated, git: j.Git, head: j.Head, tree: j.Tree}
 	for p, f := range j.Files {
 		s.Set(p, f)
 	}

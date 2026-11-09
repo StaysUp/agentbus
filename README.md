@@ -164,8 +164,11 @@ curl -s http://127.0.0.1:8787/api/v0/turns \
 Use your own token path if the data folder is elsewhere. `folder` must be an absolute path to a
 folder that exists. The agent works in its own copy of it, made exactly as the folder is now,
 under the data folder, so your folder is not changed; send `"isolate":false` to work in the folder
-itself. `isolation` in `permissions.toml` picks how the copy is made: `copy` (the default), `git`
-(a worktree, in a repo) or `none`. `model` is passed to the agent as `--model`; a small
+itself. `isolation` in `permissions.toml` picks how the copy is made: `auto` (the default: one
+APFS clone on macOS; on Linux an overlay mount where the runner can mount one, else a reflink or
+plain copy), `overlay`, `copy`, `git` (a worktree, in a repo) or `none`. The table of what `auto`
+picks, and `share_read_only` for a big `node_modules`, are in `docs/CLIENT_API.md` ("Isolation").
+`model` is passed to the agent as `--model`; a small
 model keeps this first turn cheap. `read_only` gives the agent read tools only. For codex, use
 `"agent":"codex"` and one of its models, or leave `model` out.
 
