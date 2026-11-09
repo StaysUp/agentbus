@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -44,9 +45,10 @@ type Session struct {
 	// Resumable: the session has a resume_id on a session.closed and is not
 	// open, so POST /api/v0/turns with this session can run its next turn.
 	Resumable bool `json:"resumable" doc:"POST /api/v0/turns accepts it as session."`
-	// Title is the text of the session's first turn.started that has text,
-	// the person's own words, cut to TitleRunes. Absent with no such turn.
-	Title string `json:"title,omitempty" doc:"The person's words from the first turn.started with text, cut to 120 characters."`
+	// Title is the title of the session's latest session.renamed, else the
+	// text of its first turn.started that has text, the person's own words,
+	// cut to TitleRunes. Absent with neither.
+	Title string `json:"title,omitempty" doc:"The name from the session's latest session.renamed; without one, the person's words from the first turn.started with text, cut to 120 characters."`
 
 	// Why cost_complete is false. Not sent: the contract has no field for
 	// them.
@@ -62,8 +64,10 @@ func (s *Store) Snapshot() (Snapshot, error) {
 	snap := Snapshot{Store: s.id, Seq: hi, Sessions: []Session{}}
 	byID := map[string]*Session{}
 
+	// A rename is not activity: it leaves started and last as they were.
 	rows, err := s.r.Query(`SELECT session,
-			MIN(time), MAX(time),
+			COALESCE(MIN(CASE WHEN kind <> 'session.renamed' THEN time END), MIN(time)),
+			COALESCE(MAX(CASE WHEN kind <> 'session.renamed' THEN time END), MAX(time)),
 			SUM(kind = 'turn.started'),
 			SUM(kind = 'model.responded' AND COALESCE(json_type(data, '$.usage'), 'null') = 'object'),
 			SUM(kind = 'model.responded' AND COALESCE(json_type(data, '$.usage'), 'null') <> 'object'),
@@ -170,33 +174,33 @@ func (s *Store) Snapshot() (Snapshot, error) {
 		held[h.Session] = true
 	}
 
-	// The first turn.started with text names the session. A probe (Claude
-	// Code's startup quota check, marked probe: true) never does. SQLite
-	// takes the bare column from the row MIN(seq) picked.
-	rows, err = s.r.Query(`SELECT session, json_extract(data, '$.text'), MIN(seq) FROM events
-		WHERE seq <= ? AND kind = 'turn.started'
-			AND COALESCE(json_extract(data, '$.probe'), 0) <> 1
-			AND COALESCE(json_extract(data, '$.text'), '') <> ''
-		GROUP BY session`, hi)
-	if err != nil {
-		return snap, fmt.Errorf("store: snapshot: %w", err)
-	}
-	for rows.Next() {
-		var id, text string
-		var seq int64
-		if err := rows.Scan(&id, &text, &seq); err != nil {
+	// The latest session.renamed names the session; without one, the first
+	// turn.started with text does. A probe (Claude Code's startup quota
+	// check, marked probe: true) never does. SQLite takes the bare column
+	// from the row MAX(seq) or MIN(seq) picked. The first query runs first,
+	// so a rename wins.
+	for _, q := range []string{firstText + ` AND seq <= ? GROUP BY session`, latestRename + ` AND seq <= ? GROUP BY session`} {
+		rows, err = s.r.Query(q, hi)
+		if err != nil {
+			return snap, fmt.Errorf("store: snapshot: %w", err)
+		}
+		for rows.Next() {
+			var id, text string
+			var seq int64
+			if err := rows.Scan(&id, &text, &seq); err != nil {
+				rows.Close()
+				return snap, fmt.Errorf("store: snapshot: %w", err)
+			}
+			if x := byID[id]; x != nil {
+				x.Title = title(text)
+			}
+		}
+		if err := rows.Err(); err != nil {
 			rows.Close()
 			return snap, fmt.Errorf("store: snapshot: %w", err)
 		}
-		if x := byID[id]; x != nil {
-			x.Title = title(text)
-		}
-	}
-	if err := rows.Err(); err != nil {
 		rows.Close()
-		return snap, fmt.Errorf("store: snapshot: %w", err)
 	}
-	rows.Close()
 
 	// A session with a resume_id can be continued.
 	rows, err = s.r.Query(`SELECT DISTINCT session FROM events
@@ -246,6 +250,46 @@ func (s *Store) Snapshot() (Snapshot, error) {
 
 // TitleRunes bounds a session's title, "…" included.
 const TitleRunes = 120
+
+// The two sources of a session's title, each a query of session, text and seq
+// to finish with more conditions and GROUP BY session.
+const (
+	firstText = `SELECT session, json_extract(data, '$.text'), MIN(seq) FROM events
+		WHERE kind = 'turn.started'
+			AND COALESCE(json_extract(data, '$.probe'), 0) <> 1
+			AND COALESCE(json_extract(data, '$.text'), '') <> ''`
+	latestRename = `SELECT session, COALESCE(json_extract(data, '$.title'), ''), MAX(seq) FROM events
+		WHERE kind = 'session.renamed'`
+)
+
+// Rename stores e, a session.renamed, with OldTitle set to the session's title
+// before it: the latest rename, else its first message cut to TitleRunes, as
+// Snapshot computes it. The title is read and e written under one lock, so
+// two renames each name the title the other left.
+func (s *Store) Rename(e event.Event) (event.Event, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return e, ErrClosed
+	}
+	old := ""
+	for _, q := range []string{firstText, latestRename} {
+		var id, text string
+		var seq int64
+		err := s.r.QueryRow(q+` AND session = ? GROUP BY session`, e.Session).Scan(&id, &text, &seq)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return e, fmt.Errorf("store: read title: %w", err)
+		}
+		old = title(text)
+	}
+	e.Kind = event.SessionRenamed
+	e.OldTitle = old
+	out, _, err := s.appendLocked(e)
+	return out, err
+}
 
 // title is text cut to TitleRunes runes, ending in "…" when cut.
 func title(text string) string {

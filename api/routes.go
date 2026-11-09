@@ -129,6 +129,18 @@ var routes = append([]route{
 		doc:     "The sessions, and the seq they were computed at.",
 		replies: []reply{ok(200, store.Snapshot{}, "The snapshot."), storeFailed},
 		serve:   plain((*API).sessions)},
+	{method: "PATCH", path: "/api/v0/sessions/{id}", op: "renameSession",
+		tag:     "Sessions",
+		summary: "Rename a session",
+		doc: "Give a session a name: it stores a session.renamed with the new title and the old one.\n\n" +
+			"GET /api/v0/sessions then names the session by its latest rename; without one, by its first message. " +
+			"Earlier names stay in the record, as the session's events. A rename does not change the session's last activity. " +
+			"A turn token may rename a session in its scope unless rename is false in [agent_api] of permissions.toml; a read-only turn's token may not.",
+		body: RenameRequest{},
+		replies: []reply{ok(200, Renamed{}, "Renamed."), badRequest,
+			fail(403, "A turn token's request is refused: error says why."), noSession, storeFailed},
+		turn:  renameSession,
+		serve: (*API).rename},
 	{method: "GET", path: "/api/v0/events", op: "streamEvents",
 		tag:     "Events",
 		summary: "Stream events",

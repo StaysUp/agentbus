@@ -48,6 +48,11 @@ const (
 	// its command matched a forbid entry of permissions.toml. The agent did
 	// not run it. Rule names the entry.
 	ToolRefused Kind = "tool.refused"
+
+	// SessionRenamed: the person, or a turn of the session's request tree,
+	// gave the session a name (PATCH /api/v0/sessions/{id}). Title is the new
+	// name and OldTitle the one it replaced. The latest names the session.
+	SessionRenamed Kind = "session.renamed"
 )
 
 // KindInfo says what one framework kind means and which fields it always
@@ -75,6 +80,7 @@ var Kinds = []KindInfo{
 	{SchemaUnexpected, "The vendor sent a shape the adapter does not know: unexpected, as names only. Show it as a quiet warning.", []string{"unexpected"}},
 	{ReplayFailed, "A model request of a replayed turn (a turn.started with replay_from) could not be given the earlier turn's history: error says why, such as the harness's request layout not being one the gateway knows. The gateway refused that request with 400 and did not send it to the vendor, so the turn fails rather than continue without its history. Show it as an error.", []string{"error"}},
 	{ToolRefused, "The gateway refused a tool call before the agent could run it, because its command matched a forbid entry of permissions.toml: tool_id, tool_name, tool_input, rule (the entry), and text (what the model is told in place of the output). The call's tool.requested is still stored, and its tool.completed carries that text. Show it as a warning.", []string{"tool_id", "rule"}},
+	{SessionRenamed, "The session was given a name with PATCH /api/v0/sessions/{id}: title is the new name, old_title the one it had before (absent when it had none). The latest names the session in GET /api/v0/sessions; earlier names stay in the record.", []string{"session", "title"}},
 }
 
 // Unexpected names one unknown shape: where on the wire, and the unknown value
@@ -169,6 +175,10 @@ type Event struct {
 	ToolOutput string          `json:"tool_output,omitempty"`
 	// Rule, only on tool.refused: the forbid entry that matched.
 	Rule string `json:"rule,omitempty" doc:"On tool.refused: the forbid entry of permissions.toml that matched, such as git push."`
+	// Title and OldTitle, only on session.renamed: the new name and the one
+	// it replaced.
+	Title    string `json:"title,omitempty" doc:"On session.renamed: the session's new name."`
+	OldTitle string `json:"old_title,omitempty" doc:"On session.renamed: the name the session had before, absent when it had none."`
 
 	Dropped  int      `json:"dropped,omitempty" doc:"On events.dropped: how many events were lost. Never 0."`
 	Sessions []string `json:"sessions,omitempty" doc:"On events.dropped: every session that lost events."`

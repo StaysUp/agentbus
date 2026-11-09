@@ -252,7 +252,7 @@ func TestAskFanOutAndDeliver(t *testing.T) {
 func TestAskCaps(t *testing.T) {
 	e, dir := askEnv(t)
 	folder := t.TempDir()
-	startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"root"}`)
+	root := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"root"}`)
 	tok := tokenOf(t, dir, "root")
 	ask(t, e, tok, `{"agent":"claude","prompt":"d1"}`)
 	ask(t, e, tokenOf(t, dir, "d1"), `{"agent":"claude","prompt":"d2"}`)
@@ -272,6 +272,10 @@ func TestAskCaps(t *testing.T) {
 	code, out = as(t, e, tokenOf(t, dir, "ro"), "POST", "/api/v0/turns", `{"agent":"claude","prompt":"x"}`)
 	if code != 403 || !strings.Contains(out, "read-only") {
 		t.Errorf("read-only turn asking: %d %s", code, out)
+	}
+	code, out = as(t, e, tokenOf(t, dir, "ro"), "PATCH", "/api/v0/sessions/"+root.ID, `{"title":"x"}`)
+	if code != 403 || !strings.Contains(out, "read-only") {
+		t.Errorf("read-only turn renaming: %d %s", code, out)
 	}
 	for _, p := range []string{"root", "d1", "d2", "ro"} {
 		release(dir, p)
@@ -317,6 +321,8 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 		{"list_agents off", "[agent_api]\nlist_agents = false\n", "GET", "/api/v0/harnesses", "", "list_agents is false", tok},
 		{"cancel off", "[agent_api]\ncancel = false\n", "POST", "/api/v0/jobs/job_x/cancel", "", "cancel is false", tok},
 		{"review off", "[agent_api]\nreview = false\n", "POST", "/api/v0/jobs/job_x/review", `{}`, "review is false", tok},
+		{"rename off", "[agent_api]\nrename = false\n", "PATCH", "/api/v0/sessions/" + root.ID, `{"title":"x"}`, "rename is false", tok},
+		{"scope session, rename", "[agent_api]\nscope = \"session\"\n", "PATCH", "/api/v0/sessions/" + root.ID, `{"title":"x"}`, "only its own session", child},
 		// scope = "session": the child's token reads its own session only,
 		// not the person's.
 		{"scope session", "[agent_api]\nscope = \"session\"\n", "GET", "/api/v0/sessions/" + root.ID + "/search?q=x", "", "only its own session", child},
@@ -331,8 +337,12 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 		}
 	}
 	// Every switch on, the routes that change agents stay closed to a turn
-	// token: they take the main token, always.
+	// token: they take the main token, always. rename is on by default, in
+	// the tree.
 	write("")
+	if code, out := as(t, e, tok, "PATCH", "/api/v0/sessions/"+root.ID, `{"title":"Named by a turn"}`); code != 200 || !strings.Contains(out, "Named by a turn") {
+		t.Errorf("rename in the tree: %d %s", code, out)
+	}
 	for _, r := range [][3]string{
 		{"POST", "/api/v0/agents", `{"name":"x","harness":"claude","access":"subscription"}`},
 		{"PUT", "/api/v0/agents/a_x", `{"name":"x","harness":"claude","access":"subscription"}`},

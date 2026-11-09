@@ -19,7 +19,7 @@ func samePolicy(p, q Permissions) bool {
 	return p.Edit == q.Edit && *l.MaxDepth == *m.MaxDepth && *l.MaxJobsPerTurn == *m.MaxJobsPerTurn &&
 		*l.MaxJobsPerTree == *m.MaxJobsPerTree && *l.MaxCostUSDPerTree == *m.MaxCostUSDPerTree && a.Scope == b.Scope &&
 		*a.Read == *b.Read && *a.ListAgents == *b.ListAgents && *a.Start == *b.Start && *a.Continue == *b.Continue &&
-		*a.Review == *b.Review && *a.Cancel == *b.Cancel
+		*a.Review == *b.Review && *a.Cancel == *b.Cancel && *a.Rename == *b.Rename
 }
 
 func writePerm(t *testing.T, path, s string) {
@@ -42,7 +42,7 @@ func TestLoadPermissions(t *testing.T) {
 		t.Fatalf("missing file: %+v %v", p, err)
 	}
 	if def.Edit != EditSession || *def.Limits.MaxDepth != 2 || *def.Limits.MaxJobsPerTurn != 10 || *def.Limits.MaxJobsPerTree != 30 ||
-		*def.Limits.MaxCostUSDPerTree != 0 || def.AgentAPI.Scope != ScopeTree || !*def.AgentAPI.Start || !*def.AgentAPI.Cancel {
+		*def.Limits.MaxCostUSDPerTree != 0 || def.AgentAPI.Scope != ScopeTree || !*def.AgentAPI.Start || !*def.AgentAPI.Cancel || !*def.AgentAPI.Rename {
 		t.Fatalf("defaults: %+v %+v", def.Limits, def.AgentAPI)
 	}
 	// The starter parses, with empty lists, and writes out every default.
@@ -56,9 +56,9 @@ func TestLoadPermissions(t *testing.T) {
 	if p, err := loadPermissions(path, home); err != nil || !slices.Equal(p.Allow, []string{"go test"}) || !samePolicy(p, def) {
 		t.Fatalf("older file: %+v %v", p, err)
 	}
-	writePerm(t, path, "edit = \"none\"\n[limits]\nmax_depth = 0\nmax_cost_usd_per_tree = 0.25\n[agent_api]\nscope = \"session\"\nstart = false\n")
+	writePerm(t, path, "edit = \"none\"\n[limits]\nmax_depth = 0\nmax_cost_usd_per_tree = 0.25\n[agent_api]\nscope = \"session\"\nstart = false\nrename = false\n")
 	if p, err := loadPermissions(path, home); err != nil || p.Edit != EditNone || *p.Limits.MaxDepth != 0 || *p.Limits.MaxJobsPerTurn != 10 ||
-		*p.Limits.MaxCostUSDPerTree != 0.25 || p.AgentAPI.Scope != ScopeSession || *p.AgentAPI.Start || !*p.AgentAPI.Continue {
+		*p.Limits.MaxCostUSDPerTree != 0.25 || p.AgentAPI.Scope != ScopeSession || *p.AgentAPI.Start || !*p.AgentAPI.Continue || *p.AgentAPI.Rename {
 		t.Fatalf("set values: %+v %v", p, err)
 	}
 	// ~ is the home folder; a folder comes back absolute and clean.

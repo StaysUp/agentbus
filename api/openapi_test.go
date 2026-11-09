@@ -208,7 +208,8 @@ func served(t *testing.T, e *env, method, path string) bool {
 // Every route the code serves is in the spec, and every operation in the spec
 // is served.
 // One endpoint starts every turn: POST /api/v0/turns,
-// with session for a session's next turn. /sessions is read-only. The turn is
+// with session for a session's next turn. /sessions is read-only but for the
+// rename, PATCH /sessions/{id}, which starts nothing. The turn is
 // the one resource that is written: POST /turns starts one, GET /turns lists
 // them, GET /turns/{id}/events reads one; /runs is gone with no alias.
 func TestOneEndpointStartsEveryTurn(t *testing.T) {
@@ -217,13 +218,13 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 	for p, item := range doc.Paths.Map() {
 		for m := range item.Operations() {
 			ops = append(ops, m+" "+p)
-			if strings.HasPrefix(p, "/api/v0/sessions") && m != http.MethodGet {
-				t.Errorf("%s %s: /sessions takes only GET", m, p)
+			if strings.HasPrefix(p, "/api/v0/sessions") && m != http.MethodGet && m+" "+p != "PATCH /api/v0/sessions/{id}" {
+				t.Errorf("%s %s: /sessions takes only GET, and PATCH to rename", m, p)
 			}
 		}
 	}
-	if len(ops) != 36 {
-		t.Errorf("%d endpoints, want 36: %v", len(ops), ops)
+	if len(ops) != 37 {
+		t.Errorf("%d endpoints, want 37: %v", len(ops), ops)
 	}
 	for _, want := range []string{"POST /api/v0/turns", "GET /api/v0/turns", "GET /api/v0/turns/{id}", "GET /api/v0/turns/{id}/events", "POST /api/v0/turns/{id}/stop"} {
 		if !slices.Contains(ops, want) {

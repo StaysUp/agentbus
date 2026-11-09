@@ -148,15 +148,16 @@ to the asking session as a later turn** (see "Results come back as the next turn
 | `POST /api/v0/turns` with `session` | a session the tree started; never its own, never the person's (the root) |
 | `POST /api/v0/jobs/<id>/review` | a job of a session in the tree |
 | `POST /api/v0/jobs/<id>/cancel`, `POST /api/v0/turns/<id>/stop` | only work the tree asked for |
+| `PATCH /api/v0/sessions/<id>` (rename) | a session in the tree |
 
 The writes are refused for a **read-only** turn (`read_only: true`): its token only reads.
 
 Each row is also a switch of `[agent_api]`, read for every request: `read` (the reads of the first
-five rows), `list_agents`, `start` (a new session), `continue` (with `session`), `review` and
-`cancel`. Each is on unless the file says `false`; a call switched off gets **403** naming the
+five rows), `list_agents`, `start` (a new session), `continue` (with `session`), `review`,
+`cancel` and `rename`. Each is on unless the file says `false`; a call switched off gets **403** naming the
 switch. `scope = "session"` keeps the token to its own session: it reads only that session's turns,
-calls and jobs, reviews only its jobs, cancels only what its own turns asked for, and continues no
-session. A `permissions.toml` that cannot be used refuses every turn token's request with **503**.
+calls and jobs, reviews only its jobs, cancels only what its own turns asked for, renames only its
+own session, and continues no session. A `permissions.toml` that cannot be used refuses every turn token's request with **503**.
 
 **What a turn token never does**, each a **403** with a plain reason, whatever `[agent_api]` says:
 change policy (no route writes `permissions.toml` or `instructions.md`), save, edit or remove agents, see or make a token (no reply holds one), make a
@@ -258,6 +259,7 @@ start = true
 continue = true
 review = true
 cancel = true
+rename = true
 ```
 
 - `agentbus up` makes the file when it is missing, mode 0600, with empty lists, every other value
@@ -429,15 +431,42 @@ Sessions are newest activity first. Every field is computed from stored events u
   A claude session continued by own replay can still be refused with 409 when its newest turn's
   history cannot be rebuilt (see `POST /api/v0/turns` with `session`). A turn that was interrupted
   or failed does not cause this: the next turn continues after it.
-- `title`: the `text` of the session's first `turn.started` that has text, the person's own words.
-  Over 120 characters (runes) it is cut to 119 on a rune boundary plus `…`, so it is never longer
-  than 120. A `turn.started` with `probe: true` (Claude Code's startup quota check) never gives
-  it. Absent when the session has no such turn.
+- `title`: the `title` of the session's latest `session.renamed` (`PATCH /api/v0/sessions/<id>`,
+  below). Without one, the `text` of the session's first `turn.started` that has text, the
+  person's own words. Over 120 characters (runes) that text is cut to 119 on a rune boundary plus
+  `…`, so it is never longer than 120. A `turn.started` with `probe: true` (Claude Code's startup
+  quota check) never gives it. Absent when the session has neither.
+- `started` and `last`: the time of the session's first and latest event. A `session.renamed` does
+  not count, so a rename does not move a session up the list.
 - `cost_complete` is false if any of these is true: a call's output count was incomplete; a
   `model.responded` had no `usage` (absent, which is not the same as zeros); a model had no price;
   any `model.responded` lacks `cost_complete: true` (which covers the others, and events stored
   before cost was wired); or an `events.dropped` event names this session or says `all_sessions`.
 - `cost_usd` sums `cost_usd` over the session's `model.responded` events.
+
+### `PATCH /api/v0/sessions/<id>` — rename a session
+
+```sh
+curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Login fix"}' $B/api/v0/sessions/abc
+# {"seq":1042,"id":"evt_7a1b…","title":"Login fix","old_title":"Fix the login bug on the settings page"}
+```
+
+It stores a `session.renamed` event with `title`, the new name, and `old_title`, the name the
+session had just before (its latest rename, else its first message as `title` above; absent when it
+had none). From then on `GET /api/v0/sessions` names the session by its latest rename. Earlier names
+stay in the record: every rename is one of the session's events, so
+`GET /api/v0/sessions/<id>/events` lists them all, in order.
+
+- The body is one JSON object with `title` and nothing else. Spaces at either end are dropped.
+  What is left must be 1 to 120 characters (runes), on one line: a newline, tab, Unicode line or
+  paragraph separator, or other control character is refused. Each refusal is **400** with the reason; nothing is stored.
+- **404** for a session the store has no events for.
+- A rename is not activity: the session's `last` stays, so the list keeps its order.
+- With the main token, any session. With a turn token, a session in its scope (its request tree,
+  or its own session with `scope = "session"`), unless `rename = false` in `[agent_api]`. A
+  read-only turn's token may not rename. The turns token may not.
+- The answer is the stored event: `seq`, `id`, `title` and `old_title`.
 
 ### `GET /api/v0/events?store=<store>&after=<seq>&session=<id>`
 
@@ -1342,6 +1371,48 @@ cockpit never calls them.
 Every call after take names its attempt id and number. A call for an attempt that is not current
 gets 409 with `stale: true`, and the runner stops that turn.
 
+## Who writes each kind
+
+An event's `kind` names where it comes from, as a topic does in a message broker. There is no
+separate source field: read the kind. Built-in kinds have two parts, `<subject>.<what>`. A
+program's kinds have three and start with `x.`, which no built-in kind does.
+
+**Observed by the gateway**, from the agent's traffic with its model. These say what the agent and
+the model did; AgentBus only reads them off the wire.
+
+| Kind | From |
+|---|---|
+| `model.requested`, `model.responded` | each model request and its reply |
+| `tool.requested`, `tool.completed` | the tool calls in a reply, and their results in the next request |
+| `schema.unexpected` | a shape on the wire the adapter does not know |
+| `turn.completed` | the reply's stop reason |
+| `turn.started` | the person's words in a request, for traffic pointed at the gateway by hand |
+
+**Written by AgentBus** about what it did itself.
+
+| Kind | Written by |
+|---|---|
+| `turn.started` | the API, for a turn started with `POST /api/v0/turns`, before its agent starts. The store keeps one per turn, so the gateway's copy of the same turn is not stored again |
+| `session.opened`, `session.closed` | the engine, when a turn's agent process starts and exits; the store, at start, for a process the previous service left running |
+| `session.renamed` | the API, on `PATCH /api/v0/sessions/<id>` |
+| `session.registered` | older versions only; nothing writes it now |
+| `tool.refused` | the gateway, when it refused a tool call by a `forbid` rule |
+| `replay.failed` | the gateway, when it refused a request it could not give its history |
+| `events.dropped` | the gateway, when its output fell behind and events were lost |
+
+Two kinds do not follow the subject by writer: `turn.completed` is observed, though most of
+`turn.*` and `session.*` is AgentBus's own, and `tool.refused` is AgentBus's own, though the other
+`tool.*` kinds are observed.
+
+**Written by programs**, with `POST /api/v0/events`: `x.<program>.<name>`, with `vendor`
+`"program"`. The API refuses any other kind there, so a program can never write a built-in kind,
+and a built-in kind is never mistaken for a program's.
+
+**A job attempt's own events** are a separate stream, `GET /api/v0/attempts/<id>/events`, written by
+the runner that ran it: `attempt.started`, `workspace.ready`, `workspace.changes`,
+`workspace.removed`, `turn.created`, `turn.refused`, `turn.stop`, `turn.unended` and `turn.ended`.
+They are not in the store's event stream. A turn's own events, such as `turn.started`, are.
+
 ## What changes in the event
 
 | Field or kind | Meaning |
@@ -1364,6 +1435,7 @@ gets 409 with `stale: true`, and the runner stops that turn.
 | `replayed` on `model.requested` | how many messages of the earlier turn's history the gateway put in front of this request. Omitted when none |
 | kind `tool.refused` | the gateway refused a tool call of a run's turn, because its command matched a `forbid` entry of `permissions.toml`. `tool_id`, `tool_name`, `tool_input` as the model wrote them; `rule` is the entry; `text` is what the model is told in place of the output. The agent did not run the call. Show it as a warning |
 | kind `replay.failed` | a model request of a replayed turn could not be given the earlier turn's history; `error` says why. The gateway answered the agent 400 and sent nothing to the vendor, so the turn fails rather than run without its past. Show it as an error |
+| kind `session.renamed` | the session was given a name with `PATCH /api/v0/sessions/<id>`: `title` is the new name, `old_title` the one before it (absent when it had none). It has no `turn`. The latest names the session in `GET /api/v0/sessions` |
 | kinds `x.<program>.<name>` | a program's own event (`POST /api/v0/events`); `vendor` is `"program"` |
 | `data` | only on a program's own event: the JSON object it sent |
 | `sessions` on `events.dropped` | every session that lost events. The queue knows each lost event's session when it drops it. A request without `/s/<session>` counts as the session `default` |

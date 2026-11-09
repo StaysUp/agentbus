@@ -302,6 +302,7 @@ start = true                 # start a session on a saved agent
 continue = true              # continue a session its tree started
 review = true                # ask for a review
 cancel = true                # cancel what it asked for
+rename = true                # rename sessions
 ```
 
 `agentbus up` makes it with empty lists and every other value at its default, as above. A key you

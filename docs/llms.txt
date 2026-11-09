@@ -43,7 +43,7 @@ job routes. This file describes the API of `up` and `server`.
   folder's own files (`permissions.toml`, `instructions.md`, `agents.json`, the tokens): claude gets
   a deny rule on each. `[limits]`: `max_depth` (2), `max_jobs_per_turn` (10), `max_jobs_per_tree`
   (30), `max_cost_usd_per_tree` (0, off). `[agent_api]`: `scope` (`"tree"` or `"session"`), and
-  `read`, `list_agents`, `start`, `continue`, `review`, `cancel`, each true unless set false. A
+  `read`, `list_agents`, `start`, `continue`, `review`, `cancel`, `rename`, each true unless set false. A
   broken file answers 400 and nothing is stored; a turn token's requests get 503 then. A missing
   file is every default.
 - `instructions.md` in the data folder is the text every turn gets as its agent's own instruction
@@ -145,13 +145,27 @@ is 409 with the current `store` in the body: start over from step 1.
 
 ### GET /api/v0/sessions
 
-The sessions, newest activity first, with tokens, cost, open state and title. `agent` and `folder`
+The sessions, newest activity first, with tokens, cost, open state and title (the latest rename,
+else the first message). `agent` and `folder`
 come from the session's latest turn that names them. `open` is true while a turn's agent for the
 session is running. A session groups turns; `GET /api/v0/turns` lists the turns themselves.
 
 ```sh
 curl -s -H "Authorization: Bearer $TOKEN" $B/api/v0/sessions
 # {"store":"st_9f2c…","seq":1041,"sessions":[{"id":"abc","agent":"claude","open":true,"turns":7,…}]}
+```
+
+### PATCH /api/v0/sessions/{id}
+
+Rename a session: body `{"title":"..."}`, 1 to 120 characters on one line. It stores a
+`session.renamed` event with `title` and `old_title`; the list then shows the latest name, and
+earlier names stay in the session's events. A rename does not change `last`. A turn token may
+rename a session in its scope unless `rename = false` in `[agent_api]`; a read-only turn may not.
+
+```sh
+curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"Login fix"}' $B/api/v0/sessions/abc
+# {"seq":1042,"id":"evt_…","title":"Login fix","old_title":"Fix the login bug"}
 ```
 
 ### GET /api/v0/events
@@ -406,6 +420,13 @@ curl -s $B/api/v0/openapi.json
 Every event has `seq`, `id`, `kind`, `time`, `exchange` and `vendor`, and usually `session`. Other
 fields depend on the kind. Ignore kinds and fields you do not know: v0 may add both.
 
+The kind says who wrote the event; there is no separate source field. `model.*`, `tool.requested`,
+`tool.completed`, `schema.unexpected` and `turn.completed` are observed by the gateway from the
+agent's model traffic. `session.*`, `tool.refused`, `replay.failed`, `events.dropped` and the API's
+own `turn.started` are written by AgentBus about its own actions. `x.<program>.<name>` is written
+by a program and can never be a built-in kind. A job attempt's runner events (`workspace.*`,
+`attempt.started`, `turn.created` and the like) are in `GET /api/v0/attempts/{id}/events`, not here.
+
 | kind | what happened | main fields |
 |---|---|---|
 | `turn.started` | a person's message started a turn | `turn`, `text`, `agent`, `folder` (empty when the turn was not started through `POST /api/v0/turns`), `replay_from` (the earlier turn a replayed turn continues), `continuity` (`replay`, `resume` or `transcript`, on a next turn), `context` (with `transcript`: the earlier turns as text, put before `text` in the agent's prompt), `agent_id` (the saved agent that ran the turn), `recovered_from` and `recovered_reason` (the previous turn did not finish and how it ended; this turn continues after it) |
@@ -421,6 +442,7 @@ fields depend on the kind. Ignore kinds and fields you do not know: v0 may add b
 | `schema.unexpected` | the vendor sent a shape the adapter does not know | `unexpected` (`where`, `value` or `field`) |
 | `replay.failed` | a replayed turn's request could not be given the earlier turn's history; the gateway refused it and the turn fails | `error` |
 | `tool.refused` | the gateway refused a tool call because its command matched a `forbid` entry; the agent did not run it | `tool_id`, `tool_name`, `tool_input`, `rule`, `text` (what the model is told) |
+| `session.renamed` | the session was renamed with `PATCH /api/v0/sessions/{id}`; the latest names it | `title`, `old_title` (absent when it had none) |
 | `x.<program>.<name>` | a program's own event | `text`, `data`, `turn`; `vendor` is `program` |
 
 - `usage` is absent when the vendor sent none. Absent is not zero.

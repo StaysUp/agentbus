@@ -77,6 +77,7 @@ start = true         # start a new session on a saved agent
 continue = true      # continue a session its tree started (never its own or the person's)
 review = true        # ask for a review of a job in its scope
 cancel = true        # cancel jobs and stop turns its tree asked for
+rename = true        # rename sessions in its scope
 `
 
 // Edit values: where a turn may edit files without asking.
@@ -123,6 +124,7 @@ type AgentAPI struct {
 	Continue   *bool  `toml:"continue"`
 	Review     *bool  `toml:"review"`
 	Cancel     *bool  `toml:"cancel"`
+	Rename     *bool  `toml:"rename"`
 }
 
 // The defaults, as the starter file writes them.
@@ -160,7 +162,7 @@ func (p *Permissions) fill() {
 		p.AgentAPI.Scope = ScopeTree
 	}
 	for _, b := range []**bool{&p.AgentAPI.Read, &p.AgentAPI.ListAgents, &p.AgentAPI.Start,
-		&p.AgentAPI.Continue, &p.AgentAPI.Review, &p.AgentAPI.Cancel} {
+		&p.AgentAPI.Continue, &p.AgentAPI.Review, &p.AgentAPI.Cancel, &p.AgentAPI.Rename} {
 		if *b == nil {
 			on := true
 			*b = &on

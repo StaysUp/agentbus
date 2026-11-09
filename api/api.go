@@ -246,7 +246,7 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h := w.Header()
-		h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE")
+		h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE")
 		// Named, not "*": the wildcard never covers Authorization.
 		h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
 		w.WriteHeader(http.StatusNoContent)

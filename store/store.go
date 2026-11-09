@@ -188,6 +188,11 @@ var ErrClosed = errors.New("store: closed")
 func (s *Store) Append(e event.Event) (out event.Event, stored bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.appendLocked(e)
+}
+
+// appendLocked is Append with s.mu held.
+func (s *Store) appendLocked(e event.Event) (out event.Event, stored bool, err error) {
 	if s.closed {
 		return e, false, ErrClosed
 	}
