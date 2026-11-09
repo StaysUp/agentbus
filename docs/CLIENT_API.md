@@ -1456,23 +1456,41 @@ the copy is made. Every method starts from the folder exactly as it is, uncommit
 | Machine | Method | What a copy costs |
 |---|---|---|
 | macOS (APFS) | `copy`: one `clonefile(2)` of the folder | about 20 µs and 0.35 KB per file; bytes are shared |
-| Linux, runner can mount (root or `CAP_SYS_ADMIN`) | `overlay` | one snapshot of the folder (a reflink per file on xfs or btrfs), then one mount |
-| Linux, runner cannot mount, or the disk cannot hold an overlay | `copy`: a reflink per file (xfs, btrfs), else a plain copy (ext4) | per file; a plain copy also costs every byte |
+| Linux, root, or not root in its own user namespace (below) | `overlay` | one snapshot of the folder (a reflink per file on xfs or btrfs), then one mount |
+| Linux, no namespace (AppArmor without the profile), or the disk cannot hold an overlay | `copy`: a reflink per file (xfs, btrfs), else a plain copy (ext4) | per file; a plain copy also costs every byte |
 | Anything else | `copy` | as above |
 
 When `auto` or `overlay` falls back to `copy`, the session still runs. The runner's log and the
-job's `workspace.ready` event (`fallback`) say why, for example that the runner is not root.
+job's `workspace.ready` event (`fallback`) say why, for example that AppArmor refused the
+namespace and which step allows it.
 
 - **`auto`** (the default): the table above.
 - **`overlay`** (Linux): an overlayfs mount. Below it is the session's own read-only snapshot: a
   copy of the folder as it was when the session began (a reflink per file where the disk has
   them), so the person's live folder is never under a copy. Above it is an empty upper folder that
   takes the session's writes. The session shares nothing with another session; closing it removes
-  the snapshot with the rest. Needs root or `CAP_SYS_ADMIN`: in a user namespace the mount would
-  be hidden from the agent's processes. Without it, `copy`, as `auto` does. Pick an xfs or btrfs
+  the snapshot with the rest. Needs root, or the user namespace below. Without either, `copy`,
+  as `auto` does. Pick an xfs or btrfs
   disk for the runner's data folder: there the snapshot and a changed big file's copy-up are
   reflinks; on ext4 the snapshot copies every byte, and the first write to a 1 GiB file copies
   all of it.
+- **Overlay without root.** On Linux, `agentbus up` and `agentbus runner`, when not root, start
+  themselves again once in a user and mount namespace of their own. The user id inside is your
+  own, not root, and the service holds only the capabilities a mount needs. It clears them before
+  it starts any agent, so agents run as you with no capability. Agents inherit the namespace and
+  see each copy at its path. The network is the host's, so the gateway and every address work as
+  before. **The catch: a copy's mount lives only in that namespace.** Your own tools, outside it,
+  see an empty folder at the copy's path and reach the copy at `/proc/<pid>/root/<path>`, where
+  `<pid>` is the service's; it logs that path when it starts. The copy goes when the service
+  stops, and comes back from its record at the session's next turn.
+  Ubuntu 24.04 and later let a program make a user namespace only when an AppArmor profile allows
+  it. `install.sh` installs one (`packaging/apparmor/agentbus`) when it runs as root, and
+  otherwise prints the one command to run as root:
+  `curl -fsSL https://raw.githubusercontent.com/staysup/agentbus/main/install.sh | sudo sh -s apparmor /path/to/agentbus`.
+  The profile names the binary's path, so a moved binary needs it again. Without it, or where the
+  namespace cannot mount, the service runs as it is and sessions use `copy`, with the reason in
+  the log and in `workspace.ready`. `AGENTBUS_USERNS=off` keeps the service out of a namespace.
+  In one, a `sudo` an agent runs cannot become root.
 - **`copy`**: a copy of the folder, whatever it is. On macOS (APFS) it is one copy-on-write clone,
   which takes no space until a file changes; on Linux each file is a reflink where the disk has
   them (btrfs, xfs) and a plain copy where it does not. A `.git` folder at the top is copied with

@@ -71,6 +71,11 @@ func main() {
 	if filepath.Base(os.Args[0]) == engine.APIClient {
 		os.Exit(apiCall(os.Args[1:], os.Getenv, os.Stdin, os.Stdout, os.Stderr))
 	}
+	// Not root on Linux, up and runner run in a namespace of their own
+	// (userns_linux.go).
+	if code, done := userns(os.Args[1:], os.Getenv, os.Stderr); done {
+		os.Exit(code)
+	}
 	os.Exit(run(os.Args[1:], os.Getenv, os.Stdout, os.Stderr))
 }
 

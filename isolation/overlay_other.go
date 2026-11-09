@@ -18,6 +18,12 @@ func (overlayBackend) Name() string { return Overlay }
 // overlayWhy says why no overlay can be mounted: none can, here.
 func overlayWhy(string) string { return "overlay is a Linux filesystem" }
 
+// OverlayWhy says why no overlay can be mounted: none can, here.
+func OverlayWhy(workdir string) string { return overlayWhy(workdir) }
+
+// NoNamespace does nothing here: a user namespace is Linux's.
+func NoNamespace(string) {}
+
 func (overlayBackend) Open(r Request) (*Space, error) {
 	if err := checkOpen(r); err != nil {
 		return nil, err

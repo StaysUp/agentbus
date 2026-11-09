@@ -1,0 +1,19 @@
+# AppArmor profile for agentbus. Ubuntu 24.04 and later let a program make
+# an unprivileged user namespace only when a profile allows it. agentbus up
+# and agentbus runner, when not root, run in their own user and mount
+# namespace so a session's copy can be an overlay mount. This profile allows
+# that one thing, the way Ubuntu's own profiles allow it for podman.
+#
+# install.sh installs it for the binary it installed, as root, only on
+# systems that restrict user namespaces:
+#   curl -fsSL https://raw.githubusercontent.com/staysup/agentbus/main/install.sh | sudo sh -s apparmor /path/to/agentbus
+# The path below is the binary's; a moved or renamed binary needs it again.
+
+abi <abi/4.0>,
+include <tunables/global>
+
+profile agentbus "/usr/local/bin/agentbus" flags=(unconfined) {
+  userns,
+
+  include if exists <local/agentbus>
+}

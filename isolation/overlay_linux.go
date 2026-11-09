@@ -32,6 +32,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -415,6 +416,20 @@ func unmountAll(p string) error {
 // it can).
 var probes sync.Map
 
+// noNamespace is why this runner runs outside a user namespace of its own,
+// as the service found when it started (NoNamespace); "" when it is inside
+// one, is root, or never tried.
+var noNamespace atomic.Value // string
+
+// NoNamespace records why the service, not root, could not run in its own
+// user and mount namespace, where it could mount overlays. An overlay's
+// refusal then says it, and so does the fallback a session records.
+func NoNamespace(why string) { noNamespace.Store(why) }
+
+// OverlayWhy says why this runner cannot mount an overlay in workdir, in
+// words for the person, or "" when it can.
+func OverlayWhy(workdir string) string { return overlayWhy(workdir) }
+
 // overlayWhy says why this runner cannot mount an overlay in workdir, in
 // words for the person, or "" when it can. It mounts a small one to find
 // out, once per workdir.
@@ -449,8 +464,11 @@ func probe(workdir string) string {
 	err := mountIn(dir, m, "lowerdir=l,upperdir=u,workdir=w,"+overlayOptions)
 	switch {
 	case err == unix.EPERM || err == unix.EACCES:
-		return fmt.Sprintf("mounting an overlay needs root or CAP_SYS_ADMIN, and this runner runs as uid %d "+
-			"(a user namespace would hide the mount from the agent's processes)", os.Geteuid())
+		why := fmt.Sprintf("mounting an overlay needs root or CAP_SYS_ADMIN, and this runner runs as uid %d", os.Geteuid())
+		if no, _ := noNamespace.Load().(string); no != "" {
+			why += " outside a user namespace of its own: " + no
+		}
+		return why
 	case err == unix.ENODEV:
 		return "this kernel has no overlay filesystem"
 	case err == unix.EINVAL:
