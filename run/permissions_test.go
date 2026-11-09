@@ -16,7 +16,7 @@ import (
 func samePolicy(p, q Permissions) bool {
 	l, m := p.Limits, q.Limits
 	a, b := p.AgentAPI, q.AgentAPI
-	return p.Edit == q.Edit && *l.MaxDepth == *m.MaxDepth && *l.MaxJobsPerTurn == *m.MaxJobsPerTurn &&
+	return p.Edit == q.Edit && *p.Subagents == *q.Subagents && *l.MaxDepth == *m.MaxDepth && *l.MaxJobsPerTurn == *m.MaxJobsPerTurn &&
 		*l.MaxJobsPerTree == *m.MaxJobsPerTree && *l.MaxCostUSDPerTree == *m.MaxCostUSDPerTree && a.Scope == b.Scope &&
 		*a.Read == *b.Read && *a.ListAgents == *b.ListAgents && *a.Start == *b.Start && *a.Continue == *b.Continue &&
 		*a.Review == *b.Review && *a.Cancel == *b.Cancel && *a.Rename == *b.Rename
@@ -45,6 +45,9 @@ func TestLoadPermissions(t *testing.T) {
 		*def.Limits.MaxCostUSDPerTree != 0 || def.AgentAPI.Scope != ScopeTree || !*def.AgentAPI.Start || !*def.AgentAPI.Cancel || !*def.AgentAPI.Rename {
 		t.Fatalf("defaults: %+v %+v", def.Limits, def.AgentAPI)
 	}
+	if !*def.Subagents {
+		t.Fatal("subagents are off by default")
+	}
 	// The starter parses, with empty lists, and writes out every default.
 	writePerm(t, path, PermissionsStarter)
 	if p, err := loadPermissions(path, home); err != nil || len(p.ReadFolders)+len(p.Allow)+len(p.Forbid) != 0 || !samePolicy(p, def) {
@@ -60,6 +63,10 @@ func TestLoadPermissions(t *testing.T) {
 	if p, err := loadPermissions(path, home); err != nil || p.Edit != EditNone || *p.Limits.MaxDepth != 0 || *p.Limits.MaxJobsPerTurn != 10 ||
 		*p.Limits.MaxCostUSDPerTree != 0.25 || p.AgentAPI.Scope != ScopeSession || *p.AgentAPI.Start || !*p.AgentAPI.Continue || *p.AgentAPI.Rename {
 		t.Fatalf("set values: %+v %v", p, err)
+	}
+	writePerm(t, path, "subagents = false\n")
+	if p, err := loadPermissions(path, home); err != nil || *p.Subagents || p.Edit != EditSession {
+		t.Fatalf("subagents = false: %+v %v", p, err)
 	}
 	// ~ is the home folder; a folder comes back absolute and clean.
 	writePerm(t, path, "read_folders = [\"~\", \"~/notes/a/\", \""+dir+"/.\"]\n"+
@@ -110,6 +117,7 @@ func TestLoadPermissions(t *testing.T) {
 		{"cost negative", "[limits]\nmax_cost_usd_per_tree = -0.5\n", "max_cost_usd_per_tree must be 0"},
 		{"unknown limit", "[limits]\nmax_rounds = 2\n", `unknown key "limits.max_rounds"`},
 		{"scope unknown", "[agent_api]\nscope = \"all\"\n", `scope must be "tree" or "session"`},
+		{"subagents not a bool", "subagents = \"no\"\n", "subagents is true or false"},
 		{"switch not a bool", "[agent_api]\nstart = \"no\"\n", "wrong type"},
 		{"unknown switch", "[agent_api]\nwrite_permissions = true\n", `unknown key "agent_api.write_permissions"`},
 	} {
@@ -197,8 +205,8 @@ func TestTurnArgsPermissions(t *testing.T) {
 		{"codex resume and model", "codex", "r-1", "gpt-5", edit, perm, []string{"exec", "--skip-git-repo-check", "--sandbox", "workspace-write",
 			"-c", "sandbox_workspace_write.network_access=true", "resume", "--json", "--model", "gpt-5", "--", "r-1", "hi"}},
 	} {
-		got, ok := turnArgs(tc.agent, "", tc.resume, tc.model, tc.w, tc.perm, "hi")
-		if !ok || !slices.Equal(got, tc.want) {
+		got := turnArgs(hn(tc.agent), "", tc.resume, tc.model, tc.w, tc.perm, "hi")
+		if !slices.Equal(got, tc.want) {
 			t.Errorf("%s:\n got %q\nwant %q", tc.name, got, tc.want)
 		}
 	}
@@ -213,55 +221,53 @@ func TestWritesFor(t *testing.T) {
 	data := filepath.Join(t.TempDir(), "home")
 	protect := []string{filepath.Join(data, PermissionsFile)}
 	def := DefaultPermissions()
-	w, why := writesFor("claude", folder, false, def, protect)
+	w, why := writesFor(hn("claude"), folder, false, def, protect)
 	if why != "" || len(w.Edit) == 0 || w.Edit[0] != folder || !slices.Contains(w.Edit, real) || len(w.Protect) == 0 || w.ReadOnly {
 		t.Fatalf("claude: %+v %q", w, why)
 	}
-	if w, _ := writesFor("codex", folder, false, def, protect); len(w.Edit) == 0 {
+	if w, _ := writesFor(hn("codex"), folder, false, def, protect); len(w.Edit) == 0 {
 		t.Fatalf("codex: %+v", w)
 	}
-	if w, _ := writesFor("claude", folder, true, def, protect); !w.ReadOnly || len(w.Edit)+len(w.Protect) != 0 {
+	if w, _ := writesFor(hn("claude"), folder, true, def, protect); !w.ReadOnly || len(w.Edit)+len(w.Protect) != 0 {
 		t.Fatalf("read-only: %+v", w)
 	}
 	none := def
 	none.Edit = EditNone
-	if w, _ := writesFor("claude", folder, false, none, protect); len(w.Edit) != 0 || len(w.Protect) == 0 {
+	if w, _ := writesFor(hn("claude"), folder, false, none, protect); len(w.Edit) != 0 || len(w.Protect) == 0 {
 		t.Fatalf("edit none: %+v", w)
 	}
 	odd := filepath.Join(t.TempDir(), "a,b")
 	if err := os.Mkdir(odd, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if w, why := writesFor("claude", odd, false, def, protect); len(w.Edit) != 0 || why != "folder_shape" {
+	if w, why := writesFor(hn("claude"), odd, false, def, protect); len(w.Edit) != 0 || why != "folder_shape" {
 		t.Fatalf("a comma in the folder: %+v %q", w, why)
 	}
 	// codex takes any folder name: its sandbox needs no rule.
-	if w, why := writesFor("codex", odd, false, def, protect); len(w.Edit) == 0 || why != "" {
+	if w, why := writesFor(hn("codex"), odd, false, def, protect); len(w.Edit) == 0 || why != "" {
 		t.Fatalf("codex, a comma in the folder: %+v %q", w, why)
 	}
 	// A data folder named relative to the service's own folder is still
 	// found inside the session's folder.
 	wd, _ := os.Getwd()
 	t.Chdir(filepath.Dir(data))
-	if w, why := writesFor("codex", filepath.Dir(data), false, def, []string{filepath.Join("home", PermissionsFile)}); len(w.Edit) != 0 || why != "data_folder_inside" {
+	if w, why := writesFor(hn("codex"), filepath.Dir(data), false, def, []string{filepath.Join("home", PermissionsFile)}); len(w.Edit) != 0 || why != "data_folder_inside" {
 		t.Fatalf("codex, a relative data folder inside: %+v %q", w, why)
 	}
 	t.Chdir(wd)
 	// The data folder inside the session's folder.
 	parent := filepath.Dir(data)
-	if w, why := writesFor("codex", parent, false, def, protect); len(w.Edit) != 0 || why != "data_folder_inside" {
+	if w, why := writesFor(hn("codex"), parent, false, def, protect); len(w.Edit) != 0 || why != "data_folder_inside" {
 		t.Fatalf("codex over the data folder: %+v %q", w, why)
 	}
-	if w, why := writesFor("claude", parent, false, def, protect); len(w.Edit) == 0 || why != "" || len(w.Protect) == 0 {
+	if w, why := writesFor(hn("claude"), parent, false, def, protect); len(w.Edit) == 0 || why != "" || len(w.Protect) == 0 {
 		t.Fatalf("claude over the data folder keeps the deny rules: %+v %q", w, why)
 	}
 	// A protected file that cannot go in a deny rule leaves edits out.
-	if w, why := writesFor("claude", folder, false, def, []string{"/data/a(b"}); len(w.Edit) != 0 || why != "protected_file_shape" {
+	if w, why := writesFor(hn("claude"), folder, false, def, []string{"/data/a(b"}); len(w.Edit) != 0 || why != "protected_file_shape" {
 		t.Fatalf("an odd protected file: %+v %q", w, why)
 	}
 }
-
-func jsonString(s string) string { return tomlString(s) }
 
 // A broken permissions.toml stops the turn before anything is stored, with
 // the file and the line in the refusal. The file is read for every turn, so a

@@ -18,26 +18,14 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/agents"
+	"github.com/staysup/agentbus/harness"
 )
-
-// HarnessNames are the harnesses turns can start, in the order they are listed.
-var HarnessNames = []string{agents.Claude, agents.Codex}
 
 // HarnessProbeTimeout bounds each --version or status command.
 const HarnessProbeTimeout = 5 * time.Second
 
 // HarnessCacheFor is how long an answer is kept.
 const HarnessCacheFor = time.Minute
-
-// statusArgs is each harness's own offline sign-in status command. Its exit
-// code is the answer: 0 signed in, 1 not. Its output is discarded, since it
-// can name the account. Both answer with network access denied (Claude Code
-// 2.1.318 and codex-cli 0.164.0, 2026-11-05, run under a sandbox profile
-// that denies the network).
-var statusArgs = map[string][]string{
-	"claude": {"auth", "status"},
-	"codex":  {"login", "status"},
-}
 
 // Harness is one harness in GET /api/v0/harnesses.
 type Harness struct {
@@ -67,20 +55,6 @@ type HarnessList struct {
 	Harnesses []Harness `json:"harnesses"`
 }
 
-// openRouterModels are offered first for an OpenRouter agent; any OpenRouter
-// model id is accepted.
-var openRouterModels = []string{"deepseek/deepseek-v4.1-flash", "openai/gpt-oss-120b"}
-
-// harnessInfo is what is fixed about each harness: its label and its models
-// per access. Models "" is the harness's own default.
-var harnessInfo = map[string]struct {
-	label, subLabel string
-	subModels       []string
-}{
-	agents.Claude: {"Claude Code", "Claude subscription", []string{"sonnet", "opus", "haiku"}},
-	agents.Codex:  {"Codex", "ChatGPT sign-in", []string{"gpt-5.5"}},
-}
-
 type harnessCache struct {
 	mu   sync.Mutex
 	at   time.Time
@@ -97,11 +71,13 @@ func (a *API) listHarnesses(w http.ResponseWriter, r *http.Request) {
 	defer a.harnesses.mu.Unlock()
 	now := a.cfg.Now()
 	if a.harnesses.list == nil || now.Sub(a.harnesses.at) >= HarnessCacheFor {
-		list := make([]Harness, 0, len(HarnessNames)+1)
-		for _, name := range HarnessNames {
-			list = append(list, a.probe(r.Context(), name))
+		list := make([]Harness, 0, len(harness.All())+len(harness.Planned()))
+		for _, h := range harness.All() {
+			list = append(list, a.probe(r.Context(), h.Info()))
 		}
-		list = append(list, Harness{Name: "opencode", Label: "opencode", Disabled: true, Access: []AccessOption{}})
+		for _, p := range harness.Planned() {
+			list = append(list, Harness{Name: p.Name, Label: p.Label, Disabled: true, Access: []AccessOption{}})
+		}
 		a.harnesses.list, a.harnesses.at = list, now
 	}
 	// key_set is read on every call: it is cheap, and a cached answer would
@@ -120,15 +96,18 @@ func (a *API) listHarnesses(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, HarnessList{out})
 }
 
-// accessOptions is what a harness offers: its subscription, an OpenRouter
-// key, and an API key, which is not available yet.
-func accessOptions(name string) []AccessOption {
-	info := harnessInfo[name]
-	return []AccessOption{
-		{Kind: agents.Subscription, Label: info.subLabel, Models: info.subModels},
-		{Kind: agents.OpenRouter, Label: "OpenRouter key", Models: openRouterModels, AnyModel: true, KeyEnv: agents.DefaultKeyEnv},
-		{Kind: agents.API, Label: "API key", Disabled: true, Models: []string{}},
+// accessOptions is what a harness offers (harness.Info.Access). An
+// OpenRouter key is read from agents.DefaultKeyEnv unless an agent names
+// another variable.
+func accessOptions(info harness.Info) []AccessOption {
+	out := make([]AccessOption, len(info.Access))
+	for i, ac := range info.Access {
+		out[i] = AccessOption{Kind: ac.Kind, Label: ac.Label, Disabled: ac.Disabled, Models: ac.Models, AnyModel: ac.AnyModel}
+		if ac.Kind == harness.OpenRouter {
+			out[i].KeyEnv = agents.DefaultKeyEnv
+		}
 	}
+	return out
 }
 
 // keySet says whether name is set, and not empty, in the service's
@@ -146,13 +125,15 @@ func (a *API) keySet(name string) bool {
 }
 
 // probe finds one harness's binary and asks it its version and sign-in
-// status. It never returns the path.
-func (a *API) probe(ctx context.Context, name string) Harness {
-	ag := Harness{Name: name, Label: harnessInfo[name].label, Access: accessOptions(name)}
+// status: its own offline status command, whose exit code is the answer, 0
+// signed in and 1 not. That command's output is discarded, since it can name
+// the account. It never returns the path.
+func (a *API) probe(ctx context.Context, info harness.Info) Harness {
+	ag := Harness{Name: info.Name, Label: info.Label, Access: accessOptions(info)}
 	if a.cfg.LookPath == nil {
 		return ag
 	}
-	bin, err := a.cfg.LookPath(name)
+	bin, err := a.cfg.LookPath(info.Name)
 	if err != nil {
 		return ag
 	}
@@ -161,7 +142,7 @@ func (a *API) probe(ctx context.Context, name string) Harness {
 	if code == 0 {
 		ag.Version = versionToken(out)
 	}
-	if args, ok := statusArgs[name]; ok {
+	if args := info.StatusArgs; len(args) > 0 {
 		switch _, code := a.runProbe(ctx, bin, args...); code {
 		case 0:
 			t := true

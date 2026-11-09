@@ -59,7 +59,8 @@ may hold other projects' Go code. Go's own tools skip folders that start with `_
 - **One program, one flow.** `agentbus up`, `server` and `runner` are modes of one binary. Every
   turn is a job, and every runner, the built-in one too, takes jobs through the runner protocol
   over HTTP. A runner starts a turn through `run/`, never through the API.
-- **The package rule is tested** (`cmd/agentbus/layers_test.go`): `gateway/`, `adapter/`,
+- **The package rule is tested** (`cmd/agentbus/layers_test.go`): `harness/` imports nothing of
+  the module, so every package may use it; `gateway/`, `adapter/`,
   `event/`, `cost/`, `replay/`, `store/`, `body/` and `logfile/` import nothing from `run/`,
   `workspace/`, `queue/`, `jobs/` or `runner/`; `run/` imports nothing from the queue side;
   `agents/` (the saved agents) may use `run/`, never the queue side or `workspace/`;
@@ -67,6 +68,24 @@ may hold other projects' Go code. Go's own tools skip folders that start with `_
 - **Fix the root cause.** No defensive backstops on top of a fix.
 - **A live run beats a fixture.** Vendors change their wire formats. Check a change against a real
   agent when it touches an adapter or the gateway.
+
+## Adding a harness
+
+A harness is a program that runs an agent's loop, such as `claude` or `codex`. Everything that
+differs per harness lives in `harness/`, one file each, and the rest of the code asks the registry
+(`harness.Get`, `harness.All`). No other package branches on a harness name.
+
+1. Write `harness/<name>.go` with a type that implements `harness.Harness`: its `Info` (name,
+   label, what to install, the sign-in status command, the endpoint variable, the access it offers,
+   its replay format), its `Wire` and `WireOpenRouter`, `Edit`, `OwnInstructions`, `Args` and
+   `ResumeID`. Note the version and date each flag was checked on, next to the code.
+2. Add it to `registry` in `harness/harness.go`. A harness listed as coming but not runnable goes
+   in `planned` instead, as opencode does.
+3. Add its cases to `cmd/agentbus/launch_integration_test.go`, run it with `-update-launch`, and
+   read the diff of `testdata/launch.golden` line by line. Existing lines must not change.
+4. Own replay needs a history format in `replay/`. Without one, leave `Info.Replay` empty: its
+   sessions continue by the vendor's resume. The gateway's `forbid` guard reads shell commands by
+   API format (`gateway/guard.go`), so check that it sees the new harness's shell tool.
 
 ## Changes and review
 

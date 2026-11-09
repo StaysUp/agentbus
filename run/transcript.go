@@ -5,6 +5,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -122,20 +123,17 @@ func cutTo(s string, max int, cut bool) string {
 	return s
 }
 
-// harnessNames are the harnesses' own names.
-var harnessNames = map[string]string{"claude": "Claude Code", "codex": "Codex"}
-
 // agentLabel names an earlier turn's agent: the saved agent's name, else its
 // harness, with the model its last call asked for.
-func (e *Engine) agentLabel(id, harness, model string) string {
+func (e *Engine) agentLabel(id, harnessName, model string) string {
 	name := ""
 	if id != "" && e.cfg.AgentName != nil {
 		name = e.cfg.AgentName(id)
 	}
 	if name == "" {
-		name = harness
-		if p, ok := harnessNames[harness]; ok {
-			name = p
+		name = harnessName
+		if h, ok := harness.Get(harnessName); ok {
+			name = h.Info().Label
 		}
 	}
 	if name == "" {

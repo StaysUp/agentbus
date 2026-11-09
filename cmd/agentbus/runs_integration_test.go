@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -331,7 +332,8 @@ func TestRunRefusals(t *testing.T) {
 // A person who already points an agent at their own gateway would have that
 // gateway's credentials sent to the vendor. A run refuses, storing nothing.
 func TestRunRefusesWhenServiceSendsAgentElsewhere(t *testing.T) {
-	for agent, v := range ownEndpoint {
+	for _, h := range harness.All() {
+		agent, v := h.Info().Name, h.Info().OwnEndpointEnv
 		home := t.TempDir()
 		env := map[string]string{v: "https://gateway.example"}
 		svc := runService(t, home, func(k string) string { return env[k] }, 0)

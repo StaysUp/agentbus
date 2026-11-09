@@ -25,6 +25,9 @@ import (
 // `auth status` (claude) or `login status` (codex) it exits with
 // AGENTBUS_FAKE_AUTH_EXIT or AGENTBUS_FAKE_LOGIN_EXIT, 1 when unset.
 func TestMain(m *testing.M) {
+	if d := os.Getenv(launchDirEnv); d != "" {
+		fakeLaunch(d)
+	}
 	if os.Getenv("AGENTBUS_FAKE_AGENT") == "1" {
 		fakeAgent()
 	}

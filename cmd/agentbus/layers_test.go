@@ -12,9 +12,10 @@ import (
 
 const module = "github.com/staysup/agentbus"
 
-// The package rule of one program: the gateway and the record know nothing
-// about jobs; run, which starts one turn, knows nothing about queues or
-// saved agents; agents, the saved agents, may use run and nothing of the
+// The package rule of one program: harness, what differs per harness, is at
+// the bottom and uses nothing of the module; the gateway and the record know
+// nothing about jobs; run, which starts one turn, knows nothing about queues
+// or saved agents; agents, the saved agents, may use run and nothing of the
 // queue side; the queue may use run and workspace, never the reverse.
 // Checked over every import, direct or not.
 func TestPackageLayers(t *testing.T) {
@@ -23,6 +24,8 @@ func TestPackageLayers(t *testing.T) {
 		pkgs      []string // these packages, and every subpackage
 		mayNotUse []string
 	}{
+		{[]string{"harness"}, append([]string{"run", "agents", "workspace", "api", "gateway", "adapter", "event",
+			"cost", "replay", "store", "body", "logfile", "cmd"}, jobSide...)},
 		{[]string{"gateway", "adapter", "event", "cost", "replay", "store", "body", "logfile"},
 			append([]string{"run", "agents", "workspace", "api"}, jobSide...)},
 		{[]string{"run"}, append([]string{"agents", "workspace", "api"}, jobSide...)},

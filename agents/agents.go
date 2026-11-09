@@ -24,24 +24,18 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/run"
 )
 
 // FileName is the file in the data folder that holds the agents.
 const FileName = "agents.json"
 
-// Harnesses an agent can run on today. opencode is listed by the API but
-// cannot be saved yet.
+// Access kinds (harness.Subscription and the rest).
 const (
-	Claude = "claude"
-	Codex  = "codex"
-)
-
-// Access kinds.
-const (
-	Subscription = "subscription" // the harness's own sign-in
-	OpenRouter   = "openrouter"   // an OpenRouter key, from an environment variable
-	API          = "api"          // the vendor's API key: not available yet
+	Subscription = harness.Subscription // the harness's own sign-in
+	OpenRouter   = harness.OpenRouter   // an OpenRouter key, from an environment variable
+	API          = harness.API          // the vendor's API key: not available yet
 )
 
 // DefaultKeyEnv is the variable an OpenRouter agent reads when none is named.
@@ -102,10 +96,10 @@ func Check(f *Fields) string {
 	switch {
 	case f.Name == "" || len(f.Name) > MaxName || !utf8.ValidString(f.Name) || strings.ContainsAny(f.Name, "\x00\r\n"):
 		return "name must be 1 to 100 bytes of text on one line"
-	case f.Harness == "opencode":
-		return "harness opencode is not available yet; use claude or codex"
-	case f.Harness != Claude && f.Harness != Codex:
-		return "harness must be claude or codex"
+	case planned(f.Harness):
+		return "harness " + f.Harness + " is not available yet; use " + harness.NameList()
+	case !known(f.Harness):
+		return "harness must be " + harness.NameList()
 	case f.Access == API:
 		return "access api is not available yet; use subscription or openrouter"
 	case f.Access != Subscription && f.Access != OpenRouter:
@@ -142,13 +136,32 @@ type file struct {
 	Agents []Agent `json:"agents"`
 }
 
-// Defaults are the agents a new data folder starts with. Their ids are the
-// harness names, so a turn that names claude or codex finds them.
+// Defaults are the agents a new data folder starts with: one per harness, on
+// its own subscription. Their ids are the harness names, so a turn that names
+// claude or codex finds them.
 func Defaults(now time.Time) []Agent {
-	return []Agent{
-		{ID: Claude, Name: "Claude Code", Harness: Claude, Access: Subscription, Created: now, Updated: now},
-		{ID: Codex, Name: "Codex", Harness: Codex, Access: Subscription, Created: now, Updated: now},
+	var out []Agent
+	for _, h := range harness.All() {
+		i := h.Info()
+		out = append(out, Agent{ID: i.Name, Name: i.Label, Harness: i.Name, Access: Subscription, Created: now, Updated: now})
 	}
+	return out
+}
+
+// known says an agent can be saved on name.
+func known(name string) bool {
+	_, ok := harness.Get(name)
+	return ok
+}
+
+// planned says name is a harness listed as coming.
+func planned(name string) bool {
+	for _, p := range harness.Planned() {
+		if p.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Open reads dir's agents file, or saves the defaults when there is none. now
@@ -276,7 +289,7 @@ func (s *Store) Resolve(id string) (Agent, error) {
 	if err == nil {
 		return a, nil
 	}
-	if id == Claude || id == Codex {
+	if known(id) {
 		return Agent{Harness: id, Access: Subscription}, nil
 	}
 	return Agent{}, err

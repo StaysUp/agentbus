@@ -244,6 +244,7 @@ read_folders = ["~/.agents", "~/Sites/agentbus-notes"]
 allow = ["go test", "make test", "git commit"]
 forbid = ["git push", "git checkout"]
 edit = "session"
+subagents = true
 
 [limits]
 max_depth = 2
@@ -287,6 +288,9 @@ rename = true
   `run.edit … left_out=data_folder_inside`. This covers the tools that edit files. A command in
   `allow` that runs any code, such as `python3`, `node` or `sh`, can still write these files: allow
   only commands you would let change your policy.
+- `subagents`: `true` (the default) or `false`. `false` turns off the agent's own subagents for
+  every turn, on the command line only (the table below). The person's `~/.claude/settings.json`
+  and `~/.codex/config.toml` are never edited.
 - `[limits]`: the caps on work agents ask for (above, "The caps on asked work"). Whole numbers
   from 0 for the first three; dollars from 0 for the cost, where 0 is off.
 - `[agent_api]`: what a turn's token may call (above, "Turn tokens"). `scope` is `"tree"` or
@@ -300,6 +304,7 @@ What each list becomes:
 | `allow` | `--allowedTools Bash(<cmd>:*),…` | nothing yet |
 | `forbid` | the gateway's guard, and `--disallowedTools Bash(<cmd>:*),…` | the gateway's guard |
 | `edit = "session"` | `--allowedTools Edit(//<folder>/**)`, and `--disallowedTools Edit(//<file>),…` for the data folder's files | `--sandbox workspace-write -c sandbox_workspace_write.network_access=true` |
+| `subagents = false` | `--disallowedTools Task,Agent,Workflow`: `Task` is the subagent tool of Claude Code 2.1.319, `Agent` its newer name, and `Workflow` runs scripts that start subagents | `--disable multi_agent --disable multi_agent_v2`, before `resume` on a next turn |
 | `edit = "none"` | `--disallowedTools Edit,Write,NotebookEdit`: a deny, so the person's own settings (an `acceptEdits` mode, an Edit allow rule) cannot approve an edit either | `--sandbox read-only`, which has no network |
 
 - `read_folders` grants reading only. It is not `--add-dir`: that makes a working folder, which

@@ -22,7 +22,6 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -37,6 +36,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/logfile"
 	"github.com/staysup/agentbus/store"
 )
@@ -287,23 +287,26 @@ func (t *Turn) Done() <-chan struct{} { return t.done }
 // Ended is how the turn ended. Read it after Done.
 func (t *Turn) Ended() Ended { <-t.done; return t.end }
 
-// agentProducts names the product that installs each agent's program, for the
-// missing-agent reply.
-var agentProducts = map[string]string{"claude": "Claude Code", "codex": "the Codex CLI"}
-
 // missingAgent is the fixed reply when agent's program is not on the service's
 // PATH. The program has the agent's name.
 func missingAgent(agent string) string {
+	product := ""
+	if h, ok := harness.Get(agent); ok {
+		product = h.Info().Product
+	}
 	return "agent " + agent + " cannot start: the program " + agent + " is not on the service's PATH. " +
-		"Install " + agentProducts[agent] + " and run " + agent + " once to sign in, then try again. " +
+		"Install " + product + " and run " + agent + " once to sign in, then try again. " +
 		"If it is installed, start agentbus from a shell where " + agent + " runs."
 }
 
-// KnownHarness says a turn can start on harness.
-func KnownHarness(harness string) bool {
-	_, ok := turnArgs(harness, "", "", "", Writes{}, Permissions{}, "")
+// KnownHarness says a turn can start on name.
+func KnownHarness(name string) bool {
+	_, ok := harness.Get(name)
 	return ok
 }
+
+// unknownHarness refuses a turn on a harness no turn can start.
+func unknownHarness() string { return "agent must be " + harness.NameList() }
 
 // CheckPrompt says what is wrong with a prompt and a model, or "".
 func CheckPrompt(prompt, model string) string {
@@ -337,7 +340,7 @@ func (e *Engine) Start(req Request) (*Turn, error) {
 		return e.next(req)
 	}
 	if !KnownHarness(req.Harness) {
-		return nil, refuse(http.StatusBadRequest, "agent must be claude or codex")
+		return nil, refuse(http.StatusBadRequest, unknownHarness())
 	}
 	if len(req.Folder) > MaxFolder || !filepath.IsAbs(req.Folder) || !isDir(req.Folder) {
 		return nil, refuse(http.StatusBadRequest, "folder must be an absolute path to an existing directory, at most 4096 bytes")
@@ -409,7 +412,7 @@ func (e *Engine) next(req Request) (*Turn, error) {
 	}
 	if req.Harness != "" {
 		if !KnownHarness(req.Harness) {
-			return fail(refuse(http.StatusBadRequest, "agent must be claude or codex"))
+			return fail(refuse(http.StatusBadRequest, unknownHarness()))
 		}
 		if req.Access != "" && req.Access != "subscription" && req.Access != "openrouter" {
 			return fail(refuse(http.StatusBadRequest, "access must be subscription or openrouter"))
@@ -519,26 +522,28 @@ const (
 	ByTranscript = "transcript"
 )
 
-// Continuity says how agent's next turns continue a session. claude and codex
-// use own replay when ReplayBase is set: both send the whole conversation on
-// every request, so the gateway can rebuild what the vendor's resume would
-// send. Any other agent, and both with ReplayBase nil, use the vendor's
-// resume.
+// Continuity says how agent's next turns continue a session. A harness with a
+// replay format (harness.Info.Replay) uses own replay when ReplayBase is set:
+// claude and codex send the whole conversation on every request, so the
+// gateway can rebuild what the vendor's resume would send. Any other agent,
+// and every agent with ReplayBase nil, use the vendor's resume.
 func (e *Engine) Continuity(agent string) string {
-	if (agent == "claude" || agent == "codex") && e.cfg.ReplayBase != nil {
+	if h, ok := harness.Get(agent); ok && h.Info().Replay != "" && e.cfg.ReplayBase != nil {
 		return ByReplay
 	}
 	return ByResume
 }
 
 // replayLayout says own replay knows the requests agent sends with access:
-// claude with either access, codex on its subscription. codex on OpenRouter
-// sends its input items without the content kinds codex puts on them for
-// chatgpt.com, which is how the codex format finds the prompt and the
-// context (codex-cli 0.167.0, 2026-11-09), so its turns neither give nor take
-// a replayed history: a turn after one, or on one, gets the transcript.
+// on a subscription always, on OpenRouter only when the harness says so
+// (harness.Info.ReplayOnOpenRouter). A turn of a harness that does not
+// neither gives nor takes a replayed history: a turn after one, or on one,
+// gets the transcript.
 func replayLayout(agent, access string) bool {
-	return agent == "claude" || access != "openrouter"
+	if h, ok := harness.Get(agent); ok && h.Info().ReplayOnOpenRouter {
+		return true
+	}
+	return access != harness.OpenRouter
 }
 
 // TurnRunning is the refusal of a turn sent to a session whose turn runs.
@@ -576,6 +581,7 @@ type turn struct {
 // stored, gets its session.closed with the reason. The slot is freed when
 // nothing started, or once the child's session.closed is stored.
 func (e *Engine) start(t turn) (*Turn, error) {
+	h, _ := harness.Get(t.harness) // Start and next checked it (KnownHarness)
 	started := false
 	var tok string // the turn's own token, once minted
 	defer func() {
@@ -638,15 +644,17 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	cmd := exec.Command(l.Path)
 	cmd.Env = turnEnv(l.Env, os.Environ(), e.cfg.BaseURL, tok, e.cfg.APIDir)
 	perm = withAPI(perm, e.cfg.APIDir != "", t.readOnly)
-	if t.harness == "codex" && hint != "" && codexOwnInstructions(cmd.Env, t.folder) {
-		hint = ""
-		e.cfg.Logf("run.hint session=%s turn=%s left_out=codex_developer_instructions_set", t.session, t.id)
+	if hint != "" {
+		if why := h.OwnInstructions(cmd.Env, t.folder); why != "" {
+			hint = ""
+			e.cfg.Logf("run.hint session=%s turn=%s left_out=%s", t.session, t.id, why)
+		}
 	}
-	w, why := writesFor(t.harness, t.folder, t.readOnly, perm, e.cfg.Protect)
+	w, why := writesFor(h, t.folder, t.readOnly, perm, e.cfg.Protect)
 	if why != "" {
 		e.cfg.Logf("run.edit session=%s turn=%s left_out=%s", t.session, t.id, why)
 	}
-	args, _ := turnArgs(t.harness, hint, t.resumeID, t.model, w, perm, t.context+t.prompt)
+	args := turnArgs(h, hint, t.resumeID, t.model, w, perm, t.context+t.prompt)
 	all := append(append([]string{}, l.Args...), args...)
 	cmd.Args = append([]string{l.Path}, all...)
 	cmd.Dir = t.folder
@@ -654,7 +662,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	// vendor's session id, the only thing from it that reaches an event; the
 	// work is in the events. Stdout and stderr together, their last
 	// RunOutputMax bytes, go to the run's own log and nowhere else.
-	ids := &idScanner{harness: t.harness}
+	ids := &idScanner{harness: h}
 	out := &logfile.Tail{Max: RunOutputMax}
 	// Its own session, and so its own process group: stopping it reaches
 	// what it started, and the session marks its descendants for procTree,
@@ -831,134 +839,15 @@ func (e *Engine) StopAll() {
 	<-done
 }
 
-// turnArgs is what an agent runs, after the Launch's own arguments: a new
+// turnArgs is what h runs, after the Launch's own arguments: a new
 // conversation when resumeID is empty, else the next turn of that one. The
 // prompt is always last, after "--", so it is never read as a flag. hint, when
 // not empty, goes in as an instruction of the agent's own, never inside the
 // prompt (historyHint). perm is the person's permissions.toml (permissions.go).
-// ok is false for an agent a turn cannot start.
-func turnArgs(agent, hint, resumeID, model string, w Writes, perm Permissions, prompt string) (args []string, ok bool) {
-	readOnly := w.ReadOnly
-	switch agent {
-	case "claude":
-		// --output-format json prints one result object with the session_id.
-		a := []string{"-p", "--output-format", "json"}
-		// The hint goes at the end of Claude Code's system prompt. Own replay
-		// keeps each request's system prompt as the agent sent it, and the
-		// text is the same on every turn of the session, so the main thread
-		// is still recognised and the prompt cache still holds.
-		if hint != "" {
-			a = append(a, "--append-system-prompt", hint)
-		}
-		if resumeID != "" {
-			a = append(a, "--resume", resumeID)
-		}
-		// One --allowedTools, comma-joined (Claude Code 2.1.318,
-		// 2026-11-05): what the tools may do without asking.
-		allowed := readRules(perm.ReadFolders)
-		if readOnly {
-			// --tools removes every other tool. --allowedTools only approves
-			// without asking, and the person's settings could approve more.
-			// allow never widens a read-only turn.
-			allowed = append([]string{"Read", "Grep", "Glob"}, allowed...)
-			a = append(a, "--tools", "Read,Grep,Glob", "--allowedTools", strings.Join(allowed, ","))
-			// --tools restricts built-in tools only: an MCP server from the
-			// person's settings could still write. --strict-mcp-config with
-			// no --mcp-config loads no MCP server at all.
-			a = append(a, "--strict-mcp-config")
-		} else {
-			// edit: Edit(<folder>/**) lets Edit and Write change files there
-			// without asking; one Edit rule covers every built-in tool that
-			// edits files. Without it a -p turn cannot edit at all: nobody
-			// is there to approve.
-			allowed = append(allowed, editRules(w.Edit)...)
-			// allow: each command runs without asking, as Bash(<cmd>:*)
-			// (Claude Code 2.1.319, 2026-11-07, checked live with a rule
-			// that has a space in it).
-			if len(perm.Allow) > 0 {
-				allowed = append(allowed, bashRules(perm.Allow))
-			}
-			if len(allowed) > 0 {
-				a = append(a, "--allowedTools", strings.Join(allowed, ","))
-			}
-		}
-		// forbid: never run, even when allow or the person's settings
-		// approve it; a deny wins over an allow (checked live, 2026-11-07).
-		// The gateway's guard refuses them too, in the shapes this rule
-		// misses, such as git -C repo push (gateway/guard.go). The data
-		// folder's own files are never edited: a deny on each, which wins
-		// over the edit rule and the person's settings alike.
-		var denied []string
-		if len(perm.Forbid) > 0 {
-			denied = append(denied, bashRules(perm.Forbid))
-		}
-		if !readOnly {
-			denied = append(denied, protectRules(w.Protect)...)
-			// No edit rule: a deny on every tool that edits files, so the
-			// person's own settings (an acceptEdits mode, an Edit allow
-			// rule) cannot approve one either. A deny wins over any allow.
-			if len(w.Edit) == 0 {
-				denied = append(denied, "Edit", "Write", "NotebookEdit")
-			}
-		}
-		if len(denied) > 0 {
-			a = append(a, "--disallowedTools", strings.Join(denied, ","))
-		}
-		if model != "" {
-			a = append(a, "--model", model)
-		}
-		return append(a, "--", prompt), true
-	case "codex":
-		a := []string{"exec", "--skip-git-repo-check"}
-		if resumeID == "" {
-			// --json prints events as lines; the first is thread.started
-			// with the thread_id (codex-cli 0.164.0, 2026-11-05).
-			a = append(a, "--json")
-		}
-		// The sandbox is always named, so a turn gets what read_only says
-		// and not codex's own default, which for `codex exec` is read-only
-		// (acceptance soak, 2026-11-06: every turn with read_only false
-		// could not write). `codex exec resume` takes no --sandbox of its
-		// own. Given to exec before resume it reaches the resumed turn: the
-		// turn's recorded sandbox policy follows it (codex-cli 0.164.0,
-		// 2026-11-05).
-		// workspace-write only with an edit rule: edit = "none", or a
-		// folder codex could not be kept out of the data folder's files
-		// in, runs read-only (writesFor).
-		write := !readOnly && len(w.Edit) > 0
-		a = append(a, "--sandbox", codexSandbox(!write))
-		// The hint as codex's developer_instructions, which codex puts in a
-		// developer message of the context before the prompt; own replay
-		// keeps it from the session's first turn.
-		if hint != "" {
-			a = append(a, "-c", "developer_instructions="+tomlString(hint))
-		}
-		// A turn that may write may also reach the network, as Claude Code
-		// can under typical settings: the person's decision, 2026-11-06. Per
-		// turn, on the command line; ~/.codex/config.toml is never edited.
-		if write {
-			a = append(a, codexNetwork()...)
-		}
-		// permissions.toml gives codex no flags. read_folders: codex's
-		// sandbox reads every folder already, in read-only and in
-		// workspace-write, and its --add-dir makes a folder writable, which
-		// read_folders never means (codex-cli 0.164.0, 2026-11-07, checked
-		// with codex sandbox). allow: codex has no per-command flag. forbid
-		// reaches codex through the gateway's guard (gateway/guard.go).
-		if resumeID != "" {
-			a = append(a, "resume", "--json")
-		}
-		if model != "" {
-			a = append(a, "--model", model)
-		}
-		a = append(a, "--")
-		if resumeID != "" {
-			// After "--" too, so an id can never be read as a flag.
-			a = append(a, resumeID)
-		}
-		return append(a, prompt), true
-	}
-	return nil, false
+func turnArgs(h harness.Harness, hint, resumeID, model string, w Writes, perm Permissions, prompt string) []string {
+	return h.Args(harness.Turn{Hint: hint, ResumeID: resumeID, Model: model, Writes: w,
+		ReadFolders: perm.ReadFolders, Allow: perm.Allow, Forbid: perm.Forbid,
+		NoSubagents: perm.Subagents != nil && !*perm.Subagents, Prompt: prompt})
 }
 
 // withAPI is perm with the agent's way to the API allowed without asking,
@@ -976,105 +865,6 @@ func withAPI(perm Permissions, api, readOnly bool) Permissions {
 
 // APIClient is the name of the API client on a turn's PATH (Config.APIDir).
 const APIClient = "agentbus-api"
-
-// codexOwnInstructions says the person set codex's developer_instructions
-// themselves, in $CODEX_HOME/config.toml (~/.codex by default, read from env,
-// the child's environment) or in a .codex/config.toml of the folder or any
-// folder above it: codex reads a project's config from its root down to the
-// folder it runs in (codex-cli 0.164.0, 2026-11-07, found in review). Every
-// folder above is checked, so a file codex would skip still leaves the hint
-// out, which keeps the person's setting either way. A -c value
-// would replace theirs, so a turn then gets no hint: their own setting wins.
-// A top-level key is a line naming it before the first table header; nothing
-// else of the file is read, and the file is never written.
-func codexOwnInstructions(env []string, folder string) bool {
-	var home, codexHome string
-	for _, kv := range env {
-		k, v, _ := strings.Cut(kv, "=")
-		switch k {
-		case "HOME":
-			home = v
-		case "CODEX_HOME":
-			codexHome = v
-		}
-	}
-	if codexHome == "" && home != "" {
-		codexHome = filepath.Join(home, ".codex")
-	}
-	// A relative CODEX_HOME is read by codex from its own working folder,
-	// the turn's folder, not from the service's (found in review).
-	if codexHome != "" && !filepath.IsAbs(codexHome) {
-		codexHome = filepath.Join(folder, codexHome)
-	}
-	if codexHome != "" && topLevelKey(filepath.Join(codexHome, "config.toml"), "developer_instructions") {
-		return true
-	}
-	// Both the folder as given and its real path: codex walks the physical
-	// parents of a folder reached through a symlink (found in review).
-	starts := []string{filepath.Clean(folder)}
-	if real, err := filepath.EvalSymlinks(folder); err == nil && real != starts[0] {
-		starts = append(starts, real)
-	}
-	for _, start := range starts {
-		for dir := start; ; dir = filepath.Dir(dir) {
-			if topLevelKey(filepath.Join(dir, ".codex", "config.toml"), "developer_instructions") {
-				return true
-			}
-			if filepath.Dir(dir) == dir {
-				break
-			}
-		}
-	}
-	return false
-}
-
-// topLevelKey says a TOML file sets key before its first table header. A
-// missing or unreadable file sets nothing.
-func topLevelKey(path, key string) bool {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return false
-	}
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "[") {
-			return false
-		}
-		k, _, ok := strings.Cut(line, "=")
-		if ok && strings.Trim(strings.TrimSpace(k), `"'`) == key {
-			return true
-		}
-	}
-	return false
-}
-
-// tomlString quotes s as a TOML basic string, for a codex -c value, which
-// codex reads as TOML. A JSON string is one: TOML takes the same escapes,
-// \uXXXX among them.
-func tomlString(s string) string {
-	b, _ := json.Marshal(s)
-	return string(b)
-}
-
-// codexSandbox is the value of codex's --sandbox for a turn: read-only when
-// read_only is true, else workspace-write, which lets codex write in the
-// turn's folder (and its temporary folders) and nowhere else (codex-cli
-// 0.164.0, `codex exec --help`). danger-full-access is never used.
-func codexSandbox(readOnly bool) string {
-	if readOnly {
-		return "read-only"
-	}
-	return "workspace-write"
-}
-
-// codexNetwork turns on network access in codex's workspace-write sandbox,
-// which has it off by default. Without it a codex turn could not reach the
-// service with its turn token: curl exited 7 (acceptance soak, 2026-11-06,
-// item 2). The key is the [sandbox_workspace_write] table's network_access
-// (codex-cli 0.164.0). A read-only turn never gets it.
-func codexNetwork() []string {
-	return []string{"-c", "sandbox_workspace_write.network_access=true"}
-}
 
 // OutputGrace is how long a run waits for its child's output after the child
 // exits, for a process the child left behind that keeps it open.
@@ -1160,15 +950,12 @@ func (e *Engine) keepOutput(t turn, args []string, code int, ended time.Time, ou
 // session id. A longer line is skipped.
 const MaxStdoutLine = 1 << 20
 
-var resumeIDShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,63}$`)
-
 // idScanner reads a child's stdout a line at a time and keeps only the
-// vendor's session id: the session_id of claude's "type":"result" object, or
-// the thread_id of codex's first "type":"thread.started" line. Each line is
-// decoded whole as JSON, so text inside a reply cannot pose as the id. It
-// holds at most one line of MaxStdoutLine bytes, and nothing else.
+// vendor's session id, as its harness reads it from each line
+// (harness.Harness.ResumeID). It holds at most one line of MaxStdoutLine
+// bytes, and nothing else.
 type idScanner struct {
-	harness string
+	harness harness.Harness
 	line    []byte
 	over    bool // the current line passed MaxStdoutLine
 	id      string
@@ -1200,19 +987,7 @@ func (s *idScanner) Write(p []byte) (int, error) {
 
 func (s *idScanner) endLine() {
 	if !s.over && len(s.line) > 0 {
-		var v struct {
-			Type      string `json:"type"`
-			SessionID string `json:"session_id"`
-			ThreadID  string `json:"thread_id"`
-		}
-		if json.Unmarshal(s.line, &v) == nil {
-			switch {
-			case s.harness == "claude" && v.Type == "result" && resumeIDShape.MatchString(v.SessionID):
-				s.id = v.SessionID
-			case s.harness == "codex" && v.Type == "thread.started" && s.id == "" && resumeIDShape.MatchString(v.ThreadID):
-				s.id = v.ThreadID
-			}
-		}
+		s.id = s.harness.ResumeID(s.line, s.id)
 	}
 	s.line, s.over = s.line[:0], false
 }

@@ -288,6 +288,7 @@ read_folders = ["~/.agents"]           # claude may Read, Grep and Glob there
 allow = ["go test", "make test"]       # claude gets --allowedTools Bash(go test:*),...
 forbid = ["git push", "git checkout"]  # the gateway refuses these, for claude and codex
 edit = "session"                       # where a turn may edit files: "session" or "none"
+subagents = true                       # false: no turn starts the agent's own subagents
 
 [limits]                     # work agents ask other agents for
 max_depth = 2                # levels of asking below your turn
@@ -319,6 +320,11 @@ edits. No turn may edit the data folder's own files (this file, `instructions.md
 the tokens): a turn that could would raise its own limits. That rule is not a setting. It covers
 the tools that edit files: a command in `allow` that runs any code (`python3`, `node`, `sh`) can
 still write them, so allow only commands you would let change your policy.
+
+**Subagents.** With `subagents = false`, a turn cannot start the agent's own subagents. claude
+gets `--disallowedTools Task,Agent,Workflow`, and codex runs with `--disable multi_agent --disable
+multi_agent_v2`. Both are flags of that turn only: your `~/.claude/settings.json` and
+`~/.codex/config.toml` are never changed. The default, `true`, changes nothing.
 
 **Limits.** A request past a limit is refused, and the refusal names the limit.
 
