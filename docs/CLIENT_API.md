@@ -1456,7 +1456,7 @@ the copy is made. Every method starts from the folder exactly as it is, uncommit
 | Machine | Method | What a copy costs |
 |---|---|---|
 | macOS (APFS) | `copy`: one `clonefile(2)` of the folder | about 20 µs and 0.35 KB per file; bytes are shared |
-| Linux, runner can mount (root or `CAP_SYS_ADMIN`) | `overlay` | one mount; the folder's read-only layers are shared |
+| Linux, runner can mount (root or `CAP_SYS_ADMIN`) | `overlay` | one snapshot of the folder (a reflink per file on xfs or btrfs), then one mount |
 | Linux, runner cannot mount, or the disk cannot hold an overlay | `copy`: a reflink per file (xfs, btrfs), else a plain copy (ext4) | per file; a plain copy also costs every byte |
 | Anything else | `copy` | as above |
 
@@ -1464,18 +1464,15 @@ When `auto` or `overlay` falls back to `copy`, the session still runs. The runne
 job's `workspace.ready` event (`fallback`) say why, for example that the runner is not root.
 
 - **`auto`** (the default): the table above.
-- **`overlay`** (Linux): an overlayfs mount. Below it are read-only layers: a copy of the folder
-  (a reflink per file where the disk has them), made once and shared by every session copied from
-  the same folder state. A later session compares the folder with the newest layers by size,
-  modification time and mode, and puts what changed into one more small layer, so the person's
-  live folder is never a layer. Above the layers each session has an empty upper folder that takes
-  its writes. Past 16 layers the next session makes a new base layer, so a mount never stacks
-  many; the mount options are relative and short, and a mount is refused rather than cut at the
-  kernel's 4 KiB limit. Needs root or `CAP_SYS_ADMIN`: in a user namespace the mount would be
-  hidden from the agent's processes. Without it, `copy`, as `auto` does. Layers no session uses
-  are removed when a session closes. Pick an xfs or btrfs disk for the runner's data folder: there
-  the kernel copies a changed big file up by reflink; on ext4 the first write to a 1 GiB file
-  copies all of it.
+- **`overlay`** (Linux): an overlayfs mount. Below it is the session's own read-only snapshot: a
+  copy of the folder as it was when the session began (a reflink per file where the disk has
+  them), so the person's live folder is never under a copy. Above it is an empty upper folder that
+  takes the session's writes. The session shares nothing with another session; closing it removes
+  the snapshot with the rest. Needs root or `CAP_SYS_ADMIN`: in a user namespace the mount would
+  be hidden from the agent's processes. Without it, `copy`, as `auto` does. Pick an xfs or btrfs
+  disk for the runner's data folder: there the snapshot and a changed big file's copy-up are
+  reflinks; on ext4 the snapshot copies every byte, and the first write to a 1 GiB file copies
+  all of it.
 - **`copy`**: a copy of the folder, whatever it is. On macOS (APFS) it is one copy-on-write clone,
   which takes no space until a file changes; on Linux each file is a reflink where the disk has
   them (btrfs, xfs) and a plain copy where it does not. A `.git` folder at the top is copied with
@@ -1495,7 +1492,7 @@ only the rest of the project. **A turn cannot write there**: `npm install`, `pip
 `.venv`, or a tool that patches a package fails with "permission denied". It is off by default
 because agents often install packages, and some tools treat a linked folder differently (a bundler
 that resolves links may see files outside the project). Turn it on for sessions that only read
-their dependencies. `overlay` ignores it: its copies are mounts and share every file already.
+their dependencies. It is the one thing sessions share. `overlay` ignores it.
 
 Each turn starts from a checkpoint and ends with one, named by the turn's id (the start one adds
 `.start`, and is the last turn's end when nothing changed in between). A checkpoint records every
@@ -1533,8 +1530,8 @@ a file refused it. A session with an apply that has not ended cannot be closed.
 
 **A known limit: a disk without copy-on-write.** On ext4, and on a folder shared into a container
 from another disk, `copy` copies every byte, so a big folder (a `node_modules`, a build output)
-is slow to start and takes its full size again. `overlay` copies it once and shares it; where the
-runner cannot mount, use `git` for a repo, or `none`.
+is slow to start and takes its full size again, and so does `overlay`'s snapshot. Put the
+runner's data folder on xfs or btrfs, use `git` for a repo, or `none`.
 
 ### Reviews
 

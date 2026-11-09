@@ -9,8 +9,8 @@
 //
 // Three backends today. copy copies the folder: a copy-on-write clone where
 // the disk has one (APFS on macOS, a reflink on Linux), a plain copy
-// otherwise. overlay (Linux) mounts an overlayfs over read-only layers of the
-// folder that every copy of it shares (overlay_linux.go). git makes a git
+// otherwise. overlay (Linux) mounts an overlayfs over the session's own
+// read-only snapshot of the folder (overlay_linux.go). git makes a git
 // worktree of the folder's repo at its HEAD and carries the folder's
 // uncommitted edits into it. All start from the folder exactly as it is now,
 // and all keep checkpoints the same way: a manifest of every file's size,
@@ -23,7 +23,9 @@
 //
 // On disk, under the runner's workdir: the copy at <workdir>/<id>, and the
 // space's own record at <workdir>/.isolation/<id>: space.json, the
-// checkpoints, and the saved files.
+// checkpoints, the saved files, and an overlay's snapshot. A space shares
+// nothing with another, but the read-only folders share_read_only names
+// (shared.go), so closing it removes everything it made.
 package isolation
 
 import (
@@ -115,9 +117,6 @@ type Space struct {
 	// Method, for copy: clone (copy-on-write), reflink, or copy (a plain
 	// copy); overlay for overlay.
 	Method string `json:"method,omitempty"`
-	// Layers, for overlay: the read-only layers under the copy, the lowest
-	// first (overlay_linux.go).
-	Layers []int `json:"layers,omitempty"`
 	// Shared, for copy: the read-only shared folders the copy links to.
 	Shared []string `json:"shared,omitempty"`
 	// Fallback: why the backend asked for could not be used, and which one
