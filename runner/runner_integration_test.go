@@ -33,6 +33,9 @@ import (
 //	write <path> <text>   writes text to path, in its folder
 //	hold                  waits until the file $RUNNER_FAKE_LOG.go exists
 //	exit <n>              exits with n
+//
+// While the file $RUNNER_FAKE_LOG.hold exists, every turn holds first, as
+// hold does: for a turn whose prompt the test does not write, a review's.
 func TestMain(m *testing.M) {
 	if os.Getenv("RUNNER_FAKE_AGENT") == "1" {
 		fakeAgent()
@@ -52,6 +55,9 @@ func fakeAgent() {
 		f.Close()
 	}
 	prompt := os.Args[len(os.Args)-1]
+	if _, err := os.Stat(log + ".hold"); err == nil {
+		prompt = "hold\n" + prompt
+	}
 	code := 0
 	for _, line := range strings.Split(prompt, "\n") {
 		f := strings.SplitN(line, " ", 3)
@@ -425,8 +431,10 @@ func TestReviewRunsInTheAuthorsWorktree(t *testing.T) {
 	waitFor(t, "finished", func() bool { return w.job(t, author.ID).Ended != nil })
 
 	// The reviewer's reply, as the gateway would store it: written into the
-	// record as soon as the review's turn has started, before it ends.
+	// record as soon as the review's turn has started, before it ends. The
+	// review's prompt is the control plane's, so the fake holds by file.
 	os.Remove(w.log + ".go")
+	write(t, w.log+".hold", "")
 	rev, _, err := w.q.Review(queue.DefaultTeam, author.ID, "claude", "sonnet", "", false)
 	if err != nil {
 		t.Fatal(err)
