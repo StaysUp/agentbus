@@ -124,6 +124,11 @@ differs per harness lives in `harness/`, one file each, and the rest of the code
 
 - Every change is reviewed by someone other than its author before it lands on `main`.
 - Keep commits small, with a message that says what changed and why.
+- **When one area keeps failing review, replace the mechanism.** If two review rounds in a row find
+  new problems in the same area, and some come from the last fix, stop patching. Ask what single
+  rule would make every one of those cases impossible, build that, and add a test for each earlier
+  finding. (Step 4 of 0.3: six rounds of case fixes to record ownership ended in one round once
+  "control assigns the session to the job" replaced them.)
 - New dependencies need a reason in the commit message. Third-party code shipped in the binary is
   listed in `THIRD_PARTY.md`.
 
