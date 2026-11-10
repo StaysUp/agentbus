@@ -40,11 +40,19 @@ const (
 	modeConnector = "connector"
 )
 
-// Where a runner's agents send model calls (agentbus runner -gateway).
+// Where a runner's agents' model calls get their credential (agentbus runner
+// -gateway). The runner's own gateway records them either way.
 const (
-	gatewayLocal  = "local"  // the runner's own gateway, on its machine
-	gatewayServer = "server" // the server's gateway: not built yet
+	// gatewayServer: the runner holds no secret. Its gateway sends each call
+	// on to the server's, which adds the credential (jobs/relay.go).
+	gatewayServer = "server"
+	// gatewayLocal: the call goes to the vendor with the sign-in or key of
+	// the runner's own machine, as before.
+	gatewayLocal = "local"
 )
+
+// noSecrets: a runner whose agents' credentials come from the server.
+func (c config) noSecrets() bool { return c.mode == modeRunner && c.gatewayMode != gatewayLocal }
 
 // hasQueue: the service keeps the job queue (up, server).
 func (c config) hasQueue() bool { return c.mode != modeRunner }
@@ -61,8 +69,9 @@ func (c config) modeName() string {
 
 const usage = `usage: agentbus up     [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false] [-max-runs 4]
        agentbus server [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false]
-       agentbus runner -server URL [-enroll-token-file F] [-gateway local] [-capacity 4] [-name NAME] [-folder DIR]... [-labels a,b] [-listen 127.0.0.1:0] [-replay=false]
+       agentbus runner -server URL [-enroll-token-file F] [-gateway server|local] [-capacity 4] [-name NAME] [-folder DIR]... [-labels a,b] [-listen 127.0.0.1:0] [-replay=false]
        agentbus connector -server URL -folder DIR... [-enroll-token-file F] [-name NAME]
+       agentbus connect HARNESS           (on control, once: keep your own subscription's token for your runners)
        agentbus api METHOD PATH [BODY]   (inside a turn: calls this service with the turn's token)
        agentbus version`
 
@@ -112,7 +121,7 @@ func parse(args []string, home string, stderr io.Writer) (config, bool) {
 		server = fl.String("server", "", "the server's URL, such as http://192.168.1.10:8787 (required)")
 		enrollFile = fl.String("enroll-token-file", "", "the server's enroll_token, copied here with mode 0600; default <data folder>/enroll_token")
 		runnerName = fl.String("name", "", "the runner's name; default the host name")
-		gatewayMode = fl.String("gateway", gatewayLocal, "where agents send model calls: local (this runner's own gateway) or server (not built yet)")
+		gatewayMode = fl.String("gateway", gatewayServer, "where agents' model calls get their credential: server (the server's gateway adds it; this runner holds no key or sign-in) or local (this machine's own sign-in and keys)")
 	}
 	if err := fl.Parse(args[1:]); err != nil {
 		return c, false
@@ -141,15 +150,7 @@ func parse(args []string, home string, stderr io.Writer) (config, bool) {
 			return c, false
 		}
 		switch *gatewayMode {
-		case gatewayLocal:
-		case gatewayServer:
-			// TODO(central gateway): agents of a runner send model calls to
-			// the server's gateway, which adds API keys on the way out and
-			// keeps the record central, so runners hold no secret. It needs
-			// the server's gateway to take calls from other machines, the
-			// key store, and the runner's turns to name the server's base URL.
-			fmt.Fprintf(stderr, "%s: -gateway server is not built yet; agents send model calls to this runner's own gateway (-gateway local)\n", name)
-			return c, false
+		case gatewayLocal, gatewayServer:
 		default:
 			fmt.Fprintf(stderr, "%s: -gateway must be local or server\n", name)
 			return c, false

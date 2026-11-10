@@ -292,3 +292,63 @@ func (s *Store) CallPiece(exchange string, n int, reply bool) (p Piece, count in
 	return Piece{Kind: ref.Kind, Label: ref.Label, Hash: ref.Hash, Size: len(b),
 		ApproxTokens: body.ApproxTokens(len(b)), JSON: b}, count, nil
 }
+
+// KeepSent stores a call another service kept, such as a runner's, as
+// CallContext read it there: each piece that carries its bytes is stored
+// once, after its hash is checked; a piece without them must be stored
+// already. A call with pieces this store lacks is not stored, and their
+// hashes are returned, for the sender to send again with their bytes. A
+// second call with the same exchange is ignored.
+func (s *Store) KeepSent(c CallContext) (missing []string, err error) {
+	refs := make([]pieceRef, len(c.Pieces))
+	for i, p := range c.Pieces {
+		if p.JSON != nil && (body.Piece{JSON: p.JSON}).Hash() != p.Hash {
+			return nil, errors.New("store: a piece's bytes do not match its hash")
+		}
+		refs[i] = pieceRef{Hash: p.Hash, Kind: p.Kind, Label: p.Label}
+	}
+	list, err := json.Marshal(refs)
+	if err != nil {
+		return nil, fmt.Errorf("store: encode a call's pieces: %w", err)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return nil, ErrClosed
+	}
+	tx, err := s.w.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("store: write a call: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	now := c.Time.UnixNano()
+	for _, p := range c.Pieces {
+		if p.JSON != nil {
+			if _, err := tx.Exec(`INSERT INTO pieces(hash, bytes, size, created) VALUES(?, ?, ?, ?) ON CONFLICT(hash) DO NOTHING`,
+				p.Hash, []byte(p.JSON), len(p.JSON), now); err != nil {
+				return nil, fmt.Errorf("store: write a piece: %w", err)
+			}
+			continue
+		}
+		var n int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM pieces WHERE hash = ?`, p.Hash).Scan(&n); err != nil {
+			return nil, fmt.Errorf("store: read a piece: %w", err)
+		}
+		if n == 0 {
+			missing = append(missing, p.Hash)
+		}
+	}
+	if len(missing) > 0 {
+		// The pieces that came are kept: the second send needs only the rest.
+		return missing, tx.Commit()
+	}
+	if _, err := tx.Exec(`INSERT INTO calls(exchange, session, vendor, time, size, top, pieces)
+		VALUES(?, ?, ?, ?, ?, ?, ?) ON CONFLICT(exchange) DO NOTHING`,
+		c.Exchange, c.Session, c.Vendor, now, c.Size, string(c.Request), string(list)); err != nil {
+		return nil, fmt.Errorf("store: write a call: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("store: write a call: %w", err)
+	}
+	return nil, nil
+}

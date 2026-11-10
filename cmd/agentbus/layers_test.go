@@ -69,6 +69,10 @@ func TestPackageLayers(t *testing.T) {
 			"cost", "replay", "store", "body", "logfile", "settings", "cmd", "jobs", "runner"}},
 		{[]string{"isolation", "run"}, []string{"folders", "connector"}},
 		{[]string{"runner"}, []string{"connector"}},
+		// credentials, where control's gateway gets a credential, uses
+		// nothing of the module.
+		{[]string{"credentials"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
+			"cost", "replay", "store", "body", "logfile", "settings", "cmd", "folders", "connector", "blobs"}, jobSide...)},
 		{[]string{"blobs"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
 			"cost", "replay", "store", "body", "logfile", "settings", "cmd", "folders", "connector"}, jobSide...)},
 	} {
@@ -91,7 +95,7 @@ func TestPackageLayers(t *testing.T) {
 }
 
 // controlPackages are the control side: they never touch a person's folder.
-var controlPackages = []string{"api", "jobs", "queue", "agents", "store", "gateway", "replay", "settings"}
+var controlPackages = []string{"api", "jobs", "queue", "agents", "store", "gateway", "replay", "settings", "credentials"}
 
 // The calls that touch files or start programs. A control package makes
 // none of them, but where an entry of controlAllowed names it: its own data
@@ -111,6 +115,16 @@ var touchCalls = map[string][]string{
 // folder, never a person's.
 var controlAllowed = []string{
 	"agents/agents.go Open os.ReadFile",
+	// The vendor's own login, which prints a subscription's token, and the
+	// folder control keeps those tokens in.
+	"credentials/connect.go Manager.Connect exec.Command",
+	"credentials/connect.go Run exec.Command",
+	"credentials/subscriptions.go Subscriptions.Put os.CreateTemp",
+	"credentials/subscriptions.go Subscriptions.Put os.MkdirAll",
+	"credentials/subscriptions.go Subscriptions.Put os.Remove",
+	"credentials/subscriptions.go Subscriptions.Put os.Rename",
+	"credentials/subscriptions.go Subscriptions.Remove os.Remove",
+	"credentials/subscriptions.go Subscriptions.read os.ReadFile",
 	"agents/agents.go Store.save os.CreateTemp",
 	"agents/agents.go Store.save os.Remove",
 	"agents/agents.go Store.save os.Rename",

@@ -62,6 +62,26 @@ type Info struct {
 	// too. When false, a turn of it on OpenRouter neither gives nor takes a
 	// replayed history: the turn after gets the earlier turns as text.
 	ReplayOnOpenRouter bool
+	// Login is its own login that prints a long-lived token for the
+	// person's subscription, so they can connect it once on control for
+	// the runners they own. Nil: its subscription cannot be used on a
+	// runner yet.
+	Login *Login
+}
+
+// Login is a harness's own login that prints a token (credentials.Manager
+// runs it on control), and how a child is handed such a token.
+type Login struct {
+	// Args are the login's arguments, after the program's name.
+	Args []string
+	// Prefix starts every token it prints; Token matches the whole token.
+	Prefix, Token string
+	// ValidDays is how long a token works, as the vendor says.
+	ValidDays int
+	// TokenEnv is the variable the harness reads such a token from. On a
+	// runner it holds a placeholder, which control's gateway swaps for the
+	// token.
+	TokenEnv string
 }
 
 // Access is one way a harness reaches a model.

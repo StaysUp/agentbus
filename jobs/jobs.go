@@ -27,6 +27,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/blobs"
+	"github.com/staysup/agentbus/credentials"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/settings"
@@ -81,12 +82,18 @@ type Config struct {
 	// Sweeper cleans Blobs; a closed session asks it for a sweep. Nil:
 	// none.
 	Sweeper *Sweeper
+	// Relay is where control sends runners' model calls, by the name in
+	// their path (relay.go), with the credential Credentials gives. Nil:
+	// no relay.
+	Relay       map[string]Upstream
+	Credentials credentials.Source
 }
 
 // Server is the http.Handler.
 type Server struct {
 	cfg          Config
 	token, enrol [32]byte
+	tokenKey     [32]byte // signs runners' turn tokens (tokens.go)
 	mux          *http.ServeMux
 }
 
@@ -104,7 +111,8 @@ func New(cfg Config) (*Server, error) {
 	if cfg.MaxWait == 0 {
 		cfg.MaxWait = MaxWait
 	}
-	s := &Server{cfg: cfg, token: sha256.Sum256([]byte(cfg.Token)), enrol: sha256.Sum256([]byte(cfg.EnrollToken)), mux: http.NewServeMux()}
+	s := &Server{cfg: cfg, token: sha256.Sum256([]byte(cfg.Token)), enrol: sha256.Sum256([]byte(cfg.EnrollToken)), mux: http.NewServeMux(),
+		tokenKey: sha256.Sum256([]byte("agentbus runner turn tokens\x00" + cfg.Token))}
 	main := s.main
 	s.mux.HandleFunc("POST /api/v0/jobs", main(s.createJob))
 	s.mux.HandleFunc("GET /api/v0/jobs", main(s.listJobs))
@@ -125,6 +133,7 @@ func New(cfg Config) (*Server, error) {
 	s.mux.HandleFunc("POST /api/v0/attempts/{id}/finish", s.runner(s.finish))
 	s.mux.HandleFunc("POST /api/v0/attempts/{id}/snapshot", s.runner(s.snapshot))
 	s.mux.HandleFunc("POST /api/v0/attempts/{id}/record", s.runner(s.record))
+	s.mux.HandleFunc("POST /api/v0/attempts/{id}/calls", s.runner(s.calls))
 	s.mux.HandleFunc("POST /api/v0/blobs", s.runner(s.blobsMissing))
 	s.mux.HandleFunc("POST /api/v0/packs", s.runner(s.blobPack))
 	s.mux.HandleFunc("POST /api/v0/packs/fetch", s.runner(s.blobFetch))
@@ -843,6 +852,10 @@ type AttemptStarted struct {
 	Attempt queue.Attempt `json:"attempt"`
 	// Cancel: the job was asked to stop. Finish it as cancelled.
 	Cancel bool `json:"cancel"`
+	// Token is the attempt's turn token, minted by control (tokens.go): the
+	// agent's token for control's API, and the placeholder credential of its
+	// model calls. It works while the attempt is current.
+	Token string `json:"token"`
 }
 
 func (s *Server) start(w http.ResponseWriter, r *http.Request, rn queue.Runner) {
@@ -856,7 +869,7 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request, rn queue.Runner) 
 		s.queueError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, AttemptStarted{a, c})
+	writeJSON(w, http.StatusOK, AttemptStarted{Attempt: a, Cancel: c, Token: s.mint(rn.ID, a.ID, a.Number)})
 }
 
 // AttemptBeat is the answer to a heartbeat.

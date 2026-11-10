@@ -24,10 +24,31 @@ func runWire(getenv func(string) string, environ func() []string, lookPath func(
 			return engine.Launch{}, engine.ErrOwnEndpoint
 		}
 		var env, pre []string
-		switch acc.Kind {
-		case "", harness.Subscription:
+		switch {
+		case acc.Placeholder != "" && (acc.Kind == "" || acc.Kind == harness.Subscription):
+			// A runner that holds no secrets: the child's sign-in is the
+			// placeholder, and control's gateway adds the person's own
+			// subscription token, connected once on control.
+			l := h.Info().Login
+			if l == nil {
+				return engine.Launch{}, engine.Refused(http.StatusBadRequest, "a "+h.Info().Label+
+					" subscription cannot be used on a runner yet; use an OpenRouter agent there, or run this agent with agentbus up")
+			}
 			env, pre = h.Wire(baseURL)
-		case harness.OpenRouter:
+			env = append(env, l.TokenEnv+"="+acc.Placeholder)
+		case acc.Placeholder != "" && acc.Kind == harness.OpenRouter:
+			// The key's variable holds the placeholder; control's gateway
+			// adds the key from its own environment. Nothing of this
+			// machine's environment is read.
+			if acc.KeyEnv == "" {
+				return engine.Launch{}, engine.Refused(http.StatusBadRequest, "this agent names no variable for its OpenRouter key")
+			}
+			env, pre = h.WireOpenRouter(harness.OpenRouterWire{Base: baseURL + openRouterPrefix,
+				KeyEnv: acc.KeyEnv, Key: acc.Placeholder, Model: acc.Model})
+			env = append(env, acc.KeyEnv+"="+acc.Placeholder)
+		case acc.Kind == "" || acc.Kind == harness.Subscription:
+			env, pre = h.Wire(baseURL)
+		case acc.Kind == harness.OpenRouter:
 			if acc.KeyEnv == "" || getenv(acc.KeyEnv) == "" {
 				return engine.Launch{}, engine.Refused(http.StatusBadRequest, "this agent reads its OpenRouter key from "+
 					acc.KeyEnv+", which is not set where the turn runs; set it and restart agentbus")

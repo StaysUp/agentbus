@@ -70,9 +70,13 @@ func fakeAgent() {
 	for _, body := range calls {
 		req, _ := http.NewRequest("POST", os.Getenv("ANTHROPIC_BASE_URL")+"/v1/messages", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
-		// As Claude Code sends a gateway credential.
+		// As Claude Code sends a gateway credential, or the OAuth token of
+		// claude setup-token.
 		if tok := os.Getenv("ANTHROPIC_AUTH_TOKEN"); tok != "" {
 			req.Header.Set("Authorization", "Bearer "+tok)
+		} else if tok := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+			req.Header.Set("anthropic-beta", "oauth-2025-04-20")
 		}
 		resp, err := http.DefaultClient.Do(req)
 		if err == nil {
@@ -93,6 +97,21 @@ func fakeAgent() {
 					io.Copy(io.Discard, resp.Body)
 					resp.Body.Close()
 				}
+			}
+		}
+	}
+	// With AGENTBUS_FAKE_ASK, a turn whose prompt is "ask someone" asks
+	// another agent through the API, with its own token, as agentbus-api
+	// does: POST /api/v0/turns with that body.
+	if b := os.Getenv("AGENTBUS_FAKE_ASK"); b != "" && len(os.Args) > 1 && os.Args[len(os.Args)-1] == "ask someone" {
+		req, _ := http.NewRequest("POST", os.Getenv("AGENTBUS_URL")+"/api/v0/turns", strings.NewReader(b))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+os.Getenv("AGENTBUS_TOKEN"))
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			out, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if p := os.Getenv("AGENTBUS_FAKE_ASKED"); p != "" {
+				os.WriteFile(p, []byte(fmt.Sprintf("%d %s", resp.StatusCode, out)), 0o600)
 			}
 		}
 	}

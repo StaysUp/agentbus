@@ -32,6 +32,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -44,6 +45,7 @@ import (
 	"github.com/staysup/agentbus/blobs"
 	"github.com/staysup/agentbus/body"
 	"github.com/staysup/agentbus/cost"
+	"github.com/staysup/agentbus/credentials"
 	"github.com/staysup/agentbus/folders"
 	"github.com/staysup/agentbus/gateway"
 	"github.com/staysup/agentbus/harness"
@@ -103,6 +105,9 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	if err != nil {
 		own.Print(err)
 		return 1
+	}
+	if args[0] == "connect" {
+		return runConnect(args[1:], home, os.Stdin, stdout, stderr)
 	}
 	c, ok := parse(args, home, stderr)
 	if !ok {
@@ -197,6 +202,7 @@ type service struct {
 	blobs    *blobs.Store      // the control plane's blob store (up, server)
 	blobSwp  *jobs.Sweeper     // cleans it
 	log      *logfile.Log      // logs/service.log
+	logins   *credentials.Manager
 	done     chan error
 	once     sync.Once
 
@@ -256,6 +262,16 @@ func start(c config) (*service, error) {
 	// The data folder's own files, which no turn may edit: a turn that could
 	// would raise its own limits, or read a token.
 	protect := cfgStore.Protected()
+	// Control keeps the person's connected subscriptions there: no turn
+	// edits them either.
+	subs := &credentials.Subscriptions{Dir: filepath.Join(c.home, subscriptionsDir)}
+	if c.hasQueue() {
+		for _, h := range harness.All() {
+			if h.Info().Login != nil {
+				protect = append(protect, filepath.Join(subs.Dir, h.Info().Name+".json"))
+			}
+		}
+	}
 	// The enrollment token adds a runner. A service with a queue keeps it in
 	// its data folder: the built-in runner reads it, and a runner on
 	// another machine is given a copy. A runner reads the server's copy.
@@ -279,6 +295,8 @@ func start(c config) (*service, error) {
 	// service on this folder.
 	var q *queue.Queue
 	var jobsAPI http.Handler // nil, not a nil *jobs.Server, without a queue
+	var runnerJobs *jobs.Server
+	var logins *credentials.Manager // connects subscriptions, where the queue is
 	closeQ := func() {
 		if q != nil {
 			q.Close()
@@ -336,14 +354,27 @@ func start(c config) (*service, error) {
 		}
 		bs.Clean(time.Hour)
 		blobSweep = jobs.NewSweeper(q, bs, nil) // logs once the log is open
+		// Runners' model calls get their credential here: an API key from
+		// this process's environment, by its variable's name, or the
+		// person's own subscription, connected once (credentials).
+		orUp := c.openrouter
+		if orUp == nil {
+			orUp, _ = url.Parse(openrouter)
+		}
+		relay := map[string]jobs.Upstream{
+			relayAnthropic:  {URL: c.upstream, Access: credentials.AccessSubscription},
+			relayOpenRouter: {URL: orUp, Access: credentials.AccessOpenRouter},
+		}
+		creds := credentials.Plug{credentials.AccessOpenRouter: credentials.Env{Getenv: c.getenvOr()}, credentials.AccessSubscription: subs}
 		js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollToken, Heartbeat: c.heartbeat, Agents: saved, Settings: cfgStore,
-			Folders: issuer, Blobs: bs, Sweeper: blobSweep, Record: st})
+			Folders: issuer, Blobs: bs, Sweeper: blobSweep, Record: st, Relay: relay, Credentials: creds})
 		if err != nil {
 			closeQ()
 			st.Close()
 			return nil, err
 		}
-		jobsAPI = js
+		jobsAPI, runnerJobs = js, js
+		logins = subscriptionLogins(c, subs)
 	}
 	// The logs are opened after the store, which refuses a second service on
 	// this folder, so two services never write one log.
@@ -450,9 +481,14 @@ func start(c config) (*service, error) {
 			return nil, err
 		}
 	}
-	a, err := api.New(api.Config{Store: st, Token: token, TurnsToken: turnsToken, Port: port, AnyHost: !loopback,
+	acfg := api.Config{Store: st, Token: token, TurnsToken: turnsToken, Port: port, AnyHost: !loopback,
 		BaseURL: baseURL, Origin: c.origin, Hosts: c.hosts, Environ: c.environ, Folders: issuer, Build: build(debug.ReadBuildInfo()),
-		Queue: q, Jobs: jobsAPI, Engine: eng, TurnWait: c.turnWait, Agents: saved, Settings: cfgStore})
+		Queue: q, Jobs: jobsAPI, Engine: eng, TurnWait: c.turnWait, Agents: saved, Settings: cfgStore, Subscriptions: logins}
+	var relayHandler http.Handler
+	if runnerJobs != nil {
+		acfg.RunnerTokens, relayHandler = runnerJobs.TurnGrant, runnerJobs.Relay()
+	}
+	a, err := api.New(acfg)
 	if err != nil {
 		ln.Close()
 		svcLog.Close()
@@ -463,14 +499,23 @@ func start(c config) (*service, error) {
 	// Every model.responded is priced, and every turn.started of a run's
 	// session gets the run's agent and folder, before it is stored.
 	sink := cost.Sink{Table: cost.Default(), Next: engine.TurnSink(st, st)}
-	anth := gateway.New(c.upstream, anthropic.Adapter{}, sink)
-	oai := gateway.New(c.chatgpt, openai.Adapter{}, sink)
-	// An OpenRouter agent's calls, under /openrouter of its base URL: one
-	// gateway per API format, both to OpenRouter.
-	orURL := c.openrouter
+	anthURL, chatURL, orURL := c.upstream, c.chatgpt, c.openrouter
 	if orURL == nil {
 		orURL, _ = url.Parse(openrouter)
 	}
+	// A runner that holds no secret sends each call on to the server's
+	// relay, which adds the credential (jobs/relay.go). It records the call
+	// here as before. codex's ChatGPT sign-in is not relayed yet: its turns
+	// are refused on such a runner before they start (wire.go).
+	if c.noSecrets() {
+		srv := strings.TrimSuffix(c.server, "/") + jobs.RelayPrefix
+		anthURL, orURL = mustParse(srv+relayAnthropic), mustParse(srv+relayOpenRouter)
+		chatURL = mustParse(srv + "chatgpt")
+	}
+	anth := gateway.New(anthURL, anthropic.Adapter{}, sink)
+	oai := gateway.New(chatURL, openai.Adapter{}, sink)
+	// An OpenRouter agent's calls, under /openrouter of its base URL: one
+	// gateway per API format, both to OpenRouter.
 	orAnth := gateway.New(orURL, anthropic.Adapter{}, sink)
 	orOAI := gateway.New(orURL, openai.Adapter{}, sink)
 	orAnth.SetPrefix(openRouterPrefix)
@@ -509,9 +554,9 @@ func start(c config) (*service, error) {
 	}
 	host, _, _ := net.SplitHostPort(c.listen)
 	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: gws, api: a, eng: eng, store: st, blobs: bs, blobSwp: blobSweep,
-		queue: q, remote: remote, settings: cfgStore, folders: fr, log: svcLog, done: make(chan error, 1)}
+		queue: q, remote: remote, settings: cfgStore, folders: fr, log: svcLog, logins: logins, done: make(chan error, 1)}
 	s.srv = &http.Server{
-		Handler:           logRequests(svcLog, route(a, vendors{anth, oai, orAnth, orOAI}, !loopback)),
+		Handler:           logRequests(svcLog, route(a, vendors{anth, oai, orAnth, orOAI, relayHandler}, !loopback)),
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          log.New(io.Discard, "", 0),
 	}
@@ -614,7 +659,7 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 		Engine: s.eng, Store: s.store, Logf: svcLog.Printf, Labels: c.labels,
 		LookPath: c.lookPath, Environ: c.environ,
 		Workdir: filepath.Join(c.home, "worktrees"), StateFile: filepath.Join(c.home, "runner.json"), Settings: s.settings,
-		Forward: c.mode == modeRunner}
+		Forward: c.mode == modeRunner, NoSecrets: c.noSecrets()}
 	// A runner of a server keeps its own store; a connector beside it
 	// shares the one handle.
 	var own *blobs.Store
@@ -663,6 +708,104 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 	return nil
 }
 
+// The relay's names for the vendors it adds credentials for: under
+// jobs.RelayPrefix of the server.
+const (
+	relayAnthropic  = "anthropic"
+	relayOpenRouter = "openrouter"
+)
+
+// subscriptionsDir is where control keeps connected subscriptions, in its
+// data folder.
+const subscriptionsDir = "subscriptions"
+
+// getenvOr is c.getenv, or the process's own environment.
+func (c config) getenvOr() func(string) string {
+	if c.getenv != nil {
+		return c.getenv
+	}
+	return os.Getenv
+}
+
+func mustParse(s string) *url.URL {
+	u, err := url.Parse(s)
+	if err != nil {
+		panic(err)
+	}
+	return u
+}
+
+// subscriptionLogins are the harnesses' own logins, for connecting a
+// subscription on control (harness.Login).
+func subscriptionLogins(c config, subs *credentials.Subscriptions) *credentials.Manager {
+	look := c.lookPath
+	if look == nil {
+		look = exec.LookPath
+	}
+	m := &credentials.Manager{Store: subs, Logins: map[string]credentials.Login{}}
+	for _, h := range harness.All() {
+		l := h.Info().Login
+		if l == nil {
+			continue
+		}
+		path, err := look(h.Info().Name)
+		if err != nil {
+			path = h.Info().Name // the connect says it could not start
+		}
+		m.Logins[h.Info().Name] = credentials.Login{Path: path, Args: l.Args, Prefix: l.Prefix,
+			Token: regexp.MustCompile(l.Token), Valid: time.Duration(l.ValidDays) * 24 * time.Hour}
+	}
+	return m
+}
+
+// runConnect is agentbus connect HARNESS: the harness's own login, run here
+// on control in this terminal, once. The token it prints is kept in the data
+// folder's subscriptions (never shown), and control's gateway adds it to the
+// model calls of agents on the person's runners when permissions.toml says
+// subscriptions_on_runners = "own".
+func runConnect(args []string, home string, stdin io.Reader, stdout, stderr io.Writer) int {
+	if len(args) != 1 {
+		fmt.Fprintln(stderr, "usage: agentbus connect HARNESS   (such as claude)")
+		return 2
+	}
+	subs := &credentials.Subscriptions{Dir: filepath.Join(home, subscriptionsDir)}
+	l, ok := subscriptionLogins(config{}, subs).Logins[args[0]]
+	if !ok {
+		fmt.Fprintf(stderr, "agentbus connect: %s has no login AgentBus can keep a token from; harnesses: %s\n", args[0], loginNames())
+		return 2
+	}
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		fmt.Fprintf(stderr, "agentbus connect: the data folder %s could not be made\n", home)
+		return 1
+	}
+	fmt.Fprintf(stdout, "Running %s %s. Sign in when it asks; AgentBus keeps the token it prints and never shows it.\n\n",
+		args[0], strings.Join(l.Args, " "))
+	tok, err := credentials.Run(l, stdin, stdout)
+	if err != nil {
+		fmt.Fprintf(stderr, "agentbus connect: %v\n", err)
+		return 1
+	}
+	if err := subs.Put(args[0], tok, l.Valid); err != nil {
+		fmt.Fprintf(stderr, "agentbus connect: the token could not be kept in %s\n", subs.Dir)
+		return 1
+	}
+	fmt.Fprintf(stdout, "\nConnected: %s's token is kept in %s, readable by you only, for %d days.\n"+
+		"Control adds it to your runners' calls once permissions.toml says subscriptions_on_runners = \"own\".\n",
+		args[0], subs.Dir, int(l.Valid.Hours()/24))
+	return 0
+}
+
+// loginNames are the harnesses agentbus connect takes.
+func loginNames() string {
+	var n []string
+	for _, h := range harness.All() {
+		if h.Info().Login != nil {
+			n = append(n, h.Info().Name)
+		}
+	}
+	return strings.Join(n, ", ")
+}
+
 // settleTimeout bounds how long a turn's session.closed waits for the
 // gateway to write the turn's calls.
 const settleTimeout = 30 * time.Second
@@ -706,6 +849,10 @@ func (k keeper) KeepReply(r body.Reply) error {
 type vendors struct {
 	anthropic, openai               http.Handler // the vendors' own, for a subscription
 	openrouterAnth, openrouterResps http.Handler // OpenRouter's, under /openrouter
+	// relay takes runners' model calls and adds their credential, under
+	// jobs.RelayPrefix; nil without a queue. A runner's turn token guards
+	// it, so it answers callers on other machines.
+	relay http.Handler
 }
 
 func route(a *api.API, v vendors, open bool) http.Handler {
@@ -720,6 +867,10 @@ func route(a *api.API, v vendors, open bool) http.Handler {
 		}
 		if r.URL.Path == "/" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 			http.Redirect(w, r, "/docs", http.StatusFound)
+			return
+		}
+		if v.relay != nil && strings.HasPrefix(r.URL.Path, jobs.RelayPrefix) {
+			v.relay.ServeHTTP(w, r)
 			return
 		}
 		_, _, rest := gateway.SplitSession(r.URL.EscapedPath())
@@ -805,6 +956,9 @@ func (s *service) shutdown() {
 	if s.stopSweep != nil {
 		s.stopSweep()
 		<-s.sweepDone
+	}
+	if s.logins != nil {
+		s.logins.Stop()
 	}
 	if s.queue != nil {
 		_ = s.queue.Close()

@@ -199,11 +199,21 @@ var jobRoutes = []route{
 		idDoc:   "The attempt id: the turn id. Another shape gets 404.",
 		tag:     "Runners",
 		summary: "Send a turn's record",
-		doc: "A runner of a server sends its own record of the attempt's turn, at the turn's end, so the server's record holds the turn: " +
+		doc: "A runner of a server sends its own record of the attempt's turn, while it runs and at its end, so the server's record holds the turn: " +
 			"its session, prompt, model calls and how it ended. Each event keeps its id, and one already held is not stored again. " +
 			"An event's folder (the copy's path on the runner) is dropped; folder_ref stays.",
 		body:    jobs.RecordBatch{},
 		replies: []reply{ok(200, jobs.RecordAck{}, "Stored."), badRequest, noAttempt, staleReply, storeFailed},
+		self:    true, serve: jobsRoute},
+	{method: "POST", path: "/api/v0/attempts/{id}/calls", op: "attemptCalls",
+		idDoc:   "The attempt id: the turn id. Another shape gets 404.",
+		tag:     "Runners",
+		summary: "Send a turn's model calls",
+		doc: "A runner of a server sends the model calls of the attempt's turn as its own record kept them, while the turn runs, " +
+			"so a cockpit on the server shows each call's context and reply. A piece the server holds may come without its bytes; " +
+			"the answer lists the hashes it lacks, and those calls are sent again with them. A call already held is not stored again.",
+		body:    jobs.CallBatch{},
+		replies: []reply{ok(200, jobs.CallAck{}, "Stored, or the pieces still missing."), badRequest, noAttempt, staleReply, storeFailed},
 		self:    true, serve: jobsRoute},
 	{method: "POST", path: "/api/v0/blobs", op: "missingBlobs",
 		tag:     "Runners",

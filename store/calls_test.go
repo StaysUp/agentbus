@@ -82,3 +82,33 @@ func TestCallContextKeepsOrder(t *testing.T) {
 		t.Error("an unknown exchange was found")
 	}
 }
+
+// A call another service kept is stored once its pieces are all here: one
+// without its bytes that this store lacks is named, and the call waits.
+func TestKeepSentAsksForMissingPieces(t *testing.T) {
+	s := newStore(t)
+	sys := body.Piece{Kind: body.System, JSON: json.RawMessage(`{"type":"text","text":"sys"}`)}
+	msg := body.Piece{Kind: body.Message, Label: "user", JSON: json.RawMessage(`{"role":"user","content":"hi"}`)}
+	c := CallContext{Exchange: "x-r-1", Session: "s1", Vendor: "anthropic", Time: time.Now(), Size: 10, Request: json.RawMessage(`{"model":"m"}`),
+		Pieces: []Piece{{Kind: sys.Kind, Hash: sys.Hash()}, {Kind: msg.Kind, Label: msg.Label, Hash: msg.Hash(), JSON: msg.JSON}}}
+	missing, err := s.KeepSent(c)
+	if err != nil || len(missing) != 1 || missing[0] != sys.Hash() {
+		t.Fatalf("%v %v", missing, err)
+	}
+	if _, found, _ := s.CallContext("x-r-1", false); found {
+		t.Fatal("a call with a missing piece was stored")
+	}
+	c.Pieces[0].JSON = sys.JSON
+	c.Pieces[1].JSON = nil // stored by the first send
+	if missing, err = s.KeepSent(c); err != nil || len(missing) != 0 {
+		t.Fatalf("%v %v", missing, err)
+	}
+	got, found, err := s.CallContext("x-r-1", true)
+	if err != nil || !found || len(got.Pieces) != 2 || string(got.Pieces[0].JSON) != string(sys.JSON) || string(got.Pieces[1].JSON) != string(msg.JSON) {
+		t.Fatalf("%+v %v", got, err)
+	}
+	c.Pieces[0].JSON = json.RawMessage(`{"forged":true}`)
+	if _, err := s.KeepSent(c); err == nil {
+		t.Fatal("a piece that does not match its hash was taken")
+	}
+}

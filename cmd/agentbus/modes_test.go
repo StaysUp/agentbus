@@ -25,7 +25,6 @@ func TestModeFlags(t *testing.T) {
 		{[]string{"down"}, "usage:"},
 		{[]string{"runner"}, "-server must be the server's URL"},
 		{[]string{"runner", "-server", "ftp://x"}, "-server must be the server's URL"},
-		{[]string{"runner", "-server", "http://127.0.0.1:1", "-gateway", "server"}, "-gateway server is not built yet"},
 		{[]string{"runner", "-server", "http://127.0.0.1:1", "-gateway", "other"}, "-gateway must be local or server"},
 		{[]string{"runner", "-server", "http://127.0.0.1:1", "-capacity", "65"}, "-capacity must be 1 to 64"},
 		{[]string{"runner", "-server", "http://127.0.0.1:1", "-max-runs", "2"}, "not defined: -max-runs"},

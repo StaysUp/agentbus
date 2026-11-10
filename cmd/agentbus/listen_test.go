@@ -73,7 +73,7 @@ func TestRouteOpenRouter(t *testing.T) {
 	gw := func(name string) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hit = name })
 	}
-	h := route(nil, vendors{gw("anthropic"), gw("openai"), gw("or-anthropic"), gw("or-responses")}, false)
+	h := route(nil, vendors{gw("anthropic"), gw("openai"), gw("or-anthropic"), gw("or-responses"), nil}, false)
 	for path, want := range map[string]string{
 		"/s/abc/t/t_1/v1/messages":                         "anthropic",
 		"/s/abc/t/t_1/backend-api/codex/responses":         "openai",
@@ -118,7 +118,7 @@ func TestGatewayThisMachineOnly(t *testing.T) {
 		{true, "[::1]:5000", "/s/abc/t/t_1/openrouter/v1/messages", true},
 	} {
 		anth, oai = false, false
-		h := route(nil, vendors{reached("anthropic", &anth), reached("openai", &oai), reached("openrouter", &anth), reached("openrouter", &oai)}, tc.open)
+		h := route(nil, vendors{reached("anthropic", &anth), reached("openai", &oai), reached("openrouter", &anth), reached("openrouter", &oai), nil}, tc.open)
 		r := httptest.NewRequest("POST", tc.path, nil)
 		r.RemoteAddr = tc.remote
 		r = r.WithContext(context.WithValue(r.Context(), http.LocalAddrContextKey, net.Addr(local)))
@@ -163,7 +163,7 @@ func TestRootAndUnroutedPaths(t *testing.T) {
 				{"POST", "/s/abc/t/t_1/openrouter/v2/x", http.StatusNotFound, ""},
 			} {
 				reached = false
-				h := route(nil, vendors{gw, gw, gw, gw}, open)
+				h := route(nil, vendors{gw, gw, gw, gw, nil}, open)
 				r := httptest.NewRequest(tc.method, tc.path, nil)
 				r.RemoteAddr = remote
 				r = r.WithContext(context.WithValue(r.Context(), http.LocalAddrContextKey, net.Addr(local)))

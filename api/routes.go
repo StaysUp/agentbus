@@ -392,7 +392,7 @@ var routes = slices.Concat([]route{
 		doc:     "This description.",
 		replies: []reply{ok(200, map[string]any{}, "This document.")},
 		public:  true},
-}, jobRoutes, settingsRoutes)
+}, jobRoutes, settingsRoutes, subscriptionRoutes)
 
 // match reports whether p is rt's path, and the id in it.
 func (rt *route) match(p string) (id string, ok bool) {

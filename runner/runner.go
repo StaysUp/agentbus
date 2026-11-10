@@ -78,11 +78,16 @@ type Config struct {
 	LookPath func(string) (string, error)
 	Environ  func() []string
 
-	// Forward sends each turn's record to the control plane at the turn's
-	// end (POST /api/v0/attempts/{id}/record): a runner of a server, whose
-	// Store is its own. In agentbus up Store is the control plane's, and
-	// nothing is sent.
+	// Forward sends each turn's record to the control plane while the turn
+	// runs (POST /api/v0/attempts/{id}/record and /calls): a runner of a
+	// server, whose Store is its own. Its agents then call control's API,
+	// at Queue, with the turn token control minted. In agentbus up Store is
+	// the control plane's, nothing is sent, and the engine mints the token.
 	Forward bool
+	// NoSecrets: this runner holds no credential. Its agents' model calls
+	// carry the turn token as a placeholder, and control's gateway adds the
+	// real credential (jobs/relay.go). Only with Forward.
+	NoSecrets bool
 
 	// StopWait bounds how long a runner waits for a stopped turn to end
 	// before it lets go of the job. Zero means one minute.
@@ -346,6 +351,12 @@ type attempt struct {
 	watch   *isolation.Space
 	start   string
 	session string
+
+	// token is the attempt's turn token, minted by control (jobs.AttemptStarted).
+	token string
+	// sent is what of the turn's record control holds (record.go).
+	fwdMu sync.Mutex
+	sent  sent
 }
 
 func (at *attempt) path(op string) string {
@@ -396,7 +407,7 @@ func (at *attempt) finish(ctx context.Context, f queue.Finish) {
 	ctx = context.WithoutCancel(ctx)
 	at.addChanges(ctx, &f)
 	at.flush(ctx)
-	at.forward(ctx, f)
+	at.forward(ctx, at.sessionOf(f), true)
 	f.LastSeq = at.lastSeq()
 	for i := range 5 {
 		var j queue.Job
@@ -416,74 +427,6 @@ func (at *attempt) finish(ctx context.Context, f queue.Finish) {
 // MaxRecordBatch bounds the event bytes of one record batch, under the
 // protocol's body limit.
 const MaxRecordBatch = jobs.MaxBody * 3 / 4
-
-// forward sends the turn's record, from the runner's own store, to the
-// control plane, a batch at a time (Config.Forward). A batch that cannot be
-// sent is given up after a few tries: the job still finishes, and the
-// turn's events stay in the runner's record.
-func (at *attempt) forward(ctx context.Context, f queue.Finish) {
-	if !at.r.cfg.Forward || at.r.cfg.Store == nil {
-		return
-	}
-	session := at.session
-	if res, _ := queue.ReadResult(f.Result); res.Session != "" {
-		session = res.Session
-	}
-	if session == "" {
-		return
-	}
-	filter := store.Filter{Turn: at.a.ID, TurnSession: session}
-	var after int64
-	for range 10000 {
-		recs, more, err := at.r.cfg.Store.Page(after, filter, jobs.MaxBatch, MaxRecordBatch)
-		if err != nil || len(recs) == 0 {
-			return
-		}
-		b := jobs.RecordBatch{Number: at.a.Number}
-		size, taken := 0, 0
-		for _, rec := range recs {
-			if len(rec.Data) > MaxRecordBatch {
-				// Bigger than a batch may be (a tool's whole output): left
-				// out, so the rest of the turn still goes.
-				at.r.cfg.Logf("job %s: an event of the turn is too big to send, left out", at.job.ID)
-				after, taken = rec.Seq, taken+1
-				continue
-			}
-			if size+len(rec.Data) > MaxRecordBatch {
-				break
-			}
-			b.Events = append(b.Events, rec.Data)
-			size += len(rec.Data)
-			after, taken = rec.Seq, taken+1
-		}
-		if len(b.Events) == 0 {
-			if !more && taken == len(recs) {
-				return
-			}
-			continue
-		}
-		sent := false
-		for i := range 3 {
-			var ack jobs.RecordAck
-			status, err := call(ctx, at.r.short, at.path("record"), at.r.token, b, &ack)
-			if err == nil && status == http.StatusOK {
-				sent = true
-				break
-			}
-			if err == nil && status < 500 {
-				break
-			}
-			sleep(ctx, time.Duration(i+1)*time.Second)
-		}
-		if !sent {
-			at.r.cfg.Logf("job %s: the turn's record could not be sent", at.job.ID)
-			return
-		}
-		if !more && taken == len(recs) {
-			return
-		}
-	}
-}
 
 // addChanges puts what the job changed in its workspace into f's result, and
 // for a session's first job the session and its workspace, so the session's
@@ -613,6 +556,7 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	}
 	at.mu.Lock()
 	at.until = time.Now().Add(r.lease)
+	at.token = st.Token
 	at.mu.Unlock()
 	done := make(chan struct{})
 	defer close(done)
@@ -659,6 +603,8 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	at.session = turn.Session
 	at.event("turn.created", map[string]any{"session": turn.Session, "turn": turn.ID})
 	at.flush(ctx)
+	// The turn's record reaches control while it runs (record.go).
+	go at.live(ctx, done)
 	r.follow(ctx, at, turn)
 }
 
@@ -669,6 +615,9 @@ func (r *Runner) request(at *attempt) run.Request {
 	sp := at.job.Spec
 	req := run.Request{Turn: at.a.ID, Prompt: sp.Prompt, Model: sp.Model, ReadOnly: sp.ReadOnly,
 		IdempotencyKey: at.job.IdempotencyKey}
+	if r.cfg.Forward && at.token != "" {
+		req.Token, req.APIURL, req.Placeholder = at.token, r.cfg.Queue, r.cfg.NoSecrets
+	}
 	switch {
 	case sp.Session != "":
 		// A next turn may name another agent: it runs on that one.

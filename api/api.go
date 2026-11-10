@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"github.com/staysup/agentbus/agents"
 	"github.com/staysup/agentbus/blobs"
+	"github.com/staysup/agentbus/credentials"
 	"io"
 	"net/http"
 	"regexp"
@@ -103,6 +104,13 @@ type Config struct {
 	// Jobs serves the job queue's routes (api/jobs.go): package jobs. Nil
 	// answers them 404.
 	Jobs http.Handler
+	// RunnerTokens says what the turn token of a runner's turn may do,
+	// while its attempt is current: control minted it (jobs.Server.TurnGrant).
+	// Nil: only this process's own turns have tokens.
+	RunnerTokens func(tok string) (run.Grant, bool)
+	// Subscriptions connects the person's own subscriptions on control, for
+	// their runners (subscriptions.go). Nil: none here.
+	Subscriptions *credentials.Manager
 
 	// Settings hold the policy and the instructions. The policy's
 	// [agent_api] says what a turn token may call and its [limits] cap the
@@ -332,11 +340,16 @@ func (a *API) authorized(r *http.Request) (who int, g run.Grant, ok bool) {
 	if a.hasTurnsToken && subtle.ConstantTimeCompare(sum[:], a.turnsToken[:]) == 1 {
 		return byTurns, g, true
 	}
-	if a.cfg.Engine == nil {
-		return byTurn, g, false
+	if a.cfg.Engine != nil {
+		if g, ok = a.cfg.Engine.TokenGrant(got); ok {
+			return byTurn, g, true
+		}
 	}
-	g, ok = a.cfg.Engine.TokenGrant(got)
-	return byTurn, g, ok
+	if a.cfg.RunnerTokens != nil {
+		g, ok = a.cfg.RunnerTokens(got)
+		return byTurn, g, ok
+	}
+	return byTurn, g, false
 }
 
 func notAllowed(w http.ResponseWriter, allow string) {
