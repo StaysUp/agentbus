@@ -476,6 +476,12 @@ func Unmount(workdir string) (int, error) {
 			}
 			continue
 		}
+		// overlayfs makes its workdir's work folder with mode 000; once
+		// unmounted it is opened up, so the person's rm -rf of the data
+		// folder can go through it. The next mount uses it as it is.
+		if p != probe {
+			_ = os.Chmod(filepath.Join(stateDir(real, filepath.Base(p)), "w", "work"), 0o700)
+		}
 		n++
 	}
 	return n, first

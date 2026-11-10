@@ -249,6 +249,10 @@ func TestUnmountKeepsTheSession(t *testing.T) {
 	if !mounted(other.Root) {
 		t.Fatal("a mount in another workdir was unmounted")
 	}
+	// overlayfs's work folder, mode 000 while mounted, can be removed.
+	if fi, err := os.Stat(filepath.Join(s.state(), "w", "work")); err != nil || fi.Mode().Perm() != 0o700 {
+		t.Fatalf("the work folder: %v %v", fi, err)
+	}
 	if n, err := Unmount(s.Workdir); err != nil || n != 0 {
 		t.Fatalf("a second unmount: %d, %v", n, err)
 	}
