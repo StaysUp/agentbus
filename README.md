@@ -184,10 +184,10 @@ table of what `auto` picks, the AppArmor step Ubuntu 24.04 needs for overlay wit
 model keeps this first turn cheap. `read_only` gives the agent read tools only. For codex, use
 `"agent":"codex"` and one of its models, or leave `model` out.
 
-The reply names the new session (`id`) and turn (`turn`):
+The reply names the new session (`id`), the turn (`turn`) and the job that runs it (`job`):
 
 ```json
-{"id":"8c1f…","turn":"t_5d0c19a2e7b3f481","base_url":"http://127.0.0.1:8787/s/8c1f…/t/t_5d0c19a2e7b3f481"}
+{"id":"8c1f…","turn":"t_5d0c19a2e7b3f481","job":"job_3b3d…","base_url":"http://127.0.0.1:8787/s/8c1f…/t/t_5d0c19a2e7b3f481"}
 ```
 
 If the service cannot find the agent's program, the reply is HTTP 400 and nothing is stored:
@@ -215,85 +215,139 @@ curl -s -X POST "http://127.0.0.1:8787/api/v0/turns/<turn>/stop" -H "Authorizati
 
 The next turn of the session continues after it, and the agent is told that you stopped it.
 
-## Jobs, Review and CI/CD
+## Talking to agents
 
-Every turn runs as a job. `agentbus up` keeps a job queue and runs a runner in the same process,
-so there is nothing else to start. The runner takes each job and runs it as a turn. The cockpit
-reads the jobs from the same address with the same token.
+A session is one conversation. You write; an agent answers. Everything else is asked for in the
+chat, in plain words.
 
-- **A job can run in its own git worktree.** Name a `repo` and a `base` (a branch, tag or commit),
-  and the runner makes a worktree for the session. Your own checkout is not touched. The work
-  stays in the worktree until you close it. Nothing is committed or pushed.
-- **Every job records what it changed**: each file added, modified or deleted, files git ignores
-  too, with each text file's own diff. It is the diff of the turn's checkpoints; git is not asked.
-- **Review is another job.** It runs read-only in the author's workspace, with another agent and
-  model, and ends with a verdict (pass, fail or unknown) and its findings. Any P1 makes it fail.
-- **Fix is the session's next turn**, in the same workspace, with the findings as its prompt.
+- **Saved agents.** An agent is a saved setup: a harness (`claude` or `codex`), its access (your
+  subscription, or an OpenRouter key read from a variable by name), a model and a name. A new data
+  folder has `claude` and `codex`. Add more with `POST /api/v0/agents`
+  ([Agents](docs/CLIENT_API.md#agents)), or with "+ Agent" in the cockpit.
+- **Switch model or agent on any message.** Each message may name a `model`, an `agent`, or both.
+  The conversation carries on with the new one. A message that names neither keeps the last ones.
+- **Messages queue.** Send the next message while a turn runs. It waits and runs after it.
+- **Ask other agents.** An agent can hand work to another agent, or to many at once. It does not
+  wait: it starts the work and ends its turn. **Each answer comes back as the next turn** of its
+  session. Inside a turn the agent uses `agentbus-api`, which sends its turn's own token. You can
+  ask in the chat: "have codex review this", "ask all three".
+- **A copy per conversation.** Each new session works in its own copy of your folder, made as the
+  folder is now, uncommitted edits included. Your folder does not change while agents work.
+  Several sessions on one folder never touch each other's files. How the copy is made:
+  [Isolation](docs/CLIENT_API.md#isolation).
+- **Every turn has a diff.** `GET /api/v0/turns/<turn>/diff` shows each file the turn added,
+  changed or removed, with each text file's own diff. Git is not asked.
+- **Apply up to a turn, all or nothing.** `POST /api/v0/turns/<turn>/apply` makes your folder
+  match the session at that turn. It applies every turn not yet applied, up to that one, in one
+  step. It checks every file first. If a file changed in your folder since, it writes nothing and
+  answers 409 with each file and why.
+- **Review is optional.** Reading the diff and saying "apply" is a review. To have an agent check
+  the work, ask for it. A review runs read-only in the author's copy, on another agent, and ends
+  with a verdict (pass, fail or unknown) and its findings. Any P1 makes it fail.
 
-In the cockpit: start a session with New worktree, open the turn, pick a reviewer under Checked by,
-and press Review. If it fails, press Fix, then Send, then Review again. With curl, see
-[Jobs](docs/CLIENT_API.md#jobs).
+A turn is a job, so programs and CI can do all this too: [Jobs](docs/CLIENT_API.md#jobs).
 
-## Modes
+With curl, using the session from step 3:
 
-One program, three roles: **control** (the API, the job queue, the record, the gateway, and a store
-of file contents), a **connector** (the folders of one machine: it takes their snapshots and
-applies changes into them) and a **runner** (it runs agents, each session in its own copy). Control
-never reads or writes your folder. Four ways to run them:
+```sh
+# The next message, on another model:
+curl -s http://127.0.0.1:8787/api/v0/turns -H "Authorization: Bearer $TOKEN" \
+  -d '{"session":"<id>","prompt":"Now add a test for it.","model":"sonnet"}'
+
+# A saved agent on OpenRouter (the key stays in OPENROUTER_API_KEY, in the service's environment):
+curl -s http://127.0.0.1:8787/api/v0/agents -H "Authorization: Bearer $TOKEN" \
+  -d '{"name":"DeepSeek","harness":"claude","access":"openrouter","model":"deepseek/deepseek-v4.1-flash"}'
+
+# Hand the session to it for the next message:
+curl -s http://127.0.0.1:8787/api/v0/turns -H "Authorization: Bearer $TOKEN" \
+  -d '{"session":"<id>","prompt":"Check the test.","agent":"<the new agent id>"}'
+
+# What a turn did, then make your folder match the session at that turn:
+curl -s http://127.0.0.1:8787/api/v0/turns/<turn>/diff -H "Authorization: Bearer $TOKEN"
+curl -s -X POST http://127.0.0.1:8787/api/v0/turns/<turn>/apply -H "Authorization: Bearer $TOKEN"
+```
+
+## Three roles, one or more machines
+
+One program has three roles:
+
+- **Control** keeps the API, the job queue, the record, the settings, the saved agents, the
+  gateway, and a store of file contents. It never reads or writes your folder.
+- **A connector** owns the folders of its machine. It takes their snapshots and applies changes
+  into them.
+- **A runner** runs agents, each session in its own copy.
 
 | Command | What runs | For |
 |---|---|---|
 | `agentbus up` | Control, a connector and a runner, in one process | One person on one machine. The default. |
-| `agentbus server` | Control alone | A central queue that runners and connectors on other machines pull from. |
-| `agentbus runner -server <url>` | A runner, with its own gateway and record; with `-folder DIR`, a connector beside it | Any machine that should run jobs for a server. |
-| `agentbus connector -server <url> -folder DIR...` | A connector alone: no agent, record or gateway | The machine that holds the code, when the agents run elsewhere. |
+| `agentbus server` | Control alone | The machine that holds the record. |
+| `agentbus connector -server <url> -folder DIR...` | A connector alone | The machine that holds the code. |
+| `agentbus runner -server <url>` | A runner; with `-folder DIR`, a connector beside it | Any machine that should run agents. |
 
-Runners and connectors pull work and are never called, so they work behind NAT. They always talk
-to the queue through the runner protocol over HTTP, the built-in ones in `agentbus up` included.
+On one machine, `agentbus up` is all you need. Its copy is a clone or an overlay of your folder,
+and nothing goes over HTTP. Its runner uses each harness's own sign-in, as you do.
 
-File contents go through control's store, by the SHA-256 of each file, so only what the other side
-lacks is sent. A runner on another machine builds a session's copy from a snapshot of the folder,
-which the folder's connector takes. At the end of each turn the runner puts what the copy changed
-in the store, and an apply is a job of the folder's connector, which reads the changes from there.
-In `agentbus up` the three share the store on disk: nothing is sent over HTTP, and the copy is a
-clone or an overlay of the folder, as fast as before.
+**More machines.** Keep control and the connector on the machine with your code. Run runners
+anywhere, such as in a Linux VM. Runners and connectors pull their work and are never called, so
+they work behind a router.
 
 ```sh
-# On the central machine:
+# On the machine with the code: control, then a connector for your folders.
 agentbus server -listen 0.0.0.0
+agentbus connector -server http://127.0.0.1:8787 -folder ~/code/app
+
 # On each runner machine, with the server's enroll_token file copied over (mode 0600):
-agentbus runner -server http://central:8787 -enroll-token-file ./enroll_token
-# On the machine with the code (it may be the central one):
-agentbus connector -server http://central:8787 -enroll-token-file ./enroll_token -folder ~/code/app
+agentbus runner -server http://devbox:8787 -enroll-token-file ./enroll_token
 ```
 
-A turn then names the folder by its reference, from `GET /api/v0/folders`, with `folder_ref`,
-`connector` and `isolate: true`. A folder used as it is (`isolate: false`) and a git worktree run
-only on the folder's own machine. `go run ./tools/remote` runs the whole path with the runner in a Lima VM and the code on a Mac.
+A runner on the same machine as its server needs its own data folder (`AGENTBUS_HOME`). For a
+runner in a Lima VM and a server on the Mac's loopback, start the server with
+`-host host.lima.internal`. `go run ./tools/remote` runs the whole path that way.
 
-The runner's data folder is its own (`AGENTBUS_HOME`, as for `agentbus up`): a runner on the same
-machine as its server needs another one. Its policy and instructions are the server's, read before
-each turn ([Permissions](#permissions)). Its own service listens on a free loopback port, for its
-agents only. `-capacity` sets how many jobs it runs at once, 1 to 64, and defaults to `4`, as
-`-max-runs` does for `agentbus up`.
+`agentbus server` has no folders of its own. A session names its folder by reference:
+`GET /api/v0/folders` lists them, and a turn sends `folder_ref`, `connector` and
+`"isolate": true` in place of `folder`. A cockpit does this for you.
 
-Runners hold no secrets. A runner's agent gets its turn's token, which the server minted, as its
-model credential. The runner's own gateway records each call and sends it on to the server's,
-which swaps in the real credential (`-gateway`, on `agentbus runner`):
+File contents go through control's store, by the SHA-256 of each file, so each side sends only
+what the other lacks. A runner builds a session's copy from a snapshot the connector took. At the
+end of each turn it puts what changed in the store. An apply is a job of the folder's connector.
 
-- `server` (the default): the runner holds no key and no sign-in. An API-key agent's key is read by
-  the server from its own environment, by the variable's name (`key_env`). A subscription agent
-  uses the person's own subscription, connected once on the server, for runners on their own
-  machines only: `agentbus connect claude` there (or Connect in the cockpit), and
-  `subscriptions_on_runners = "own"` in its `permissions.toml`. codex's ChatGPT sign-in cannot be
-  used on a runner yet.
-- `local`: the runner's own machine signs in, as the person on it, with its own keys.
+**Runners hold no secrets.** Control gives each runner turn a token of its own. The agent uses it
+as its model credential. Control's gateway swaps it for the real one on the way out:
 
-A runner's turn reaches the server's record while it runs: its events, its model calls and their
-replies, so a cockpit pointed at the server shows it live. Its agent calls the server's API with
-the same token, so it can ask other agents; each answer comes back as its session's next turn.
+- An OpenRouter agent: control reads the key from its own environment, by the variable's name
+  (`key_env`).
+- A subscription agent: your own subscription, for runners on your own machines. Connect it once
+  on control with `agentbus connect claude` (or Connect in the cockpit), and set
+  `subscriptions_on_runners = "own"` in control's `permissions.toml`. It is off by default.
 
-One machine (`agentbus up`) needs none of this: its runner uses each harness's own sign-in.
+`agentbus runner -gateway local` makes a runner use its own machine's sign-in and keys instead.
+
+A runner's turn reaches control's record while it runs: its events, model calls and replies. A
+cockpit pointed at control shows it live. The runner reads its policy and instructions from
+control before each turn ([Permissions](#permissions)). `-capacity` sets how many jobs it runs at
+once (1 to 64, default 4).
+
+### Network control (Linux)
+
+<!-- NETWORK CONTROL: to be written with step 5b (network control for Linux runners). -->
+
+To be written with the network control work.
+
+## Known limits
+
+- **OpenRouter turns show a cost of $0.** The price table has no OpenRouter prices yet.
+- **A session stays on one runner.** Its copy lives there, so its later turns go to the same
+  runner. Moving a session between runners comes later.
+- **Copies on shared or network disks are slow.** A copy is a clone (APFS) or a reflink (xfs,
+  btrfs) only when the folder and the data folder are on the same disk that can make one.
+  Elsewhere, such as a network disk, every file is copied byte by byte.
+- **A first transfer of a big folder is slow.** A runner on another machine gets a 50,000-file
+  folder (414 MB) in about 30 s the first time. Later sessions send only what changed: about 4 s.
+- **Network control is Linux-only.** A runner on macOS has none.
+- **codex on a subscription cannot run on a remote runner yet.** Control cannot add codex's
+  ChatGPT sign-in, so such a turn is refused before it starts. Use an OpenRouter agent there, or
+  `agentbus up`.
 
 ## Docs
 
@@ -310,10 +364,13 @@ The contract in words is [docs/CLIENT_API.md](docs/CLIENT_API.md).
 
 Everything stays on your machine, in the data folder: `events.db` (a SQLite file, the record),
 `jobs.db` (the job queue), `token`, `turns_token`, `enroll_token`, `runner.json`,
-`permissions.toml`, `instructions.md`, `agents.json`, `worktrees/` and `logs/`. `turns_token` is a second token for a program that
-only starts, stops and reads turns. `enroll_token` adds a runner; the built-in runner reads it, and
-keeps its identity in `runner.json`. `worktrees/` holds the copies and git worktrees sessions run in. Nothing is sent anywhere except the model calls themselves, to the vendor your agent
-already uses.
+`connector.json`, `folders.json`, `permissions.toml`, `instructions.md`, `agents.json`, `blobs/`,
+`worktrees/` and `logs/`. `turns_token` is a second token for a program that only starts, stops
+and reads turns. `enroll_token` adds a runner or a connector; the built-in ones read it, and keep
+their identities in `runner.json` and `connector.json`. `blobs/` is control's store of file
+contents. `worktrees/` holds the copies and git worktrees sessions run in. `subscriptions/`
+appears once you connect a subscription; its files are readable by you only. Nothing is sent
+anywhere except the model calls themselves, to the vendor your agent already uses.
 
 `events.db` holds each turn's model requests and replies, so it holds whatever your agent read or
 printed during a turn, such as a file it opened or a command's output. It is not encrypted, and it

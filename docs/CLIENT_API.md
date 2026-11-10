@@ -758,7 +758,7 @@ macOS has no such per-argument limit.
 {"session":"abc","prompt":"Now fix the second one","read_only":true}
 ```
 
-The reply is **202** `{"id":"abc","turn":"t_91ee…","base_url":"http://127.0.0.1:8787/s/abc/t/t_91ee…"}`,
+The reply is **202** `{"id":"abc","turn":"t_91ee…","base_url":"http://127.0.0.1:8787/s/abc/t/t_91ee…","job":"job_…"}`,
 the same shape as a new session's first turn, with the session's own id and a new turn id. It is
 sent as soon as the agent has started. The turn's work arrives as events of the same session,
 carrying the new turn id, since the agent's base URL names both.
@@ -1250,10 +1250,39 @@ its first report, up to 15 seconds.
 ```
 
 A folder is known here by its reference, `fld_` and 16 hex digits, issued by the connector on the
-machine that has it (in `agentbus up`, this service's own; on another machine, `agentbus runner
--folder <path>`). The path stays on that machine; `name` is its last part only. Start a turn in it
+machine that has it (in `agentbus up`, this service's own; on another machine, `agentbus connector
+-folder <path>` or `agentbus runner -folder <path>`). The path stays on that machine; `name` is its last part only. Start a turn in it
 with `folder_ref` and `connector`. In `agentbus up` every folder a turn was started in is listed,
 newest first, within a minute of its first turn.
+
+### Subscriptions — your own sign-in, for your own runners
+
+A runner holds no sign-in. For a subscription agent on a runner, control adds the person's own
+subscription token to each model call ([Where it listens](#where-it-listens)). The person connects
+it once, on control, with the harness's own login. Only for runners on the person's own machines,
+and only with `subscriptions_on_runners = "own"` in `permissions.toml` (default `"off"`). One
+machine (`agentbus up`) uses each harness's own sign-in and needs none of this. Main token only.
+
+```json
+{"on":true,"subscriptions":[{"harness":"claude","connected":true,"connected_at":"2026-11-10T16:40:01Z",
+ "expires_at":"2027-11-10T16:40:01Z","expired":false}]}
+```
+
+- `GET /api/v0/subscriptions`: the above. `on` is `subscriptions_on_runners = "own"`.
+- `POST /api/v0/subscriptions/<harness>/connect`: **202**. Starts the login on control (for
+  claude, `claude setup-token`). The answer is `{harness, state, output, error}`: `state` is
+  `running`, `connected` or `failed`, and `output` holds only the links the login printed. A login
+  already running is answered as it is.
+- `GET /api/v0/subscriptions/<harness>/connect`: the same view, to follow the login.
+- `POST /api/v0/subscriptions/<harness>/connect/input` with `{"line":"<code>"}`: **204**. Sends the
+  code the browser showed to the running login. It is never kept. **409** when no login runs.
+- `DELETE /api/v0/subscriptions/<harness>`: **204**. Forgets the token; runners' calls on it are
+  refused until it is connected again.
+
+The token is kept in `subscriptions/<harness>.json` in control's data folder, mode 0600, with its
+expiry, and is never shown or logged. claude's lasts a year and is not renewed: when it expires,
+the cockpit and the relay say to connect again. codex has no login here yet. `agentbus connect
+claude` does the same in a terminal.
 
 ### `GET /api/v0/version` — which build this service is
 
@@ -1974,7 +2003,37 @@ Invalid API key · Please run /login
 `v0` may change without notice until the November demo. After that, a change that breaks a cockpit
 gets a new version path, and the old one stays for a while.
 
+**0.2 was never published.** A 0.1 client moving to 0.3 reads both lists below: what 0.2 changed,
+then what 0.3 changed after it.
+
 **What 0.2 changed for a 0.1 client:**
+
+- **Every turn is a job.** `agentbus up` keeps a job queue (`jobs.db`) and runs a runner in the
+  same process. `POST /api/v0/turns` answers `job` beside `id` and `turn`. New, main token only:
+  `POST` and `GET /api/v0/jobs`, `GET /api/v0/jobs/<id>`, `POST /api/v0/jobs/<id>/cancel`,
+  `POST /api/v0/jobs/<id>/review`, `GET /api/v0/workspaces` and
+  `POST /api/v0/workspaces/<id>/close` ([Jobs](#jobs)).
+- **The runner protocol**, for runners only: `POST /api/v0/runners`, `POST
+  /api/v0/runners/<id>/take`, `/heartbeat` and `/removed`, and `POST
+  /api/v0/attempts/<id>/start`, `/heartbeat`, `/events` and `/finish`; `GET
+  /api/v0/attempts/<id>/events` reads an attempt's runner events ([The runner
+  protocol](#the-runner-protocol)). `agentbus server` and `agentbus runner -server <url>` are new
+  modes.
+- `GET /api/v0/turns/<id>` reads one turn. `idempotency_key` on `POST /api/v0/turns` makes a retry
+  safe: the same body again answers the same turn, with `existing: true`, and starts nothing.
+- **The turns token** (`turns_token`, `abq_…`) may only start, stop and read turns.
+- `agentbus up -max-runs` sets how many turns run at once (1 to 64, default 4).
+- **Every message queues.** A next turn sent while one runs waits behind it. Only an open hold
+  still answers 409 `a turn is already running in this session`.
+- **Switching agent per message.** A next turn may name `agent`: that turn runs on it.
+- **Agents ask agents.** A turn's own token may start turns on saved agents, continue a session
+  its tree started, ask for a review and cancel what it asked for; each result comes back as the
+  asking session's next turn. Every turn has `agentbus-api` on its PATH, which sends its token.
+  `[limits]` and `[agent_api]` in `permissions.toml` bound it ([The turn
+  token](#the-turn-token-what-a-turn-may-read-and-how-it-asks-other-agents)).
+- `permissions.toml` gains `edit`, `subagents`, `[limits]` and `[agent_api]`. `instructions.md`
+  holds the text every turn gets as its agent's own instruction.
+- `PATCH /api/v0/sessions/<id>` renames a session, as a `session.renamed` event.
 
 - The settings have routes: `GET` and `PUT /api/v0/settings/permissions` and
   `/api/v0/settings/instructions` ([Settings](#settings)). A `PUT` needs `If-Match`. A turn token
@@ -1998,7 +2057,7 @@ gets a new version path, and the old one stays for a while.
   `git_diff_truncated`, `head_before`, `head_after` and each file's `git` label. `kind` is always
   `snapshot`. Each changed text file has its own `diff` instead, where its earlier content is kept.
 
-**What 0.3 changes for a 0.2 client (in progress):**
+**What 0.3 changes after 0.2:**
 
 - A folder is kept by its reference. `POST /api/v0/turns` and `POST /api/v0/jobs` still take
   `folder` (and `repo`) as a path in `agentbus up`; the queue keeps `folder_ref` (or `repo_ref`)
@@ -2044,15 +2103,18 @@ gets a new version path, and the old one stays for a while.
   /api/v0/packs/fetch` answers one, so a snapshot of 50,000 files is about a hundred requests, not
   50,000. The server removes blobs no open session needs, an hour after their last use.
 - **A runner's turn reaches the server's record** while it runs (`POST /api/v0/attempts/<id>/record`
-  and `/calls`), so `GET /api/v0/sessions`, `/turns`, `/turns/<id>/diff` and `/calls/<id>/context` on
+  and `POST /api/v0/attempts/<id>/calls`), so `GET /api/v0/sessions`, `/turns`, `/turns/<id>/diff` and `/calls/<id>/context` on
   a server show turns run on other machines, live.
-- **Runners hold no secrets.** `POST /api/v0/attempts/<id>/start` answers the attempt's `token`,
-  minted by the server; the server's relay (`/relay/...`) swaps it for the real credential on the
-  way out. `agentbus runner -gateway server` is the default; `-gateway local` keeps the runner's own
+- **Runners hold no secrets.** `POST /api/v0/attempts/<id>/start` answers the attempt's `token`
+  (`abr_…`), minted by the server and working while that attempt is current. The runner's agent
+  uses it as `AGENTBUS_TOKEN` and as its model credential. The server's relay,
+  `/relay/anthropic/…` and `/relay/openrouter/…`, swaps it for the real credential on the way out
+  ([Where it listens](#where-it-listens)). `agentbus runner -gateway server` is the default; `-gateway local` keeps the runner's own
   sign-in and keys.
 - **Subscriptions for the person's own runners**: `GET /api/v0/subscriptions`,
   `POST /api/v0/subscriptions/<harness>/connect` (the harness's own login, run on the server; for
-  claude, `claude setup-token`), `GET` of it, `POST .../connect/input` and
+  claude, `claude setup-token`), `GET` of it (the login's state and links),
+  `POST /api/v0/subscriptions/<harness>/connect/input` (what the person types) and
   `DELETE /api/v0/subscriptions/<harness>`, the main token only. `agentbus connect claude` does the
   same in a terminal. The policy key `subscriptions_on_runners` (`off` or `own`, default `off`).
 - **An agent on a runner asks other agents** through the server's API with its turn token; the

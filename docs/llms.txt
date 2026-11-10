@@ -268,10 +268,10 @@ were kept continues by the vendor's resume. A next turn's `turn.started` says wh
 ```sh
 curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"agent":"codex","folder":"/Users/ana/Sites/x","prompt":"Review the last commit"}' $B/api/v0/turns
-# {"id":"abc","turn":"t_5d0c…","base_url":"http://127.0.0.1:8787/s/abc/t/t_5d0c…"}
+# {"id":"abc","turn":"t_5d0c…","base_url":"http://127.0.0.1:8787/s/abc/t/t_5d0c…","job":"job_…"}
 curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
   -d '{"session":"abc","prompt":"Now fix the second one"}' $B/api/v0/turns
-# {"id":"abc","turn":"t_91ee…","base_url":"http://127.0.0.1:8787/s/abc/t/t_91ee…"}
+# {"id":"abc","turn":"t_91ee…","base_url":"http://127.0.0.1:8787/s/abc/t/t_91ee…","job":"job_…"}
 ```
 
 ### GET /api/v0/turns
@@ -474,8 +474,13 @@ it changed. A review job runs read-only in the reviewed job's workspace, in a se
 and ends with `verdict` (`pass`, `fail` or `unknown`) and `findings`; any P1 makes it `fail`.
 `POST /api/v0/jobs/{id}/cancel` stops one. `GET /api/v0/workspaces` lists the sessions'
 workspaces, and `POST /api/v0/workspaces/{id}/close` closes one, which removes a worktree. All take
-the main token. `/api/v0/runners` and `/api/v0/attempts/{id}/{start,heartbeat,events,finish}` are
-the runner protocol: runners only.
+the main token. The runner protocol is for runners and connectors only, with their own tokens:
+`POST /api/v0/runners`, `/api/v0/runners/{id}/{take,heartbeat,removed}`, `GET
+/api/v0/runners/{id}/settings`, `/api/v0/attempts/{id}/{start,heartbeat,events,snapshot,record,calls,finish}`,
+and the blob store: `POST /api/v0/blobs` (which hashes are missing), `GET`/`PUT
+/api/v0/blobs/{id}`, `POST /api/v0/packs` and `POST /api/v0/packs/fetch` (many blobs at once).
+Runners' model calls go to control's relay, `/relay/anthropic/…` and `/relay/openrouter/…`, which
+swaps the turn's token for the real credential. A client never calls these.
 
 ```sh
 curl -s $B/api/v0/jobs -H "Authorization: Bearer $TOKEN" \
@@ -483,6 +488,24 @@ curl -s $B/api/v0/jobs -H "Authorization: Bearer $TOKEN" \
 # {"id":"job_…","kind":"turn","state":"queued","session":"6f1c…",…}
 curl -s $B/api/v0/jobs/job_…/review -H "Authorization: Bearer $TOKEN" -d '{"agent":"claude","model":"sonnet"}'
 # {"id":"job_…","kind":"review","state":"queued","verdict":null,…}
+```
+
+### Subscriptions: GET /api/v0/subscriptions, POST /api/v0/subscriptions/{id}/connect
+
+The person's own subscription, for runners on their own machines, which hold no sign-in. Control
+adds it to their agents' model calls when `subscriptions_on_runners = "own"`. Main token only.
+`GET /api/v0/subscriptions` answers `on` and, per harness, `connected`, `expires_at` and `expired`.
+`POST /api/v0/subscriptions/{id}/connect` starts the harness's own login on control (claude:
+`claude setup-token`) and answers `state` (`running`, `connected`, `failed`) and `output`, the
+links only; `GET` of it follows the login. `POST /api/v0/subscriptions/{id}/connect/input` with
+`{"line":"<code>"}` sends the code the browser showed (409 when no login runs). `DELETE
+/api/v0/subscriptions/{id}` forgets the token. The token is never shown. `agentbus connect claude`
+does the same in a terminal. codex has no login yet.
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" $B/api/v0/subscriptions
+curl -s -X POST -H "Authorization: Bearer $TOKEN" $B/api/v0/subscriptions/claude/connect
+curl -s -H "Authorization: Bearer $TOKEN" -d '{"line":"<code>"}' $B/api/v0/subscriptions/claude/connect/input
 ```
 
 ### GET /api/v0/openapi.json
