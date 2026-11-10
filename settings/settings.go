@@ -85,7 +85,7 @@ const (
 // dataFiles are the data folder's own files, which no turn may edit: a turn
 // that could would raise its own limits, or read a token.
 var dataFiles = []string{PolicyFile, InstructionsFile, AgentsFile, "token", "turns_token",
-	"enroll_token", "events.db", "jobs.db", "runner.json", filepath.Join("bin", APIClient)}
+	"enroll_token", "events.db", "jobs.db", "runner.json", "folders.json", filepath.Join("bin", APIClient)}
 
 // protected is dataFiles under dir.
 func protected(dir string) []string {

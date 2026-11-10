@@ -1449,18 +1449,23 @@ func (q *Queue) CloseSession(team, id string) (Workspace, error) {
 }
 
 // RunnerBeat is a runner's idle heartbeat: it marks the runner seen and sets
-// its capacity and, when caps is not nil, its capabilities, and answers the
-// runner.
-func (q *Queue) RunnerBeat(runnerID string, capacity int, caps *Capabilities) (Runner, error) {
-	var err error
+// its capacity and, when not nil, its labels and its capabilities, and
+// answers the runner. A runner restarted with other labels keeps its id.
+func (q *Queue) RunnerBeat(runnerID string, capacity int, labels []string, caps *Capabilities) (Runner, error) {
+	if _, err := q.db.Exec(`UPDATE runners SET seen = ?, capacity = ? WHERE id = ?`, nanos(q.now()), capacity, runnerID); err != nil {
+		return Runner{}, fmt.Errorf("queue: write runner: %w", err)
+	}
+	if labels != nil {
+		lb, _ := json.Marshal(labels)
+		if _, err := q.db.Exec(`UPDATE runners SET labels = ? WHERE id = ?`, string(lb), runnerID); err != nil {
+			return Runner{}, fmt.Errorf("queue: write runner: %w", err)
+		}
+	}
 	if caps != nil {
 		cb, _ := json.Marshal(caps)
-		_, err = q.db.Exec(`UPDATE runners SET seen = ?, capacity = ?, caps = ? WHERE id = ?`, nanos(q.now()), capacity, string(cb), runnerID)
-	} else {
-		_, err = q.db.Exec(`UPDATE runners SET seen = ?, capacity = ? WHERE id = ?`, nanos(q.now()), capacity, runnerID)
-	}
-	if err != nil {
-		return Runner{}, fmt.Errorf("queue: write runner: %w", err)
+		if _, err := q.db.Exec(`UPDATE runners SET caps = ? WHERE id = ?`, string(cb), runnerID); err != nil {
+			return Runner{}, fmt.Errorf("queue: write runner: %w", err)
+		}
 	}
 	q.wake()
 	return q.runner(`id = ?`, runnerID)

@@ -118,7 +118,7 @@ func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 	if st, ok := loadState(cfg.StateFile); ok {
 		var rn queue.Runner
 		status, err := call(ctx, r.short, cfg.Queue+"/api/v0/runners/"+st.Runner+"/heartbeat", st.Token,
-			jobs.RunnerBeat{Capacity: cfg.Capacity, Capabilities: r.caps(nil)}, &rn)
+			jobs.RunnerBeat{Capacity: cfg.Capacity, Labels: cfg.Labels, Capabilities: r.caps(nil)}, &rn)
 		if err != nil {
 			return nil, err
 		}

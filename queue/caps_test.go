@@ -109,7 +109,7 @@ func TestTakeRoutesByHarness(t *testing.T) {
 	}
 
 	// Now no runner has codex: the one that had it reports it gone.
-	if _, err := q.RunnerBeat(both.ID, 4, &Capabilities{Harnesses: found("claude")}); err != nil {
+	if _, err := q.RunnerBeat(both.ID, 4, nil, &Capabilities{Harnesses: found("claude")}); err != nil {
 		t.Fatal(err)
 	}
 	j2 := makeJob(t, q, Spec{Harness: "codex", Folder: "/x"})
@@ -246,5 +246,49 @@ func TestMigrateFoldersAndColumns(t *testing.T) {
 	}
 	if n, _ := q.MigrateFolders(f); n != 0 {
 		t.Fatalf("a second run rewrote %d", n)
+	}
+}
+
+// The harness rule counts only runners that could take the job: a runner of
+// another connector that has the harness does not hold back the folder's
+// own runner, whose engine then says how to install it.
+func TestHarnessRuleCountsOnlyEligibleRunners(t *testing.T) {
+	q, _ := open(t)
+	owner := capsRunner(t, q, nil, &Capabilities{Connector: conA, Harnesses: found("claude")})
+	capsRunner(t, q, []string{"gpu"}, &Capabilities{Connector: conB, Harnesses: found("claude", "codex")})
+	j := makeJob(t, q, Spec{Harness: "codex", FolderRef: refX, Connector: conA})
+	if got := takes(t, q, owner); got != j.ID {
+		t.Fatalf("the folder's runner took %q, want %s", got, j.ID)
+	}
+	// Labels count the same way: a runner without the job's label does not
+	// count as having the harness.
+	plain := capsRunner(t, q, []string{"cuda"}, &Capabilities{Harnesses: found("claude")})
+	capsRunner(t, q, nil, &Capabilities{Harnesses: found("codex")})
+	j2 := makeJob(t, q, Spec{Harness: "codex", Folder: "/x", Labels: []string{"cuda"}})
+	if got := takes(t, q, plain); got != j2.ID {
+		t.Fatalf("the only runner with the label took %q, want %s", got, j2.ID)
+	}
+}
+
+// Equal paths on two connectors are two folders.
+func TestFoldersOfTwoConnectors(t *testing.T) {
+	q, _ := open(t)
+	capsRunner(t, q, nil, &Capabilities{Connector: conA, Folders: []FolderInfo{{Ref: refX, Name: "p"}}})
+	capsRunner(t, q, nil, &Capabilities{Connector: conB, Folders: []FolderInfo{{Ref: refX, Name: "p"}}})
+	if list, err := q.Folders(DefaultTeam); err != nil || len(list) != 2 || list[0].Connector == list[1].Connector {
+		t.Fatalf("%+v %v", list, err)
+	}
+}
+
+// A heartbeat's labels replace the runner's, as after a restart with others.
+func TestHeartbeatReplacesLabels(t *testing.T) {
+	q, _ := open(t)
+	r := capsRunner(t, q, []string{"agentbus"}, nil)
+	got, err := q.RunnerBeat(r.ID, 4, []string{"agentbus", "gpu"}, nil)
+	if err != nil || len(got.Labels) != 2 || got.Labels[1] != "gpu" {
+		t.Fatalf("%+v %v", got.Labels, err)
+	}
+	if got, _ := q.RunnerBeat(r.ID, 4, nil, nil); len(got.Labels) != 2 {
+		t.Fatalf("a heartbeat without labels changed them: %+v", got.Labels)
 	}
 }

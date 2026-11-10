@@ -88,17 +88,20 @@ const RunnerFresh = time.Minute
 
 // harnessTake is Take's harness rule for a job j and runner r: a session's
 // first job on a harness goes to a runner that reports it found. When no
-// runner seen within RunnerFresh does, or this runner has not reported yet,
-// any runner may take it, and its engine refuses it with how to install the
-// program, as on one machine. A job of a known session goes to the
-// session's runner whatever it reports.
+// runner that could take the job (seen within RunnerFresh, with its
+// connector and every label it asks for) does, or this runner has not
+// reported yet, any runner may take it, and its engine refuses it with how
+// to install the program, as on one machine. A job of a known session goes
+// to the session's runner whatever it reports.
 const harnessTake = `(j.session IS NOT NULL AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team))
 	OR COALESCE(json_extract(j.spec, '$.agent'), '') = ''
 	OR json_extract(r.caps, '$.harnesses') IS NULL
 	OR EXISTS (SELECT 1 FROM json_each(r.caps, '$.harnesses') h
 		WHERE json_extract(h.value, '$.name') = json_extract(j.spec, '$.agent') AND json_extract(h.value, '$.found'))
 	OR NOT EXISTS (SELECT 1 FROM runners o, json_each(o.caps, '$.harnesses') h WHERE o.team = j.team AND o.seen >= ?
-		AND json_extract(h.value, '$.name') = json_extract(j.spec, '$.agent') AND json_extract(h.value, '$.found'))`
+		AND json_extract(h.value, '$.name') = json_extract(j.spec, '$.agent') AND json_extract(h.value, '$.found')
+		AND (COALESCE(json_extract(j.spec, '$.connector'), '') = '' OR json_extract(j.spec, '$.connector') = json_extract(o.caps, '$.connector'))
+		AND NOT EXISTS (SELECT 1 FROM json_each(j.spec, '$.labels') l WHERE l.value NOT IN (SELECT value FROM json_each(o.labels))))`
 
 // connectorTake: a job that names a folder's connector goes only to the
 // runner that reports that connector.
@@ -110,8 +113,9 @@ const labelsTake = `NOT EXISTS (SELECT 1 FROM json_each(j.spec, '$.labels') l
 	WHERE l.value NOT IN (SELECT value FROM json_each(r.labels)))`
 
 // Folders is every folder the team's runners report, by runner, newest
-// report first. A ref reported by two runners is listed once, from the one
-// seen last.
+// report first. A folder (its connector and reference) reported by two
+// runners is listed once, from the one seen last. Equal paths on two
+// connectors have one reference, and are two folders.
 func (q *Queue) Folders(team string) ([]RunnerFolder, error) {
 	rows, err := q.db.Query(`SELECT id, caps FROM runners WHERE team = ? AND caps IS NOT NULL ORDER BY seen DESC, id`, team)
 	if err != nil {
@@ -131,10 +135,11 @@ func (q *Queue) Folders(team string) ([]RunnerFolder, error) {
 			continue
 		}
 		for _, f := range c.Folders {
-			if seen[f.Ref] {
+			key := c.Connector + "/" + f.Ref
+			if seen[key] {
 				continue
 			}
-			seen[f.Ref] = true
+			seen[key] = true
 			out = append(out, RunnerFolder{Ref: f.Ref, Name: f.Name, Connector: c.Connector, Runner: id})
 		}
 	}

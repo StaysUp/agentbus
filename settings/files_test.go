@@ -198,7 +198,7 @@ func TestFilesInit(t *testing.T) {
 			t.Errorf("%s: an existing file was written: %q", file, b)
 		}
 	}
-	want := []string{PolicyFile, InstructionsFile, AgentsFile, "token", "turns_token", "enroll_token", "events.db", "jobs.db", "runner.json", "bin/" + APIClient}
+	want := []string{PolicyFile, InstructionsFile, AgentsFile, "token", "turns_token", "enroll_token", "events.db", "jobs.db", "runner.json", "folders.json", "bin/" + APIClient}
 	for i := range want {
 		want[i] = filepath.Join(dir, want[i])
 	}

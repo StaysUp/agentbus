@@ -441,10 +441,11 @@ type RemovedReport struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// RunnerBeat is the body of a runner's idle heartbeat. Capabilities, when
-// sent, replace what the runner reported before.
+// RunnerBeat is the body of a runner's idle heartbeat. Labels and
+// capabilities, when sent, replace what the runner had before.
 type RunnerBeat struct {
 	Capacity     int                 `json:"capacity"`
+	Labels       []string            `json:"labels,omitempty"`
 	Capabilities *queue.Capabilities `json:"capabilities,omitempty"`
 }
 
@@ -458,13 +459,17 @@ func (s *Server) runnerBeat(w http.ResponseWriter, r *http.Request, rn queue.Run
 		fail(w, http.StatusBadRequest, "the body must be one JSON object with capacity, 1 to 64, and optionally capabilities")
 		return
 	}
+	if msg := checkLabels(b.Labels); msg != "" {
+		fail(w, http.StatusBadRequest, msg)
+		return
+	}
 	if b.Capabilities != nil {
 		if msg := b.Capabilities.Check(); msg != "" {
 			fail(w, http.StatusBadRequest, msg)
 			return
 		}
 	}
-	got, err := s.cfg.Queue.RunnerBeat(rn.ID, b.Capacity, b.Capabilities)
+	got, err := s.cfg.Queue.RunnerBeat(rn.ID, b.Capacity, b.Labels, b.Capabilities)
 	if err != nil {
 		s.internal(w)
 		return
@@ -717,11 +722,9 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "name must be 1 to 128 bytes, capacity 1 to 64, and at most 64 labels")
 		return
 	}
-	for _, l := range b.Labels {
-		if !queue.LabelOK(l) {
-			fail(w, http.StatusBadRequest, "each label is 1 to 64 of A-Z, a-z, 0-9 and . _ : -, starting with a letter or digit")
-			return
-		}
+	if msg := checkLabels(b.Labels); msg != "" {
+		fail(w, http.StatusBadRequest, msg)
+		return
 	}
 	if b.Capabilities != nil {
 		if msg := b.Capabilities.Check(); msg != "" {
@@ -927,4 +930,17 @@ func (s *Server) retried(key string) func() (bool, error) {
 		return nil
 	}
 	return func() (bool, error) { return s.cfg.Queue.HasKey(queue.DefaultTeam, key) }
+}
+
+// checkLabels says what is wrong with a runner's labels, or "".
+func checkLabels(labels []string) string {
+	if len(labels) > 64 {
+		return "at most 64 labels"
+	}
+	for _, l := range labels {
+		if !queue.LabelOK(l) {
+			return "each label is 1 to 64 of A-Z, a-z, 0-9 and . _ : -, starting with a letter or digit"
+		}
+	}
+	return ""
 }
