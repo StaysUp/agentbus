@@ -30,12 +30,12 @@ environment, by `key_env`, or the person's own subscription connected on the ser
 (`agentbus connect claude`, or `POST /api/v0/subscriptions/claude/connect`) when
 `subscriptions_on_runners = "own"`. A runner turn's events and model calls reach the server's
 record while it runs. `GET /api/v0/subscriptions` lists what is connected; the main token only.
-On Linux a runner's agents are closed off from the network (`[network]` of `permissions.toml`:
-`contain` is `auto`, on for `agentbus runner` and off for `agentbus up`, or `on` or `off`; `allow`
-lists host names, `*.x` for names under x). An agent then reaches its runner's gateway, the server
-and the allowed hosts through a proxy (`HTTPS_PROXY`); anything else is refused and stored as
-`network.refused` with `host` and `error`. A runner that cannot close an agent off refuses the turn
-with the reason. macOS has no network control.
+Network control is off by default: agents reach any host. Turn it on with `[network]` in
+`permissions.toml`: `contain = "on"` (the default is `"off"`; no other value) and an `allow` list of
+host names, `*.x` for names under x. It is Linux only. An agent then reaches its runner's gateway,
+the server and the allowed hosts through a proxy (`HTTPS_PROXY`); anything else is refused and
+stored as `network.refused` with `host` and `error`. A runner that cannot close an agent off, such
+as on macOS, refuses the turn with the reason.
 
 ## Address and token
 

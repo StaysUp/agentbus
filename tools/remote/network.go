@@ -1,7 +1,8 @@
 package main
 
 // -network: after the checks, the runner's network control. The server's
-// policy allows one host ([network] allow, -allow), and the stand-in, asked
+// policy turns it on ([network] contain = "on") and allows one host
+// ([network] allow, -allow), and the stand-in, asked
 // "network probe", tries every way out from inside its turn: its gateway,
 // the allowed host, a host not on the list, a raw IP (straight and through
 // the proxy) and a DNS lookup. It writes what happened to a file in the
@@ -31,12 +32,12 @@ echo "proxy $HTTPS_PROXY" >> "$r"
 `
 
 func (w *world) network() error {
-	fmt.Printf("\nnetwork control: [network] allow = [%q] on the server; the stand-in probes from its turn\n", w.o.allow)
+	fmt.Printf("\nnetwork control: [network] contain = \"on\", allow = [%q] on the server; the stand-in probes from its turn\n", w.o.allow)
 	var p map[string]any
 	if code, out := w.api.call("GET", "/api/v0/settings/permissions", nil, &p); code != 200 {
 		return fmt.Errorf("GET permissions: %d %s", code, out)
 	}
-	p["network"] = map[string]any{"contain": "auto", "allow": []string{w.o.allow}}
+	p["network"] = map[string]any{"contain": "on", "allow": []string{w.o.allow}}
 	if code, out := w.api.callMatch("PUT", "/api/v0/settings/permissions", p, "*"); code != 200 {
 		return fmt.Errorf("PUT permissions: %d %s", code, out)
 	}

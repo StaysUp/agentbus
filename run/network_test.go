@@ -30,6 +30,18 @@ func TestSetEnv(t *testing.T) {
 	}
 }
 
+// A policy that leaves contain out runs the agent open, on every machine:
+// "off" is the default for a runner too.
+func TestContainMissingRunsOpen(t *testing.T) {
+	p, err := settings.ParsePolicy([]byte("[network]\nallow = [\"github.com\"]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if on, why := (&Engine{}).contained(p); on || why != "" {
+		t.Fatalf("contained = %v %q, want open", on, why)
+	}
+}
+
 // contain = "on" on a machine that cannot close an agent off refuses the
 // turn with why, before anything is stored. Where it can, the turn runs.
 func TestContainOnRefusedWhereItCannot(t *testing.T) {

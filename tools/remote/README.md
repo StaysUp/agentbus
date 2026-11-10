@@ -60,7 +60,7 @@ Ctrl-C at any point stops what the tool started, on both machines.
 
 ## Network control (-network)
 
-The server's policy gets `[network] allow = ["<-allow>"]`, and one turn asks the stand-in for
+The server's policy gets `[network] contain = "on"` and `allow = ["<-allow>"]`, and one turn asks the stand-in for
 `network probe`. From inside its turn it tries, with curl and getent:
 
 - its runner's gateway (any HTTP answer means it got there);

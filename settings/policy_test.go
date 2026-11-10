@@ -165,14 +165,14 @@ func TestNetworkPolicy(t *testing.T) {
 	if p.Network.Contain != ContainOn || !slices.Equal(p.Network.Allow, []string{"github.com", "*.npmjs.org", "10.0.0.5"}) {
 		t.Fatalf("network: %+v", p.Network)
 	}
-	if d := DefaultPolicy(); d.Network.Contain != ContainAuto || d.Network.Allow == nil || len(d.Network.Allow) != 0 {
+	if d := DefaultPolicy(); d.Network.Contain != ContainOff || d.Network.Allow == nil || len(d.Network.Allow) != 0 {
 		t.Fatalf("default network: %+v", d.Network)
 	}
 	again, err := ParsePolicy(FormatPolicy(p))
 	if err != nil || again.Network.Contain != ContainOn || !slices.Equal(again.Network.Allow, p.Network.Allow) {
 		t.Fatalf("format and read back: %+v %v", again.Network, err)
 	}
-	if j, err := DecodePolicy([]byte(`{"network":{"allow":["github.com"]}}`)); err != nil || j.Network.Contain != ContainAuto {
+	if j, err := DecodePolicy([]byte(`{"network":{"allow":["github.com"]}}`)); err != nil || j.Network.Contain != ContainOff {
 		t.Fatalf("JSON: %+v %v", j.Network, err)
 	}
 	for _, bad := range []string{
@@ -188,5 +188,34 @@ func TestNetworkPolicy(t *testing.T) {
 		if _, err := ParsePolicy([]byte(bad)); err == nil {
 			t.Errorf("accepted %q", bad)
 		}
+	}
+}
+
+// A missing contain reads as "off": no [network] table, a table with allow
+// only, and the starter file all leave agents open.
+func TestNetworkContainMissingIsOff(t *testing.T) {
+	for _, src := range []string{"", "edit = \"session\"\n", "[network]\nallow = [\"github.com\"]\n", PolicyStarter} {
+		p, err := ParsePolicy([]byte(src))
+		if err != nil {
+			t.Fatalf("%q: %v", src, err)
+		}
+		if p.Network.Contain != ContainOff {
+			t.Errorf("%q: contain %q, want %q", src, p.Network.Contain, ContainOff)
+		}
+	}
+}
+
+// "auto" was a value before 0.3 shipped; it is refused, in words that name
+// the two values left.
+func TestNetworkContainAutoRefused(t *testing.T) {
+	_, err := ParsePolicy([]byte("[network]\ncontain = \"auto\"\n"))
+	if err == nil {
+		t.Fatal("accepted contain = \"auto\"")
+	}
+	if msg := err.Error(); !strings.Contains(msg, `[network] contain must be "off" or "on"`) {
+		t.Errorf("error: %s", msg)
+	}
+	if _, err := DecodePolicy([]byte(`{"network":{"contain":"auto"}}`)); err == nil {
+		t.Error("JSON accepted contain \"auto\"")
 	}
 }

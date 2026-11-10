@@ -332,20 +332,21 @@ once (1 to 64, default 4).
 
 ### Network control (Linux)
 
-On Linux a runner's agents are closed off from the network: each reaches only its runner's
-gateway, control, and the hosts in `[network] allow` of control's `permissions.toml`, through a
-proxy. Anything else is refused and recorded as `network.refused`. A runner that cannot close an
-agent off refuses the turn with the reason. macOS has no network control: a runner on a Mac says
-so at start.
+Network control is off by default: agents reach any host. Turn it on in control's
+`permissions.toml` with `contain = "on"` and an `allow` list:
 
 ```toml
 [network]
-contain = "auto"   # on for agentbus runner, off for agentbus up; "on" or "off" to choose
+contain = "on"
 allow = ["github.com", "*.npmjs.org"]
 ```
 
-On one machine (`agentbus up`) agents reach the network as before; `contain = "on"` closes them
-off too. Details: `docs/CLIENT_API.md`, "Network control".
+Then each agent reaches only its runner's gateway, control, and the hosts in `allow`, through a
+proxy. Anything else is refused and recorded as `network.refused`. It works the same for
+`agentbus up` and `agentbus runner`.
+
+It is Linux only. A runner that cannot close an agent off, such as one on a Mac, refuses the turn
+with the reason. Details: `docs/CLIENT_API.md`, "Network control".
 
 ## Known limits
 
@@ -357,7 +358,8 @@ off too. Details: `docs/CLIENT_API.md`, "Network control".
   Elsewhere, such as a network disk, every file is copied byte by byte.
 - **A first transfer of a big folder is slow.** A runner on another machine gets a 50,000-file
   folder (414 MB) in about 30 s the first time. Later sessions send only what changed: about 4 s.
-- **Network control is Linux-only.** A runner on macOS has none.
+- **Network control is Linux-only, and off by default.** On macOS, `contain = "on"` refuses
+  every turn.
 - **An asked agent reads the asker's changes but cannot run them.** Its copy is made from your
   folder, so "have codex review this" gets the diff of the asking turn through the API, not those
   files in its copy. Tests it runs run on your folder as it is. A copy started from the asking

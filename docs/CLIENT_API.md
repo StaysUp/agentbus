@@ -297,7 +297,7 @@ rename = true
 apply = true
 
 [network]
-contain = "auto"
+contain = "on"
 allow = ["github.com", "registry.npmjs.org"]
 ```
 
@@ -349,8 +349,8 @@ allow = ["github.com", "registry.npmjs.org"]
   from 0 for the first three; dollars from 0 for the cost, where 0 is off.
 - `[agent_api]`: what a turn's token may call (above, "Turn tokens"). `scope` is `"tree"` or
   `"session"`; the others are `true` or `false`.
-- `[network]`: what a turn's agent may reach on the network, on Linux. `contain` is `"auto"` (the
-  default: on for `agentbus runner`, off for `agentbus up`), `"on"` or `"off"`. `allow` lists host
+- `[network]`: what a turn's agent may reach on the network, on Linux. `contain` is `"off"` (the
+  default: agents reach any host) or `"on"` (agents are closed off). `allow` lists host
   names a closed-off agent may reach, on any port, such as `"github.com"`; `"*.example.com"` also
   allows every name under `example.com`. No scheme, port or path. Empty by default: only the
   runner's gateway and the server. See [Network control](#network-control).
@@ -1686,15 +1686,15 @@ runner's data folder on xfs or btrfs, use `git` for a repo, or `none`.
 
 ### Network control
 
-On Linux, a runner starts each agent closed off from the network, so it can reach only what it
-needs. `[network]` in `permissions.toml` says when and what:
+Network control is off by default. Turn it on with `[network]` in `permissions.toml`. It is
+Linux only.
 
-- `contain = "auto"` (the default): on for `agentbus runner`, off for `agentbus up` on one machine.
-  On one machine the agent works on the person's own machine with their own sign-in, as it always
-  has, so closing it off would only break package installs, `git push` and web fetches until they
-  write an allowlist. A runner works on code from somewhere else, so it is closed off.
-- `contain = "on"`: always, `agentbus up` too. `"off"`: never.
+- `contain = "off"` (the default): agents reach any host.
+- `contain = "on"`: each agent runs closed off from the network, on `agentbus up` and on every
+  runner. It reaches only what is listed below.
 - `allow = ["github.com", "*.npmjs.org"]`: the hosts a closed-off agent may reach, on any port.
+
+Any other value, such as `"auto"`, is a broken file: the turn is refused with the reason.
 
 A closed-off agent runs in its own network namespace, with loopback only: no route out and no DNS.
 It reaches, on 127.0.0.1 inside it:
@@ -1715,15 +1715,15 @@ What it does not cover:
   not network, and stay as the runner's user has them.
 - The real wall is the VM a runner runs in. This closes the obvious way out; it is not a sandbox.
 
-**If a runner cannot close an agent off, the turn is refused** with the reason, before anything is
-stored. It never runs open instead. The runner says at start whether it can. It needs user
-namespaces: Ubuntu 22.04 allows them; Ubuntu 24.04 and later allow them to a binary with an
+**Under `contain = "on"`, a runner that cannot close an agent off refuses the turn** with the
+reason, before anything is stored. It never runs open instead. The runner says at start whether it
+can. It needs user namespaces: Ubuntu 22.04 allows them; Ubuntu 24.04 and later allow them to a binary with an
 AppArmor profile only (`install.sh apparmor`, as for overlay copies). It works as a normal user and
 as root: the agent gets a user namespace of its own, so even as root it cannot join the runner's
 network again.
 
-**macOS has no network control.** A runner on a Mac says so at start, and its agents reach any
-host. `contain = "on"` refuses every turn there.
+**macOS has no network control.** A runner on a Mac says so at start. With `contain = "off"` its
+agents reach any host. `contain = "on"` refuses every turn there.
 
 ### Reviews
 

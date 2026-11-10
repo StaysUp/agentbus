@@ -123,16 +123,15 @@ apply = true         # apply a turn's changes to the person's folder, for a turn
 # What a turn's agent may reach on the network. Linux only: macOS has no
 # network control, and its agents reach any host.
 # contain: whether each agent runs closed off from the network.
-#   "auto"  on for agentbus runner, off for agentbus up on one machine.
-#   "on"    always. An agent then reaches only its runner's gateway, the
-#           server's API, and the hosts in allow, through a proxy. Anything
-#           else is refused and recorded (network.refused). If the runner
-#           cannot close the network off, the turn is refused.
-#   "off"   never: agents reach any host.
+#   "off"   the default: agents reach any host.
+#   "on"    an agent reaches only its runner's gateway, the server's API,
+#           and the hosts in allow, through a proxy. Anything else is
+#           refused and recorded (network.refused). If the runner cannot
+#           close the network off, such as on macOS, the turn is refused.
 # allow: host names an agent may reach, on any port, such as "github.com".
 # "*.example.com" also allows every name under example.com.
 [network]
-contain = "auto"
+contain = "off"
 allow = []           # e.g. ["github.com", "registry.npmjs.org"]
 `
 
@@ -166,9 +165,8 @@ const (
 // Contain values of [network]: whether a turn's agent runs closed off from
 // the network.
 const (
-	ContainAuto = "auto"
-	ContainOn   = "on"
-	ContainOff  = "off"
+	ContainOff = "off"
+	ContainOn  = "on"
 )
 
 // The defaults, as the starter file writes them.
@@ -227,7 +225,7 @@ type AgentAPI struct {
 // Network says what a turn's agent may reach ([network]). Read by the
 // runner that starts the agent (netjail).
 type Network struct {
-	Contain string   `toml:"contain" json:"contain,omitempty" doc:"Whether each agent runs closed off from the network, on Linux: auto (on for agentbus runner, off for agentbus up), on or off. Closed off, it reaches only its runner's gateway, the server's API and the hosts in allow; anything else is refused and recorded as network.refused. Absent in a PUT: auto."`
+	Contain string   `toml:"contain" json:"contain,omitempty" doc:"Whether each agent runs closed off from the network: off (the default; agents reach any host) or on. On, it reaches only its runner's gateway, the server's API and the hosts in allow; anything else is refused and recorded as network.refused. Linux only: a runner that cannot close an agent off refuses the turn. Absent in a PUT: off."`
 	Allow   []string `toml:"allow" json:"allow" doc:"Host names a closed-off agent may reach, on any port, such as github.com. *.example.com also allows every name under example.com. Absent in a PUT: none."`
 }
 
@@ -274,7 +272,7 @@ func (p *Policy) fill() {
 		p.AgentAPI.Scope = ScopeTree
 	}
 	if p.Network.Contain == "" {
-		p.Network.Contain = ContainAuto
+		p.Network.Contain = ContainOff
 	}
 	for _, b := range []**bool{&p.AgentAPI.Read, &p.AgentAPI.ListAgents, &p.AgentAPI.Start,
 		&p.AgentAPI.Continue, &p.AgentAPI.Review, &p.AgentAPI.Cancel, &p.AgentAPI.Rename, &p.AgentAPI.Apply} {
@@ -322,9 +320,9 @@ func (p *Policy) Check() error {
 		return fmt.Errorf("[agent_api] scope must be %q or %q", ScopeTree, ScopeSession)
 	}
 	switch p.Network.Contain {
-	case "", ContainAuto, ContainOn, ContainOff:
+	case "", ContainOff, ContainOn:
 	default:
-		return fmt.Errorf("[network] contain must be %q, %q or %q", ContainAuto, ContainOn, ContainOff)
+		return fmt.Errorf("[network] contain must be %q or %q", ContainOff, ContainOn)
 	}
 	for _, h := range p.Network.Allow {
 		if !hostShape(h) {

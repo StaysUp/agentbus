@@ -467,7 +467,7 @@ func start(c config) (*service, error) {
 			}
 		}
 		eng, err = engine.New(engine.Config{Store: st, BaseURL: baseURL, MaxRuns: c.maxRuns, ReplayBase: replayBase, AgentName: agentName,
-			Settings: cfgStore, Protect: protect, Contain: c.mode == modeRunner, APIDir: apiLink(c.home, c.self, svcLog), Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace, Logf: svcLog.Printf,
+			Settings: cfgStore, Protect: protect, APIDir: apiLink(c.home, c.self, svcLog), Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace, Logf: svcLog.Printf,
 			RunLog: func(session string, data []byte) {
 				// The session id is the service's own hex, so it is a plain
 				// file name.
@@ -1090,12 +1090,12 @@ func checkListen(addr string) (loopback bool, err error) {
 // networkNote is what a runner says at start about its agents' network.
 func networkNote() string {
 	if !netjail.Supported {
-		return "network control is Linux-only: on this runner, agents reach any host"
+		return "network control is Linux-only: on this runner, agents reach any host, and a turn under [network] contain = \"on\" is refused"
 	}
 	if err := netjail.Check(); err != nil {
-		return err.Error() + "; every turn is refused until that is fixed here, or [network] contain = \"off\" is set on the server"
+		return err.Error() + "; a turn under [network] contain = \"on\" is refused until that is fixed here"
 	}
-	return "each agent runs closed off from the network: it reaches this runner's gateway, the server, and the hosts in [network] allow of the server's permissions.toml"
+	return "network control is ready: with [network] contain = \"on\" in the server's permissions.toml, each agent reaches only this runner's gateway, the server, and the hosts in [network] allow"
 }
 
 func agentAddr(listened net.Addr) string {

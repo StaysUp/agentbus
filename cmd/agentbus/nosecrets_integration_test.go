@@ -78,7 +78,6 @@ func startNoSecrets(t *testing.T) *noSecretsSetup {
 	t.Setenv("OPENAI_BASE_URL", "")
 	t.Setenv("AB_TEST_OR_KEY", "") // in this process only the server's getenv has it
 	ns := &noSecretsSetup{anth: newFakeVendor(t), or: newFakeVendor(t), serverHome: t.TempDir()}
-	networkOffWhereUnsupported(t, ns.serverHome)
 	look := func(string) (string, error) { return self, nil }
 	// The server's own environment holds the API key.
 	serverEnv := func(k string) string {
@@ -118,27 +117,7 @@ func startNoSecrets(t *testing.T) *noSecretsSetup {
 	return ns
 }
 
-// networkOffWhereUnsupported turns network control off on the server when
-// this Linux machine cannot close an agent off (Ubuntu 24.04 without the
-// AppArmor profile, as on CI): a runner there refuses every turn, and the
-// tests that call this are not about the network. TestRunnerAgentClosedOff
-// is.
-func networkOffWhereUnsupported(t *testing.T, serverHome string) {
-	t.Helper()
-	if !netjail.Supported {
-		return
-	}
-	err := netjail.Check()
-	if err == nil {
-		return
-	}
-	t.Logf("network control off for this test: %v", err)
-	if err := os.WriteFile(filepath.Join(serverHome, "permissions.toml"), []byte("[network]\ncontain = \"off\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// A runner's agent runs closed off: its model call still reaches the
+// Under contain = "on" a runner's agent runs closed off: its model call still reaches the
 // vendor through the runner's gateway and the server's relay, a host not in
 // [network] allow is refused, and the refusal is in the server's record.
 func TestRunnerAgentClosedOff(t *testing.T) {
@@ -149,6 +128,9 @@ func TestRunnerAgentClosedOff(t *testing.T) {
 		t.Skipf("this machine cannot close an agent off: %v", err)
 	}
 	ns := startNoSecrets(t)
+	if err := os.WriteFile(filepath.Join(ns.serverHome, "permissions.toml"), []byte("[network]\ncontain = \"on\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("AGENTBUS_FAKE_NET", "http://blocked.example/")
 	code, ag := sendAPI(t, ns.server, ns.tok, "POST", "/api/v0/agents", map[string]any{"name": "DeepSeek", "harness": "claude",
 		"access": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "key_env": "AB_TEST_OR_KEY"})

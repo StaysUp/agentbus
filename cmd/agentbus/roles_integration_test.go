@@ -436,7 +436,6 @@ func TestOneMachineFilesPinned(t *testing.T) {
 func TestThreeProcesses(t *testing.T) {
 	bin, bins := built(t), standInDir(t)
 	serverHome, addr := t.TempDir(), freeAddr(t)
-	networkOffWhereUnsupported(t, serverHome)
 	sp := startProc(t, bin, serverHome, bins, "server", "-listen", addr, "-replay=false")
 	c := waitService(t, sp, addr, serverHome)
 	enroll := filepath.Join(serverHome, "enroll_token")

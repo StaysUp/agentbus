@@ -165,11 +165,6 @@ type Config struct {
 	// AgentName names a saved agent by its id in the transcript a turn on
 	// another harness gets; "" or a nil func names it by harness and model.
 	AgentName func(id string) string
-	// Contain says whether a turn's agent runs closed off from the network
-	// when the policy's [network] contain is "auto": true for a runner, false
-	// for agentbus up on one machine. Closed off, it reaches only BaseURL,
-	// the turn's API URL and the policy's [network] allow (netjail).
-	Contain bool
 	// Now is the clock. Nil means time.Now.
 	Now func() time.Time
 	// Logf writes one line to the service log: a child starting and exiting.
@@ -853,16 +848,12 @@ func (e *Engine) start(t turn) (*Turn, error) {
 // network, or why it cannot start: the policy asks for it and this runner
 // cannot do it.
 func (e *Engine) contained(p settings.Policy) (bool, string) {
-	on := p.Network.Contain == settings.ContainOn || (p.Network.Contain != settings.ContainOff && e.cfg.Contain)
-	if !on {
+	if p.Network.Contain != settings.ContainOn {
 		return false, ""
 	}
 	if !netjail.Supported {
-		if p.Network.Contain == settings.ContainOn {
-			return false, "[network] contain is \"on\" in the permissions, and network control is Linux-only, so the turn did not start. " +
-				"Run the agent on a Linux runner, or set contain to \"auto\" or \"off\"."
-		}
-		return false, "" // a runner on macOS: agents reach any host, as its start says
+		return false, "[network] contain is \"on\" in the permissions, and network control is Linux-only, so the turn did not start. " +
+			"Run the agent on a Linux runner, or set contain to \"off\"."
 	}
 	if err := netjail.Check(); err != nil {
 		return false, err.Error() + ", so the turn did not start. Fix it on this runner, or set [network] contain = \"off\" in the permissions to run agents open."
