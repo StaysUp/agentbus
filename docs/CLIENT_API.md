@@ -653,13 +653,14 @@ job that runs it. The agent's work arrives later, as events of that session, **e
   file gives no instructions, and a file over 64 KiB, not UTF-8 or holding a NUL byte stops the
   turn with 400, as a broken `permissions.toml` does. `GET` and `PUT /api/v0/settings/instructions`
   read and write it ([Settings](#settings)); a runner on another machine uses the server's. Keep the
-  text the same within a session: own replay and the prompt cache rely on it. The default is four lines:
+  text the same within a session: own replay and the prompt cache rely on it. The default is five lines:
 
   ```
   Your session's earlier turns are stored by AgentBus. To look something up, run:
   agentbus-api GET "/api/v0/sessions/<session>/search?q=<text>"
   with <text> URL-encoded. Each hit's "read" is a path you can GET the same way, for the whole of what matched.
   You can also ask other agents with the same command: start a turn on any saved agent, continue one, or ask for a review. Do not wait for them: each result comes back to you as a later turn. How: agentbus-api GET /docs/llms.txt, section "Ask other agents".
+  AgentBus agents are not your harness's own agents or subagents. To list them: agentbus-api GET /api/v0/agents
   ```
 
   `agentbus-api METHOD PATH [BODY]` is the API client. It is a link to the running program, kept
@@ -1298,8 +1299,12 @@ machine (`agentbus up`) uses each harness's own sign-in and needs none of this. 
 - `POST /api/v0/subscriptions/<harness>/connect`: **202**. Starts the login on control (for
   claude, `claude setup-token`). The answer is `{harness, state, output, error}`: `state` is
   `running`, `connected` or `failed`, and `output` holds only the links the login printed. A login
-  already running is answered as it is.
-- `GET /api/v0/subscriptions/<harness>/connect`: the same view, to follow the login.
+  already running is answered as it is. The login runs in a terminal of its own, as when a person
+  runs it by hand. A login still running after 10 minutes is stopped, and the connect fails with
+  "the login waited too long". **500** with the reason when the login cannot be started, such as
+  `claude is not on PATH (searched: ...); add the folder that holds claude to PATH`.
+- `GET /api/v0/subscriptions/<harness>/connect`: the same view, to follow the login. A wrong code
+  ends it as `failed`, with `error` saying so.
 - `POST /api/v0/subscriptions/<harness>/connect/input` with `{"line":"<code>"}`: **204**. Sends the
   code the browser showed to the running login. It is never kept. **409** when no login runs.
 - `DELETE /api/v0/subscriptions/<harness>`: **204**. Forgets the token; runners' calls on it are

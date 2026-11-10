@@ -58,6 +58,15 @@ const (
 	// does not allow ([network] of permissions.toml), and the runner's proxy
 	// refused it. Host is what it asked for; Error says why.
 	NetworkRefused Kind = "network.refused"
+
+	// Control's own operations, in no session: a subscription connected or
+	// failed to (Harness, and Error says why), a runner enrolled or stopped
+	// answering (Runner), and a settings file changed (File). Never a value.
+	SubscriptionConnected Kind = "subscription.connected"
+	SubscriptionFailed    Kind = "subscription.failed"
+	RunnerEnrolled        Kind = "runner.enrolled"
+	RunnerGone            Kind = "runner.gone"
+	SettingsChanged       Kind = "settings.changed"
 )
 
 // KindInfo says what one framework kind means and which fields it always
@@ -86,6 +95,11 @@ var Kinds = []KindInfo{
 	{ReplayFailed, "A model request of a replayed turn (a turn.started with replay_from) could not be given the earlier turn's history: error says why, such as the harness's request layout not being one the gateway knows. The gateway refused that request with 400 and did not send it to the vendor, so the turn fails rather than continue without its history. Show it as an error.", []string{"error"}},
 	{ToolRefused, "The gateway refused a tool call before the agent could run it, because its command matched a forbid entry of permissions.toml: tool_id, tool_name, tool_input, rule (the entry), and text (what the model is told in place of the output). The call's tool.requested is still stored, and its tool.completed carries that text. Show it as a warning.", []string{"tool_id", "rule"}},
 	{NetworkRefused, "A turn's agent runs closed off from the network ([network] of permissions.toml), and asked its runner's proxy for a host the policy does not allow: host (host:port as asked) and error (why). The connection was refused. Each refusal is its own event. Show it as a warning.", []string{"host"}},
+	{SubscriptionConnected, "Control kept a token from the person's own login for a subscription (POST /api/v0/subscriptions/{id}/connect): agent is the harness. No session. The token is never in the record.", []string{"agent"}},
+	{SubscriptionFailed, "A subscription's connect ended without a token: agent is the harness, error says why, such as a wrong code or the login waiting too long. No session. Show it as an error.", []string{"agent", "error"}},
+	{RunnerEnrolled, "A runner or a connector enrolled with control: runner is its id (GET /api/v0/runners). No session.", []string{"runner"}},
+	{RunnerGone, "A runner or a connector stopped asking control for work for a minute: runner is its id. It may come back; a turn it was running whose lease runs out ends as runner_lost. No session. Show it as a warning.", []string{"runner"}},
+	{SettingsChanged, "A settings file was written through the API: file is permissions.toml or instructions.md. Never its content. No session.", []string{"file"}},
 	{SessionRenamed, "The session was given a name with PATCH /api/v0/sessions/{id}: title is the new name, old_title the one it had before (absent when it had none). The latest names the session in GET /api/v0/sessions; earlier names stay in the record.", []string{"session", "title"}},
 }
 
@@ -183,6 +197,10 @@ type Event struct {
 	Rule string `json:"rule,omitempty" doc:"On tool.refused: the forbid entry of permissions.toml that matched, such as git push."`
 	// Host is what a closed-off agent asked to reach.
 	Host string `json:"host,omitempty" doc:"On network.refused: the host and port the agent asked for, such as example.com:443."`
+	// Runner, only on runner.enrolled and runner.gone: the runner's id.
+	Runner string `json:"runner,omitempty" doc:"On runner.enrolled and runner.gone: the runner's id."`
+	// File, only on settings.changed: which settings file was written.
+	File string `json:"file,omitempty" doc:"On settings.changed: the file written, permissions.toml or instructions.md."`
 	// Title and OldTitle, only on session.renamed: the new name and the one
 	// it replaced.
 	Title    string `json:"title,omitempty" doc:"On session.renamed: the session's new name."`

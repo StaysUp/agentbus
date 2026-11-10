@@ -20,6 +20,8 @@ type storedEvent struct {
 	Error   string `json:"error"`
 }
 
+// storedEvents are the store's events of sessions, and its drops. Control's
+// own events, in no session (such as runner.enrolled), are left out.
 func storedEvents(t *testing.T, st *store.Store) []storedEvent {
 	t.Helper()
 	recs, err := st.After(0, store.Filter{}, 10000)
@@ -31,6 +33,9 @@ func storedEvents(t *testing.T, st *store.Store) []storedEvent {
 		var e storedEvent
 		if err := json.Unmarshal(r.Data, &e); err != nil {
 			t.Fatal(err)
+		}
+		if e.Session == "" && e.Kind != "events.dropped" {
+			continue
 		}
 		out = append(out, e)
 	}

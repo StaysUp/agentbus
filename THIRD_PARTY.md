@@ -44,3 +44,12 @@ entry, and run the tests: `api/docs_test.go` checks that `/docs` serves the file
   simple command in it against `forbid` (`gateway/command.go`, its `syntax` package only).
 - Source: https://github.com/mvdan/sh
 - License: BSD 3-Clause, Copyright (c) 2016, Daniel Martí.
+
+### golang.org/x/sys v0.48.0
+
+- What: system calls the standard library does not offer: overlay mounts and file clones
+  (`isolation/`, `connector/`), user namespaces (`cmd/agentbus`), the network jail (`netjail/`),
+  the process table on macOS (`run/`), and the terminal a subscription's login runs in
+  (`credentials/pty*.go`).
+- Source: https://go.googlesource.com/sys
+- License: BSD 3-Clause, Copyright 2009 The Go Authors.

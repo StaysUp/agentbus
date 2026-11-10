@@ -123,6 +123,9 @@ var controlAllowed = []string{
 	// folder control keeps those tokens in.
 	"credentials/connect.go Manager.Connect exec.Command",
 	"credentials/connect.go Run exec.Command",
+	// The terminal the login runs in: a device, not a folder.
+	"credentials/pty_darwin.go openPty os.OpenFile",
+	"credentials/pty_linux.go openPty os.OpenFile",
 	"credentials/subscriptions.go Subscriptions.Put os.CreateTemp",
 	"credentials/subscriptions.go Subscriptions.Put os.MkdirAll",
 	"credentials/subscriptions.go Subscriptions.Put os.Remove",
@@ -190,12 +193,27 @@ func TestControlTouchesSeesCalls(t *testing.T) {
 func touches(t *testing.T, pkg string) []string {
 	t.Helper()
 	dir := filepath.Join(root(t), filepath.FromSlash(strings.TrimPrefix(strings.TrimPrefix(pkg, module), "/")))
-	bp, err := gobuild.ImportDir(dir, 0)
-	if err != nil {
-		t.Fatalf("%s: %v", pkg, err)
+	// The files of every system a release is built for, whichever this
+	// machine is, so an entry of controlAllowed in a _linux file holds on
+	// a Mac too.
+	var names []string
+	got := map[string]bool{}
+	for _, goos := range []string{"linux", "darwin"} {
+		ctx := gobuild.Default
+		ctx.GOOS = goos
+		bp, err := ctx.ImportDir(dir, 0)
+		if err != nil {
+			t.Fatalf("%s: %v", pkg, err)
+		}
+		for _, name := range append(append([]string{}, bp.GoFiles...), bp.CgoFiles...) {
+			if !got[name] {
+				got[name] = true
+				names = append(names, name)
+			}
+		}
 	}
 	var out []string
-	for _, name := range append(append([]string{}, bp.GoFiles...), bp.CgoFiles...) {
+	for _, name := range names {
 		fs := token.NewFileSet()
 		f, err := parser.ParseFile(fs, filepath.Join(dir, name), nil, 0)
 		if err != nil {

@@ -78,6 +78,10 @@ type Login struct {
 	Prefix, Token string
 	// ValidDays is how long a token works, as the vendor says.
 	ValidDays int
+	// Refused matches a line the login prints when it did not take the
+	// code and waits to be asked again: the connect ends there, failed.
+	// Empty: the login ends by itself.
+	Refused string
 	// TokenEnv is the variable the harness reads such a token from. On a
 	// runner it holds a placeholder, which control's gateway swaps for the
 	// token.

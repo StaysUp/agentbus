@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/settings"
 )
 
@@ -184,6 +185,7 @@ func (a *API) putPermissions(w http.ResponseWriter, r *http.Request) {
 		a.settingsWrite(w, err)
 		return
 	}
+	a.changed(event.Event{Kind: event.SettingsChanged, File: settings.PolicyFile}, "settings.changed file=%s", settings.PolicyFile)
 	setVersion(w, v)
 	writeJSON(w, http.StatusOK, p)
 }
@@ -219,6 +221,7 @@ func (a *API) putInstructions(w http.ResponseWriter, r *http.Request) {
 		a.settingsWrite(w, err)
 		return
 	}
+	a.changed(event.Event{Kind: event.SettingsChanged, File: settings.InstructionsFile}, "settings.changed file=%s", settings.InstructionsFile)
 	setVersion(w, v)
 	writeJSON(w, http.StatusOK, body)
 }

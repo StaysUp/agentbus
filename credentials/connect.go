@@ -13,8 +13,10 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"sync"
@@ -32,6 +34,9 @@ type Login struct {
 	Token  *regexp.Regexp
 	// Valid is how long a token works, as the vendor says.
 	Valid time.Duration
+	// Refused matches a line the login prints when it did not take the
+	// code and waits to be asked again. Nil: it ends by itself.
+	Refused *regexp.Regexp
 }
 
 // Connect states.
@@ -69,8 +74,12 @@ type connecting struct {
 	text    []byte // what it printed, escapes taken out, for the token
 	state   string
 	why     string
-	stdin   io.WriteCloser
-	cmd     *exec.Cmd
+	late    bool // it ran past the Manager's Wait and was stopped
+	refused bool // it printed a Refused line
+	// onRefused is called once, when the login prints a Refused line.
+	onRefused func()
+	tty       *os.File // the login's terminal: what is written is its typing
+	cmd       *exec.Cmd
 }
 
 func (c *connecting) view() View {
@@ -89,6 +98,10 @@ func (c *connecting) take(r io.Reader, shown func(string)) {
 		plain := escapes.ReplaceAll(line, nil)
 		c.mu.Lock()
 		c.text = append(append(c.text, plain...), '\n')
+		refused := !c.refused && c.onRefused != nil && c.login.Refused != nil && c.login.Refused.Match(plain)
+		if refused {
+			c.refused = true
+		}
 		var added []string
 		for _, l := range link.FindAll(plain, -1) {
 			if !bytes.Contains(l, []byte(c.login.Prefix)) && len(c.links) < maxLines {
@@ -99,6 +112,9 @@ func (c *connecting) take(r io.Reader, shown func(string)) {
 		c.mu.Unlock()
 		for _, l := range added {
 			shown(l)
+		}
+		if refused {
+			c.onRefused()
 		}
 		line = line[:0]
 	}
@@ -126,19 +142,51 @@ func (c *connecting) token() string {
 }
 
 // Manager runs at most one login per harness, and keeps what they print.
+// Each login runs in its own terminal (startInPty), as when a person runs
+// it by hand.
 type Manager struct {
 	Store  *Subscriptions
 	Logins map[string]Login // by harness; one missing has no login here
+	// Wait bounds how long a login may run, such as one left waiting for a
+	// code no one sends. Zero: MaxWait.
+	Wait time.Duration
+	// Logf writes one line to the service log for each step of a connect:
+	// started, link shown, input received, connected or failed. Never a
+	// link, a code or a token. Nil: none.
+	Logf func(format string, args ...any)
+	// Ended is told how each connect ended: Connected, or Failed and why.
+	// Nil: no one.
+	Ended func(harness, state, why string)
 
 	mu      sync.Mutex
 	running map[string]*connecting
 }
 
+// MaxWait is how long a login may run by default.
+const MaxWait = 10 * time.Minute
+
+func (m *Manager) logf(format string, args ...any) {
+	if m.Logf != nil {
+		m.Logf(format, args...)
+	}
+}
+
 // ErrNoLogin is a harness whose subscription cannot be connected here.
 var ErrNoLogin = errors.New("credentials: no login for this harness")
 
+// notStarted says why l could not be started, in fixed wording: a program
+// not found names itself and the PATH searched.
+func notStarted(l Login, err error) error {
+	if !errors.Is(err, exec.ErrNotFound) && !errors.Is(err, fs.ErrNotExist) {
+		return &Missing{Why: "the login " + filepath.Base(l.Path) + " could not be started"}
+	}
+	// exec.Command looks a bare name up on this process's PATH.
+	name := filepath.Base(l.Path)
+	return &Missing{Why: name + " is not on PATH (searched: " + os.Getenv("PATH") + "); add the folder that holds " + name + " to PATH"}
+}
+
 // Connect starts harness's login, or answers the one running. A login that
-// ended is started again.
+// ended is started again. A login that cannot be started is a *Missing.
 func (m *Manager) Connect(harness string) (View, error) {
 	l, ok := m.Logins[harness]
 	if !ok {
@@ -152,40 +200,54 @@ func (m *Manager) Connect(harness string) (View, error) {
 	c := &connecting{harness: harness, login: l, state: Running}
 	cmd := exec.Command(l.Path, l.Args...)
 	cmd.Env = l.Env
-	r, w, err := os.Pipe()
+	tty, err := startInPty(cmd)
 	if err != nil {
-		return View{}, err
+		e := notStarted(l, err)
+		m.logf("subscription.failed harness=%s why=%q", harness, e.Error())
+		return View{}, e
 	}
-	cmd.Stdout, cmd.Stderr = w, w
-	if c.stdin, err = cmd.StdinPipe(); err != nil {
-		r.Close()
-		w.Close()
-		return View{}, err
-	}
-	if err := cmd.Start(); err != nil {
-		r.Close()
-		w.Close()
-		return View{}, errors.New("credentials: the login could not be started")
-	}
-	w.Close() // the login holds its own copy
-	c.cmd = cmd
+	m.logf("subscription.login_started harness=%s", harness)
+	c.cmd, c.tty = cmd, tty
+	c.onRefused = func() { stopGroup(cmd) }
 	if m.running == nil {
 		m.running = map[string]*connecting{}
 	}
 	m.running[harness] = c
+	wait := m.Wait
+	if wait == 0 {
+		wait = MaxWait
+	}
+	late := time.AfterFunc(wait, func() {
+		c.mu.Lock()
+		c.late = true
+		c.mu.Unlock()
+		stopGroup(cmd)
+	})
 	read := make(chan struct{})
-	go func() { c.take(r, func(string) {}); r.Close(); close(read) }()
+	go func() {
+		c.take(tty, func(string) { m.logf("subscription.link_shown harness=%s", harness) })
+		close(read)
+	}()
 	go func() {
 		err := cmd.Wait()
-		// What it printed last may still be in the pipe; a child it left
-		// holding the pipe is given up on after a moment.
+		late.Stop()
+		// What it printed last may still be in the terminal. A child it
+		// left holding the terminal is stopped after a moment, and given
+		// up on after another.
 		select {
 		case <-read:
 		case <-time.After(2 * time.Second):
+			stopGroup(cmd)
+			select {
+			case <-read:
+			case <-time.After(2 * time.Second):
+			}
 		}
+		tty.Close()
 		tok := c.token()
 		c.mu.Lock()
 		c.text = nil
+		wasLate, wasRefused := c.late, c.refused
 		c.mu.Unlock()
 		state, why := Failed, ""
 		switch {
@@ -195,10 +257,24 @@ func (m *Manager) Connect(harness string) (View, error) {
 			} else {
 				state = Connected
 			}
+		case wasRefused:
+			why = "the login did not accept the code: it may be incomplete, expired, already used, or from an earlier sign-in; connect again for a new link"
+		case wasLate:
+			why = "the login waited too long (" + wait.String() + ") and was stopped; connect again"
 		case err != nil:
 			why = "the login ended without a token (exit " + strconv.Itoa(cmd.ProcessState.ExitCode()) + ")"
 		default:
 			why = "the login ended without printing a token"
+		}
+		// Logged and recorded before it shows, so a client that sees the
+		// end finds it in the record.
+		if state == Connected {
+			m.logf("subscription.connected harness=%s", harness)
+		} else {
+			m.logf("subscription.failed harness=%s why=%q", harness, why)
+		}
+		if m.Ended != nil {
+			m.Ended(harness, state, why)
 		}
 		c.mu.Lock()
 		c.state, c.why = state, why
@@ -219,8 +295,8 @@ func (m *Manager) View(harness string) (View, bool) {
 	return c.view(), true
 }
 
-// Input sends one line to harness's running login, such as the code the
-// browser showed. It is never kept or shown.
+// Input types one line into harness's running login, such as the code the
+// browser showed, and presses Enter. It is never kept or shown.
 func (m *Manager) Input(harness, line string) error {
 	m.mu.Lock()
 	c := m.running[harness]
@@ -228,8 +304,14 @@ func (m *Manager) Input(harness, line string) error {
 	if c == nil || c.view().State != Running {
 		return errors.New("credentials: no login is running")
 	}
-	_, err := io.WriteString(c.stdin, line+"\n")
-	return err
+	// Enter is a carriage return, as a terminal sends it: a login that
+	// reads the terminal raw (claude's) takes it as Enter, and one that
+	// reads it by lines gets a newline.
+	if _, err := io.WriteString(c.tty, line+"\r"); err != nil {
+		return err
+	}
+	m.logf("subscription.input_received harness=%s", harness)
+	return nil
 }
 
 // Stop stops every login still running, when control stops.
@@ -237,8 +319,8 @@ func (m *Manager) Stop() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, c := range m.running {
-		if c.view().State == Running && c.cmd.Process != nil {
-			_ = c.cmd.Process.Kill()
+		if c.view().State == Running {
+			stopGroup(c.cmd)
 		}
 	}
 }
@@ -258,7 +340,7 @@ func Run(l Login, in io.Reader, out io.Writer) (string, error) {
 	if err := cmd.Start(); err != nil {
 		r.Close()
 		w.Close()
-		return "", errors.New("the login could not be started: is the harness's program on PATH?")
+		return "", notStarted(l, err)
 	}
 	w.Close()
 	c.take(r, func(l string) {

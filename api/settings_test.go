@@ -194,6 +194,12 @@ func TestSettingsInstructionsReadWrite(t *testing.T) {
 	if resp, _ := send(t, e, "PUT", "/api/v0/settings/instructions", v0, `{"text":"x"}`); resp.StatusCode != 412 {
 		t.Errorf("PUT with a stale version: %d", resp.StatusCode)
 	}
+	// The write that took is in the record, by file name only.
+	recs, _ := e.store.After(0, store.Filter{}, 10)
+	if len(recs) != 1 || !strings.Contains(string(recs[0].Data), `"kind":"settings.changed"`) ||
+		!strings.Contains(string(recs[0].Data), `"file":"instructions.md"`) || strings.Contains(string(recs[0].Data), "Be brief") {
+		t.Fatalf("%d events: %v", len(recs), recs)
+	}
 }
 
 // The turns token, which may only start, stop and read turns, never reads or

@@ -124,9 +124,13 @@ func (a *API) connectSubscription(w http.ResponseWriter, r *http.Request, id str
 		return
 	}
 	v, err := a.cfg.Subscriptions.Connect(id)
+	var missing *credentials.Missing
 	switch {
 	case errors.Is(err, credentials.ErrNoLogin):
 		writeError(w, http.StatusNotFound, "control has no login for "+id+"'s subscription")
+	case errors.As(err, &missing):
+		// Fixed wording: the program's name and control's PATH.
+		writeError(w, http.StatusInternalServerError, missing.Why)
 	case err != nil:
 		writeError(w, http.StatusInternalServerError, "the login could not be started: is the harness's program on control's PATH?")
 	default:

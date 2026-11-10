@@ -83,7 +83,7 @@ func (s *Store) Snapshot() (Snapshot, error) {
 			(SELECT e2.client FROM events e2 WHERE e2.session = events.session AND e2.client <> '' AND e2.seq <= ?
 				ORDER BY e2.seq DESC LIMIT 1)
 		FROM events
-		WHERE seq <= ? AND kind <> 'events.dropped'
+		WHERE seq <= ? AND session <> ''
 		GROUP BY session`, hi, hi)
 	if err != nil {
 		return snap, fmt.Errorf("store: snapshot: %w", err)

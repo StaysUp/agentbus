@@ -23,8 +23,12 @@ func (claude) Info() Info {
 		// (code.claude.com/docs/en/authentication, read 2026-11-08). The
 		// token's shape is not yet checked against a live login: the
 		// person's first connect is that check.
+		//
+		// A wrong code (2.1.322, 2026-11-10, in a terminal) prints "OAuth
+		// error: That code wasn't accepted. ..." and "Press Enter to
+		// retry.", and waits: it does not exit.
 		Login: &Login{Args: []string{"setup-token"}, Prefix: "sk-ant-oat", Token: `sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]{20,}`,
-			ValidDays: 365, TokenEnv: "CLAUDE_CODE_OAUTH_TOKEN"},
+			ValidDays: 365, Refused: `OAuth\s*error`, TokenEnv: "CLAUDE_CODE_OAUTH_TOKEN"},
 	}
 }
 

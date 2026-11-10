@@ -46,6 +46,7 @@ import (
 	"github.com/staysup/agentbus/body"
 	"github.com/staysup/agentbus/cost"
 	"github.com/staysup/agentbus/credentials"
+	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/folders"
 	"github.com/staysup/agentbus/gateway"
 	"github.com/staysup/agentbus/harness"
@@ -401,6 +402,21 @@ func start(c config) (*service, error) {
 	if blobSweep != nil {
 		blobSweep.Logf = svcLog.Printf
 	}
+	if runnerJobs != nil {
+		runnerJobs.Logf = svcLog.Printf
+	}
+	if logins != nil {
+		logins.Logf = svcLog.Printf
+		logins.Ended = func(h, state, why string) {
+			e := event.Event{ID: queue.NewID("evt_"), Kind: event.SubscriptionFailed, Time: time.Now().UTC(), Harness: h, Error: why}
+			if state == credentials.Connected {
+				e.Kind, e.Error = event.SubscriptionConnected, ""
+			}
+			if _, _, err := st.Append(e); err != nil {
+				svcLog.Printf("store.error what=%s", e.Kind)
+			}
+		}
+	}
 	st.OnError = func(err error) {
 		c.logf("an event could not be stored: %v", err)
 		svcLog.Printf("store.error error=%q", err.Error())
@@ -485,7 +501,8 @@ func start(c config) (*service, error) {
 	}
 	acfg := api.Config{Store: st, Token: token, TurnsToken: turnsToken, Port: port, AnyHost: !loopback,
 		BaseURL: baseURL, Origin: c.origin, Hosts: c.hosts, Environ: c.environ, Folders: issuer, Build: build(debug.ReadBuildInfo()),
-		Queue: q, Jobs: jobsAPI, Engine: eng, TurnWait: c.turnWait, Agents: saved, Settings: cfgStore, Subscriptions: logins}
+		Queue: q, Jobs: jobsAPI, Engine: eng, TurnWait: c.turnWait, Agents: saved, Settings: cfgStore, Subscriptions: logins,
+		Logf: svcLog.Printf}
 	var relayHandler http.Handler
 	if runnerJobs != nil {
 		acfg.RunnerTokens, relayHandler = runnerJobs.TurnGrant, runnerJobs.Relay()
@@ -613,6 +630,8 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 		defer blobsDone.Wait()
 		t := time.NewTicker(time.Second)
 		defer t.Stop()
+		var presence jobs.Presence
+		tick := 0
 		for {
 			select {
 			case <-stop:
@@ -629,6 +648,22 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 					svcLog.Printf("record.close_lost_failed")
 				} else if n > 0 {
 					svcLog.Printf("record.lost_turns_closed n=%d", n)
+				}
+				// A runner that stopped answering, or came back.
+				if tick++; tick%10 == 0 {
+					gone, back, err := presence.Check(s.queue, time.Now().UTC())
+					if err != nil {
+						svcLog.Printf("queue.runners_failed")
+					}
+					for _, r := range gone {
+						svcLog.Printf("runner.gone id=%s name=%q seen=%s", r.ID, r.Name, r.Seen.Format(time.RFC3339))
+						if _, _, err := s.store.Append(event.Event{ID: queue.NewID("evt_"), Kind: event.RunnerGone, Time: time.Now().UTC(), Runner: r.ID}); err != nil {
+							svcLog.Printf("store.error what=%s", event.RunnerGone)
+						}
+					}
+					for _, r := range back {
+						svcLog.Printf("runner.back id=%s name=%q", r.ID, r.Name)
+					}
 				}
 				// Asked work that ended: its result becomes the asking
 				// session's next turn (queue.Deliver).
@@ -761,8 +796,12 @@ func subscriptionLogins(c config, subs *credentials.Subscriptions) *credentials.
 		if err != nil {
 			path = h.Info().Name // the connect says it could not start
 		}
-		m.Logins[h.Info().Name] = credentials.Login{Path: path, Args: l.Args, Prefix: l.Prefix,
+		login := credentials.Login{Path: path, Args: l.Args, Prefix: l.Prefix,
 			Token: regexp.MustCompile(l.Token), Valid: time.Duration(l.ValidDays) * 24 * time.Hour}
+		if l.Refused != "" {
+			login.Refused = regexp.MustCompile(l.Refused)
+		}
+		m.Logins[h.Info().Name] = login
 	}
 	return m
 }

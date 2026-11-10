@@ -20,6 +20,7 @@ import (
 	"github.com/staysup/agentbus/agents"
 	"github.com/staysup/agentbus/blobs"
 	"github.com/staysup/agentbus/credentials"
+	"github.com/staysup/agentbus/event"
 	"io"
 	"net/http"
 	"regexp"
@@ -118,6 +119,11 @@ type Config struct {
 	// settings routes read and write them (settings.go). Nil: the defaults,
 	// and the settings routes answer 404.
 	Settings settings.Store
+
+	// Logf writes one line to the service log for each change the API
+	// makes to control's own state, such as a settings file written.
+	// Never a value. Nil: none.
+	Logf func(format string, args ...any)
 }
 
 // API is the client API's http.Handler.
@@ -389,6 +395,18 @@ func (a *API) internal(w http.ResponseWriter) {
 }
 
 func newEventID() string { return "evt_" + randomHex(8) }
+
+// changed records one change to control's own state: a line in the service
+// log and an event in no session.
+func (a *API) changed(e event.Event, format string, args ...any) {
+	if a.cfg.Logf != nil {
+		a.cfg.Logf(format, args...)
+	}
+	e.ID, e.Time = newEventID(), a.cfg.Now().UTC()
+	if _, _, err := a.cfg.Store.Append(e); err != nil && a.cfg.Logf != nil {
+		a.cfg.Logf("store.error what=%s", e.Kind)
+	}
+}
 
 func randomHex(n int) string {
 	b := make([]byte, n)

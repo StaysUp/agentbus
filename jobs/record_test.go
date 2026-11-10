@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -57,9 +58,13 @@ func TestRecordRoute(t *testing.T) {
 	if code := send(t, srv, a.Token, "POST", path, batch, &ack); code != 200 || ack.Stored != 0 {
 		t.Fatalf("the same batch again: %d %+v", code, ack)
 	}
-	recs, _ := st.After(0, store.Filter{}, 100)
+	// The two runners' runner.enrolled are in no session.
+	recs, _ := st.After(0, store.Filter{Session: session, Only: true}, 100)
 	if len(recs) != 2 {
 		t.Fatalf("%d events stored, want 2", len(recs))
+	}
+	if all, _ := st.After(0, store.Filter{}, 100); len(all) != 4 || !strings.Contains(string(all[0].Data), `"kind":"runner.enrolled","time"`) || !strings.Contains(string(all[0].Data), a.Runner.ID) {
+		t.Fatalf("%d events, first %s", len(all), all[0].Data)
 	}
 	for _, r := range recs {
 		var e event.Event

@@ -343,8 +343,8 @@ func TestRunRefusesWhenServiceSendsAgentElsewhere(t *testing.T) {
 		if code != http.StatusBadRequest || !strings.Contains(out["error"].(string), "another endpoint") {
 			t.Fatalf("%s with %s set: %d %s, want 400", agent, v, code, raw)
 		}
-		if svc.store.Last() != 0 {
-			t.Fatalf("%s: a refused run stored events", agent)
+		if evs := storedEvents(t, svc.store); len(evs) != 0 {
+			t.Fatalf("%s: a refused run stored events: %+v", agent, evs)
 		}
 	}
 }

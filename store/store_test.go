@@ -374,6 +374,16 @@ func TestSnapshotOrderAndSeq(t *testing.T) {
 	}
 }
 
+// Control's own events are in no session, and make none.
+func TestSnapshotLeavesOutControlEvents(t *testing.T) {
+	s := newStore(t)
+	mustAppend(t, s, ev(event.ModelRequested, "a"))
+	mustAppend(t, s, event.Event{ID: "evt_r", Kind: event.RunnerEnrolled, Time: t0, Runner: "run_1"})
+	if snap, _ := s.Snapshot(); snap.Seq != 2 || len(snap.Sessions) != 1 || snap.Sessions[0].ID != "a" {
+		t.Fatalf("snapshot %+v", snap)
+	}
+}
+
 func TestNotifySignalsAfterWrite(t *testing.T) {
 	s := newStore(t)
 	ch, cancel := s.Notify()

@@ -28,6 +28,7 @@ import (
 
 	"github.com/staysup/agentbus/blobs"
 	"github.com/staysup/agentbus/credentials"
+	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/settings"
@@ -95,6 +96,9 @@ type Server struct {
 	token, enrol [32]byte
 	tokenKey     [32]byte // signs runners' turn tokens (tokens.go)
 	mux          *http.ServeMux
+	// Logf writes one line to the service log for each runner that
+	// enrolls. Set before serving; nil: none.
+	Logf func(format string, args ...any)
 }
 
 // New returns the jobs.
@@ -777,6 +781,18 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		s.internal(w)
 		return
+	}
+	role := "runner"
+	if b.Capabilities != nil && b.Capabilities.Role == queue.RoleConnector {
+		role = queue.RoleConnector
+	}
+	if s.Logf != nil {
+		s.Logf("runner.enrolled id=%s name=%q role=%s", rn.ID, rn.Name, role)
+	}
+	if s.cfg.Record != nil {
+		if _, err := s.cfg.Record.AppendOnce(event.Event{ID: queue.NewID("evt_"), Kind: event.RunnerEnrolled, Time: rn.Created, Runner: rn.ID}); err != nil && s.Logf != nil {
+			s.Logf("store.error what=%s", event.RunnerEnrolled)
+		}
 	}
 	writeJSON(w, http.StatusCreated, Enrolled{rn, rt, s.cfg.Heartbeat.Milliseconds(), s.cfg.Lease.Milliseconds()})
 }
