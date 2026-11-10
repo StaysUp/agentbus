@@ -23,6 +23,7 @@ const DefaultInstructions = `Your session's earlier turns are stored by AgentBus
 agentbus-api GET "/api/v0/sessions/{session}/search?q=<text>"
 with <text> URL-encoded. Each hit's "read" is a path you can GET the same way, for the whole of what matched.
 You can also ask other agents with the same command: start a turn on any saved agent, continue one, or ask for a review. Do not wait for them: each result comes back to you as a later turn. How: agentbus-api GET /docs/llms.txt, section "Ask other agents".
+AgentBus agents are not your harness's own agents or subagents. To list them: agentbus-api GET /api/v0/agents
 `
 
 // CheckInstructions refuses text a turn cannot carry.
