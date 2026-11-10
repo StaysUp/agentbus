@@ -21,7 +21,7 @@ AgentBus is a cross-vendor middleware framework for coding agents. It sits betwe
 
 ## Demo
 
-[![AgentBus framework demo](https://img.youtube.com/vi/q4d0v1aJJ0E/maxresdefault.jpg)](https://youtu.be/q4d0v1aJJ0E)
+[![AgentBus demo](https://img.youtube.com/vi/si0HHQFcCD0/maxresdefault.jpg)](https://youtu.be/si0HHQFcCD0)
 
 Click to watch on YouTube.
 
