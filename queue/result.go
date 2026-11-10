@@ -35,6 +35,24 @@ type Result struct {
 	Changes *workspace.Changes `json:"changes,omitempty"`
 	// Apply, for an apply job: what it wrote, or the files that refused it.
 	Apply *ApplyResult `json:"apply,omitempty"`
+	// Changeset, for a turn in an isolated copy: the blob, in the control
+	// plane's store, of what the copy holds at the turn's end that differs
+	// from its base (workspace.Changeset). An apply reads it.
+	Changeset string `json:"changeset,omitempty"`
+	// Snapshot, for a snapshot job: the snapshot it took.
+	Snapshot *SnapshotTaken `json:"snapshot,omitempty"`
+}
+
+// SnapshotTaken is a snapshot a connector took: its id, the blob of its
+// files' times, and how many files it holds. Its trees and files are blobs
+// in the control plane's store.
+type SnapshotTaken struct {
+	ID    string `json:"id"`
+	Times string `json:"times,omitempty"`
+	Files int    `json:"files"`
+	// Git: the content tree of the folder's .git, carried beside the
+	// snapshot and not part of its id.
+	Git string `json:"git,omitempty"`
 }
 
 // ApplyResult is what an apply job did in the person's folder.

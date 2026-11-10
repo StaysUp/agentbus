@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/staysup/agentbus/blobs"
+	"github.com/staysup/agentbus/connector"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -122,15 +124,29 @@ func newWorld(t *testing.T, capacity int) *world {
 	if err != nil {
 		t.Fatal(err)
 	}
+	bs, err := blobs.Open(filepath.Join(dir, "blobs"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	s, err := jobs.New(jobs.Config{Queue: q, Token: mainTok, EnrollToken: enrollTok,
-		Lease: 2 * time.Second, Heartbeat: 50 * time.Millisecond, MaxWait: 200 * time.Millisecond, Folders: fr})
+		Lease: 2 * time.Second, Heartbeat: 50 * time.Millisecond, MaxWait: 200 * time.Millisecond, Folders: fr, Blobs: bs})
 	if err != nil {
 		t.Fatal(err)
 	}
 	plane := httptest.NewServer(s)
 	ctx, cancel := context.WithCancel(context.Background())
+	conn := &connector.Connector{Folders: fr, Store: bs, State: filepath.Join(dir, "connector")}
+	cn, err := Enroll(ctx, Config{Queue: plane.URL, EnrollToken: enrollTok, Name: "connector", Capacity: 2,
+		Role: queue.RoleConnector, FolderSide: connector.Jobs{Connector: conn}, Folders: fr, Logf: t.Logf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cnDone := make(chan struct{})
+	go func() { cn.Run(ctx); close(cnDone) }()
+	t.Cleanup(func() { <-cnDone })
 	r, err := Enroll(ctx, Config{Queue: plane.URL, EnrollToken: enrollTok, Name: "test", Capacity: capacity,
-		Engine: eng, Store: st, StopWait: 5 * time.Second, Logf: t.Logf, Workdir: filepath.Join(dir, "worktrees"), Folders: fr})
+		Engine: eng, Store: st, StopWait: 5 * time.Second, Logf: t.Logf, Workdir: filepath.Join(dir, "worktrees"), Folders: fr,
+		Lender: conn, Blobs: bs, BlobSink: bs})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,7 +355,7 @@ func TestWorktreeSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantDir := filepath.Join(w.r.cfg.Workdir, first.ID)
-	if res.Folder != wantDir || w.runs()[0].Cwd != wantDir && !sameDir(w.runs()[0].Cwd, wantDir) {
+	if res.Folder != "" || got.Workspace == nil || got.Workspace.Space != first.ID || w.runs()[0].Cwd != wantDir && !sameDir(w.runs()[0].Cwd, wantDir) {
 		t.Fatalf("folder %q, turn ran in %q, want %q", res.Folder, w.runs()[0].Cwd, wantDir)
 	}
 	m := byPath(res.Changes)

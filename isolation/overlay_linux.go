@@ -24,6 +24,7 @@ package isolation
 // process the agent left running cannot stop one.
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,7 +64,11 @@ func storeDir(workdir string) string { return filepath.Join(workdir, stateFolder
 func (s *Space) lowerDir() string    { return filepath.Join(s.state(), "l") }
 
 func (overlayBackend) Open(r Request) (*Space, error) {
-	if err := checkFolder(r); err != nil {
+	if r.Snapshot != nil {
+		if err := checkOpen(r); err != nil {
+			return nil, err
+		}
+	} else if err := checkFolder(r); err != nil {
 		return nil, err
 	}
 	if s, err := Load(r.Workdir, filepath.Join(r.Workdir, r.ID)); err == nil {
@@ -79,9 +84,12 @@ func (overlayBackend) Open(r Request) (*Space, error) {
 	if why := overlayWhy(r.Workdir); why != "" {
 		return nil, &Unavailable{Overlay, why}
 	}
-	s := &Space{ID: r.ID, Backend: Overlay, Source: filepath.Clean(r.Folder), Root: filepath.Join(r.Workdir, r.ID),
+	s := &Space{ID: r.ID, Backend: Overlay, Ref: r.Ref, Root: filepath.Join(r.Workdir, r.ID),
 		Workdir: r.Workdir, Method: MethodOverlay}
 	s.Dir = s.Root
+	if r.Snapshot != nil {
+		s.Snapshot = r.Snapshot.ID
+	}
 	// What a failed attempt left, with no record, is this job's own.
 	if err := unmountAll(s.Root); err != nil {
 		return nil, err
@@ -92,9 +100,13 @@ func (overlayBackend) Open(r Request) (*Space, error) {
 	if err := removeState(s); err != nil {
 		return nil, err
 	}
-	rootInfo, err := os.Stat(s.Source)
-	if err != nil {
-		return nil, err
+	rootMode := fs.FileMode(0o755)
+	if r.Snapshot == nil {
+		rootInfo, err := os.Stat(r.Folder)
+		if err != nil {
+			return nil, err
+		}
+		rootMode = rootInfo.Mode()
 	}
 	fail := func(err error) (*Space, error) {
 		overlayBackend{}.Close(s)
@@ -103,16 +115,20 @@ func (overlayBackend) Open(r Request) (*Space, error) {
 	if err := os.MkdirAll(s.state(), 0o700); err != nil {
 		return fail(err)
 	}
-	if err := snapshot(s, time.Now()); err != nil {
+	if r.Snapshot != nil {
+		if err := lowerFromSnapshot(ctxOf(r), s, r.Snapshot); err != nil {
+			return fail(err)
+		}
+	} else if err := snapshot(s, filepath.Clean(r.Folder), time.Now()); err != nil {
 		return fail(err)
 	}
 	// The upper layer's own folder is the copy's top folder: it has the
 	// person's folder's mode.
 	up := filepath.Join(s.state(), "u")
-	if err := os.Mkdir(up, rootInfo.Mode().Perm()); err != nil {
+	if err := os.Mkdir(up, rootMode.Perm()); err != nil {
 		return fail(err)
 	}
-	if err := os.Chmod(up, rootInfo.Mode().Perm()); err != nil {
+	if err := os.Chmod(up, rootMode.Perm()); err != nil {
 		return fail(err)
 	}
 	if err := os.Mkdir(filepath.Join(s.state(), "w"), 0o700); err != nil {
@@ -135,9 +151,9 @@ func (overlayBackend) Open(r Request) (*Space, error) {
 // copy, so it says what the layer holds, whatever changed in the folder
 // meanwhile. A .git file at the top is left out, as the copy backend leaves
 // it out.
-func snapshot(s *Space, start time.Time) error {
+func snapshot(s *Space, source string, start time.Time) error {
 	dir := s.lowerDir()
-	if _, err := copyTree(s.Source, dir); err != nil {
+	if _, err := copyTree(source, dir); err != nil {
 		return err
 	}
 	if fi, err := os.Lstat(filepath.Join(dir, ".git")); err == nil && !fi.IsDir() {
@@ -145,7 +161,7 @@ func snapshot(s *Space, start time.Time) error {
 			return err
 		}
 	}
-	files, err := scan(dir, baseHasher(start))
+	files, err := scan(dir, baseHasher(start, s.objectDir()))
 	if err != nil {
 		return err
 	}
@@ -156,6 +172,28 @@ func snapshot(s *Space, start time.Time) error {
 	st, n, err := t.fromSnapshot(nil, nil, files)
 	if err != nil {
 		return err
+	}
+	if err := t.flush(); err != nil {
+		return err
+	}
+	b, _ := json.Marshal(lowerRec{Tree: st, Files: n})
+	return writeFileAtomic(filepath.Join(s.state(), "lower.json"), b)
+}
+
+// lowerFromSnapshot writes the files of snap as s's lower layer, and
+// records them: each with its blob's hash, so the Base is snap.
+func lowerFromSnapshot(ctx context.Context, s *Space, snap *Snapshot) error {
+	files, err := materialise(ctx, snap, s.lowerDir(), 0o755)
+	if err != nil {
+		return err
+	}
+	t := s.trees()
+	st, n, err := t.fromSnapshot(nil, nil, files)
+	if err != nil {
+		return err
+	}
+	if id, ok, err := t.contentOf(st.Root, nil); err != nil || !ok || id != snap.ID {
+		return ErrSnapshot
 	}
 	if err := t.flush(); err != nil {
 		return err
@@ -189,7 +227,6 @@ func (overlayBackend) Checkpoints(s *Space) ([]Checkpoint, error) { return check
 func (overlayBackend) Diff(s *Space, from, to string) (workspace.Changes, error) {
 	return diff(s, from, to)
 }
-func (overlayBackend) Apply(s *Space, from, to string) (Applied, error) { return apply(s, from, to) }
 
 func (overlayBackend) Close(s *Space) error {
 	if s.Root != filepath.Join(s.Workdir, s.ID) {

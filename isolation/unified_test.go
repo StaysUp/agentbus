@@ -3,15 +3,18 @@ package isolation
 import (
 	"errors"
 	"fmt"
+	"github.com/staysup/agentbus/connector"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 )
 
-// An apply is recorded before its prune, so the same apply again, as after
-// a lost answer, answers as it did and writes nothing.
-func TestApplyAgainAfterPrune(t *testing.T) {
+// The same apply again, as after a lost answer, finds every file already
+// as the turn left it and writes nothing. Once the person changed the file
+// after it, it is refused, and still writes nothing: the control plane
+// answers a repeated request with the apply that ran (queue.Apply).
+func TestApplyAgain(t *testing.T) {
 	src := t.TempDir()
 	fixture(t, src, map[string]string{"a.txt": "one\n"})
 	b, s := open(t, Copy, src)
@@ -20,17 +23,21 @@ func TestApplyAgainAfterPrune(t *testing.T) {
 	if _, err := b.Checkpoint(s, "t1"); err != nil {
 		t.Fatal(err)
 	}
-	first, err := b.Apply(s, Base, "t1")
-	if err != nil || !first.Pruned || len(first.Files) != 1 {
+	first, err := applyIn(t, s, src, Base, "t1")
+	if err != nil || len(first.Files) != 1 {
 		t.Fatalf("apply: %+v %v", first, err)
 	}
-	fixture(t, src, map[string]string{"a.txt": "theirs\n"})
-	again, err := b.Apply(s, Base, "t1")
-	if err != nil || !again.Pruned || len(again.Files) != 1 || again.Files[0] != "a.txt" {
+	again, err := applyIn(t, s, src, Base, "t1")
+	if err != nil || len(again.Files) != 0 {
 		t.Fatalf("apply again: %+v %v", again, err)
 	}
+	fixture(t, src, map[string]string{"a.txt": "theirs\n"})
+	var cf *connector.Conflict
+	if _, err := applyIn(t, s, src, Base, "t1"); !errors.As(err, &cf) {
+		t.Fatalf("apply over their change: %v", err)
+	}
 	if read(t, filepath.Join(src, "a.txt")) != "theirs\n" {
-		t.Fatal("the second apply wrote again")
+		t.Fatal("the third apply wrote")
 	}
 }
 
@@ -58,11 +65,11 @@ func TestConcurrentAppliesToOneFolder(t *testing.T) {
 	}
 	errs := make(chan error, 2)
 	for _, s := range spaces {
-		go func() { _, err := b.Apply(s, Base, "t1"); errs <- err }()
+		go func() { _, err := applyIn(t, s, src, Base, "t1"); errs <- err }()
 	}
 	ok, refused := 0, 0
 	for range 2 {
-		var cf *Conflict
+		var cf *connector.Conflict
 		switch err := <-errs; {
 		case err == nil:
 			ok++
@@ -149,16 +156,32 @@ func TestDiffHasFileDiffs(t *testing.T) {
 		}
 	}
 
-	// The person's file changed since: the first turn's earlier content is
-	// no longer kept, so a later diff of it is left out, never wrong.
+	// The person's file changed since: the first diff kept the earlier
+	// content it read, checked against its hash, so a later diff still
+	// shows it, and never the person's new content.
 	fixture(t, src, map[string]string{"a.txt": "theirs\n"})
 	c, err = b.Diff(s, Base, "t1")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, f := range c.Files {
-		if f.Path == "a.txt" && (f.Diff != nil || !f.DiffLeftOut) {
+		if f.Path == "a.txt" && (f.Diff == nil || *f.Diff != want["a.txt"]) {
 			t.Fatalf("a.txt after the person changed it: %+v", f)
 		}
+	}
+	// A copy whose earlier content was never read, once the person's file
+	// changed, has it left out, never wrong.
+	src2 := t.TempDir()
+	fixture(t, src2, map[string]string{"a.txt": "one\ntwo\n"})
+	b2, s2 := open(t, Copy, src2)
+	fixture(t, s2.Dir, map[string]string{"a.txt": "one\n2\n"})
+	b2.Checkpoint(s2, "t1")
+	fixture(t, src2, map[string]string{"a.txt": "theirs\n"})
+	c, err = b2.Diff(s2, Base, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(c.Files) != 1 || c.Files[0].Diff != nil || !c.Files[0].DiffLeftOut {
+		t.Fatalf("a.txt of a copy never read: %+v", c.Files)
 	}
 }

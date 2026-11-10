@@ -42,8 +42,11 @@ func (gitBackend) Open(r Request) (*Space, error) {
 	if s, err := Load(r.Workdir, root); err == nil {
 		return s, nil // a retry of the job that made it
 	}
+	if r.Snapshot != nil {
+		return nil, &Unavailable{Git, "a worktree needs the folder's repo on this machine"}
+	}
 	s := &Space{ID: r.ID, Backend: Git, Root: root, Dir: root, Workdir: r.Workdir}
-	rel := "."
+	rel, source := ".", ""
 	if r.Folder != "" {
 		repo, in, head, ok := repoOf(r.Folder)
 		if !ok {
@@ -54,7 +57,7 @@ func (gitBackend) Open(r Request) (*Space, error) {
 		if holds(repo, r.Workdir) {
 			return nil, &Refusal{refusedHoldsWorkdir}
 		}
-		s.Source, s.Repo, s.Base, rel = filepath.Clean(r.Folder), repo, head, in
+		source, s.Ref, s.Repo, s.Base, rel = filepath.Clean(r.Folder), r.Ref, repo, head, in
 	} else {
 		s.Repo, s.Base = r.Repo, r.Base
 	}
@@ -74,8 +77,8 @@ func (gitBackend) Open(r Request) (*Space, error) {
 	if !insideDir(root, s.Dir) {
 		return undo(&Refusal{refusedNotInCommit})
 	}
-	if s.Source != "" {
-		if err := carry(s.Repo, s.Source, root); err != nil {
+	if source != "" {
+		if err := carry(s.Repo, source, root); err != nil {
 			return undo(err)
 		}
 	}
@@ -99,7 +102,7 @@ func (b gitBackend) Checkpoint(s *Space, name string) (Checkpoint, error) {
 func (gitBackend) take(s *Space, t *trees, prev *treeState, save workspace.Hasher) (treeState, int, error) {
 	if prev == nil {
 		keep := func(rel, p string, info fs.FileInfo) (string, error) {
-			if info.Mode().IsRegular() && info.Size() <= MaxFileDiff {
+			if info.Mode()&fs.ModeSymlink != 0 || info.Mode().IsRegular() && info.Size() <= MaxFileDiff {
 				return save(rel, p, info)
 			}
 			return workspace.Hash(rel, p, info)
@@ -119,7 +122,6 @@ func (gitBackend) Checkpoints(s *Space) ([]Checkpoint, error)                { r
 func (gitBackend) Diff(s *Space, from, to string) (workspace.Changes, error) {
 	return diff(s, from, to)
 }
-func (gitBackend) Apply(s *Space, from, to string) (Applied, error) { return apply(s, from, to) }
 
 func (gitBackend) Close(s *Space) error {
 	if s.Root != filepath.Join(s.Workdir, s.ID) {

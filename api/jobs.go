@@ -6,6 +6,7 @@ package api
 // description, the Host check, CORS and the main token.
 
 import (
+	"github.com/staysup/agentbus/blobs"
 	"net/http"
 
 	"github.com/staysup/agentbus/jobs"
@@ -23,11 +24,13 @@ func jobsRoute(a *API, w http.ResponseWriter, r *http.Request, _ string) {
 }
 
 var (
-	noJob       = fail(http.StatusNotFound, "No such job, or this service keeps no job queue.")
-	queueFull   = fail(http.StatusTooManyRequests, "Too many jobs are waiting; wait for some to end.")
-	jobConflict = fail(http.StatusConflict, "The idempotency key names a job with other fields, or the session is closed.")
-	staleReply  = ok(http.StatusConflict, jobs.JobError{}, "The attempt is no longer current (stale is true): stop its work. Or, for events, a gap: send from next.")
-	noAttempt   = fail(http.StatusNotFound, "No such attempt or runner for this runner token, or this service keeps no job queue.")
+	noJob         = fail(http.StatusNotFound, "No such job, or this service keeps no job queue.")
+	queueFull     = fail(http.StatusTooManyRequests, "Too many jobs are waiting; wait for some to end.")
+	jobConflict   = fail(http.StatusConflict, "The idempotency key names a job with other fields, or the session is closed.")
+	staleReply    = ok(http.StatusConflict, jobs.JobError{}, "The attempt is no longer current (stale is true): stop its work. Or, for events, a gap: send from next.")
+	noAttempt     = fail(http.StatusNotFound, "No such attempt or runner for this runner token, or this service keeps no job queue.")
+	noBlobs       = fail(http.StatusNotFound, "This service keeps no blob store, or no blob of that hash.")
+	noRunnerToken = fail(http.StatusUnauthorized, "A runner's or a connector's token is required.")
 )
 
 const jobsDoc = "A job is a requested turn. Its kind is turn or review. A runner takes it and runs it as an attempt, and " +
@@ -182,6 +185,39 @@ var jobRoutes = []route{
 		doc:     "A batch of the attempt's events, numbered from offset. A batch sent again stores nothing new.",
 		body:    jobs.EventBatch{},
 		replies: []reply{ok(200, jobs.EventBatchAck{}, "Stored."), badRequest, noAttempt, staleReply, storeFailed},
+		self:    true, serve: jobsRoute},
+	{method: "POST", path: "/api/v0/attempts/{id}/snapshot", op: "attemptSnapshot",
+		idDoc:   "The attempt id: the turn id. Another shape gets 404.",
+		tag:     "Runners",
+		summary: "Ask for a folder's snapshot",
+		doc: "For a session's first turn in an isolated copy of a folder on another machine: the snapshot job, made the first time and the same job after, " +
+			"on the folder's connector. Send it again until snapshot is set, then build the copy from its blobs (GET /api/v0/blobs/{id}).",
+		body:    jobs.AttemptCall{},
+		replies: []reply{ok(200, jobs.SnapshotState{}, "The snapshot job, and the snapshot once taken."), badRequest, noAttempt, staleReply, storeFailed},
+		self:    true, serve: jobsRoute},
+	{method: "POST", path: "/api/v0/blobs", op: "missingBlobs",
+		tag:     "Runners",
+		summary: "Ask which blobs are missing",
+		doc: "The control plane's blob store holds every file of a snapshot and of a turn's changes, by the hex SHA-256 of its content. " +
+			"Of the hashes sent, at most 10000, the reply lists those it does not hold, so only those are sent. A runner's or a connector's token.",
+		body:    blobs.MissingRequest{},
+		replies: []reply{ok(200, blobs.MissingReply{}, "The hashes not held."), badRequest, noBlobs, noRunnerToken},
+		self:    true, serve: jobsRoute},
+	{method: "PUT", path: "/api/v0/blobs/{id}", op: "putBlob",
+		idDoc:   "The blob's hash: 64 lowercase hex digits, the SHA-256 of the body.",
+		tag:     "Runners",
+		summary: "Send a blob",
+		doc: "The body is the blob's content, as application/octet-stream, streamed: the 2 MiB limit of the runner protocol does not apply, up to 4 GiB. " +
+			"It is kept only when its SHA-256 is the hash in the path. A blob already held is kept as it was. A runner's or a connector's token.",
+		replies: []reply{{status: 204, doc: "Kept.", empty: true}, fail(400, "The content does not have the hash in the path."), noBlobs,
+			noRunnerToken, fail(413, "The blob is bigger than 4 GiB."), fail(500, "The blob could not be kept.")},
+		self: true, serve: jobsRoute},
+	{method: "GET", path: "/api/v0/blobs/{id}", op: "getBlob",
+		idDoc:   "The blob's hash: 64 lowercase hex digits.",
+		tag:     "Runners",
+		summary: "Read a blob",
+		doc:     "The blob's content, as application/octet-stream, streamed. A runner's or a connector's token.",
+		replies: []reply{{status: 200, doc: "The content.", empty: true}, fail(404, "No blob of that hash, or this service keeps no blob store."), noRunnerToken},
 		self:    true, serve: jobsRoute},
 	{method: "POST", path: "/api/v0/attempts/{id}/finish", op: "finishAttempt",
 		idDoc:   "The attempt id: the turn id. Another shape gets 404.",

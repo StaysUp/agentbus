@@ -1,16 +1,21 @@
 package main
 
-// One program, three ways to run it:
+// One program, four ways to run it:
 //
-//	agentbus up      the API, the job queue, the record, the gateway and a
-//	                 runner, in one process: one person on one machine
-//	agentbus server  the API, the job queue, the record and the gateway,
-//	                 with no runner: runners on other machines pull from it
-//	agentbus runner  a runner, with its own gateway and record, that takes
-//	                 jobs from a server
+//	agentbus up         the API, the job queue, the record, the gateway, a
+//	                    connector and a runner, in one process: one person
+//	                    on one machine
+//	agentbus server     the API, the job queue, the record, the gateway and
+//	                    the blob store, with no runner: runners and
+//	                    connectors on other machines pull from it
+//	agentbus runner     a runner, with its own gateway and record, that takes
+//	                    jobs from a server; with -folder, a connector beside it
+//	agentbus connector  a connector alone: the folders of this machine, their
+//	                    snapshots and their applies, for a server
 //
-// Every runner, the built-in one of up too, talks to its queue through the
-// runner protocol over HTTP.
+// Every runner and connector, the built-in ones of up too, talks to its
+// queue through the runner protocol over HTTP. File data goes through the
+// server's blob store; in up the three share it on disk.
 
 import (
 	"errors"
@@ -29,9 +34,10 @@ import (
 
 // The modes. up is the zero value of config.mode.
 const (
-	modeUp     = ""
-	modeServer = "server"
-	modeRunner = "runner"
+	modeUp        = ""
+	modeServer    = "server"
+	modeRunner    = "runner"
+	modeConnector = "connector"
 )
 
 // Where a runner's agents send model calls (agentbus runner -gateway).
@@ -56,6 +62,7 @@ func (c config) modeName() string {
 const usage = `usage: agentbus up     [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false] [-max-runs 4]
        agentbus server [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false]
        agentbus runner -server URL [-enroll-token-file F] [-gateway local] [-capacity 4] [-name NAME] [-folder DIR]... [-labels a,b] [-listen 127.0.0.1:0] [-replay=false]
+       agentbus connector -server URL -folder DIR... [-enroll-token-file F] [-name NAME]
        agentbus api METHOD PATH [BODY]   (inside a turn: calls this service with the turn's token)
        agentbus version`
 
@@ -68,6 +75,8 @@ func parse(args []string, home string, stderr io.Writer) (config, bool) {
 		c.mode = modeUp
 	case modeServer, modeRunner:
 		c.mode = args[0]
+	case modeConnector:
+		return parseConnector(args, home, stderr)
 	default:
 		fmt.Fprintln(stderr, usage)
 		return c, false
@@ -197,3 +206,44 @@ type folderFlags []string
 
 func (f *folderFlags) String() string     { return strings.Join(*f, ",") }
 func (f *folderFlags) Set(v string) error { *f = append(*f, v); return nil }
+
+// parseConnector reads agentbus connector's command line.
+func parseConnector(args []string, home string, stderr io.Writer) (config, bool) {
+	c := config{mode: modeConnector}
+	name := "agentbus connector"
+	fl := flag.NewFlagSet(args[0], flag.ContinueOnError)
+	fl.SetOutput(stderr)
+	var folderList folderFlags
+	fl.Var(&folderList, "folder", "a folder on this machine that sessions may copy and apply to, by its absolute path; repeat it for each one (required)")
+	server := fl.String("server", "", "the server's URL, such as http://192.168.1.10:8787 (required)")
+	enrollFile := fl.String("enroll-token-file", "", "the server's enroll_token, copied here with mode 0600; default <data folder>/enroll_token")
+	runnerName := fl.String("name", "", "the connector's name; default the host name")
+	if err := fl.Parse(args[1:]); err != nil {
+		return c, false
+	}
+	if fl.NArg() > 0 {
+		fmt.Fprintf(stderr, "%s: unexpected argument %q\n", name, fl.Arg(0))
+		return c, false
+	}
+	u, err := url.Parse(*server)
+	if *server == "" || err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		fmt.Fprintf(stderr, "%s: -server must be the server's URL, such as http://192.168.1.10:8787\n", name)
+		return c, false
+	}
+	if len(folderList) == 0 {
+		fmt.Fprintf(stderr, "%s: name at least one -folder\n", name)
+		return c, false
+	}
+	for _, f := range folderList {
+		if !filepath.IsAbs(f) || len(f) > 4096 {
+			fmt.Fprintf(stderr, "%s: -folder must be an absolute path\n", name)
+			return c, false
+		}
+	}
+	c.server, c.runnerName, c.folders = *server, *runnerName, folderList
+	c.enrollFile = *enrollFile
+	if c.enrollFile == "" {
+		c.enrollFile = home + string(os.PathSeparator) + "enroll_token"
+	}
+	return c, true
+}

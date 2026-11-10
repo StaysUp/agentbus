@@ -316,7 +316,6 @@ func TestCopiedSessionKeptAcrossTurnsAndRemovedOnClose(t *testing.T) {
 	tok := readToken(t, home)
 	folder := t.TempDir()
 	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("v1"), 0o600)
-	real := func(p string) string { r, _ := filepath.EvalSymlinks(p); return r }
 	t.Setenv("AGENTBUS_FAKE_STDOUT", `{"type":"result","session_id":"sess-1"}`+"\n")
 	var j queue.Job
 	if code := callAPI(t, svc, tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn",
@@ -325,8 +324,13 @@ func TestCopiedSessionKeptAcrossTurnsAndRemovedOnClose(t *testing.T) {
 	}
 	j = waitJob(t, svc, tok, j.ID)
 	want := filepath.Join(home, "worktrees", j.ID)
-	if j.State != queue.Finished || j.Workspace == nil || j.Workspace.Kind != queue.WorkspaceCopy || real(j.Workspace.Folder) != real(want) {
-		t.Fatalf("first job %s, workspace %+v, want a copy at %s", j.State, j.Workspace, want)
+	// The control plane knows the copy by its space, never by a path.
+	if j.State != queue.Finished || j.Workspace == nil || j.Workspace.Kind != queue.WorkspaceCopy || j.Workspace.Space != j.ID ||
+		j.Workspace.Folder != "" {
+		t.Fatalf("first job %s, workspace %+v, want a copy %s at %s", j.State, j.Workspace, j.ID, want)
+	}
+	if fi, err := os.Stat(want); err != nil || !fi.IsDir() {
+		t.Fatalf("no copy at %s: %v", want, err)
 	}
 	// The second turn writes a file in the copy, through the fake agent.
 	t.Setenv("AGENTBUS_FAKE_MARK", filepath.Join(want, "made.txt"))
@@ -427,8 +431,11 @@ func TestIsolatedSubfolderKeptAcrossTurnsAndReview(t *testing.T) {
 	}
 	j = waitJob(t, svc, tok, j.ID)
 	want := filepath.Join(home, "worktrees", j.ID, "sub")
-	if j.State != queue.Finished || j.Workspace == nil || real(j.Workspace.Folder) != real(want) {
-		t.Fatalf("first job %s, workspace %+v, want folder %s", j.State, j.Workspace, want)
+	if j.State != queue.Finished || j.Workspace == nil || j.Workspace.Space != j.ID || j.Workspace.Folder != "" {
+		t.Fatalf("first job %s, workspace %+v, want space %s", j.State, j.Workspace, j.ID)
+	}
+	if fi, err := os.Stat(want); err != nil || !fi.IsDir() {
+		t.Fatalf("no worktree folder at %s: %v", want, err)
 	}
 	// The queue keeps the folder by its reference, and the session its
 	// snapshot id; the record has the reference too.
@@ -456,7 +463,7 @@ func TestIsolatedSubfolderKeptAcrossTurnsAndReview(t *testing.T) {
 		t.Fatalf("review: %d", code)
 	}
 	// The review names no folder: it reads the reviewed session's workspace.
-	if rev.Spec.Folder != "" || rev.Workspace == nil || real(rev.Workspace.Folder) != real(want) {
+	if rev.Spec.Folder != "" || rev.Workspace == nil || rev.Workspace.Space != j.ID {
 		t.Fatalf("review spec folder %q, workspace %+v, want %s", rev.Spec.Folder, rev.Workspace, want)
 	}
 	waitJob(t, svc, tok, rev.ID)

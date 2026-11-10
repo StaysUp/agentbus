@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -126,6 +127,38 @@ func (r *Registry) Path(ref string) (string, bool) {
 	defer r.mu.Unlock()
 	e, ok := r.folders[ref]
 	return e.Path, ok
+}
+
+// Within says the folder at path is the folder ref or inside it, once
+// every symbolic link of both is resolved: a link inside the folder that
+// leads out of it is not inside. False when ref is not this connector's.
+func (r *Registry) Within(path, ref string) bool {
+	dir, ok := r.Path(ref)
+	if !ok || !filepath.IsAbs(path) {
+		return false
+	}
+	return within(path, dir)
+}
+
+// WithinRef is Within for a folder named by its reference.
+func (r *Registry) WithinRef(child, ref string) bool {
+	p, ok := r.Path(child)
+	return ok && r.Within(p, ref)
+}
+
+// WithinDir says the folder at path is dir or inside it, once every
+// symbolic link of both is resolved.
+func (r *Registry) WithinDir(path, dir string) bool {
+	return filepath.IsAbs(path) && filepath.IsAbs(dir) && within(path, dir)
+}
+
+func within(folder, dir string) bool {
+	f, err1 := filepath.EvalSymlinks(folder)
+	d, err2 := filepath.EvalSymlinks(dir)
+	if err1 != nil || err2 != nil {
+		return false
+	}
+	return f == d || strings.HasPrefix(f, d+string(os.PathSeparator))
 }
 
 // Folder is one folder as the control plane may know it.

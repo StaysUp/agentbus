@@ -76,8 +76,6 @@ func (noneBackend) Diff(s *Space, from, to string) (workspace.Changes, error) {
 	return c, err
 }
 
-func (noneBackend) Apply(*Space, string, string) (Applied, error) { return Applied{}, ErrNoSource }
-
 // Close removes the record only. The folder is the person's own.
 func (noneBackend) Close(s *Space) error {
 	if s.Backend != None {

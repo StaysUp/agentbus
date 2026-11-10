@@ -31,7 +31,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/staysup/agentbus/jobs"
@@ -429,45 +428,58 @@ func (a *API) askChecks(w http.ResponseWriter, g run.Grant, perm settings.Policy
 	if body.Isolate != nil && !*body.Isolate {
 		return refuse(turnIsolateRefused)
 	}
-	asked, ws, err := a.cfg.Queue.SessionFolders(queue.DefaultTeam, g.Session, a.cfg.Folders)
+	// The folder is compared by reference: the control plane holds no
+	// path. Whether a path is inside a folder is the connector's to say,
+	// where the folder is (queue.FolderIssuer).
+	ref, connector, repo, err := a.cfg.Queue.SessionFolder(queue.DefaultTeam, g.Session)
 	if err != nil {
 		a.internal(w)
 		return queue.Links{}, false
 	}
-	if asked == "" && ws == "" {
+	if ref == "" {
+		return refuse(turnFolderRefused)
+	}
+	switch {
+	case body.Folder == "" && body.FolderRef == "" && repo && a.cfg.Folders != nil && a.cfg.Folders.Connector() == connector:
+		// A worktree's session: the new session works on the worktree as
+		// this one left it, its base and edits, in a copy of its own.
 		c, err := a.cfg.Store.Continuation(g.Session)
 		if err != nil {
 			a.internal(w)
 			return queue.Links{}, false
 		}
-		ws = c.Folder
-	}
-	if body.Folder == "" {
-		// The folder the person picked, so the new session gets a worktree
-		// of its own beside this one, not inside it.
-		body.Folder = asked
-		if body.Folder == "" {
-			body.Folder = ws
-		}
-		if body.Folder == "" {
+		if c.Folder == "" {
 			return refuse(turnFolderRefused)
 		}
-	} else if !within(body.Folder, asked) && !within(body.Folder, ws) {
-		return refuse(turnFolderRefused)
+		body.Folder = c.Folder
+	case body.Folder == "" && body.FolderRef == "":
+		// The folder the person picked, so the new session gets a copy of
+		// its own beside this one, not inside it.
+		body.FolderRef, body.Connector = ref, connector
+	case body.FolderRef != "":
+		if body.Connector == "" && a.cfg.Folders != nil {
+			body.Connector = a.cfg.Folders.Connector()
+		}
+		if body.Connector != connector || (body.FolderRef != ref && (a.cfg.Folders == nil ||
+			a.cfg.Folders.Connector() != connector || !a.cfg.Folders.WithinRef(body.FolderRef, ref))) {
+			return refuse(turnFolderRefused)
+		}
+	default:
+		// The session's own folder or one inside it, or the folder its turns
+		// run in (its copy, as the record names it), or one inside that.
+		if a.cfg.Folders == nil || a.cfg.Folders.Connector() != connector {
+			return refuse(turnFolderRefused)
+		}
+		if !a.cfg.Folders.Within(body.Folder, ref) {
+			c, err := a.cfg.Store.Continuation(g.Session)
+			if err != nil {
+				a.internal(w)
+				return queue.Links{}, false
+			}
+			if c.Folder == "" || !a.cfg.Folders.WithinDir(body.Folder, c.Folder) {
+				return refuse(turnFolderRefused)
+			}
+		}
 	}
 	return askedLinks(g), true
-}
-
-// within says folder is dir or inside it, once both are resolved: a symlink
-// inside dir that leads out of it is not inside.
-func within(folder, dir string) bool {
-	if dir == "" || !filepath.IsAbs(folder) {
-		return false
-	}
-	f, err1 := filepath.EvalSymlinks(folder)
-	d, err2 := filepath.EvalSymlinks(dir)
-	if err1 != nil || err2 != nil {
-		return false
-	}
-	return f == d || strings.HasPrefix(f, d+string(os.PathSeparator))
 }

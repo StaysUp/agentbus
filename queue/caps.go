@@ -29,7 +29,16 @@ type Capabilities struct {
 	// owns any. Folders are those folders, at most MaxFolders.
 	Connector string       `json:"connector,omitempty"`
 	Folders   []FolderInfo `json:"folders,omitempty"`
+	// Role: RoleConnector for a connector, which takes only snapshot and
+	// apply jobs of its own folders; empty for a runner, which takes every
+	// other job. A runner that reports Connector shares the connector's
+	// machine and disk: it can use a folder as it is, and copy it by the
+	// local fast path.
+	Role string `json:"role,omitempty"`
 }
+
+// RoleConnector is a connector's Capabilities.Role.
+const RoleConnector = "connector"
 
 // FolderInfo is one folder a connector owns, as control may know it: its
 // reference and the last part of its path. The path itself stays with the
@@ -57,6 +66,12 @@ func LabelOK(l string) bool { return labelShape.MatchString(l) }
 func (c Capabilities) Check() string {
 	if c.Connector != "" && !ConnectorShape.MatchString(c.Connector) {
 		return "capabilities.connector must be con_ and 16 hex digits"
+	}
+	if c.Role != "" && c.Role != RoleConnector {
+		return "capabilities.role must be connector, or absent"
+	}
+	if c.Role == RoleConnector && c.Connector == "" {
+		return "a connector needs capabilities.connector"
 	}
 	if len(c.Folders) > MaxFolders || len(c.Harnesses) > 64 || len(c.Isolation) > 16 || len(c.OS) > 32 || len(c.Arch) > 32 {
 		return "capabilities lists too much"
@@ -100,13 +115,31 @@ const harnessTake = `(j.session IS NOT NULL AND EXISTS (SELECT 1 FROM sessions s
 		WHERE json_extract(h.value, '$.name') = json_extract(j.spec, '$.agent') AND json_extract(h.value, '$.found'))
 	OR NOT EXISTS (SELECT 1 FROM runners o, json_each(o.caps, '$.harnesses') h WHERE o.team = j.team AND o.seen >= ?
 		AND json_extract(h.value, '$.name') = json_extract(j.spec, '$.agent') AND json_extract(h.value, '$.found')
-		AND (COALESCE(json_extract(j.spec, '$.connector'), '') = '' OR json_extract(j.spec, '$.connector') = json_extract(o.caps, '$.connector'))
+		AND COALESCE(json_extract(o.caps, '$.role'), '') != 'connector'
+		AND (COALESCE(json_extract(j.spec, '$.connector'), '') = '' OR ` + remoteIsolated + `
+			OR json_extract(j.spec, '$.connector') = json_extract(o.caps, '$.connector'))
 		AND NOT EXISTS (SELECT 1 FROM json_each(j.spec, '$.labels') l WHERE l.value NOT IN (SELECT value FROM json_each(o.labels))))`
 
-// connectorTake: a job that names a folder's connector goes only to the
-// runner that reports that connector.
-const connectorTake = `COALESCE(json_extract(j.spec, '$.connector'), '') = ''
+// remoteIsolated: a job j that any runner can run, wherever its folder is: a
+// first turn in an isolated copy of a folder, built from its snapshot.
+const remoteIsolated = `(j.kind = 'turn' AND json_extract(j.spec, '$.isolate') AND COALESCE(json_extract(j.spec, '$.folder_ref'), '') != ''
+	AND COALESCE(json_extract(j.spec, '$.repo_ref'), '') = '')`
+
+// connectorTake: a job that names a folder's connector goes to a runner on
+// the connector's machine (one that reports that connector), unless it is a
+// first turn in an isolated copy of a folder, which any runner can build
+// from the folder's snapshot.
+const connectorTake = `COALESCE(json_extract(j.spec, '$.connector'), '') = '' OR ` + remoteIsolated + `
 	OR json_extract(j.spec, '$.connector') = json_extract(r.caps, '$.connector')`
+
+// roleTake: snapshot and apply jobs go only to the connector of their
+// folder, and every other job only to a runner.
+const roleTake = `CASE WHEN j.kind IN ('snapshot','apply')
+	THEN COALESCE(json_extract(r.caps, '$.role'), '') = 'connector' AND json_extract(j.spec, '$.connector') = json_extract(r.caps, '$.connector')
+	ELSE COALESCE(json_extract(r.caps, '$.role'), '') != 'connector' END`
+
+// SpaceShape is a copy's id on its runner (isolation): a job id.
+var SpaceShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
 
 // labelsTake: a job with labels goes only to a runner with every one.
 const labelsTake = `NOT EXISTS (SELECT 1 FROM json_each(j.spec, '$.labels') l
@@ -199,13 +232,20 @@ var SnapshotShape = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
 // FolderIssuer is a connector on this machine, as the control plane of
 // agentbus up reaches it: package folders. It turns a path a request names
-// into the reference the queue keeps, and back, so a check that needs the
-// path (a turn token's folder) runs where the folder is. agentbus server has
-// none, and takes references only.
+// into the reference the queue keeps, and says whether one folder is inside
+// another, so a check that needs the path (a turn token's folder) runs where
+// the folder is. agentbus server has none, and takes references only.
 type FolderIssuer interface {
 	Connector() string
 	Register(path string) (ref string, err error)
 	Path(ref string) (string, bool)
+	// Within says the folder at path is the folder ref or inside it, and
+	// WithinRef the same of the folder child: on the connector, where the
+	// folders are, once every symbolic link is resolved.
+	Within(path, ref string) bool
+	WithinRef(child, ref string) bool
+	// WithinDir says the same of two paths on the connector's machine.
+	WithinDir(path, dir string) bool
 }
 
 // ResolveFolders turns the paths spec names into references issued by f, and

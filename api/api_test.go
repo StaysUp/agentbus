@@ -31,6 +31,8 @@ type env struct {
 	// With a stack (stackEnv): the queue and the engine behind the API.
 	q   *queue.Queue
 	eng *run.Engine
+	// workdir is the runner's folder for copies.
+	workdir string
 }
 
 func newEnvAt(t *testing.T, dbPath string) *env {

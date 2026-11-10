@@ -41,6 +41,7 @@ import (
 	"github.com/staysup/agentbus/adapter/anthropic"
 	"github.com/staysup/agentbus/adapter/openai"
 	"github.com/staysup/agentbus/api"
+	"github.com/staysup/agentbus/blobs"
 	"github.com/staysup/agentbus/body"
 	"github.com/staysup/agentbus/cost"
 	"github.com/staysup/agentbus/folders"
@@ -108,6 +109,9 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		return 2
 	}
 	c.home, c.logf, c.self = home, own.Printf, self()
+	if c.mode == modeConnector {
+		return runConnector(c, own.Printf)
+	}
 	c.upstream, _ = url.Parse(upstream)
 	c.chatgpt, _ = url.Parse(chatgpt)
 	svc, err := start(c)
@@ -189,6 +193,7 @@ type service struct {
 	remote   *settings.Remote  // a runner's settings: the server's
 	settings settings.Store    // the settings the built-in runner reads
 	folders  *folders.Registry // the folders this machine owns (up, runner)
+	blobs    *blobs.Store      // the control plane's blob store (up, server)
 	log      *logfile.Log      // logs/service.log
 	done     chan error
 	once     sync.Once
@@ -285,6 +290,7 @@ func start(c config) (*service, error) {
 	// it the paths they are sent, and keep only references.
 	var fr *folders.Registry
 	var issuer queue.FolderIssuer // nil, not a nil *folders.Registry, in server
+	var bs *blobs.Store           // the control plane's blob store (up, server)
 	if c.hasEngine() {
 		if fr, err = folders.Open(filepath.Join(c.home, "folders.json")); err != nil {
 			st.Close()
@@ -318,8 +324,16 @@ func start(c config) (*service, error) {
 				return nil, err
 			}
 		}
+		// Every file of a snapshot or of a turn's changes goes through the
+		// control plane's blob store.
+		if bs, err = blobs.Open(filepath.Join(c.home, "blobs")); err != nil {
+			closeQ()
+			st.Close()
+			return nil, err
+		}
+		bs.Clean(time.Hour)
 		js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollToken, Heartbeat: c.heartbeat, Agents: saved, Settings: cfgStore,
-			Folders: issuer})
+			Folders: issuer, Blobs: bs})
 		if err != nil {
 			closeQ()
 			st.Close()
@@ -487,7 +501,7 @@ func start(c config) (*service, error) {
 		orOAI.SetRewriter(codexReplay)
 	}
 	host, _, _ := net.SplitHostPort(c.listen)
-	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: gws, api: a, eng: eng, store: st,
+	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: gws, api: a, eng: eng, store: st, blobs: bs,
 		queue: q, remote: remote, settings: cfgStore, folders: fr, log: svcLog, done: make(chan error, 1)}
 	s.srv = &http.Server{
 		Handler:           logRequests(svcLog, route(a, vendors{anth, oai, orAnth, orOAI}, !loopback)),
@@ -558,7 +572,12 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 	}()
 }
 
-// startRunner enrolls the built-in runner and starts it.
+// startRunner enrolls the built-in runner and starts it, and beside it the
+// connector of this machine's folders when it has any: in up always, and in
+// a runner with -folder. In up both share the control plane's blob store on
+// disk, so a copy is made by clone or overlay and no file is sent over
+// HTTP. A runner of a server keeps its own store, with the server's behind
+// it.
 func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfile.Log) error {
 	capacity := s.eng.MaxRuns()
 	name := c.runnerName
@@ -569,13 +588,42 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 		name = "built-in"
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	rn, err := runner.Enroll(ctx, runner.Config{Queue: self, EnrollToken: enrollToken, Name: name, Capacity: capacity,
-		Engine: s.eng, Store: s.store, Logf: svcLog.Printf, Labels: c.labels,
-		Folders: s.folders, LookPath: c.lookPath, Environ: c.environ,
-		Workdir: filepath.Join(c.home, "worktrees"), StateFile: filepath.Join(c.home, "runner.json"), Settings: s.settings})
-	if err != nil {
+	var wg sync.WaitGroup
+	fail := func(err error) error {
 		cancel()
-		return fmt.Errorf("the runner could not enroll with %s: %w", self, err)
+		wg.Wait()
+		return err
+	}
+	cfg := runner.Config{Queue: self, EnrollToken: enrollToken, Name: name, Capacity: capacity,
+		Engine: s.eng, Store: s.store, Logf: svcLog.Printf, Labels: c.labels,
+		LookPath: c.lookPath, Environ: c.environ,
+		Workdir: filepath.Join(c.home, "worktrees"), StateFile: filepath.Join(c.home, "runner.json"), Settings: s.settings}
+	if s.folders != nil && (c.mode == modeUp || len(c.folders) > 0) {
+		wg.Add(1)
+		conn, err := startConnector(ctx, connectorConfig{server: self, enrollToken: enrollToken, name: name, home: c.home,
+			folders: s.folders, store: s.blobs, logf: svcLog.Printf}, wg.Done)
+		if err != nil {
+			wg.Done()
+			return fail(err)
+		}
+		cfg.Folders, cfg.Lender = s.folders, conn
+	}
+	var own *blobs.Store
+	if s.blobs != nil {
+		cfg.Blobs, cfg.BlobSink = s.blobs, s.blobs
+	} else {
+		var err error
+		if own, err = blobs.Open(filepath.Join(c.home, "blobs")); err != nil {
+			return fail(err)
+		}
+	}
+	rn, err := runner.Enroll(ctx, cfg)
+	if err != nil {
+		return fail(fmt.Errorf("the runner could not enroll with %s: %w", self, err))
+	}
+	if own != nil {
+		client := blobClient(self, rn.Token())
+		rn.UseBlobs(blobs.Local{Store: own, From: client}, client)
 	}
 	if s.remote != nil {
 		s.remote.Enrolled(rn.ID(), rn.Token())
@@ -583,9 +631,14 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 	svcLog.Printf("runner.start id=%s capacity=%d", rn.ID(), capacity)
 	s.stopRunner = cancel
 	s.runnerDone = make(chan struct{})
+	wg.Add(1)
 	go func() {
-		defer close(s.runnerDone)
+		defer wg.Done()
 		rn.Run(ctx)
+	}()
+	go func() {
+		wg.Wait()
+		close(s.runnerDone)
 	}()
 	return nil
 }

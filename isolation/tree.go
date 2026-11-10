@@ -572,3 +572,69 @@ func (e *editor) finishAt(n *tnode) (string, int) {
 	sort.Slice(es, func(i, j int) bool { return es[i].name < es[j].name })
 	return e.t.put(es, n.hash), count
 }
+
+// contentCache keeps, by a tree's hash, the content tree id of the same
+// folder (workspace.ContentTrees): a tree never changes, so neither does
+// its id. "" is a tree with a file not hashed, which has no content id.
+var contentCache = struct {
+	sync.Mutex
+	m map[string]string
+}{m: map[string]string{}}
+
+// contentOf is the content tree id of the tree h: the snapshot id of the
+// folder it records, equal on every machine for equal files. ok is false
+// when a file under it has no hash, as the Base of a copy made on this
+// machine leaves most files. put, when not nil, gets each content tree
+// made, by its id.
+func (t *trees) contentOf(h string, put func(id string, b []byte)) (string, bool, error) {
+	if h == emptyTree {
+		return workspace.EmptyTree, true, nil
+	}
+	if put == nil {
+		contentCache.Lock()
+		id, ok := contentCache.m[h]
+		contentCache.Unlock()
+		if ok {
+			return id, id != "", nil
+		}
+	}
+	es, err := t.get(h)
+	if err != nil {
+		return "", false, err
+	}
+	out := make([]workspace.TreeEntry, 0, len(es))
+	for _, e := range es {
+		if !e.dir {
+			if e.f.Hash == "" {
+				rememberContent(h, "")
+				return "", false, nil
+			}
+			out = append(out, workspace.TreeEntry{Name: e.name, Hash: e.f.Hash, Mode: e.f.Mode, Size: e.f.Size})
+			continue
+		}
+		id, ok, err := t.contentOf(e.hash, put)
+		if err != nil || !ok {
+			if err == nil {
+				rememberContent(h, "")
+			}
+			return "", false, err
+		}
+		out = append(out, workspace.TreeEntry{Name: e.name, Dir: true, Hash: id, Count: e.count})
+	}
+	b := workspace.EncodeTree(out)
+	id := workspace.TreeHash(b)
+	if put != nil {
+		put(id, b)
+	}
+	rememberContent(h, id)
+	return id, true, nil
+}
+
+func rememberContent(h, id string) {
+	contentCache.Lock()
+	defer contentCache.Unlock()
+	if len(contentCache.m) >= maxCached {
+		contentCache.m = map[string]string{}
+	}
+	contentCache.m[h] = id
+}

@@ -20,12 +20,19 @@ import (
 
 // caps is what the runner can report now. harnesses is nil before a probe.
 func (r *Runner) caps(harnesses []harness.Report) *queue.Capabilities {
-	c := &queue.Capabilities{OS: runtime.GOOS, Arch: runtime.GOARCH, Isolation: isolation.Available(), Harnesses: harnesses}
-	if f := r.cfg.Folders; f != nil {
-		c.Connector = f.Connector()
-		for _, fo := range f.List(queue.MaxFolders) {
+	if r.cfg.Role == queue.RoleConnector {
+		// A connector runs no agent: it reports its folders only.
+		c := &queue.Capabilities{OS: runtime.GOOS, Arch: runtime.GOARCH, Role: queue.RoleConnector, Connector: r.cfg.Folders.Connector()}
+		for _, fo := range r.cfg.Folders.List(queue.MaxFolders) {
 			c.Folders = append(c.Folders, queue.FolderInfo{Ref: fo.Ref, Name: fo.Name})
 		}
+		return c
+	}
+	c := &queue.Capabilities{OS: runtime.GOOS, Arch: runtime.GOARCH, Isolation: isolation.Available(), Harnesses: harnesses}
+	if f := r.cfg.Folders; f != nil {
+		// On the connector's machine: it can use those folders by the
+		// local fast path. The connector reports them.
+		c.Connector = f.Connector()
 	}
 	return c
 }
@@ -37,7 +44,10 @@ func (r *Runner) caps(harnesses []harness.Report) *queue.Capabilities {
 func (r *Runner) report(ctx context.Context, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for {
-		hs := harness.ProbeAll(ctx, r.cfg.LookPath, r.cfg.Environ)
+		var hs []harness.Report
+		if r.cfg.Role != queue.RoleConnector {
+			hs = harness.ProbeAll(ctx, r.cfg.LookPath, r.cfg.Environ)
+		}
 		if ctx.Err() != nil {
 			return
 		}

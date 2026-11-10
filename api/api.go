@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/staysup/agentbus/agents"
+	"github.com/staysup/agentbus/blobs"
 	"io"
 	"net/http"
 	"regexp"
@@ -176,6 +177,10 @@ func Reserved(r *http.Request) bool {
 // MaxBody bounds an API request's body.
 const MaxBody = 64 << 10
 
+// BlobTimeout bounds how long one blob's upload may take: a blob is a whole
+// file of a snapshot or of a turn's changes.
+const BlobTimeout = 30 * time.Minute
+
 // bodyLimit is MaxBody, except for a run, which carries a prompt, and a
 // program's own event.
 func bodyLimit(r *http.Request) int64 {
@@ -186,7 +191,11 @@ func bodyLimit(r *http.Request) int64 {
 		return MaxEventBody
 	case strings.HasPrefix(p, "/api/v0/settings/"):
 		return MaxSettingsBody
-	case strings.HasPrefix(p, "/api/v0/jobs") || strings.HasPrefix(p, "/api/v0/attempts") || strings.HasPrefix(p, "/api/v0/runners"):
+	case r.Method == http.MethodPut && strings.HasPrefix(p, jobs.BlobPath):
+		// A blob is a whole file, streamed to disk (package jobs).
+		return blobs.MaxBlob
+	case strings.HasPrefix(p, "/api/v0/jobs") || strings.HasPrefix(p, "/api/v0/attempts") || strings.HasPrefix(p, "/api/v0/runners") ||
+		p == "/api/v0/blobs" || strings.HasPrefix(p, jobs.BlobPath):
 		// A job carries a prompt, and a finish a result with the reply.
 		return jobs.MaxBody
 	}
@@ -209,7 +218,11 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// open. The server clears it before the connection's next request.
 	r.Body = http.MaxBytesReader(w, r.Body, bodyLimit(r))
 	if r.ContentLength != 0 {
-		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(a.cfg.BodyTimeout))
+		wait := a.cfg.BodyTimeout
+		if r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, jobs.BlobPath) {
+			wait = BlobTimeout
+		}
+		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(wait))
 	}
 	// The Host check stops DNS rebinding: a web page whose name the attacker
 	// points at 127.0.0.1 reaches a loopback service from the person's own

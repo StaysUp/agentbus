@@ -1,6 +1,6 @@
 //go:build !darwin && !linux
 
-package isolation
+package connector
 
 import "os"
 

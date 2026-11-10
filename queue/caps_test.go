@@ -178,6 +178,14 @@ func (f fakeIssuer) Register(p string) (string, error) {
 	return ref, nil
 }
 func (f fakeIssuer) Path(ref string) (string, bool) { p, ok := f[ref]; return p, ok }
+func (f fakeIssuer) Within(p, ref string) bool {
+	d, ok := f[ref]
+	return ok && (p == d || strings.HasPrefix(p, d+"/"))
+}
+func (f fakeIssuer) WithinRef(child, ref string) bool {
+	p, ok := f[child]
+	return ok && f.Within(p, ref)
+}
 
 // A path becomes a reference and goes; a server with no connector refuses a
 // path; a reference without a connector takes the issuer's.
@@ -292,3 +300,5 @@ func TestHeartbeatReplacesLabels(t *testing.T) {
 		t.Fatalf("a heartbeat without labels changed them: %+v", got.Labels)
 	}
 }
+
+func (f fakeIssuer) WithinDir(p, d string) bool { return p == d || strings.HasPrefix(p, d+"/") }

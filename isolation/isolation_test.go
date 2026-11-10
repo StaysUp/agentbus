@@ -3,6 +3,7 @@ package isolation
 import (
 	"errors"
 	"fmt"
+	"github.com/staysup/agentbus/connector"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -39,10 +40,12 @@ func read(t *testing.T, p string) string {
 func open(t *testing.T, name, folder string) (Backend, *Space) {
 	t.Helper()
 	b, _ := Get(name)
-	s, err := b.Open(Request{ID: "job_1", Workdir: filepath.Join(t.TempDir(), "worktrees"), Folder: folder})
+	ref, lender := lenderFor(t, folder)
+	s, err := b.Open(Request{ID: "job_1", Workdir: filepath.Join(t.TempDir(), "worktrees"), Folder: folder, Ref: ref})
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	s.Lender = lender
 	// An overlay copy left mounted would keep its temp folder from going.
 	t.Cleanup(func() { b.Close(s) })
 	return b, s
@@ -109,11 +112,11 @@ func TestCopyRoundTrip(t *testing.T) {
 		}
 	}
 
-	a, err := b.Apply(s, Base, "t1")
+	a, err := applyIn(t, s, src, Base, "t1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(a.Files) != 5 || !a.Pruned {
+	if len(a.Files) != 5 {
 		t.Fatalf("applied %+v", a)
 	}
 	if read(t, filepath.Join(src, "a.txt")) != "a2" || read(t, filepath.Join(src, "new", "c.txt")) != "c1" ||
@@ -126,8 +129,9 @@ func TestCopyRoundTrip(t *testing.T) {
 	if fi, _ := os.Stat(filepath.Join(src, "keep.txt")); fi.Mode().Perm() != 0o755 {
 		t.Fatalf("mode %v", fi.Mode())
 	}
-	// The apply started at the oldest checkpoint: the ones before t1 went.
-	if n := names(t, b, s); !reflect.DeepEqual(n, []string{"t1"}) {
+	// An apply runs on the folder's connector: the copy keeps every
+	// checkpoint, so a turn's diff still reads, until the session closes.
+	if n := names(t, b, s); !reflect.DeepEqual(n, []string{Base, "t1"}) {
 		t.Fatalf("checkpoints after apply %v", n)
 	}
 	if err := b.Close(s); err != nil {
@@ -179,8 +183,8 @@ func TestApplyConflictRefused(t *testing.T) {
 	fixture(t, src, map[string]string{"a.txt": "mine", "new.txt": "mine too", "same.txt": "s", "c.txt": "c-mine"})
 	os.Remove(filepath.Join(src, "d.txt"))
 
-	_, err := b.Apply(s, Base, "t1")
-	var c *Conflict
+	_, err := applyIn(t, s, src, Base, "t1")
+	var c *connector.Conflict
 	if !errors.As(err, &c) {
 		t.Fatalf("want a conflict, got %v", err)
 	}
@@ -188,7 +192,7 @@ func TestApplyConflictRefused(t *testing.T) {
 	for _, f := range c.Files {
 		got[f.Path] = f.Why
 	}
-	want := map[string]string{"a.txt": whyChanged, "new.txt": whyAdded, "c.txt": whyChanged, "d.txt": whyRemoved}
+	want := map[string]string{"a.txt": connector.WhyChanged, "new.txt": connector.WhyAdded, "c.txt": connector.WhyChanged, "d.txt": connector.WhyRemoved}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("conflicts %v, want %v", got, want)
 	}
@@ -205,7 +209,7 @@ func TestApplyConflictRefused(t *testing.T) {
 	// Resolved: the person takes back their edits.
 	fixture(t, src, map[string]string{"a.txt": "a1", "c.txt": "c1", "d.txt": "d1"})
 	os.Remove(filepath.Join(src, "new.txt"))
-	if _, err := b.Apply(s, Base, "t1"); err != nil {
+	if _, err := applyIn(t, s, src, Base, "t1"); err != nil {
 		t.Fatalf("after resolving: %v", err)
 	}
 	if read(t, filepath.Join(src, "a.txt")) != "a2" || read(t, filepath.Join(src, "same.txt")) != "s" {
@@ -232,21 +236,20 @@ func TestApplyOneTurnAtATime(t *testing.T) {
 	if c.Count != 1 || *c.Files[0].Content != "v2" {
 		t.Fatalf("t1 diff %+v", c)
 	}
-	if _, err := b.Apply(s, Base, "t1"); err != nil {
+	if _, err := applyIn(t, s, src, Base, "t1"); err != nil {
 		t.Fatal(err)
 	}
 	if read(t, filepath.Join(src, "a.txt")) != "v2" || read(t, filepath.Join(src, "b.txt")) != "b1" {
 		t.Fatal("t1 is not applied as it was")
 	}
-	if _, err := b.Apply(s, "t1", "t2"); err != nil {
+	if _, err := applyIn(t, s, src, "t1", "t2"); err != nil {
 		t.Fatal(err)
 	}
 	if read(t, filepath.Join(src, "a.txt")) != "v3" || read(t, filepath.Join(src, "b.txt")) != "b2" {
 		t.Fatal("t2 is not applied")
 	}
-	objects, _ := os.ReadDir(s.objectDir())
-	if n := names(t, b, s); !reflect.DeepEqual(n, []string{"t2"}) || len(objects) != 0 {
-		t.Fatalf("after both applies: checkpoints %v, saved files %d", n, len(objects))
+	if n := names(t, b, s); !reflect.DeepEqual(n, []string{Base, "t1", "t2"}) {
+		t.Fatalf("after both applies: checkpoints %v", n)
 	}
 }
 
@@ -259,7 +262,7 @@ func TestCloseRemovesTheCopy(t *testing.T) {
 	fixture(t, s.Dir, map[string]string{"ro/x": "x"})
 	os.Chmod(filepath.Join(s.Dir, "ro"), 0o555) // as a copied module cache is
 	b.Checkpoint(s, "t1")
-	if got, err := Load(s.Workdir, s.Dir); err != nil || got.Root != s.Root || got.Source != src {
+	if got, err := Load(s.Workdir, s.Dir); err != nil || got.Root != s.Root || got.Ref != s.Ref || got.Ref == "" {
 		t.Fatalf("load %+v %v", got, err)
 	}
 	if err := Close(s); err != nil {
@@ -372,7 +375,7 @@ func TestBigFolderTimes(t *testing.T) {
 	b.Checkpoint(s, "t1")
 	changed := time.Since(start)
 	start = time.Now()
-	if _, err := b.Apply(s, Base, "t1"); err != nil {
+	if _, err := applyIn(t, s, src, Base, "t1"); err != nil {
 		t.Fatal(err)
 	}
 	applied := time.Since(start)

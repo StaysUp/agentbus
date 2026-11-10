@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/staysup/agentbus/connector"
 	"io/fs"
 	"math/rand"
 	"os"
@@ -245,7 +246,7 @@ func TestOldCheckpointMigrated(t *testing.T) {
 	if c, _ := b.Diff(s, "t1", "t2"); c.Count != 1 || c.Files[0].Path != "sub/b.txt" {
 		t.Fatalf("diff on a migrated checkpoint %+v", c)
 	}
-	if _, err := b.Apply(s, Base, "t2"); err != nil {
+	if _, err := applyIn(t, s, src, Base, "t2"); err != nil {
 		t.Fatal(err)
 	}
 	if read(t, filepath.Join(src, "sub", "b.txt")) != "b2" || read(t, filepath.Join(src, "a.txt")) != "a2" {
@@ -386,8 +387,8 @@ func TestFileBecomesFolder(t *testing.T) {
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("diff %v, want %v", got, want)
 			}
-			var cf *Conflict
-			if _, err := b.Apply(s, Base, "t1"); !errors.As(err, &cf) {
+			var cf *connector.Conflict
+			if _, err := applyIn(t, s, src, Base, "t1"); !errors.As(err, &cf) {
 				t.Fatalf("apply: %v", err)
 			}
 			if read(t, filepath.Join(src, "item")) != "a file" || read(t, filepath.Join(src, "dir", "x.txt")) != "x" {

@@ -87,8 +87,9 @@ func TestSessionRoot(t *testing.T) {
 	if root, err := q.SessionRoot(DefaultTeam, own.Session); err != nil || root != "" {
 		t.Fatalf("the person's session: %q %v", root, err)
 	}
-	if asked, ws, err := q.SessionFolders(DefaultTeam, c.Session, nil); err != nil || asked != "/x" || ws != "" {
-		t.Fatalf("folders: %q %q %v", asked, ws, err)
+	// A job stored with a path names no reference.
+	if ref, con, _, err := q.SessionFolder(DefaultTeam, c.Session); err != nil || ref != "" || con != "" {
+		t.Fatalf("folder: %q %q %v", ref, con, err)
 	}
 }
 
@@ -287,5 +288,14 @@ func TestResultPromptBounded(t *testing.T) {
 		Result: json.RawMessage(`{"error":"` + strings.Repeat("e", 100000) + `"}`)}, nil)
 	if len(p) > MaxResultPrompt+100 || strings.IndexByte(p, 0) >= 0 {
 		t.Fatalf("prompt of %d bytes, NUL %v", len(p), strings.IndexByte(p, 0) >= 0)
+	}
+}
+
+// A worktree's session names its repo as its folder.
+func TestSessionFolderOfARepo(t *testing.T) {
+	q, _ := open(t)
+	j := makeJob(t, q, Spec{Harness: "claude", RepoRef: refX, Connector: conA, Base: "main"})
+	if ref, con, repo, err := q.SessionFolder(DefaultTeam, j.Session); err != nil || ref != refX || con != conA || !repo {
+		t.Fatalf("%q %q %v", ref, con, err)
 	}
 }

@@ -291,6 +291,7 @@ const (
 		"or it did not run in an isolated copy of a folder"
 	applySessionClosed = "this turn's session was closed, so its copy and checkpoints are gone"
 	applyNoJob         = "no job of this service ran this turn"
+	applyBusy          = "an apply of an earlier turn of this session has not ended; ask again once it has"
 )
 
 // POST /api/v0/turns/<id>/apply: put the turn's changes into the person's
@@ -310,6 +311,9 @@ func (a *API) applyTurn(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	case errors.Is(err, queue.ErrSessionClosed):
 		writeError(w, http.StatusBadRequest, applySessionClosed)
+		return
+	case errors.Is(err, queue.ErrApplyBusy):
+		writeError(w, http.StatusConflict, applyBusy)
 		return
 	case errors.Is(err, queue.ErrFull):
 		writeError(w, http.StatusTooManyRequests, "too many jobs are waiting; retry later")
@@ -365,20 +369,14 @@ func (a *API) awaitEnd(ctx context.Context, job queue.Job) (queue.Job, error) {
 	}
 }
 
-// applyState is the newest apply of turn, or nil when none was asked for.
+// applyState is the apply that put turn's changes in the folder, its own or
+// a later turn's, else the newest apply of turn; nil when none was asked for.
 func (a *API) applyState(turn string) (*ApplyState, error) {
-	list, err := a.cfg.Queue.Applies(queue.DefaultTeam, turn)
-	if err != nil || len(list) == 0 {
+	j, ok, err := a.cfg.Queue.AppliedBy(queue.DefaultTeam, turn)
+	if err != nil || !ok {
 		return nil, err
 	}
-	// An apply that finished wins over a later one that was refused.
-	for _, j := range list {
-		if j.State == queue.Finished {
-			st := applyStateOf(j)
-			return &st, nil
-		}
-	}
-	st := applyStateOf(list[0])
+	st := applyStateOf(j)
 	return &st, nil
 }
 

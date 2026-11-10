@@ -56,7 +56,10 @@ type header struct {
 // Snapshot of it says besides its files. A checkpoint from an earlier build
 // may also hold git's state (git, head, git_tree): it is no longer read.
 type treeState struct {
-	Root      string `json:"root"`
+	Root string `json:"root"`
+	// ID is the checkpoint's snapshot id: its content tree's
+	// (workspace.ContentTrees). Empty when a file of it is not hashed.
+	ID        string `json:"id,omitempty"`
 	Taken     int64  `json:"taken,omitempty"`
 	Truncated bool   `json:"truncated,omitempty"`
 }
@@ -123,7 +126,7 @@ func headers(s *Space) ([]header, error) {
 		}
 		h.file = strings.TrimSuffix(n, ".json")
 		if h.Tree != nil {
-			h.Checkpoint.Root = h.Tree.Root
+			h.Checkpoint.Root = h.Tree.ID
 		}
 		out = append(out, h)
 	}
@@ -256,11 +259,18 @@ type keeper interface {
 // since a little before start (workspace.Racy: a file written in the same
 // clock tick as the copy was made can change again without its time
 // changing); any other file is recorded by size, modification time and mode
-// only.
-func baseHasher(start time.Time) workspace.Hasher {
+// only. Each link is saved too, under objects, as a link costs nothing to
+// keep: an apply that puts a link back as the Base had it reads it there.
+func baseHasher(start time.Time, objects string) workspace.Hasher {
 	since := start.Add(-workspace.Racy).UnixNano()
 	return func(rel, p string, info fs.FileInfo) (string, error) {
-		if info.Mode()&fs.ModeSymlink == 0 && info.ModTime().UnixNano() < since {
+		if info.Mode()&fs.ModeSymlink != 0 {
+			if err := os.MkdirAll(objects, 0o700); err != nil {
+				return "", err
+			}
+			return saveObject(p, objects)
+		}
+		if info.ModTime().UnixNano() < since {
 			return "", nil
 		}
 		return workspace.Hash(rel, p, info)
@@ -339,6 +349,11 @@ func checkpoint(s *Space, name string, k keeper) (Checkpoint, error) {
 		}
 		saved = append(saved, learned...)
 	}
+	if id, ok, err := t.contentOf(cur.Root, nil); err != nil {
+		return Checkpoint{}, err
+	} else if ok {
+		cur.ID = id
+	}
 	if err := t.flush(); err != nil {
 		return Checkpoint{}, err
 	}
@@ -346,7 +361,7 @@ func checkpoint(s *Space, name string, k keeper) (Checkpoint, error) {
 	if len(list) > 0 {
 		seq = list[len(list)-1].Checkpoint.Seq + 1
 	}
-	h := header{Checkpoint: Checkpoint{Name: name, Seq: seq, Time: time.Now().UTC(), Files: files, Root: cur.Root}, Saved: dedupe(saved), Tree: &cur}
+	h := header{Checkpoint: Checkpoint{Name: name, Seq: seq, Time: time.Now().UTC(), Files: files, Root: cur.ID}, Saved: dedupe(saved), Tree: &cur}
 	if err := os.MkdirAll(s.checkpointDir(), 0o700); err != nil {
 		return Checkpoint{}, err
 	}
@@ -646,288 +661,6 @@ func readRegular(rt *os.Root, name string, max int) ([]byte, bool) {
 		return nil, false
 	}
 	return b, true
-}
-
-// Why a file conflicts, in the refusal.
-const (
-	whyChanged = "changed in your folder since the checkpoint"
-	whyAdded   = "added in your folder since the checkpoint"
-	whyRemoved = "removed from your folder since the checkpoint"
-	whyNotFile = "is a folder or cannot be read in your folder"
-)
-
-// apply is Backend.Apply.
-func apply(s *Space, from, to string) (Applied, error) {
-	if s.Source == "" {
-		return Applied{}, ErrNoSource
-	}
-	if !checkpointName.MatchString(from) || !checkpointName.MatchString(to) {
-		return Applied{}, ErrBadName
-	}
-	unlock := lock(s)
-	defer unlock()
-	// The check and the writes are one step for the person's folder.
-	applyMu.Lock()
-	defer applyMu.Unlock()
-	// An apply already done answers as it did, even once its checkpoints
-	// were pruned: a caller that lost the answer may ask again.
-	if done, ok := readApplied(s, from, to); ok {
-		return done, nil
-	}
-	list, err := headers(s)
-	if err != nil {
-		return Applied{}, err
-	}
-	a, b, _, hb, err := pair(s, list, from, to)
-	if err != nil {
-		return Applied{}, err
-	}
-	if a.Truncated() || b.Truncated() {
-		return Applied{}, ErrTruncated
-	}
-	// Every write goes through the person's folder as a root, so no
-	// symbolic link in it can take a write outside it.
-	rt, err := os.OpenRoot(s.Source)
-	if err != nil {
-		return Applied{}, errors.New("isolation: your folder could not be opened")
-	}
-	defer rt.Close()
-	type op struct {
-		rel    string
-		f      workspace.File
-		remove bool
-	}
-	var ops []op
-	var conflict Conflict
-	for _, rel := range b.Changed(a) {
-		fa, inA := a.File(rel)
-		fb, inB := b.File(rel)
-		name := filepath.FromSlash(rel)
-		// A file from never hashed is as the Base saw it, by size,
-		// modification time and mode: one still so in the person's folder is
-		// as at from, without reading it. Any other is hashed and compared.
-		if inA && fa.Hash == "" && sameStat(rt, name, fa) {
-			ops = append(ops, op{rel: rel, f: fb, remove: !inB})
-			continue
-		}
-		cur, mode, exists, err := hashIn(rt, name)
-		switch {
-		case err != nil:
-			conflict.Files = append(conflict.Files, ConflictFile{rel, whyNotFile})
-		case inB && exists && cur == fb.Hash:
-			if mode.IsRegular() && mode.Perm() != fb.Mode.Perm() {
-				ops = append(ops, op{rel: rel, f: fb})
-			}
-		case !inB && !exists:
-		case inA && exists && cur == fa.Hash, !inA && !exists:
-			ops = append(ops, op{rel: rel, f: fb, remove: !inB})
-		case !inA:
-			conflict.Files = append(conflict.Files, ConflictFile{rel, whyAdded})
-		case !exists:
-			conflict.Files = append(conflict.Files, ConflictFile{rel, whyRemoved})
-		default:
-			conflict.Files = append(conflict.Files, ConflictFile{rel, whyChanged})
-		}
-	}
-	if len(conflict.Files) > 0 {
-		return Applied{}, &conflict
-	}
-	out := Applied{Files: []string{}}
-	for _, o := range ops {
-		var err error
-		if o.remove {
-			err = rt.Remove(filepath.FromSlash(o.rel))
-			if errors.Is(err, fs.ErrNotExist) {
-				err = nil
-			}
-		} else {
-			err = writeObject(rt, s.objectDir(), filepath.FromSlash(o.rel), o.f)
-		}
-		if err != nil {
-			sort.Strings(out.Files)
-			return out, fmt.Errorf("isolation: %s could not be written; the files before it were applied", o.rel)
-		}
-		out.Files = append(out.Files, o.rel)
-	}
-	sort.Strings(out.Files)
-	prunes := len(list) > 0 && list[0].Checkpoint.Name == from && hb.Checkpoint.Seq > list[0].Checkpoint.Seq
-	out.Pruned = prunes
-	// The record is written before the prune, so a retry after a lost
-	// answer finds it rather than a missing checkpoint.
-	if err := writeApplied(s, from, to, out); err != nil {
-		return out, err
-	}
-	if prunes {
-		if err := prune(s, list, hb); err != nil {
-			return out, err
-		}
-	}
-	return out, nil
-}
-
-// appliedFile is where the apply from one checkpoint to another is recorded.
-func appliedFile(s *Space, from, to string) string {
-	sum := sha256.Sum256([]byte(from + "\x00" + to))
-	return filepath.Join(s.state(), "applied", hex.EncodeToString(sum[:])+".json")
-}
-
-// readApplied is the recorded apply from from to to, if one was done.
-func readApplied(s *Space, from, to string) (Applied, bool) {
-	b, err := os.ReadFile(appliedFile(s, from, to))
-	if err != nil {
-		return Applied{}, false
-	}
-	var r struct {
-		From, To string
-		Applied  Applied
-	}
-	if json.Unmarshal(b, &r) != nil || r.From != from || r.To != to {
-		return Applied{}, false
-	}
-	return r.Applied, true
-}
-
-func writeApplied(s *Space, from, to string, done Applied) error {
-	p := appliedFile(s, from, to)
-	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
-		return err
-	}
-	b, _ := json.Marshal(struct {
-		From, To string
-		Applied  Applied
-	}{from, to, done})
-	return writeFileAtomic(p, b)
-}
-
-// sameStat says whether the file name of rt has f's size, modification time
-// and mode.
-func sameStat(rt *os.Root, name string, f workspace.File) bool {
-	fi, err := rt.Lstat(name)
-	return err == nil && fi.Mode() == f.Mode && fi.Size() == f.Size && fi.ModTime().UnixNano() == f.ModTime
-}
-
-// hashIn hashes the file name of rt as workspace.Walk does. A missing file
-// is not an error: exists is false.
-func hashIn(rt *os.Root, name string) (hash string, mode fs.FileMode, exists bool, err error) {
-	fi, err := rt.Lstat(name)
-	if errors.Is(err, fs.ErrNotExist) {
-		return "", 0, false, nil
-	}
-	if err != nil {
-		return "", 0, false, err
-	}
-	switch {
-	case fi.Mode()&fs.ModeSymlink != 0:
-		target, err := rt.Readlink(name)
-		if err != nil {
-			return "", 0, false, err
-		}
-		return linkHash(target), fi.Mode(), true, nil
-	case fi.Mode().IsRegular():
-		f, err := rt.Open(name)
-		if err != nil {
-			return "", 0, false, err
-		}
-		defer f.Close()
-		h := sha256.New()
-		if _, err := io.Copy(h, f); err != nil {
-			return "", 0, false, err
-		}
-		return hex.EncodeToString(h.Sum(nil)), fi.Mode(), true, nil
-	}
-	return "", 0, false, errors.New("not a file")
-}
-
-// writeObject writes the saved file f at name of rt, by rename, so a reader
-// never sees half a file.
-func writeObject(rt *os.Root, objects, name string, f workspace.File) error {
-	if dir := filepath.Dir(name); dir != "." {
-		if err := rt.MkdirAll(dir, 0o755); err != nil {
-			return err
-		}
-	}
-	src := filepath.Join(objects, f.Hash)
-	if f.Mode&fs.ModeSymlink != 0 {
-		target, err := os.Readlink(src)
-		if err != nil {
-			return err
-		}
-		if err := rt.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return err
-		}
-		return rt.Symlink(target, name)
-	}
-	tmp := filepath.Join(filepath.Dir(name), ".agentbus-apply-"+strconv.FormatInt(time.Now().UnixNano(), 36))
-	// A clone of the saved file where the disk has them: no bytes copied.
-	var err error
-	if !cloneInto(rt, tmp, src) {
-		err = copyInto(rt, tmp, src, f.Mode.Perm())
-	}
-	if err == nil {
-		err = rt.Chmod(tmp, f.Mode.Perm()) // the umask narrowed it
-	}
-	if err == nil {
-		err = rt.Rename(tmp, name)
-	}
-	if err != nil {
-		rt.Remove(tmp)
-	}
-	return err
-}
-
-// copyInto writes a new file tmp of rt with src's bytes.
-func copyInto(rt *os.Root, tmp, src string, perm fs.FileMode) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-	out, err := rt.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
-	if err != nil {
-		return err
-	}
-	_, err = io.Copy(out, in)
-	if cerr := out.Close(); err == nil {
-		err = cerr
-	}
-	return err
-}
-
-// prune removes the checkpoints before to, and every saved file no later
-// checkpoint saved: an apply from the oldest checkpoint makes to the oldest.
-func prune(s *Space, list []header, to header) error {
-	needed := map[string]bool{}
-	for _, h := range list {
-		if h.Checkpoint.Seq > to.Checkpoint.Seq {
-			for _, o := range h.Saved {
-				needed[o] = true
-			}
-		}
-	}
-	for _, h := range list {
-		if h.Checkpoint.Seq > to.Checkpoint.Seq {
-			continue
-		}
-		for _, o := range h.Saved {
-			if !needed[o] {
-				if err := os.Remove(filepath.Join(s.objectDir(), o)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-					return err
-				}
-			}
-		}
-		if h.Checkpoint.Seq == to.Checkpoint.Seq {
-			continue
-		}
-		for _, ext := range []string{".json", ".snap.json"} {
-			if err := os.Remove(filepath.Join(s.checkpointDir(), h.file+ext)); err != nil && !errors.Is(err, fs.ErrNotExist) {
-				return err
-			}
-		}
-	}
-	// to keeps its files' hashes, and no longer its saved files.
-	to.Saved = nil
-	b, _ := json.Marshal(to)
-	return writeFileAtomic(filepath.Join(s.checkpointDir(), to.file+".json"), b)
 }
 
 // removeState removes s's record.

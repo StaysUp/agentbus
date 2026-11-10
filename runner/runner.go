@@ -9,6 +9,8 @@ package runner
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -19,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/staysup/agentbus/blobs"
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/folders"
 	"github.com/staysup/agentbus/isolation"
@@ -53,9 +56,23 @@ type Config struct {
 	// Empty enrolls a new runner on every start.
 	StateFile string
 
-	// Folders are the folders this runner owns, as their connector: a job's
-	// folder reference becomes its path here. Nil owns none.
+	// Role is queue.RoleConnector for a connector, which takes only snapshot
+	// and apply jobs and does them through FolderSide; empty for a runner.
+	Role       string
+	FolderSide FolderSide
+	// Folders are the folders of the connector on this runner's machine:
+	// a connector reports them; a runner that has them uses the local fast
+	// path for them (a copy by clone or overlay, and a folder used as it
+	// is), reading their base content through Lender. Nil: none here.
 	Folders *folders.Registry
+	Lender  isolation.Lender
+	// Blobs reads blobs for a copy built from a snapshot: the runner's own
+	// store with the control plane's behind it, or in agentbus up the
+	// control plane's own. BlobSink is the control plane's store, where a
+	// turn's changeset and the files it names go. Nil: a runner without
+	// them can only use the local fast path, and records no changeset.
+	Blobs    isolation.BlobSource
+	BlobSink blobs.Sink
 	// LookPath and Environ are how the runner probes its harnesses for its
 	// report (caps.go). Nil LookPath probes nothing.
 	LookPath func(string) (string, error)
@@ -99,7 +116,10 @@ func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 	if cfg.StopWait == 0 {
 		cfg.StopWait = time.Minute
 	}
-	if cfg.Engine == nil || cfg.Store == nil {
+	switch {
+	case cfg.Role == queue.RoleConnector && (cfg.FolderSide == nil || cfg.Folders == nil):
+		return nil, errors.New("runner: a connector needs its folders")
+	case cfg.Role != queue.RoleConnector && (cfg.Engine == nil || cfg.Store == nil):
 		return nil, errors.New("runner: an engine and its store are required")
 	}
 	if cfg.HTTP == nil {
@@ -269,7 +289,7 @@ func (r *Runner) clean(ctx context.Context, w queue.Workspace) {
 	}
 	status, err := call(context.WithoutCancel(ctx), r.short, r.cfg.Queue+"/api/v0/runners/"+r.id+"/removed", r.token,
 		jobs.RemovedReport{Session: w.Session, Error: msg}, nil)
-	r.cfg.Logf("session %s closed: workspace %s %s (control plane %d, %v)", w.Session, w.Kind, w.Folder, status, err)
+	r.cfg.Logf("session %s closed: workspace %s %s (control plane %d, %v)", w.Session, w.Kind, w.Space+w.Folder, status, err)
 	if err == nil && (status == http.StatusNoContent || status == http.StatusNotFound) {
 		if r.cleaned == nil {
 			r.cleaned = map[string]bool{}
@@ -282,7 +302,7 @@ func (r *Runner) clean(ctx context.Context, w queue.Workspace) {
 // worktree made before the backends kept a record has none, and is removed
 // as a worktree.
 func (r *Runner) remove(w queue.Workspace) error {
-	s, err := isolation.Load(r.cfg.Workdir, w.Folder)
+	s, err := r.loadSpace(w)
 	switch {
 	case err == nil:
 		return isolation.Close(s)
@@ -368,7 +388,7 @@ func (at *attempt) lastSeq() int64 {
 // send again.
 func (at *attempt) finish(ctx context.Context, f queue.Finish) {
 	ctx = context.WithoutCancel(ctx)
-	at.addChanges(&f)
+	at.addChanges(ctx, &f)
 	at.flush(ctx)
 	f.LastSeq = at.lastSeq()
 	for i := range 5 {
@@ -389,7 +409,7 @@ func (at *attempt) finish(ctx context.Context, f queue.Finish) {
 // addChanges puts what the job changed in its workspace into f's result, and
 // for a session's first job the session and its workspace, so the session's
 // later jobs come to this runner.
-func (at *attempt) addChanges(f *queue.Finish) {
+func (at *attempt) addChanges(ctx context.Context, f *queue.Finish) {
 	if at.watch == nil && at.space == nil {
 		return
 	}
@@ -398,7 +418,16 @@ func (at *attempt) addChanges(f *queue.Finish) {
 	if !ok {
 		c = workspace.Changes{Kind: workspace.KindSnapshot, Files: []workspace.Change{}, Error: "the workspace could not be read at the end"}
 	}
-	res.Folder, res.Changes = at.folder, nil
+	// What the copy holds now goes to the control plane's store, so an
+	// apply reads it there, not from this runner.
+	if ok && at.space != nil && at.job.Kind == queue.KindTurn {
+		if h, err := at.r.publish(ctx, at.space, c.To); err != nil {
+			at.r.cfg.Logf("job %s: the turn's changes could not be put in the store: %s", at.job.ID, err)
+		} else {
+			res.Changeset = h
+		}
+	}
+	res.Folder, res.Changes = "", nil
 	// The whole finish must fit the jobs API's body limit, so the changes get
 	// what the rest leaves, less a margin for the fields added after this.
 	f.Result = mustJSON(res)
@@ -515,11 +544,16 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 		at.finish(ctx, queue.Finish{Status: queue.Cancelled})
 		return
 	}
-	if job.Kind == queue.KindApply {
-		at.finish(ctx, r.apply(at))
+	switch {
+	case job.Kind == queue.KindApply || job.Kind == queue.KindSnapshot:
+		at.finish(ctx, r.folderWork(ctx, at))
+		return
+	case r.cfg.Role == queue.RoleConnector:
+		at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup,
+			Result: mustJSON(queue.Result{Refused: "a connector takes only snapshot and apply jobs", Status: http.StatusBadRequest})})
 		return
 	}
-	refused := r.prepare(at)
+	refused := r.prepare(ctx, at)
 	defer at.unwatch()
 	if refused != nil {
 		at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup, Result: mustJSON(refused)})
@@ -535,7 +569,7 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 		// No turn started, so no session owns a copy made for it.
 		if at.ws != nil && at.space != nil {
 			if err := isolation.Close(at.space); err == nil {
-				at.event("workspace.removed", map[string]any{"folder": at.ws.Folder})
+				at.event("workspace.removed", map[string]any{"space": at.ws.Space})
 			}
 			at.space = nil
 		}
@@ -548,83 +582,6 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	at.flush(ctx)
 	r.follow(ctx, at, turn)
 }
-
-// apply puts the changes of the turn an apply job names into the person's
-// folder, through its session's isolation backend. A conflict finishes as
-// failed with reason conflict and each file; nothing is written then.
-func (r *Runner) apply(at *attempt) queue.Finish {
-	sp := at.job.Spec
-	refuse := func(msg string, written []string) queue.Finish {
-		res := queue.Result{Refused: msg, Status: http.StatusConflict}
-		if len(written) > 0 {
-			res.Apply = &queue.ApplyResult{Files: written}
-		}
-		return applyFinish(queue.Failed, queue.ReasonSetup, res)
-	}
-	if at.job.Workspace == nil {
-		return refuse(applyNoCopy, nil)
-	}
-	s, err := isolation.Load(r.cfg.Workdir, at.job.Workspace.Folder)
-	if err != nil {
-		return refuse(applyNoCopy, nil)
-	}
-	b, ok := isolation.Get(s.Backend)
-	if !ok {
-		return refuse(applyNoCopy, nil)
-	}
-	// The folder the copy was made from can be another session's copy:
-	// mounted again, or the changes would land under its mount point.
-	if s.Source != "" {
-		if res := r.remount(at, s.Source); res != nil {
-			return refuse(res.Refused, nil)
-		}
-	}
-	done, err := b.Apply(s, sp.ApplyFrom, sp.ApplyTo)
-	var cf *isolation.Conflict
-	switch {
-	case errors.As(err, &cf):
-		msg := cf.Error()
-		if len(msg) > maxApplyMessage {
-			msg = fmt.Sprintf("apply refused: %d file(s) in your folder changed since the checkpoint; conflicts lists them", len(cf.Files))
-		}
-		res := queue.Result{Refused: msg, Status: http.StatusConflict, Apply: &queue.ApplyResult{Files: []string{}}}
-		for _, f := range cf.Files {
-			res.Apply.Conflicts = append(res.Apply.Conflicts, queue.ApplyConflict{Path: f.Path, Why: f.Why})
-		}
-		at.event("workspace.apply_refused", map[string]any{"turn": at.job.Links.AppliesTurn, "conflicts": len(cf.Files)})
-		return applyFinish(queue.Failed, queue.ReasonConflict, res)
-	case errors.Is(err, isolation.ErrNoCheckpoint):
-		return refuse("the turn's checkpoints are no longer kept, so its changes cannot be applied", nil)
-	case errors.Is(err, isolation.ErrNoSource):
-		return refuse("this session's copy was made from a repo and a base, not from a folder of yours, so there is nowhere to apply", nil)
-	case errors.Is(err, isolation.ErrTruncated):
-		return refuse("the folder has more files than a checkpoint holds, so the turn cannot be applied", nil)
-	case err != nil:
-		// The backend's words go to the service log only: they can name
-		// paths on this runner.
-		r.cfg.Logf("the apply of turn %s could not be written: %s", at.job.Links.AppliesTurn, err)
-		return refuse("the changes could not all be written to your folder; files lists those that were", done.Files)
-	}
-	at.event("workspace.applied", map[string]any{"turn": at.job.Links.AppliesTurn, "files": len(done.Files)})
-	return applyFinish(queue.Finished, "", queue.Result{Apply: &queue.ApplyResult{Files: done.Files, Pruned: done.Pruned}})
-}
-
-// maxApplyMessage bounds a refusal's message; past it, the message gives the
-// count and conflicts lists the files.
-const maxApplyMessage = 4 << 10
-
-// applyFinish is an apply job's finish, its result sized so the finish fits
-// the jobs API's body limit.
-func applyFinish(status, reason string, res queue.Result) queue.Finish {
-	if res.Apply != nil {
-		res.Apply.Count = len(res.Apply.Files)
-		res.Apply.Fit(jobs.MaxBody - finishMargin - len(res.Refused) - 1024)
-	}
-	return queue.Finish{Status: status, Reason: reason, Result: mustJSON(res)}
-}
-
-// applyNoCopy: the session keeps no isolated copy on this runner.
-const applyNoCopy = "this session keeps no isolated copy, so there is nothing to apply"
 
 // request is the turn the attempt runs. Its id is the attempt's. A turn
 // job's first turn opens the session the queue named for it; a review opens
@@ -667,12 +624,12 @@ func (r *Runner) request(at *attempt) run.Request {
 // copy the isolation setting names. A folder without Isolate, or with the
 // setting none, is used as it is. A later job runs in its session's
 // workspace. It answers why the job cannot run, or nil.
-func (r *Runner) prepare(at *attempt) *queue.Result {
+func (r *Runner) prepare(ctx context.Context, at *attempt) *queue.Result {
 	sp := at.job.Spec
 	switch {
 	case at.job.Kind == queue.KindReview && at.job.Workspace != nil:
 		// A review reads the reviewed session's workspace, as it is.
-		at.folder = at.job.Workspace.Folder
+		at.folder = r.workspaceDir(*at.job.Workspace)
 		if res := r.remount(at, at.folder); res != nil {
 			return res
 		}
@@ -687,7 +644,15 @@ func (r *Runner) prepare(at *attempt) *queue.Result {
 		}
 		at.ref = sp.RepoRef
 		b, _ := isolation.Get(isolation.Git)
-		return r.isolate(at, b, isolation.Request{Repo: repo, Base: sp.Base})
+		return r.isolate(at, b, isolation.Request{Repo: repo, Base: sp.Base, Ref: sp.RepoRef})
+	case (sp.Folder != "" || sp.FolderRef != "") && !r.local(sp):
+		// The folder is on another machine: the copy is built from its
+		// snapshot, which its connector takes.
+		if !sp.Isolate {
+			return &queue.Result{Refused: folderNotHere, Status: http.StatusBadRequest}
+		}
+		at.ref = sp.FolderRef
+		return r.fromSnapshot(ctx, at)
 	case sp.Folder != "" || sp.FolderRef != "":
 		folder, ok := r.folderPath(sp.Folder, sp.FolderRef, sp.Connector)
 		if !ok {
@@ -710,17 +675,18 @@ func (r *Runner) prepare(at *attempt) *queue.Result {
 				return &queue.Result{Refused: "the permissions cannot be read, so the turn did not start; fix them and send the turn again"}
 			}
 			if b, ok := isolation.For(p.Isolation, folder); ok {
-				return r.isolate(at, b, isolation.Request{Folder: folder, Share: p.ShareReadOnly})
+				return r.isolate(at, b, isolation.Request{Folder: folder, Share: p.ShareReadOnly, Ref: at.ref})
 			}
 		}
 		at.folder = folder
-		at.ws = &queue.Workspace{Kind: queue.WorkspaceFolder, Folder: folder}
+		at.ws = &queue.Workspace{Kind: queue.WorkspaceFolder, FolderRef: at.ref}
 	case at.job.Workspace != nil:
-		at.folder = at.job.Workspace.Folder
-		if k := at.job.Workspace.Kind; k == queue.WorkspaceWorktree || k == queue.WorkspaceCopy {
+		w := *at.job.Workspace
+		at.folder = r.workspaceDir(w)
+		if k := w.Kind; k == queue.WorkspaceWorktree || k == queue.WorkspaceCopy {
 			// A worktree made before the backends kept a record has none:
 			// it is checkpointed as a folder used as it is.
-			if s, err := isolation.Load(r.cfg.Workdir, at.folder); err == nil {
+			if s, err := r.loadSpace(w); err == nil {
 				at.space = s
 				return r.checkpointStart(at)
 			}
@@ -733,6 +699,67 @@ func (r *Runner) prepare(at *attempt) *queue.Result {
 		}
 	}
 	return r.watchFolder(at)
+}
+
+// local says the folder sp names is on this runner's machine: its
+// connector is this runner's, or sp names the path itself, as a job stored
+// before references did.
+func (r *Runner) local(sp queue.Spec) bool {
+	if sp.FolderRef == "" {
+		return true
+	}
+	if r.cfg.Folders == nil || sp.Connector != r.cfg.Folders.Connector() {
+		return false
+	}
+	_, ok := r.cfg.Folders.Path(sp.FolderRef)
+	return ok
+}
+
+// folderNotHere refuses a folder used as it is on a runner that is not on
+// the folder's machine.
+const folderNotHere = "the folder is on another machine, so this runner can only work in a copy of it; " +
+	"start the session with isolate true"
+
+// workspaceDir is where a session's workspace is on this runner: its
+// space's folder, a folder used as it is, or the path a session made
+// before ids recorded.
+func (r *Runner) workspaceDir(w queue.Workspace) string {
+	switch {
+	case w.Space != "":
+		if s, err := isolation.LoadID(r.cfg.Workdir, w.Space); err == nil {
+			return s.Dir
+		}
+		return ""
+	case w.FolderRef != "":
+		if r.cfg.Folders != nil {
+			p, _ := r.cfg.Folders.Path(w.FolderRef)
+			return p
+		}
+		return ""
+	}
+	return w.Folder
+}
+
+// loadSpace is the space of a session's workspace, ready to use: with this
+// runner's blob store and lender.
+func (r *Runner) loadSpace(w queue.Workspace) (*isolation.Space, error) {
+	var s *isolation.Space
+	var err error
+	if w.Space != "" {
+		s, err = isolation.LoadID(r.cfg.Workdir, w.Space)
+	} else {
+		s, err = isolation.Load(r.cfg.Workdir, w.Folder)
+	}
+	if err != nil {
+		return nil, err
+	}
+	r.equip(s)
+	return s, nil
+}
+
+// equip gives s what reads its base content.
+func (r *Runner) equip(s *isolation.Space) {
+	s.Blobs, s.Lender = r.cfg.Blobs, r.cfg.Lender
 }
 
 // policy is the settings' policy, or the defaults with no settings.
@@ -773,8 +800,9 @@ func (r *Runner) isolate(at *attempt, b isolation.Backend, req isolation.Request
 	if s.Backend == isolation.Git {
 		kind = queue.WorkspaceWorktree
 	}
+	r.equip(s)
 	at.space, at.folder = s, s.Dir
-	at.ws = &queue.Workspace{Kind: kind, Folder: s.Dir, Repo: s.Repo, Base: s.Base}
+	at.ws = &queue.Workspace{Kind: kind, Space: s.ID, Repo: s.Repo, Base: s.Base}
 	// The session's snapshot id: the copy as it was made.
 	if base, err := b.Checkpoint(s, isolation.Base); err == nil {
 		at.ws.Snapshot = base.Root
@@ -787,15 +815,15 @@ func (r *Runner) isolate(at *attempt, b isolation.Backend, req isolation.Request
 		at.space, at.ws = nil, nil
 		return res
 	}
-	ready := map[string]any{"kind": kind, "folder": s.Dir}
+	ready := map[string]any{"kind": kind, "space": s.ID}
 	if at.ws.Snapshot != "" {
 		ready["snapshot"] = at.ws.Snapshot
 	}
 	if s.Base != "" {
 		ready["base"] = s.Base
 	}
-	if s.Source != "" {
-		ready["from"] = s.Source
+	if s.Ref != "" {
+		ready["folder_ref"] = s.Ref
 	}
 	if s.Method != "" {
 		ready["method"] = s.Method
@@ -983,6 +1011,11 @@ func (r *Runner) lastReply(session, turnID string) string {
 // finishMargin is room in a finish body for what is set after the changes
 // are sized: the session, its workspace and the last event sequence.
 const finishMargin = 16 << 10
+
+func sha256Hex(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
 
 func mustJSON(v any) json.RawMessage {
 	b, _ := json.Marshal(v)

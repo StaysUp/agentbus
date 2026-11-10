@@ -44,7 +44,7 @@ func TestGitRoundTrip(t *testing.T) {
 	r := repo(t)
 	src := filepath.Join(r, "sub")
 	b, s := open(t, Git, src)
-	if s.Dir != filepath.Join(s.Root, "sub") || s.Source != src {
+	if s.Dir != filepath.Join(s.Root, "sub") || s.Ref == "" {
 		t.Fatalf("space %+v", s)
 	}
 	for p, want := range map[string]string{"a.txt": "a-uncommitted", "untracked.txt": "u", "gone.txt": "<missing>",
@@ -59,7 +59,7 @@ func TestGitRoundTrip(t *testing.T) {
 	if err != nil || c.Count != 2 {
 		t.Fatalf("diff %+v %v", c, err)
 	}
-	if _, err := b.Apply(s, Base, "t1"); err != nil {
+	if _, err := applyIn(t, s, src, Base, "t1"); err != nil {
 		t.Fatal(err)
 	}
 	if read(t, filepath.Join(src, "keep.txt")) != "k2" || read(t, filepath.Join(src, "made.txt")) != "m" ||

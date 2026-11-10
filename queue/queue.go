@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,9 +53,12 @@ const (
 const (
 	KindTurn   = "turn"
 	KindReview = "review"
-	// KindApply puts one turn's changes into the person's folder, on the
-	// runner that holds the turn's session (apply.go). It starts no turn.
+	// KindApply puts a session's changes, up to one turn, into the person's
+	// folder, on the folder's connector (apply.go). It starts no turn.
 	KindApply = "apply"
+	// KindSnapshot takes a snapshot of a folder, on its connector, for a
+	// runner that builds a copy from it (connector.go). It starts no turn.
+	KindSnapshot = "snapshot"
 )
 
 // Failure reasons.
@@ -239,8 +243,10 @@ type Spec struct {
 	// the runner to use only if the turn switches agent: a turn that names
 	// the session's own latest agent keeps the session's model.
 	AgentModel string `json:"agent_model,omitempty"`
-	// ApplyFrom and ApplyTo, for an apply job: the checkpoints of the turn
-	// whose changes it applies.
+	// ApplyFrom and ApplyTo, for an apply job: the changesets
+	// (workspace.Changeset) it goes from and to, by their blobs in the
+	// control plane's store. ApplyFrom empty is the session's base: no turn
+	// of it was applied before.
 	ApplyFrom string `json:"apply_from,omitempty"`
 	ApplyTo   string `json:"apply_to,omitempty"`
 }
@@ -325,9 +331,15 @@ type Workspace struct {
 	Session string `json:"session"`
 	Runner  string `json:"runner"`
 	Kind    string `json:"kind"`
-	Folder  string `json:"folder"`
-	Repo    string `json:"repo,omitempty"`
-	Base    string `json:"base,omitempty"`
+	// Space: a copy or worktree, by its id on its runner. FolderRef: a
+	// folder used as it is, by its reference. Folder: a path on the
+	// runner, kept only by a session made before these ids. The control
+	// plane reads no file through any of them.
+	Space     string `json:"space,omitempty"`
+	FolderRef string `json:"folder_ref,omitempty"`
+	Folder    string `json:"folder,omitempty"`
+	Repo      string `json:"repo,omitempty"`
+	Base      string `json:"base,omitempty"`
 	// Snapshot: the snapshot id of the session's copy as it was made, the
 	// root hash of its first checkpoint's tree. Empty for a folder used as
 	// it is, and for a session made before snapshot ids.
@@ -408,6 +420,9 @@ type Queue struct {
 
 	mu   sync.Mutex
 	subs map[chan struct{}]struct{}
+	// applyMu makes Apply's read of a session's applies and its new job
+	// one step. One process keeps a queue (the record's lock says so).
+	applyMu sync.Mutex
 }
 
 // Open opens or creates the queue at path. now is the clock; nil is time.Now.
@@ -901,9 +916,34 @@ func scanWorkspace(s scanner) (Workspace, error) {
 	var w Workspace
 	var created int64
 	var closed, removed sql.NullInt64
-	err := s.Scan(&w.Session, &w.Runner, &w.Kind, &w.Folder, &w.Repo, &w.Base, &w.Snapshot, &created, &closed, &removed, &w.RemovalError)
+	var where string
+	err := s.Scan(&w.Session, &w.Runner, &w.Kind, &where, &w.Repo, &w.Base, &w.Snapshot, &created, &closed, &removed, &w.RemovalError)
 	w.Created, w.Closed, w.Removed = fromNanos(created), optTime(closed), optTime(removed)
+	w.setWhere(where)
 	return w, err
+}
+
+// where is what the sessions table keeps in its folder column: the space
+// id, the folder's reference, or, for a session made before them, the path.
+func (w Workspace) where() string {
+	switch {
+	case w.Space != "":
+		return w.Space
+	case w.FolderRef != "":
+		return w.FolderRef
+	}
+	return w.Folder
+}
+
+func (w *Workspace) setWhere(v string) {
+	switch {
+	case strings.HasPrefix(v, "/") || strings.Contains(v, `\`):
+		w.Folder = v
+	case FolderRefShape.MatchString(v):
+		w.FolderRef = v
+	default:
+		w.Space = v
+	}
 }
 
 // workspaceOf is the workspace of the job's session: the one it continues,
@@ -973,7 +1013,8 @@ func (q *Queue) Take(runnerID string, lease time.Duration) (job Job, att Attempt
 		// for, and its harness.
 		var id string
 		err = tx.QueryRow(`SELECT j.id FROM jobs j, runners r WHERE r.id = ? AND j.team = ? AND j.state = 'queued'
-			AND (j.session IS NULL OR NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team)
+			AND (`+roleTake+`)
+			AND (j.kind IN ('snapshot','apply') OR j.session IS NULL OR NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team)
 				OR EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team AND s.runner = r.id AND s.closed IS NULL))
 			AND (j.kind != 'turn' OR j.session IS NULL OR NOT EXISTS (SELECT 1 FROM jobs o WHERE o.team = j.team
 				AND o.state IN ('taken','running') AND ((o.session = j.session AND o.kind = 'turn') OR (`+reviewIn+`))))
@@ -1101,6 +1142,25 @@ func sweepTx(tx *sql.Tx, now time.Time) error {
 		if err := expire(tx, now, a, j); err != nil {
 			return err
 		}
+		if err := endSnapshotsTx(tx, now, a.ID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// endSnapshotsTx stops the snapshot job the attempt asked for (Snapshot),
+// once the attempt has ended: no one is left to build a copy from it. A
+// queued one is cancelled; a taken or running one is asked to stop.
+func endSnapshotsTx(tx *sql.Tx, now time.Time, attempt string) error {
+	key := SnapshotKey(attempt)
+	if _, err := tx.Exec(`UPDATE jobs SET state = ?, cancel = 1, updated = ?, ended = ? WHERE idem_key = ? AND kind = 'snapshot' AND state = 'queued'`,
+		Cancelled, nanos(now), nanos(now), key); err != nil {
+		return fmt.Errorf("queue: write job: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE jobs SET cancel = 1, updated = ? WHERE idem_key = ? AND kind = 'snapshot' AND state IN ('taken','running')`,
+		nanos(now), key); err != nil {
+		return fmt.Errorf("queue: write job: %w", err)
 	}
 	return nil
 }
@@ -1325,6 +1385,9 @@ func (q *Queue) End(runnerID, attemptID string, number int, f Finish) (Job, erro
 			f.Status, f.Reason, verdict, findings, result, nanos(now), nanos(now), j.ID); err != nil {
 			return fmt.Errorf("queue: write job: %w", err)
 		}
+		if err := endSnapshotsTx(tx, now, a.ID); err != nil {
+			return err
+		}
 		// A session's first job ties the session to this runner. A later
 		// finish naming the same session changes nothing.
 		if j.Kind == KindTurn && f.Session != "" && f.Session == j.Session && f.Workspace != nil && j.Spec.Session == "" {
@@ -1335,8 +1398,11 @@ func (q *Queue) End(runnerID, attemptID string, number int, f Finish) (Job, erro
 			if w.Snapshot != "" && !SnapshotShape.MatchString(w.Snapshot) {
 				return ErrBadState
 			}
+			if w.Space != "" && !SpaceShape.MatchString(w.Space) || w.FolderRef != "" && !FolderRefShape.MatchString(w.FolderRef) {
+				return ErrBadState
+			}
 			if _, err := tx.Exec(`INSERT INTO sessions(id, team, runner, kind, folder, repo, base, snapshot, created) VALUES(?,?,?,?,?,?,?,?,?)
-				ON CONFLICT DO NOTHING`, f.Session, j.Team, runnerID, w.Kind, w.Folder, w.Repo, w.Base, w.Snapshot, nanos(now)); err != nil {
+				ON CONFLICT DO NOTHING`, f.Session, j.Team, runnerID, w.Kind, w.where(), w.Repo, w.Base, w.Snapshot, nanos(now)); err != nil {
 				return fmt.Errorf("queue: write session: %w", err)
 			}
 		}

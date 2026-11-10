@@ -11,7 +11,6 @@ package queue
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -145,30 +144,18 @@ func (q *Queue) TreeSessions(team, root string) ([]string, error) {
 	return out, rows.Err()
 }
 
-// SessionFolders are the folders a session was started in: asked, the
-// folder its first turn job named, as f (its connector) knows its path, and
-// ws, its workspace's folder (a worktree inside asked, or asked itself).
-// Either may be "". Without f, asked is "".
-func (q *Queue) SessionFolders(team, session string, f FolderIssuer) (asked, ws string, err error) {
-	var spec string
-	err = q.db.QueryRow(`SELECT spec FROM jobs WHERE team = ? AND session = ? AND kind = 'turn' ORDER BY created, id LIMIT 1`,
-		team, session).Scan(&spec)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", "", fmt.Errorf("queue: read session: %w", err)
+// SessionFolder is the folder the session's first turn named, or its repo
+// for a worktree (repo true): its reference and its connector, or "" when
+// it named none, or a path, as a job stored before references did.
+func (q *Queue) SessionFolder(team, session string) (ref, connector string, repo bool, err error) {
+	sp, err := q.firstSpec(team, session)
+	if err != nil {
+		return "", "", false, err
 	}
-	var sp Spec
-	_ = json.Unmarshal([]byte(spec), &sp)
-	err = q.db.QueryRow(`SELECT folder FROM sessions WHERE id = ? AND team = ?`, session, team).Scan(&ws)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", "", fmt.Errorf("queue: read session: %w", err)
+	if sp.FolderRef == "" && sp.RepoRef != "" {
+		return sp.RepoRef, sp.Connector, true, nil
 	}
-	switch {
-	case sp.Folder != "":
-		asked = sp.Folder // a job from before folder references
-	case sp.FolderRef != "" && f != nil && sp.Connector == f.Connector():
-		asked, _ = f.Path(sp.FolderRef)
-	}
-	return asked, ws, nil
+	return sp.FolderRef, sp.Connector, false, nil
 }
 
 // ReviewLinked is ReviewAs with links: for a review an agent asked for, its

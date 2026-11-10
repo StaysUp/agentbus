@@ -5,6 +5,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/staysup/agentbus/folders"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -202,7 +203,7 @@ func TestAskFanOutAndDeliver(t *testing.T) {
 			t.Fatalf("no result of %s delivered; got %+v", c.Job, got)
 		}
 		if tn.Origin.Session != c.ID || tn.Origin.Turn != c.Turn || tn.Origin.JobKind != "turn" ||
-			!strings.HasPrefix(tn.Prompt, "[AgentBus]") || !strings.Contains(tn.Prompt, "worktrees/"+c.Job+"\n") ||
+			!strings.HasPrefix(tn.Prompt, "[AgentBus]") || strings.Contains(tn.Prompt, "worktrees/") ||
 			!strings.HasSuffix(w, "worktrees/"+c.Job) {
 			t.Errorf("result of %s: %+v\n%s", c.Job, tn.Origin, tn.Prompt)
 		}
@@ -380,4 +381,51 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 	for _, p := range []string{"root", "child"} {
 		release(dir, p)
 	}
+}
+
+// A turn may start a session in the folder it runs in (its copy) or one
+// inside it, as well as in its session's own folder; never elsewhere. The
+// connector says whether a path is inside, where the folders are.
+func TestAskInOwnCopy(t *testing.T) {
+	e, dir := askEnv(t)
+	folder := t.TempDir()
+	os.MkdirAll(filepath.Join(folder, "sub"), 0o755)
+	os.WriteFile(filepath.Join(folder, "sub", "x.txt"), []byte("x"), 0o644)
+	startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"root"}`)
+	tok := tokenOf(t, dir, "root")
+	copyDir := pwdOf(t, dir, "root")
+	if copyDir == folder {
+		t.Fatalf("the root turn ran in the folder itself")
+	}
+	ask(t, e, tok, `{"agent":"claude","prompt":"in-copy","folder":"`+copyDir+`"}`)
+	ask(t, e, tok, `{"agent":"claude","prompt":"in-copy-sub","folder":"`+filepath.Join(copyDir, "sub")+`"}`)
+	ask(t, e, tok, `{"agent":"claude","prompt":"in-folder-sub","folder":"`+filepath.Join(folder, "sub")+`"}`)
+	if code, out := as(t, e, tok, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"x","folder":"`+t.TempDir()+`"}`); code != 403 {
+		t.Errorf("a folder outside: %d %s", code, out)
+	}
+	for _, p := range []string{"root", "in-copy", "in-copy-sub", "in-folder-sub"} {
+		release(dir, p)
+	}
+}
+
+// A worktree's session asks with no folder: the new session works on the
+// worktree as it is (its base and its edits), not on the repo.
+func TestAskFromAWorktree(t *testing.T) {
+	e, dir := askEnv(t)
+	repo := gitRepo(t)
+	code, out := as(t, e, token, "POST", "/api/v0/jobs", `{"kind":"turn","spec":{"agent":"claude","repo":"`+repo+`","base":"HEAD","prompt":"root"}}`)
+	if code != 201 {
+		t.Fatalf("job: %d %s", code, out)
+	}
+	tok := tokenOf(t, dir, "root")
+	child := ask(t, e, tok, `{"agent":"claude","prompt":"child"}`)
+	j, err := e.q.Get(queue.DefaultTeam, child.Job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if j.Spec.FolderRef == "" || j.Spec.FolderRef == folders.Ref(repo) {
+		t.Fatalf("the child's folder is %q, the repo's is %q", j.Spec.FolderRef, folders.Ref(repo))
+	}
+	release(dir, "root")
+	release(dir, "child")
 }

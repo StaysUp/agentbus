@@ -60,7 +60,7 @@ func TestOverlayRoundTrip(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("diff %v, want %v", got, want)
 	}
-	if _, err := b.Apply(s, Base, "t1"); err != nil {
+	if _, err := applyIn(t, s, src, Base, "t1"); err != nil {
 		t.Fatal(err)
 	}
 	if read(t, filepath.Join(src, "a.txt")) != "a2" || read(t, filepath.Join(src, "redo", "fresh.txt")) != "f" ||
@@ -119,7 +119,7 @@ func TestOverlaySnapshotOwned(t *testing.T) {
 	if c, _ := b.Diff(s2, Base, "t1"); c.Count != 1 {
 		t.Fatalf("diff %+v", c)
 	}
-	if _, err := b.Apply(s2, Base, "t1"); err != nil {
+	if _, err := applyIn(t, s2, src, Base, "t1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := b.Close(s1); err != nil {

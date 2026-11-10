@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/staysup/agentbus/blobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/settings"
@@ -68,6 +69,11 @@ type Config struct {
 	// path becomes its reference there (queue.ResolveFolders). Nil, as in
 	// agentbus server, takes references only.
 	Folders queue.FolderIssuer
+	// Blobs is the control plane's blob store (blobs.go). Nil keeps none.
+	Blobs interface {
+		blobs.Source
+		blobs.Sink
+	}
 }
 
 // Server is the http.Handler.
@@ -110,6 +116,10 @@ func New(cfg Config) (*Server, error) {
 	s.mux.HandleFunc("POST /api/v0/attempts/{id}/heartbeat", s.runner(s.heartbeat))
 	s.mux.HandleFunc("POST /api/v0/attempts/{id}/events", s.runner(s.events))
 	s.mux.HandleFunc("POST /api/v0/attempts/{id}/finish", s.runner(s.finish))
+	s.mux.HandleFunc("POST /api/v0/attempts/{id}/snapshot", s.runner(s.snapshot))
+	s.mux.HandleFunc("POST /api/v0/blobs", s.runner(s.blobsMissing))
+	s.mux.HandleFunc("PUT /api/v0/blobs/{id}", s.runner(s.blobPut))
+	s.mux.HandleFunc("GET /api/v0/blobs/{id}", s.runner(s.blobGet))
 	return s, nil
 }
 
@@ -117,7 +127,11 @@ func New(cfg Config) (*Server, error) {
 // it (package api) has already checked the Host, answered CORS and bounded
 // the body; this checks the tokens.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	r.Body = http.MaxBytesReader(w, r.Body, MaxBody)
+	limit := int64(MaxBody)
+	if r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, BlobPath) {
+		limit = blobs.MaxBlob
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	if _, pattern := s.mux.Handler(r); pattern == "" {
 		fail(w, http.StatusNotFound, "no such API path")
 		return

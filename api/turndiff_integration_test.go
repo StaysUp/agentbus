@@ -233,14 +233,18 @@ func TestTurnChangesAreTheCheckpointDiff(t *testing.T) {
 					t.Fatalf("turn %s: the diff %+v is not the result's %+v", c.st.Turn, d.Files, res.Changes)
 				}
 				if setting == settings.IsolationNone {
-					if res.Changes.From != "" || res.Changes.To != "" || res.Folder != folder {
+					if res.Changes.From != "" || res.Changes.To != "" || res.Folder != "" {
 						t.Fatalf("turn %s in the folder: %+v in %s", c.st.Turn, res.Changes, res.Folder)
 					}
 					continue
 				}
-				// The copy is at <workdir>/<id>: the backend diffs the turn's
-				// checkpoints again, and answers what the result holds.
-				s, err := isolation.Load(filepath.Dir(res.Folder), res.Folder)
+				// The copy is at <workdir>/<id>, named by its space: the
+				// backend diffs the turn's checkpoints again, and answers what
+				// the result holds. No path of the runner's is in the result.
+				if res.Folder != "" || j.Workspace == nil || j.Workspace.Space == "" || res.Changeset == "" {
+					t.Fatalf("turn %s: result folder %q, workspace %+v, changeset %q", c.st.Turn, res.Folder, j.Workspace, res.Changeset)
+				}
+				s, err := isolation.LoadID(e.workdir, j.Workspace.Space)
 				if err != nil {
 					t.Fatal(err)
 				}

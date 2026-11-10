@@ -16,6 +16,9 @@ const (
 	MethodClone   = "clone"   // one copy-on-write clone of the whole folder (APFS)
 	MethodReflink = "reflink" // every file a copy-on-write reflink (btrfs, xfs)
 	MethodCopy    = "copy"    // a plain copy of some or all files (ext4, or across disks)
+	// MethodSnapshot: every file written from a snapshot's blobs, a clone
+	// of each where the runner's store is on the same disk.
+	MethodSnapshot = "snapshot"
 )
 
 // copyBackend copies the person's folder, whatever it is: in a git repo or
@@ -28,13 +31,17 @@ type copyBackend struct{}
 func (copyBackend) Name() string { return Copy }
 
 func (copyBackend) Open(r Request) (*Space, error) {
+	if r.Snapshot != nil {
+		return openSnapshot(r)
+	}
 	if err := checkFolder(r); err != nil {
 		return nil, err
 	}
 	if s, err := Load(r.Workdir, filepath.Join(r.Workdir, r.ID)); err == nil {
 		return s, nil // a retry of the job that made it
 	}
-	s := &Space{ID: r.ID, Backend: Copy, Source: filepath.Clean(r.Folder), Root: filepath.Join(r.Workdir, r.ID), Workdir: r.Workdir}
+	source := filepath.Clean(r.Folder)
+	s := &Space{ID: r.ID, Backend: Copy, Ref: r.Ref, Root: filepath.Join(r.Workdir, r.ID), Workdir: r.Workdir}
 	s.Dir = s.Root
 	// What a failed attempt left, with no record, is this job's own.
 	if err := removeAll(s.Root); err != nil {
@@ -47,13 +54,13 @@ func (copyBackend) Open(r Request) (*Space, error) {
 		return nil, err
 	}
 	s.start = time.Now()
-	share := shareable(s.Source, r.Share)
+	share := shareable(source, r.Share)
 	var method string
 	var err error
 	if len(share) > 0 {
-		method, err = cloneTreeExcept(s.Source, s.Root, share)
+		method, err = cloneTreeExcept(source, s.Root, share)
 	} else {
-		method, err = cloneTree(s.Source, s.Root)
+		method, err = cloneTree(source, s.Root)
 	}
 	if err != nil {
 		removeAll(s.Root)
@@ -68,7 +75,7 @@ func (copyBackend) Open(r Request) (*Space, error) {
 	}
 	sharedMu.Lock()
 	if len(share) > 0 {
-		s.Shared, err = linkShared(r.Workdir, s.Source, s.Root, share)
+		s.Shared, err = linkShared(r.Workdir, source, s.Root, share)
 	}
 	if err == nil {
 		err = s.save()
@@ -110,8 +117,7 @@ func checkFolder(r Request) error {
 	return nil
 }
 
-func (copyBackend) Checkpoints(s *Space) ([]Checkpoint, error)       { return checkpoints(s) }
-func (copyBackend) Apply(s *Space, from, to string) (Applied, error) { return apply(s, from, to) }
+func (copyBackend) Checkpoints(s *Space) ([]Checkpoint, error) { return checkpoints(s) }
 
 func (copyBackend) Diff(s *Space, from, to string) (workspace.Changes, error) {
 	return diff(s, from, to)
@@ -142,12 +148,15 @@ func (copyBackend) Close(s *Space) error {
 // checkpoint walks it again against prev's files, and writes the trees of
 // the folders whose files changed.
 func (copyBackend) take(s *Space, t *trees, prev *treeState, save workspace.Hasher) (treeState, int, error) {
+	if prev == nil && s.base != nil {
+		return t.fromSnapshot(nil, nil, s.base)
+	}
 	if prev == nil {
 		start := s.start
 		if start.IsZero() {
 			start = time.Now()
 		}
-		snap, err := workspace.Walk(s.Dir, nil, baseHasher(start))
+		snap, err := workspace.Walk(s.Dir, nil, baseHasher(start, s.objectDir()))
 		if err != nil {
 			return treeState{}, 0, err
 		}
@@ -172,10 +181,64 @@ func walkAgainst(s *Space, t *trees, prev *treeState, save workspace.Hasher) (tr
 	return t.fromSnapshot(prev, old, snap)
 }
 
-// learn reads the Base content of rel from the person's folder, where the
-// file still has the size, modification time and mode the Base saw.
+// learn reads the Base content of rel from the person's folder, through the
+// Lender, where the file still has the size, modification time and mode the
+// Base saw. A copy built from a snapshot hashed every file, so it never
+// needs to.
 func (copyBackend) learn(s *Space, rel string, f workspace.File) (string, bool, bool) {
-	return learnFrom(filepath.Join(s.Source, filepath.FromSlash(rel)), f, s.objectDir())
+	return lend(s, rel, f, f.Size <= MaxFileDiff)
+}
+
+// openSnapshot makes a copy from r's snapshot: every file written from its
+// blobs, and the Base its files as written, each with the hash its blob
+// has. The Base's snapshot id must be the snapshot's.
+func openSnapshot(r Request) (*Space, error) {
+	if err := checkOpen(r); err != nil {
+		return nil, err
+	}
+	if s, err := Load(r.Workdir, filepath.Join(r.Workdir, r.ID)); err == nil {
+		return s, nil // a retry of the job that made it
+	}
+	s := &Space{ID: r.ID, Backend: Copy, Ref: r.Ref, Root: filepath.Join(r.Workdir, r.ID), Workdir: r.Workdir,
+		Method: MethodSnapshot, Snapshot: r.Snapshot.ID}
+	s.Dir = s.Root
+	if err := removeAll(s.Root); err != nil {
+		return nil, err
+	}
+	if err := removeState(s); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(r.Workdir, 0o700); err != nil {
+		return nil, err
+	}
+	files, err := materialise(ctxOf(r), r.Snapshot, s.Root, 0o755)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.save(); err != nil {
+		removeAll(s.Root)
+		return nil, err
+	}
+	if err := writeBase(s, files); err != nil {
+		copyBackend{}.Close(s)
+		return nil, err
+	}
+	return s, nil
+}
+
+// writeBase records files, every one hashed, as s's Base, and checks its
+// snapshot id is the one s was built from.
+func writeBase(s *Space, files *workspace.Snapshot) error {
+	s.base = files
+	defer func() { s.base = nil }()
+	c, err := checkpoint(s, Base, copyBackend{})
+	if err != nil {
+		return err
+	}
+	if c.Root != s.Snapshot {
+		return ErrSnapshot
+	}
+	return nil
 }
 
 // copyTree copies the folder src to dst, which must not exist: folders,
@@ -281,3 +344,7 @@ func copyFile(src, dst string, perm fs.FileMode, tryReflink bool) (bool, error) 
 	}
 	return false, err
 }
+
+// Clone makes dst, which must not exist, a copy of the file src: a
+// copy-on-write clone where the disk has one, a plain copy otherwise.
+func Clone(src, dst string) error { return cloneFile(src, dst, 0o600) }

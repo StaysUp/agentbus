@@ -2,6 +2,7 @@ package isolation
 
 import (
 	"errors"
+	"github.com/staysup/agentbus/connector"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -148,7 +149,7 @@ func TestLazyBaseDiffAndApply(t *testing.T) {
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("diff %v, want %v", got, want)
 			}
-			if _, err := b.Apply(s, Base, "t1"); err != nil {
+			if _, err := applyIn(t, s, src, Base, "t1"); err != nil {
 				t.Fatal(err)
 			}
 			if read(t, filepath.Join(src, "a.txt")) != "line1\nline2 changed\n" || read(t, filepath.Join(src, "big.bin")) != strings.Repeat("y", MaxFileDiff+20) ||
@@ -174,8 +175,8 @@ func TestConflictWithoutBaseHash(t *testing.T) {
 			b.Checkpoint(s, "t1")
 			// The person, meanwhile: the same size, a new time.
 			fixture(t, src, map[string]string{"a.txt": "zz", "big.bin": strings.Repeat("z", MaxFileDiff+10)})
-			_, err := b.Apply(s, Base, "t1")
-			var c *Conflict
+			_, err := applyIn(t, s, src, Base, "t1")
+			var c *connector.Conflict
 			if !errors.As(err, &c) {
 				t.Fatalf("want a conflict, got %v", err)
 			}
@@ -183,7 +184,7 @@ func TestConflictWithoutBaseHash(t *testing.T) {
 			for _, f := range c.Files {
 				got[f.Path] = f.Why
 			}
-			if want := map[string]string{"a.txt": whyChanged, "big.bin": whyChanged}; !reflect.DeepEqual(got, want) {
+			if want := map[string]string{"a.txt": connector.WhyChanged, "big.bin": connector.WhyChanged}; !reflect.DeepEqual(got, want) {
 				t.Fatalf("conflicts %v, want %v", got, want)
 			}
 			if read(t, filepath.Join(src, "b.txt")) != "b1" {
@@ -191,7 +192,7 @@ func TestConflictWithoutBaseHash(t *testing.T) {
 			}
 			// The person's edit made as the turn's: no conflict.
 			fixture(t, src, map[string]string{"a.txt": "a2", "big.bin": strings.Repeat("x", MaxFileDiff+11)})
-			if _, err := b.Apply(s, Base, "t1"); err != nil {
+			if _, err := applyIn(t, s, src, Base, "t1"); err != nil {
 				t.Fatalf("after resolving: %v", err)
 			}
 			Close(s)

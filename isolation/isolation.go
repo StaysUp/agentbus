@@ -1,40 +1,58 @@
-// Package isolation gives a session its own copy of the person's folder, so
-// its turns change nothing of theirs until a change is applied.
+// Package isolation is the runner's side of a session's files: it gives a
+// session its own copy, so its turns change nothing of the person's until a
+// change is applied, and records the copy as it was at each moment.
+//
+// It never writes the person's folder. Reading it and writing it is the
+// folder side's (package connector): a snapshot of the folder going out, a
+// turn's changes coming back. A runner builds its copy from a snapshot
+// (Request.Snapshot, the files from a blob store), or, on the local fast
+// path, where the connector is in this process and shares the disk, by a
+// clone or an overlay of the folder itself (Request.Folder) as before; and
+// it reads the base content of a file its turn changed from its own saved
+// files, the snapshot's blobs, or, on the local fast path only, through the
+// connector (Lender).
 //
 // A Backend makes the copy (Open), records it as it is at a moment
-// (Checkpoint), says what changed between two checkpoints (Diff), puts those
-// changes into the person's folder (Apply), and removes the copy and its
-// checkpoints (Close). One backend owns the whole lifecycle of a Space, so
-// nothing above this package makes, finds or removes copies by itself.
+// (Checkpoint) and says what changed between two checkpoints (Diff), and
+// removes the copy and its checkpoints (Close). One backend owns the whole
+// lifecycle of a Space, so nothing above this package makes, finds or
+// removes copies by itself. What a checkpoint holds that differs from the
+// base goes out as a workspace.Changeset (ChangesetOf), with the saved files
+// it names (Blob): an apply needs nothing else.
 //
 // Three backends make copies. copy copies the folder: a copy-on-write clone
 // where the disk has one (APFS on macOS, a reflink on Linux), a plain copy
-// otherwise. overlay (Linux) mounts an overlayfs over the session's own
-// read-only snapshot of the folder (overlay_linux.go). git makes a git
-// worktree of the folder's repo at its HEAD and carries the folder's
-// uncommitted edits into it; it is the only code that runs git (git.go). A
-// fourth, none, makes no copy: it checkpoints a folder used as it is for one
-// job, so that every job's changes come from checkpoints (none.go). All start
-// from the folder exactly as it is now,
-// and all keep checkpoints the same way: a manifest of every file's size,
-// modification time, mode and hash, and a copy of each file a checkpoint saw
-// change, so a checkpoint can be applied after later turns changed the file
-// again. Hashes are taken only where a file's size or time says it changed
-// (checkpoint). For picks a backend for the isolation setting; auto is the
-// fastest one this machine has. A VM backend is one more implementation of
-// Backend.
+// otherwise, or the files of a snapshot. overlay (Linux) mounts an overlayfs
+// over the session's own read-only copy of the folder or snapshot
+// (overlay_linux.go). git makes a git worktree of the folder's repo at its
+// HEAD and carries the folder's uncommitted edits into it, on the local fast
+// path only; it is the only code that runs git (git.go). A fourth, none,
+// makes no copy: it checkpoints a folder used as it is for one job, so that
+// every job's changes come from checkpoints (none.go). All keep checkpoints
+// the same way: a Merkle tree of every file's size, modification time, mode
+// and hash, and a copy of each file a checkpoint saw change. Hashes are
+// taken only where a file's size or time says it changed (checkpoint), and
+// a copy made by clone records its base by size, time and mode only, as the
+// clone keeps each file's time: hashing every file of a 50,000-file folder
+// costs about 2 s on an APFS Mac (measured 2026-11-10), more than the clone.
+// A checkpoint whose files are all hashed has a snapshot id (Checkpoint.Root):
+// the same on any machine for the same files. For picks a backend for the
+// isolation setting; auto is the fastest one this machine has. A VM backend
+// is one more implementation of Backend.
 //
 // On disk, under the runner's workdir: the copy at <workdir>/<id>, and the
 // space's own record at <workdir>/.isolation/<id>: space.json, the
-// checkpoints, the saved files, and an overlay's snapshot. A space shares
-// nothing with another, but the read-only folders share_read_only names
-// (shared.go), so closing it removes everything it made.
+// checkpoints, the saved files, and an overlay's lower layer. A space
+// shares nothing with another, but the read-only folders share_read_only
+// names (shared.go), so closing it removes everything it made.
 package isolation
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -77,14 +95,6 @@ type Backend interface {
 	Checkpoints(s *Space) ([]Checkpoint, error)
 	// Diff is what changed from one checkpoint to a later one.
 	Diff(s *Space, from, to string) (workspace.Changes, error)
-	// Apply puts the changes from one checkpoint to a later one into the
-	// person's folder. A file there that is neither as it was at from nor
-	// already as it is at to refuses the whole apply with a *Conflict, and
-	// nothing is written. Applying from the oldest checkpoint kept also
-	// removes what the checkpoints up to to kept: to becomes the oldest.
-	// An apply already done is recorded: the same from and to again answer
-	// as it did and write nothing, even once its checkpoints were pruned.
-	Apply(s *Space, from, to string) (Applied, error)
 	// Close removes the copy and everything the space kept.
 	Close(s *Space) error
 }
@@ -93,10 +103,19 @@ type Backend interface {
 type Request struct {
 	ID      string // the space's name under Workdir: the job that opens it
 	Workdir string // the runner's folder for copies
-	// Folder is the person's folder, copied as it is now. Repo and Base,
-	// for git only and instead of Folder: a worktree of Repo at Base.
+	// Folder is the person's folder, copied as it is now: the local fast
+	// path, where the folder is on this machine's disk. Snapshot, instead,
+	// is a snapshot of it, built from its blobs. Repo and Base, for git
+	// only and instead of either: a worktree of Repo at Base.
 	Folder     string
+	Snapshot   *Snapshot
 	Repo, Base string
+	// Ref is the folder's reference, kept with the space: the Lender reads
+	// the folder by it.
+	Ref string
+	// Ctx, when not nil, stops a copy built from a snapshot while its
+	// blobs are fetched.
+	Ctx context.Context
 	// Share, for copy: folders at the top of Folder, such as node_modules,
 	// that the copy links to one read-only copy shared by every session
 	// made from the same folder, instead of copying them (shared.go).
@@ -107,9 +126,14 @@ type Request struct {
 type Space struct {
 	ID      string `json:"id"`
 	Backend string `json:"backend"`
-	// Source is the person's folder, which Apply writes to. Empty for a
-	// worktree made from a repo and a base.
+	// Ref is the person's folder the copy was made from, by its reference
+	// (package folders). Empty for a worktree made from a repo and a base.
+	// The path is never kept: a space made before references kept it as
+	// source, which Load turns into Ref.
+	Ref    string `json:"ref,omitempty"`
 	Source string `json:"source,omitempty"`
+	// Snapshot: the snapshot id the copy was built from, when it was.
+	Snapshot string `json:"snapshot,omitempty"`
 	// Root is the copy, or the worktree, at <workdir>/<id>. Dir is where
 	// turns run: Root, or the same subfolder inside it as Source is inside
 	// its repo.
@@ -128,8 +152,15 @@ type Space struct {
 	Fallback string `json:"fallback,omitempty"`
 
 	Workdir string `json:"-"`
+	// Blobs, when not nil, reads blobs the space's saved files lack: the
+	// snapshot's, for a copy built from one. Lender, when not nil, reads
+	// the person's folder on the local fast path. The runner sets both.
+	Blobs  BlobSource `json:"-"`
+	Lender Lender     `json:"-"`
 	// start: when Open began making the copy (baseHasher).
 	start time.Time
+	// base, while a copy built from a snapshot takes its Base: its files.
+	base *workspace.Snapshot
 	// temp, for none: Workdir is a temporary folder of this space's own.
 	temp bool
 }
@@ -145,35 +176,6 @@ type Checkpoint struct {
 	Root string `json:"root,omitempty"`
 }
 
-// Applied is what an Apply changed in the person's folder.
-type Applied struct {
-	// Files were written or removed, sorted.
-	Files []string `json:"files"`
-	// Pruned: the checkpoints before to and their saved files were removed.
-	Pruned bool `json:"pruned,omitempty"`
-}
-
-// Conflict refuses an Apply: these files of the person's folder changed
-// since the checkpoint the changes start from.
-type Conflict struct {
-	Files []ConflictFile `json:"files"`
-}
-
-// ConflictFile is one file Apply would not overwrite, and why.
-type ConflictFile struct {
-	Path string `json:"path"`
-	Why  string `json:"why"`
-}
-
-func (c *Conflict) Error() string {
-	paths := make([]string, len(c.Files))
-	for i, f := range c.Files {
-		paths[i] = f.Path
-	}
-	return fmt.Sprintf("apply refused: %d file(s) in your folder changed since the checkpoint: %s",
-		len(c.Files), strings.Join(paths, ", "))
-}
-
 // Refusal is a space that cannot be made, in words for the person.
 type Refusal struct{ Msg string }
 
@@ -185,7 +187,6 @@ var (
 	ErrNoCheckpoint = errors.New("isolation: no checkpoint of that name")
 	ErrBadName      = errors.New("isolation: a checkpoint name is letters, digits, _ . and -")
 	ErrOrder        = errors.New("isolation: from must be an earlier checkpoint than to")
-	ErrNoSource     = errors.New("isolation: this space was not made from a folder of yours, so there is nowhere to apply")
 	ErrTruncated    = errors.New("isolation: the folder has more files than a checkpoint holds, so it cannot be applied")
 	ErrOutside      = errors.New("isolation: the folder is not under this runner's workdir")
 )
@@ -298,9 +299,6 @@ func (f fallback) Checkpoints(s *Space) ([]Checkpoint, error) { return f.own(s).
 func (f fallback) Diff(s *Space, from, to string) (workspace.Changes, error) {
 	return f.own(s).Diff(s, from, to)
 }
-func (f fallback) Apply(s *Space, from, to string) (Applied, error) {
-	return f.own(s).Apply(s, from, to)
-}
 func (f fallback) Close(s *Space) error { return f.own(s).Close(s) }
 
 // stateFolder holds each space's record, under the workdir. Its name starts
@@ -329,7 +327,28 @@ func Load(workdir, dir string) (*Space, error) {
 		return nil, ErrNoSpace
 	}
 	s.Workdir = workdir
+	if s.Ref == "" && s.Source != "" {
+		s.Ref = folderRef(s.Source)
+	}
+	s.Source = ""
 	return &s, nil
+}
+
+// LoadID is Load by the space's id: a session's workspace names its space
+// by id, not by its folder on the runner.
+func LoadID(workdir, id string) (*Space, error) {
+	if !spaceName.MatchString(id) {
+		return nil, ErrNoSpace
+	}
+	return Load(workdir, filepath.Join(workdir, id))
+}
+
+// folderRef is package folders' reference of a path: fld_ and 16 hex digits
+// of the SHA-256 of the cleaned path. A space made before references kept
+// the path; its reference is the same one the connector gives that path.
+func folderRef(path string) string {
+	sum := sha256.Sum256([]byte(filepath.Clean(path)))
+	return "fld_" + hex.EncodeToString(sum[:8])
 }
 
 // Remount mounts s's copy again where its backend mounts one (overlay) and
@@ -428,6 +447,14 @@ func holds(folder, workdir string) bool {
 	}
 	rel, err := filepath.Rel(f, w)
 	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
+// ctxOf is r's context, or one that never ends.
+func ctxOf(r Request) context.Context {
+	if r.Ctx != nil {
+		return r.Ctx
+	}
+	return context.Background()
 }
 
 // checkOpen checks what every backend's Open needs.

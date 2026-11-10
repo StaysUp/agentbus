@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"github.com/staysup/agentbus/blobs"
+	"github.com/staysup/agentbus/connector"
 	"net"
 	"net/http/httptest"
 	"path/filepath"
@@ -65,8 +67,12 @@ func stackEnv(t *testing.T, s stack) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
+	bs, err := blobs.Open(filepath.Join(dir, "blobs"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollTok, Heartbeat: 50 * time.Millisecond,
-		MaxWait: 500 * time.Millisecond, Folders: fr})
+		MaxWait: 500 * time.Millisecond, Folders: fr, Blobs: bs})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,20 +88,31 @@ func stackEnv(t *testing.T, s stack) *env {
 	srv.Config.Handler = a
 	srv.Start()
 	ctx, cancel := context.WithCancel(context.Background())
-	rn, err := runner.Enroll(ctx, runner.Config{Queue: base, EnrollToken: enrollTok, Name: "test", Capacity: s.maxRuns,
-		Engine: eng, Store: st, Workdir: filepath.Join(dir, "worktrees"), Settings: cfgStore, Logf: t.Logf, Folders: fr})
+	// As in agentbus up: a connector beside the runner, sharing the blob
+	// store on disk.
+	conn := &connector.Connector{Folders: fr, Store: bs, State: filepath.Join(dir, "connector")}
+	cn, err := runner.Enroll(ctx, runner.Config{Queue: base, EnrollToken: enrollTok, Name: "connector", Capacity: 2,
+		Role: queue.RoleConnector, FolderSide: connector.Jobs{Connector: conn}, Folders: fr, Logf: t.Logf})
 	if err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan struct{})
-	go func() { rn.Run(ctx); close(done) }()
+	rn, err := runner.Enroll(ctx, runner.Config{Queue: base, EnrollToken: enrollTok, Name: "test", Capacity: s.maxRuns,
+		Engine: eng, Store: st, Workdir: filepath.Join(dir, "worktrees"), Settings: cfgStore, Logf: t.Logf, Folders: fr,
+		Lender: conn, Blobs: bs, BlobSink: bs})
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{}, 2)
+	go func() { rn.Run(ctx); done <- struct{}{} }()
+	go func() { cn.Run(ctx); done <- struct{}{} }()
 	t.Cleanup(func() {
 		cancel()
+		<-done
 		<-done
 		eng.StopAll()
 		srv.Close()
 		q.Close()
 		st.Close()
 	})
-	return &env{srv: srv, api: a, store: st, port: port, q: q, eng: eng}
+	return &env{srv: srv, api: a, store: st, port: port, q: q, eng: eng, workdir: filepath.Join(dir, "worktrees")}
 }

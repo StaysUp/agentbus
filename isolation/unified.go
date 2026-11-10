@@ -29,19 +29,13 @@ const (
 // addFileDiffs gives each changed text file of c its own unified diff, from
 // its content at a to its content at b. A file's content at either side is
 // read by end: its saved copy, or the space's folder while the file there is
-// still as it was then. Its earlier content may also be the person's folder,
-// when the file there is still as it was at a (the base checkpoint saves
-// nothing). A file with no diff that has a change of content is marked
-// DiffLeftOut: binary, a link, too big, past the budget, or its earlier
-// content is not kept.
+// still as it was then. Its earlier content may also be a blob of the
+// snapshot the copy was built from, or, on the local fast path, the
+// person's folder read through the Lender while the file there is still as
+// it was at a (a clone's base saves nothing). A file with no diff that has a
+// change of content is marked DiffLeftOut: binary, a link, too big, past the
+// budget, or its earlier content is not kept.
 func addFileDiffs(s *Space, end func(rel string, f workspace.File, max int) ([]byte, bool), a, b *workspace.Snapshot, c *workspace.Changes) {
-	var source *os.Root
-	if s.Source != "" {
-		if rt, err := os.OpenRoot(s.Source); err == nil {
-			source = rt
-			defer rt.Close()
-		}
-	}
 	read := func(rel string, f workspace.File) ([]byte, bool) {
 		if f.Mode&fs.ModeSymlink != 0 || f.Size > MaxFileDiff {
 			return nil, false
@@ -56,8 +50,8 @@ func addFileDiffs(s *Space, end func(rel string, f workspace.File, max int) ([]b
 		if ch.Change != "added" {
 			fa, _ := a.File(ch.Path)
 			old, ok = read(ch.Path, fa)
-			if !ok && source != nil && fa.Mode&fs.ModeSymlink == 0 && fa.Size <= MaxFileDiff && fa.Hash != "" {
-				old, ok = readMatching(source, ch.Path, fa.Hash, MaxFileDiff)
+			if !ok && fa.Mode&fs.ModeSymlink == 0 && fa.Size <= MaxFileDiff && fa.Hash != "" && baseContent(s, ch.Path, fa) {
+				old, ok = read(ch.Path, fa)
 			}
 		}
 		if ok && ch.Change != "deleted" {
@@ -258,4 +252,15 @@ func hunkRange(before, count int) string {
 		return fmt.Sprintf("%d", before+1)
 	}
 	return fmt.Sprintf("%d,%d", before+1, count)
+}
+
+// baseContent saves the earlier content of rel, f, among s's saved files,
+// from the snapshot's blobs or the person's folder, and says whether it
+// could.
+func baseContent(s *Space, rel string, f workspace.File) bool {
+	if fromBlobs(s, f.Hash) {
+		return true
+	}
+	h, saved, ok := lend(s, rel, f, true)
+	return ok && saved && h == f.Hash
 }

@@ -1,7 +1,6 @@
 package isolation
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -45,9 +44,6 @@ func TestNoneChangesInPlace(t *testing.T) {
 	}
 	if f := c.Files[m["gone.txt"]]; f.Change != "deleted" {
 		t.Errorf("gone.txt: %+v", f)
-	}
-	if _, err := b.Apply(s, Base, end.Name); !errors.Is(err, ErrNoSource) {
-		t.Fatalf("apply: %v", err)
 	}
 	if _, err := Load(s.Workdir, dir); err == nil {
 		t.Fatal("a folder used as it is loads as a copy")
