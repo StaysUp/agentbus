@@ -15,8 +15,11 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"runtime"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 )
@@ -105,6 +108,106 @@ func Walk(root string, prev *Snapshot, hash Hasher) (*Snapshot, error) {
 		s.files[it.Rel] = e
 	}
 	return s, nil
+}
+
+// WalkParallel is Walk with the hashes taken on several goroutines at once,
+// at most workers (0: one per CPU): reading a file costs more than hashing
+// it, and a disk answers several reads at once. hash must be safe to call
+// from several goroutines.
+func WalkParallel(root string, prev *Snapshot, hash Hasher, workers int) (*Snapshot, error) {
+	if hash == nil {
+		hash = Hash
+	}
+	if workers <= 0 {
+		workers = runtime.GOMAXPROCS(0)
+	}
+	s := &Snapshot{files: map[string]entry{}, taken: time.Now().UnixNano()}
+	list, truncated, err := List(root, true, MaxSnapshotFiles)
+	if err != nil {
+		return nil, err
+	}
+	s.truncated = truncated
+	type job struct {
+		rel, path string
+		info      fs.FileInfo
+		e         entry
+		ok        bool
+	}
+	var todo []*job
+	for _, it := range list {
+		info := it.Info
+		if info.IsDir() || (info.Mode()&fs.ModeSymlink == 0 && !info.Mode().IsRegular()) {
+			continue
+		}
+		if len(s.files)+len(todo) >= MaxSnapshotFiles {
+			s.truncated = true
+			break
+		}
+		e := entry{size: info.Size(), mode: info.Mode(), modTime: info.ModTime().UnixNano()}
+		if old, ok := prevEntry(prev, it.Rel); ok && old.size == e.size && old.modTime == e.modTime && old.mode == e.mode && !prev.racy(old.modTime) {
+			e.hash = old.hash
+			s.files[it.Rel] = e
+			continue
+		}
+		todo = append(todo, &job{rel: it.Rel, path: it.Path, info: info, e: e})
+	}
+	var wg sync.WaitGroup
+	next := make(chan *job)
+	for range min(workers, max(1, len(todo))) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := range next {
+				if h, err := hash(j.rel, j.path, j.info); err == nil {
+					j.e.hash, j.ok = h, true
+				}
+			}
+		}()
+	}
+	for _, j := range todo {
+		next <- j
+	}
+	close(next)
+	wg.Wait()
+	for _, j := range todo {
+		if j.ok {
+			s.files[j.rel] = j.e
+		}
+	}
+	return s, nil
+}
+
+// FormatTimes is each file's modification time, one "<unix nanoseconds>
+// <path>" a line: what a copy built from a snapshot sets its files' times
+// to, so a build tool sees the times the folder had. They are not part of
+// the snapshot id.
+func FormatTimes(s *Snapshot) []byte {
+	var b strings.Builder
+	for _, rel := range s.Paths() {
+		e := s.files[rel]
+		b.WriteString(strconv.FormatInt(e.modTime, 10))
+		b.WriteByte(' ')
+		b.WriteString(rel)
+		b.WriteByte('\n')
+	}
+	return []byte(b.String())
+}
+
+// ParseTimes reads what FormatTimes writes.
+func ParseTimes(b []byte) map[string]int64 {
+	out := map[string]int64{}
+	for _, line := range strings.Split(string(b), "\n") {
+		t, rel, ok := strings.Cut(line, " ")
+		if !ok || rel == "" {
+			continue
+		}
+		n, err := strconv.ParseInt(t, 10, 64)
+		if err != nil {
+			continue
+		}
+		out[rel] = n
+	}
+	return out
 }
 
 // File is one file of a Snapshot. Hash is the SHA-256 of its content, or of
