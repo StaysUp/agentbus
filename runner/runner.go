@@ -109,6 +109,7 @@ type Runner struct {
 	lease     time.Duration
 	cleanMu   sync.Mutex      // one workspace removal at a time
 	cleaned   map[string]bool // sessions this process already cleaned, under cleanMu
+	down      retry           // the take loops' wait while control does not answer
 }
 
 // state is what StateFile keeps.
@@ -265,9 +266,16 @@ func (r *Runner) loop(ctx context.Context) {
 		case ctx.Err() != nil:
 			return
 		case err != nil || (status != http.StatusOK && status != http.StatusNoContent):
-			r.cfg.Logf("take failed: status %d", status)
-			sleep(ctx, 2*time.Second)
+			wait, grew := r.down.failed(time.Now())
+			if grew {
+				r.cfg.Logf("%s", retryLine(r.cfg.Queue, status, wait))
+			}
+			sleep(ctx, wait)
 			continue
+		case r.down.answered():
+			r.cfg.Logf("control at %s answers again", r.cfg.Queue)
+		}
+		switch {
 		case status == http.StatusNoContent:
 			continue
 		case t.Cleanup != nil:
