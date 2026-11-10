@@ -211,6 +211,8 @@ func (q *Queue) Deliver(team string, name func(id string) string) (int, error) {
 			return n, nil // the queue is full: try again later
 		case errors.Is(err, ErrSessionClosed):
 			why = "the asking session is closed"
+		case errors.Is(err, ErrSessionEnded):
+			why = "the asking session ended with its first turn"
 		case errors.Is(err, ErrKeyConflict):
 			why = "a delivery of this result already exists with other fields"
 		default:

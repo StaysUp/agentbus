@@ -496,3 +496,35 @@ func TestStaleAttemptStopsTheTurn(t *testing.T) {
 		t.Fatalf("the turn ended without a stop: %+v", list.Turns[0])
 	}
 }
+
+// A file written to a session's copy between turns, as by a turn whose
+// runner was lost or what it left running, is in the next turn's diff: the
+// diff starts at the copy's latest checkpoint, so nothing reaches an apply
+// unseen.
+func TestCopyWrittenBetweenTurnsIsInTheNextDiff(t *testing.T) {
+	repo := t.TempDir()
+	mustGit(t, repo, "init", "-q", "-b", "main")
+	write(t, filepath.Join(repo, "app.txt"), "v1\n")
+	mustGit(t, repo, "add", ".")
+	mustGit(t, repo, "commit", "-q", "-m", "one")
+	w := newWorld(t, 1)
+	first := w.create(t, queue.Spec{Harness: "claude", Repo: repo, Base: "main", Prompt: "write app.txt v2"})
+	waitFor(t, "finished", func() bool { return w.job(t, first.ID).Ended != nil })
+	f := w.job(t, first.ID)
+	if f.State != queue.Finished {
+		t.Fatalf("first: %s %s", f.State, f.Reason)
+	}
+	write(t, filepath.Join(w.r.cfg.Workdir, first.ID, "stray.txt"), "left behind\n")
+	next := w.create(t, queue.Spec{Session: first.Session, Prompt: "write second.txt two"})
+	waitFor(t, "finished", func() bool { return w.job(t, next.ID).Ended != nil })
+	var res struct {
+		Changes workspace.Changes `json:"changes"`
+	}
+	n := w.job(t, next.ID)
+	_ = json.Unmarshal(n.Result, &res)
+	m := byPath(res.Changes)
+	if n.State != queue.Finished || res.Changes.Count != 2 || m["second.txt"].Change != "added" || m["stray.txt"].Change != "added" ||
+		res.Changes.From != f.Attempts[0].ID {
+		t.Fatalf("second: %s, changes %+v", n.State, res.Changes)
+	}
+}

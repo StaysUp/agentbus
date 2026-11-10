@@ -367,6 +367,9 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, queue.ErrSessionClosed):
 		fail(w, http.StatusConflict, "the session is closed")
 		return
+	case errors.Is(err, queue.ErrSessionEnded):
+		fail(w, http.StatusConflict, queue.SessionEnded)
+		return
 	case errors.Is(err, queue.ErrFull):
 		fail(w, http.StatusTooManyRequests, "too many jobs are waiting; wait for some to end")
 		return

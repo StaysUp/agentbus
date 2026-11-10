@@ -295,7 +295,7 @@ var routes = slices.Concat([]route{
 			badRequest,
 			fail(404, "This service keeps no job queue, or no job ran this turn."),
 			ok(409, ApplyState{}, "Refused or failed: error says why, and conflicts names each file in your folder that changed. Nothing was written on a conflict."),
-			tooMany, storeFailed},
+			tooMany, fail(503, "The folder's connector has not been seen for a minute. Nothing was written and no apply was made."), storeFailed},
 		turn:  applyTurnTok,
 		serve: (*API).applyTurn},
 	{method: "GET", path: "/api/v0/agents", op: "listAgents",

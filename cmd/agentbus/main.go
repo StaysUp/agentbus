@@ -623,6 +623,13 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 				} else if n > 0 {
 					svcLog.Printf("queue.leases_expired n=%d", n)
 				}
+				// A remote turn whose runner was lost: its hold in the
+				// record is closed, so the session takes its next turn.
+				if n, err := jobs.CloseLost(s.queue, s.store, time.Now().UTC()); err != nil {
+					svcLog.Printf("record.close_lost_failed")
+				} else if n > 0 {
+					svcLog.Printf("record.lost_turns_closed n=%d", n)
+				}
 				// Asked work that ended: its result becomes the asking
 				// session's next turn (queue.Deliver).
 				if n, err := s.queue.Deliver(queue.DefaultTeam, name); err != nil {

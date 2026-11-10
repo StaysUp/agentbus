@@ -354,6 +354,12 @@ type Workspace struct {
 	// RemovalError: the runner could not remove the worktree. It is left on
 	// disk, and the session counts as removed so it is not tried forever.
 	RemovalError string `json:"removal_error,omitempty"`
+	// DiffFrom: the checkpoint the session's latest turn whose changes
+	// control holds (its changeset) ended at, as a job's workspace names
+	// it. A later turn's diff starts there, so whatever the copy holds
+	// since, from a turn whose runner was lost or whose finish was refused,
+	// shows in that diff, as an apply would write it.
+	DiffFrom string `json:"diff_from,omitempty"`
 }
 
 // Attempt is one execution of a job.
@@ -730,6 +736,15 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, lim Limit
 			if closed.Valid {
 				return ErrSessionClosed
 			}
+			if errors.Is(err, sql.ErrNoRows) && kind == KindTurn {
+				var ended bool
+				if err := tx.QueryRow(`SELECT `+sessionEnded("?1"), session).Scan(&ended); err != nil {
+					return fmt.Errorf("queue: read session: %w", err)
+				}
+				if ended {
+					return ErrSessionEnded
+				}
+			}
 		}
 		if err := checkAsked(tx, team, links, lim); err != nil {
 			return err
@@ -965,6 +980,13 @@ func workspaceOf(db querier, j Job) (*Workspace, error) {
 	if err != nil {
 		return nil, fmt.Errorf("queue: read session: %w", err)
 	}
+	// As appliableTurns orders them: the last to end.
+	err = db.QueryRow(`SELECT COALESCE(json_extract(result, '$.changes.to'), '') FROM jobs WHERE team = ? AND session = ? AND kind = 'turn'
+		AND ended IS NOT NULL AND attempt IS NOT NULL AND COALESCE(json_extract(result, '$.changeset'), '') != ''
+		ORDER BY ended DESC, rowid DESC LIMIT 1`, j.Team, session).Scan(&w.DiffFrom)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("queue: read session: %w", err)
+	}
 	return &w, nil
 }
 
@@ -1119,7 +1141,8 @@ func reasonIf(ok bool, r string) string {
 	return ""
 }
 
-// sweepTx settles every attempt whose lease ran out.
+// sweepTx settles every attempt whose lease ran out, and ends the queued
+// turns of every ended session (sessionEnded).
 func sweepTx(tx *sql.Tx, now time.Time) error {
 	rows, err := tx.Query(`SELECT `+attemptCols+` FROM attempts WHERE state IN ('taken','running') AND lease_until <= ?`, nanos(now))
 	if err != nil {
@@ -1150,7 +1173,9 @@ func sweepTx(tx *sql.Tx, now time.Time) error {
 			return err
 		}
 	}
-	return nil
+	// Whatever ended a session's first turn, its queued turns end here,
+	// before any runner can take one.
+	return endSessionsTx(tx, now)
 }
 
 // endSnapshotsTx stops the snapshot job the attempt asked for (Snapshot),
@@ -1167,6 +1192,56 @@ func endSnapshotsTx(tx *sql.Tx, now time.Time, attempt string) error {
 		return fmt.Errorf("queue: write job: %w", err)
 	}
 	return nil
+}
+
+// A session is ended when its first job, the turn that opened it, has
+// ended and the queue holds no workspace for it. (A session the queue
+// first saw as a next turn, known only to the record, is not opened here.) A workspace is bound only by the first turn's
+// accepted finish; every other way that turn ends (cancelled, lease lost,
+// finish refused, refused at setup) leaves nothing to continue in. Every
+// queued and later turn of an ended session, and every result for it, gets
+// SessionEnded; nothing else waits on it. This is the one place the rule is
+// decided: sessionEnded below, read by create and by sweepTx.
+
+// ErrSessionEnded: a turn for an ended session.
+var ErrSessionEnded = errors.New("queue: the session ended with its first turn")
+
+// SessionEnded is why a turn of an ended session is refused or ended.
+const SessionEnded = "this session's first turn ended before the session was set up (it was stopped, its runner stopped, or it did not start), so the session is ended; start a new session"
+
+// sessionEnded is the rule, as SQL over a session id named by sess (a
+// column or a "?" bound twice, once per use).
+func sessionEnded(sess string) string {
+	return `(NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = ` + sess + `)
+		AND EXISTS (SELECT 1 FROM jobs f WHERE f.session = ` + sess + ` AND f.kind = 'turn' AND f.ended IS NOT NULL
+			AND COALESCE(json_extract(f.spec, '$.session'), '') = ''
+			AND f.rowid = (SELECT MIN(g.rowid) FROM jobs g WHERE g.session = f.session)))`
+}
+
+// endSessionsTx ends every queued turn of an ended session, with why.
+func endSessionsTx(tx *sql.Tx, now time.Time) error {
+	res, _ := json.Marshal(Result{Refused: SessionEnded, Status: 409}) // 409 Conflict, as the API answers it
+	if _, err := tx.Exec(`UPDATE jobs SET state = ?, reason = ?, result = ?, updated = ?, ended = ?
+		WHERE kind = 'turn' AND state = 'queued' AND session IS NOT NULL AND `+sessionEnded("jobs.session"),
+		Failed, ReasonSetup, string(res), nanos(now), nanos(now)); err != nil {
+		return fmt.Errorf("queue: write job: %w", err)
+	}
+	return nil
+}
+
+// Lost says which of these attempts ended because their lease ran out.
+func (q *Queue) Lost(ids []string) (map[string]bool, error) {
+	out := map[string]bool{}
+	for _, id := range ids {
+		var n int
+		if err := q.db.QueryRow(`SELECT COUNT(*) FROM attempts WHERE id = ? AND state = ?`, id, Lost).Scan(&n); err != nil {
+			return nil, fmt.Errorf("queue: read attempt: %w", err)
+		}
+		if n > 0 {
+			out[id] = true
+		}
+	}
+	return out, nil
 }
 
 // Sweep settles every attempt whose lease ran out, and says how many.

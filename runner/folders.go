@@ -143,7 +143,9 @@ func (r *Runner) fromSnapshot(ctx context.Context, at *attempt) *queue.Result {
 			return &queue.Result{Refused: "the runner stopped while the folder's snapshot was taken"}
 		case err == nil && status == http.StatusOK && st.Snapshot != nil:
 		case err == nil && status == http.StatusOK && st.Error != "":
-			return &queue.Result{Refused: st.Error}
+			// The folder's side could not give the snapshot: not this
+			// service's fault, and the turn may be sent again.
+			return &queue.Result{Refused: st.Error, Status: http.StatusServiceUnavailable}
 		case err == nil && status != http.StatusOK && status < 500:
 			return &queue.Result{Refused: "the folder's snapshot could not be asked for: " + e.Error}
 		case time.Now().After(deadline):

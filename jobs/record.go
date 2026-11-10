@@ -223,3 +223,37 @@ func (s *Server) record(w http.ResponseWriter, r *http.Request, rn queue.Runner)
 	}
 	writeJSON(w, http.StatusOK, RecordAck{Stored: n})
 }
+
+// CloseLost stores session.closed, unsettled, for each hold the record has
+// open whose turn is an attempt whose lease ran out. Its runner stopped
+// during the turn, so nothing else closes it: the cockpit would show the
+// turn running, and the session would take no next turn. It is what
+// store.CloseStaleHolds does at start for this process's own turns.
+func CloseLost(q *queue.Queue, st *store.Store, now time.Time) (int, error) {
+	holds, err := st.OpenHolds(st.Last())
+	if err != nil || len(holds) == 0 {
+		return 0, err
+	}
+	var turns []string
+	for _, h := range holds {
+		if h.Turn != "" {
+			turns = append(turns, h.Turn)
+		}
+	}
+	lost, err := q.Lost(turns)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for _, h := range holds {
+		if !lost[h.Turn] {
+			continue
+		}
+		if _, _, err := st.Append(event.Event{ID: queue.NewID("evt_"), Kind: event.SessionClosed, Time: now,
+			Session: h.Session, Turn: h.Turn, Hold: h.Hold, Unsettled: true}); err != nil {
+			return n, err
+		}
+		n++
+	}
+	return n, nil
+}

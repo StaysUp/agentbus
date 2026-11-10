@@ -218,6 +218,9 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 	case errors.Is(err, queue.ErrSessionClosed):
 		writeError(w, http.StatusConflict, "this session's workspace is closed; it takes no more turns")
 		return
+	case errors.Is(err, queue.ErrSessionEnded):
+		writeError(w, http.StatusConflict, queue.SessionEnded)
+		return
 	case errors.Is(err, queue.ErrFull):
 		writeError(w, http.StatusTooManyRequests, "too many jobs are waiting; wait for some to end and retry")
 		return

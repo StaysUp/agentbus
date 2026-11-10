@@ -187,6 +187,20 @@ type RunnerFolder struct {
 	Runner    string `json:"runner" doc:"The runner that reported it."`
 }
 
+// ConnectorSeen says whether the connector of this id asked for work within
+// RunnerFresh. A connected one asks about once a second, so one not seen
+// that long is gone: its folder's snapshots and applies wait for nothing.
+func (q *Queue) ConnectorSeen(team, connector string) (bool, error) {
+	var n int
+	err := q.db.QueryRow(`SELECT COUNT(*) FROM runners WHERE team = ? AND seen >= ?
+		AND json_extract(caps, '$.role') = ? AND json_extract(caps, '$.connector') = ?`,
+		team, nanos(q.now().Add(-RunnerFresh)), RoleConnector, connector).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("queue: read runners: %w", err)
+	}
+	return n > 0, nil
+}
+
 // Runners is every runner of the team, newest seen first.
 func (q *Queue) Runners(team string) ([]Runner, error) {
 	rows, err := q.db.Query(`SELECT `+runnerCols+` FROM runners WHERE team = ? ORDER BY seen DESC, id`, team)

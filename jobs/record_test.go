@@ -210,3 +210,66 @@ func TestRecordRouteReview(t *testing.T) {
 		t.Fatalf("the other review's own session: %d", code)
 	}
 }
+
+// A turn whose runner was lost while it ran has its hold closed in the
+// record, unsettled, so the session takes its next turn; a turn still
+// running keeps its hold.
+func TestCloseLost(t *testing.T) {
+	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	q, err := queue.Open(filepath.Join(t.TempDir(), "jobs.db"), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { q.Close(); st.Close() })
+	rn, err := q.RegisterRunner(queue.DefaultTeam, "r", nil, 2, queue.HashToken("tok"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var turns []string
+	var sessions []string
+	for range 2 {
+		j, _, err := q.Create(queue.DefaultTeam, queue.KindTurn, "", queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"}, queue.Links{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, a, ok, _, err := q.Take(rn.ID, 30*time.Second)
+		if err != nil || !ok {
+			t.Fatalf("take: %v %v", ok, err)
+		}
+		if _, _, err := q.Start(rn.ID, a.ID, a.Number, 30*time.Second); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := st.Append(event.Event{ID: queue.NewID("evt_"), Kind: event.SessionOpened, Time: now, Session: j.Session, Turn: a.ID}); err != nil {
+			t.Fatal(err)
+		}
+		turns, sessions = append(turns, a.ID), append(sessions, j.Session)
+	}
+	if n, err := CloseLost(q, st, now); err != nil || n != 0 {
+		t.Fatalf("before any lease ran out: %d %v", n, err)
+	}
+	// The second turn's runner still beats; the first's does not.
+	now = now.Add(20 * time.Second)
+	if _, _, err := q.Heartbeat(rn.ID, turns[1], 1, 30*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(20 * time.Second)
+	if _, err := q.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	if n, err := CloseLost(q, st, now); err != nil || n != 1 {
+		t.Fatalf("closed %d %v, want 1", n, err)
+	}
+	for i, open := range []bool{false, true} {
+		c, err := st.Continuation(sessions[i])
+		if err != nil || c.Open != open {
+			t.Fatalf("session %d open %v, want %v (%v)", i, c.Open, open, err)
+		}
+	}
+	if n, _ := CloseLost(q, st, now); n != 0 {
+		t.Fatalf("closed again: %d", n)
+	}
+}

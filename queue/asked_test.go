@@ -158,7 +158,8 @@ func TestDeliver(t *testing.T) {
 	if _, _, ok, _, err := q.Take(r.ID, lease); err != nil || ok {
 		t.Fatalf("took the delivery while the parent runs: %v %v", ok, err)
 	}
-	if _, err := q.End(r.ID, pa.ID, pa.Number, Finish{Status: Finished}); err != nil {
+	if _, err := q.End(r.ID, pa.ID, pa.Number, Finish{Status: Finished, Session: parent.Session,
+		Workspace: &Workspace{Kind: WorkspaceFolder, FolderRef: "fld_0123456789abcdef"}}); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := take(t, q, r); got.ID != d.ID {
@@ -297,5 +298,44 @@ func TestSessionFolderOfARepo(t *testing.T) {
 	j := makeJob(t, q, Spec{Harness: "claude", RepoRef: refX, Connector: conA, Base: "main"})
 	if ref, con, repo, err := q.SessionFolder(DefaultTeam, j.Session); err != nil || ref != refX || con != conA || !repo {
 		t.Fatalf("%q %q %v", ref, con, err)
+	}
+}
+
+// A result for a session that ended with its first turn (its lease ran
+// out) cannot be delivered: it is recorded as undelivered, and the sweep
+// goes on to the next result instead of stopping on it.
+func TestDeliverToALostSession(t *testing.T) {
+	q, c := open(t)
+	r := runner(t, q, 5)
+	parent, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Harness: "claude", Folder: "/x", Prompt: "hi", Isolate: true}, Links{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, pa := take(t, q, r)
+	if _, _, err := q.Start(r.ID, pa.ID, pa.Number, lease); err != nil {
+		t.Fatal(err)
+	}
+	child, err := askTurn(q, asked(parent.Session, pa.ID, parent.Session, 1), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cj, ca := take(t, q, r)
+	if cj.ID != child.ID {
+		t.Fatalf("took %s, want the child", cj.ID)
+	}
+	if _, _, err := q.Start(r.ID, ca.ID, ca.Number, lease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.End(r.ID, ca.ID, ca.Number, Finish{Status: Finished, Result: json.RawMessage(`{"state":"finished"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	c.add(lease + time.Second)
+	if _, err := q.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if n, err := q.Deliver(DefaultTeam, nil); err != nil || n != 0 {
+			t.Fatalf("deliver: %d %v", n, err)
+		}
 	}
 }

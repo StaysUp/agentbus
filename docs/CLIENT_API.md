@@ -1175,6 +1175,9 @@ names in the control plane's blob store, and the connector reads them from there
   before this build kept changesets, or its session was closed. **404** when no job of this service
   ran the turn. **409** with `state` `failed` when the apply job did not finish (its connector went
   away): ask again, and a file it already wrote counts as applied.
+- **503** when the folder's connector has not asked for work for a minute: `the folder's connector
+  is not connected, so nothing was written: start agentbus connector on the folder's machine, then
+  ask again`. No apply job is made.
 - The runner keeps every checkpoint of a session until the session closes: an apply no longer
   removes any (`pruned` is never set).
 - **A turn token** may apply a turn whose job ran in a session of its request tree, its own session
@@ -1824,6 +1827,19 @@ of its content, never from a connector to a runner:
   its base) and the files it names in the store; the job's `result.changeset` names it.
 - An apply job goes to the folder's connector, which reads both changesets and the files from the
   store, checks the folder and writes it.
+- A connector that takes work asks for it about once a second. One not seen for a minute is gone:
+  a turn that needs a snapshot of its folder is refused (`the folder's connector is not connected:
+  start agentbus connector on the folder's machine, then send the turn again`), and so is an apply
+  (503). A connector stopped while it takes a snapshot ends that turn: `the folder's connector
+  stopped while it took the snapshot; send the turn again`.
+- A turn whose runner stops answering ends with `runner_lost` once its lease runs out. Control
+  closes the turn in its record (unsettled), so the cockpit shows it ended and the session takes
+  its next turn when the runner is back. A later turn's diff starts at the end of the session's
+  latest turn whose changes control holds (the job's `workspace.diff_from`), so anything written
+  to the copy since (by a lost turn, or what it left running) shows in that diff, as an apply up to
+  it writes it. A session whose first turn ends without an accepted finish (stopped while
+  queued, its runner lost, its finish refused) is ended: a turn already queued behind it ends,
+  and a new one gets **409**, both with `the session is ended; start a new session`.
 
 The modes:
 
@@ -2150,6 +2166,10 @@ then what 0.3 changed after it.
   earlier turn of the session runs. `pruned` is gone: the runner keeps a session's checkpoints until
   it closes. An apply job's `spec` names `folder_ref`, `connector`, and in `apply_from` and
   `apply_to` the changesets it goes between (blob hashes), not checkpoint names.
+- **A gone connector is an error, not a wait.** A snapshot or an apply of a folder whose connector
+  has not been seen for a minute is refused at once (an apply with **503**), and a turn whose
+  runner was lost is closed in control's record, so its session goes on. A later turn's diff
+  starts at the end of the latest turn control holds (`workspace.diff_from`).
 - **Snapshots are content-addressed.** A snapshot id is the SHA-256 of a Merkle tree of the files'
   contents, modes and sizes, never their times, so the same files have the same id on any machine.
   A workspace's `snapshot` is that id when every file of the copy's base was hashed: a copy built

@@ -2,11 +2,14 @@ package queue
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/staysup/agentbus/harness"
+	"github.com/staysup/agentbus/workspace"
 )
 
 // An apply's key holds a "/", as no caller's key may, so no other job can
@@ -163,6 +166,7 @@ func mustAttempt(t *testing.T, q *Queue, job string) string {
 func TestApplyAtOnce(t *testing.T) {
 	q, _ := open(t)
 	rn := capsRunner(t, q, nil, nil)
+	capsRunner(t, q, nil, &Capabilities{Role: RoleConnector, Connector: conA})
 	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Connector: conA, Isolate: true})
 	turns := []Job{run(t, q, rn, Result{Changeset: hexOf('1')})}
 	for _, c := range []byte{'2', '3'} {
@@ -211,6 +215,51 @@ func TestTakeIsolatedByHarness(t *testing.T) {
 	}
 }
 
+// A snapshot or an apply of a folder whose connector has not been seen for
+// RunnerFresh is refused: nothing would take it. An apply makes no job; a
+// snapshot already queued stays, and goes once the connector is back.
+func TestFolderJobsNeedTheirConnector(t *testing.T) {
+	q, c := open(t)
+	conn := capsRunner(t, q, nil, &Capabilities{Role: RoleConnector, Connector: conA})
+	c.add(RunnerFresh + time.Second)
+	rn := capsRunner(t, q, nil, nil)
+	turn := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Connector: conA, Isolate: true})
+	j, a := take(t, q, rn)
+	if j.ID != turn.ID {
+		t.Fatalf("took %s", j.ID)
+	}
+	if _, _, err := q.Start(rn.ID, a.ID, a.Number, lease); err != nil {
+		t.Fatal(err)
+	}
+	snap, err := q.Snapshot(rn.ID, a.ID, a.Number)
+	if !errors.Is(err, ErrNoConnector) || snap.State != Queued {
+		t.Fatalf("snapshot without its connector: %s %v", snap.State, err)
+	}
+	if takes(t, q, conn) != snap.ID {
+		t.Fatal("the connector, back, did not take the snapshot")
+	}
+	if again, err := q.Snapshot(rn.ID, a.ID, a.Number); err != nil || again.ID != snap.ID {
+		t.Fatalf("snapshot once taken: %s %v", again.ID, err)
+	}
+	if _, err := q.End(rn.ID, a.ID, a.Number, Finish{Status: Finished, Session: j.Session,
+		Workspace: &Workspace{Kind: WorkspaceCopy, Space: j.ID}, Result: []byte(`{"changeset":"` + hexOf('1') + `"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	c.add(RunnerFresh + time.Second)
+	if _, _, err := q.Apply(DefaultTeam, a.ID); !errors.Is(err, ErrNoConnector) {
+		t.Fatalf("apply without its connector: %v", err)
+	}
+	if applies, _ := q.sessionApplies(DefaultTeam, j.Session); len(applies) != 0 {
+		t.Fatalf("%d applies made", len(applies))
+	}
+	if _, err := q.RunnerBeat(conn.ID, 1, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, created, err := q.Apply(DefaultTeam, a.ID); err != nil || !created {
+		t.Fatalf("apply with its connector back: %v %v", created, err)
+	}
+}
+
 // The snapshot job an attempt asked for ends with it: queued, it is
 // cancelled; taken, it is asked to stop.
 func TestSnapshotEndsWithItsAttempt(t *testing.T) {
@@ -241,4 +290,117 @@ func TestSnapshotEndsWithItsAttempt(t *testing.T) {
 			t.Fatalf("taken %v: the snapshot job is %s, cancel %v", taken, got.State, got.CancelRequested)
 		}
 	}
+}
+
+// A later turn's workspace names where its diff starts: the end of the
+// session's latest turn whose changeset control holds. A turn whose finish
+// was refused after its lease ran out holds none, so the diff after it
+// starts before it.
+func TestDiffFromIsTheLastTurnControlHolds(t *testing.T) {
+	q, c := open(t)
+	rn := capsRunner(t, q, nil, nil)
+	first := makeJob(t, q, Spec{Harness: "claude", Folder: "/x", Isolate: true})
+	t1 := run(t, q, rn, Result{Changeset: hexOf('1'), Changes: &workspace.Changes{To: "t_end1"}})
+	if t1.ID != first.ID {
+		t.Fatalf("ran %s", t1.ID)
+	}
+	makeJob(t, q, Spec{Session: first.Session})
+	_, a := take(t, q, rn)
+	if _, _, err := q.Start(rn.ID, a.ID, a.Number, lease); err != nil {
+		t.Fatal(err)
+	}
+	c.add(lease + time.Second)
+	if _, err := q.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(Result{Changeset: hexOf('2'), Changes: &workspace.Changes{To: "t_end2"}})
+	if _, err := q.End(rn.ID, a.ID, a.Number, Finish{Status: Finished, Result: b}); err == nil {
+		t.Fatal("the finish after the lease ran out was taken")
+	}
+	makeJob(t, q, Spec{Session: first.Session})
+	j, _ := take(t, q, rn)
+	if j.Workspace == nil || j.Workspace.DiffFrom != "t_end1" {
+		t.Fatalf("workspace %+v", j.Workspace)
+	}
+}
+
+// A session whose first turn ends without an accepted finish is ended,
+// however that turn ended and whatever its isolation: the turn queued
+// behind it ends with SessionEnded, no runner gets it, and a new turn is
+// refused. One rule (sessionEnded) decides every case.
+func TestSessionEndsWithItsFirstTurn(t *testing.T) {
+	for name, c := range map[string]struct {
+		spec Spec
+		end  func(t *testing.T, q *Queue, c *clock, rn Runner, first Job)
+	}{
+		"lease lost, isolated":        {Spec{Harness: "claude", Folder: "/x", Isolate: true}, loseLease},
+		"lease lost, folder as it is": {Spec{Harness: "claude", Folder: "/x"}, loseLease},
+		"finish refused after the lease": {Spec{Harness: "claude", Folder: "/x", Isolate: true}, func(t *testing.T, q *Queue, c *clock, rn Runner, first Job) {
+			_, a := take(t, q, rn)
+			if _, _, err := q.Start(rn.ID, a.ID, a.Number, lease); err != nil {
+				t.Fatal(err)
+			}
+			c.add(lease + time.Second)
+			if _, err := q.End(rn.ID, a.ID, a.Number, Finish{Status: Finished, Session: first.Session,
+				Workspace: &Workspace{Kind: WorkspaceCopy, Space: first.ID}}); err == nil {
+				t.Fatal("a finish after the lease was taken")
+			}
+		}},
+		"cancelled while queued": {Spec{Harness: "claude", Folder: "/x", Isolate: true}, func(t *testing.T, q *Queue, c *clock, rn Runner, first Job) {
+			if _, err := q.Cancel(DefaultTeam, first.ID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			q, clk := open(t)
+			rn := capsRunner(t, q, nil, nil)
+			c.spec.Prompt = "hi"
+			first, _, err := q.Create(DefaultTeam, KindTurn, "", c.spec, Links{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			clk.add(time.Millisecond) // made after the first, as on a real clock
+			next, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: first.Session, Prompt: "next"}, Links{})
+			if err != nil {
+				t.Fatalf("behind the first turn: %v", err)
+			}
+			c.end(t, q, clk, rn, first)
+			if j, _, ok, _, err := q.Take(rn.ID, lease); err != nil || ok {
+				t.Fatalf("a runner took a turn: %v %v: %s (first %s, next %s)", ok, err, j.ID, first.ID, next.ID)
+			}
+			got := state(t, q, next.ID)
+			r, _ := ReadResult(got.Result)
+			if got.State != Failed || got.Reason != ReasonSetup || r.Refused != SessionEnded {
+				t.Fatalf("the queued next turn: %s %s %q", got.State, got.Reason, r.Refused)
+			}
+			if _, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: first.Session, Prompt: "again"}, Links{}); !errors.Is(err, ErrSessionEnded) {
+				t.Fatalf("a new turn: %v", err)
+			}
+		})
+	}
+}
+
+// A session whose first turn finished with its workspace goes on.
+func TestSessionGoesOnAfterItsFirstFinish(t *testing.T) {
+	q, _ := open(t)
+	rn := capsRunner(t, q, nil, nil)
+	first := makeJob(t, q, Spec{Harness: "claude", Folder: "/x"})
+	run(t, q, rn, Result{})
+	if _, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: first.Session, Prompt: "next"}, Links{}); err != nil {
+		t.Fatal(err)
+	}
+	if j, _ := take(t, q, rn); j.Workspace == nil {
+		t.Fatal("the next turn has no workspace")
+	}
+}
+
+// loseLease starts the first turn and lets its lease run out.
+func loseLease(t *testing.T, q *Queue, c *clock, rn Runner, first Job) {
+	t.Helper()
+	_, a := take(t, q, rn)
+	if _, _, err := q.Start(rn.ID, a.ID, a.Number, lease); err != nil {
+		t.Fatal(err)
+	}
+	c.add(lease + time.Second)
 }

@@ -12,6 +12,11 @@ import (
 // copy with its changes recorded.
 var ErrNotApplicable = errors.New("queue: the turn's changes cannot be applied")
 
+// ErrNoConnector: the folder's connector has not asked for work within
+// RunnerFresh, so a new snapshot or apply of its folder would wait for
+// nothing. No job is made.
+var ErrNoConnector = errors.New("queue: the folder's connector is not connected")
+
 // ErrApplyBusy: an apply of the session up to an earlier turn has not ended.
 var ErrApplyBusy = errors.New("queue: an apply of this session has not ended")
 
@@ -196,6 +201,11 @@ func (q *Queue) Apply(team, turn string) (job Job, created bool, err error) {
 	// The key counts the applies of turn that ended without applying, so
 	// requests at once make one job, and one after a refusal makes a new
 	// one. It holds a "/", which no key a caller sends may hold (ResultKey).
+	if ok, err := q.ConnectorSeen(team, first.Connector); err != nil {
+		return Job{}, false, err
+	} else if !ok {
+		return Job{}, false, ErrNoConnector
+	}
 	key := ApplyKey(turn, refused)
 	spec := Spec{Session: j.Session, FolderRef: first.FolderRef, Connector: first.Connector, ApplyFrom: from, ApplyTo: r.Changeset}
 	links := Links{AppliesTurn: turn, AppliesJob: j.ID}
@@ -231,7 +241,8 @@ func SnapshotKey(attempt string) string { return "snapshot/" + attempt }
 // a snapshot of the folder its job names, on the folder's connector, for
 // the runner to build the session's copy from. Only the runner holding the
 // attempt, while it is current, may ask, and only for a first turn in an
-// isolated copy of a folder.
+// isolated copy of a folder. While no connector has taken it, a connector
+// not seen within RunnerFresh is ErrNoConnector: the runner stops waiting.
 func (q *Queue) Snapshot(runnerID, attemptID string, number int) (Job, error) {
 	var a Attempt
 	var j Job
@@ -249,5 +260,13 @@ func (q *Queue) Snapshot(runnerID, attemptID string, number int) (Job, error) {
 	}
 	job, _, err := q.create(j.Team, KindSnapshot, SnapshotKey(a.ID), Spec{FolderRef: sp.FolderRef, Connector: sp.Connector},
 		Links{}, Limits{}, "")
-	return job, err
+	if err != nil || job.State != Queued {
+		return job, err
+	}
+	if ok, err := q.ConnectorSeen(j.Team, sp.Connector); err != nil {
+		return Job{}, err
+	} else if !ok {
+		return job, ErrNoConnector
+	}
+	return job, nil
 }

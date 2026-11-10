@@ -170,6 +170,10 @@ func (d *deadlineWriter) Write(p []byte) (int, error) {
 	return d.w.Write(p)
 }
 
+// noConnector refuses a turn that needs a snapshot of a folder whose
+// connector is gone.
+const noConnector = "the folder's connector is not connected: start agentbus connector on the folder's machine, then send the turn again"
+
 // SnapshotState is the answer to an attempt's snapshot request: the
 // snapshot job, and once it has finished, the snapshot.
 type SnapshotState struct {
@@ -188,6 +192,9 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request, rn queue.Runne
 	}
 	j, err := s.cfg.Queue.Snapshot(rn.ID, r.PathValue("id"), b.Number)
 	switch {
+	case errors.Is(err, queue.ErrNoConnector):
+		writeJSON(w, http.StatusOK, SnapshotState{Job: j.ID, State: j.State, Error: noConnector})
+		return
 	case errors.Is(err, queue.ErrNotApplicable):
 		fail(w, http.StatusBadRequest, "only a session's first turn in an isolated copy of a folder takes a snapshot")
 		return
@@ -201,7 +208,9 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request, rn queue.Runne
 		st.Snapshot = res.Snapshot
 	} else if j.Ended != nil {
 		st.Error = res.Refused
-		if st.Error == "" {
+		if st.Error == "" && j.Reason == queue.ReasonRunnerLost {
+			st.Error = "the folder's connector stopped while it took the snapshot; send the turn again"
+		} else if st.Error == "" {
 			st.Error = "the snapshot job ended " + j.State
 		}
 	}

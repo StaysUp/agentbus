@@ -868,19 +868,33 @@ func (r *Runner) isolate(at *attempt, b isolation.Backend, req isolation.Request
 	return nil
 }
 
-// checkpointStart takes the checkpoint the turn starts from. Nothing changed
-// since the last turn ended, as is usual, costs a walk of the folder and
-// records nothing.
+// checkpointStart names the checkpoint the turn's diff starts from: the
+// end of the session's latest turn whose changes control holds
+// (Workspace.DiffFrom), else the copy's Base. Whatever the copy holds since
+// (from a turn whose runner was lost, or whose finish control refused) is
+// then in this turn's diff, as an apply up to it would write it.
 func (r *Runner) checkpointStart(at *attempt) *queue.Result {
 	b, ok := isolation.Get(at.space.Backend)
 	if !ok {
 		return &queue.Result{Refused: "the workspace could not be read"}
 	}
-	c, err := b.Checkpoint(at.space, at.a.ID+".start")
+	// After a restart an overlay copy is not mounted; the turn needs it.
+	if err := isolation.Remount(at.space); err != nil {
+		r.cfg.Logf("the copy for job %s could not be mounted again: %s", at.job.ID, err)
+		return &queue.Result{Refused: "the workspace could not be read"}
+	}
+	list, err := b.Checkpoints(at.space)
 	if err != nil {
 		return &queue.Result{Refused: "the workspace could not be read"}
 	}
-	at.start = c.Name
+	at.start = isolation.Base
+	if w := at.job.Workspace; w != nil && w.DiffFrom != "" {
+		for _, c := range list {
+			if c.Name == w.DiffFrom {
+				at.start = c.Name
+			}
+		}
+	}
 	return nil
 }
 
