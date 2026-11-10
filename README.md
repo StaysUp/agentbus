@@ -356,6 +356,10 @@ with the reason. Details: `docs/CLIENT_API.md`, "Network control".
 - **Copies on shared or network disks are slow.** A copy is a clone (APFS) or a reflink (xfs,
   btrfs) only when the folder and the data folder are on the same disk that can make one.
   Elsewhere, such as a network disk, every file is copied byte by byte.
+- **Keep the data folder on a disk that keeps exact file times.** Some disks keep a file's time
+  only to the second, such as a Mac folder shared into Docker, a network share or FAT. With the
+  data folder there, every apply of a changed file is refused as "changed in your folder", even
+  when it is not. Put the data folder (`AGENTBUS_HOME`) on the machine's own disk.
 - **A first transfer of a big folder is slow.** A runner on another machine gets a 50,000-file
   folder (414 MB) in about 30 s the first time. Later sessions send only what changed: about 4 s.
 - **Network control is Linux-only, and off by default.** On macOS, `contain = "on"` refuses
