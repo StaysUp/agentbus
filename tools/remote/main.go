@@ -70,6 +70,7 @@ type options struct {
 	sizes          []int
 	keep, hold     bool
 	real, connect  bool
+	connectCodex   bool
 	keyEnv, model  string
 	network        bool
 	allow          string
@@ -89,8 +90,9 @@ func main() {
 	flag.StringVar(&sizes, "sizes", "300,3000,50000", "folder sizes, in files, whose snapshot transfer is measured; empty for none")
 	flag.BoolVar(&o.keep, "keep", false, "keep the scratch folders")
 	flag.BoolVar(&o.hold, "hold", false, "after the checks, keep everything running until Ctrl-C (to look at it in a cockpit)")
-	flag.BoolVar(&o.real, "real", false, "after the checks, run the VM's real claude on a runner that holds no secret: an OpenRouter agent, then a subscription agent")
+	flag.BoolVar(&o.real, "real", false, "after the checks, run the VM's real claude on a runner that holds no secret: an OpenRouter agent, then a subscription agent; then the VM's codex on its subscription")
 	flag.BoolVar(&o.connect, "connect", false, "with -real: first connect your claude subscription on the scratch server (runs agentbus connect claude here)")
+	flag.BoolVar(&o.connectCodex, "connect-codex", false, "with -real: first connect your codex ChatGPT sign-in on the scratch server (runs agentbus connect codex here)")
 	flag.StringVar(&o.keyEnv, "key-env", "OPENROUTER_API_KEY", "with -real: the variable the server reads the OpenRouter key from, by name")
 	flag.BoolVar(&o.network, "network", false, "after the checks, probe the runner's network control from a turn: gateway, an allowed host, others refused and recorded")
 	flag.StringVar(&o.allow, "allow", "github.com", "with -network: the one host in the server's [network] allow")

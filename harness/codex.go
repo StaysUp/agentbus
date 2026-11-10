@@ -32,6 +32,23 @@ func (codex) Info() Info {
 		// codex keeps its config.toml, sign-in, sessions and memories
 		// under CODEX_HOME, which must exist.
 		ConfigEnv: "CODEX_HOME", ConfigDir: ".codex",
+		// codex login --device-auth prints a link and a one-time code
+		// (XXXX-XXXXX), needs no terminal and reads no input, and keeps the
+		// ChatGPT sign-in in $CODEX_HOME/auth.json: tokens.access_token (a
+		// JWT that expires), tokens.refresh_token and tokens.account_id
+		// (codex-cli 0.164.0, 2026-11-10, run with an empty CODEX_HOME; the
+		// file's shape from codex-rs/login/src/auth/storage.rs and
+		// token_data.rs). The file store is named: never the Keychain.
+		// Renewal and the account header are codex's own
+		// (codex-rs/login/src/auth/manager.rs, oauth/client.rs and
+		// model-provider/src/bearer_auth_provider.rs, same version). The
+		// client id is the public id of codex's own CLI, not a secret.
+		Login: &Login{Args: []string{"login", "--device-auth", "-c", `cli_auth_credentials_store="file"`},
+			Code: `^[A-Z0-9]{4,8}-[A-Z0-9]{4,8}$`,
+			Home: "CODEX_HOME", File: "auth.json",
+			TokenKey: "tokens.access_token", RefreshKey: "tokens.refresh_token", AccountKey: "tokens.account_id",
+			RenewURL: "https://auth.openai.com/oauth/token", ClientID: "app_EMoamEEZ73f0CkXaXp7hrann",
+			AccountHeader: "ChatGPT-Account-ID"},
 	}
 }
 
@@ -72,6 +89,36 @@ func (codex) WireOpenRouter(w OpenRouterWire) (env, args []string) {
 		"-c", p + "supports_websockets=false",
 	}
 }
+
+// relayProvider is the id codex files a relayed turn's provider under.
+const relayProvider = "agentbus_chatgpt"
+
+// WireRelay: a provider of its own for this run, at the service's
+// /backend-api/codex, reading the placeholder from AGENTBUS_CODEX_TOKEN as an
+// API key: codex sends it as the bearer, and control's relay swaps in the
+// ChatGPT sign-in and its account. Named "OpenAI", as codex's own provider
+// is: codex then sends the request it sends chatgpt.com, with the content
+// kinds own replay reads, which it leaves out for a provider of another name
+// (codex-cli 0.164.0, 2026-11-10, measured against a local listener: the
+// same body keys and item keys as the ChatGPT capture in
+// adapter/openai/testdata, but access_programs, and no ChatGPT-Account-ID
+// header, which the relay adds). supports_websockets=false: codex posts at
+// once. A runner's sessions are its own, so codex filing them under this
+// provider hides nothing from the person.
+func (codex) WireRelay(baseURL, placeholder string) (env, args []string) {
+	p := "model_providers." + relayProvider + "."
+	return []string{codexRelayEnv + "=" + placeholder}, []string{
+		"-c", "model_provider=" + relayProvider,
+		"-c", p + `name="OpenAI"`,
+		"-c", p + `base_url="` + baseURL + `/backend-api/codex"`,
+		"-c", p + `env_key="` + codexRelayEnv + `"`,
+		"-c", p + `wire_api="responses"`,
+		"-c", p + "supports_websockets=false",
+	}
+}
+
+// codexRelayEnv holds a relayed turn's placeholder.
+const codexRelayEnv = "AGENTBUS_CODEX_TOKEN"
 
 // Edit: codex's sandbox takes its folder as it is, so any name works; what it
 // cannot do is keep a protected file inside it read-only. A folder holding a

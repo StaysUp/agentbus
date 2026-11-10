@@ -72,30 +72,40 @@ type Info struct {
 	// settings, memory, plugins and transcripts there only, whatever the
 	// runner's own environment says.
 	ConfigEnv, ConfigDir string
-	// Login is its own login that prints a long-lived token for the
-	// person's subscription, so they can connect it once on control for
-	// the runners they own. Nil: its subscription cannot be used on a
-	// runner yet.
+	// Login is its own login for the person's subscription, so they can
+	// connect it once on control for the runners they own. Nil: its
+	// subscription cannot be used on a runner yet.
 	Login *Login
 }
 
-// Login is a harness's own login that prints a token (credentials.Manager
-// runs it on control), and how a child is handed such a token.
+// Login is a harness's own login (credentials.Manager runs it on control):
+// one that prints a long-lived token, or one that keeps an OAuth sign-in in
+// a file, which control renews.
 type Login struct {
 	// Args are the login's arguments, after the program's name.
 	Args []string
-	// Prefix starts every token it prints; Token matches the whole token.
+	// A login that prints its token: Prefix starts every token it prints;
+	// Token matches the whole token; ValidDays is how long a token works,
+	// as the vendor says.
 	Prefix, Token string
-	// ValidDays is how long a token works, as the vendor says.
-	ValidDays int
+	ValidDays     int
 	// Refused matches a line the login prints when it did not take the
 	// code and waits to be asked again: the connect ends there, failed.
 	// Empty: the login ends by itself.
 	Refused string
-	// TokenEnv is the variable the harness reads such a token from. On a
-	// runner it holds a placeholder, which control's gateway swaps for the
-	// token.
-	TokenEnv string
+	// Code matches a whole line that is a one-time code the person enters
+	// at the login's link (a device login). It is shown to them.
+	Code string
+	// A login that keeps an OAuth sign-in in a file: Home names the
+	// variable that sets its folder, File the file there, and the keys the
+	// dotted JSON paths of the access token, the refresh token and the
+	// account.
+	Home, File                       string
+	TokenKey, RefreshKey, AccountKey string
+	// RenewURL and ClientID renew such a sign-in: the vendor's OAuth token
+	// endpoint and its CLI's client id. AccountHeader names the header that
+	// carries the account on a model call.
+	RenewURL, ClientID, AccountHeader string
 }
 
 // Access is one way a harness reaches a model.
@@ -171,6 +181,11 @@ type Harness interface {
 	Wire(baseURL string) (env, args []string)
 	// WireOpenRouter is the same for a turn on an OpenRouter key.
 	WireOpenRouter(w OpenRouterWire) (env, args []string)
+	// WireRelay is the same for a subscription turn on a runner that holds
+	// no secret: the child's sign-in is placeholder, and control's relay
+	// adds the subscription connected there (Login). Only for a harness
+	// with a Login.
+	WireRelay(baseURL, placeholder string) (env, args []string)
 	// Edit is the edit folders a turn may get, from the turn's folder (and
 	// its real path) and the files it must never edit. Empty, with why for
 	// the service log, when edits must be left out.

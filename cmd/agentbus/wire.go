@@ -29,13 +29,11 @@ func runWire(getenv func(string) string, environ func() []string, lookPath func(
 			// A runner that holds no secrets: the child's sign-in is the
 			// placeholder, and control's gateway adds the person's own
 			// subscription token, connected once on control.
-			l := h.Info().Login
-			if l == nil {
+			if h.Info().Login == nil {
 				return engine.Launch{}, engine.Refused(http.StatusBadRequest, "a "+h.Info().Label+
 					" subscription cannot be used on a runner yet; use an OpenRouter agent there, or run this agent with agentbus up")
 			}
-			env, pre = h.Wire(baseURL)
-			env = append(env, l.TokenEnv+"="+acc.Placeholder)
+			env, pre = h.WireRelay(baseURL, acc.Placeholder)
 		case acc.Placeholder != "" && acc.Kind == harness.OpenRouter:
 			// The key's variable holds the placeholder; control's gateway
 			// adds the key from its own environment. Nothing of this

@@ -30,6 +30,9 @@ Flags:
 - `-real`: after the checks, a real model turn on a runner that holds no secret (below).
 - `-connect`: with `-real`, first connect your claude subscription on the scratch server: it runs
   `agentbus connect claude` in this terminal (`claude setup-token`, then you sign in).
+- `-connect-codex`: with `-real`, first connect your codex ChatGPT sign-in on the scratch server:
+  it runs `agentbus connect codex` in this terminal (`codex login --device-auth`: open the link,
+  sign in, enter the code it shows).
 - `-key-env OPENROUTER_API_KEY`: with `-real`, the variable the server reads the OpenRouter key
   from, by its name. The tool checks only whether it is set; the server inherits it.
 - `-model deepseek/deepseek-v4.1-flash`: with `-real`, the OpenRouter agent's model.
@@ -39,13 +42,14 @@ Flags:
 
 ## A real model turn (-real)
 
-A second runner starts in the VM, `-labels real`, with the VM's own `claude` on its `PATH`, by
-`env -i` as the first: no key, no sign-in, a `HOME` of its own. It runs two turns, each asking for
-one word:
+A second runner starts in the VM, `-labels real`, with the VM's own `claude` and `codex` on its
+`PATH`, by `env -i` as the first: no key, no sign-in, a `HOME` of its own. It runs three turns,
+each asking for one word:
 
 1. An OpenRouter agent (`key_env` as `-key-env`). The server reads the key from its environment.
 2. A claude subscription agent, with `subscriptions_on_runners = "own"` set on the scratch server.
    It uses the subscription connected there (`-connect`), or is refused when none is.
+3. A codex subscription agent, the same way (`-connect-codex`). Left out when the VM has no codex.
 
 Each turn's agent gets its turn token as its credential. Its model calls go through the runner's
 gateway to the server's relay (`/relay/...`), which adds the real one. The tool prints how each
@@ -56,7 +60,7 @@ subscription, the relay answers 403 and the turn fails; that still shows the pat
 Your own run, with the key exported in your shell under its usual name:
 
 ```sh
-go run ./tools/remote -runs 1 -sizes "" -real -connect
+go run ./tools/remote -runs 1 -sizes "" -real -connect -connect-codex
 ```
 
 Ctrl-C at any point stops what the tool started, on both machines.

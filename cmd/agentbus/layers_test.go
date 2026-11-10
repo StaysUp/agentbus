@@ -122,14 +122,20 @@ var controlAllowed = []string{
 	// The vendor's own login, which prints a subscription's token, and the
 	// folder control keeps those tokens in.
 	"credentials/connect.go Manager.Connect exec.Command",
-	"credentials/connect.go Run exec.Command",
+	"credentials/connect.go Run exec.CommandContext",
 	// The terminal the login runs in: a device, not a folder.
 	"credentials/pty_darwin.go openPty os.OpenFile",
 	"credentials/pty_linux.go openPty os.OpenFile",
-	"credentials/subscriptions.go Subscriptions.Put os.CreateTemp",
-	"credentials/subscriptions.go Subscriptions.Put os.MkdirAll",
-	"credentials/subscriptions.go Subscriptions.Put os.Remove",
-	"credentials/subscriptions.go Subscriptions.Put os.Rename",
+	// A login that keeps its sign-in in a file gets a folder of its own
+	// inside the subscriptions folder, read and removed when it ends.
+	"credentials/connect.go removeHome os.RemoveAll",
+	"credentials/signin.go Login.home os.MkdirAll",
+	"credentials/signin.go Login.home os.MkdirTemp",
+	"credentials/signin.go Login.signin os.ReadFile",
+	"credentials/subscriptions.go Subscriptions.write os.CreateTemp",
+	"credentials/subscriptions.go Subscriptions.write os.MkdirAll",
+	"credentials/subscriptions.go Subscriptions.write os.Remove",
+	"credentials/subscriptions.go Subscriptions.write os.Rename",
 	"credentials/subscriptions.go Subscriptions.Remove os.Remove",
 	"credentials/subscriptions.go Subscriptions.read os.ReadFile",
 	"agents/agents.go Store.save os.CreateTemp",

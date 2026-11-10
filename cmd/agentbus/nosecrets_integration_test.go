@@ -32,8 +32,9 @@ import (
 // an Anthropic Messages reply.
 type fakeVendor struct {
 	*httptest.Server
-	mu    sync.Mutex
-	auths []string
+	mu       sync.Mutex
+	auths    []string
+	accounts []string // each request's ChatGPT-Account-ID
 }
 
 func newFakeVendor(t *testing.T) *fakeVendor {
@@ -42,6 +43,7 @@ func newFakeVendor(t *testing.T) *fakeVendor {
 		io.Copy(io.Discard, r.Body)
 		v.mu.Lock()
 		v.auths = append(v.auths, r.URL.Path+" "+r.Header.Get("Authorization"))
+		v.accounts = append(v.accounts, r.Header.Get("ChatGPT-Account-ID"))
 		v.mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"hello from the fake"}],`+
@@ -63,7 +65,7 @@ type noSecretsSetup struct {
 	ref, connector  string
 	serverHome      string
 	runnerHome      string
-	anth, or        *fakeVendor
+	anth, or, chat  *fakeVendor
 	report, release string
 }
 
@@ -78,7 +80,7 @@ func startNoSecrets(t *testing.T) *noSecretsSetup {
 	t.Setenv("ANTHROPIC_BASE_URL", "")
 	t.Setenv("OPENAI_BASE_URL", "")
 	t.Setenv("AB_TEST_OR_KEY", "") // in this process only the server's getenv has it
-	ns := &noSecretsSetup{anth: newFakeVendor(t), or: newFakeVendor(t), serverHome: t.TempDir()}
+	ns := &noSecretsSetup{anth: newFakeVendor(t), or: newFakeVendor(t), chat: newFakeVendor(t), serverHome: t.TempDir()}
 	look := func(string) (string, error) { return self, nil }
 	// The server's own environment holds the API key.
 	serverEnv := func(k string) string {
@@ -88,7 +90,7 @@ func startNoSecrets(t *testing.T) *noSecretsSetup {
 		return os.Getenv(k)
 	}
 	ns.server, err = start(config{mode: modeServer, listen: "127.0.0.1:0", home: ns.serverHome, upstream: mustURL(ns.anth.URL),
-		chatgpt: mustURL("http://127.0.0.1:1"), openrouter: mustURL(ns.or.URL), getenv: serverEnv, logf: t.Logf,
+		chatgpt: mustURL(ns.chat.URL), openrouter: mustURL(ns.or.URL), getenv: serverEnv, logf: t.Logf,
 		heartbeat: 100 * time.Millisecond, turnWait: 10 * time.Second})
 	if err != nil {
 		t.Fatal(err)
@@ -323,7 +325,8 @@ func TestRunnerUsesConnectedSubscription(t *testing.T) {
 		}
 	}
 	if code := callAPI(t, ns.server, ns.tok, "GET", "/api/v0/subscriptions", nil, &list); code != 200 || !list.On ||
-		len(list.Subscriptions) != 1 || list.Subscriptions[0].Harness != "claude" || list.Subscriptions[0].Connected {
+		len(list.Subscriptions) != 2 || list.Subscriptions[0].Harness != "claude" || list.Subscriptions[0].Connected ||
+		list.Subscriptions[1].Harness != "codex" || list.Subscriptions[1].Connected {
 		t.Fatalf("subscriptions: %d %+v", code, list)
 	}
 	// Connected: the vendor gets the person's token, the agent a placeholder.
@@ -346,6 +349,92 @@ func TestRunnerUsesConnectedSubscription(t *testing.T) {
 		t.Fatal("the agent's environment holds the token")
 	}
 	if code := callAPI(t, ns.server, ns.tok, "GET", "/api/v0/subscriptions", nil, &list); code != 200 || !list.Subscriptions[0].Connected {
+		t.Fatalf("subscriptions: %d %+v", code, list)
+	}
+}
+
+// codex on its ChatGPT sign-in, connected on the server: the runner's codex
+// gets a placeholder as its key and the runner's gateway as its provider; the
+// relay sends chatgpt.com the sign-in's token and account. The sign-in goes
+// to its own vendor only: the same turn's token on the Anthropic path gets
+// nothing.
+func TestRunnerUsesConnectedCodexSubscription(t *testing.T) {
+	ns := startNoSecrets(t)
+	if err := os.WriteFile(filepath.Join(ns.serverHome, "permissions.toml"), []byte("subscriptions_on_runners = \"own\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTBUS_FAKE_CALL", "")
+	t.Setenv("AGENTBUS_FAKE_CODEX_BODY", `{"model":"gpt-5.5","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
+	t.Setenv("AGENTBUS_FAKE_THREAD", "fake-thread-1")
+	t.Setenv("AGENTBUS_FAKE_WAIT", ns.release)
+	run := func() queue.Job {
+		var j queue.Job
+		if code := callAPI(t, ns.server, ns.tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn",
+			"spec": map[string]any{"agent": "codex", "folder_ref": ns.ref, "connector": ns.connector, "prompt": "hello"}}, &j); code != 201 {
+			t.Fatalf("POST /api/v0/jobs: %d", code)
+		}
+		return j
+	}
+	// Not connected: refused, and the vendor sees nothing.
+	os.WriteFile(ns.release, nil, 0o600)
+	waitJob(t, ns.server, ns.tok, run().ID)
+	if got := ns.chat.seen(); len(got) != 0 {
+		t.Fatalf("with nothing connected the vendor saw %v", got)
+	}
+	os.Remove(ns.release)
+	os.Remove(ns.report)
+	subs := subscriptionStore(ns.serverHome)
+	if err := subs.Keep("codex", credentials.Signin{Token: "fake-chatgpt-access-for-tests", Refresh: "fake-chatgpt-refresh-for-tests",
+		Account: "fake-account-1", Expires: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	j := run()
+	waitFor(t, "the codex call at the vendor", func() bool { return len(ns.chat.seen()) == 1 })
+	if got := ns.chat.seen(); got[0] != "/backend-api/codex/responses Bearer fake-chatgpt-access-for-tests" || ns.chat.accounts[0] != "fake-account-1" {
+		t.Fatalf("the vendor saw %v %v", got, ns.chat.accounts)
+	}
+	// The agent writes its report after its call, before it waits.
+	waitFor(t, "the running turn's report", func() bool { _, err := os.Stat(ns.report); return err == nil })
+	env := envOf(t, ns.report)
+	placeholder := env["AGENTBUS_CODEX_TOKEN"]
+	if !strings.HasPrefix(placeholder, "abr_") {
+		t.Fatalf("the agent's key: %q", placeholder)
+	}
+	// codex runs in the session's own home, and no sign-in file is put
+	// there: its key is the placeholder in its environment.
+	if want := filepath.Join(ns.runnerHome, homesDir, j.Session, ".codex"); env["CODEX_HOME"] != want {
+		t.Fatalf("CODEX_HOME %q, want %q", env["CODEX_HOME"], want)
+	}
+	if _, err := os.Stat(filepath.Join(env["CODEX_HOME"], "auth.json")); !os.IsNotExist(err) {
+		t.Fatalf("a sign-in file in the session's codex home: %v", err)
+	}
+	b, _ := os.ReadFile(ns.report)
+	if strings.Contains(string(b), "fake-chatgpt") || strings.Contains(string(b), "fake-account-1") {
+		t.Fatal("the agent's environment or arguments hold the sign-in")
+	}
+	// The running turn's token on the Anthropic path: refused, nothing sent.
+	req, _ := http.NewRequest("POST", "http://"+ns.server.addr+"/relay/anthropic/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+placeholder)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || len(ns.anth.seen()) != 0 {
+		t.Fatalf("a codex turn's token on the Anthropic path: %d, %v", resp.StatusCode, ns.anth.seen())
+	}
+	os.WriteFile(ns.release, nil, 0o600)
+	if jj := waitJob(t, ns.server, ns.tok, j.ID); jj.State != queue.Finished {
+		t.Fatalf("job %s %s %s", jj.State, jj.Reason, jj.Result)
+	}
+	var list struct {
+		Subscriptions []struct {
+			Harness           string
+			Connected, Renews bool
+		}
+	}
+	if code := callAPI(t, ns.server, ns.tok, "GET", "/api/v0/subscriptions", nil, &list); code != 200 || len(list.Subscriptions) != 2 ||
+		!list.Subscriptions[1].Connected || !list.Subscriptions[1].Renews {
 		t.Fatalf("subscriptions: %d %+v", code, list)
 	}
 }

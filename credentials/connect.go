@@ -2,15 +2,18 @@ package credentials
 
 // Connecting a subscription: control runs the vendor's own login (such as
 // claude setup-token), passes on what the person types (the code the
-// browser shows), and keeps the token the login prints in Subscriptions.
+// browser shows), and keeps the token the login prints in Subscriptions. A
+// login that keeps its sign-in in a file (codex login --device-auth) is read
+// from a folder of control's own instead (signin.go).
 //
-// One rule keeps the token out of sight: only links leave the login. Of
-// everything it prints, the person is shown the web addresses alone, where
-// they sign in; no other text, so no form of the token, reaches a reply,
-// the terminal or a log.
+// One rule keeps the token out of sight: only links leave the login, and a
+// one-time code the person enters at the link, matched by its exact shape.
+// Of everything it prints, the person is shown those alone; no other text,
+// so no form of the token, reaches a reply, the terminal or a log.
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"io/fs"
@@ -20,6 +23,7 @@ import (
 	"regexp"
 	"strconv"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -37,6 +41,17 @@ type Login struct {
 	// Refused matches a line the login prints when it did not take the
 	// code and waits to be asked again. Nil: it ends by itself.
 	Refused *regexp.Regexp
+	// Code matches a whole line, spaces trimmed, that is a one-time code
+	// the person enters at the link (a device login). It is shown; nothing
+	// is typed back.
+	Code *regexp.Regexp
+	// Home, when set, names the variable that sets the folder the login
+	// keeps its sign-in in. It is then read from File there, an OAuth
+	// sign-in: TokenKey, RefreshKey and AccountKey are the dotted JSON
+	// paths of the access token, the refresh token and the account. The
+	// access token's own expiry says how long it works.
+	Home, File                       string
+	TokenKey, RefreshKey, AccountKey string
 }
 
 // Connect states.
@@ -52,6 +67,7 @@ type View struct {
 	Harness string   `json:"harness" doc:"The harness being connected."`
 	State   string   `json:"state" doc:"running, connected or failed."`
 	Output  []string `json:"output" doc:"The links the login printed, where to sign in; nothing else it prints is shown. Send the code the browser shows with POST .../connect/input."`
+	Code    string   `json:"code,omitempty" doc:"A one-time code to enter at the link (codex's device login). Then nothing is sent back: the login ends by itself once the browser accepts it."`
 	Error   string   `json:"error,omitempty" doc:"Why it failed."`
 }
 
@@ -71,6 +87,7 @@ type connecting struct {
 	login   Login
 	mu      sync.Mutex
 	links   []string
+	code    string // the one-time code it printed, to enter at the link
 	text    []byte // what it printed, escapes taken out, for the token
 	state   string
 	why     string
@@ -85,7 +102,7 @@ type connecting struct {
 func (c *connecting) view() View {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return View{Harness: c.harness, State: c.state, Output: append([]string{}, c.links...), Error: c.why}
+	return View{Harness: c.harness, State: c.state, Output: append([]string{}, c.links...), Code: c.code, Error: c.why}
 }
 
 // take reads the login's output until it ends: each ended line's links are
@@ -103,8 +120,12 @@ func (c *connecting) take(r io.Reader, shown func(string)) {
 			c.refused = true
 		}
 		var added []string
+		if t := bytes.TrimSpace(plain); c.login.Code != nil && c.code == "" && c.login.Code.Match(t) {
+			c.code = string(t)
+			added = append(added, c.code)
+		}
 		for _, l := range link.FindAll(plain, -1) {
-			if !bytes.Contains(l, []byte(c.login.Prefix)) && len(c.links) < maxLines {
+			if (c.login.Prefix == "" || !bytes.Contains(l, []byte(c.login.Prefix))) && len(c.links) < maxLines {
 				c.links = append(c.links, string(l))
 				added = append(added, string(l))
 			}
@@ -134,13 +155,6 @@ func (c *connecting) take(r io.Reader, shown func(string)) {
 	end()
 }
 
-// token is the token the login printed, or "".
-func (c *connecting) token() string {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return string(c.login.Token.Find(c.text))
-}
-
 // Manager runs at most one login per harness, and keeps what they print.
 // Each login runs in its own terminal (startInPty), as when a person runs
 // it by hand.
@@ -151,7 +165,7 @@ type Manager struct {
 	// code no one sends. Zero: MaxWait.
 	Wait time.Duration
 	// Logf writes one line to the service log for each step of a connect:
-	// started, link shown, input received, connected or failed. Never a
+	// started, link or code shown, input received, connected or failed. Never a
 	// link, a code or a token. Nil: none.
 	Logf func(format string, args ...any)
 	// Ended is told how each connect ended: Connected, or Failed and why.
@@ -199,9 +213,14 @@ func (m *Manager) Connect(harness string) (View, error) {
 	}
 	c := &connecting{harness: harness, login: l, state: Running}
 	cmd := exec.Command(l.Path, l.Args...)
-	cmd.Env = l.Env
+	env, home, err := l.home(m.Store.Dir)
+	if err != nil {
+		return View{}, err
+	}
+	cmd.Env = env
 	tty, err := startInPty(cmd)
 	if err != nil {
+		removeHome(home)
 		e := notStarted(l, err)
 		m.logf("subscription.failed harness=%s why=%q", harness, e.Error())
 		return View{}, e
@@ -225,7 +244,13 @@ func (m *Manager) Connect(harness string) (View, error) {
 	})
 	read := make(chan struct{})
 	go func() {
-		c.take(tty, func(string) { m.logf("subscription.link_shown harness=%s", harness) })
+		c.take(tty, func(s string) {
+			if s == c.view().Code {
+				m.logf("subscription.code_shown harness=%s", harness)
+			} else {
+				m.logf("subscription.link_shown harness=%s", harness)
+			}
+		})
 		close(read)
 	}()
 	go func() {
@@ -244,15 +269,16 @@ func (m *Manager) Connect(harness string) (View, error) {
 			}
 		}
 		tty.Close()
-		tok := c.token()
 		c.mu.Lock()
+		si, ok := l.signin(c.text, home, m.Store.now())
 		c.text = nil
 		wasLate, wasRefused := c.late, c.refused
 		c.mu.Unlock()
+		removeHome(home)
 		state, why := Failed, ""
 		switch {
-		case tok != "":
-			if m.Store.Put(harness, tok, l.Valid) != nil {
+		case ok:
+			if m.Store.Keep(harness, si) != nil {
 				why = "the token could not be kept in the data folder"
 			} else {
 				state = Connected
@@ -262,9 +288,9 @@ func (m *Manager) Connect(harness string) (View, error) {
 		case wasLate:
 			why = "the login waited too long (" + wait.String() + ") and was stopped; connect again"
 		case err != nil:
-			why = "the login ended without a token (exit " + strconv.Itoa(cmd.ProcessState.ExitCode()) + ")"
+			why = l.ended() + " (exit " + strconv.Itoa(cmd.ProcessState.ExitCode()) + ")"
 		default:
-			why = "the login ended without printing a token"
+			why = l.ended()
 		}
 		// Logged and recorded before it shows, so a client that sees the
 		// end finds it in the record.
@@ -326,34 +352,65 @@ func (m *Manager) Stop() {
 }
 
 // Run runs l in a terminal: in is the person's typing; out is shown the
-// links the login prints, and a prompt for the code, never anything else.
-// It returns the token the login printed.
-func Run(l Login, in io.Reader, out io.Writer) (string, error) {
+// links the login prints, and a prompt for the code or the one-time code to
+// enter, never anything else. dir is the subscriptions folder, where a login
+// that keeps its sign-in in a file gets its own folder. It returns the
+// sign-in the login gave. When ctx ends (the person stopped it), the login
+// is stopped and its folder removed.
+func Run(ctx context.Context, l Login, dir string, now time.Time, in io.Reader, out io.Writer) (Signin, error) {
 	c := &connecting{login: l}
-	cmd := exec.Command(l.Path, l.Args...)
-	cmd.Env, cmd.Stdin = l.Env, in
+	cmd := exec.CommandContext(ctx, l.Path, l.Args...)
+	// Stopped, the login is asked to end, as Ctrl-C asks it, and a child it
+	// left holding its output no longer holds this read.
+	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
+	env, home, err := l.home(dir)
+	if err != nil {
+		return Signin{}, err
+	}
+	defer removeHome(home)
+	cmd.Env, cmd.Stdin = env, in
 	r, w, err := os.Pipe()
 	if err != nil {
-		return "", err
+		return Signin{}, err
 	}
 	cmd.Stdout, cmd.Stderr = w, w
 	if err := cmd.Start(); err != nil {
 		r.Close()
 		w.Close()
-		return "", notStarted(l, err)
+		return Signin{}, notStarted(l, err)
 	}
 	w.Close()
-	c.take(r, func(l string) {
-		io.WriteString(out, "Sign in here: "+l+"\nThen paste the code the browser shows, and press Enter.\n")
+	unread := context.AfterFunc(ctx, func() { r.Close() })
+	defer unread()
+	c.take(r, func(s string) {
+		switch {
+		case s == c.view().Code:
+			io.WriteString(out, "Enter this one-time code there: "+s+"\nThe login ends by itself once the browser accepts it.\n")
+		case l.Code != nil:
+			io.WriteString(out, "Sign in here: "+s+"\n")
+		default:
+			io.WriteString(out, "Sign in here: "+s+"\nThen paste the code the browser shows, and press Enter.\n")
+		}
 	})
 	r.Close()
 	werr := cmd.Wait()
-	tok := c.token()
-	if tok == "" {
-		if werr != nil {
-			return "", errors.New("the login ended without a token (exit " + strconv.Itoa(cmd.ProcessState.ExitCode()) + ")")
-		}
-		return "", errors.New("the login ended without printing a token")
+	if ctx.Err() != nil {
+		return Signin{}, errors.New("the login was stopped")
 	}
-	return tok, nil
+	si, ok := l.signin(c.text, home, now)
+	if !ok {
+		if werr != nil {
+			return Signin{}, errors.New(l.ended() + " (exit " + strconv.Itoa(cmd.ProcessState.ExitCode()) + ")")
+		}
+		return Signin{}, errors.New(l.ended())
+	}
+	return si, nil
+}
+
+// removeHome removes a login's own folder, which may hold a copy of the
+// sign-in; "" is none.
+func removeHome(home string) {
+	if home != "" {
+		_ = os.RemoveAll(home)
+	}
 }

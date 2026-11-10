@@ -100,18 +100,32 @@ func fakeAgent() {
 		}
 	}
 	// With AGENTBUS_FAKE_CODEX_BODY, one model call as codex makes it: to the
-	// openai_base_url its -c argument names, with AGENTBUS_FAKE_THREAD as its
-	// Thread-Id header.
+	// openai_base_url its -c argument names, or the base_url of the provider
+	// its -c arguments set, with the key its env_key names as the bearer, and
+	// AGENTBUS_FAKE_THREAD as its Thread-Id header.
 	if b := os.Getenv("AGENTBUS_FAKE_CODEX_BODY"); b != "" {
+		var base, key string
 		for _, a := range os.Args[1:] {
-			if base, ok := strings.CutPrefix(a, `openai_base_url="`); ok {
-				req, _ := http.NewRequest("POST", strings.TrimSuffix(base, `"`)+"/responses", strings.NewReader(b))
-				req.Header.Set("Content-Type", "application/json")
-				req.Header.Set("Thread-Id", os.Getenv("AGENTBUS_FAKE_THREAD"))
-				if resp, err := http.DefaultClient.Do(req); err == nil {
-					io.Copy(io.Discard, resp.Body)
-					resp.Body.Close()
-				}
+			if v, ok := strings.CutPrefix(a, `openai_base_url="`); ok {
+				base = strings.TrimSuffix(v, `"`)
+			}
+			if _, v, ok := strings.Cut(a, `.base_url="`); ok && strings.HasPrefix(a, "model_providers.") {
+				base = strings.TrimSuffix(v, `"`)
+			}
+			if _, v, ok := strings.Cut(a, `.env_key="`); ok && strings.HasPrefix(a, "model_providers.") {
+				key = os.Getenv(strings.TrimSuffix(v, `"`))
+			}
+		}
+		if base != "" {
+			req, _ := http.NewRequest("POST", base+"/responses", strings.NewReader(b))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Thread-Id", os.Getenv("AGENTBUS_FAKE_THREAD"))
+			if key != "" {
+				req.Header.Set("Authorization", "Bearer "+key)
+			}
+			if resp, err := http.DefaultClient.Do(req); err == nil {
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
 			}
 		}
 	}

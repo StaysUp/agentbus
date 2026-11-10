@@ -1,6 +1,7 @@
 package credentials
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -65,7 +66,7 @@ echo done`)}}
 		t.Fatalf("%+v", v)
 	}
 	got, err := m.Store.Credential(Need{Access: AccessSubscription, Harness: "claude"})
-	if err != nil || got != fakeToken {
+	if err != nil || got.Token != fakeToken || got.Headers != nil {
 		t.Fatalf("credential: %v", err)
 	}
 	fi, err := os.Stat(filepath.Join(dir, "subscriptions", "claude.json"))
@@ -127,7 +128,7 @@ func TestEnvByName(t *testing.T) {
 		return ""
 	}}
 	p := Plug{AccessOpenRouter: e}
-	if v, err := p.Credential(Need{Access: AccessOpenRouter, KeyEnv: "AB_KEY"}); err != nil || v != "fake-key" {
+	if v, err := p.Credential(Need{Access: AccessOpenRouter, KeyEnv: "AB_KEY"}); err != nil || v.Token != "fake-key" {
 		t.Fatalf("%q %v", v, err)
 	}
 	for _, name := range []string{"", "AB_UNSET", "1X", "A-B"} {
@@ -151,16 +152,16 @@ printf 'ke-oat01-AAAABBBBCCCCDDDDEEEEFFFF0000 again `+fakeToken+`\n'
 printf 'x sk-fa\033(Bke-oat01-AAAA\033[1mBBBBCCCCDDDDEEEEFFFF0000 y\n'
 printf 'https://example.test/x?t=`+fakeToken+`\n'`)
 	var out strings.Builder
-	tok, err := Run(l, strings.NewReader(""), &out)
-	if err != nil || tok != fakeToken {
-		t.Fatalf("%q %v", tok, err)
+	si, err := Run(context.Background(), l, t.TempDir(), time.Now(), strings.NewReader(""), &out)
+	if err != nil || si.Token != fakeToken {
+		t.Fatalf("%q %v", si.Token, err)
 	}
 	if s := out.String(); s != "Sign in here: https://example.test/auth\nThen paste the code the browser shows, and press Enter.\n" {
 		t.Fatalf("%q", s)
 	}
 	c := &connecting{login: l}
 	c.take(strings.NewReader("a https://example.test/a "+fakeToken+"\nx sk-fa\x1b(Bke-oat01-AAAABBBBCCCCDDDDEEEEFFFF0000\n"), func(string) {})
-	if v := c.view(); len(v.Output) != 1 || v.Output[0] != "https://example.test/a" || c.token() != fakeToken {
-		t.Fatalf("%q %q", v.Output, c.token())
+	if si, _ := l.signin(c.text, "", time.Now()); len(c.view().Output) != 1 || c.view().Output[0] != "https://example.test/a" || si.Token != fakeToken {
+		t.Fatalf("%q %q", c.view().Output, si.Token)
 	}
 }

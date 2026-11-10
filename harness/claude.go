@@ -35,13 +35,21 @@ func (claude) Info() Info {
 		// error: That code wasn't accepted. ..." and "Press Enter to
 		// retry.", and waits: it does not exit.
 		Login: &Login{Args: []string{"setup-token"}, Prefix: "sk-ant-oat", Token: `sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]{20,}`,
-			ValidDays: 365, Refused: `OAuth\s*error`, TokenEnv: "CLAUDE_CODE_OAUTH_TOKEN"},
+			ValidDays: 365, Refused: `OAuth\s*error`},
 	}
 }
 
 // Wire: Claude Code reads ANTHROPIC_BASE_URL (2.1.318, 2026-11-05).
 func (claude) Wire(baseURL string) (env, args []string) {
 	return []string{"ANTHROPIC_BASE_URL=" + baseURL}, nil
+}
+
+// WireRelay: as Wire, with the placeholder in CLAUDE_CODE_OAUTH_TOKEN, where
+// Claude Code reads a setup-token's token from
+// (code.claude.com/docs/en/authentication, read 2026-11-08).
+func (c claude) WireRelay(baseURL, placeholder string) (env, args []string) {
+	env, args = c.Wire(baseURL)
+	return append(env, "CLAUDE_CODE_OAUTH_TOKEN="+placeholder), args
 }
 
 // WireOpenRouter: ANTHROPIC_BASE_URL at the service, the key in

@@ -36,14 +36,17 @@ cockpit pointed at the server shows the turn live, as it shows one on its own ma
 attempt of that job: it works while the attempt is current and stops when it ends. The turn's agent
 gets it as `AGENTBUS_TOKEN`, with `AGENTBUS_URL` set to the server, and, on a runner with `-gateway
 server` (the default), as its model credential: the `key_env` variable of an OpenRouter agent, or
-`CLAUDE_CODE_OAUTH_TOKEN` for a claude subscription. The runner's gateway records each call and
-sends it to the server's relay, `/relay/<anthropic|openrouter>/…`, which checks the token, takes the agent the job names (or, for a next turn that names none, the
+`CLAUDE_CODE_OAUTH_TOKEN` for a claude subscription, or `AGENTBUS_CODEX_TOKEN` for a codex one
+(codex reads it as the key of a provider set on its command line for the turn, below). The
+runner's gateway records each call and sends it to the server's relay,
+`/relay/<anthropic|chatgpt|openrouter>/…`, which checks the token, takes the agent the job names (or, for a next turn that names none, the
 session's latest agent as its record holds it, with that saved agent's access and `key_env` from
 the server's own saved agents), and swaps in the real credential: an OpenRouter key from the
 server's environment by its variable's name, or the person's own subscription token, connected on
-the server (`GET /api/v0/subscriptions`), when `subscriptions_on_runners = "own"`. A refusal names
-what to do, as a 401 or 403 the agent shows. codex's ChatGPT sign-in is not relayed yet: such a turn
-is refused on the runner before it starts.
+the server (`GET /api/v0/subscriptions`), when `subscriptions_on_runners = "own"`. A subscription
+goes only to its own vendor: claude's on `/relay/anthropic`, codex's ChatGPT sign-in on
+`/relay/chatgpt`, with its account in `ChatGPT-Account-ID`, as codex sends it. A refusal names
+what to do, as a 401 or 403 the agent shows.
 
 | Path | Who calls it | Sign-in |
 |---|---|---|
@@ -629,6 +632,14 @@ job that runs it. The agent's work arrives later, as events of that session, **e
   (`logs/runs/<session>.log`, under [Logs](#logs)) and nowhere else.
 - **The base URL reaches the agent through the child only**: Claude Code gets
   `ANTHROPIC_BASE_URL` in the child's environment; codex gets `-c openai_base_url=…`.
+- **A subscription agent on a runner that holds no secret** gets a placeholder (its turn token)
+  as its sign-in. Claude Code gets it in `CLAUDE_CODE_OAUTH_TOKEN`, beside `ANTHROPIC_BASE_URL`.
+  codex gets a provider of its own, set by `-c` for this run only:
+  `model_provider=agentbus_chatgpt`, named `"OpenAI"`, its `base_url` (`<base>/backend-api/codex`),
+  `env_key="AGENTBUS_CODEX_TOKEN"`, `wire_api="responses"` and `supports_websockets=false`. Under
+  that name codex sends the same request it sends chatgpt.com on its own sign-in, with the content
+  kinds own replay reads (codex-cli 0.164.0, 2026-11-10); it sends no `ChatGPT-Account-ID`, which
+  the relay adds.
 - **An OpenRouter agent** ([Agents](#agents)) reaches OpenRouter through the service, under
   `/openrouter` of its base URL, so its turns are in the record like any other. Claude Code gets
   `ANTHROPIC_BASE_URL=<base>/openrouter`, the key in `ANTHROPIC_AUTH_TOKEN`, an empty
@@ -1316,28 +1327,46 @@ machine (`agentbus up`) uses each harness's own sign-in and needs none of this. 
 
 ```json
 {"on":true,"subscriptions":[{"harness":"claude","connected":true,"connected_at":"2026-11-10T16:40:01Z",
- "expires_at":"2027-11-10T16:40:01Z","expired":false}]}
+ "expires_at":"2027-11-10T16:40:01Z","renews":false,"expired":false},
+ {"harness":"codex","connected":true,"connected_at":"2026-11-10T16:45:12Z",
+ "expires_at":"2026-11-20T16:45:12Z","renews":true,"expired":false}]}
 ```
 
 - `GET /api/v0/subscriptions`: the above. `on` is `subscriptions_on_runners = "own"`.
 - `POST /api/v0/subscriptions/<harness>/connect`: **202**. Starts the login on control (for
-  claude, `claude setup-token`). The answer is `{harness, state, output, error}`: `state` is
-  `running`, `connected` or `failed`, and `output` holds only the links the login printed. A login
-  already running is answered as it is. The login runs in a terminal of its own, as when a person
-  runs it by hand. A login still running after 10 minutes is stopped, and the connect fails with
-  "the login waited too long". **500** with the reason when the login cannot be started, such as
-  `claude is not on PATH (searched: ...); add the folder that holds claude to PATH`.
+  claude, `claude setup-token`; for codex, `codex login --device-auth`). The answer is
+  `{harness, state, output, code, error}`: `state` is `running`, `connected` or `failed`, `output`
+  holds only the links the login printed, and `code` the one-time code codex's login prints, to
+  enter at its link (nothing is sent back: the login ends by itself once the browser accepts it).
+  A login already running is answered as it is. The login runs in a terminal of its own, as when a
+  person runs it by hand. A login still running after 10 minutes is stopped, and the connect fails
+  with "the login waited too long". **500** with the reason when the login cannot be started, such
+  as `claude is not on PATH (searched: ...); add the folder that holds claude to PATH`.
 - `GET /api/v0/subscriptions/<harness>/connect`: the same view, to follow the login. A wrong code
   ends it as `failed`, with `error` saying so.
 - `POST /api/v0/subscriptions/<harness>/connect/input` with `{"line":"<code>"}`: **204**. Sends the
-  code the browser showed to the running login. It is never kept. **409** when no login runs.
+  code the browser showed to the running login (claude's). It is never kept. **409** when no login
+  runs.
 - `DELETE /api/v0/subscriptions/<harness>`: **204**. Forgets the token; runners' calls on it are
   refused until it is connected again.
 
-The token is kept in `subscriptions/<harness>.json` in control's data folder, mode 0600, with its
-expiry, and is never shown or logged. claude's lasts a year and is not renewed: when it expires,
-the cockpit and the relay say to connect again. codex has no login here yet. `agentbus connect
-claude` does the same in a terminal.
+The sign-in is kept in `subscriptions/<harness>.json` in control's data folder, mode 0600, with its
+expiry, and is never shown or logged. claude's token lasts a year and is not renewed: when it
+expires, the cockpit and the relay say to connect again.
+
+codex's is its ChatGPT sign-in: an access token that expires, a refresh token and the account. Its
+login runs with `CODEX_HOME` set to a new folder of control's own inside `subscriptions/` (and
+`cli_auth_credentials_store="file"`, so never the Keychain). Control reads the sign-in from that
+folder's `auth.json` when the login ends and removes the folder; the person's own `~/.codex` is
+never read or written. Control renews the access token itself, by codex's own rule: when it has
+less than five minutes left, or eight days after the last renewal, before a relayed call and once a
+minute between turns. One renewal runs at a time, since a refresh token works once, and its
+result is kept only over the sign-in it renewed: a disconnect or a new connect made while it
+waited on the vendor stands. When the vendor
+refuses a renewal, `expired` is true and `error` says to connect again; a renewal that fails for
+now is tried again. `renews` is true for such a sign-in.
+
+`agentbus connect claude` and `agentbus connect codex` do the same in a terminal.
 
 ### `GET /api/v0/version` — which build this service is
 
@@ -2223,15 +2252,16 @@ then what 0.3 changed after it.
 - **Runners hold no secrets.** `POST /api/v0/attempts/<id>/start` answers the attempt's `token`
   (`abr_…`), minted by the server and working while that attempt is current. The runner's agent
   uses it as `AGENTBUS_TOKEN` and as its model credential. The server's relay,
-  `/relay/anthropic/…` and `/relay/openrouter/…`, swaps it for the real credential on the way out
+  `/relay/anthropic/…`, `/relay/chatgpt/…` and `/relay/openrouter/…`, swaps it for the real credential on the way out
   ([Where it listens](#where-it-listens)). `agentbus runner -gateway server` is the default; `-gateway local` keeps the runner's own
   sign-in and keys.
 - **Subscriptions for the person's own runners**: `GET /api/v0/subscriptions`,
   `POST /api/v0/subscriptions/<harness>/connect` (the harness's own login, run on the server; for
-  claude, `claude setup-token`), `GET` of it (the login's state and links),
+  claude, `claude setup-token`; for codex, `codex login --device-auth`), `GET` of it (the login's
+  state, links and one-time code),
   `POST /api/v0/subscriptions/<harness>/connect/input` (what the person types) and
-  `DELETE /api/v0/subscriptions/<harness>`, the main token only. `agentbus connect claude` does the
-  same in a terminal. The policy key `subscriptions_on_runners` (`off` or `own`, default `off`).
+  `DELETE /api/v0/subscriptions/<harness>`, the main token only. `agentbus connect claude` and
+  `agentbus connect codex` do the same in a terminal. Control renews codex's ChatGPT sign-in itself. The policy key `subscriptions_on_runners` (`off` or `own`, default `off`).
 - **An agent on a runner asks other agents** through the server's API with its turn token; the
   answer comes back as its session's next turn.
 - **`-host`** on `up` and `server`: another name a loopback service answers to, such as

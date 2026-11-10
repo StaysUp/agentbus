@@ -36,10 +36,12 @@ import (
 const RelayPrefix = "/relay/"
 
 // Upstream is one vendor control relays runners' model calls to, and the
-// access whose calls go there.
+// access whose calls go there. A subscription goes only to its own vendor:
+// Harness names the one harness whose subscription a call there gets.
 type Upstream struct {
-	URL    *url.URL
-	Access string // subscription or openrouter
+	URL     *url.URL
+	Access  string // subscription or openrouter
+	Harness string // for a subscription: the harness whose vendor this is
 }
 
 // Relay answers RelayPrefix. It is nil without Config.Relay.
@@ -80,6 +82,10 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if access == credentials.AccessSubscription {
+		if sp.Harness != up.Harness {
+			fail(w, http.StatusForbidden, "this turn's agent runs "+sp.Harness+", so control adds its subscription to no call on this path")
+			return
+		}
 		p := settings.DefaultPolicy()
 		if s.cfg.Settings != nil {
 			var err error
@@ -116,7 +122,10 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request) {
 			pr.Out.URL.Path, pr.Out.URL.RawPath = strings.TrimSuffix(u.Path, "/")+"/"+rest, ""
 			pr.Out.Host = u.Host
 			pr.Out.Header.Del("X-Api-Key")
-			pr.Out.Header.Set("Authorization", "Bearer "+cred)
+			pr.Out.Header.Set("Authorization", "Bearer "+cred.Token)
+			for k, v := range cred.Headers {
+				pr.Out.Header.Set(k, v)
+			}
 		},
 		FlushInterval: -1, // a streamed reply goes on as it comes
 		ErrorLog:      discard,

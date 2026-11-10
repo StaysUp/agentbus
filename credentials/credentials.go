@@ -33,10 +33,18 @@ type Need struct {
 	KeyEnv  string
 }
 
+// Cred is what control adds to one model call: the bearer token, and the
+// other headers the sign-in needs, such as the ChatGPT account of codex's
+// sign-in.
+type Cred struct {
+	Token   string
+	Headers map[string]string
+}
+
 // Source gives the credential for a need. A credential that cannot be given
 // is a *Missing, whose text says what to do and never quotes a value.
 type Source interface {
-	Credential(n Need) (string, error)
+	Credential(n Need) (Cred, error)
 }
 
 // Missing says why no credential could be given, in fixed wording.
@@ -49,10 +57,10 @@ func (m *Missing) Error() string { return m.Why }
 type Plug map[string]Source
 
 // Credential asks the source of n's access.
-func (p Plug) Credential(n Need) (string, error) {
+func (p Plug) Credential(n Need) (Cred, error) {
 	s, ok := p[n.Access]
 	if !ok {
-		return "", &Missing{Why: "control adds no credential for access " + n.Access}
+		return Cred{}, &Missing{Why: "control adds no credential for access " + n.Access}
 	}
 	return s.Credential(n)
 }
@@ -64,15 +72,15 @@ type Env struct {
 }
 
 // Credential reads the variable n.KeyEnv.
-func (e Env) Credential(n Need) (string, error) {
+func (e Env) Credential(n Need) (Cred, error) {
 	if !EnvNameOK(n.KeyEnv) {
-		return "", &Missing{Why: "the agent names no usable variable for its key"}
+		return Cred{}, &Missing{Why: "the agent names no usable variable for its key"}
 	}
 	v := e.Getenv(n.KeyEnv)
 	if v == "" {
-		return "", &Missing{Why: "the agent's key is read from " + n.KeyEnv + ", which is not set where control runs; set it and restart agentbus"}
+		return Cred{}, &Missing{Why: "the agent's key is read from " + n.KeyEnv + ", which is not set where control runs; set it and restart agentbus"}
 	}
-	return v, nil
+	return Cred{Token: v}, nil
 }
 
 // EnvNameOK says name is an environment variable's name: A-Z, 0-9 and _,

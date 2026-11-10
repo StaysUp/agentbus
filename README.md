@@ -320,8 +320,23 @@ as its model credential. Control's gateway swaps it for the real one on the way 
 - An OpenRouter agent: control reads the key from its own environment, by the variable's name
   (`key_env`).
 - A subscription agent: your own subscription, for runners on your own machines. Connect it once
-  on control with `agentbus connect claude` (or Connect in the cockpit), and set
-  `subscriptions_on_runners = "own"` in control's `permissions.toml`. It is off by default.
+  on control with `agentbus connect claude` or `agentbus connect codex` (or Connect in the
+  cockpit), and set `subscriptions_on_runners = "own"` in control's `permissions.toml`. It is off
+  by default. codex's login shows a link and a one-time code: open the link, sign in to ChatGPT,
+  and enter the code there. Control keeps the ChatGPT sign-in in its own data folder, never in
+  `~/.codex` or the Keychain, and renews it before it expires.
+
+A runner finds `claude` and `codex` on its own `PATH`. A runner started as a service gets the
+service's `PATH`, which is often short. With codex installed by npm into `~/.npm-global/bin`, a
+systemd user unit needs that folder in its `PATH`:
+
+```ini
+[Service]
+Environment=PATH=%h/.npm-global/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+```
+
+Then `systemctl --user daemon-reload` and restart the unit. Without it, a codex turn on that
+runner is refused before it starts: the program is not on the service's `PATH`.
 
 `agentbus runner -gateway local` makes a runner use its own machine's sign-in and keys instead.
 
@@ -378,9 +393,11 @@ with the reason. Details: `docs/CLIENT_API.md`, "Network control".
   folder, so "have codex review this" gets the diff of the asking turn through the API, not those
   files in its copy. Tests it runs run on your folder as it is. A copy started from the asking
   session's latest checkpoint is a later option.
-- **codex on a subscription cannot run on a remote runner yet.** Control cannot add codex's
-  ChatGPT sign-in, so such a turn is refused before it starts. Use an OpenRouter agent there, or
-  `agentbus up`.
+- **codex's ChatGPT sign-in on a runner is not yet checked against a live login.** Everything up
+  to the login is: codex's device login on control, and codex sending, through a provider of its
+  own, the same request it sends chatgpt.com, with no secret on the runner (codex-cli 0.164.0 and
+  0.167.0, 2026-11-10). That request leaves out one field codex sends on its own sign-in
+  (`access_programs`), and the first live turn is what shows whether chatgpt.com minds.
 
 ## Docs
 

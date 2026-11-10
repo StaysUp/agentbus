@@ -213,6 +213,7 @@ type service struct {
 	stopRunner func()
 	runnerDone chan struct{}
 	stopSweep  func()
+	subs       *credentials.Subscriptions // control's connected subscriptions; nil without a queue
 	sweepDone  chan struct{}
 }
 
@@ -267,7 +268,7 @@ func start(c config) (*service, error) {
 	protect := cfgStore.Protected()
 	// Control keeps the person's connected subscriptions there: no turn
 	// edits them either.
-	subs := &credentials.Subscriptions{Dir: filepath.Join(c.home, subscriptionsDir)}
+	subs := subscriptionStore(c.home)
 	if c.hasQueue() {
 		for _, h := range harness.All() {
 			if h.Info().Login != nil {
@@ -365,7 +366,8 @@ func start(c config) (*service, error) {
 			orUp, _ = url.Parse(openrouter)
 		}
 		relay := map[string]jobs.Upstream{
-			relayAnthropic:  {URL: c.upstream, Access: credentials.AccessSubscription},
+			relayAnthropic:  {URL: c.upstream, Access: credentials.AccessSubscription, Harness: "claude"},
+			relayChatGPT:    {URL: c.chatgpt, Access: credentials.AccessSubscription, Harness: "codex"},
 			relayOpenRouter: {URL: orUp, Access: credentials.AccessOpenRouter},
 		}
 		creds := credentials.Plug{credentials.AccessOpenRouter: credentials.Env{Getenv: c.getenvOr()}, credentials.AccessSubscription: subs}
@@ -533,12 +535,11 @@ func start(c config) (*service, error) {
 	}
 	// A runner that holds no secret sends each call on to the server's
 	// relay, which adds the credential (jobs/relay.go). It records the call
-	// here as before. codex's ChatGPT sign-in is not relayed yet: its turns
-	// are refused on such a runner before they start (wire.go).
+	// here as before.
 	if c.noSecrets() {
 		srv := strings.TrimSuffix(c.server, "/") + jobs.RelayPrefix
 		anthURL, orURL = mustParse(srv+relayAnthropic), mustParse(srv+relayOpenRouter)
-		chatURL = mustParse(srv + "chatgpt")
+		chatURL = mustParse(srv + relayChatGPT)
 	}
 	anth := gateway.New(anthURL, anthropic.Adapter{}, sink)
 	oai := gateway.New(chatURL, openai.Adapter{}, sink)
@@ -583,6 +584,9 @@ func start(c config) (*service, error) {
 	host, _, _ := net.SplitHostPort(c.listen)
 	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: gws, api: a, eng: eng, store: st, blobs: bs, blobSwp: blobSweep,
 		queue: q, remote: remote, settings: cfgStore, folders: fr, log: svcLog, logins: logins, done: make(chan error, 1)}
+	if q != nil {
+		s.subs = subs
+	}
 	s.srv = &http.Server{
 		Handler:           logRequests(svcLog, route(a, vendors{anth, oai, orAnth, orOAI, relayHandler}, !loopback)),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -629,14 +633,40 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 	s.sweepDone = make(chan struct{})
 	// The blob store: blobs no snapshot or changeset of an open session
 	// reaches (jobs.Sweeper).
-	var blobsDone sync.WaitGroup
+	// The sweeps that run beside the queue's, each on its own clock.
+	var beside sync.WaitGroup
 	if s.blobSwp != nil {
-		blobsDone.Add(1)
-		go func() { defer blobsDone.Done(); s.blobSwp.Run(ctx) }()
+		beside.Add(1)
+		go func() { defer beside.Done(); s.blobSwp.Run(ctx) }()
+	}
+	// Control renews an OAuth sign-in before it expires, as the vendor's own
+	// CLI would, so one no turn used still works. On its own clock: a
+	// renewal waits on the vendor, and the queue's sweep must not.
+	if s.subs != nil {
+		beside.Add(1)
+		go func() {
+			defer beside.Done()
+			t := time.NewTicker(time.Minute)
+			defer t.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-t.C:
+					for h, err := range s.subs.RenewDue() {
+						if err != nil {
+							svcLog.Printf("subscription.renew_failed harness=%s why=%q", h, err.Error())
+						} else {
+							svcLog.Printf("subscription.renewed harness=%s", h)
+						}
+					}
+				}
+			}
+		}()
 	}
 	go func() {
 		defer close(s.sweepDone)
-		defer blobsDone.Wait()
+		defer beside.Wait()
 		t := time.NewTicker(time.Second)
 		defer t.Stop()
 		var presence jobs.Presence
@@ -765,6 +795,7 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 // jobs.RelayPrefix of the server.
 const (
 	relayAnthropic  = "anthropic"
+	relayChatGPT    = "chatgpt"
 	relayOpenRouter = "openrouter"
 )
 
@@ -792,6 +823,18 @@ func mustParse(s string) *url.URL {
 	return u
 }
 
+// subscriptionStore is control's connected subscriptions in home, with how
+// each harness's OAuth sign-in is renewed (harness.Login).
+func subscriptionStore(home string) *credentials.Subscriptions {
+	s := &credentials.Subscriptions{Dir: filepath.Join(home, subscriptionsDir), OAuth: map[string]credentials.OAuth{}}
+	for _, h := range harness.All() {
+		if l := h.Info().Login; l != nil && l.RenewURL != "" {
+			s.OAuth[h.Info().Name] = credentials.OAuth{URL: l.RenewURL, ClientID: l.ClientID, AccountHeader: l.AccountHeader}
+		}
+	}
+	return s
+}
+
 // subscriptionLogins are the harnesses' own logins, for connecting a
 // subscription on control (harness.Login).
 func subscriptionLogins(c config, subs *credentials.Subscriptions) *credentials.Manager {
@@ -809,8 +852,14 @@ func subscriptionLogins(c config, subs *credentials.Subscriptions) *credentials.
 		if err != nil {
 			path = h.Info().Name // the connect says it could not start
 		}
-		login := credentials.Login{Path: path, Args: l.Args, Prefix: l.Prefix,
-			Token: regexp.MustCompile(l.Token), Valid: time.Duration(l.ValidDays) * 24 * time.Hour}
+		login := credentials.Login{Path: path, Args: l.Args, Prefix: l.Prefix, Valid: time.Duration(l.ValidDays) * 24 * time.Hour,
+			Home: l.Home, File: l.File, TokenKey: l.TokenKey, RefreshKey: l.RefreshKey, AccountKey: l.AccountKey}
+		if l.Token != "" {
+			login.Token = regexp.MustCompile(l.Token)
+		}
+		if l.Code != "" {
+			login.Code = regexp.MustCompile(l.Code)
+		}
 		if l.Refused != "" {
 			login.Refused = regexp.MustCompile(l.Refused)
 		}
@@ -829,7 +878,7 @@ func runConnect(args []string, home string, stdin io.Reader, stdout, stderr io.W
 		fmt.Fprintln(stderr, "usage: agentbus connect HARNESS   (such as claude)")
 		return 2
 	}
-	subs := &credentials.Subscriptions{Dir: filepath.Join(home, subscriptionsDir)}
+	subs := subscriptionStore(home)
 	l, ok := subscriptionLogins(config{}, subs).Logins[args[0]]
 	if !ok {
 		fmt.Fprintf(stderr, "agentbus connect: %s has no login AgentBus can keep a token from; harnesses: %s\n", args[0], loginNames())
@@ -839,20 +888,27 @@ func runConnect(args []string, home string, stdin io.Reader, stdout, stderr io.W
 		fmt.Fprintf(stderr, "agentbus connect: the data folder %s could not be made\n", home)
 		return 1
 	}
-	fmt.Fprintf(stdout, "Running %s %s. Sign in when it asks; AgentBus keeps the token it prints and never shows it.\n\n",
+	fmt.Fprintf(stdout, "Running %s %s. Sign in when it asks; AgentBus keeps the sign-in it gives and never shows it.\n\n",
 		args[0], strings.Join(l.Args, " "))
-	tok, err := credentials.Run(l, stdin, stdout)
+	// Ctrl-C stops the login, and its folder goes with it.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	si, err := credentials.Run(ctx, l, subs.Dir, time.Now(), stdin, stdout)
 	if err != nil {
 		fmt.Fprintf(stderr, "agentbus connect: %v\n", err)
 		return 1
 	}
-	if err := subs.Put(args[0], tok, l.Valid); err != nil {
-		fmt.Fprintf(stderr, "agentbus connect: the token could not be kept in %s\n", subs.Dir)
+	if err := subs.Keep(args[0], si); err != nil {
+		fmt.Fprintf(stderr, "agentbus connect: the sign-in could not be kept in %s\n", subs.Dir)
 		return 1
 	}
-	fmt.Fprintf(stdout, "\nConnected: %s's token is kept in %s, readable by you only, for %d days.\n"+
+	how := fmt.Sprintf("for %d days", int(l.Valid.Hours()/24))
+	if si.Refresh != "" {
+		how = "and control renews it before it expires"
+	}
+	fmt.Fprintf(stdout, "\nConnected: %s's sign-in is kept in %s, readable by you only, %s.\n"+
 		"Control adds it to your runners' calls once permissions.toml says subscriptions_on_runners = \"own\".\n",
-		args[0], subs.Dir, int(l.Valid.Hours()/24))
+		args[0], subs.Dir, how)
 	return 0
 }
 

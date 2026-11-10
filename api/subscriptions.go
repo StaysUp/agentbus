@@ -29,8 +29,10 @@ type SubscriptionState struct {
 	Harness     string            `json:"harness" doc:"The harness, such as claude."`
 	Connected   bool              `json:"connected" doc:"A token is kept for it on control."`
 	ConnectedAt *time.Time        `json:"connected_at,omitempty" doc:"When it was connected."`
-	ExpiresAt   *time.Time        `json:"expires_at,omitempty" doc:"When the token stops working, as the vendor's login says; connect again before then."`
-	Expired     bool              `json:"expired" doc:"The token's time is up: connect again."`
+	ExpiresAt   *time.Time        `json:"expires_at,omitempty" doc:"When the token stops working, as the vendor says. Without renews, connect again before then."`
+	Renews      bool              `json:"renews" doc:"Control renews the token itself before it expires, with what the login gave it (codex's ChatGPT sign-in)."`
+	Expired     bool              `json:"expired" doc:"The sign-in cannot be used: its time is up, or the vendor refused to renew it. Connect again."`
+	Error       string            `json:"error,omitempty" doc:"Why it cannot be used, when it cannot."`
 	Connect     *credentials.View `json:"connect,omitempty" doc:"The latest connect, while control runs."`
 }
 
@@ -54,9 +56,11 @@ var subscriptionRoutes = []route{
 		idDoc:   "A harness, such as claude. Another shape gets 404.",
 		tag:     "Settings",
 		summary: "Connect a subscription",
-		doc: "Start the harness's own login on control (for claude: claude setup-token). Of what it prints, only the links come back: " +
-			"open the link, sign in, and send the code the browser shows with POST .../connect/input. The token it prints is kept " +
-			"in control's data folder, readable by its owner only, and never shown. A login already running is answered as it is. No body is read.",
+		doc: "Start the harness's own login on control (for claude: claude setup-token; for codex: codex login --device-auth). " +
+			"Of what it prints, only the links come back, and a one-time code to enter at the link. For claude: open the link, sign in, and " +
+			"send the code the browser shows with POST .../connect/input. For codex: open the link, sign in, and enter the code; the login " +
+			"ends by itself. The sign-in is kept in control's data folder, readable by its owner only, and never shown; codex's is renewed " +
+			"by control before it expires. A login already running is answered as it is. No body is read.",
 		replies: []reply{ok(202, credentials.View{}, "The login, running."), badRequest, fail(404, "No login for this harness here."),
 			fail(500, "The login could not be started.")},
 		serve: (*API).connectSubscription},
@@ -64,7 +68,7 @@ var subscriptionRoutes = []route{
 		idDoc:   "A harness, such as claude. Another shape gets 404.",
 		tag:     "Settings",
 		summary: "Follow a connect",
-		doc:     "The harness's latest login: running, connected or failed, and the links it printed; nothing else it prints is shown.",
+		doc:     "The harness's latest login: running, connected or failed, and the links and one-time code it printed; nothing else it prints is shown.",
 		replies: []reply{ok(200, credentials.View{}, "The login."), fail(404, "No login was started for it since control started.")},
 		serve:   (*API).getConnect},
 	{method: "POST", path: "/api/v0/subscriptions/{id}/connect/input", op: "connectInput",
@@ -106,7 +110,8 @@ func (a *API) listSubscriptions(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			st = credentials.Status{Harness: h}
 		}
-		s := SubscriptionState{Harness: h, Connected: st.Connected, ConnectedAt: st.ConnectedAt, ExpiresAt: st.ExpiresAt, Expired: st.Expired}
+		s := SubscriptionState{Harness: h, Connected: st.Connected, ConnectedAt: st.ConnectedAt, ExpiresAt: st.ExpiresAt,
+			Renews: st.Renews, Expired: st.Expired, Error: st.Error}
 		if v, ok := m.View(h); ok {
 			s.Connect = &v
 		}
