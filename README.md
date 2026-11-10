@@ -364,6 +364,8 @@ with the reason. Details: `docs/CLIENT_API.md`, "Network control".
   folder (414 MB) in about 30 s the first time. Later sessions send only what changed: about 4 s.
 - **Network control is Linux-only, and off by default.** On macOS, `contain = "on"` refuses
   every turn.
+- **Not yet tested on Ubuntu 24.04**, which restricts user namespaces. Network control and the
+  rootless overlay may need its AppArmor profile there (`install.sh` prints the command).
 - **An asked agent reads the asker's changes but cannot run them.** Its copy is made from your
   folder, so "have codex review this" gets the diff of the asking turn through the API, not those
   files in its copy. Tests it runs run on your folder as it is. A copy started from the asking
