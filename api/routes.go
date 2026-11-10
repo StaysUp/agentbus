@@ -345,11 +345,21 @@ var routes = slices.Concat([]route{
 	{method: "GET", path: "/api/v0/harnesses", op: "listHarnesses",
 		tag:     "Agents",
 		summary: "List harnesses",
-		doc: "The harnesses this service can run an agent on: whether it finds each, its version, whether it is signed in, " +
-			"and the access and models each offers, for a form that saves an agent. Probed at most once a minute.",
+		doc: "The harnesses an agent can run on: whether a runner finds each, its version, whether it is signed in, " +
+			"and the access and models each offers, for a form that saves an agent. Each runner probes its own machine when it starts " +
+			"and once a minute after, and reports it; this service never runs an agent's program to answer. " +
+			"Just after a runner starts, the answer waits for its first report, up to 15 seconds.",
 		replies: []reply{ok(200, HarnessList{}, "The harnesses."), badRequest},
 		turn:    anyRead,
 		serve:   plain((*API).listHarnesses)},
+	{method: "GET", path: "/api/v0/folders", op: "listFolders",
+		tag:     "Agents",
+		summary: "List folders",
+		doc: "The folders the runners own, each by its reference: a turn names one as folder_ref, with its connector. " +
+			"A folder's path stays on the machine that owns it; the answer has only the last part of it. " +
+			"In agentbus up every folder a turn was started in is listed, newest first, within a minute of its first turn. No body is read.",
+		replies: []reply{ok(200, FolderList{}, "The folders."), badRequest},
+		serve:   plain((*API).listFolders)},
 	{method: "GET", path: "/api/v0/version", op: "getVersion",
 		tag:     "Service",
 		summary: "Get the version",

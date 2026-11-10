@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/staysup/agentbus/folders"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/store"
 )
@@ -429,6 +430,15 @@ func TestIsolatedSubfolderKeptAcrossTurnsAndReview(t *testing.T) {
 	if j.State != queue.Finished || j.Workspace == nil || real(j.Workspace.Folder) != real(want) {
 		t.Fatalf("first job %s, workspace %+v, want folder %s", j.State, j.Workspace, want)
 	}
+	// The queue keeps the folder by its reference, and the session its
+	// snapshot id; the record has the reference too.
+	if j.Spec.Folder != "" || j.Spec.FolderRef != folders.Ref(filepath.Join(repo, "sub")) || j.Spec.Connector == "" ||
+		!queue.SnapshotShape.MatchString(j.Workspace.Snapshot) {
+		t.Fatalf("first job spec %+v, snapshot %q", j.Spec, j.Workspace.Snapshot)
+	}
+	if c, err := svc.store.Continuation(j.Session); err != nil || c.FolderRef != j.Spec.FolderRef {
+		t.Fatalf("the record's folder_ref %q, want %q (%v)", c.FolderRef, j.Spec.FolderRef, err)
+	}
 	os.Remove(report)
 	var next queue.Job
 	if code := callAPI(t, svc, tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn",
@@ -445,8 +455,9 @@ func TestIsolatedSubfolderKeptAcrossTurnsAndReview(t *testing.T) {
 	if code := callAPI(t, svc, tok, "POST", "/api/v0/jobs/"+next.ID+"/review", map[string]any{"agent": "codex"}, &rev); code != http.StatusCreated {
 		t.Fatalf("review: %d", code)
 	}
-	if real(rev.Spec.Folder) != real(want) {
-		t.Fatalf("review folder %s, want %s", rev.Spec.Folder, want)
+	// The review names no folder: it reads the reviewed session's workspace.
+	if rev.Spec.Folder != "" || rev.Workspace == nil || real(rev.Workspace.Folder) != real(want) {
+		t.Fatalf("review spec folder %q, workspace %+v, want %s", rev.Spec.Folder, rev.Workspace, want)
 	}
 	waitJob(t, svc, tok, rev.ID)
 	if code := callAPI(t, svc, tok, "POST", "/api/v0/workspaces/"+j.Session+"/close", nil, nil); code/100 != 2 {

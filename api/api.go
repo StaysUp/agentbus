@@ -79,11 +79,14 @@ type Config struct {
 	// turns' own tokens are accepted here. Nil accepts none.
 	Engine *run.Engine
 
-	// LookPath finds an agent's binary for GET /api/v0/agents, the same
-	// lookup runs use. Environ is the environment its --version and status
-	// commands run with. Nil LookPath answers every agent as not found.
-	LookPath func(string) (string, error)
-	Environ  func() []string
+	// Environ is this service's environment: GET /api/v0/harnesses says
+	// whether an agent's key variable is set in it, never its value.
+	Environ func() []string
+
+	// Folders is this machine's connector, in agentbus up: a folder a
+	// request names by path is kept as its reference (queue.ResolveFolders).
+	// Nil, as in agentbus server, takes references only.
+	Folders queue.FolderIssuer
 
 	// Agents are the saved agents: /api/v0/agents, and the agent a turn
 	// names. Nil lists none, saves none, and lets a turn name a harness only.
@@ -112,8 +115,6 @@ type API struct {
 
 	// streams admits at most MaxStreams at once.
 	streams chan struct{}
-
-	harnesses harnessCache
 
 	// spec is the OpenAPI description, built from the route table.
 	spec []byte

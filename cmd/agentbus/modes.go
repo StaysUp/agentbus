@@ -19,9 +19,11 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/staysup/agentbus/jobs"
+	"github.com/staysup/agentbus/queue"
 	engine "github.com/staysup/agentbus/run"
 )
 
@@ -53,7 +55,7 @@ func (c config) modeName() string {
 
 const usage = `usage: agentbus up     [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false] [-max-runs 4]
        agentbus server [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false]
-       agentbus runner -server URL [-enroll-token-file F] [-gateway local] [-capacity 4] [-name NAME] [-listen 127.0.0.1:0] [-replay=false]
+       agentbus runner -server URL [-enroll-token-file F] [-gateway local] [-capacity 4] [-name NAME] [-folder DIR]... [-labels a,b] [-listen 127.0.0.1:0] [-replay=false]
        agentbus api METHOD PATH [BODY]   (inside a turn: calls this service with the turn's token)
        agentbus version`
 
@@ -91,8 +93,11 @@ func parse(args []string, home string, stderr io.Writer) (config, bool) {
 	case modeRunner:
 		fl.IntVar(maxRuns, "capacity", engine.DefaultMaxRuns, "how many jobs this runner runs at once, 1 to 64")
 	}
-	var server, enrollFile, runnerName, gatewayMode *string
+	var server, enrollFile, runnerName, gatewayMode, labels *string
+	var folderList folderFlags
 	if c.mode == modeRunner {
+		fl.Var(&folderList, "folder", "a folder on this machine that turns may run in, by its absolute path; repeat it for each one. The server knows it only by its reference (GET /api/v0/folders)")
+		labels = fl.String("labels", "", "words a job can ask for in spec.labels, comma-separated, such as gpu,docker; default agentbus")
 		server = fl.String("server", "", "the server's URL, such as http://192.168.1.10:8787 (required)")
 		enrollFile = fl.String("enroll-token-file", "", "the server's enroll_token, copied here with mode 0600; default <data folder>/enroll_token")
 		runnerName = fl.String("name", "", "the runner's name; default the host name")
@@ -138,6 +143,22 @@ func parse(args []string, home string, stderr io.Writer) (config, bool) {
 			return c, false
 		}
 		c.server, c.runnerName, c.gatewayMode = *server, *runnerName, *gatewayMode
+		for _, f := range folderList {
+			if !filepath.IsAbs(f) || len(f) > 4096 {
+				fmt.Fprintf(stderr, "%s: -folder must be an absolute path\n", name)
+				return c, false
+			}
+		}
+		c.folders = folderList
+		if *labels != "" {
+			for _, l := range strings.Split(*labels, ",") {
+				if !queue.LabelOK(l) {
+					fmt.Fprintf(stderr, "%s: each of -labels is 1 to 64 of A-Z, a-z, 0-9 and . _ : -, starting with a letter or digit\n", name)
+					return c, false
+				}
+				c.labels = append(c.labels, l)
+			}
+		}
 		c.enrollFile = *enrollFile
 		if c.enrollFile == "" {
 			c.enrollFile = home + string(os.PathSeparator) + "enroll_token"
@@ -170,3 +191,9 @@ func readTokenFile(path string) (string, error) {
 	}
 	return tok, nil
 }
+
+// folderFlags is -folder, given once per folder.
+type folderFlags []string
+
+func (f *folderFlags) String() string     { return strings.Join(*f, ",") }
+func (f *folderFlags) Set(v string) error { *f = append(*f, v); return nil }

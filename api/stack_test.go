@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/staysup/agentbus/folders"
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
@@ -60,13 +61,17 @@ func stackEnv(t *testing.T, s stack) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fr, err := folders.Open(filepath.Join(dir, "folders.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollTok, Heartbeat: 50 * time.Millisecond,
-		MaxWait: 500 * time.Millisecond})
+		MaxWait: 500 * time.Millisecond, Folders: fr})
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg := Config{Store: st, Token: token, Port: port, BaseURL: base, Queue: q, Jobs: js, Engine: eng, TurnWait: s.turnWait,
-		Settings: cfgStore}
+		Settings: cfgStore, Folders: fr}
 	if s.turnsToken {
 		cfg.TurnsToken = turnsTok
 	}
@@ -78,7 +83,7 @@ func stackEnv(t *testing.T, s stack) *env {
 	srv.Start()
 	ctx, cancel := context.WithCancel(context.Background())
 	rn, err := runner.Enroll(ctx, runner.Config{Queue: base, EnrollToken: enrollTok, Name: "test", Capacity: s.maxRuns,
-		Engine: eng, Store: st, Workdir: filepath.Join(dir, "worktrees"), Settings: cfgStore, Logf: t.Logf})
+		Engine: eng, Store: st, Workdir: filepath.Join(dir, "worktrees"), Settings: cfgStore, Logf: t.Logf, Folders: fr})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,0 +1,250 @@
+package queue
+
+import (
+	"database/sql"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/staysup/agentbus/harness"
+)
+
+func capsRunner(t *testing.T, q *Queue, labels []string, caps *Capabilities) Runner {
+	t.Helper()
+	r, err := q.RegisterRunner(DefaultTeam, "r", labels, 4, HashToken(NewID("tok_")), caps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+func makeJob(t *testing.T, q *Queue, sp Spec) Job {
+	t.Helper()
+	sp.Prompt = "hi"
+	j, _, err := q.Create(DefaultTeam, KindTurn, "", sp, Links{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return j
+}
+
+func takes(t *testing.T, q *Queue, r Runner) string {
+	t.Helper()
+	j, _, ok, _, err := q.Take(r.ID, lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		return ""
+	}
+	return j.ID
+}
+
+const (
+	conA = "con_aaaaaaaaaaaaaaaa"
+	conB = "con_bbbbbbbbbbbbbbbb"
+	refX = "fld_0123456789abcdef"
+)
+
+// A job that names a folder goes only to the runner of that folder's
+// connector; a runner of none, or of another, never takes it.
+func TestTakeRoutesByConnector(t *testing.T) {
+	q, _ := open(t)
+	none := capsRunner(t, q, nil, nil)
+	other := capsRunner(t, q, nil, &Capabilities{Connector: conB})
+	owner := capsRunner(t, q, nil, &Capabilities{Connector: conA})
+	j := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Connector: conA})
+	if got := takes(t, q, none); got != "" {
+		t.Fatalf("a runner with no connector took %s", got)
+	}
+	if got := takes(t, q, other); got != "" {
+		t.Fatalf("another connector's runner took %s", got)
+	}
+	if got := takes(t, q, owner); got != j.ID {
+		t.Fatalf("the owner took %q, want %s", got, j.ID)
+	}
+}
+
+// A job's labels must all be the runner's.
+func TestTakeRoutesByLabels(t *testing.T) {
+	q, _ := open(t)
+	plain := capsRunner(t, q, []string{"agentbus"}, nil)
+	gpu := capsRunner(t, q, []string{"agentbus", "gpu"}, nil)
+	j := makeJob(t, q, Spec{Harness: "claude", Folder: "/x", Labels: []string{"gpu"}})
+	if got := takes(t, q, plain); got != "" {
+		t.Fatalf("a runner without the label took %s", got)
+	}
+	if got := takes(t, q, gpu); got != j.ID {
+		t.Fatalf("the gpu runner took %q", got)
+	}
+}
+
+func found(names ...string) []harness.Report {
+	var out []harness.Report
+	for _, n := range []string{"claude", "codex"} {
+		r := harness.Report{Name: n}
+		for _, f := range names {
+			if f == n {
+				r.Found = true
+			}
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// A first job on a harness goes to a runner that has it. When no runner
+// seen lately has it, any runner takes it, so its engine says how to install
+// the program; a runner that has not probed yet takes any.
+func TestTakeRoutesByHarness(t *testing.T) {
+	q, c := open(t)
+	noCodex := capsRunner(t, q, nil, &Capabilities{Harnesses: found("claude")})
+	both := capsRunner(t, q, nil, &Capabilities{Harnesses: found("claude", "codex")})
+	j := makeJob(t, q, Spec{Harness: "codex", Folder: "/x"})
+	if got := takes(t, q, noCodex); got != "" {
+		t.Fatalf("a runner without codex took %s while another has it", got)
+	}
+	if got := takes(t, q, both); got != j.ID {
+		t.Fatalf("the runner with codex took %q", got)
+	}
+
+	// Now no runner has codex: the one that had it reports it gone.
+	if _, err := q.RunnerBeat(both.ID, 4, &Capabilities{Harnesses: found("claude")}); err != nil {
+		t.Fatal(err)
+	}
+	j2 := makeJob(t, q, Spec{Harness: "codex", Folder: "/x"})
+	if got := takes(t, q, noCodex); got != j2.ID {
+		t.Fatalf("with no runner that has codex, %q was taken, want %s", got, j2.ID)
+	}
+
+	// A runner that reported codex but was not seen within RunnerFresh does
+	// not hold jobs back from the others.
+	stale := capsRunner(t, q, nil, &Capabilities{Harnesses: found("codex")})
+	if _, err := q.db.Exec(`UPDATE runners SET seen = ? WHERE id = ?`, nanos(c.now().Add(-2*RunnerFresh)), stale.ID); err != nil {
+		t.Fatal(err)
+	}
+	j3 := makeJob(t, q, Spec{Harness: "codex", Folder: "/x"})
+	if got := takes(t, q, noCodex); got != j3.ID {
+		t.Fatalf("a stale runner's report held the job back: %q", got)
+	}
+
+	// A runner that has not reported its harnesses takes any.
+	fresh := capsRunner(t, q, nil, &Capabilities{OS: "linux"})
+	j4 := makeJob(t, q, Spec{Harness: "claude", Folder: "/x"})
+	if got := takes(t, q, fresh); got != j4.ID {
+		t.Fatalf("an unprobed runner took %q", got)
+	}
+}
+
+// A runner's report is checked: ids shaped as issued, and bounded lists.
+func TestCapabilitiesCheck(t *testing.T) {
+	for _, c := range []Capabilities{
+		{Connector: "con_x"},
+		{Folders: []FolderInfo{{Ref: refX, Name: "a"}}},
+		{Connector: conA, Folders: []FolderInfo{{Ref: "/abs/path", Name: "a"}}},
+		{Connector: conA, Folders: []FolderInfo{{Ref: refX, Name: strings.Repeat("a", 256)}}},
+	} {
+		if c.Check() == "" {
+			t.Errorf("accepted %+v", c)
+		}
+	}
+	if msg := (Capabilities{Connector: conA, Folders: []FolderInfo{{Ref: refX, Name: "a"}}}).Check(); msg != "" {
+		t.Fatal(msg)
+	}
+}
+
+// Folders lists what runners report, once per reference.
+func TestFoldersListed(t *testing.T) {
+	q, _ := open(t)
+	capsRunner(t, q, nil, &Capabilities{Connector: conA, Folders: []FolderInfo{{Ref: refX, Name: "proj"}}})
+	capsRunner(t, q, nil, nil)
+	list, err := q.Folders(DefaultTeam)
+	if err != nil || len(list) != 1 || list[0].Ref != refX || list[0].Connector != conA || list[0].Name != "proj" {
+		t.Fatalf("%+v %v", list, err)
+	}
+}
+
+type fakeIssuer map[string]string
+
+func (f fakeIssuer) Connector() string { return conA }
+func (f fakeIssuer) Register(p string) (string, error) {
+	ref := "fld_" + strings.Repeat("0", 15) + string(rune('0'+len(f)))
+	for k, v := range f {
+		if v == p {
+			return k, nil
+		}
+	}
+	f[ref] = p
+	return ref, nil
+}
+func (f fakeIssuer) Path(ref string) (string, bool) { p, ok := f[ref]; return p, ok }
+
+// A path becomes a reference and goes; a server with no connector refuses a
+// path; a reference without a connector takes the issuer's.
+func TestResolveFolders(t *testing.T) {
+	f := fakeIssuer{}
+	sp := Spec{Folder: "/a/b", Repo: ""}
+	if msg := ResolveFolders(&sp, f); msg != "" || sp.Folder != "" || sp.FolderRef == "" || sp.Connector != conA || f[sp.FolderRef] != "/a/b" {
+		t.Fatalf("%q %+v", msg, sp)
+	}
+	if msg := ResolveFolders(&Spec{Folder: "/a"}, nil); msg == "" {
+		t.Fatal("a server took a path")
+	}
+	sp = Spec{FolderRef: refX}
+	if msg := ResolveFolders(&sp, nil); msg == "" {
+		t.Fatal("a reference with no connector was taken by a server")
+	}
+	if msg := ResolveFolders(&Spec{Folder: "/a", FolderRef: refX}, f); msg == "" {
+		t.Fatal("both a path and a reference")
+	}
+	if msg := ResolveFolders(&Spec{FolderRef: "/a", Connector: conA}, nil); msg == "" {
+		t.Fatal("a path as a reference")
+	}
+}
+
+// A queue from before references: its jobs' paths become references, and
+// its tables get the new columns.
+func TestMigrateFoldersAndColumns(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "jobs.db")
+	q, err := Open(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Harness: "claude", Folder: "/p/q", Prompt: "hi"}, Links{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The columns as an earlier build made them: none.
+	for _, s := range []string{`ALTER TABLE runners DROP COLUMN caps`, `ALTER TABLE sessions DROP COLUMN snapshot`} {
+		if _, err := q.db.Exec(s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	q.Close()
+	if q, err = Open(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { q.Close() })
+	for _, c := range []struct{ table, col string }{{"runners", "caps"}, {"sessions", "snapshot"}} {
+		var n int
+		if err := q.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, c.table, c.col).Scan(&n); err != nil || n != 1 {
+			t.Fatalf("%s.%s: %d %v", c.table, c.col, n, err)
+		}
+	}
+	f := fakeIssuer{}
+	if n, err := q.MigrateFolders(f); err != nil || n != 1 {
+		t.Fatalf("migrated %d %v", n, err)
+	}
+	got := state(t, q, j.ID)
+	if got.Spec.Folder != "" || got.Spec.FolderRef == "" || got.Spec.Connector != conA || f[got.Spec.FolderRef] != "/p/q" {
+		t.Fatalf("%+v", got.Spec)
+	}
+	var raw sql.NullString
+	if err := q.db.QueryRow(`SELECT spec FROM jobs WHERE id = ?`, j.ID).Scan(&raw); err != nil || strings.Contains(raw.String, "/p/q") {
+		t.Fatalf("the path is still stored: %s %v", raw.String, err)
+	}
+	if n, _ := q.MigrateFolders(f); n != 0 {
+		t.Fatalf("a second run rewrote %d", n)
+	}
+}

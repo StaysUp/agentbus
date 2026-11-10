@@ -122,6 +122,9 @@ func headers(s *Space) ([]header, error) {
 			return nil, errors.New("isolation: a checkpoint could not be read")
 		}
 		h.file = strings.TrimSuffix(n, ".json")
+		if h.Tree != nil {
+			h.Checkpoint.Root = h.Tree.Root
+		}
 		out = append(out, h)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Checkpoint.Seq < out[j].Checkpoint.Seq })
@@ -162,7 +165,7 @@ func migrate(s *Space, t *trees, list []header) error {
 		if err := t.flush(); err != nil {
 			return err
 		}
-		h.Tree, h.Checkpoint.Files = &st, n
+		h.Tree, h.Checkpoint.Files, h.Checkpoint.Root = &st, n, st.Root
 		hb, _ := json.Marshal(h)
 		if err := writeFileAtomic(filepath.Join(s.checkpointDir(), h.file+".json"), hb); err != nil {
 			return err
@@ -343,7 +346,7 @@ func checkpoint(s *Space, name string, k keeper) (Checkpoint, error) {
 	if len(list) > 0 {
 		seq = list[len(list)-1].Checkpoint.Seq + 1
 	}
-	h := header{Checkpoint: Checkpoint{Name: name, Seq: seq, Time: time.Now().UTC(), Files: files}, Saved: dedupe(saved), Tree: &cur}
+	h := header{Checkpoint: Checkpoint{Name: name, Seq: seq, Time: time.Now().UTC(), Files: files, Root: cur.Root}, Saved: dedupe(saved), Tree: &cur}
 	if err := os.MkdirAll(s.checkpointDir(), 0o700); err != nil {
 		return Checkpoint{}, err
 	}

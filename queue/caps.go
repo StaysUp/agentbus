@@ -1,0 +1,294 @@
+package queue
+
+// What a runner can do, and the folders it owns. A runner reports them at
+// enroll and on its heartbeat; Take routes a job only to a runner that can
+// run it. plans/IDENTITIES.md in the notes says who issues each id.
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"regexp"
+	"time"
+
+	"github.com/staysup/agentbus/harness"
+)
+
+// Capabilities is what one runner reports of itself. Runners hold no
+// secrets: which credential an agent uses is the control plane's business,
+// so none is listed here.
+type Capabilities struct {
+	OS   string `json:"os,omitempty"`
+	Arch string `json:"arch,omitempty"`
+	// Isolation: the isolation backends the runner can use.
+	Isolation []string `json:"isolation,omitempty"`
+	// Harnesses: each harness's program on the runner's machine. Nil until
+	// the runner's first probe has ended.
+	Harnesses []harness.Report `json:"harnesses,omitempty"`
+	// Connector: the connector id of the folders this runner owns, when it
+	// owns any. Folders are those folders, at most MaxFolders.
+	Connector string       `json:"connector,omitempty"`
+	Folders   []FolderInfo `json:"folders,omitempty"`
+}
+
+// FolderInfo is one folder a connector owns, as control may know it: its
+// reference and the last part of its path. The path itself stays with the
+// connector.
+type FolderInfo struct {
+	Ref  string `json:"ref"`
+	Name string `json:"name"`
+}
+
+// MaxFolders bounds the folders one runner reports.
+const MaxFolders = 1000
+
+// Shapes of the ids a connector issues.
+var (
+	ConnectorShape = regexp.MustCompile(`^con_[0-9a-f]{16}$`)
+	FolderRefShape = regexp.MustCompile(`^fld_[0-9a-f]{16}$`)
+	labelShape     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$`)
+)
+
+// LabelOK says a label is 1 to 64 of A-Z, a-z, 0-9 and . _ : -, starting with a
+// letter or digit.
+func LabelOK(l string) bool { return labelShape.MatchString(l) }
+
+// Check says what is wrong with c, or "".
+func (c Capabilities) Check() string {
+	if c.Connector != "" && !ConnectorShape.MatchString(c.Connector) {
+		return "capabilities.connector must be con_ and 16 hex digits"
+	}
+	if len(c.Folders) > MaxFolders || len(c.Harnesses) > 64 || len(c.Isolation) > 16 || len(c.OS) > 32 || len(c.Arch) > 32 {
+		return "capabilities lists too much"
+	}
+	if len(c.Folders) > 0 && c.Connector == "" {
+		return "capabilities.folders need capabilities.connector"
+	}
+	for _, f := range c.Folders {
+		if !FolderRefShape.MatchString(f.Ref) || len(f.Name) > 255 {
+			return "each folder needs ref fld_ and 16 hex digits, and a name of at most 255 bytes"
+		}
+	}
+	for _, h := range c.Harnesses {
+		if len(h.Name) > 64 || len(h.Version) > 64 {
+			return "a harness's name and version are at most 64 bytes"
+		}
+	}
+	for _, b := range c.Isolation {
+		if len(b) > 32 {
+			return "an isolation backend's name is at most 32 bytes"
+		}
+	}
+	return ""
+}
+
+// RunnerFresh is how recently a runner must have been seen for its report
+// to count when Take decides whether some runner has a job's harness.
+const RunnerFresh = time.Minute
+
+// harnessTake is Take's harness rule for a job j and runner r: a session's
+// first job on a harness goes to a runner that reports it found. When no
+// runner seen within RunnerFresh does, or this runner has not reported yet,
+// any runner may take it, and its engine refuses it with how to install the
+// program, as on one machine. A job of a known session goes to the
+// session's runner whatever it reports.
+const harnessTake = `(j.session IS NOT NULL AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team))
+	OR COALESCE(json_extract(j.spec, '$.agent'), '') = ''
+	OR json_extract(r.caps, '$.harnesses') IS NULL
+	OR EXISTS (SELECT 1 FROM json_each(r.caps, '$.harnesses') h
+		WHERE json_extract(h.value, '$.name') = json_extract(j.spec, '$.agent') AND json_extract(h.value, '$.found'))
+	OR NOT EXISTS (SELECT 1 FROM runners o, json_each(o.caps, '$.harnesses') h WHERE o.team = j.team AND o.seen >= ?
+		AND json_extract(h.value, '$.name') = json_extract(j.spec, '$.agent') AND json_extract(h.value, '$.found'))`
+
+// connectorTake: a job that names a folder's connector goes only to the
+// runner that reports that connector.
+const connectorTake = `COALESCE(json_extract(j.spec, '$.connector'), '') = ''
+	OR json_extract(j.spec, '$.connector') = json_extract(r.caps, '$.connector')`
+
+// labelsTake: a job with labels goes only to a runner with every one.
+const labelsTake = `NOT EXISTS (SELECT 1 FROM json_each(j.spec, '$.labels') l
+	WHERE l.value NOT IN (SELECT value FROM json_each(r.labels)))`
+
+// Folders is every folder the team's runners report, by runner, newest
+// report first. A ref reported by two runners is listed once, from the one
+// seen last.
+func (q *Queue) Folders(team string) ([]RunnerFolder, error) {
+	rows, err := q.db.Query(`SELECT id, caps FROM runners WHERE team = ? AND caps IS NOT NULL ORDER BY seen DESC, id`, team)
+	if err != nil {
+		return nil, fmt.Errorf("queue: read runners: %w", err)
+	}
+	defer rows.Close()
+	out := []RunnerFolder{}
+	seen := map[string]bool{}
+	for rows.Next() {
+		var id string
+		var raw sql.NullString
+		if err := rows.Scan(&id, &raw); err != nil {
+			return nil, fmt.Errorf("queue: read runners: %w", err)
+		}
+		var c Capabilities
+		if json.Unmarshal([]byte(raw.String), &c) != nil {
+			continue
+		}
+		for _, f := range c.Folders {
+			if seen[f.Ref] {
+				continue
+			}
+			seen[f.Ref] = true
+			out = append(out, RunnerFolder{Ref: f.Ref, Name: f.Name, Connector: c.Connector, Runner: id})
+		}
+	}
+	return out, rows.Err()
+}
+
+// RunnerFolder is one folder in Folders.
+type RunnerFolder struct {
+	Ref       string `json:"ref" doc:"The folder's reference: name it as folder_ref."`
+	Name      string `json:"name" doc:"The last part of the folder's path, for a screen. The path stays on the connector's machine."`
+	Connector string `json:"connector" doc:"The connector that owns the folder."`
+	Runner    string `json:"runner" doc:"The runner that reported it."`
+}
+
+// Runners is every runner of the team, newest seen first.
+func (q *Queue) Runners(team string) ([]Runner, error) {
+	rows, err := q.db.Query(`SELECT `+runnerCols+` FROM runners WHERE team = ? ORDER BY seen DESC, id`, team)
+	if err != nil {
+		return nil, fmt.Errorf("queue: read runners: %w", err)
+	}
+	defer rows.Close()
+	var out []Runner
+	for rows.Next() {
+		r, err := scanRunner(rows)
+		if err != nil {
+			return nil, fmt.Errorf("queue: read runners: %w", err)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// addColumns adds the columns a queue made by an earlier build lacks:
+// runners.caps and sessions.snapshot. They start empty.
+func addColumns(db *sql.DB) error {
+	for _, c := range []struct{ table, column, decl string }{
+		{"runners", "caps", "TEXT"},
+		{"sessions", "snapshot", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		var n int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, c.table, c.column).Scan(&n); err != nil {
+			return fmt.Errorf("queue: read tables: %w", err)
+		}
+		if n > 0 {
+			continue
+		}
+		if _, err := db.Exec(`ALTER TABLE ` + c.table + ` ADD COLUMN ` + c.column + ` ` + c.decl); err != nil {
+			return fmt.Errorf("queue: add %s.%s: %w", c.table, c.column, err)
+		}
+	}
+	return nil
+}
+
+// SnapshotShape is a snapshot id: the hex SHA-256 of a checkpoint's root
+// tree (package isolation).
+var SnapshotShape = regexp.MustCompile(`^[0-9a-f]{64}$`)
+
+// FolderIssuer is a connector on this machine, as the control plane of
+// agentbus up reaches it: package folders. It turns a path a request names
+// into the reference the queue keeps, and back, so a check that needs the
+// path (a turn token's folder) runs where the folder is. agentbus server has
+// none, and takes references only.
+type FolderIssuer interface {
+	Connector() string
+	Register(path string) (ref string, err error)
+	Path(ref string) (string, bool)
+}
+
+// ResolveFolders turns the paths spec names into references issued by f, and
+// clears the paths, so only references are kept. A spec that names
+// references keeps them. It answers what is wrong, or "".
+func ResolveFolders(spec *Spec, f FolderIssuer) string {
+	if spec.Folder == "" && spec.Repo == "" {
+		if spec.FolderRef != "" || spec.RepoRef != "" {
+			if (spec.FolderRef != "" && !FolderRefShape.MatchString(spec.FolderRef)) ||
+				(spec.RepoRef != "" && !FolderRefShape.MatchString(spec.RepoRef)) {
+				return "folder_ref and repo_ref are fld_ and 16 hex digits, from GET /api/v0/folders"
+			}
+			if spec.Connector == "" && f != nil {
+				spec.Connector = f.Connector()
+			}
+			if !ConnectorShape.MatchString(spec.Connector) {
+				return "a folder_ref needs connector, from GET /api/v0/folders"
+			}
+		}
+		return ""
+	}
+	if spec.FolderRef != "" || spec.RepoRef != "" {
+		return "name a folder by its path or by its reference, not both"
+	}
+	if f == nil {
+		return "this server has no folders of its own: name folder_ref and connector from GET /api/v0/folders, which lists the folders its runners own"
+	}
+	for _, p := range []struct{ path, ref *string }{{&spec.Folder, &spec.FolderRef}, {&spec.Repo, &spec.RepoRef}} {
+		if *p.path == "" {
+			continue
+		}
+		ref, err := f.Register(*p.path)
+		if err != nil {
+			return "folder must be an absolute path to an existing directory, at most 4096 bytes"
+		}
+		*p.ref, *p.path = ref, ""
+	}
+	spec.Connector = f.Connector()
+	return ""
+}
+
+// MigrateFolders rewrites every job whose spec still names a path, as a queue
+// made before folder references holds them, to the references f issues: the
+// paths go. It answers how many jobs it rewrote. agentbus up runs it at
+// start; a server has no connector, and its runners register such a path
+// when they take the job.
+//
+// The job's request hash is left as it was: a retry, after the upgrade, of
+// a request made before it gets 409 rather than the first job.
+func (q *Queue) MigrateFolders(f FolderIssuer) (int, error) {
+	n := 0
+	err := q.tx(func(tx *sql.Tx) error {
+		rows, err := tx.Query(`SELECT id, spec FROM jobs WHERE COALESCE(json_extract(spec, '$.folder'), '') != ''
+			OR COALESCE(json_extract(spec, '$.repo'), '') != ''`)
+		if err != nil {
+			return fmt.Errorf("queue: read jobs: %w", err)
+		}
+		type row struct{ id, spec string }
+		var todo []row
+		for rows.Next() {
+			var r row
+			if err := rows.Scan(&r.id, &r.spec); err != nil {
+				rows.Close()
+				return fmt.Errorf("queue: read jobs: %w", err)
+			}
+			todo = append(todo, r)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for _, r := range todo {
+			var sp Spec
+			if json.Unmarshal([]byte(r.spec), &sp) != nil {
+				continue
+			}
+			if ResolveFolders(&sp, f) != "" {
+				// A path the connector cannot keep stays, and its runner
+				// refuses it as it would have.
+				continue
+			}
+			sb, _ := json.Marshal(sp)
+			if _, err := tx.Exec(`UPDATE jobs SET spec = ? WHERE id = ?`, string(sb), r.id); err != nil {
+				return fmt.Errorf("queue: write job: %w", err)
+			}
+			n++
+		}
+		return nil
+	})
+	return n, err
+}

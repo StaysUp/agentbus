@@ -140,6 +140,9 @@ type Checkpoint struct {
 	Seq   int       `json:"seq"`
 	Time  time.Time `json:"time"`
 	Files int       `json:"files"`
+	// Root is the checkpoint's snapshot id: the hex SHA-256 of its top
+	// folder's tree (tree.go). Equal files give an equal id, on any machine.
+	Root string `json:"root,omitempty"`
 }
 
 // Applied is what an Apply changed in the person's folder.
@@ -202,6 +205,19 @@ func Names() []string {
 		out = append(out, n)
 	}
 	sort.Strings(out)
+	return out
+}
+
+// Available are the backends this build can use, sorted: overlay only on
+// Linux, where it may still fall back to copy when the kernel refuses it.
+func Available() []string {
+	var out []string
+	for _, n := range Names() {
+		if n == Overlay && runtime.GOOS != "linux" {
+			continue
+		}
+		out = append(out, n)
+	}
 	return out
 }
 

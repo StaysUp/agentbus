@@ -15,20 +15,6 @@ import (
 	"github.com/staysup/agentbus/store"
 )
 
-func TestVersionToken(t *testing.T) {
-	for in, want := range map[string]string{
-		"2.1.318 (Claude Code)\n": "2.1.318",
-		"codex-cli 0.164.0\n":     "0.164.0",
-		"tool v1.2.3-beta.1":      "1.2.3-beta.1",
-		"no version here":         "",
-		"":                        "",
-	} {
-		if got := versionToken(in); got != want {
-			t.Errorf("%q: %q, want %q", in, got, want)
-		}
-	}
-}
-
 // resumableEnv is an API with a whole stack, whose engine's Wire calls wire,
 // with session "s1" started by a run of claude and closed with a resume_id.
 func resumableEnv(t *testing.T, wire run.Wire) *env {

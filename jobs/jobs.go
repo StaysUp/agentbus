@@ -64,6 +64,10 @@ type Config struct {
 	// Settings are the policy and the instructions a runner reads for each
 	// turn (GET /api/v0/runners/{id}/settings). Nil sends the defaults.
 	Settings settings.Store
+	// Folders is this machine's connector, in agentbus up: a job's folder
+	// path becomes its reference there (queue.ResolveFolders). Nil, as in
+	// agentbus server, takes references only.
+	Folders queue.FolderIssuer
 }
 
 // Server is the http.Handler.
@@ -289,6 +293,10 @@ func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, msg)
 		return
 	}
+	if msg := queue.ResolveFolders(&b.Spec, s.cfg.Folders); msg != "" {
+		fail(w, http.StatusBadRequest, msg)
+		return
+	}
 	if s.cfg.Agents != nil && (b.Spec.Session == "" || b.Spec.Harness != "") {
 		// A retry of a request whose agent was removed since gets the first
 		// job (Spec.asked).
@@ -356,25 +364,37 @@ func baseShape(b string) bool {
 // job names agent and a workspace: folder, or repo and base. A later job
 // names session, and may name agent: its turn runs on that agent.
 func checkSpec(sp queue.Spec) string {
+	if len(sp.Labels) > 16 {
+		return "spec.labels holds at most 16 labels"
+	}
+	for _, l := range sp.Labels {
+		if !queue.LabelOK(l) {
+			return "each of spec.labels is 1 to 64 of A-Z, a-z, 0-9 and . _ : -, starting with a letter or digit"
+		}
+	}
+	folder, repo := sp.Folder != "" || sp.FolderRef != "", sp.Repo != "" || sp.RepoRef != ""
 	if sp.Session != "" {
-		if sp.Folder != "" || sp.Repo != "" || sp.Base != "" || sp.Isolate {
+		if folder || repo || sp.Connector != "" || sp.Base != "" || sp.Isolate {
 			return "spec with session takes no folder, isolate, repo or base: they are the session's"
 		}
 		return ""
 	}
-	if sp.Isolate && sp.Folder == "" {
+	if sp.Connector != "" && sp.FolderRef == "" && sp.RepoRef == "" {
+		return "spec.connector goes with spec.folder_ref or spec.repo_ref"
+	}
+	if sp.Isolate && !folder {
 		return "spec.isolate goes with spec.folder"
 	}
 	if sp.Harness == "" {
 		return "spec needs agent with folder, or with repo and base; or session"
 	}
 	switch {
-	case sp.Folder != "" && sp.Repo == "" && sp.Base == "":
-		if !filepath.IsAbs(sp.Folder) {
+	case folder && !repo && sp.Base == "":
+		if sp.Folder != "" && !filepath.IsAbs(sp.Folder) {
 			return "spec.folder must be an absolute path"
 		}
-	case sp.Folder == "" && sp.Repo != "":
-		if !filepath.IsAbs(sp.Repo) || len(sp.Repo) > 4096 {
+	case !folder && repo:
+		if sp.Repo != "" && (!filepath.IsAbs(sp.Repo) || len(sp.Repo) > 4096) {
 			return "spec.repo must be an absolute path"
 		}
 		if !baseShape(sp.Base) {
@@ -421,9 +441,11 @@ type RemovedReport struct {
 	Error   string `json:"error,omitempty"`
 }
 
-// RunnerBeat is the body of a runner's idle heartbeat.
+// RunnerBeat is the body of a runner's idle heartbeat. Capabilities, when
+// sent, replace what the runner reported before.
 type RunnerBeat struct {
-	Capacity int `json:"capacity"`
+	Capacity     int                 `json:"capacity"`
+	Capabilities *queue.Capabilities `json:"capabilities,omitempty"`
 }
 
 func (s *Server) runnerBeat(w http.ResponseWriter, r *http.Request, rn queue.Runner) {
@@ -433,10 +455,16 @@ func (s *Server) runnerBeat(w http.ResponseWriter, r *http.Request, rn queue.Run
 	}
 	var b RunnerBeat
 	if !decode(r, &b) || b.Capacity < 1 || b.Capacity > MaxCapacity {
-		fail(w, http.StatusBadRequest, "the body must be one JSON object with capacity, 1 to 64")
+		fail(w, http.StatusBadRequest, "the body must be one JSON object with capacity, 1 to 64, and optionally capabilities")
 		return
 	}
-	got, err := s.cfg.Queue.RunnerBeat(rn.ID, b.Capacity)
+	if b.Capabilities != nil {
+		if msg := b.Capabilities.Check(); msg != "" {
+			fail(w, http.StatusBadRequest, msg)
+			return
+		}
+	}
+	got, err := s.cfg.Queue.RunnerBeat(rn.ID, b.Capacity, b.Capabilities)
 	if err != nil {
 		s.internal(w)
 		return
@@ -654,6 +682,9 @@ type EnrollRequest struct {
 	Labels   []string `json:"labels,omitempty"`
 	Capacity int      `json:"capacity"`
 	Protocol int      `json:"protocol"`
+	// Capabilities: what the runner can do (queue.Capabilities). A runner
+	// sends its harnesses later, on a heartbeat, once it has probed them.
+	Capabilities *queue.Capabilities `json:"capabilities,omitempty"`
 }
 
 // Enrolled is the answer: the runner, and its token, shown this once.
@@ -686,9 +717,21 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "name must be 1 to 128 bytes, capacity 1 to 64, and at most 64 labels")
 		return
 	}
+	for _, l := range b.Labels {
+		if !queue.LabelOK(l) {
+			fail(w, http.StatusBadRequest, "each label is 1 to 64 of A-Z, a-z, 0-9 and . _ : -, starting with a letter or digit")
+			return
+		}
+	}
+	if b.Capabilities != nil {
+		if msg := b.Capabilities.Check(); msg != "" {
+			fail(w, http.StatusBadRequest, msg)
+			return
+		}
+	}
 	// 256 random bits: four ids of 64 bits each.
 	rt := runnerTokenPrefix + queue.NewID("") + queue.NewID("") + queue.NewID("") + queue.NewID("")
-	rn, err := s.cfg.Queue.RegisterRunner(queue.DefaultTeam, b.Name, b.Labels, b.Capacity, queue.HashToken(rt))
+	rn, err := s.cfg.Queue.RegisterRunner(queue.DefaultTeam, b.Name, b.Labels, b.Capacity, queue.HashToken(rt), b.Capabilities)
 	if err != nil {
 		s.internal(w)
 		return

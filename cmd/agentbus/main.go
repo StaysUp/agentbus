@@ -43,6 +43,7 @@ import (
 	"github.com/staysup/agentbus/api"
 	"github.com/staysup/agentbus/body"
 	"github.com/staysup/agentbus/cost"
+	"github.com/staysup/agentbus/folders"
 	"github.com/staysup/agentbus/gateway"
 	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/jobs"
@@ -171,6 +172,8 @@ type config struct {
 	// A runner's: the server's URL, its enroll_token file, the runner's
 	// name, and where its agents send model calls.
 	server, enrollFile, runnerName, gatewayMode string
+	// A runner's folders it owns (-folder), and its labels (-labels).
+	folders, labels []string
 }
 
 type service struct {
@@ -183,9 +186,10 @@ type service struct {
 	eng      *engine.Engine
 	store    *store.Store
 	queue    *queue.Queue
-	remote   *settings.Remote // a runner's settings: the server's
-	settings settings.Store   // the settings the built-in runner reads
-	log      *logfile.Log     // logs/service.log
+	remote   *settings.Remote  // a runner's settings: the server's
+	settings settings.Store    // the settings the built-in runner reads
+	folders  *folders.Registry // the folders this machine owns (up, runner)
+	log      *logfile.Log      // logs/service.log
 	done     chan error
 	once     sync.Once
 
@@ -276,6 +280,26 @@ func start(c config) (*service, error) {
 	// The saved agents live with the queue: where turns are asked for, not
 	// where they run.
 	var saved *agents.Store
+	// The folders this machine owns, as their connector: in up and in a
+	// runner, where the folders are. In up the API and the jobs routes hand
+	// it the paths they are sent, and keep only references.
+	var fr *folders.Registry
+	var issuer queue.FolderIssuer // nil, not a nil *folders.Registry, in server
+	if c.hasEngine() {
+		if fr, err = folders.Open(filepath.Join(c.home, "folders.json")); err != nil {
+			st.Close()
+			return nil, err
+		}
+		if c.mode == modeUp {
+			issuer = fr
+		}
+		for _, f := range c.folders {
+			if _, err := fr.Register(f); err != nil {
+				st.Close()
+				return nil, fmt.Errorf("-folder %s: %w", f, err)
+			}
+		}
+	}
 	if c.hasQueue() {
 		if saved, err = agents.Open(c.home, nil); err != nil {
 			st.Close()
@@ -285,7 +309,17 @@ func start(c config) (*service, error) {
 			st.Close()
 			return nil, err
 		}
-		js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollToken, Heartbeat: c.heartbeat, Agents: saved, Settings: cfgStore})
+		// Jobs stored before folder references name paths: the built-in
+		// connector keeps them, and the jobs keep references.
+		if issuer != nil {
+			if _, err := q.MigrateFolders(issuer); err != nil {
+				closeQ()
+				st.Close()
+				return nil, err
+			}
+		}
+		js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollToken, Heartbeat: c.heartbeat, Agents: saved, Settings: cfgStore,
+			Folders: issuer})
 		if err != nil {
 			closeQ()
 			st.Close()
@@ -396,7 +430,7 @@ func start(c config) (*service, error) {
 		}
 	}
 	a, err := api.New(api.Config{Store: st, Token: token, TurnsToken: turnsToken, Port: port, AnyHost: !loopback,
-		BaseURL: baseURL, Origin: c.origin, LookPath: c.lookPath, Environ: c.environ, Build: build(debug.ReadBuildInfo()),
+		BaseURL: baseURL, Origin: c.origin, Environ: c.environ, Folders: issuer, Build: build(debug.ReadBuildInfo()),
 		Queue: q, Jobs: jobsAPI, Engine: eng, TurnWait: c.turnWait, Agents: saved, Settings: cfgStore})
 	if err != nil {
 		ln.Close()
@@ -454,7 +488,7 @@ func start(c config) (*service, error) {
 	}
 	host, _, _ := net.SplitHostPort(c.listen)
 	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: gws, api: a, eng: eng, store: st,
-		queue: q, remote: remote, settings: cfgStore, log: svcLog, done: make(chan error, 1)}
+		queue: q, remote: remote, settings: cfgStore, folders: fr, log: svcLog, done: make(chan error, 1)}
 	s.srv = &http.Server{
 		Handler:           logRequests(svcLog, route(a, vendors{anth, oai, orAnth, orOAI}, !loopback)),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -536,7 +570,8 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	rn, err := runner.Enroll(ctx, runner.Config{Queue: self, EnrollToken: enrollToken, Name: name, Capacity: capacity,
-		Engine: s.eng, Store: s.store, Logf: svcLog.Printf,
+		Engine: s.eng, Store: s.store, Logf: svcLog.Printf, Labels: c.labels,
+		Folders: s.folders, LookPath: c.lookPath, Environ: c.environ,
 		Workdir: filepath.Join(c.home, "worktrees"), StateFile: filepath.Join(c.home, "runner.json"), Settings: s.settings})
 	if err != nil {
 		cancel()

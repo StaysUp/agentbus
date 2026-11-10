@@ -1,40 +1,37 @@
 package api
 
-// GET /api/v0/harnesses: the programs this service can run an agent on, which
-// it finds, their versions, whether each is signed in, and the access and
-// models each offers. The "+ Agent" form reads it. docs/CLIENT_API.md is the
-// contract.
+// GET /api/v0/harnesses: the programs an agent can run on, which the runners
+// find, their versions, whether each is signed in, and the access and models
+// each offers. Each runner probes its own machine and reports it (package
+// runner, queue.Capabilities); this service never runs an agent's program to
+// answer. The "+ Agent" form reads it. docs/CLIENT_API.md is the contract.
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"net/http"
-	"os/exec"
-	"regexp"
-	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/staysup/agentbus/agents"
 	"github.com/staysup/agentbus/harness"
+	"github.com/staysup/agentbus/queue"
 )
 
-// HarnessProbeTimeout bounds each --version or status command.
-const HarnessProbeTimeout = 5 * time.Second
-
-// HarnessCacheFor is how long an answer is kept.
-const HarnessCacheFor = time.Minute
+// HarnessReportWait bounds how long GET /api/v0/harnesses waits for a runner
+// that has enrolled but not yet reported its first probe, as just after
+// agentbus up starts.
+const HarnessReportWait = 15 * time.Second
 
 // Harness is one harness in GET /api/v0/harnesses.
 type Harness struct {
 	Name     string `json:"name" doc:"The harness, as an agent names it: claude, codex or opencode."`
 	Label    string `json:"label" doc:"Its name for a screen, such as Claude Code."`
 	Disabled bool   `json:"disabled,omitempty" doc:"True when no agent can be saved on it yet, as for opencode. It is not probed."`
-	Found    bool   `json:"found" doc:"The binary is on the service's PATH."`
-	Version  string `json:"version,omitempty" doc:"From <bin> --version. Absent when not found or not shaped like a version."`
-	SignedIn *bool  `json:"signed_in,omitempty" doc:"From the harness's own offline status command. Absent when it gave no clear answer."`
+	Found    bool   `json:"found" doc:"The binary is on the PATH of a runner seen in the last minute."`
+	Version  string `json:"version,omitempty" doc:"From <bin> --version, on the first runner that found it (the newest seen). Absent when not found or not shaped like a version."`
+	SignedIn *bool  `json:"signed_in,omitempty" doc:"From the harness's own offline status command, on the same runner. Absent when it gave no clear answer."`
+	// Runners: what each runner reported of it.
+	Runners []RunnerHarness `json:"runners" doc:"What each runner seen in the last minute reported of this harness, newest seen first. Empty when none did."`
 	// Access lists every kind of access, in the order a form shows them.
 	Access []AccessOption `json:"access" doc:"Each way the harness can reach a model, in the order a form shows them."`
 }
@@ -50,50 +47,97 @@ type AccessOption struct {
 	KeySet   *bool    `json:"key_set,omitempty" doc:"For openrouter: whether key_env is set in this service's environment. Its value is never sent."`
 }
 
+// RunnerHarness is one runner's report of one harness.
+type RunnerHarness struct {
+	Runner   string `json:"runner" doc:"The runner's id."`
+	Name     string `json:"name" doc:"The runner's name."`
+	Found    bool   `json:"found" doc:"The binary is on that runner's PATH."`
+	Version  string `json:"version,omitempty" doc:"From <bin> --version there."`
+	SignedIn *bool  `json:"signed_in,omitempty" doc:"From the harness's own offline status command there."`
+}
+
 // HarnessList is the answer to GET /api/v0/harnesses.
 type HarnessList struct {
 	Harnesses []Harness `json:"harnesses"`
-}
-
-type harnessCache struct {
-	mu   sync.Mutex
-	at   time.Time
-	list []Harness
 }
 
 func (a *API) listHarnesses(w http.ResponseWriter, r *http.Request) {
 	if !noBody(w, r) {
 		return
 	}
-	// One probe at a time; a caller arriving meanwhile waits and reads the
-	// fresh answer.
-	a.harnesses.mu.Lock()
-	defer a.harnesses.mu.Unlock()
-	now := a.cfg.Now()
-	if a.harnesses.list == nil || now.Sub(a.harnesses.at) >= HarnessCacheFor {
-		list := make([]Harness, 0, len(harness.All())+len(harness.Planned()))
-		for _, h := range harness.All() {
-			list = append(list, a.probe(r.Context(), h.Info()))
-		}
-		for _, p := range harness.Planned() {
-			list = append(list, Harness{Name: p.Name, Label: p.Label, Disabled: true, Access: []AccessOption{}})
-		}
-		a.harnesses.list, a.harnesses.at = list, now
+	runners, err := a.reportedRunners(r.Context())
+	if err != nil {
+		a.internal(w)
+		return
 	}
-	// key_set is read on every call: it is cheap, and a cached answer would
-	// hide a variable the person just set.
-	out := make([]Harness, len(a.harnesses.list))
-	for i, h := range a.harnesses.list {
-		h.Access = slices.Clone(h.Access)
-		for j := range h.Access {
-			if h.Access[j].Kind == agents.OpenRouter {
-				set := a.keySet(h.Access[j].KeyEnv)
-				h.Access[j].KeySet = &set
+	list := make([]Harness, 0, len(harness.All())+len(harness.Planned()))
+	for _, h := range harness.All() {
+		info := h.Info()
+		ag := Harness{Name: info.Name, Label: info.Label, Access: accessOptions(info), Runners: []RunnerHarness{}}
+		for _, rn := range runners {
+			for _, rep := range rn.Caps.Harnesses {
+				if rep.Name != info.Name {
+					continue
+				}
+				ag.Runners = append(ag.Runners, RunnerHarness{Runner: rn.ID, Name: rn.Name, Found: rep.Found,
+					Version: rep.Version, SignedIn: rep.SignedIn})
+				if rep.Found && !ag.Found {
+					ag.Found, ag.Version, ag.SignedIn = true, rep.Version, rep.SignedIn
+				}
 			}
 		}
-		out[i] = h
+		// key_set is read on every call: it is cheap, and an answer kept
+		// would hide a variable the person just set. The key is the
+		// control plane's: runners hold no secrets.
+		for j := range ag.Access {
+			if ag.Access[j].Kind == agents.OpenRouter {
+				set := a.keySet(ag.Access[j].KeyEnv)
+				ag.Access[j].KeySet = &set
+			}
+		}
+		list = append(list, ag)
 	}
-	writeJSON(w, http.StatusOK, HarnessList{out})
+	for _, p := range harness.Planned() {
+		list = append(list, Harness{Name: p.Name, Label: p.Label, Disabled: true, Access: []AccessOption{}, Runners: []RunnerHarness{}})
+	}
+	writeJSON(w, http.StatusOK, HarnessList{list})
+}
+
+// reportedRunners are the runners seen within queue.RunnerFresh that have
+// reported their harnesses, newest seen first. While a runner so seen has
+// not reported yet, it waits for that report, up to HarnessReportWait.
+func (a *API) reportedRunners(ctx context.Context) ([]queue.Runner, error) {
+	if a.cfg.Queue == nil {
+		return nil, nil
+	}
+	deadline := a.cfg.Now().Add(HarnessReportWait)
+	for {
+		all, err := a.cfg.Queue.Runners(queue.DefaultTeam)
+		if err != nil {
+			return nil, err
+		}
+		var out []queue.Runner
+		waiting := false
+		now := a.cfg.Now()
+		for _, rn := range all {
+			if now.Sub(rn.Seen) > queue.RunnerFresh {
+				continue
+			}
+			if rn.Caps == nil || rn.Caps.Harnesses == nil {
+				waiting = true
+				continue
+			}
+			out = append(out, rn)
+		}
+		if !waiting || len(out) > 0 || !a.cfg.Now().Before(deadline) {
+			return out, nil
+		}
+		select {
+		case <-ctx.Done():
+			return out, nil
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 // accessOptions is what a harness offers (harness.Info.Access). An
@@ -124,90 +168,22 @@ func (a *API) keySet(name string) bool {
 	return false
 }
 
-// probe finds one harness's binary and asks it its version and sign-in
-// status: its own offline status command, whose exit code is the answer, 0
-// signed in and 1 not. That command's output is discarded, since it can name
-// the account. It never returns the path.
-func (a *API) probe(ctx context.Context, info harness.Info) Harness {
-	ag := Harness{Name: info.Name, Label: info.Label, Access: accessOptions(info)}
-	if a.cfg.LookPath == nil {
-		return ag
+// FolderList is the answer to GET /api/v0/folders.
+type FolderList struct {
+	Folders []queue.RunnerFolder `json:"folders" doc:"Each folder a runner reported, newest report first."`
+}
+
+func (a *API) listFolders(w http.ResponseWriter, r *http.Request) {
+	if !noBody(w, r) {
+		return
 	}
-	bin, err := a.cfg.LookPath(info.Name)
-	if err != nil {
-		return ag
-	}
-	ag.Found = true
-	out, code := a.runProbe(ctx, bin, "--version")
-	if code == 0 {
-		ag.Version = versionToken(out)
-	}
-	if args := info.StatusArgs; len(args) > 0 {
-		switch _, code := a.runProbe(ctx, bin, args...); code {
-		case 0:
-			t := true
-			ag.SignedIn = &t
-		case 1:
-			f := false
-			ag.SignedIn = &f
+	list := []queue.RunnerFolder{}
+	if a.cfg.Queue != nil {
+		var err error
+		if list, err = a.cfg.Queue.Folders(queue.DefaultTeam); err != nil {
+			a.internal(w)
+			return
 		}
 	}
-	return ag
-}
-
-// runProbe runs bin with args, an empty stdin and the service's environment,
-// within HarnessProbeTimeout. It returns at most 4 KiB of stdout and the exit
-// code, or -1 when the command did not end on its own.
-func (a *API) runProbe(ctx context.Context, bin string, args ...string) (string, int) {
-	ctx, cancel := context.WithTimeout(ctx, HarnessProbeTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, bin, args...)
-	if a.cfg.Environ != nil {
-		cmd.Env = a.cfg.Environ()
-	}
-	out := &capped{max: 4 << 10}
-	cmd.Stdout = out
-	cmd.WaitDelay = time.Second
-	err := cmd.Run()
-	if ctx.Err() != nil {
-		return "", -1
-	}
-	var ee *exec.ExitError
-	switch {
-	case err == nil:
-		return out.String(), 0
-	case errors.As(err, &ee) && ee.Exited():
-		return out.String(), ee.ExitCode()
-	}
-	return "", -1
-}
-
-var versionShape = regexp.MustCompile(`^v?([0-9]+\.[0-9]+(\.[0-9]+)?([-+][0-9A-Za-z.-]+)?)$`)
-
-// versionToken is the first word of out shaped like a version: "2.1.318" from
-// "2.1.318 (Claude Code)", "0.164.0" from "codex-cli 0.164.0".
-func versionToken(out string) string {
-	for _, f := range strings.Fields(out) {
-		if m := versionShape.FindStringSubmatch(f); m != nil {
-			return m[1]
-		}
-	}
-	return ""
-}
-
-// capped keeps the first max bytes written to it.
-type capped struct {
-	bytes.Buffer
-	max int
-}
-
-func (c *capped) Write(p []byte) (int, error) {
-	if room := c.max - c.Len(); room > 0 {
-		if len(p) > room {
-			c.Buffer.Write(p[:room])
-		} else {
-			c.Buffer.Write(p)
-		}
-	}
-	return len(p), nil
+	writeJSON(w, http.StatusOK, FolderList{list})
 }

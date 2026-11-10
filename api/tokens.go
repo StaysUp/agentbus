@@ -429,7 +429,7 @@ func (a *API) askChecks(w http.ResponseWriter, g run.Grant, perm settings.Policy
 	if body.Isolate != nil && !*body.Isolate {
 		return refuse(turnIsolateRefused)
 	}
-	asked, ws, err := a.cfg.Queue.SessionFolders(queue.DefaultTeam, g.Session)
+	asked, ws, err := a.cfg.Queue.SessionFolders(queue.DefaultTeam, g.Session, a.cfg.Folders)
 	if err != nil {
 		a.internal(w)
 		return queue.Links{}, false

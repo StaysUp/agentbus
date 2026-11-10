@@ -19,7 +19,10 @@ const module = "github.com/staysup/agentbus"
 // or saved agents; agents, the saved agents, may use run and nothing of the
 // queue side; isolation, the session's copies, may use workspace and
 // nothing of the turn or queue side; the queue may use run and workspace,
-// never the reverse.
+// never the reverse. folders, the connector's folders by path, uses nothing
+// of the module, and the control side (api, jobs, queue, agents, store, the
+// gateway, replay, settings) never uses it: control knows a folder by its
+// reference only (plans/IDENTITIES.md in the notes).
 // Checked over every import, direct or not.
 func TestPackageLayers(t *testing.T) {
 	jobSide := []string{"queue", "jobs", "runner"}
@@ -41,6 +44,9 @@ func TestPackageLayers(t *testing.T) {
 		{[]string{"queue"}, []string{"jobs", "runner", "api"}},
 		{[]string{"jobs"}, []string{"runner", "api"}},
 		{[]string{"runner"}, []string{"api"}},
+		{[]string{"folders"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
+			"cost", "replay", "store", "body", "logfile", "settings", "cmd"}, jobSide...)},
+		{[]string{"api", "jobs", "queue", "agents", "store", "gateway", "replay", "settings"}, []string{"folders"}},
 	} {
 		for _, top := range c.pkgs {
 			pkgs := packagesUnder(t, top)

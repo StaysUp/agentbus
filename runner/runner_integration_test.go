@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/folders"
 	"github.com/staysup/agentbus/isolation"
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
@@ -117,15 +118,19 @@ func newWorld(t *testing.T, capacity int) *world {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fr, err := folders.Open(filepath.Join(dir, "folders.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	s, err := jobs.New(jobs.Config{Queue: q, Token: mainTok, EnrollToken: enrollTok,
-		Lease: 2 * time.Second, Heartbeat: 50 * time.Millisecond, MaxWait: 200 * time.Millisecond})
+		Lease: 2 * time.Second, Heartbeat: 50 * time.Millisecond, MaxWait: 200 * time.Millisecond, Folders: fr})
 	if err != nil {
 		t.Fatal(err)
 	}
 	plane := httptest.NewServer(s)
 	ctx, cancel := context.WithCancel(context.Background())
 	r, err := Enroll(ctx, Config{Queue: plane.URL, EnrollToken: enrollTok, Name: "test", Capacity: capacity,
-		Engine: eng, Store: st, StopWait: 5 * time.Second, Logf: t.Logf, Workdir: filepath.Join(dir, "worktrees")})
+		Engine: eng, Store: st, StopWait: 5 * time.Second, Logf: t.Logf, Workdir: filepath.Join(dir, "worktrees"), Folders: fr})
 	if err != nil {
 		t.Fatal(err)
 	}

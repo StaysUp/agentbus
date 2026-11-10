@@ -5,13 +5,16 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/staysup/agentbus/folders"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/store"
 )
@@ -125,11 +128,26 @@ func TestServerAndRunner(t *testing.T) {
 	folder := t.TempDir()
 	t.Setenv("AGENTBUS_FAKE_MARK", filepath.Join(folder, "made.txt"))
 
+	// The server has no folders of its own: a path is refused. The runner
+	// owns the folder (-folder), and the server knows it by its reference.
+	if code := callAPI(t, server, tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn",
+		"spec": map[string]any{"agent": "claude", "folder": folder, "prompt": "hello"}}, nil); code != 400 {
+		t.Fatalf("POST /api/v0/jobs with a path on the server: %d, want 400", code)
+	}
+	fr, err := folders.Open(filepath.Join(runnerHome, "folders.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, connector := folders.Ref(folder), fr.Connector()
+
 	// With no runner yet, a turn waits in the server's queue.
 	var queued queue.Job
 	if code := callAPI(t, server, tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn",
-		"spec": map[string]any{"agent": "claude", "folder": folder, "prompt": "hello", "model": "haiku"}}, &queued); code != 201 {
+		"spec": map[string]any{"agent": "claude", "folder_ref": ref, "connector": connector, "prompt": "hello", "model": "haiku"}}, &queued); code != 201 {
 		t.Fatalf("POST /api/v0/jobs: %d", code)
+	}
+	if strings.Contains(fmt.Sprint(queued.Spec), folder) {
+		t.Fatalf("the server keeps the folder's path: %+v", queued.Spec)
 	}
 	time.Sleep(300 * time.Millisecond)
 	if j := waitState(t, server, tok, queued.ID); j.State != queue.Queued {
@@ -138,7 +156,7 @@ func TestServerAndRunner(t *testing.T) {
 
 	r, err := start(config{mode: modeRunner, listen: "127.0.0.1:0", home: runnerHome, upstream: mustURL("http://127.0.0.1:1"),
 		chatgpt: mustURL("http://127.0.0.1:1"), logf: t.Logf, lookPath: look, noReplay: true,
-		server: "http://" + server.addr, enrollFile: filepath.Join(serverHome, "enroll_token"), runnerName: "far"})
+		server: "http://" + server.addr, enrollFile: filepath.Join(serverHome, "enroll_token"), runnerName: "far", folders: []string{folder}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,9 +185,18 @@ func TestServerAndRunner(t *testing.T) {
 	}
 	// POST /api/v0/turns on the server runs on the runner too, and answers
 	// with the turn.
-	code, out, raw := postRun(t, server, tok, map[string]any{"agent": "claude", "folder": folder, "prompt": "again"})
+	code, out, raw := postRun(t, server, tok, map[string]any{"agent": "claude", "folder_ref": ref, "connector": connector, "prompt": "again"})
 	if code != 202 || out["turn"] == "" || out["queued"] == true {
 		t.Fatalf("POST /api/v0/turns on the server: %d %s", code, raw)
+	}
+	// The runner reported its folder by reference and its name, never its path.
+	var fl struct {
+		Folders []queue.RunnerFolder `json:"folders"`
+	}
+	if code, raw := getAPI(t, server, tok, "/api/v0/folders"); code != 200 || json.Unmarshal([]byte(raw), &fl) != nil ||
+		len(fl.Folders) != 1 || fl.Folders[0].Ref != ref || fl.Folders[0].Connector != connector ||
+		fl.Folders[0].Name != filepath.Base(folder) || strings.Contains(raw, folder) {
+		t.Fatalf("GET /api/v0/folders: %d %s", code, raw)
 	}
 	// The runner's own service keeps no queue: it takes no turns itself.
 	rtok := readToken(t, runnerHome)

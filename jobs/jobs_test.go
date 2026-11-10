@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/staysup/agentbus/folders"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/settings"
 )
@@ -28,7 +29,11 @@ func newServer(t *testing.T) *httptest.Server {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := New(Config{Queue: q, Token: mainTok, EnrollToken: enrollTok, MaxWait: 200 * time.Millisecond})
+	fr, err := testFolders(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(Config{Queue: q, Token: mainTok, EnrollToken: enrollTok, MaxWait: 200 * time.Millisecond, Folders: fr})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +71,8 @@ func send(t *testing.T, srv *httptest.Server, tok, method, path string, body any
 func enroll(t *testing.T, srv *httptest.Server, capacity int) Enrolled {
 	t.Helper()
 	var e Enrolled
-	if code := send(t, srv, enrollTok, "POST", "/api/v0/runners", EnrollRequest{Name: "r", Capacity: capacity, Protocol: 1}, &e); code != 201 {
+	if code := send(t, srv, enrollTok, "POST", "/api/v0/runners", EnrollRequest{Name: "r", Capacity: capacity, Protocol: 1,
+		Capabilities: &queue.Capabilities{Connector: testConnector}}, &e); code != 201 {
 		t.Fatalf("enroll: %d", code)
 	}
 	if !strings.HasPrefix(e.Token, runnerTokenPrefix) || len(e.Token) != len(runnerTokenPrefix)+64 {
@@ -229,10 +235,54 @@ func TestSpecShapes(t *testing.T) {
 		{queue.Spec{Session: "s1", Harness: "claude", Prompt: "x"}, 201},
 		{queue.Spec{Session: "s1", Isolate: true, Prompt: "x"}, 400},
 		{queue.Spec{Session: "s1", Repo: "/r", Base: "main", Prompt: "x"}, 400},
+		{queue.Spec{Harness: "claude", FolderRef: "fld_0123456789abcdef", Connector: "con_0123456789abcdef", Prompt: "x"}, 201},
+		{queue.Spec{Harness: "claude", FolderRef: "fld_0123456789abcdef", Prompt: "x"}, 201},
+		{queue.Spec{Harness: "claude", FolderRef: "/f", Prompt: "x"}, 400},
+		{queue.Spec{Harness: "claude", Folder: "/f", FolderRef: "fld_0123456789abcdef", Prompt: "x"}, 400},
+		{queue.Spec{Harness: "claude", Folder: "/f", Connector: "con_0123456789abcdef", Prompt: "x"}, 400},
+		{queue.Spec{Session: "s1", FolderRef: "fld_0123456789abcdef", Prompt: "x"}, 400},
+		{queue.Spec{Harness: "claude", Folder: "/f", Labels: []string{"gpu"}, Prompt: "x"}, 201},
+		{queue.Spec{Harness: "claude", Folder: "/f", Labels: []string{"-x"}, Prompt: "x"}, 400},
 	} {
 		if got := send(t, srv, mainTok, "POST", "/api/v0/jobs", JobRequest{Kind: "turn", Spec: c.spec}, nil); got != c.want {
 			t.Errorf("%+v: %d, want %d", c.spec, got, c.want)
 		}
+	}
+}
+
+// A job's folder is kept by its reference: the path a request names never
+// reaches the queue.
+func TestJobKeepsTheFolderReference(t *testing.T) {
+	srv := newServer(t)
+	var j queue.Job
+	if got := send(t, srv, mainTok, "POST", "/api/v0/jobs", JobRequest{Kind: "turn",
+		Spec: queue.Spec{Harness: "claude", Folder: "/some/where", Prompt: "x"}}, &j); got != 201 {
+		t.Fatalf("create: %d", got)
+	}
+	if j.Spec.Folder != "" || j.Spec.FolderRef != folders.Ref("/some/where") || j.Spec.Connector != testConnector {
+		t.Fatalf("%+v", j.Spec)
+	}
+}
+
+// A runner's capabilities are checked at enroll and on its heartbeat.
+func TestEnrollCapabilities(t *testing.T) {
+	srv := newServer(t)
+	bad := &queue.Capabilities{Connector: "con_short"}
+	if code := send(t, srv, enrollTok, "POST", "/api/v0/runners", EnrollRequest{Name: "r", Capacity: 1, Protocol: 1, Capabilities: bad}, nil); code != 400 {
+		t.Fatalf("bad capabilities at enroll: %d", code)
+	}
+	if code := send(t, srv, enrollTok, "POST", "/api/v0/runners", EnrollRequest{Name: "r", Capacity: 1, Protocol: 1, Labels: []string{"a b"}}, nil); code != 400 {
+		t.Fatalf("bad label at enroll: %d", code)
+	}
+	e := enroll(t, srv, 1)
+	if code := send(t, srv, e.Token, "POST", "/api/v0/runners/"+e.Runner.ID+"/heartbeat", RunnerBeat{Capacity: 1, Capabilities: bad}, nil); code != 400 {
+		t.Fatalf("bad capabilities on a heartbeat: %d", code)
+	}
+	var rn queue.Runner
+	good := &queue.Capabilities{OS: "linux", Arch: "arm64", Connector: testConnector}
+	if code := send(t, srv, e.Token, "POST", "/api/v0/runners/"+e.Runner.ID+"/heartbeat", RunnerBeat{Capacity: 1, Capabilities: good}, &rn); code != 200 ||
+		rn.Caps == nil || rn.Caps.Arch != "arm64" {
+		t.Fatalf("heartbeat: %d %+v", code, rn.Caps)
 	}
 }
 
@@ -339,4 +389,16 @@ func TestRunnerSettings(t *testing.T) {
 	if code := send(t, srv, a.Token, "GET", path, nil, nil); code != 503 {
 		t.Fatalf("a broken file: %d", code)
 	}
+}
+
+// testConnector is the connector id of testFolders: the runners the tests
+// enroll report it, so they take the jobs that name its folders.
+const testConnector = "con_0123456789abcdef"
+
+func testFolders(t *testing.T) (*folders.Registry, error) {
+	p := filepath.Join(t.TempDir(), "folders.json")
+	if err := os.WriteFile(p, []byte(`{"connector":"`+testConnector+`","folders":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return folders.Open(p)
 }

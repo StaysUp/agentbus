@@ -383,3 +383,29 @@ func TestBigFolderTimes(t *testing.T) {
 	t.Logf("%d files of 4 KiB, %s: open %v, checkpoint unchanged %v, checkpoint after 2 edits %v, apply %v, close %v",
 		n, s.Method, opened, unchanged, changed, applied, time.Since(start))
 }
+
+// A checkpoint's root is its snapshot id: two copies of one folder have the
+// same one, an edit changes it, and reading the checkpoint again gives the
+// root it was taken with. The tree holds each file's size, mode and
+// modification time, so the id names this state of the files, not their
+// content alone.
+func TestCheckpointRootIsTheSnapshotID(t *testing.T) {
+	a := t.TempDir()
+	fixture(t, a, map[string]string{"x.txt": "1", "d/y.txt": "2"})
+	ba, sa := open(t, Copy, a)
+	bb, sb := open(t, Copy, a)
+	ca, err1 := ba.Checkpoint(sa, Base)
+	cb, err2 := bb.Checkpoint(sb, Base)
+	if err1 != nil || err2 != nil || len(ca.Root) != 64 || ca.Root != cb.Root {
+		t.Fatalf("roots %q %q (%v %v)", ca.Root, cb.Root, err1, err2)
+	}
+	fixture(t, sa.Dir, map[string]string{"x.txt": "changed"})
+	c1, err := ba.Checkpoint(sa, "t1")
+	if err != nil || c1.Root == "" || c1.Root == ca.Root {
+		t.Fatalf("after an edit: %+v %v", c1, err)
+	}
+	list, err := ba.Checkpoints(sa)
+	if err != nil || len(list) != 2 || list[0].Root != ca.Root || list[1].Root != c1.Root {
+		t.Fatalf("read back: %+v %v", list, err)
+	}
+}

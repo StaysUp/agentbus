@@ -36,7 +36,7 @@ func open(t *testing.T) (*Queue, *clock) {
 
 func runner(t *testing.T, q *Queue, capacity int) Runner {
 	t.Helper()
-	r, err := q.RegisterRunner(DefaultTeam, "r", []string{"agent:claude"}, capacity, HashToken(NewID("tok_")))
+	r, err := q.RegisterRunner(DefaultTeam, "r", []string{"agent:claude"}, capacity, HashToken(NewID("tok_")), nil)
 	if err != nil {
 		t.Fatal(err)
 	}

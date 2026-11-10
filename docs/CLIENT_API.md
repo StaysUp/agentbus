@@ -546,6 +546,11 @@ process that does it.
   reaches the folder. The session's `folder` in its events is the copy's folder.
   `"isolate": false`, or the setting `"none"`, uses the folder as it is.
   `isolate` with `session` is refused: a session keeps its workspace.
+- **A folder is kept by its reference.** In `agentbus up` the built-in connector keeps the path of
+  `folder` in `folders.json` in the data folder, and the turn's job keeps only `folder_ref` and
+  `connector`. Send those two in place of `folder` to name a folder another machine owns, from
+  `GET /api/v0/folders`; `agentbus server` takes only those. The turn runs on the runner that owns
+  the folder.
 
 The reply is **202** `{"id":"abc","turn":"t_5d0c19a2e7b3f481","base_url":"http://127.0.0.1:8787/s/abc/t/t_5d0c19a2e7b3f481","job":"job_1f…"}`,
 sent as soon as the agent has started. `id` is the session, `turn` the new turn, `job` the turn
@@ -1184,9 +1189,17 @@ Routes, all with the main token only:
 
 It was `GET /api/v0/agents` in 0.1, renamed in 0.2 when agents became saved objects.
 
-- `found`: the harness's binary is on the service's `PATH`, by the same lookup runs use.
-- `version`: the version token of `<bin> --version`, run with a 5 second limit. Absent when the
-  binary is not found or the output has no version.
+Each runner probes its own machine and reports it: when it starts, and once a minute after. This
+service never runs an agent's program to answer. Just after a runner starts, the answer waits for
+its first report, up to 15 seconds.
+
+- `found`: the harness's binary is on the `PATH` of a runner seen in the last minute, by the same
+  lookup runs use. In `agentbus up` that is this machine.
+- `version`: the version token of `<bin> --version`, run with a 5 second limit, on the first runner
+  that found it (the newest seen). Absent when the binary is not found or the output has no
+  version.
+- `runners`: each runner's own report of the harness: `runner` (its id), `name`, `found`,
+  `version`, `signed_in`. Empty when no runner reported yet.
 - `signed_in`: from the harness's own offline status command, by its exit code only, output
   discarded: `claude auth status` and `codex login status` (exit 0 signed in, 1 not; both answer
   with network access denied, measured 2026-11-05 on 2.1.318 and 0.164.0). Absent when the command
@@ -1196,7 +1209,19 @@ It was `GET /api/v0/agents` in 0.1, renamed in 0.2 when agents became saved obje
   `disabled` means not available yet. `key_set` is read on every call.
 - `disabled` on a harness: no agent can be saved on it yet. It is not probed.
 - Never a path, and nothing from the harnesses' configuration.
-- The probe is kept for one minute.
+- `key_set` is this service's: a runner holds no key.
+
+### `GET /api/v0/folders` — the folders the runners own
+
+```json
+{"folders":[{"ref":"fld_3f1c0a9b2e4d5f60","name":"x","connector":"con_8a7b6c5d4e3f2a10","runner":"run_…"}]}
+```
+
+A folder is known here by its reference, `fld_` and 16 hex digits, issued by the connector on the
+machine that has it (in `agentbus up`, this service's own; on another machine, `agentbus runner
+-folder <path>`). The path stays on that machine; `name` is its last part only. Start a turn in it
+with `folder_ref` and `connector`. In `agentbus up` every folder a turn was started in is listed,
+newest first, within a minute of its first turn.
 
 ### `GET /api/v0/version` — which build this service is
 
@@ -1876,3 +1901,18 @@ gets a new version path, and the old one stays for a while.
   checkpoints whatever the isolation, and git is never asked. Gone: `git_diff`,
   `git_diff_truncated`, `head_before`, `head_after` and each file's `git` label. `kind` is always
   `snapshot`. Each changed text file has its own `diff` instead, where its earlier content is kept.
+
+**What 0.3 changes for a 0.2 client (in progress):**
+
+- A folder is kept by its reference. `POST /api/v0/turns` and `POST /api/v0/jobs` still take
+  `folder` (and `repo`) as a path in `agentbus up`; the queue keeps `folder_ref` (or `repo_ref`)
+  and `connector` instead, so a job's `spec` no longer shows the path. Both also take
+  `folder_ref` and `connector` in place of the path. `agentbus server` has no folders of its own:
+  it refuses a path with 400 and takes `folder_ref` from the new `GET /api/v0/folders`.
+- A review job's `spec` names no folder: it reads the reviewed session's workspace (`workspace`).
+- `turn.started` and `session.opened` of a run carry `folder_ref`.
+- A workspace carries `snapshot`: the root hash of its first checkpoint's tree (64 hex digits).
+- `GET /api/v0/harnesses` answers from the runners' reports, with `runners` added; see above.
+- A job's `spec.labels`: only a runner with every label takes it. A runner enrolls and heartbeats
+  with `capabilities` (`os`, `arch`, `isolation`, `harnesses`, `connector`, `folders`); a first job
+  on a harness goes to a runner that has it, unless none seen in the last minute does.

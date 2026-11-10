@@ -416,11 +416,22 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 
 ### GET /api/v0/harnesses
 
-Which harnesses this service can run an agent on: found on PATH, version, signed in, and for each
+Which harnesses an agent can run on: found on a runner's PATH, version, signed in, and for each
 the access kinds and models a "+ Agent" form offers (`api` and `opencode` are listed, disabled).
+Each runner probes its own machine and reports it; `runners` lists each runner's report.
 
 ```sh
 curl -s -H "Authorization: Bearer $TOKEN" $B/api/v0/harnesses
+```
+
+### GET /api/v0/folders
+
+The folders the runners own, each by its reference (`fld_` and 16 hex digits) with its `connector`
+and the last part of its path. The path itself stays on its machine. Start a turn in one with
+`folder_ref` and `connector` in place of `folder`; `agentbus server` takes only that.
+
+```sh
+curl -s -H "Authorization: Bearer $TOKEN" $B/api/v0/folders
 ```
 
 ### GET /api/v0/version
@@ -437,7 +448,9 @@ curl -s -H "Authorization: Bearer $TOKEN" $B/api/v0/version
 A job is a requested turn, of kind `turn` or `review`, or an `apply` that
 `POST /api/v0/turns/{id}/apply` makes. A runner takes it and runs it; its attempt
 is its turn (the attempt id is the turn id, and `turn_started` says the turn started). A session's
-first turn job names `agent` and `folder` (with `isolate: true` for a copy), or `repo` and `base` for a git worktree of its own; a
+first turn job names `agent` and `folder` (with `isolate: true` for a copy), or `repo` and `base` for a git worktree of its own
+(or `folder_ref`/`repo_ref` and `connector` in place of a path; the queue keeps only those), and
+optionally `labels`, which a runner must all have to take it; a
 later one names `session` only, waits for the one before it, and keeps the session's model when it names none. Each job's `result` lists the files
 it changed. A review job runs read-only in the reviewed job's workspace, in a session of its own,
 and ends with `verdict` (`pass`, `fail` or `unknown`) and `findings`; any P1 makes it `fail`.

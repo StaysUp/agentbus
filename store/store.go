@@ -346,11 +346,14 @@ func (s *Store) Page(after int64, f Filter, limit, maxBytes int) (recs []Record,
 // latest session.closed that carries one, and whether a run's child for it is
 // still running.
 type Continuation struct {
-	Known    bool   // the store has events of the session
-	Harness  string // the harness, such as claude
-	Folder   string
-	ResumeID string
-	Open     bool
+	Known   bool   // the store has events of the session
+	Harness string // the harness, such as claude
+	Folder  string
+	// FolderRef: the reference of the person's folder, from the same
+	// event; "" for a session from before references.
+	FolderRef string
+	ResumeID  string
+	Open      bool
 	// AgentID, Access and KeyEnv come from the same event as Harness: the
 	// saved agent, how it reaches its model, and the name of its key's
 	// variable. Empty for a session started by harness name alone.
@@ -369,13 +372,14 @@ type Continuation struct {
 // Continuation reads what the session's next turn needs, as of now.
 func (s *Store) Continuation(id string) (Continuation, error) {
 	var c Continuation
-	var agent, folder, resume, agentID, access, keyEnv, model sql.NullString
+	var agent, folder, folderRef, resume, agentID, access, keyEnv, model sql.NullString
 	err := s.r.QueryRow(`WITH latest AS (SELECT data FROM events
 				WHERE session = ?1 AND `+agentFrom+` ORDER BY seq DESC LIMIT 1)
 		SELECT
 			EXISTS(SELECT 1 FROM events WHERE session = ?1),
 			(SELECT json_extract(data, '$.agent') FROM latest),
 			(SELECT json_extract(data, '$.folder') FROM latest),
+			(SELECT json_extract(data, '$.folder_ref') FROM latest),
 			(SELECT json_extract(data, '$.agent_id') FROM latest),
 			(SELECT json_extract(data, '$.access') FROM latest),
 			(SELECT json_extract(data, '$.key_env') FROM latest),
@@ -387,11 +391,11 @@ func (s *Store) Continuation(id string) (Continuation, error) {
 				AND json_extract(t.data, '$.continuity') = 'transcript'
 				AND t.seq > (SELECT seq FROM events WHERE session = ?1 AND kind = 'session.closed'
 					AND json_extract(data, '$.resume_id') IS NOT NULL ORDER BY seq DESC LIMIT 1))`,
-		id).Scan(&c.Known, &agent, &folder, &agentID, &access, &keyEnv, &model, &resume, &c.ResumeStale)
+		id).Scan(&c.Known, &agent, &folder, &folderRef, &agentID, &access, &keyEnv, &model, &resume, &c.ResumeStale)
 	if err != nil {
 		return c, fmt.Errorf("store: read session: %w", err)
 	}
-	c.Harness, c.Folder, c.ResumeID = agent.String, folder.String, resume.String
+	c.Harness, c.Folder, c.FolderRef, c.ResumeID = agent.String, folder.String, folderRef.String, resume.String
 	c.AgentID, c.Access, c.KeyEnv, c.Model = agentID.String, access.String, keyEnv.String, model.String
 	holds, err := s.OpenHolds(s.Last())
 	if err != nil {

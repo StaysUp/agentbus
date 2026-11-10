@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/folders"
 	"github.com/staysup/agentbus/isolation"
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
@@ -51,6 +52,14 @@ type Config struct {
 	// session's later jobs still find the runner that holds its worktree.
 	// Empty enrolls a new runner on every start.
 	StateFile string
+
+	// Folders are the folders this runner owns, as their connector: a job's
+	// folder reference becomes its path here. Nil owns none.
+	Folders *folders.Registry
+	// LookPath and Environ are how the runner probes its harnesses for its
+	// report (caps.go). Nil LookPath probes nothing.
+	LookPath func(string) (string, error)
+	Environ  func() []string
 
 	// StopWait bounds how long a runner waits for a stopped turn to end
 	// before it lets go of the job. Zero means one minute.
@@ -109,7 +118,7 @@ func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 	if st, ok := loadState(cfg.StateFile); ok {
 		var rn queue.Runner
 		status, err := call(ctx, r.short, cfg.Queue+"/api/v0/runners/"+st.Runner+"/heartbeat", st.Token,
-			jobs.RunnerBeat{Capacity: cfg.Capacity}, &rn)
+			jobs.RunnerBeat{Capacity: cfg.Capacity, Capabilities: r.caps(nil)}, &rn)
 		if err != nil {
 			return nil, err
 		}
@@ -124,7 +133,8 @@ func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 	}
 	var e jobs.Enrolled
 	status, err := call(ctx, cfg.HTTP, cfg.Queue+"/api/v0/runners", cfg.EnrollToken,
-		jobs.EnrollRequest{Name: cfg.Name, Labels: cfg.Labels, Capacity: cfg.Capacity, Protocol: jobs.ProtocolVersion}, &e)
+		jobs.EnrollRequest{Name: cfg.Name, Labels: cfg.Labels, Capacity: cfg.Capacity, Protocol: jobs.ProtocolVersion,
+			Capabilities: r.caps(nil)}, &e)
 	if err != nil {
 		return nil, err
 	}
@@ -188,6 +198,8 @@ func (r *Runner) Run(ctx context.Context) {
 	r.unmount("start")
 	defer r.unmount("stop")
 	var wg sync.WaitGroup
+	wg.Add(1)
+	go r.report(ctx, &wg)
 	for range r.cfg.Capacity {
 		wg.Add(1)
 		go func() {
@@ -299,8 +311,10 @@ type attempt struct {
 	// the workspace to record. In an isolated session, space is its copy;
 	// for a folder used as it is, watch checkpoints it for this job only
 	// (isolation.None). start is the checkpoint the turn starts from, in
-	// either. session is the turn's session once it started.
+	// either. session is the turn's session once it started. ref is the
+	// folder reference of a session's first job, for the record.
 	folder  string
+	ref     string
 	ws      *queue.Workspace
 	space   *isolation.Space
 	watch   *isolation.Space
@@ -625,7 +639,7 @@ func (r *Runner) request(at *attempt) run.Request {
 		req.Session = sp.Session
 		req.Harness, req.AgentID, req.Access, req.KeyEnv, req.AgentModel = sp.Harness, sp.AgentID, sp.Access, sp.KeyEnv, sp.AgentModel
 	default:
-		req.Harness, req.Folder = sp.Harness, at.folder
+		req.Harness, req.Folder, req.FolderRef = sp.Harness, at.folder, at.ref
 		req.AgentID, req.Access, req.KeyEnv = sp.AgentID, sp.Access, sp.KeyEnv
 		if at.job.Kind == queue.KindTurn {
 			req.NewSession = at.job.Session
@@ -656,14 +670,38 @@ func (r *Runner) request(at *attempt) run.Request {
 func (r *Runner) prepare(at *attempt) *queue.Result {
 	sp := at.job.Spec
 	switch {
-	case sp.Repo != "":
-		b, _ := isolation.Get(isolation.Git)
-		return r.isolate(at, b, isolation.Request{Repo: sp.Repo, Base: sp.Base})
-	case sp.Folder != "":
-		if res := r.remount(at, sp.Folder); res != nil {
+	case at.job.Kind == queue.KindReview && at.job.Workspace != nil:
+		// A review reads the reviewed session's workspace, as it is.
+		at.folder = at.job.Workspace.Folder
+		if res := r.remount(at, at.folder); res != nil {
 			return res
 		}
-		if info, err := os.Stat(sp.Folder); err != nil || !info.IsDir() {
+		if info, err := os.Stat(at.folder); err != nil || !info.IsDir() {
+			at.folder = ""
+			return nil // the engine refuses it, in its own words
+		}
+	case sp.Repo != "" || sp.RepoRef != "":
+		repo, ok := r.folderPath(sp.Repo, sp.RepoRef, sp.Connector)
+		if !ok {
+			return &queue.Result{Refused: folderUnknown, Status: http.StatusBadRequest}
+		}
+		at.ref = sp.RepoRef
+		b, _ := isolation.Get(isolation.Git)
+		return r.isolate(at, b, isolation.Request{Repo: repo, Base: sp.Base})
+	case sp.Folder != "" || sp.FolderRef != "":
+		folder, ok := r.folderPath(sp.Folder, sp.FolderRef, sp.Connector)
+		if !ok {
+			return &queue.Result{Refused: folderUnknown, Status: http.StatusBadRequest}
+		}
+		at.ref = sp.FolderRef
+		if at.ref == "" && r.cfg.Folders != nil {
+			at.ref = folders.Ref(folder)
+		}
+		if res := r.remount(at, folder); res != nil {
+			return res
+		}
+		if info, err := os.Stat(folder); err != nil || !info.IsDir() {
+			at.folder = folder
 			return nil // the engine refuses it, in its own words
 		}
 		if sp.Isolate {
@@ -671,12 +709,12 @@ func (r *Runner) prepare(at *attempt) *queue.Result {
 			if err != nil {
 				return &queue.Result{Refused: "the permissions cannot be read, so the turn did not start; fix them and send the turn again"}
 			}
-			if b, ok := isolation.For(p.Isolation, sp.Folder); ok {
-				return r.isolate(at, b, isolation.Request{Folder: sp.Folder, Share: p.ShareReadOnly})
+			if b, ok := isolation.For(p.Isolation, folder); ok {
+				return r.isolate(at, b, isolation.Request{Folder: folder, Share: p.ShareReadOnly})
 			}
 		}
-		at.folder = sp.Folder
-		at.ws = &queue.Workspace{Kind: queue.WorkspaceFolder, Folder: sp.Folder}
+		at.folder = folder
+		at.ws = &queue.Workspace{Kind: queue.WorkspaceFolder, Folder: folder}
 	case at.job.Workspace != nil:
 		at.folder = at.job.Workspace.Folder
 		if k := at.job.Workspace.Kind; k == queue.WorkspaceWorktree || k == queue.WorkspaceCopy {
@@ -737,6 +775,10 @@ func (r *Runner) isolate(at *attempt, b isolation.Backend, req isolation.Request
 	}
 	at.space, at.folder = s, s.Dir
 	at.ws = &queue.Workspace{Kind: kind, Folder: s.Dir, Repo: s.Repo, Base: s.Base}
+	// The session's snapshot id: the copy as it was made.
+	if base, err := b.Checkpoint(s, isolation.Base); err == nil {
+		at.ws.Snapshot = base.Root
+	}
 	if res := r.checkpointStart(at); res != nil {
 		// Nothing records the copy yet, so nothing else would remove it.
 		if err := isolation.Close(s); err != nil {
@@ -746,6 +788,9 @@ func (r *Runner) isolate(at *attempt, b isolation.Backend, req isolation.Request
 		return res
 	}
 	ready := map[string]any{"kind": kind, "folder": s.Dir}
+	if at.ws.Snapshot != "" {
+		ready["snapshot"] = at.ws.Snapshot
+	}
 	if s.Base != "" {
 		ready["base"] = s.Base
 	}

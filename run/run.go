@@ -251,9 +251,12 @@ type Request struct {
 	Turn string
 	// Harness is the program that runs the turn's loop, such as claude.
 	Harness, Folder string
-	Prompt, Model   string
-	ReadOnly        bool
-	IdempotencyKey  string // stored on turn.started, as the caller's key
+	// FolderRef is the reference of the person's folder a new session is
+	// started in, for the record; "" when no connector owns it.
+	FolderRef      string
+	Prompt, Model  string
+	ReadOnly       bool
+	IdempotencyKey string // stored on turn.started, as the caller's key
 	// AgentID, Access and KeyEnv: the saved agent and how it reaches its
 	// model (Access). A new session needs Harness; for a next turn they are
 	// optional. Set with Session, Harness and these run this turn
@@ -367,7 +370,7 @@ func (e *Engine) Start(req Request) (*Turn, error) {
 	if code, msg := e.runs.take(id); code != 0 {
 		return nil, refuse(code, msg)
 	}
-	return e.start(turn{harness: req.Harness, folder: req.Folder, session: id, id: req.Turn,
+	return e.start(turn{harness: req.Harness, folder: req.Folder, folderRef: req.FolderRef, session: id, id: req.Turn,
 		model: req.Model, readOnly: req.ReadOnly, prompt: req.Prompt, key: req.IdempotencyKey,
 		agentID: req.AgentID, access: req.Access, keyEnv: req.KeyEnv, origin: req.Origin, root: req.Root, depth: req.Depth})
 }
@@ -503,7 +506,7 @@ func (e *Engine) next(req Request) (*Turn, error) {
 		return fail(refuse(http.StatusBadRequest, "folder is not this session's folder "+strconv.Quote(c.Folder)+
 			"; leave folder out to use the session's"))
 	}
-	t := turn{harness: agent, folder: c.Folder, session: session, id: req.Turn, resumeID: c.ResumeID, replayFrom: from,
+	t := turn{harness: agent, folder: c.Folder, folderRef: c.FolderRef, session: session, id: req.Turn, resumeID: c.ResumeID, replayFrom: from,
 		recoveredFrom: recovered, recoveredWhy: recoveredWhy, continuity: continuity, model: model,
 		readOnly: req.ReadOnly, prompt: req.Prompt, context: context, key: req.IdempotencyKey,
 		agentID: agentID, access: access, keyEnv: keyEnv, origin: req.Origin, root: req.Root, depth: req.Depth}
@@ -564,6 +567,7 @@ const replayOnly = "this session cannot be continued from here: it was continued
 // turn is one start of an agent: a new session's first, or a session's next.
 type turn struct {
 	harness, folder, session string
+	folderRef                string // the person's folder, by its reference
 	id                       string // the turn id
 	resumeID                 string // a next turn by resume: the conversation it continues; empty for a first
 	replayFrom               string // a next turn by replay: the earlier turn whose history the gateway replays
@@ -678,7 +682,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	// Before the child starts, so its first model call finds the agent and
 	// folder, and a store that cannot write starts nothing.
 	if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.SessionOpened,
-		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Hold: holdID, Harness: t.harness, Folder: t.folder,
+		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Hold: holdID, Harness: t.harness, Folder: t.folder, FolderRef: t.folderRef,
 		AgentID: t.agentID, Access: t.access, KeyEnv: t.keyEnv, Model: t.model}); err != nil {
 		return nil, storeFailed
 	}
@@ -695,7 +699,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	// turn.started the gateway reads from the child's first model call is the
 	// same (session, turn), so the store keeps this one only.
 	if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.TurnStarted,
-		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Text: t.prompt, Harness: t.harness, Folder: t.folder,
+		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Text: t.prompt, Harness: t.harness, Folder: t.folder, FolderRef: t.folderRef,
 		ReplayFrom: t.replayFrom, Continuity: t.continuity, RecoveredFrom: t.recoveredFrom,
 		RecoveredReason: t.recoveredWhy, IdempotencyKey: t.key, AgentID: t.agentID, Access: t.access, KeyEnv: t.keyEnv,
 		Context: t.context, Model: t.model, Origin: t.origin}); err != nil {

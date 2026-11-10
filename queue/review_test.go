@@ -145,7 +145,7 @@ func TestReviewJobs(t *testing.T) {
 		t.Fatal(err)
 	}
 	rev, created, err := q.Review(DefaultTeam, author.ID, "claude", "sonnet", "rev-1", false)
-	if err != nil || !created || rev.Kind != KindReview || !rev.Spec.ReadOnly || rev.Spec.Folder != "/w/job_a" ||
+	if err != nil || !created || rev.Kind != KindReview || !rev.Spec.ReadOnly || rev.Spec.Folder != "" || rev.Workspace == nil || rev.Workspace.Folder != "/w/job_a" ||
 		rev.Spec.Session != "" || rev.Session != s1 || rev.Links.ReviewsJob != author.ID || rev.Verdict != nil ||
 		!strings.Contains(rev.Spec.Prompt, "Bump the version.") || rev.Spec.Model != "sonnet" {
 		t.Fatalf("review: %+v %v %v", rev, created, err)

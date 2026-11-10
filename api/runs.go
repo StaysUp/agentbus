@@ -44,13 +44,15 @@ const badRun = "the body must be one JSON object with prompt, agent and folder (
 // TurnRequest is the body of POST /api/v0/turns. omitempty marks a field as
 // optional in the API's description.
 type TurnRequest struct {
-	Session  string `json:"session,omitempty" doc:"A session the snapshot calls resumable: this turn is its next one. Absent: a new session."`
-	Agent    string `json:"agent,omitempty" doc:"A saved agent's id, from GET /api/v0/agents: its harness, access and model run the turn. claude and codex also name that harness on its own subscription when no saved agent has that id. Required without session. With session it is optional: absent, the turn runs on the agent of the session's latest turn; sent, this turn runs on that agent, in the session's folder, and later turns that name none keep it. On the same harness as the latest turn the conversation continues by own replay; on another harness the turn gets the earlier turns as plain text (continuity transcript)."`
-	Folder   string `json:"folder,omitempty" doc:"An absolute path to an existing directory on the runner's machine. Required without session. With session it is the session's own; if sent it must match."`
-	Isolate  *bool  `json:"isolate,omitempty" doc:"True unless false, for a new session. True: the session runs in its own copy of folder, exactly as folder is now, uncommitted edits included, made as the isolation setting says (auto, overlay, copy, git or none). False: always folder as it is. Not sent with session."`
-	Prompt   string `json:"prompt" doc:"From 1 byte to 256 KiB, no NUL byte. Always passed after --."`
-	Model    string `json:"model,omitempty" doc:"Passed only as the value of --model. Absent with agent: the saved agent's model, for a new session or a turn that switches agent; a next turn that names the session's own latest agent keeps the session's model. A session's next turn with no agent and no model keeps the model of the session's latest turn, from its turn.started."`
-	ReadOnly *bool  `json:"read_only,omitempty" doc:"False unless true. True: claude gets Read, Grep and Glob only; codex runs with --sandbox read-only. False: claude keeps its own tools and permission settings, plus the edit rule of permissions.toml (by default it edits its session's folder without asking); with edit = \"session\" codex runs with --sandbox workspace-write and network access on, so it can edit the folder and reach the network, and with edit = \"none\" read-only. Read-only codex has no network."`
+	Session   string `json:"session,omitempty" doc:"A session the snapshot calls resumable: this turn is its next one. Absent: a new session."`
+	Agent     string `json:"agent,omitempty" doc:"A saved agent's id, from GET /api/v0/agents: its harness, access and model run the turn. claude and codex also name that harness on its own subscription when no saved agent has that id. Required without session. With session it is optional: absent, the turn runs on the agent of the session's latest turn; sent, this turn runs on that agent, in the session's folder, and later turns that name none keep it. On the same harness as the latest turn the conversation continues by own replay; on another harness the turn gets the earlier turns as plain text (continuity transcript)."`
+	Folder    string `json:"folder,omitempty" doc:"An absolute path to an existing directory on this machine, for agentbus up: its built-in connector keeps the path and the queue keeps only the folder's reference. Without session, folder or folder_ref is required. With session it is the session's own; if sent it must match. agentbus server has no folders of its own and refuses it: send folder_ref."`
+	FolderRef string `json:"folder_ref,omitempty" doc:"A folder's reference, fld_ and 16 hex digits, from GET /api/v0/folders: the turn runs in that folder, on the runner that owns it. For a new session, instead of folder."`
+	Connector string `json:"connector,omitempty" doc:"With folder_ref: the connector that owns the folder, from GET /api/v0/folders. Absent: this service's own connector."`
+	Isolate   *bool  `json:"isolate,omitempty" doc:"True unless false, for a new session. True: the session runs in its own copy of folder, exactly as folder is now, uncommitted edits included, made as the isolation setting says (auto, overlay, copy, git or none). False: always folder as it is. Not sent with session."`
+	Prompt    string `json:"prompt" doc:"From 1 byte to 256 KiB, no NUL byte. Always passed after --."`
+	Model     string `json:"model,omitempty" doc:"Passed only as the value of --model. Absent with agent: the saved agent's model, for a new session or a turn that switches agent; a next turn that names the session's own latest agent keeps the session's model. A session's next turn with no agent and no model keeps the model of the session's latest turn, from its turn.started."`
+	ReadOnly  *bool  `json:"read_only,omitempty" doc:"False unless true. True: claude gets Read, Grep and Glob only; codex runs with --sandbox read-only. False: claude keeps its own tools and permission settings, plus the edit rule of permissions.toml (by default it edits its session's folder without asking); with edit = \"session\" codex runs with --sandbox workspace-write and network access on, so it can edit the folder and reach the network, and with edit = \"none\" read-only. Read-only codex has no network."`
 	// IdempotencyKey makes a retry safe: a client whose request timed out
 	// sends it again with the same key and gets the same turn.
 	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"Optional, 1 to 128 characters of A-Z, a-z, 0-9 and . _ : -. It is the turn job's key. A retry with the same key and the same fields answers 202 with the turn the key first started, existing true, and starts nothing. The same key with other fields gets 409. A request refused with 400 used no key."`
@@ -133,6 +135,10 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "isolate is for a new session; a session keeps its own workspace")
 			return
 		}
+		if body.FolderRef != "" || body.Connector != "" {
+			writeError(w, http.StatusBadRequest, "folder_ref and connector are for a new session; a session keeps its own folder")
+			return
+		}
 		if body.Agent != "" {
 			ag, ok := a.turnAgent(w, body.Agent, body.IdempotencyKey)
 			if !ok {
@@ -179,7 +185,7 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
-		if len(body.Folder) > run.MaxFolder || !filepath.IsAbs(body.Folder) {
+		if body.FolderRef == "" && (len(body.Folder) > run.MaxFolder || !filepath.IsAbs(body.Folder)) {
 			writeError(w, http.StatusBadRequest, "folder must be an absolute path to an existing directory, at most 4096 bytes")
 			return
 		}
@@ -191,8 +197,12 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		if spec.Model == "" && ag.Model != "" {
 			spec.Model, spec.ModelFromAgent = ag.Model, true
 		}
-		spec.Folder = body.Folder
+		spec.Folder, spec.FolderRef, spec.Connector = body.Folder, body.FolderRef, body.Connector
 		spec.Isolate = body.Isolate == nil || *body.Isolate
+		if msg := queue.ResolveFolders(&spec, a.cfg.Folders); msg != "" {
+			writeError(w, http.StatusBadRequest, msg)
+			return
+		}
 	}
 	// Never refused for a busy session: the job waits behind the session's
 	// turns that have not ended, as a delivered result does.

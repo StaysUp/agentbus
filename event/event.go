@@ -193,6 +193,9 @@ type Event struct {
 	// records already kept.
 	Harness string `json:"agent,omitempty" doc:"On turn.started and session.opened: the run's agent, such as claude. Empty on a turn of a session no run started."`
 	Folder  string `json:"folder,omitempty" doc:"On turn.started and session.opened: the folder the run's agent started in. Empty on a turn of a session no run started."`
+	// FolderRef: the reference of the person's folder the session was
+	// started in, issued by its connector. The path stays there.
+	FolderRef string `json:"folder_ref,omitempty" doc:"On turn.started and session.opened: the reference (fld_ and 16 hex digits) of the folder the session was started in, as its connector issued it. Absent for a session started before references, or in a folder no connector owns."`
 	// AgentID, Access and KeyEnv, on a run's turn.started and session.opened:
 	// the saved agent the run started, how it reaches its model, and for an
 	// OpenRouter agent the name of the variable that holds its key. Never

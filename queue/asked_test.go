@@ -87,7 +87,7 @@ func TestSessionRoot(t *testing.T) {
 	if root, err := q.SessionRoot(DefaultTeam, own.Session); err != nil || root != "" {
 		t.Fatalf("the person's session: %q %v", root, err)
 	}
-	if asked, ws, err := q.SessionFolders(DefaultTeam, c.Session); err != nil || asked != "/x" || ws != "" {
+	if asked, ws, err := q.SessionFolders(DefaultTeam, c.Session, nil); err != nil || asked != "/x" || ws != "" {
 		t.Fatalf("folders: %q %q %v", asked, ws, err)
 	}
 }

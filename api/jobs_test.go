@@ -5,10 +5,12 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/staysup/agentbus/folders"
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/store"
@@ -29,7 +31,15 @@ func newJobsEnv(t *testing.T) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollTok})
+	p := filepath.Join(dir, "folders.json")
+	if err := os.WriteFile(p, []byte(`{"connector":"con_0123456789abcdef","folders":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fr, err := folders.Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollTok, Folders: fr})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +77,7 @@ func TestJobsShareTheOneAPI(t *testing.T) {
 		t.Errorf("GET /api/v0/jobs with a wrong token: %d, want 401", resp.StatusCode)
 	}
 	// Enroll takes the enrollment token, and not the main token.
-	enroll := `{"name":"r","capacity":1,"protocol":1}`
+	enroll := `{"name":"r","capacity":1,"protocol":1,"capabilities":{"connector":"con_0123456789abcdef"}}`
 	if resp, _ := do(t, e.req(t, "POST", "/api/v0/runners", strings.NewReader(enroll))); resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("enroll with the main token: %d, want 401", resp.StatusCode)
 	}

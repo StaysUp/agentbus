@@ -146,9 +146,10 @@ func (q *Queue) TreeSessions(team, root string) ([]string, error) {
 }
 
 // SessionFolders are the folders a session was started in: asked, the
-// folder its first turn job named, and ws, its workspace's folder (a
-// worktree inside asked, or asked itself). Either may be "".
-func (q *Queue) SessionFolders(team, session string) (asked, ws string, err error) {
+// folder its first turn job named, as f (its connector) knows its path, and
+// ws, its workspace's folder (a worktree inside asked, or asked itself).
+// Either may be "". Without f, asked is "".
+func (q *Queue) SessionFolders(team, session string, f FolderIssuer) (asked, ws string, err error) {
 	var spec string
 	err = q.db.QueryRow(`SELECT spec FROM jobs WHERE team = ? AND session = ? AND kind = 'turn' ORDER BY created, id LIMIT 1`,
 		team, session).Scan(&spec)
@@ -161,7 +162,13 @@ func (q *Queue) SessionFolders(team, session string) (asked, ws string, err erro
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return "", "", fmt.Errorf("queue: read session: %w", err)
 	}
-	return sp.Folder, ws, nil
+	switch {
+	case sp.Folder != "":
+		asked = sp.Folder // a job from before folder references
+	case sp.FolderRef != "" && f != nil && sp.Connector == f.Connector():
+		asked, _ = f.Path(sp.FolderRef)
+	}
+	return asked, ws, nil
 }
 
 // ReviewLinked is ReviewAs with links: for a review an agent asked for, its

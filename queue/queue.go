@@ -209,18 +209,28 @@ func (e *GapError) Error() string { return fmt.Sprintf("queue: events must start
 // and KeyEnv come from the saved agent the job was made for; the API fills
 // them, never the caller.
 type Spec struct {
-	Harness  string `json:"agent,omitempty"`
-	AgentID  string `json:"agent_id,omitempty"`
-	Access   string `json:"access,omitempty"`
-	KeyEnv   string `json:"key_env,omitempty"`
-	Folder   string `json:"folder,omitempty"`
-	Isolate  bool   `json:"isolate,omitempty"`
-	Repo     string `json:"repo,omitempty"`
-	Base     string `json:"base,omitempty"`
-	Session  string `json:"session,omitempty"`
-	Prompt   string `json:"prompt"`
-	Model    string `json:"model,omitempty"`
-	ReadOnly bool   `json:"read_only,omitempty"`
+	Harness string `json:"agent,omitempty"`
+	AgentID string `json:"agent_id,omitempty"`
+	Access  string `json:"access,omitempty"`
+	KeyEnv  string `json:"key_env,omitempty"`
+	// Folder and Repo are paths, as a request names them. The control
+	// plane never keeps them: the folder's connector gives it a reference
+	// (FolderRef, RepoRef, and Connector, the connector that owns it), and
+	// only the reference is stored. A job stored before references may
+	// still hold a path; the runner that takes it registers it.
+	Folder    string `json:"folder,omitempty"`
+	FolderRef string `json:"folder_ref,omitempty"`
+	Isolate   bool   `json:"isolate,omitempty"`
+	Repo      string `json:"repo,omitempty"`
+	RepoRef   string `json:"repo_ref,omitempty"`
+	Connector string `json:"connector,omitempty"`
+	Base      string `json:"base,omitempty"`
+	// Labels: a runner takes the job only if it has every one.
+	Labels   []string `json:"labels,omitempty"`
+	Session  string   `json:"session,omitempty"`
+	Prompt   string   `json:"prompt"`
+	Model    string   `json:"model,omitempty"`
+	ReadOnly bool     `json:"read_only,omitempty"`
 	// ModelFromAgent: Model came from the saved agent, not the request. It
 	// is never stored; it only keeps the request's hash what was asked.
 	ModelFromAgent bool `json:"-"`
@@ -312,15 +322,19 @@ const (
 
 // Workspace is where a session's turns run, on its runner.
 type Workspace struct {
-	Session string     `json:"session"`
-	Runner  string     `json:"runner"`
-	Kind    string     `json:"kind"`
-	Folder  string     `json:"folder"`
-	Repo    string     `json:"repo,omitempty"`
-	Base    string     `json:"base,omitempty"`
-	Created time.Time  `json:"created"`
-	Closed  *time.Time `json:"closed,omitempty"`
-	Removed *time.Time `json:"removed,omitempty"`
+	Session string `json:"session"`
+	Runner  string `json:"runner"`
+	Kind    string `json:"kind"`
+	Folder  string `json:"folder"`
+	Repo    string `json:"repo,omitempty"`
+	Base    string `json:"base,omitempty"`
+	// Snapshot: the snapshot id of the session's copy as it was made, the
+	// root hash of its first checkpoint's tree. Empty for a folder used as
+	// it is, and for a session made before snapshot ids.
+	Snapshot string     `json:"snapshot,omitempty"`
+	Created  time.Time  `json:"created"`
+	Closed   *time.Time `json:"closed,omitempty"`
+	Removed  *time.Time `json:"removed,omitempty"`
 	// RemovalError: the runner could not remove the worktree. It is left on
 	// disk, and the session counts as removed so it is not tried forever.
 	RemovalError string `json:"removal_error,omitempty"`
@@ -359,6 +373,8 @@ type Runner struct {
 	Capacity int       `json:"capacity"`
 	Created  time.Time `json:"created"`
 	Seen     time.Time `json:"seen"`
+	// Caps: what the runner reported it can do; nil before its first report.
+	Caps *Capabilities `json:"capabilities,omitempty"`
 }
 
 // AttemptEvent is one runner event of an attempt.
@@ -418,6 +434,10 @@ func Open(path string, now func() time.Time) (*Queue, error) {
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("queue: create tables: %w", err)
+	}
+	if err := addColumns(db); err != nil {
+		db.Close()
+		return nil, err
 	}
 	if _, err := db.Exec(`INSERT INTO teams(id, created) VALUES(?, ?) ON CONFLICT DO NOTHING`,
 		DefaultTeam, now().UnixNano()); err != nil {
@@ -515,16 +535,22 @@ func (q *Queue) tx(f func(*sql.Tx) error) error {
 	return nil
 }
 
-// RegisterRunner enrolls a runner in team, with the hash of its token.
-func (q *Queue) RegisterRunner(team, name string, labels []string, capacity int, tokenHash string) (Runner, error) {
+// RegisterRunner enrolls a runner in team, with the hash of its token and
+// what it can do (nil: not reported yet).
+func (q *Queue) RegisterRunner(team, name string, labels []string, capacity int, tokenHash string, caps *Capabilities) (Runner, error) {
 	if labels == nil {
 		labels = []string{}
 	}
 	now := q.now().UTC()
-	r := Runner{ID: NewID("run_"), Team: team, Name: name, Labels: labels, Capacity: capacity, Created: now, Seen: now}
+	r := Runner{ID: NewID("run_"), Team: team, Name: name, Labels: labels, Capacity: capacity, Created: now, Seen: now, Caps: caps}
 	lb, _ := json.Marshal(labels)
-	_, err := q.db.Exec(`INSERT INTO runners(id, team, name, labels, capacity, token_hash, created, seen) VALUES(?,?,?,?,?,?,?,?)`,
-		r.ID, team, name, string(lb), capacity, tokenHash, nanos(now), nanos(now))
+	var cb any
+	if caps != nil {
+		b, _ := json.Marshal(caps)
+		cb = string(b)
+	}
+	_, err := q.db.Exec(`INSERT INTO runners(id, team, name, labels, capacity, token_hash, created, seen, caps) VALUES(?,?,?,?,?,?,?,?,?)`,
+		r.ID, team, name, string(lb), capacity, tokenHash, nanos(now), nanos(now), cb)
 	if err != nil {
 		return r, fmt.Errorf("queue: register runner: %w", err)
 	}
@@ -546,18 +572,33 @@ func (q *Queue) GetRunner(team, id string) (Runner, error) {
 }
 
 func (q *Queue) runner(where string, arg string) (Runner, error) {
-	var r Runner
-	var labels string
-	var created, seen int64
-	err := q.db.QueryRow(`SELECT id, team, name, labels, capacity, created, seen FROM runners WHERE `+where, arg).
-		Scan(&r.ID, &r.Team, &r.Name, &labels, &r.Capacity, &created, &seen)
+	r, err := scanRunner(q.db.QueryRow(`SELECT `+runnerCols+` FROM runners WHERE `+where, arg))
 	if errors.Is(err, sql.ErrNoRows) {
 		return r, ErrNotFound
 	}
 	if err != nil {
 		return r, fmt.Errorf("queue: read runner: %w", err)
 	}
+	return r, nil
+}
+
+const runnerCols = `id, team, name, labels, capacity, created, seen, caps`
+
+func scanRunner(s scanner) (Runner, error) {
+	var r Runner
+	var labels string
+	var caps sql.NullString
+	var created, seen int64
+	if err := s.Scan(&r.ID, &r.Team, &r.Name, &labels, &r.Capacity, &created, &seen, &caps); err != nil {
+		return r, err
+	}
 	_ = json.Unmarshal([]byte(labels), &r.Labels)
+	if caps.Valid {
+		var c Capabilities
+		if json.Unmarshal([]byte(caps.String), &c) == nil {
+			r.Caps = &c
+		}
+	}
 	r.Created, r.Seen = fromNanos(created), fromNanos(seen)
 	return r, nil
 }
@@ -854,13 +895,13 @@ type querier interface {
 	QueryRow(string, ...any) *sql.Row
 }
 
-const workspaceCols = `id, runner, kind, folder, repo, base, created, closed, removed, removal_error`
+const workspaceCols = `id, runner, kind, folder, repo, base, snapshot, created, closed, removed, removal_error`
 
 func scanWorkspace(s scanner) (Workspace, error) {
 	var w Workspace
 	var created int64
 	var closed, removed sql.NullInt64
-	err := s.Scan(&w.Session, &w.Runner, &w.Kind, &w.Folder, &w.Repo, &w.Base, &created, &closed, &removed, &w.RemovalError)
+	err := s.Scan(&w.Session, &w.Runner, &w.Kind, &w.Folder, &w.Repo, &w.Base, &w.Snapshot, &created, &closed, &removed, &w.RemovalError)
 	w.Created, w.Closed, w.Removed = fromNanos(created), optTime(closed), optTime(removed)
 	return w, err
 }
@@ -927,13 +968,17 @@ func (q *Queue) Take(runnerID string, lease time.Duration) (job Job, att Attempt
 		if busy >= capacity {
 			return nil
 		}
+		// A job goes only to a runner that can run it (caps.go): the
+		// session's runner, the folder's connector, every label it asks
+		// for, and its harness.
 		var id string
-		err = tx.QueryRow(`SELECT id FROM jobs j WHERE team = ? AND state = 'queued'
-			AND (session IS NULL OR NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team)
-				OR EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team AND s.runner = ? AND s.closed IS NULL))
+		err = tx.QueryRow(`SELECT j.id FROM jobs j, runners r WHERE r.id = ? AND j.team = ? AND j.state = 'queued'
+			AND (j.session IS NULL OR NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team)
+				OR EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team AND s.runner = r.id AND s.closed IS NULL))
 			AND (j.kind != 'turn' OR j.session IS NULL OR NOT EXISTS (SELECT 1 FROM jobs o WHERE o.team = j.team
 				AND o.state IN ('taken','running') AND ((o.session = j.session AND o.kind = 'turn') OR (`+reviewIn+`))))
-			ORDER BY created, id LIMIT 1`, team, runnerID).Scan(&id)
+			AND (`+connectorTake+`) AND (`+labelsTake+`) AND (`+harnessTake+`)
+			ORDER BY j.created, j.id LIMIT 1`, runnerID, team, nanos(now.Add(-RunnerFresh))).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -1287,8 +1332,11 @@ func (q *Queue) End(runnerID, attemptID string, number int, f Finish) (Job, erro
 			if w.Kind != WorkspaceWorktree && w.Kind != WorkspaceCopy && w.Kind != WorkspaceFolder {
 				return ErrBadState
 			}
-			if _, err := tx.Exec(`INSERT INTO sessions(id, team, runner, kind, folder, repo, base, created) VALUES(?,?,?,?,?,?,?,?)
-				ON CONFLICT DO NOTHING`, f.Session, j.Team, runnerID, w.Kind, w.Folder, w.Repo, w.Base, nanos(now)); err != nil {
+			if w.Snapshot != "" && !SnapshotShape.MatchString(w.Snapshot) {
+				return ErrBadState
+			}
+			if _, err := tx.Exec(`INSERT INTO sessions(id, team, runner, kind, folder, repo, base, snapshot, created) VALUES(?,?,?,?,?,?,?,?,?)
+				ON CONFLICT DO NOTHING`, f.Session, j.Team, runnerID, w.Kind, w.Folder, w.Repo, w.Base, w.Snapshot, nanos(now)); err != nil {
 				return fmt.Errorf("queue: write session: %w", err)
 			}
 		}
@@ -1401,9 +1449,17 @@ func (q *Queue) CloseSession(team, id string) (Workspace, error) {
 }
 
 // RunnerBeat is a runner's idle heartbeat: it marks the runner seen and sets
-// its capacity, and answers the runner.
-func (q *Queue) RunnerBeat(runnerID string, capacity int) (Runner, error) {
-	if _, err := q.db.Exec(`UPDATE runners SET seen = ?, capacity = ? WHERE id = ?`, nanos(q.now()), capacity, runnerID); err != nil {
+// its capacity and, when caps is not nil, its capabilities, and answers the
+// runner.
+func (q *Queue) RunnerBeat(runnerID string, capacity int, caps *Capabilities) (Runner, error) {
+	var err error
+	if caps != nil {
+		cb, _ := json.Marshal(caps)
+		_, err = q.db.Exec(`UPDATE runners SET seen = ?, capacity = ?, caps = ? WHERE id = ?`, nanos(q.now()), capacity, string(cb), runnerID)
+	} else {
+		_, err = q.db.Exec(`UPDATE runners SET seen = ?, capacity = ? WHERE id = ?`, nanos(q.now()), capacity, runnerID)
+	}
+	if err != nil {
 		return Runner{}, fmt.Errorf("queue: write runner: %w", err)
 	}
 	q.wake()
@@ -1463,7 +1519,7 @@ func (q *Queue) review(team, id string, as Spec, key string, includeReply bool, 
 		return Job{}, false, ErrNotReviewable
 	}
 	spec := Spec{Harness: as.Harness, AgentID: as.AgentID, Access: as.Access, KeyEnv: as.KeyEnv, Model: as.Model,
-		ModelFromAgent: as.ModelFromAgent, Folder: j.Workspace.Folder, ReadOnly: true, Prompt: prompt}
+		ModelFromAgent: as.ModelFromAgent, ReadOnly: true, Prompt: prompt}
 	links.ReviewsJob = j.ID
 	return q.create(team, KindReview, key, spec, links, lim, j.Session)
 }
