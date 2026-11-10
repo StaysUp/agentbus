@@ -44,13 +44,18 @@ import (
 
 // standIn is claude for the runner. A turn appends its prompt to a.txt, adds
 // new.txt when it is missing and removes it when it is there, and prints the
-// result line claude prints. It answers the version and sign-in probes.
+// result line claude prints. It answers the version and sign-in probes. A
+// turn asked "network probe" runs probeScript instead (network.go).
 const standIn = `#!/bin/sh
 case "$1" in
 --version) echo "0.0.0 (agentbus remote stand-in)"; exit 0 ;;
 auth) exit 0 ;;
 esac
 for a; do last=$a; done
+if [ "$last" = "network probe" ]; then
+` + probeScript + `echo '{"type":"result","subtype":"success","result":"probed","session_id":"remote-'$$'"}'
+exit 0
+fi
 echo "$last" >> a.txt
 if [ -e new.txt ]; then rm new.txt; else echo "$last" > new.txt; fi
 echo '{"type":"result","subtype":"success","result":"done","session_id":"remote-'$$'"}'
@@ -64,6 +69,8 @@ type options struct {
 	keep, hold     bool
 	real, connect  bool
 	keyEnv, model  string
+	network        bool
+	allow          string
 }
 
 func main() {
@@ -80,6 +87,8 @@ func main() {
 	flag.BoolVar(&o.real, "real", false, "after the checks, run the VM's real claude on a runner that holds no secret: an OpenRouter agent, then a subscription agent")
 	flag.BoolVar(&o.connect, "connect", false, "with -real: first connect your claude subscription on the scratch server (runs agentbus connect claude here)")
 	flag.StringVar(&o.keyEnv, "key-env", "OPENROUTER_API_KEY", "with -real: the variable the server reads the OpenRouter key from, by name")
+	flag.BoolVar(&o.network, "network", false, "after the checks, probe the runner's network control from a turn: gateway, an allowed host, others refused and recorded")
+	flag.StringVar(&o.allow, "allow", "github.com", "with -network: the one host in the server's [network] allow")
 	flag.StringVar(&o.model, "model", "deepseek/deepseek-v4.1-flash", "with -real: the OpenRouter agent's model")
 	flag.Parse()
 	for _, s := range strings.Split(sizes, ",") {
@@ -172,6 +181,11 @@ func run(o options) (err error) {
 		}
 		reportTransfer(tr)
 	}
+	if o.network {
+		if err := w.network(); err != nil {
+			return fmt.Errorf("network: %w", err)
+		}
+	}
 	if o.real {
 		if err := w.real(); err != nil {
 			return fmt.Errorf("real: %w", err)
@@ -253,7 +267,7 @@ func (w *world) setup() error {
 	}
 	w.vmStarted = true
 	standInFile := filepath.Join(w.dir, "claude")
-	if err := os.WriteFile(standInFile, []byte(standIn), 0o755); err != nil {
+	if err := os.WriteFile(standInFile, []byte(strings.ReplaceAll(standIn, "$PROBE_ALLOWED", w.o.allow)), 0o755); err != nil {
 		return err
 	}
 	for src, dst := range map[string]string{linux: d + "/bin/agentbus", standInFile: d + "/bin/claude", enroll: d + "/home/enroll_token"} {

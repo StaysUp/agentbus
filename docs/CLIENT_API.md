@@ -295,6 +295,10 @@ review = true
 cancel = true
 rename = true
 apply = true
+
+[network]
+contain = "auto"
+allow = ["github.com", "registry.npmjs.org"]
 ```
 
 - `agentbus up` makes the file when it is missing, mode 0600, with empty lists, every other value
@@ -345,6 +349,11 @@ apply = true
   from 0 for the first three; dollars from 0 for the cost, where 0 is off.
 - `[agent_api]`: what a turn's token may call (above, "Turn tokens"). `scope` is `"tree"` or
   `"session"`; the others are `true` or `false`.
+- `[network]`: what a turn's agent may reach on the network, on Linux. `contain` is `"auto"` (the
+  default: on for `agentbus runner`, off for `agentbus up`), `"on"` or `"off"`. `allow` lists host
+  names a closed-off agent may reach, on any port, such as `"github.com"`; `"*.example.com"` also
+  allows every name under `example.com`. No scheme, port or path. Empty by default: only the
+  runner's gateway and the server. See [Network control](#network-control).
 
 What each list becomes:
 
@@ -1675,6 +1684,47 @@ from another disk, `copy` copies every byte, so a big folder (a `node_modules`, 
 is slow to start and takes its full size again, and so does `overlay`'s snapshot. Put the
 runner's data folder on xfs or btrfs, use `git` for a repo, or `none`.
 
+### Network control
+
+On Linux, a runner starts each agent closed off from the network, so it can reach only what it
+needs. `[network]` in `permissions.toml` says when and what:
+
+- `contain = "auto"` (the default): on for `agentbus runner`, off for `agentbus up` on one machine.
+  On one machine the agent works on the person's own machine with their own sign-in, as it always
+  has, so closing it off would only break package installs, `git push` and web fetches until they
+  write an allowlist. A runner works on code from somewhere else, so it is closed off.
+- `contain = "on"`: always, `agentbus up` too. `"off"`: never.
+- `allow = ["github.com", "*.npmjs.org"]`: the hosts a closed-off agent may reach, on any port.
+
+A closed-off agent runs in its own network namespace, with loopback only: no route out and no DNS.
+It reaches, on 127.0.0.1 inside it:
+
+- its runner's gateway, at the same address as outside, and on one machine the service's API;
+- a proxy, named in `HTTPS_PROXY` and `HTTP_PROXY` (both spellings), with loopback in `NO_PROXY`.
+  HTTPS goes through it by `CONNECT` with the host's name, so TLS is not opened. It lets through
+  the hosts in `allow` and the server's own API (for `AGENTBUS_URL`), and answers anything else
+  with 403. Each refusal is a `network.refused` event with `host` and `error`, in the runner's
+  record and so in control's.
+
+What it does not cover:
+
+- A program that does not read the proxy variables reaches nothing beyond the gateway.
+- Names are checked, not addresses: an allowed name that points at an address inside your network
+  is let through.
+- Unix sockets on the file system (such as a Docker socket the runner's user may open) are files,
+  not network, and stay as the runner's user has them.
+- The real wall is the VM a runner runs in. This closes the obvious way out; it is not a sandbox.
+
+**If a runner cannot close an agent off, the turn is refused** with the reason, before anything is
+stored. It never runs open instead. The runner says at start whether it can. It needs user
+namespaces: Ubuntu 22.04 allows them; Ubuntu 24.04 and later allow them to a binary with an
+AppArmor profile only (`install.sh apparmor`, as for overlay copies). It works as a normal user and
+as root: the agent gets a user namespace of its own, so even as root it cannot join the runner's
+network again.
+
+**macOS has no network control.** A runner on a Mac says so at start, and its agents reach any
+host. `contain = "on"` refuses every turn there.
+
 ### Reviews
 
 - **Ask for one:** `POST /api/v0/jobs/<id>/review` with `{"agent":"claude","model":"sonnet"}`.
@@ -1841,6 +1891,7 @@ the model did; AgentBus only reads them off the wire.
 | `session.renamed` | the API, on `PATCH /api/v0/sessions/<id>` |
 | `session.registered` | older versions only; nothing writes it now |
 | `tool.refused` | the gateway, when it refused a tool call by a `forbid` rule |
+| `network.refused` | the runner, when a closed-off agent asked for a host `[network] allow` does not list |
 | `replay.failed` | the gateway, when it refused a request it could not give its history |
 | `events.dropped` | the gateway, when its output fell behind and events were lost |
 
@@ -1878,6 +1929,7 @@ They are not in the store's event stream. A turn's own events, such as `turn.sta
 | `recovered_reason` on `turn.started` | with `recovered_from`: one sentence on how that turn ended, the words the model's note uses, such as `its last model request failed with status 529; its agent process exited with code 1` |
 | `replayed` on `model.requested` | how many messages of the earlier turn's history the gateway put in front of this request. Omitted when none |
 | kind `tool.refused` | the gateway refused a tool call of a run's turn, because its command matched a `forbid` entry of `permissions.toml`. `tool_id`, `tool_name`, `tool_input` as the model wrote them; `rule` is the entry; `text` is what the model is told in place of the output. The agent did not run the call. Show it as a warning |
+| kind `network.refused` | a closed-off agent asked its runner's proxy for a host the policy does not allow ([Network control](#network-control)): `host` is the `host:port` it asked for, `error` says why. The connection was refused. One event per refusal. Show it as a warning |
 | kind `replay.failed` | a model request of a replayed turn could not be given the earlier turn's history; `error` says why. The gateway answered the agent 400 and sent nothing to the vendor, so the turn fails rather than run without its past. Show it as an error |
 | kind `session.renamed` | the session was given a name with `PATCH /api/v0/sessions/<id>`: `title` is the new name, `old_title` the one before it (absent when it had none). It has no `turn`. The latest names the session in `GET /api/v0/sessions` |
 | kinds `x.<program>.<name>` | a program's own event (`POST /api/v0/events`); `vendor` is `"program"` |

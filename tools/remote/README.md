@@ -25,6 +25,8 @@ Flags:
 - `-keep`: keep both scratch folders.
 - `-hold`: after the checks, keep everything running until Ctrl-C, to look at it in a cockpit.
   The token is in `<dir>/server/token`.
+- `-network`: after the checks, probe the runner's network control from a turn (below).
+- `-allow github.com`: with `-network`, the one host in the server's `[network] allow`.
 - `-real`: after the checks, a real model turn on a runner that holds no secret (below).
 - `-connect`: with `-real`, first connect your claude subscription on the scratch server: it runs
   `agentbus connect claude` in this terminal (`claude setup-token`, then you sign in).
@@ -55,6 +57,22 @@ go run ./tools/remote -runs 1 -sizes "" -real -connect
 ```
 
 Ctrl-C at any point stops what the tool started, on both machines.
+
+## Network control (-network)
+
+The server's policy gets `[network] allow = ["<-allow>"]`, and one turn asks the stand-in for
+`network probe`. From inside its turn it tries, with curl and getent:
+
+- its runner's gateway (any HTTP answer means it got there);
+- `https://<-allow>/` through the proxy: let through;
+- `https://example.com/`: refused by the proxy (CONNECT 403);
+- `https://1.1.1.1/` through the proxy (refused, 403) and straight (no route: no answer);
+- a DNS lookup of `example.com`: fails, there is no DNS.
+
+Each line is `<name> <http code>/<CONNECT code>`; `000` is no answer. Then the tool prints the
+turn's `network.refused` rows from the server's record. On a runner that cannot close an agent off,
+the turn is refused, and the tool prints the job's reason instead. With `-real`, each real turn also
+lists its refusals by host.
 
 ## What it sets up
 

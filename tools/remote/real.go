@@ -171,6 +171,18 @@ func (w *world) realTurn(agent string) error {
 	if t.Turn.Error != "" {
 		fmt.Printf("  error: %q\n", clip(t.Turn.Error, 300))
 	}
+	// What the closed-off agent tried to reach and was refused, by host.
+	var r struct {
+		Events []struct{ Kind, Host string }
+	}
+	w.api.call("GET", "/api/v0/turns/"+j.Attempt+"/events?limit=1000", nil, &r)
+	refused := map[string]int{}
+	for _, e := range r.Events {
+		if e.Kind == "network.refused" {
+			refused[e.Host]++
+		}
+	}
+	fmt.Printf("  network.refused by host: %v\n", refused)
 	return nil
 }
 

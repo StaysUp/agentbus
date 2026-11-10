@@ -332,9 +332,20 @@ once (1 to 64, default 4).
 
 ### Network control (Linux)
 
-<!-- NETWORK CONTROL: to be written with step 5b (network control for Linux runners). -->
+On Linux a runner's agents are closed off from the network: each reaches only its runner's
+gateway, control, and the hosts in `[network] allow` of control's `permissions.toml`, through a
+proxy. Anything else is refused and recorded as `network.refused`. A runner that cannot close an
+agent off refuses the turn with the reason. macOS has no network control: a runner on a Mac says
+so at start.
 
-To be written with the network control work.
+```toml
+[network]
+contain = "auto"   # on for agentbus runner, off for agentbus up; "on" or "off" to choose
+allow = ["github.com", "*.npmjs.org"]
+```
+
+On one machine (`agentbus up`) agents reach the network as before; `contain = "on"` closes them
+off too. Details: `docs/CLIENT_API.md`, "Network control".
 
 ## Known limits
 
