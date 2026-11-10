@@ -27,8 +27,10 @@ One program runs three ways. The API is the same in each; what is behind it diff
 | `agentbus runner -server <url>` | its own record and gateway, for its agents only | taken from the server; this API has no job routes (404) |
 
 A runner's turn is recorded by the runner's own service. The server gets the job's result: how the
-turn ended, its reply, its cost and the files it changed. Sending the runner's record to the server
-comes later.
+turn ended, its reply, its cost and the files it changed. At the turn's end the runner also sends the
+turn's events to the server's record, so a cockpit pointed at the server shows the turn as it shows
+one on its own machine. While the turn runs, the server has only the job's own events. The model
+calls' bodies (`/api/v0/calls/...`) stay on the runner.
 
 | Path | Who calls it | Sign-in |
 |---|---|---|
@@ -1682,9 +1684,12 @@ cockpit never calls them.
 | `POST /api/v0/attempts/<id>/events` | A batch numbered from `offset`. A repeat stores nothing new; a gap gets 409 with `next`. |
 | `POST /api/v0/attempts/<id>/finish` | `status`, `reason`, `result`, `last_seq`. The same finish again gets the same answer. |
 | `POST /api/v0/attempts/<id>/snapshot` | For a first turn in an isolated copy of a folder on another machine: the snapshot job, made once, on the folder's connector. Ask again until `snapshot` is set. |
+| `POST /api/v0/attempts/<id>/record` | A runner of a server, at the turn's end: `{"number": n, "events":[…]}`, at most 500, the turn's events from its own record. The server's record keeps each once, by its id, without its `folder` (the runner's path). Every event must be of the session control assigned the job: a turn job's session, or for a review the one control named when it made the job (`links.review_session`). |
 | `POST /api/v0/blobs` | `{"hashes":[…]}`, at most 10,000: answers `{"missing":[…]}`, the ones the store lacks, so only those are sent. |
 | `PUT /api/v0/blobs/<hash>` | A file's content, streamed, up to 4 GiB: kept only when its SHA-256 is `<hash>`. 204. |
 | `GET /api/v0/blobs/<hash>` | A file's content, streamed. |
+| `POST /api/v0/packs` | Many blobs in one body, a **pack**: frames of `<hash> <size>\n` and then that many bytes, at most 1,000 blobs and 8 MiB of them. Each is checked against its hash. `{"kept": n}`. |
+| `POST /api/v0/packs/fetch` | `{"hashes":[…]}`, 1 to 1,000: their blobs as one pack, in that order, streamed. 404 with `{"missing":[…]}` when one is not held. |
 
 Every call after take names its attempt id and number. A call for an attempt that is not current
 gets 409 with `stale: true`, and the runner stops that turn.
@@ -1718,8 +1723,21 @@ agentbus connector -server URL -folder DIR... # a connector alone: no agents, re
 
 In `agentbus up` the three share the server's blob store on disk: nothing is sent over HTTP and
 copies are made by clone or overlay (the local fast path). A runner or a connector of a server
-keeps its own store in its data folder (`blobs/`) and sends only what the server lacks. Step 4 of
-0.3 runs a runner on another machine; today the three processes are tested on one.
+keeps its own store in its data folder (`blob-cache/`, apart from a server's `blobs/`) and sends
+only what the server lacks: blobs under
+1 MiB go a pack at a time, four packs at once, and a bigger one alone by `PUT`. A runner fetches a
+snapshot's trees a level at a time and its files a pack at a time.
+
+**The blob store is cleaned.** The server keeps every blob that a snapshot or a changeset of an open
+session reaches: every job's but those of a closed session. Once a session closes, the server
+sweeps (also at start and every hour) and removes each blob nothing reaches that is older than an
+hour. A blob just sent, or just answered as held by `POST /api/v0/blobs`, counts as new, so a
+snapshot still being sent loses nothing. A runner's or a connector's own store is a cache of the
+server's: what it lacks it fetches again, so every blob in it older than an hour may go.
+
+**A runner in a VM on the same machine.** A Lima VM reaches the Mac's loopback as
+`host.lima.internal`. A service on loopback refuses another name in `Host`, so start it with
+`-host host.lima.internal` (repeat `-host` for more names). The token still guards every request.
 
 **A runner follows the server's settings.** Before each turn, `agentbus runner -server <url>` reads
 the policy and the instructions from the server (`GET /api/v0/runners/<id>/settings`, with its own
@@ -2002,6 +2020,14 @@ gets a new version path, and the old one stays for a while.
   its copy at the turn's end; a snapshot job's `result.snapshot` is `{id, times, files, git}`:
   `git` is the folder's `.git`, carried beside the snapshot so git works in the copy, and never
   part of its id.
+- **Blobs travel many to a request.** `POST /api/v0/packs` takes a pack of blobs and `POST
+  /api/v0/packs/fetch` answers one, so a snapshot of 50,000 files is about a hundred requests, not
+  50,000. The server removes blobs no open session needs, an hour after their last use.
+- **A runner's turn reaches the server's record** at its end (`POST /api/v0/attempts/<id>/record`),
+  so `GET /api/v0/sessions`, `/turns` and `/turns/<id>/diff` on a server show turns run on other
+  machines.
+- **`-host`** on `up` and `server`: another name a loopback service answers to, such as
+  `host.lima.internal` for a runner in a Lima VM.
 - **No runner path reaches control.** A workspace names a copy by `space` (its id on its runner)
   and a folder used as it is by `folder_ref`; `folder` is set only for a session made before.
   `result.folder` is no longer set, and a delivered result no longer quotes the asked session's
