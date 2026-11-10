@@ -92,8 +92,10 @@ func parse(args []string, home string, stderr io.Writer) (config, bool) {
 	listen := fl.String("listen", listenDefault, "address to listen on: an IP, with or without a port (8787 if none); 0.0.0.0 is reachable from the network, with the token guarding the API")
 	replayOn := fl.Bool("replay", true, "continue claude and codex sessions by own replay (the gateway sends the earlier turn's history); false uses the vendor's resume")
 	var origin *string
+	var hostList folderFlags
 	if c.mode != modeRunner {
 		origin = fl.String("origin", "", "lock the API to this one browser origin, such as http://localhost:5173; without it any origin may call the API, and the token still guards every call")
+		fl.Var(&hostList, "host", "another name the API answers to on loopback, such as host.lima.internal, the name a Lima VM reaches this machine's loopback by; repeat it for each one")
 	}
 	maxRuns := new(int)
 	switch c.mode {
@@ -130,6 +132,7 @@ func parse(args []string, home string, stderr io.Writer) (config, bool) {
 	c.listen, c.noReplay, c.maxRuns = *listen, !*replayOn, *maxRuns
 	if origin != nil {
 		c.origin = *origin
+		c.hosts = hostList
 	}
 	if c.mode == modeRunner {
 		u, err := url.Parse(*server)

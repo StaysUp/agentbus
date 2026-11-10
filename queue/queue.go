@@ -288,6 +288,10 @@ type Links struct {
 	// it applies, and that turn's job.
 	AppliesTurn string `json:"applies_turn,omitempty"`
 	AppliesJob  string `json:"applies_job,omitempty"`
+	// ReviewSession: for a review job, the session its turn opens, named
+	// by control when the job is made. The runner opens it, and a runner
+	// may send that turn's record for this session only.
+	ReviewSession string `json:"review_session,omitempty"`
 }
 
 // Job is one requested turn.
@@ -1592,5 +1596,6 @@ func (q *Queue) review(team, id string, as Spec, key string, includeReply bool, 
 	spec := Spec{Harness: as.Harness, AgentID: as.AgentID, Access: as.Access, KeyEnv: as.KeyEnv, Model: as.Model,
 		ModelFromAgent: as.ModelFromAgent, ReadOnly: true, Prompt: prompt}
 	links.ReviewsJob = j.ID
+	links.ReviewSession = NewID("")
 	return q.create(team, KindReview, key, spec, links, lim, j.Session)
 }

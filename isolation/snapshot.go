@@ -202,25 +202,41 @@ type blobFetcher interface {
 // eachFile calls fn with every file of the content tree root, reading its
 // trees from src.
 func eachFile(ctx context.Context, src BlobSource, root string, fn func(workspace.TreeEntry)) error {
-	if root == workspace.EmptyTree {
-		return nil
-	}
-	b, err := readBlob(ctx, src, root, 64<<20)
-	if err != nil {
-		return err
-	}
-	es, err := workspace.DecodeTree(b)
-	if err != nil {
-		return err
-	}
-	for _, e := range es {
-		if e.Dir {
-			if err := eachFile(ctx, src, e.Hash, fn); err != nil {
+	// A level of the tree at a time: a store that fetches from another is
+	// asked for each level's trees at once, not one request a folder.
+	f, _ := src.(blobFetcher)
+	level := []string{root}
+	for len(level) > 0 {
+		var trees []string
+		for _, t := range level {
+			if t != workspace.EmptyTree {
+				trees = append(trees, t)
+			}
+		}
+		if f != nil && len(trees) > 0 {
+			if err := f.Fetch(ctx, trees); err != nil {
 				return err
 			}
-			continue
 		}
-		fn(e)
+		var next []string
+		for _, t := range trees {
+			b, err := readBlob(ctx, src, t, 64<<20)
+			if err != nil {
+				return err
+			}
+			es, err := workspace.DecodeTree(b)
+			if err != nil {
+				return err
+			}
+			for _, e := range es {
+				if e.Dir {
+					next = append(next, e.Hash)
+					continue
+				}
+				fn(e)
+			}
+		}
+		level = next
 	}
 	return nil
 }

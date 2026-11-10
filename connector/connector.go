@@ -30,6 +30,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/staysup/agentbus/blobs"
@@ -133,33 +134,9 @@ func (c *Connector) Snapshot(ctx context.Context, ref string) (Taken, error) {
 	if !ok {
 		return Taken{}, ErrChanged
 	}
-	var hashes []string
-	for _, rel := range snap.Paths() {
-		if err := ctx.Err(); err != nil {
-			return Taken{}, err
-		}
-		f, _ := snap.File(rel)
-		hashes = append(hashes, f.Hash)
-		if c.Store.Has(f.Hash) {
-			continue
-		}
-		p := filepath.Join(dir, filepath.FromSlash(rel))
-		if f.Mode&fs.ModeSymlink != 0 {
-			target, err := os.Readlink(p)
-			if err != nil {
-				return Taken{}, ErrChanged
-			}
-			if h, err := c.Store.PutBytes(workspace.LinkContent(target)); err != nil || h != f.Hash {
-				return Taken{}, ErrChanged
-			}
-			continue
-		}
-		if _, err := c.Store.PutFile(p, f.Hash, c.Link); err != nil {
-			if errors.Is(err, blobs.ErrBadHash) || errors.Is(err, fs.ErrNotExist) {
-				return Taken{}, ErrChanged
-			}
-			return Taken{}, err
-		}
+	hashes, err := c.keepFiles(ctx, dir, snap)
+	if err != nil {
+		return Taken{}, err
 	}
 	for h, b := range trees {
 		if _, err := c.Store.PutBytes(b); err != nil {
@@ -203,30 +180,9 @@ func (c *Connector) keepTree(ctx context.Context, dir string) (string, []string,
 	if !ok {
 		return "", nil, ErrChanged
 	}
-	var hashes []string
-	for _, rel := range snap.Paths() {
-		if err := ctx.Err(); err != nil {
-			return "", nil, err
-		}
-		f, _ := snap.File(rel)
-		hashes = append(hashes, f.Hash)
-		if c.Store.Has(f.Hash) {
-			continue
-		}
-		p := filepath.Join(dir, filepath.FromSlash(rel))
-		if f.Mode&fs.ModeSymlink != 0 {
-			target, err := os.Readlink(p)
-			if err != nil {
-				return "", nil, ErrChanged
-			}
-			if h, err := c.Store.PutBytes(workspace.LinkContent(target)); err != nil || h != f.Hash {
-				return "", nil, ErrChanged
-			}
-			continue
-		}
-		if _, err := c.Store.PutFile(p, f.Hash, c.Link); err != nil {
-			return "", nil, ErrChanged
-		}
+	hashes, err := c.keepFiles(ctx, dir, snap)
+	if err != nil {
+		return "", nil, err
 	}
 	for h, b := range trees {
 		if _, err := c.Store.PutBytes(b); err != nil {
@@ -235,6 +191,79 @@ func (c *Connector) keepTree(ctx context.Context, dir string) (string, []string,
 		hashes = append(hashes, h)
 	}
 	return root, hashes, nil
+}
+
+// keepWorkers is how many files keepFiles keeps at once: each is a clone
+// and a read, so one at a time leaves the disk mostly idle.
+const keepWorkers = 8
+
+// keepFiles keeps every file of snap, read under dir, in Store, and answers
+// their hashes in path order. A file no longer as the walk saw it is
+// ErrChanged.
+func (c *Connector) keepFiles(ctx context.Context, dir string, snap *workspace.Snapshot) ([]string, error) {
+	paths := snap.Paths()
+	hashes := make([]string, len(paths))
+	var (
+		wg    sync.WaitGroup
+		once  sync.Once
+		first error
+		bad   atomic.Bool
+	)
+	next := make(chan int)
+	for range keepWorkers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range next {
+				if err := c.keepFile(dir, paths[i], snap); err != nil {
+					once.Do(func() { first = err; bad.Store(true) })
+				}
+			}
+		}()
+	}
+	for i, rel := range paths {
+		f, _ := snap.File(rel)
+		hashes[i] = f.Hash
+		if ctx.Err() != nil || bad.Load() {
+			break
+		}
+		next <- i
+	}
+	close(next)
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if first != nil {
+		return nil, first
+	}
+	return hashes, nil
+}
+
+// keepFile keeps the file rel of snap, read under dir, in Store.
+func (c *Connector) keepFile(dir, rel string, snap *workspace.Snapshot) error {
+	f, _ := snap.File(rel)
+	if c.Store.Held(f.Hash) {
+		return nil
+	}
+	p := filepath.Join(dir, filepath.FromSlash(rel))
+	if f.Mode&fs.ModeSymlink != 0 {
+		target, err := os.Readlink(p)
+		if err != nil {
+			return ErrChanged
+		}
+		if h, err := c.Store.PutBytes(workspace.LinkContent(target)); err != nil || h != f.Hash {
+			return ErrChanged
+		}
+		return nil
+	}
+	if _, err := c.Store.PutFile(p, f.Hash, c.Link); err != nil {
+		if errors.Is(err, blobs.ErrBadHash) || errors.Is(err, fs.ErrNotExist) {
+			return ErrChanged
+		}
+		return err
+	}
+	return nil
 }
 
 // hashUntil hashes as workspace.Walk does until ctx ends, and then hashes
@@ -479,6 +508,19 @@ func (c *Connector) Apply(ctx context.Context, ref, from, to string) (Applied, e
 	src := blobs.Local{Store: c.Store}
 	if c.Remote != nil {
 		src.From = c.Remote
+		// Every file to write, fetched at once: few requests, not one each.
+		var hs []string
+		for _, o := range ops {
+			if o.to != nil && !o.chmod {
+				hs = append(hs, o.to.Hash)
+			}
+		}
+		if err := src.Fetch(ctx, hs); err != nil {
+			if err := ctx.Err(); err != nil {
+				return Applied{}, err
+			}
+			return Applied{}, ErrChangeset
+		}
 	}
 	for i, o := range ops {
 		if err := ctx.Err(); err != nil {

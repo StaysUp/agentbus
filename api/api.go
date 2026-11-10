@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -84,6 +85,12 @@ type Config struct {
 	// whether an agent's key variable is set in it, never its value.
 	Environ func() []string
 
+	// Hosts are more names, without a port, that the Host header may name
+	// while the service listens on loopback: host.lima.internal, by which
+	// a Lima VM reaches the Mac's loopback. The token still guards every
+	// request from there.
+	Hosts []string
+
 	// Folders is this machine's connector, in agentbus up: a folder a
 	// request names by path is kept as its reference (queue.ResolveFolders).
 	// Nil, as in agentbus server, takes references only.
@@ -112,7 +119,7 @@ type API struct {
 	// turnsToken is the SHA-256 of Config.TurnsToken, when hasTurnsToken.
 	turnsToken    [32]byte
 	hasTurnsToken bool
-	hosts         [3]string
+	hosts         []string
 
 	// streams admits at most MaxStreams at once.
 	streams chan struct{}
@@ -141,13 +148,21 @@ func New(cfg Config) (*API, error) {
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
+	for _, h := range cfg.Hosts {
+		if h == "" || strings.ContainsAny(h, ":/ ") {
+			return nil, errors.New("api: a host is a name, without a port")
+		}
+	}
 	desc, err := spec()
 	if err != nil {
 		return nil, err
 	}
 	a := &API{cfg: cfg, token: sha256.Sum256([]byte(cfg.Token)), spec: desc,
-		hosts:   [3]string{"127.0.0.1:" + cfg.Port, "localhost:" + cfg.Port, "[::1]:" + cfg.Port},
+		hosts:   []string{"127.0.0.1:" + cfg.Port, "localhost:" + cfg.Port, "[::1]:" + cfg.Port},
 		streams: make(chan struct{}, MaxStreams)}
+	for _, h := range cfg.Hosts {
+		a.hosts = append(a.hosts, h+":"+cfg.Port)
+	}
 	if cfg.TurnsToken != "" {
 		if cfg.TurnsToken == cfg.Token {
 			return nil, errors.New("api: the turns token is the main token")
@@ -194,8 +209,11 @@ func bodyLimit(r *http.Request) int64 {
 	case r.Method == http.MethodPut && strings.HasPrefix(p, jobs.BlobPath):
 		// A blob is a whole file, streamed to disk (package jobs).
 		return blobs.MaxBlob
+	case p == jobs.PackPath:
+		// Many small blobs, streamed to disk (package jobs).
+		return blobs.MaxPackBody
 	case strings.HasPrefix(p, "/api/v0/jobs") || strings.HasPrefix(p, "/api/v0/attempts") || strings.HasPrefix(p, "/api/v0/runners") ||
-		p == "/api/v0/blobs" || strings.HasPrefix(p, jobs.BlobPath):
+		p == "/api/v0/blobs" || strings.HasPrefix(p, jobs.BlobPath) || strings.HasPrefix(p, jobs.PackPath):
 		// A job carries a prompt, and a finish a result with the reply.
 		return jobs.MaxBody
 	}
@@ -219,7 +237,7 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, bodyLimit(r))
 	if r.ContentLength != 0 {
 		wait := a.cfg.BodyTimeout
-		if r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, jobs.BlobPath) {
+		if (r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, jobs.BlobPath)) || r.URL.Path == jobs.PackPath {
 			wait = BlobTimeout
 		}
 		_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(wait))
@@ -233,7 +251,7 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// There the token on every API request is the guard, and a rebound page
 	// does not have it. The docs and the description need no token either
 	// way; they hold nothing of the person's.
-	if !a.cfg.AnyHost && r.Host != a.hosts[0] && r.Host != a.hosts[1] && r.Host != a.hosts[2] {
+	if !a.cfg.AnyHost && !slices.Contains(a.hosts, r.Host) {
 		// Before anything else, and without Allow-Origin: a page reaching
 		// us through DNS rebinding learns nothing.
 		writeError(w, http.StatusForbidden, "the Host header must name this service on 127.0.0.1, localhost or [::1]")

@@ -39,6 +39,33 @@ func blobClient(server, token string) blobs.Client {
 	return blobs.Client{URL: server, Token: token, HTTP: &http.Client{Transport: http.DefaultTransport}}
 }
 
+// cacheDir is a runner's or a connector's own blob store, in its data
+// folder: apart from the control plane's (blobs), whose sweep keeps what
+// open sessions need, so a cache's sweep never reaches control's blobs even
+// where the two share a data folder.
+const cacheDir = "blob-cache"
+
+// sweepCache cleans a runner's or a connector's own blob store, at start and
+// every jobs.SweepEvery, until ctx ends. That store is a cache of the control
+// plane's: a blob it lacks is fetched again from there (blobs.Local), and the
+// control plane keeps every blob an open session needs (jobs.Sweeper). So
+// every blob older than the grace may go; one fetched or sent within it, or
+// said to be held, stays.
+func sweepCache(ctx context.Context, st *blobs.Store, logf func(string, ...any)) {
+	t := time.NewTicker(jobs.SweepEvery)
+	defer t.Stop()
+	for {
+		if _, n, err := st.Sweep(ctx, func(string) bool { return false }, jobs.SweepGrace); err == nil && n > 0 {
+			logf("blobs.cache_sweep removed=%d", n)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+	}
+}
+
 // connectorConfig is what starting a connector needs.
 type connectorConfig struct {
 	server, enrollToken, name string
@@ -48,7 +75,12 @@ type connectorConfig struct {
 	// shares it and sends nothing over HTTP. Nil: its own, under home,
 	// with the server's behind it.
 	store *blobs.Store
-	logf  func(string, ...any)
+	// own, when store is nil, is the store under home a runner in the same
+	// process already holds: one handle, so its sweep and this
+	// connector's touches share one lock. Nil: the connector opens its
+	// own and sweeps it.
+	own  *blobs.Store
+	logf func(string, ...any)
 }
 
 // startConnector enrolls a connector and runs it until ctx ends. It answers
@@ -67,8 +99,10 @@ func startConnector(ctx context.Context, cc connectorConfig, done func()) (*conn
 		return isolation.Remount(s)
 	}
 	remote := cc.store == nil
-	if remote {
-		st, err := blobs.Open(filepath.Join(cc.home, "blobs"))
+	if remote && cc.own != nil {
+		c.Store = cc.own
+	} else if remote {
+		st, err := blobs.Open(filepath.Join(cc.home, cacheDir))
 		if err != nil {
 			return nil, err
 		}
@@ -84,6 +118,9 @@ func startConnector(ctx context.Context, cc connectorConfig, done func()) (*conn
 	}
 	if remote {
 		c.Remote = blobClient(cc.server, rn.Token())
+		if cc.own == nil {
+			go sweepCache(ctx, c.Store, cc.logf)
+		}
 	}
 	cc.logf("connector.start id=%s connector=%s folders=%d", rn.ID(), cc.folders.Connector(), len(cc.folders.List(queue.MaxFolders)))
 	go func() {

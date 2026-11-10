@@ -234,6 +234,7 @@ func ResultKey(id string) string { return "result/" + id }
 // tree then gets the job the key first made; one from another tree gets
 // ErrKeyConflict.
 func hashLinks(l Links) Links {
+	l.ReviewSession = "" // named by control, not asked for
 	if l.Asker != nil {
 		l.Asker = nil
 		if l.Chain != nil {

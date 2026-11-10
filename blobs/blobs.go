@@ -26,6 +26,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -63,7 +64,19 @@ type Sink interface {
 // Store is blobs on disk, one file each at <dir>/<first two hex>/<hash>,
 // written once by rename and never changed. It is safe for concurrent use,
 // by this process and by others on the same folder.
-type Store struct{ dir string }
+//
+// Sweep removes blobs nothing needs. A blob this store says it holds (Missing,
+// PutFile, a Put of one held) is touched, so a sweep keeps it for at least
+// TouchAfter less than its grace: the caller has that long to name it.
+type Store struct {
+	dir string
+	// mu keeps a sweep's check and removal of a blob apart from a caller
+	// told the blob is held.
+	mu sync.RWMutex
+	// writing names the files in tmp this handle is still writing or
+	// reading: Clean leaves them, whatever their time.
+	writing sync.Map
+}
 
 // Open is the store in dir, made when it does not exist.
 func Open(dir string) (*Store, error) {
@@ -88,18 +101,52 @@ func (s *Store) Has(h string) bool {
 	return err == nil && fi.Mode().IsRegular()
 }
 
-// Missing are the hashes of hs this store does not hold.
+// Missing are the hashes of hs this store does not hold. Each held one is
+// touched, so a sweep keeps it.
 func (s *Store) Missing(_ context.Context, hs []string) ([]string, error) {
 	var out []string
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	for _, h := range hs {
 		if !Valid(h) {
 			return nil, ErrBadHash
 		}
-		if !s.Has(h) {
+		if !s.held(h) {
 			out = append(out, h)
 		}
 	}
 	return out, nil
+}
+
+// Held says the blob h is held, and touches it as Missing does: a caller
+// that skips sending a blob it is told is held uses this, not Has.
+func (s *Store) Held(h string) bool {
+	if !Valid(h) {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.held(h)
+}
+
+// TouchAfter is how old a held blob's time may get before Missing sets it
+// to now again.
+const TouchAfter = 10 * time.Minute
+
+// held says the blob h is held, and touches it when its time is older than
+// TouchAfter. The caller holds mu.
+func (s *Store) held(h string) bool {
+	p := s.Path(h)
+	fi, err := os.Lstat(p)
+	if err != nil || !fi.Mode().IsRegular() {
+		return false
+	}
+	if now := time.Now(); now.Sub(fi.ModTime()) > TouchAfter {
+		if os.Chtimes(p, now, now) != nil {
+			return false
+		}
+	}
+	return true
 }
 
 // Open reads the blob h.
@@ -130,7 +177,7 @@ func (s *Store) PutReader(r io.Reader) (string, error) { return s.put("", r) }
 func (s *Store) PutBytes(b []byte) (string, error) {
 	sum := sha256.Sum256(b)
 	h := hex.EncodeToString(sum[:])
-	if s.Has(h) {
+	if s.Held(h) {
 		return h, nil
 	}
 	_, err := s.put(h, bytes.NewReader(b))
@@ -148,6 +195,9 @@ func (s *Store) put(want string, r io.Reader) (string, error) {
 	if err != nil {
 		return "", errors.New("blobs: the store's folder could not be written")
 	}
+	// Made now, so new to Clean until it is marked; then marked.
+	s.writing.Store(filepath.Base(tmp.Name()), true)
+	defer s.writing.Delete(filepath.Base(tmp.Name()))
 	defer os.Remove(tmp.Name())
 	hw := sha256.New()
 	n, err := io.Copy(io.MultiWriter(tmp, hw), io.LimitReader(r, MaxBlob+1))
@@ -172,12 +222,21 @@ func (s *Store) put(want string, r io.Reader) (string, error) {
 // the file's hash as the caller took it: a blob already held under it is
 // taken as the file, and a new one is checked against it. link may be nil.
 func (s *Store) PutFile(p, hash string, link func(src, dst string) error) (string, error) {
-	if hash != "" && s.Has(hash) {
-		return hash, nil
+	if hash != "" && Valid(hash) {
+		s.mu.RLock()
+		ok := s.held(hash)
+		s.mu.RUnlock()
+		if ok {
+			return hash, nil
+		}
 	}
 	if link != nil {
 		if err := os.MkdirAll(filepath.Join(s.dir, "tmp"), 0o700); err == nil {
 			tmp := filepath.Join(s.dir, "tmp", "link-"+strconv.FormatInt(time.Now().UnixNano(), 36)+"-"+strconv.FormatInt(seq.Add(1), 36))
+			// A clone keeps its source's time, which Clean would read as
+			// left over: it is marked before it exists.
+			s.writing.Store(filepath.Base(tmp), true)
+			defer s.writing.Delete(filepath.Base(tmp))
 			if link(p, tmp) == nil {
 				defer os.Remove(tmp)
 				got, err := hashFile(tmp)
@@ -203,15 +262,21 @@ var seq atomic.Int64
 // place renames the written file tmp to the blob h, unless h is held.
 func (s *Store) place(tmp, h string) error {
 	dst := s.Path(h)
-	if s.Has(h) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.held(h) {
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return errors.New("blobs: the store's folder could not be written")
 	}
 	_ = os.Chmod(tmp, 0o600)
+	// A blob's time is when it was kept: a clone keeps its source's
+	// time, which a sweep would read as old.
+	now := time.Now()
+	_ = os.Chtimes(tmp, now, now)
 	if err := os.Rename(tmp, dst); err != nil {
-		if s.Has(h) {
+		if s.held(h) {
 			return nil
 		}
 		return errors.New("blobs: the blob could not be kept")
@@ -235,8 +300,20 @@ func hashFile(p string) (string, error) {
 // Copy puts every blob of hs that dst lacks there, read from src.
 func Copy(ctx context.Context, src Source, dst Sink, hs []string) error {
 	missing, err := missingBatched(ctx, dst, hs)
-	if err != nil {
+	if err != nil || len(missing) == 0 {
 		return err
+	}
+	// Over HTTP, many blobs go in each request.
+	if p, ok := dst.(interface {
+		packSink
+		Sink
+	}); ok {
+		if sz, ok := src.(sizer); ok {
+			return putPacks(ctx, src, sz, p, missing)
+		}
+	}
+	if p, ok := src.(packSource); ok {
+		return getPacks(ctx, p, dst, missing)
 	}
 	for _, h := range missing {
 		if err := ctx.Err(); err != nil {
@@ -305,7 +382,8 @@ func ReadAll(ctx context.Context, src Source, h string, max int64) ([]byte, erro
 	return b, nil
 }
 
-// Clean removes what an interrupted Put left in the store, older than age.
+// Clean removes what an interrupted Put left in the store, older than age;
+// never a file this handle is still writing.
 func (s *Store) Clean(age time.Duration) {
 	dir := filepath.Join(s.dir, "tmp")
 	entries, err := os.ReadDir(dir)
@@ -313,6 +391,9 @@ func (s *Store) Clean(age time.Duration) {
 		return
 	}
 	for _, e := range entries {
+		if _, busy := s.writing.Load(e.Name()); busy {
+			continue
+		}
 		if fi, err := e.Info(); err == nil && time.Since(fi.ModTime()) > age {
 			os.Remove(filepath.Join(dir, e.Name()))
 		}
@@ -352,4 +433,56 @@ func (l Local) Fetch(ctx context.Context, hs []string) error {
 		return nil
 	}
 	return Copy(ctx, l.From, l.Store, hs)
+}
+
+// Sweep removes every blob live does not name whose time is older than
+// grace: what no snapshot or changeset needs any longer. A blob just put, or
+// just said to be held, is younger than grace and stays, so a snapshot
+// still being sent loses nothing. It answers how many blobs it kept and
+// removed.
+func (s *Store) Sweep(ctx context.Context, live func(h string) bool, grace time.Duration) (kept, removed int, err error) {
+	dirs, err := os.ReadDir(s.dir)
+	if err != nil {
+		return 0, 0, errors.New("blobs: the store's folder could not be read")
+	}
+	for _, d := range dirs {
+		if len(d.Name()) != 2 || !d.IsDir() {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return kept, removed, err
+		}
+		names, err := os.ReadDir(filepath.Join(s.dir, d.Name()))
+		if err != nil {
+			continue
+		}
+		for _, e := range names {
+			h := e.Name()
+			if !Valid(h) || h[:2] != d.Name() {
+				continue
+			}
+			if live(h) {
+				kept++
+				continue
+			}
+			if s.removeOld(h, grace) {
+				removed++
+			} else {
+				kept++
+			}
+		}
+	}
+	s.Clean(grace)
+	return kept, removed, nil
+}
+
+// removeOld removes the blob h when its time is older than grace.
+func (s *Store) removeOld(h string, grace time.Duration) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fi, err := os.Lstat(s.Path(h))
+	if err != nil || time.Since(fi.ModTime()) < grace {
+		return false
+	}
+	return os.Remove(s.Path(h)) == nil
 }

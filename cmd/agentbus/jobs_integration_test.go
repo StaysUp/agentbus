@@ -180,8 +180,11 @@ func TestServerAndRunner(t *testing.T) {
 	if list, _ := r.store.Turns(store.TurnQuery{Turn: turn, Limit: 1}); len(list.Turns) != 1 || list.Turns[0].Session != j.Session {
 		t.Fatalf("the runner's record lacks turn %s", turn)
 	}
-	if list, _ := server.store.Turns(store.TurnQuery{Turn: turn, Limit: 1}); len(list.Turns) != 0 {
-		t.Fatal("the server's record holds the runner's turn")
+	// The runner sent the turn to the server's record at its end, without
+	// the path of its copy.
+	if list, _ := server.store.Turns(store.TurnQuery{Turn: turn, Limit: 1}); len(list.Turns) != 1 || list.Turns[0].Session != j.Session ||
+		list.Turns[0].Folder != "" {
+		t.Fatalf("the server's record of the runner's turn: %+v", list.Turns)
 	}
 	// POST /api/v0/turns on the server runs on the runner too, and answers
 	// with the turn.

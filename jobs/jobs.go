@@ -73,7 +73,14 @@ type Config struct {
 	Blobs interface {
 		blobs.Source
 		blobs.Sink
+		Size(h string) (int64, error)
 	}
+	// Record is the control plane's record: a runner's turn is sent to it
+	// at the turn's end (record.go). Nil: none is kept.
+	Record Recorder
+	// Sweeper cleans Blobs; a closed session asks it for a sweep. Nil:
+	// none.
+	Sweeper *Sweeper
 }
 
 // Server is the http.Handler.
@@ -117,7 +124,10 @@ func New(cfg Config) (*Server, error) {
 	s.mux.HandleFunc("POST /api/v0/attempts/{id}/events", s.runner(s.events))
 	s.mux.HandleFunc("POST /api/v0/attempts/{id}/finish", s.runner(s.finish))
 	s.mux.HandleFunc("POST /api/v0/attempts/{id}/snapshot", s.runner(s.snapshot))
+	s.mux.HandleFunc("POST /api/v0/attempts/{id}/record", s.runner(s.record))
 	s.mux.HandleFunc("POST /api/v0/blobs", s.runner(s.blobsMissing))
+	s.mux.HandleFunc("POST /api/v0/packs", s.runner(s.blobPack))
+	s.mux.HandleFunc("POST /api/v0/packs/fetch", s.runner(s.blobFetch))
 	s.mux.HandleFunc("PUT /api/v0/blobs/{id}", s.runner(s.blobPut))
 	s.mux.HandleFunc("GET /api/v0/blobs/{id}", s.runner(s.blobGet))
 	return s, nil
@@ -130,6 +140,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	limit := int64(MaxBody)
 	if r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, BlobPath) {
 		limit = blobs.MaxBlob
+	} else if r.URL.Path == PackPath {
+		limit = blobs.MaxPackBody
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	if _, pattern := s.mux.Handler(r); pattern == "" {
@@ -444,6 +456,7 @@ func (s *Server) closeWorkspace(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		s.internal(w)
 	default:
+		s.cfg.Sweeper.Kick() // its blobs may go now
 		writeJSON(w, http.StatusOK, ws)
 	}
 }

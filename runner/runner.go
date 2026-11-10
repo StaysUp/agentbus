@@ -78,6 +78,12 @@ type Config struct {
 	LookPath func(string) (string, error)
 	Environ  func() []string
 
+	// Forward sends each turn's record to the control plane at the turn's
+	// end (POST /api/v0/attempts/{id}/record): a runner of a server, whose
+	// Store is its own. In agentbus up Store is the control plane's, and
+	// nothing is sent.
+	Forward bool
+
 	// StopWait bounds how long a runner waits for a stopped turn to end
 	// before it lets go of the job. Zero means one minute.
 	StopWait time.Duration
@@ -390,6 +396,7 @@ func (at *attempt) finish(ctx context.Context, f queue.Finish) {
 	ctx = context.WithoutCancel(ctx)
 	at.addChanges(ctx, &f)
 	at.flush(ctx)
+	at.forward(ctx, f)
 	f.LastSeq = at.lastSeq()
 	for i := range 5 {
 		var j queue.Job
@@ -403,6 +410,78 @@ func (at *attempt) finish(ctx context.Context, f queue.Finish) {
 			return
 		}
 		sleep(ctx, time.Duration(i+1)*time.Second)
+	}
+}
+
+// MaxRecordBatch bounds the event bytes of one record batch, under the
+// protocol's body limit.
+const MaxRecordBatch = jobs.MaxBody * 3 / 4
+
+// forward sends the turn's record, from the runner's own store, to the
+// control plane, a batch at a time (Config.Forward). A batch that cannot be
+// sent is given up after a few tries: the job still finishes, and the
+// turn's events stay in the runner's record.
+func (at *attempt) forward(ctx context.Context, f queue.Finish) {
+	if !at.r.cfg.Forward || at.r.cfg.Store == nil {
+		return
+	}
+	session := at.session
+	if res, _ := queue.ReadResult(f.Result); res.Session != "" {
+		session = res.Session
+	}
+	if session == "" {
+		return
+	}
+	filter := store.Filter{Turn: at.a.ID, TurnSession: session}
+	var after int64
+	for range 10000 {
+		recs, more, err := at.r.cfg.Store.Page(after, filter, jobs.MaxBatch, MaxRecordBatch)
+		if err != nil || len(recs) == 0 {
+			return
+		}
+		b := jobs.RecordBatch{Number: at.a.Number}
+		size, taken := 0, 0
+		for _, rec := range recs {
+			if len(rec.Data) > MaxRecordBatch {
+				// Bigger than a batch may be (a tool's whole output): left
+				// out, so the rest of the turn still goes.
+				at.r.cfg.Logf("job %s: an event of the turn is too big to send, left out", at.job.ID)
+				after, taken = rec.Seq, taken+1
+				continue
+			}
+			if size+len(rec.Data) > MaxRecordBatch {
+				break
+			}
+			b.Events = append(b.Events, rec.Data)
+			size += len(rec.Data)
+			after, taken = rec.Seq, taken+1
+		}
+		if len(b.Events) == 0 {
+			if !more && taken == len(recs) {
+				return
+			}
+			continue
+		}
+		sent := false
+		for i := range 3 {
+			var ack jobs.RecordAck
+			status, err := call(ctx, at.r.short, at.path("record"), at.r.token, b, &ack)
+			if err == nil && status == http.StatusOK {
+				sent = true
+				break
+			}
+			if err == nil && status < 500 {
+				break
+			}
+			sleep(ctx, time.Duration(i+1)*time.Second)
+		}
+		if !sent {
+			at.r.cfg.Logf("job %s: the turn's record could not be sent", at.job.ID)
+			return
+		}
+		if !more && taken == len(recs) {
+			return
+		}
 	}
 }
 
@@ -598,8 +677,13 @@ func (r *Runner) request(at *attempt) run.Request {
 	default:
 		req.Harness, req.Folder, req.FolderRef = sp.Harness, at.folder, at.ref
 		req.AgentID, req.Access, req.KeyEnv = sp.AgentID, sp.Access, sp.KeyEnv
-		if at.job.Kind == queue.KindTurn {
+		switch at.job.Kind {
+		case queue.KindTurn:
 			req.NewSession = at.job.Session
+		case queue.KindReview:
+			// The session control named for this review: its record is
+			// accepted for that session only.
+			req.NewSession = at.job.Links.ReviewSession
 		}
 	}
 	// Work an agent asked for, and a delivered result, say so on their

@@ -7,11 +7,13 @@ package jobs
 // against its hash as it arrives: the protocol's MaxBody does not bound it.
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/staysup/agentbus/blobs"
 	"github.com/staysup/agentbus/queue"
@@ -19,6 +21,9 @@ import (
 
 // BlobPath is the prefix of the blob routes.
 const BlobPath = "/api/v0/blobs/"
+
+// PackPath is the route that takes a pack of blobs.
+const PackPath = "/api/v0/packs"
 
 func (s *Server) blobsMissing(w http.ResponseWriter, r *http.Request, _ queue.Runner) {
 	if s.cfg.Blobs == nil {
@@ -86,6 +91,83 @@ func (s *Server) blobGet(w http.ResponseWriter, r *http.Request, _ queue.Runner)
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, rc)
+}
+
+// blobPack keeps every blob of the pack the body holds (blobs.ReadPack).
+func (s *Server) blobPack(w http.ResponseWriter, r *http.Request, _ queue.Runner) {
+	if s.cfg.Blobs == nil {
+		fail(w, http.StatusNotFound, "this service keeps no blob store")
+		return
+	}
+	n, err := blobs.ReadPack(r.Body, nil, blobs.PackCount, func(h string, body io.Reader) error { return s.cfg.Blobs.Put(r.Context(), h, body) })
+	switch {
+	case errors.Is(err, blobs.ErrBadHash):
+		fail(w, http.StatusBadRequest, "a blob of the pack does not have the hash it was sent with")
+		return
+	case errors.Is(err, blobs.ErrBadPack):
+		fail(w, http.StatusBadRequest, "the pack must be frames of a hash, a size and that many bytes")
+		return
+	case err != nil:
+		fail(w, http.StatusInternalServerError, "the pack could not be kept")
+		return
+	}
+	writeJSON(w, http.StatusOK, blobs.PackReply{Kept: n})
+}
+
+// blobFetch answers the blobs asked for as one pack, in the order asked.
+func (s *Server) blobFetch(w http.ResponseWriter, r *http.Request, _ queue.Runner) {
+	if s.cfg.Blobs == nil {
+		fail(w, http.StatusNotFound, "this service keeps no blob store")
+		return
+	}
+	var b blobs.FetchRequest
+	if !decode(r, &b) || len(b.Hashes) == 0 || len(b.Hashes) > blobs.PackCount {
+		fail(w, http.StatusBadRequest, "the body must be one JSON object with hashes, 1 to 1000")
+		return
+	}
+	missing, err := s.cfg.Blobs.Missing(r.Context(), b.Hashes)
+	if err != nil {
+		fail(w, http.StatusBadRequest, "each hash must be 64 lowercase hex digits")
+		return
+	}
+	if len(missing) > 0 {
+		writeJSON(w, http.StatusNotFound, blobs.MissingReply{Missing: missing})
+		return
+	}
+	// Each blob is sized before the answer starts, and opened only when it
+	// is written: a pack holds one file open at a time. One gone meanwhile
+	// ends the pack short, which the client refuses.
+	items := make([]blobs.Item, 0, len(b.Hashes))
+	for _, h := range b.Hashes {
+		size, err := s.cfg.Blobs.Size(h)
+		if err != nil {
+			writeJSON(w, http.StatusNotFound, blobs.MissingReply{Missing: []string{h}})
+			return
+		}
+		items = append(items, blobs.Item{Hash: h, Size: size, Open: func(ctx context.Context) (io.ReadCloser, error) { return s.cfg.Blobs.Open(ctx, h) }})
+	}
+	// Every write has a deadline, up to the last bytes net/http writes
+	// after this returns; so the connection then closes, and no later
+	// request on it inherits the deadline.
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Connection", "close")
+	w.WriteHeader(http.StatusOK)
+	_ = blobs.WritePack(r.Context(), &deadlineWriter{w: w, rc: http.NewResponseController(w)}, items)
+}
+
+// PackWriteWait bounds how long one write of a fetched pack may wait on a
+// client that stopped reading.
+const PackWriteWait = time.Minute
+
+// deadlineWriter sets a write deadline before each write.
+type deadlineWriter struct {
+	w  io.Writer
+	rc *http.ResponseController
+}
+
+func (d *deadlineWriter) Write(p []byte) (int, error) {
+	_ = d.rc.SetWriteDeadline(time.Now().Add(PackWriteWait))
+	return d.w.Write(p)
 }
 
 // SnapshotState is the answer to an attempt's snapshot request: the

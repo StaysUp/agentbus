@@ -69,6 +69,7 @@ func TestClient(t *testing.T) {
 		m, _ := s.Missing(ctx, req.Hashes)
 		jsonWrite(w, MissingReply{Missing: m})
 	})
+	packRoutes(mux, s, nil)
 	mux.HandleFunc("PUT /api/v0/blobs/{h}", func(w http.ResponseWriter, r *http.Request) {
 		if err := s.Put(ctx, r.PathValue("h"), r.Body); err != nil {
 			w.WriteHeader(400)

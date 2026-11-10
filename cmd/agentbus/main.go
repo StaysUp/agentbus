@@ -144,6 +144,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 type config struct {
 	listen   string
 	origin   string
+	hosts    []string // more names the API answers to on loopback (-host)
 	home     string
 	upstream *url.URL // Anthropic
 	chatgpt  *url.URL // codex's ChatGPT backend
@@ -194,6 +195,7 @@ type service struct {
 	settings settings.Store    // the settings the built-in runner reads
 	folders  *folders.Registry // the folders this machine owns (up, runner)
 	blobs    *blobs.Store      // the control plane's blob store (up, server)
+	blobSwp  *jobs.Sweeper     // cleans it
 	log      *logfile.Log      // logs/service.log
 	done     chan error
 	once     sync.Once
@@ -291,6 +293,7 @@ func start(c config) (*service, error) {
 	var fr *folders.Registry
 	var issuer queue.FolderIssuer // nil, not a nil *folders.Registry, in server
 	var bs *blobs.Store           // the control plane's blob store (up, server)
+	var blobSweep *jobs.Sweeper   // and what cleans it
 	if c.hasEngine() {
 		if fr, err = folders.Open(filepath.Join(c.home, "folders.json")); err != nil {
 			st.Close()
@@ -332,8 +335,9 @@ func start(c config) (*service, error) {
 			return nil, err
 		}
 		bs.Clean(time.Hour)
+		blobSweep = jobs.NewSweeper(q, bs, nil) // logs once the log is open
 		js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollToken, Heartbeat: c.heartbeat, Agents: saved, Settings: cfgStore,
-			Folders: issuer, Blobs: bs})
+			Folders: issuer, Blobs: bs, Sweeper: blobSweep, Record: st})
 		if err != nil {
 			closeQ()
 			st.Close()
@@ -360,6 +364,9 @@ func start(c config) (*service, error) {
 		st.Close()
 		closeQ()
 		return nil, fmt.Errorf("the service log could not be opened: %w", err)
+	}
+	if blobSweep != nil {
+		blobSweep.Logf = svcLog.Printf
 	}
 	st.OnError = func(err error) {
 		c.logf("an event could not be stored: %v", err)
@@ -444,7 +451,7 @@ func start(c config) (*service, error) {
 		}
 	}
 	a, err := api.New(api.Config{Store: st, Token: token, TurnsToken: turnsToken, Port: port, AnyHost: !loopback,
-		BaseURL: baseURL, Origin: c.origin, Environ: c.environ, Folders: issuer, Build: build(debug.ReadBuildInfo()),
+		BaseURL: baseURL, Origin: c.origin, Hosts: c.hosts, Environ: c.environ, Folders: issuer, Build: build(debug.ReadBuildInfo()),
 		Queue: q, Jobs: jobsAPI, Engine: eng, TurnWait: c.turnWait, Agents: saved, Settings: cfgStore})
 	if err != nil {
 		ln.Close()
@@ -501,7 +508,7 @@ func start(c config) (*service, error) {
 		orOAI.SetRewriter(codexReplay)
 	}
 	host, _, _ := net.SplitHostPort(c.listen)
-	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: gws, api: a, eng: eng, store: st, blobs: bs,
+	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: gws, api: a, eng: eng, store: st, blobs: bs, blobSwp: blobSweep,
 		queue: q, remote: remote, settings: cfgStore, folders: fr, log: svcLog, done: make(chan error, 1)}
 	s.srv = &http.Server{
 		Handler:           logRequests(svcLog, route(a, vendors{anth, oai, orAnth, orOAI}, !loopback)),
@@ -544,10 +551,19 @@ func start(c config) (*service, error) {
 // second until the service stops.
 func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 	stop := make(chan struct{})
-	s.stopSweep = sync.OnceFunc(func() { close(stop) })
+	ctx, cancel := context.WithCancel(context.Background())
+	s.stopSweep = sync.OnceFunc(func() { close(stop); cancel() })
 	s.sweepDone = make(chan struct{})
+	// The blob store: blobs no snapshot or changeset of an open session
+	// reaches (jobs.Sweeper).
+	var blobsDone sync.WaitGroup
+	if s.blobSwp != nil {
+		blobsDone.Add(1)
+		go func() { defer blobsDone.Done(); s.blobSwp.Run(ctx) }()
+	}
 	go func() {
 		defer close(s.sweepDone)
+		defer blobsDone.Wait()
 		t := time.NewTicker(time.Second)
 		defer t.Stop()
 		for {
@@ -597,25 +613,28 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 	cfg := runner.Config{Queue: self, EnrollToken: enrollToken, Name: name, Capacity: capacity,
 		Engine: s.eng, Store: s.store, Logf: svcLog.Printf, Labels: c.labels,
 		LookPath: c.lookPath, Environ: c.environ,
-		Workdir: filepath.Join(c.home, "worktrees"), StateFile: filepath.Join(c.home, "runner.json"), Settings: s.settings}
-	if s.folders != nil && (c.mode == modeUp || len(c.folders) > 0) {
-		wg.Add(1)
-		conn, err := startConnector(ctx, connectorConfig{server: self, enrollToken: enrollToken, name: name, home: c.home,
-			folders: s.folders, store: s.blobs, logf: svcLog.Printf}, wg.Done)
-		if err != nil {
-			wg.Done()
-			return fail(err)
-		}
-		cfg.Folders, cfg.Lender = s.folders, conn
-	}
+		Workdir: filepath.Join(c.home, "worktrees"), StateFile: filepath.Join(c.home, "runner.json"), Settings: s.settings,
+		Forward: c.mode == modeRunner}
+	// A runner of a server keeps its own store; a connector beside it
+	// shares the one handle.
 	var own *blobs.Store
 	if s.blobs != nil {
 		cfg.Blobs, cfg.BlobSink = s.blobs, s.blobs
 	} else {
 		var err error
-		if own, err = blobs.Open(filepath.Join(c.home, "blobs")); err != nil {
+		if own, err = blobs.Open(filepath.Join(c.home, cacheDir)); err != nil {
 			return fail(err)
 		}
+	}
+	if s.folders != nil && (c.mode == modeUp || len(c.folders) > 0) {
+		wg.Add(1)
+		conn, err := startConnector(ctx, connectorConfig{server: self, enrollToken: enrollToken, name: name, home: c.home,
+			folders: s.folders, store: s.blobs, own: own, logf: svcLog.Printf}, wg.Done)
+		if err != nil {
+			wg.Done()
+			return fail(err)
+		}
+		cfg.Folders, cfg.Lender = s.folders, conn
 	}
 	rn, err := runner.Enroll(ctx, cfg)
 	if err != nil {
@@ -624,6 +643,7 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 	if own != nil {
 		client := blobClient(self, rn.Token())
 		rn.UseBlobs(blobs.Local{Store: own, From: client}, client)
+		go sweepCache(ctx, own, svcLog.Printf)
 	}
 	if s.remote != nil {
 		s.remote.Enrolled(rn.ID(), rn.Token())

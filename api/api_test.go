@@ -191,6 +191,48 @@ func TestAnyHost(t *testing.T) {
 	}
 }
 
+// Hosts adds names a loopback service answers to, each with its own port
+// only; every other name is still refused, and the token still needed.
+func TestMoreHosts(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewUnstartedServer(nil)
+	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	if _, err := New(Config{Store: st, Token: token, Port: port, Hosts: []string{"vm.lan:1"}}); err == nil {
+		t.Fatal("a host with a port was taken")
+	}
+	a, err := New(Config{Store: st, Token: token, Port: port, Hosts: []string{"host.lima.internal"}, BaseURL: "http://127.0.0.1:" + port})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv.Config.Handler = a
+	srv.Start()
+	defer func() { srv.Close(); st.Close() }()
+	for host, want := range map[string]int{
+		"host.lima.internal:" + port: 200,
+		"localhost:" + port:          200,
+		"host.lima.internal":         403,
+		"host.lima.internal:1":       403,
+		"evil.example:" + port:       403,
+	} {
+		r, _ := http.NewRequest("GET", srv.URL+"/api/v0/sessions", nil)
+		r.Host = host
+		r.Header.Set("Authorization", "Bearer "+token)
+		if resp, body := do(t, r); resp.StatusCode != want {
+			t.Errorf("Host %q: %d, want %d", host, resp.StatusCode, want)
+		} else {
+			noToken(t, resp, body)
+		}
+	}
+	r, _ := http.NewRequest("GET", srv.URL+"/api/v0/sessions", nil)
+	r.Host = "host.lima.internal:" + port
+	if resp, _ := do(t, r); resp.StatusCode != 401 {
+		t.Errorf("no token from another host: %d", resp.StatusCode)
+	}
+}
+
 func TestPreflightOnlyForAllowedOrigin(t *testing.T) {
 	e := newEnv(t)
 	pre := func(o, path string) *http.Response {

@@ -217,15 +217,25 @@ func (r *Runner) publish(ctx context.Context, s *isolation.Space, name string) (
 	if err != nil {
 		return "", err
 	}
-	// A store on this disk takes a clone of each saved file.
-	local, _ := r.cfg.BlobSink.(interface {
+	// A store on this disk takes a clone of each saved file. Over HTTP the
+	// files are kept in the runner's own store first, a clone each where
+	// it can, and go from there many to a request (blobs.Copy).
+	type filer interface {
 		PutFile(p, hash string, link func(src, dst string) error) (string, error)
-	})
+		Put(ctx context.Context, h string, r io.Reader) error
+	}
+	local, _ := r.cfg.BlobSink.(filer)
+	var own *blobs.Store
+	if l, ok := r.cfg.Blobs.(blobs.Local); ok && local == nil && l.Store != nil {
+		own, local = l.Store, l.Store
+	}
+	var staged []string
 	for _, h := range missing {
 		if p, ok := isolation.BlobPath(s, h); ok && local != nil {
 			if _, err := local.PutFile(p, h, isolation.Clone); err != nil {
 				return "", err
 			}
+			staged = append(staged, h)
 			continue
 		}
 		n := needs[h]
@@ -243,9 +253,19 @@ func (r *Runner) publish(ctx context.Context, s *isolation.Space, name string) (
 			}
 			return "", fmt.Errorf("the copy keeps no file %s", h)
 		}
-		err = r.cfg.BlobSink.Put(ctx, h, rc)
+		if local != nil {
+			err = local.Put(ctx, h, rc)
+			staged = append(staged, h)
+		} else {
+			err = r.cfg.BlobSink.Put(ctx, h, rc)
+		}
 		rc.Close()
 		if err != nil {
+			return "", err
+		}
+	}
+	if own != nil {
+		if err := blobs.Copy(ctx, own, r.cfg.BlobSink, staged); err != nil {
 			return "", err
 		}
 	}

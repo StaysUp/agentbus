@@ -457,7 +457,7 @@ func TestThreeProcesses(t *testing.T) {
 		}
 		return ref != ""
 	})
-	filesFlow(t, c, folder, map[string]any{"folder_ref": ref, "connector": connector, "isolate": true}, false)
+	filesFlow(t, c, folder, map[string]any{"folder_ref": ref, "connector": connector, "isolate": true}, true)
 	// The same folder again, now as filesFlow left it.
 	if err := os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -466,13 +466,28 @@ func TestThreeProcesses(t *testing.T) {
 	// The runner's copy came from the snapshot, not from the folder: its
 	// data folder holds the blobs it fetched, and the connector's the ones
 	// it sent.
-	for _, home := range []string{runHome, connHome, serverHome} {
-		if n := countFiles(t, filepath.Join(home, "blobs")); n == 0 {
-			t.Errorf("no blob in %s", home)
+	for home, dir := range map[string]string{runHome: cacheDir, connHome: cacheDir, serverHome: "blobs"} {
+		if n := countFiles(t, filepath.Join(home, dir)); n == 0 {
+			t.Errorf("no blob in %s", filepath.Join(home, dir))
 		}
 	}
 	if s := fileText(t, filepath.Join(runHome, "folders.json")); strings.Contains(s, folder) {
 		t.Errorf("the runner knows the folder's path: %s", s)
+	}
+	// The server's record holds the runner's turns, as the cockpit reads
+	// them, and no path of the runner's.
+	var ss struct {
+		Store    string
+		Sessions []struct{ ID string }
+	}
+	if code, out := c.call("GET", "/api/v0/sessions", nil, &ss); code != 200 || len(ss.Sessions) < 3 {
+		t.Fatalf("the server's sessions: %d %s", code, out)
+	}
+	for _, se := range ss.Sessions {
+		code, out := c.call("GET", "/api/v0/sessions/"+se.ID+"/events?after=0&limit=1000&store="+ss.Store, nil, nil)
+		if code != 200 || strings.Contains(out, runHome) || !strings.Contains(out, "turn.started") || !strings.Contains(out, "session.closed") {
+			t.Fatalf("the server's record of %s: %d %s", se.ID, code, out)
+		}
 	}
 }
 

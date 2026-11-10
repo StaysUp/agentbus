@@ -191,6 +191,28 @@ func (s *Store) Append(e event.Event) (out event.Event, stored bool, err error) 
 	return s.appendLocked(e)
 }
 
+// AppendOnce is Append of an event another service already stored under
+// its own seq, such as a runner's turn sent to the control plane: one whose
+// id this store holds for the same session and turn is not stored again, so
+// a batch sent twice is stored once. e must have an ID.
+func (s *Store) AppendOnce(e event.Event) (stored bool, err error) {
+	if e.ID == "" {
+		return false, errors.New("store: an event sent on needs its id")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int
+	if err := s.w.QueryRow(`SELECT COUNT(*) FROM events WHERE session = ? AND turn = ? AND json_extract(data, '$.id') = ?`,
+		e.Session, e.Turn, e.ID).Scan(&n); err != nil {
+		return false, fmt.Errorf("store: read %s: %w", e.Kind, err)
+	}
+	if n > 0 {
+		return false, nil
+	}
+	_, stored, err = s.appendLocked(e)
+	return stored, err
+}
+
 // appendLocked is Append with s.mu held.
 func (s *Store) appendLocked(e event.Event) (out event.Event, stored bool, err error) {
 	if s.closed {
