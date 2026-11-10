@@ -25,11 +25,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -38,6 +41,7 @@ import (
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/logfile"
+	"github.com/staysup/agentbus/netjail"
 	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 )
@@ -161,6 +165,11 @@ type Config struct {
 	// AgentName names a saved agent by its id in the transcript a turn on
 	// another harness gets; "" or a nil func names it by harness and model.
 	AgentName func(id string) string
+	// Contain says whether a turn's agent runs closed off from the network
+	// when the policy's [network] contain is "auto": true for a runner, false
+	// for agentbus up on one machine. Closed off, it reaches only BaseURL,
+	// the turn's API URL and the policy's [network] allow (netjail).
+	Contain bool
 	// Now is the clock. Nil means time.Now.
 	Now func() time.Time
 	// Logf writes one line to the service log: a child starting and exiting.
@@ -691,6 +700,29 @@ func (e *Engine) start(t turn) (*Turn, error) {
 			e.cfg.Logf("run.hint session=%s turn=%s left_out=%s", t.session, t.id, why)
 		}
 	}
+	// Closed off from the network, when the policy says so: before anything
+	// is stored, a runner that cannot do it refuses the turn.
+	var jail *netjail.Jail
+	if on, why := e.contained(perm); why != "" {
+		e.cfg.Logf("run.refused agent=%s reason=network", t.harness)
+		return nil, refuse(http.StatusBadRequest, why)
+	} else if on {
+		forward, pass := reach(e.cfg.BaseURL, apiURL)
+		session, turn := t.session, t.id
+		jail = netjail.New(netjail.Spec{Forward: forward, Pass: pass, Allow: perm.Network.Allow,
+			Refused: func(target, why string) {
+				if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.NetworkRefused,
+					Time: e.cfg.Now().UTC(), Session: session, Turn: turn, Host: target, Error: why}); err != nil {
+					e.cfg.Logf("store.error what=network_refused session=%s turn=%s", session, turn)
+				}
+			}})
+		cmd.Env = setEnv(cmd.Env, jail.Env())
+	}
+	defer func() {
+		if !started && jail != nil {
+			jail.Close()
+		}
+	}()
 	w, why := writesFor(h, t.folder, t.readOnly, perm, e.cfg.Protect)
 	if why != "" {
 		e.cfg.Logf("run.edit session=%s turn=%s left_out=%s", t.session, t.id, why)
@@ -720,12 +752,13 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	}
 	// session.opened is stored, so on any failure below the hold must close,
 	// or the session would read open until the next restart.
-	closeHold := func() {
+	closeHoldWhy := func(why string) {
 		if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.SessionClosed,
-			Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Hold: holdID, Error: "the agent could not be started"}); err != nil {
+			Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Hold: holdID, Error: why}); err != nil {
 			e.cfg.Logf("run.unclosed session=%s turn=%s hold=%s reason=store", t.session, t.id, holdID)
 		}
 	}
+	closeHold := func() { closeHoldWhy("the agent could not be started") }
 	// The turn's own turn.started, with the person's words as sent, before the
 	// child starts: the turn is listed from the moment it is started, and the
 	// turn.started the gateway reads from the child's first model call is the
@@ -749,11 +782,15 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		return nil, storeFailed
 	}
 	cmd.Stdout, cmd.Stderr = pipes.outW, pipes.errW
-	code, msg, lt := e.runs.start(cmd, t.session, t.id)
+	startCmd := cmd.Start
+	if jail != nil {
+		startCmd = func() error { return jail.Start(cmd) }
+	}
+	code, msg, lt := e.runs.start(cmd, startCmd, t.session, t.id)
 	pipes.closeWriters() // the child holds its own copies
 	if code != 0 {
 		pipes.closeReaders()
-		closeHold()
+		closeHoldWhy(msg)
 		return nil, refuse(code, msg)
 	}
 	copied := pipes.copy(io.MultiWriter(ids, out), out)
@@ -794,6 +831,9 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		copied(OutputGrace)
 		e.keepOutput(t, all[:len(all)-1], code, ended, out)
 		unsettled := e.cfg.Settle != nil && !e.cfg.Settle(t.session, t.id)
+		if jail != nil {
+			jail.Close()
+		}
 		e.cfg.Logf("%s.exit session=%s agent=%s turn=%s hold=%s exit=%d stopped=%t duration=%s", kind, t.session, t.harness, t.id, holdID,
 			code, stopped, ended.Sub(begun).Round(time.Millisecond))
 		if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.SessionClosed,
@@ -807,6 +847,71 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		close(res.done)
 	}()
 	return res, nil
+}
+
+// contained says whether a turn on policy p runs closed off from the
+// network, or why it cannot start: the policy asks for it and this runner
+// cannot do it.
+func (e *Engine) contained(p settings.Policy) (bool, string) {
+	on := p.Network.Contain == settings.ContainOn || (p.Network.Contain != settings.ContainOff && e.cfg.Contain)
+	if !on {
+		return false, ""
+	}
+	if !netjail.Supported {
+		if p.Network.Contain == settings.ContainOn {
+			return false, "[network] contain is \"on\" in the permissions, and network control is Linux-only, so the turn did not start. " +
+				"Run the agent on a Linux runner, or set contain to \"auto\" or \"off\"."
+		}
+		return false, "" // a runner on macOS: agents reach any host, as its start says
+	}
+	if err := netjail.Check(); err != nil {
+		return false, err.Error() + ", so the turn did not start. Fix it on this runner, or set [network] contain = \"off\" in the permissions to run agents open."
+	}
+	return true, ""
+}
+
+// reach sorts the addresses a turn's agent is given: loopback ones are
+// forwarded into its namespace as they are, others pass the proxy as
+// host:port.
+func reach(urls ...string) (forward, pass []string) {
+	for _, s := range urls {
+		u, err := url.Parse(s)
+		if err != nil || u.Host == "" {
+			continue
+		}
+		port := u.Port()
+		if port == "" {
+			port = "80"
+			if u.Scheme == "https" {
+				port = "443"
+			}
+		}
+		host := u.Hostname()
+		if host == "localhost" {
+			host = "127.0.0.1"
+		}
+		addr := net.JoinHostPort(host, port)
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			if !slices.Contains(forward, addr) {
+				forward = append(forward, addr)
+			}
+		} else if !slices.Contains(pass, addr) {
+			pass = append(pass, addr)
+		}
+	}
+	return forward, pass
+}
+
+// setEnv is env with each of set's variables in place of any earlier value.
+func setEnv(env, set []string) []string {
+	out := make([]string, 0, len(env)+len(set))
+	for _, kv := range env {
+		k, _, _ := strings.Cut(kv, "=")
+		if !slices.ContainsFunc(set, func(s string) bool { return strings.HasPrefix(s, k+"=") }) {
+			out = append(out, kv)
+		}
+	}
+	return append(out, set...)
 }
 
 // Stop stops a running turn: SIGTERM to its whole process tree, then SIGKILL

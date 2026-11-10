@@ -115,6 +115,7 @@ func TestServerAndRunner(t *testing.T) {
 	t.Setenv("OPENAI_BASE_URL", "")
 	look := func(string) (string, error) { return self, nil }
 	serverHome, runnerHome := t.TempDir(), t.TempDir()
+	networkOffWhereUnsupported(t, serverHome)
 	server, err := start(config{mode: modeServer, listen: "127.0.0.1:0", home: serverHome, upstream: mustURL("http://127.0.0.1:1"),
 		chatgpt: mustURL("http://127.0.0.1:1"), logf: t.Logf, heartbeat: 100 * time.Millisecond, turnWait: 10 * time.Second})
 	if err != nil {

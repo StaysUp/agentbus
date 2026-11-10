@@ -154,3 +154,39 @@ func TestReadPolicy(t *testing.T) {
 		t.Error("a folder in the file's place was read as empty lists")
 	}
 }
+
+// [network]: contain and allow, read from TOML and JSON, refused when out of
+// shape, and written back by FormatPolicy.
+func TestNetworkPolicy(t *testing.T) {
+	p, err := ParsePolicy([]byte("[network]\ncontain = \"on\"\nallow = [\"github.com\", \"*.npmjs.org\", \"10.0.0.5\"]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.Network.Contain != ContainOn || !slices.Equal(p.Network.Allow, []string{"github.com", "*.npmjs.org", "10.0.0.5"}) {
+		t.Fatalf("network: %+v", p.Network)
+	}
+	if d := DefaultPolicy(); d.Network.Contain != ContainAuto || d.Network.Allow == nil || len(d.Network.Allow) != 0 {
+		t.Fatalf("default network: %+v", d.Network)
+	}
+	again, err := ParsePolicy(FormatPolicy(p))
+	if err != nil || again.Network.Contain != ContainOn || !slices.Equal(again.Network.Allow, p.Network.Allow) {
+		t.Fatalf("format and read back: %+v %v", again.Network, err)
+	}
+	if j, err := DecodePolicy([]byte(`{"network":{"allow":["github.com"]}}`)); err != nil || j.Network.Contain != ContainAuto {
+		t.Fatalf("JSON: %+v %v", j.Network, err)
+	}
+	for _, bad := range []string{
+		"[network]\ncontain = \"yes\"\n",
+		"[network]\nallow = [\"https://github.com\"]\n",
+		"[network]\nallow = [\"github.com:443\"]\n",
+		"[network]\nallow = [\"github.com/x\"]\n",
+		"[network]\nallow = [\"\"]\n",
+		"[network]\nallow = [\"*\"]\n",
+		"[network]\nallow = [\"-a.com\"]\n",
+		"[network]\nhosts = []\n",
+	} {
+		if _, err := ParsePolicy([]byte(bad)); err == nil {
+			t.Errorf("accepted %q", bad)
+		}
+	}
+}

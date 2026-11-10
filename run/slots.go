@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/netjail"
 )
 
 // runs tracks the children the engine started.
@@ -49,15 +51,20 @@ func (rs *runs) take(session string) (int, string) {
 	return 0, ""
 }
 
-// start starts cmd, the child of turn in session, in a slot already taken,
-// unless the engine began stopping, and starts tracking its process tree.
-func (rs *runs) start(cmd *exec.Cmd, session, turn string) (int, string, *liveTurn) {
+// start starts cmd, the child of turn in session, with startCmd, in a slot
+// already taken, unless the engine began stopping, and starts tracking its
+// process tree.
+func (rs *runs) start(cmd *exec.Cmd, startCmd func() error, session, turn string) (int, string, *liveTurn) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
 	if rs.stopping {
 		return http.StatusServiceUnavailable, "the service is stopping", nil
 	}
-	if err := cmd.Start(); err != nil {
+	if err := startCmd(); err != nil {
+		var ne *netjail.Error
+		if errors.As(err, &ne) {
+			return http.StatusInternalServerError, ne.Error(), nil
+		}
 		return http.StatusInternalServerError, "the agent could not be started", nil
 	}
 	if rs.live == nil {

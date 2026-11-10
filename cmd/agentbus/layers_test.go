@@ -73,6 +73,10 @@ func TestPackageLayers(t *testing.T) {
 		// nothing of the module.
 		{[]string{"credentials"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
 			"cost", "replay", "store", "body", "logfile", "settings", "cmd", "folders", "connector", "blobs"}, jobSide...)},
+		// netjail, which closes an agent off from the network, uses
+		// nothing of the module.
+		{[]string{"netjail"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
+			"cost", "replay", "store", "body", "logfile", "settings", "cmd", "folders", "connector", "blobs", "credentials"}, jobSide...)},
 		{[]string{"blobs"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
 			"cost", "replay", "store", "body", "logfile", "settings", "cmd", "folders", "connector"}, jobSide...)},
 	} {

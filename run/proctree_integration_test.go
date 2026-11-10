@@ -35,7 +35,7 @@ func TestStopWithoutProcTableReachesTheChild(t *testing.T) {
 			cmd := exec.Command("sleep", "30")
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 			var rs runs
-			code, msg, lt := rs.start(cmd, "s", "t_1")
+			code, msg, lt := rs.start(cmd, cmd.Start, "s", "t_1")
 			if code != 0 {
 				t.Fatalf("start: %d %s", code, msg)
 			}

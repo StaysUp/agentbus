@@ -119,6 +119,21 @@ review = true        # ask for a review of a job in its scope
 cancel = true        # cancel jobs and stop turns its tree asked for
 rename = true        # rename sessions in its scope
 apply = true         # apply a turn's changes to the person's folder, for a turn in its scope
+
+# What a turn's agent may reach on the network. Linux only: macOS has no
+# network control, and its agents reach any host.
+# contain: whether each agent runs closed off from the network.
+#   "auto"  on for agentbus runner, off for agentbus up on one machine.
+#   "on"    always. An agent then reaches only its runner's gateway, the
+#           server's API, and the hosts in allow, through a proxy. Anything
+#           else is refused and recorded (network.refused). If the runner
+#           cannot close the network off, the turn is refused.
+#   "off"   never: agents reach any host.
+# allow: host names an agent may reach, on any port, such as "github.com".
+# "*.example.com" also allows every name under example.com.
+[network]
+contain = "auto"
+allow = []           # e.g. ["github.com", "registry.npmjs.org"]
 `
 
 // Edit values: where a turn may edit files without asking.
@@ -148,6 +163,14 @@ const (
 	ScopeSession = "session"
 )
 
+// Contain values of [network]: whether a turn's agent runs closed off from
+// the network.
+const (
+	ContainAuto = "auto"
+	ContainOn   = "on"
+	ContainOff  = "off"
+)
+
 // The defaults, as the starter file writes them.
 const (
 	DefaultMaxDepth       = 2
@@ -171,6 +194,7 @@ type Policy struct {
 	SubscriptionsOnRunners string   `toml:"subscriptions_on_runners" json:"subscriptions_on_runners,omitempty" doc:"Whether control adds the person's own subscription sign-in to model calls of agents on their runners: off or own (runners on their own machines; connect the subscription once on control). Absent in a PUT: off."`
 	Limits                 Limits   `toml:"limits" json:"limits" doc:"The limits on work agents ask for."`
 	AgentAPI               AgentAPI `toml:"agent_api" json:"agent_api" doc:"What a turn's own token may call."`
+	Network                Network  `toml:"network" json:"network" doc:"What a turn's agent may reach on the network (Linux runners only)."`
 
 	// where and fix say, in a turn's refusal, where the policy came from and
 	// what to do: set by the store that read it (Error).
@@ -200,6 +224,13 @@ type AgentAPI struct {
 	Apply      *bool  `toml:"apply" json:"apply,omitempty" doc:"Apply a turn's changes to the person's folder, for a turn of a session in its scope. Absent in a PUT: true."`
 }
 
+// Network says what a turn's agent may reach ([network]). Read by the
+// runner that starts the agent (netjail).
+type Network struct {
+	Contain string   `toml:"contain" json:"contain,omitempty" doc:"Whether each agent runs closed off from the network, on Linux: auto (on for agentbus runner, off for agentbus up), on or off. Closed off, it reaches only its runner's gateway, the server's API and the hosts in allow; anything else is refused and recorded as network.refused. Absent in a PUT: auto."`
+	Allow   []string `toml:"allow" json:"allow" doc:"Host names a closed-off agent may reach, on any port, such as github.com. *.example.com also allows every name under example.com. Absent in a PUT: none."`
+}
+
 // DefaultPolicy is the policy of a missing or empty file.
 func DefaultPolicy() Policy {
 	var p Policy
@@ -209,7 +240,7 @@ func DefaultPolicy() Policy {
 
 // fill sets every value left out to its default.
 func (p *Policy) fill() {
-	for _, l := range []*[]string{&p.ReadFolders, &p.Allow, &p.Forbid, &p.ShareReadOnly} {
+	for _, l := range []*[]string{&p.ReadFolders, &p.Allow, &p.Forbid, &p.ShareReadOnly, &p.Network.Allow} {
 		if *l == nil {
 			*l = []string{}
 		}
@@ -241,6 +272,9 @@ func (p *Policy) fill() {
 	}
 	if p.AgentAPI.Scope == "" {
 		p.AgentAPI.Scope = ScopeTree
+	}
+	if p.Network.Contain == "" {
+		p.Network.Contain = ContainAuto
 	}
 	for _, b := range []**bool{&p.AgentAPI.Read, &p.AgentAPI.ListAgents, &p.AgentAPI.Start,
 		&p.AgentAPI.Continue, &p.AgentAPI.Review, &p.AgentAPI.Cancel, &p.AgentAPI.Rename, &p.AgentAPI.Apply} {
@@ -287,6 +321,16 @@ func (p *Policy) Check() error {
 	if s := p.AgentAPI.Scope; s != "" && s != ScopeTree && s != ScopeSession {
 		return fmt.Errorf("[agent_api] scope must be %q or %q", ScopeTree, ScopeSession)
 	}
+	switch p.Network.Contain {
+	case "", ContainAuto, ContainOn, ContainOff:
+	default:
+		return fmt.Errorf("[network] contain must be %q, %q or %q", ContainAuto, ContainOn, ContainOff)
+	}
+	for _, h := range p.Network.Allow {
+		if !hostShape(h) {
+			return fmt.Errorf("[network] allow entry %s must be a host name, such as \"github.com\" or \"*.github.com\": no scheme, port or path", strconv.Quote(h))
+		}
+	}
 	for _, f := range p.ReadFolders {
 		if err := folderShape(f); err != nil {
 			return fmt.Errorf("read_folders entry %s %v", strconv.Quote(f), err)
@@ -319,10 +363,10 @@ func ParsePolicy(b []byte) (Policy, error) {
 		// Not a parse error: a value of the wrong type, such as a string
 		// where a list belongs.
 		return Policy{}, errors.New("a value has the wrong type: read_folders, allow, forbid and share_read_only are lists of strings, such as [\"go test\"]; " +
-			"edit, isolation, subscriptions_on_runners and scope are strings; subagents is true or false; the [limits] are numbers; the [agent_api] switches are true or false")
+			"edit, isolation, subscriptions_on_runners, scope and contain are strings; [network] allow is a list of strings; subagents is true or false; the [limits] are numbers; the [agent_api] switches are true or false")
 	}
 	if extra := md.Undecoded(); len(extra) > 0 {
-		return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, subscriptions_on_runners, [limits] and [agent_api] (see the README)", strconv.Quote(extra[0].String()))
+		return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, subscriptions_on_runners, [limits], [agent_api] and [network] (see the README)", strconv.Quote(extra[0].String()))
 	}
 	if err := p.Check(); err != nil {
 		return Policy{}, err
@@ -348,11 +392,11 @@ func DecodePolicy(b []byte) (Policy, error) {
 		switch {
 		case errors.As(err, &te) && te.Field != "":
 			return Policy{}, fmt.Errorf("%s has the wrong type: read_folders, allow, forbid and share_read_only are lists of strings; "+
-				"edit, isolation, subscriptions_on_runners and scope are strings; subagents and the agent_api switches are true or false; the limits are numbers", te.Field)
+				"edit, isolation, subscriptions_on_runners, scope and contain are strings; network.allow is a list of strings; subagents and the agent_api switches are true or false; the limits are numbers", te.Field)
 		case errors.As(err, &se):
 			return Policy{}, errors.New("the body is not valid JSON")
 		case strings.HasPrefix(err.Error(), "json: unknown field "):
-			return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, subscriptions_on_runners, limits and agent_api",
+			return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, subscriptions_on_runners, limits, agent_api and network",
 				strings.TrimPrefix(err.Error(), "json: unknown field "))
 		}
 		return Policy{}, errors.New("the body must be one JSON object: the policy")
@@ -385,6 +429,7 @@ func FormatPolicy(p Policy) []byte {
 		"agent_api.start": *p.AgentAPI.Start, "agent_api.continue": *p.AgentAPI.Continue, "agent_api.review": *p.AgentAPI.Review,
 		"agent_api.cancel": *p.AgentAPI.Cancel, "agent_api.rename": *p.AgentAPI.Rename,
 		"agent_api.apply": *p.AgentAPI.Apply,
+		"network.contain": p.Network.Contain, "network.allow": p.Network.Allow,
 	}
 	var out bytes.Buffer
 	section := ""
@@ -523,3 +568,24 @@ func checkCommand(c string) error {
 }
 
 func isControl(r rune) bool { return r < 0x20 || r == 0x7f }
+
+// hostShape accepts a host name or an IPv4 address, optionally starting
+// with "*." for every name under it: letters, digits, dots and dashes, each
+// label 1 to 63 characters.
+func hostShape(h string) bool {
+	h = strings.TrimPrefix(h, "*.")
+	if h == "" || len(h) > 253 {
+		return false
+	}
+	for _, l := range strings.Split(h, ".") {
+		if l == "" || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
+			return false
+		}
+		for _, r := range l {
+			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}

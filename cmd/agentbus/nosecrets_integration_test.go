@@ -23,6 +23,7 @@ import (
 	"github.com/staysup/agentbus/credentials"
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/folders"
+	"github.com/staysup/agentbus/netjail"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/store"
 )
@@ -77,6 +78,7 @@ func startNoSecrets(t *testing.T) *noSecretsSetup {
 	t.Setenv("OPENAI_BASE_URL", "")
 	t.Setenv("AB_TEST_OR_KEY", "") // in this process only the server's getenv has it
 	ns := &noSecretsSetup{anth: newFakeVendor(t), or: newFakeVendor(t), serverHome: t.TempDir()}
+	networkOffWhereUnsupported(t, ns.serverHome)
 	look := func(string) (string, error) { return self, nil }
 	// The server's own environment holds the API key.
 	serverEnv := func(k string) string {
@@ -114,6 +116,74 @@ func startNoSecrets(t *testing.T) *noSecretsSetup {
 	t.Setenv("AGENTBUS_FAKE_OUT", ns.report)
 	t.Setenv("AGENTBUS_FAKE_CALL", "1")
 	return ns
+}
+
+// networkOffWhereUnsupported turns network control off on the server when
+// this Linux machine cannot close an agent off (Ubuntu 24.04 without the
+// AppArmor profile, as on CI): a runner there refuses every turn, and the
+// tests that call this are not about the network. TestRunnerAgentClosedOff
+// is.
+func networkOffWhereUnsupported(t *testing.T, serverHome string) {
+	t.Helper()
+	if !netjail.Supported {
+		return
+	}
+	err := netjail.Check()
+	if err == nil {
+		return
+	}
+	t.Logf("network control off for this test: %v", err)
+	if err := os.WriteFile(filepath.Join(serverHome, "permissions.toml"), []byte("[network]\ncontain = \"off\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A runner's agent runs closed off: its model call still reaches the
+// vendor through the runner's gateway and the server's relay, a host not in
+// [network] allow is refused, and the refusal is in the server's record.
+func TestRunnerAgentClosedOff(t *testing.T) {
+	if !netjail.Supported {
+		t.Skip("network control is Linux-only")
+	}
+	if err := netjail.Check(); err != nil {
+		t.Skipf("this machine cannot close an agent off: %v", err)
+	}
+	ns := startNoSecrets(t)
+	t.Setenv("AGENTBUS_FAKE_NET", "http://blocked.example/")
+	code, ag := sendAPI(t, ns.server, ns.tok, "POST", "/api/v0/agents", map[string]any{"name": "DeepSeek", "harness": "claude",
+		"access": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "key_env": "AB_TEST_OR_KEY"})
+	if code != http.StatusCreated {
+		t.Fatalf("create: %d %v", code, ag)
+	}
+	var j queue.Job
+	if code := callAPI(t, ns.server, ns.tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn",
+		"spec": map[string]any{"agent": ag["id"], "folder_ref": ns.ref, "connector": ns.connector, "prompt": "hello"}}, &j); code != 201 {
+		t.Fatalf("POST /api/v0/jobs: %d", code)
+	}
+	jj := waitJob(t, ns.server, ns.tok, j.ID)
+	if jj.State != queue.Finished {
+		t.Fatalf("job %s %s %s", jj.State, jj.Reason, jj.Result)
+	}
+	if env := envOf(t, ns.report); !strings.HasPrefix(env["HTTPS_PROXY"], "http://127.0.0.1:") || env["NO_PROXY"] == "" {
+		t.Fatalf("the agent's proxy: %q %q", env["HTTPS_PROXY"], env["NO_PROXY"])
+	}
+	if got := ns.or.seen(); len(got) != 1 {
+		t.Fatalf("OpenRouter saw %v", got)
+	}
+	turn := jj.Attempts[0].ID
+	waitFor(t, "network.refused in the server's record", func() bool {
+		recs, _ := ns.server.store.After(0, store.Filter{Turn: turn}, 1000)
+		for _, r := range recs {
+			var e struct{ Host, Error string }
+			if r.Kind == "network.refused" && json.Unmarshal(r.Data, &e) == nil {
+				if e.Host != "blocked.example:80" || !strings.Contains(e.Error, "not in [network] allow") {
+					t.Fatalf("network.refused: %+v", e)
+				}
+				return true
+			}
+		}
+		return false
+	})
 }
 
 func envOf(t *testing.T, report string) map[string]string {

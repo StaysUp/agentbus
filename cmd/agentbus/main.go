@@ -51,6 +51,7 @@ import (
 	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/logfile"
+	"github.com/staysup/agentbus/netjail"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/replay"
 	engine "github.com/staysup/agentbus/run"
@@ -126,6 +127,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	}
 	if c.mode == modeRunner {
 		own.Printf("runner taking jobs from %s; its agents' gateway on http://%s, data folder %s", c.server, svc.addr, home)
+		own.Print(networkNote())
 	}
 	if svc.loopback {
 		own.Printf("listening on http://%s, data folder %s", svc.addr, home)
@@ -465,7 +467,7 @@ func start(c config) (*service, error) {
 			}
 		}
 		eng, err = engine.New(engine.Config{Store: st, BaseURL: baseURL, MaxRuns: c.maxRuns, ReplayBase: replayBase, AgentName: agentName,
-			Settings: cfgStore, Protect: protect, APIDir: apiLink(c.home, c.self, svcLog), Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace, Logf: svcLog.Printf,
+			Settings: cfgStore, Protect: protect, Contain: c.mode == modeRunner, APIDir: apiLink(c.home, c.self, svcLog), Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace, Logf: svcLog.Printf,
 			RunLog: func(session string, data []byte) {
 				// The session id is the service's own hex, so it is a plain
 				// file name.
@@ -1085,6 +1087,17 @@ func checkListen(addr string) (loopback bool, err error) {
 // 127.0.0.1, and the agent's sign-in never crosses a network. Go listens on
 // both IPv4 and IPv6 there, and reports [::] even for 0.0.0.0. On one
 // address it is that address.
+// networkNote is what a runner says at start about its agents' network.
+func networkNote() string {
+	if !netjail.Supported {
+		return "network control is Linux-only: on this runner, agents reach any host"
+	}
+	if err := netjail.Check(); err != nil {
+		return err.Error() + "; every turn is refused until that is fixed here, or [network] contain = \"off\" is set on the server"
+	}
+	return "each agent runs closed off from the network: it reaches this runner's gateway, the server, and the hosts in [network] allow of the server's permissions.toml"
+}
+
 func agentAddr(listened net.Addr) string {
 	host, port, _ := net.SplitHostPort(listened.String())
 	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
