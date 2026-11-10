@@ -1,0 +1,9 @@
+#!/bin/sh
+# Stands in for claude on the PATH of the service the fresh-agent test starts.
+# A turn's claude (its first argument is -p) loads no user settings and no
+# user CLAUDE.md, so it sees only what AgentBus gives it: a person's
+# ~/.claude can hold their own rules, hooks and MCP servers. The sign-in is
+# untouched. Every other call (the version, the sign-in status) passes through.
+# AT_REAL_CLAUDE is the real program, set by agenttest.py up.
+if [ "$1" = "-p" ]; then exec "${AT_REAL_CLAUDE:?}" --setting-sources project,local "$@"; fi
+exec "${AT_REAL_CLAUDE:?}" "$@"

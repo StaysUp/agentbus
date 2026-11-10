@@ -1,0 +1,24 @@
+#!/bin/sh
+# Stands in for codex on the PATH of the service the fresh-agent test starts.
+# A turn's codex (an "exec" call) ignores the user's config.toml and hooks,
+# and runs at a fixed reasoning effort. AgentBus puts its -c flags before
+# "exec", so ours go right after the first "exec". The sign-in is untouched.
+# ~/.codex/AGENTS.md is still read: codex has no switch for it
+# (codex-cli 0.164.0, 2026-11-10).
+# AT_REAL_CODEX is the real program and AT_CODEX_EFFORT the effort, set by
+# agenttest.py up.
+for a in "$@"; do
+  if [ "$a" = "exec" ]; then
+    n=$#
+    for b in "$@"; do
+      set -- "$@" "$b"
+      if [ "$b" = "exec" ] && [ -z "$done" ]; then
+        set -- "$@" --ignore-user-config --disable hooks -c "model_reasoning_effort=${AT_CODEX_EFFORT:-high}"
+        done=1
+      fi
+    done
+    shift "$n"
+    exec "${AT_REAL_CODEX:?}" "$@"
+  fi
+done
+exec "${AT_REAL_CODEX:?}" "$@"
