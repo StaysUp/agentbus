@@ -62,6 +62,7 @@ type noSecretsSetup struct {
 	tok             string
 	ref, connector  string
 	serverHome      string
+	runnerHome      string
 	anth, or        *fakeVendor
 	report, release string
 }
@@ -95,6 +96,7 @@ func startNoSecrets(t *testing.T) *noSecretsSetup {
 	t.Cleanup(ns.server.stop)
 	ns.tok = readToken(t, ns.serverHome)
 	folder, runnerHome := t.TempDir(), t.TempDir()
+	ns.runnerHome = runnerHome
 	fr, err := folders.Open(filepath.Join(runnerHome, "folders.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -434,4 +436,93 @@ func TestRunnerTurnShownBeforeItsFirstCall(t *testing.T) {
 	})
 	os.WriteFile(ns.release, nil, 0o600)
 	waitJob(t, ns.server, ns.tok, j.ID)
+}
+
+// A runner that holds no secrets runs each session in a home of its own:
+// a session's next turn finds what its first left there, another session
+// finds nothing of it, the runner user's own home gets nothing, and the
+// home goes when the session is closed.
+func TestRunnerHomePerSession(t *testing.T) {
+	realHome := t.TempDir()
+	t.Setenv("HOME", realHome)
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(realHome, ".claude"))
+	ns := startNoSecrets(t)
+	t.Setenv("AGENTBUS_FAKE_HOME", "1")
+	// A resume id, so a session can take a next turn: the runner continues
+	// by the vendor's resume, which reads the transcript in the home.
+	t.Setenv("AGENTBUS_FAKE_STDOUT", `{"type":"result","subtype":"success","result":"done","session_id":"fake-resume-1"}`+"\n")
+	code, ag := sendAPI(t, ns.server, ns.tok, "POST", "/api/v0/agents", map[string]any{"name": "DeepSeek", "harness": "claude",
+		"access": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "key_env": "AB_TEST_OR_KEY"})
+	if code != http.StatusCreated {
+		t.Fatalf("create: %d %v", code, ag)
+	}
+	turn := func(spec map[string]any) (queue.Job, fakeReport) {
+		t.Helper()
+		var j queue.Job
+		if code := callAPI(t, ns.server, ns.tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn", "spec": spec}, &j); code != 201 {
+			t.Fatalf("POST /api/v0/jobs: %d", code)
+		}
+		if jj := waitJob(t, ns.server, ns.tok, j.ID); jj.State != queue.Finished {
+			t.Fatalf("job %s %s %s", jj.State, jj.Reason, jj.Result)
+		}
+		var rep fakeReport
+		b, err := os.ReadFile(ns.report)
+		if err != nil || json.Unmarshal(b, &rep) != nil {
+			t.Fatalf("no report: %v", err)
+		}
+		return j, rep
+	}
+	homeOf := func(rep fakeReport) string {
+		for _, kv := range rep.Env {
+			if v, ok := strings.CutPrefix(kv, "HOME="); ok {
+				return v
+			}
+		}
+		return ""
+	}
+	first := map[string]any{"agent": ag["id"], "folder_ref": ns.ref, "connector": ns.connector, "isolate": true}
+	first["prompt"] = "first of A"
+	a, repA := turn(first)
+	homeA := homeOf(repA)
+	if homeA != filepath.Join(ns.runnerHome, homesDir, a.Session) || len(repA.Seen) != 0 {
+		t.Fatalf("session A's home %q, seen %q", homeA, repA.Seen)
+	}
+	if env := envOf(t, ns.report); env["CLAUDE_CONFIG_DIR"] != filepath.Join(homeA, ".claude") {
+		t.Fatalf("claude's config folder: %q", env["CLAUDE_CONFIG_DIR"])
+	}
+	_, repA2 := turn(map[string]any{"session": a.Session, "prompt": "second of A"})
+	if homeOf(repA2) != homeA || strings.Join(repA2.Seen, ",") != "first of A" {
+		t.Fatalf("A's next turn: home %q, seen %q", homeOf(repA2), repA2.Seen)
+	}
+	first["prompt"] = "first of B"
+	_, repB := turn(first)
+	if homeOf(repB) == homeA || len(repB.Seen) != 0 {
+		t.Fatalf("session B: home %q, seen %q", homeOf(repB), repB.Seen)
+	}
+	// A review runs in a home of its own too, removed once it ends.
+	var rev queue.Job
+	if code := callAPI(t, ns.server, ns.tok, "POST", "/api/v0/jobs/"+a.ID+"/review", map[string]any{"agent": ag["id"]}, &rev); code != http.StatusCreated {
+		t.Fatalf("review: %d", code)
+	}
+	if rev = waitJob(t, ns.server, ns.tok, rev.ID); rev.State != queue.Finished {
+		t.Fatalf("review %s %s %s", rev.State, rev.Reason, rev.Result)
+	}
+	b, _ := os.ReadFile(ns.report)
+	var repR fakeReport
+	json.Unmarshal(b, &repR)
+	homeR := homeOf(repR)
+	if homeR == homeA || filepath.Dir(homeR) != filepath.Dir(homeA) || len(repR.Seen) != 0 {
+		t.Fatalf("the review's home %q, seen %q", homeR, repR.Seen)
+	}
+	waitFor(t, "the review's home removed", func() bool { _, err := os.Stat(homeR); return os.IsNotExist(err) })
+	if left, _ := os.ReadDir(realHome); len(left) != 0 {
+		t.Fatalf("the runner user's home holds %v", left)
+	}
+	if code := callAPI(t, ns.server, ns.tok, "POST", "/api/v0/workspaces/"+a.Session+"/close", nil, nil); code != 200 {
+		t.Fatalf("close A: %d", code)
+	}
+	waitFor(t, "session A's home removed", func() bool { _, err := os.Stat(homeA); return os.IsNotExist(err) })
+	if _, err := os.Stat(homeOf(repB)); err != nil {
+		t.Fatalf("session B's home: %v", err)
+	}
 }

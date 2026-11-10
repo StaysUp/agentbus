@@ -18,8 +18,11 @@ package harness
 
 import (
 	"encoding/json"
+	"errors"
+	"os"
 	"regexp"
 	"strings"
+	"syscall"
 )
 
 // Access kinds: how a harness reaches its model.
@@ -62,6 +65,13 @@ type Info struct {
 	// too. When false, a turn of it on OpenRouter neither gives nor takes a
 	// replayed history: the turn after gets the earlier turns as text.
 	ReplayOnOpenRouter bool
+	// ConfigEnv names the variable that points the harness at its own
+	// config folder, and ConfigDir is that folder's name in a home. A turn
+	// in a home of its own (run.Config.Homes) gets HOME and
+	// ConfigEnv=<home>/<ConfigDir>, so the harness reads and keeps its
+	// settings, memory, plugins and transcripts there only, whatever the
+	// runner's own environment says.
+	ConfigEnv, ConfigDir string
 	// Login is its own login that prints a long-lived token for the
 	// person's subscription, so they can connect it once on control for
 	// the runners they own. Nil: its subscription cannot be used on a
@@ -169,6 +179,10 @@ type Harness interface {
 	// person set this harness's instructions themselves, so a turn's hint is
 	// left out. env is the child's environment.
 	OwnInstructions(env []string, folder string) (why string)
+	// Native says the harness reads the file name of the turn's folder by
+	// itself, as instructions, so a turn is not given it again. folder is
+	// the turn's folder; nothing outside it is read.
+	Native(folder *os.Root, name string) bool
 	// Args is the turn's command line, after the wire's arguments.
 	Args(t Turn) []string
 	// ResumeID reads one line of the child's stdout and returns the resume
@@ -235,3 +249,20 @@ func decodeLine(line []byte) (stdoutLine, bool) {
 }
 
 func isControl(r rune) bool { return r < 0x20 || r == 0x7f }
+
+// OpenFile opens the file name of folder for reading, if it is a regular
+// file. It never waits: a named pipe there opens at once and is refused, as
+// any other file that is not a regular one is.
+func OpenFile(folder *os.Root, name string) (*os.File, error) {
+	f, err := folder.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		f.Close()
+		return nil, errNotRegular
+	}
+	return f, nil
+}
+
+var errNotRegular = errors.New("harness: not a regular file")

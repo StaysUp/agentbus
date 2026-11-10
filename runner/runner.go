@@ -306,6 +306,10 @@ func (r *Runner) clean(ctx context.Context, w queue.Workspace) {
 			msg = "the " + w.Kind + " could not be removed: " + err.Error()
 		}
 	}
+	// The session's own home goes with it (run.Config.Homes).
+	if err := r.cfg.Engine.RemoveHome(w.Session); err != nil && msg == "" {
+		msg = "the session's home could not be removed"
+	}
 	status, err := call(context.WithoutCancel(ctx), r.short, r.cfg.Queue+"/api/v0/runners/"+r.id+"/removed", r.token,
 		jobs.RemovedReport{Session: w.Session, Error: msg}, nil)
 	r.cfg.Logf("session %s closed: workspace %s %s (control plane %d, %v)", w.Session, w.Kind, w.Space+w.Folder, status, err)
@@ -614,6 +618,16 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	// The turn's record reaches control while it runs (record.go).
 	go at.live(ctx, done)
 	r.follow(ctx, at, turn)
+	// A review's session has no workspace to be removed with, and takes no
+	// next turn: its home goes once its turn has ended.
+	if job.Kind == queue.KindReview {
+		go func() {
+			<-turn.Done()
+			if err := r.cfg.Engine.RemoveHome(turn.Session); err != nil {
+				r.cfg.Logf("review %s: its session's home could not be removed", job.ID)
+			}
+		}()
+	}
 }
 
 // request is the turn the attempt runs. Its id is the attempt's. A turn

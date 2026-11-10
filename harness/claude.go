@@ -1,6 +1,10 @@
 package harness
 
-import "strings"
+import (
+	"bufio"
+	"os"
+	"strings"
+)
 
 // claude is Claude Code.
 type claude struct{}
@@ -17,6 +21,9 @@ func (claude) Info() Info {
 		Access:             standardAccess("Claude subscription", []string{"sonnet", "opus", "haiku"}),
 		Replay:             FormatAnthropic,
 		ReplayOnOpenRouter: true,
+		// Claude Code keeps its settings, memory, plugins, transcripts and
+		// .claude.json under CLAUDE_CONFIG_DIR when it is set.
+		ConfigEnv: "CLAUDE_CONFIG_DIR", ConfigDir: ".claude",
 		// claude setup-token prints a long-lived OAuth token "for CI
 		// pipelines, scripts, or other environments", valid one year, which
 		// Claude Code reads from CLAUDE_CODE_OAUTH_TOKEN
@@ -77,6 +84,48 @@ func (claude) Edit(folders, protect []string) ([]string, string) {
 // OwnInstructions: --append-system-prompt adds to the person's own system
 // prompt, never replaces it, so the hint always goes in.
 func (claude) OwnInstructions([]string, string) string { return "" }
+
+// Native: Claude Code reads the folder's CLAUDE.md and .claude/CLAUDE.md,
+// and a file such a CLAUDE.md imports with a line "@<file>". With neither
+// CLAUDE.md, it reads the folder's AGENTS.md instead; with one, it does not
+// (Claude Code 2.1.318 and 2.1.321, 2026-11-10, checked live: a folder with
+// AGENTS.md alone, with a CLAUDE.md beside it, with .claude/CLAUDE.md beside
+// it, and with a CLAUDE.md that imports @AGENTS.md). So it reads name when no
+// CLAUDE.md is there and name is AGENTS.md, when a CLAUDE.md is name itself
+// (a symlink to it), or when the folder's CLAUDE.md imports it by a line
+// "@name" or "@./name". Any other way of pointing at it is not seen, and the
+// file is then given again.
+func (claude) Native(folder *os.Root, name string) bool {
+	want, err := folder.Stat(name)
+	if err != nil {
+		return false
+	}
+	own := false
+	for _, f := range []string{"CLAUDE.md", ".claude/CLAUDE.md"} {
+		if _, err := folder.Lstat(f); err != nil {
+			continue
+		}
+		own = true
+		if fi, err := folder.Stat(f); err == nil && os.SameFile(fi, want) {
+			return true
+		}
+	}
+	if !own {
+		return name == "AGENTS.md"
+	}
+	f, err := OpenFile(folder, "CLAUDE.md")
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		if l := strings.TrimSpace(sc.Text()); l == "@"+name || l == "@./"+name {
+			return true
+		}
+	}
+	return false
+}
 
 // ResumeID is the session_id of the "type":"result" object that
 // --output-format json prints.

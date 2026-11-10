@@ -71,7 +71,10 @@ as on macOS, refuses the turn with the reason.
   file is every default.
 - `instructions.md` in the data folder is the text every turn gets as its agent's own instruction
   (`--append-system-prompt`, `developer_instructions`), with `{session}` replaced by the session id.
-  Missing: the default text. Empty: none.
+  Missing: the default text. Empty: none. Before it goes the folder's `AGENTS.md` for a harness that
+  does not read it by itself (claude beside a `CLAUDE.md` that neither is it nor imports it); after
+  it, for an asked agent, who asked. On a runner that holds no secrets each session runs in a home
+  of its own (`homes/<session>` in its data folder), removed when the session is closed.
 - Settings through the API, main token only: `GET`/`PUT /api/v0/settings/permissions` (the policy
   as JSON) and `GET`/`PUT /api/v0/settings/instructions` (`{"text": "..."}`). A `PUT` sends
   `If-Match` with the `ETag` of a `GET`, or `*`; a stale one gets 412, none 428. A turn token gets

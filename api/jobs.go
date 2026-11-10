@@ -114,7 +114,7 @@ var jobRoutes = []route{
 	{method: "POST", path: "/api/v0/workspaces/{id}/close", op: "closeWorkspace",
 		tag:     "Jobs",
 		summary: "Close a workspace",
-		doc: "Close a session's workspace. The session takes no more jobs, and its runner removes a worktree it made. " +
+		doc: "Close a session's workspace. The session takes no more jobs, and its runner removes a worktree or copy it made, and the session's own home. " +
 			"A folder the job named is never removed. No body is read.",
 		replies: []reply{ok(200, queue.Workspace{}, "The workspace, closed."), noSession,
 			fail(409, "A job of the session has not ended."), storeFailed},

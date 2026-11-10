@@ -260,7 +260,8 @@ It holds `events.db` (the store: events, and since this version every model requ
 workspaces, in a file of its own so the record knows nothing about jobs), `token`, `turns_token`
 (above), `enroll_token` (adds a runner, [The runner protocol](#the-runner-protocol)),
 `runner.json` (the built-in runner's id and token, mode 0600), `worktrees/` (each isolated
-session's copy or git worktree, and in `worktrees/.isolation/` its checkpoints), `permissions.toml` (below), `instructions.md` (below), `agents.json`
+session's copy or git worktree, and in `worktrees/.isolation/` its checkpoints), `homes/` (a
+runner's, each session's own home, below), `permissions.toml` (below), `instructions.md` (below), `agents.json`
 (the saved agents), `bin/agentbus-api` (below), `logs/` (below), and `events.db.lock`,
 which one service holds while it runs, so a second `agentbus up` on the same folder refuses to
 start. No version in the name.
@@ -672,6 +673,17 @@ job that runs it. The agent's work arrives later, as events of that session, **e
   `forbid` in `permissions.toml` still wins. When the link cannot be made, the service log says
   `api_client.link_failed`, and the instructions still name `agentbus-api`.
 
+  **The folder's `AGENTS.md` comes first**, for a harness that does not read it by itself, as
+  `The AGENTS.md of your working folder:` and its text, up to 32 KiB (past that the turn is told to
+  read the file for the rest). Each harness says what it reads (`harness.Harness.Native`): codex
+  reads `AGENTS.md`, so it is not given it. claude reads `CLAUDE.md` and `.claude/CLAUDE.md`, and
+  `AGENTS.md` only when neither is there (Claude Code 2.1.318 and 2.1.321, checked 2026-11-10). So
+  claude is given `AGENTS.md` when the folder also has a `CLAUDE.md`, unless that is a symlink to
+  it, or `CLAUDE.md` has a line `@AGENTS.md` or `@./AGENTS.md`. Only the turn's folder is read: a
+  symlink that leads out of it gives nothing, and a file that is not a regular one, such as a named
+  pipe, is never waited on. **An asked agent's paragraph comes last** (who asked it, and how to read that
+  turn's changes). So every turn gets each piece once, whatever its harness.
+
   It goes through the agent's own instruction flag, never into the prompt: claude adds it at the
   end of its system prompt, codex puts it in its developer message (as a TOML string, the way `-c`
   reads values). Because it never changes within a session, own replay recognises each turn's
@@ -683,7 +695,19 @@ job that runs it. The agent's work arrives later, as events of that session, **e
   from the turn's folder, as codex reads it) or a `.codex/config.toml` in the
   folder or any folder above it, a codex turn gets no hint: a `-c` value would replace theirs. The service
   log then says `run.hint … left_out=codex_developer_instructions_set`. Only that key is looked
-  for; the file is never written.
+  for; the file is never written. On a runner that holds no secrets `CODEX_HOME` is the session's
+  own home (below), so only a `.codex/config.toml` of the folder can set it there.
+- **A home of its own per session, on a runner that holds no secrets.** Each session's turns run
+  with `HOME` set to `<data folder>/homes/<session>`, and the harness's own config folder inside
+  it (`CLAUDE_CONFIG_DIR=<home>/.claude`, `CODEX_HOME=<home>/.codex`); `XDG_CONFIG_HOME`,
+  `XDG_DATA_HOME`, `XDG_STATE_HOME` and `XDG_CACHE_HOME` are left out, so each falls back under
+  that `HOME`. The home is made empty at the session's first turn and kept for its next ones, so a
+  vendor's resume finds its transcript. A session started before this version has no home and
+  keeps the service's own `HOME`, where its transcript is. Nothing is written into it: the turn's credential is the
+  placeholder control's gateway swaps. It is removed when the session's workspace is closed, a
+  review's when the review ends, and a first turn's when that turn does not start. `agentbus up`
+  and `agentbus runner -gateway local` run turns in the service's own `HOME`, because the
+  harness's own sign-in is there.
 - **`read_only` is false unless the body says true.**
   - claude gets `--tools Read,Grep,Glob --allowedTools Read,Grep,Glob`, plus the `read_folders`
     rules of `permissions.toml` in the same `--allowedTools` value. `--tools` is what removes

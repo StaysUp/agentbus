@@ -162,6 +162,16 @@ type Config struct {
 	// calls still work. Empty puts nothing on PATH: the instructions still
 	// name agentbus-api, and the service log says why it is missing.
 	APIDir string
+	// Homes, when set, is the folder that holds a home of its own for each
+	// session: <Homes>/<session>, made empty at the session's first turn,
+	// kept for its next ones (the vendor's resume reads its transcript
+	// there), and removed with the session (RemoveHome). A session started
+	// before it was set has none, and keeps the service's own HOME. Each turn gets it as
+	// HOME and as its harness's config folder (harness.Info.ConfigEnv). No
+	// sign-in is put in it: set it only where the credential comes from
+	// elsewhere, as on a runner that holds no secrets. Empty runs every turn
+	// in the service's own HOME, with the harness's own sign-in.
+	Homes string
 	// AgentName names a saved agent by its id in the transcript a turn on
 	// another harness gets; "" or a nil func names it by harness and model.
 	AgentName func(id string) string
@@ -685,9 +695,28 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	cmd := exec.Command(l.Path)
 	asked := askedBy(t.origin)
 	cmd.Env = turnEnv(l.Env, os.Environ(), apiURL, childTok, e.cfg.APIDir, asked)
-	if line := askedLine(asked, perm.AgentAPI, e.cfg.APIDir != ""); line != "" {
-		hint = strings.TrimLeft(hint+"\n\n"+line, "\n")
+	if e.cfg.Homes != "" {
+		var made bool
+		cmd.Env, made, err = e.home(t.session, t.continuity == "", h, cmd.Env)
+		// A home made for a turn that does not start goes again: no session
+		// owns it.
+		defer func() {
+			if made && !started {
+				_ = e.RemoveHome(t.session)
+			}
+		}()
+		if err != nil {
+			e.cfg.Logf("run.refused agent=%s reason=home", t.harness)
+			return nil, refuse(http.StatusInternalServerError, "the turn's home folder could not be made, so the turn did not start")
+		}
 	}
+	// The folder's AGENTS.md, then the instructions, then who asked: the
+	// same for every harness, each once.
+	doc, why := folderDoc(h, t.folder)
+	if why != "" {
+		e.cfg.Logf("run.doc session=%s turn=%s left_out=%s", t.session, t.id, why)
+	}
+	hint = joinText(doc, hint, askedLine(asked, perm.AgentAPI, e.cfg.APIDir != ""))
 	perm = withAPI(perm, e.cfg.APIDir != "", t.readOnly)
 	if hint != "" {
 		if why := h.OwnInstructions(cmd.Env, t.folder); why != "" {

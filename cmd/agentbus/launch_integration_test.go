@@ -64,6 +64,9 @@ type launchCase struct {
 	oddFolder   bool     // a folder with a comma in its name
 	dataInside  bool     // the turn's folder holds the data folder
 	codexConfig bool     // developer_instructions in ~/.codex/config.toml
+	homes       bool     // each session in a home of its own (engine.Config.Homes)
+	agentsMD    bool     // the folder has an AGENTS.md
+	claudeMD    string   // and a CLAUDE.md: "link" to AGENTS.md, or "own" text
 	turns       []engine.Request
 }
 
@@ -81,6 +84,7 @@ func TestLaunchGolden(t *testing.T) {
 		return engine.Request{Session: "s1", Turn: turn, Prompt: "next " + turn}
 	}
 	with := func(r engine.Request, f func(*engine.Request)) engine.Request { f(&r); return r }
+	asked := &event.Origin{Kind: event.OriginAsked, Session: "s0", Turn: "t_0"}
 	or := func(r *engine.Request) { r.Access, r.KeyEnv = "openrouter", "OPENROUTER_API_KEY" }
 	lists := "read_folders = [\"<readfolder>\"]\nallow = [\"go test\", \"git commit\"]\nforbid = [\"git push\", \"rm -rf\"]\n"
 	var cases []launchCase
@@ -113,6 +117,15 @@ func TestLaunchGolden(t *testing.T) {
 			launchCase{name: h + " subagents off, read-only, with lists", perm: lists + "subagents = false\n",
 				turns: []engine.Request{with(first(h), func(r *engine.Request) { r.ReadOnly = true })}},
 			launchCase{name: h + " subagents on, said", perm: "subagents = true\n", turns: []engine.Request{first(h)}},
+			launchCase{name: h + " in a home of its own, then resume", homes: true, codexConfig: true,
+				env:   []string{"CLAUDE_CONFIG_DIR=<home>/.claude", "CODEX_HOME=<home>/.codex", "XDG_CONFIG_HOME=<home>/.config"},
+				turns: []engine.Request{first(h), next("t_2")}},
+			launchCase{name: h + " folder with AGENTS.md only, asked by another agent", agentsMD: true,
+				turns: []engine.Request{with(first(h), func(r *engine.Request) { r.Origin = asked })}},
+			launchCase{name: h + " folder with AGENTS.md and a CLAUDE.md of its own, asked", agentsMD: true, claudeMD: "own",
+				turns: []engine.Request{with(first(h), func(r *engine.Request) { r.Origin = asked })}},
+			launchCase{name: h + " folder with AGENTS.md and CLAUDE.md linked to it", agentsMD: true, claudeMD: "link",
+				turns: []engine.Request{first(h)}},
 		)
 	}
 	cases = append(cases,
@@ -206,7 +219,26 @@ func runLaunchCase(t *testing.T, self string, c launchCase) string {
 			t.Fatal(err)
 		}
 	}
-	environ := append([]string{"PATH=/usr/bin:/bin", "HOME=" + home, launchDirEnv + "=" + launch}, c.env...)
+	if c.agentsMD {
+		if err := os.WriteFile(filepath.Join(folder, "AGENTS.md"), []byte("Run make test before you finish.\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	switch c.claudeMD {
+	case "link":
+		if err := os.Symlink("AGENTS.md", filepath.Join(folder, "CLAUDE.md")); err != nil {
+			t.Fatal(err)
+		}
+	case "own":
+		if err := os.WriteFile(filepath.Join(folder, "CLAUDE.md"), []byte("Be brief.\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var envs []string
+	for _, kv := range c.env {
+		envs = append(envs, strings.ReplaceAll(kv, "<home>", home))
+	}
+	environ := append([]string{"PATH=/usr/bin:/bin", "HOME=" + home, launchDirEnv + "=" + launch}, envs...)
 	getenv := func(k string) string {
 		for _, kv := range environ {
 			if n, v, _ := strings.Cut(kv, "="); n == k {
@@ -234,12 +266,16 @@ func runLaunchCase(t *testing.T, self string, c launchCase) string {
 		Protect: []string{permPath, instrPath, filepath.Join(data, "agents.json")},
 		Logf: func(f string, a ...any) {
 			l := fmt.Sprintf(f, a...)
-			if strings.HasPrefix(l, "run.edit") || strings.HasPrefix(l, "run.hint") || strings.HasPrefix(l, "run.refused") {
+			if strings.HasPrefix(l, "run.edit") || strings.HasPrefix(l, "run.hint") || strings.HasPrefix(l, "run.refused") || strings.HasPrefix(l, "run.doc") {
 				mu.Lock()
 				logs = append(logs, l)
 				mu.Unlock()
 			}
 		}}
+	homes := filepath.Join(realTemp(t), "homes")
+	if c.homes {
+		cfg.Homes = homes
+	}
 	if c.replay {
 		cfg.ReplayBase = func(agent, session string) (engine.ReplayPlan, error) {
 			replayAsked = append(replayAsked, agent)
@@ -252,7 +288,7 @@ func runLaunchCase(t *testing.T, self string, c launchCase) string {
 	}
 	mask := func(s string) string {
 		s = tokenValue.ReplaceAllString(s, "AGENTBUS_TOKEN=<token>")
-		for _, r := range [][2]string{{self, "<bin>"}, {data, "<data>"}, {folder, "<folder>"}, {home, "<home>"},
+		for _, r := range [][2]string{{self, "<bin>"}, {data, "<data>"}, {folder, "<folder>"}, {homes, "<homes>"}, {home, "<home>"},
 			{launch, "<launch>"}, {readFolder, "<readfolder>"}} {
 			s = strings.ReplaceAll(s, r[0], r[1])
 		}

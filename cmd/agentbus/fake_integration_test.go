@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -154,11 +155,30 @@ func fakeAgent() {
 			os.Rename(p+".tmp", p)
 		}
 	}
+	// With AGENTBUS_FAKE_HOME=1 it keeps a transcript in its config folder,
+	// as a vendor does: it reports the lines earlier turns left there, then
+	// adds its own prompt. It also leaves a file in its HOME.
+	var seen []string
+	if os.Getenv("AGENTBUS_FAKE_HOME") == "1" {
+		conf := os.Getenv("CLAUDE_CONFIG_DIR")
+		if conf == "" {
+			conf = os.Getenv("CODEX_HOME")
+		}
+		tr := filepath.Join(conf, "transcript")
+		if b, err := os.ReadFile(tr); err == nil {
+			seen = strings.Split(strings.TrimSpace(string(b)), "\n")
+		}
+		if f, err := os.OpenFile(tr, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+			fmt.Fprintln(f, os.Args[len(os.Args)-1])
+			f.Close()
+		}
+		os.WriteFile(filepath.Join(os.Getenv("HOME"), "left-by-a-turn"), nil, 0o600)
+	}
 	// A run keeps the child's output out of every reply, so it reports through a file: its
 	// arguments, environment and folder.
 	if p := os.Getenv("AGENTBUS_FAKE_OUT"); p != "" {
 		cwd, _ := os.Getwd()
-		b, _ := json.Marshal(fakeReport{Args: os.Args[1:], Env: os.Environ(), Cwd: cwd})
+		b, _ := json.Marshal(fakeReport{Args: os.Args[1:], Env: os.Environ(), Cwd: cwd, Seen: seen})
 		os.WriteFile(p+".tmp", b, 0o600)
 		os.Rename(p+".tmp", p) // whole or absent, never half written
 	}
@@ -178,4 +198,5 @@ type fakeReport struct {
 	Args []string `json:"args"`
 	Env  []string `json:"env"`
 	Cwd  string   `json:"cwd"`
+	Seen []string `json:"seen,omitempty"` // AGENTBUS_FAKE_HOME: what earlier turns left
 }

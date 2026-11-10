@@ -29,6 +29,9 @@ func (codex) Info() Info {
 		// format finds the prompt and the context (codex-cli 0.167.0,
 		// 2026-11-09).
 		ReplayOnOpenRouter: false,
+		// codex keeps its config.toml, sign-in, sessions and memories
+		// under CODEX_HOME, which must exist.
+		ConfigEnv: "CODEX_HOME", ConfigDir: ".codex",
 	}
 }
 
@@ -83,6 +86,10 @@ func (codex) Edit(folders, protect []string) ([]string, string) {
 	}
 	return folders, ""
 }
+
+// Native: codex reads the AGENTS.md of its folder by itself, into the
+// context of every turn.
+func (codex) Native(_ *os.Root, name string) bool { return name == "AGENTS.md" }
 
 // ResumeID is the thread_id of the first "type":"thread.started" line that
 // --json prints.

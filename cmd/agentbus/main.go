@@ -482,7 +482,16 @@ func start(c config) (*service, error) {
 				return a.Name
 			}
 		}
-		eng, err = engine.New(engine.Config{Store: st, BaseURL: baseURL, MaxRuns: c.maxRuns, ReplayBase: replayBase, AgentName: agentName,
+		// A runner that holds no secrets runs each session in a home of its
+		// own: its agents' credentials come from control, so nothing of this
+		// user's home is needed. agentbus up and a runner with -gateway local
+		// use the harness's own sign-in, which lives in this user's home, so
+		// their turns run there.
+		homes := ""
+		if c.noSecrets() {
+			homes = filepath.Join(c.home, homesDir)
+		}
+		eng, err = engine.New(engine.Config{Store: st, BaseURL: baseURL, MaxRuns: c.maxRuns, ReplayBase: replayBase, AgentName: agentName, Homes: homes,
 			Settings: cfgStore, Protect: protect, APIDir: apiLink(c.home, c.self, svcLog), Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace, Logf: svcLog.Printf,
 			RunLog: func(session string, data []byte) {
 				// The session id is the service's own hex, so it is a plain
@@ -762,6 +771,10 @@ const (
 // subscriptionsDir is where control keeps connected subscriptions, in its
 // data folder.
 const subscriptionsDir = "subscriptions"
+
+// homesDir is where a runner that holds no secrets keeps each session's own
+// home, in its data folder (engine.Config.Homes).
+const homesDir = "homes"
 
 // getenvOr is c.getenv, or the process's own environment.
 func (c config) getenvOr() func(string) string {

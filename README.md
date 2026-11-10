@@ -325,6 +325,14 @@ as its model credential. Control's gateway swaps it for the real one on the way 
 
 `agentbus runner -gateway local` makes a runner use its own machine's sign-in and keys instead.
 
+**Each conversation gets a home of its own** on a runner that holds no secrets: an empty folder in
+the runner's data folder, `homes/<session>`, made at the session's first turn and kept for its
+next ones. The agent gets it as `HOME`, and as its own config folder (Claude Code's
+`CLAUDE_CONFIG_DIR`, codex's `CODEX_HOME`). So a turn sees none of the runner user's settings,
+memory, plugins or transcripts, and none of another conversation's. No sign-in goes into it. The
+home is removed when the session is closed, and a review's when the review ends. `agentbus up`
+and `-gateway local` run turns in your own home, because the harness's own sign-in lives there.
+
 A runner's turn reaches control's record while it runs: its events, model calls and replies. A
 cockpit pointed at control shows it live. The runner reads its policy and instructions from
 control before each turn ([Permissions](#permissions)). `-capacity` sets how many jobs it runs at
@@ -390,7 +398,7 @@ The contract in words is [docs/CLIENT_API.md](docs/CLIENT_API.md).
 Everything stays on your machine, in the data folder: `events.db` (a SQLite file, the record),
 `jobs.db` (the job queue), `token`, `turns_token`, `enroll_token`, `runner.json`,
 `connector.json`, `folders.json`, `permissions.toml`, `instructions.md`, `agents.json`, `blobs/`,
-`worktrees/` and `logs/`. `turns_token` is a second token for a program that only starts, stops
+`worktrees/`, `homes/` (a runner's) and `logs/`. `turns_token` is a second token for a program that only starts, stops
 and reads turns. `enroll_token` adds a runner or a connector; the built-in ones read it, and keep
 their identities in `runner.json` and `connector.json`. `blobs/` is control's store of file
 contents. `worktrees/` holds the copies and git worktrees sessions run in. `subscriptions/`
@@ -482,7 +490,12 @@ Details: [docs/CLIENT_API.md](docs/CLIENT_API.md#permissionstoml).
 ## Instructions
 
 Every turn gets the same short instructions, as an instruction of its agent's own (Claude Code's
-`--append-system-prompt`, codex's `developer_instructions`), never inside your prompt. They are the
+`--append-system-prompt`, codex's `developer_instructions`), never inside your prompt. Before them
+goes the `AGENTS.md` of the turn's folder, for a harness that does not read it by itself. codex
+reads it, so it is not given it again. Claude Code reads `AGENTS.md` only when the folder has no
+`CLAUDE.md`; beside a `CLAUDE.md` of its own it is given `AGENTS.md`, unless that `CLAUDE.md` is a
+symlink to it or imports it with a line `@AGENTS.md`. An asked agent also gets who asked it, after
+them. They are the
 text of `instructions.md` in the data folder. `agentbus up` writes it with the default: how to
 search the session's earlier turns and ask other agents with `agentbus-api`. Edit it to change what
 every agent is told; `{session}` becomes the session id. An empty file gives no instructions, and a
