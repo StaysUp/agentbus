@@ -127,7 +127,11 @@ and folder, the changed files, a review's verdict, and the agent's final reply.
 2. Start a turn on one: `POST /api/v0/turns` with `agent` and `prompt`. Leave `folder` out: the
    new session works on its own copy of the person's folder, so several agents can work on the
    same task without touching each other's files or the person's. To fan out ("run all 3 on this"),
-   start one turn per agent; each result comes back on its own.
+   start one turn per agent; each result comes back on its own. That copy does not hold your
+   session's changes that are not applied yet. The agent is told your session and turn
+   (`AGENTBUS_ASKED_BY_SESSION`, `AGENTBUS_ASKED_BY_TURN`) and reads what you changed with
+   `GET /api/v0/turns/{turn}/diff?session={session}`, once your turn has ended. So to have it check
+   your work, ask, then end your turn.
 3. Continue a session you started: `POST /api/v0/turns` with that `session` and `prompt`.
 4. Ask for a review of a turn's work once its job has ended: `POST /api/v0/jobs/{job}/review` with
    `agent` (the job id is in the reply of step 2, as `job`).

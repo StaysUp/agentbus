@@ -12,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/staysup/agentbus/event"
 )
 
 // runs tracks the children the engine started.
@@ -218,18 +220,23 @@ func (e *Engine) LiveTokens() int { return e.turnTokens.live() }
 // turnEnv is the child's environment: env, or the parent's when env is nil,
 // with the service's address and the turn's own token set, and any earlier
 // value of either removed. apiDir, when set, goes first on PATH
-// (Config.APIDir).
-func turnEnv(env, parent []string, base, tok, apiDir string) []string {
+// (Config.APIDir). asked, for work another turn asked for, is the asking
+// session and turn (AGENTBUS_ASKED_BY_SESSION, AGENTBUS_ASKED_BY_TURN); an
+// earlier value of either is removed whether it is set or not.
+func turnEnv(env, parent []string, base, tok, apiDir string, asked *event.Origin) []string {
 	if env == nil {
 		env = parent
 	}
 	set := []string{"AGENTBUS_URL=" + base, "AGENTBUS_TOKEN=" + tok}
+	if asked != nil {
+		set = append(set, "AGENTBUS_ASKED_BY_SESSION="+asked.Session, "AGENTBUS_ASKED_BY_TURN="+asked.Turn)
+	}
 	out := make([]string, 0, len(env)+len(set)+1)
 	path := false
 	for _, kv := range env {
 		k, v, _ := strings.Cut(kv, "=")
 		switch {
-		case k == "AGENTBUS_URL" || k == "AGENTBUS_TOKEN":
+		case k == "AGENTBUS_URL" || k == "AGENTBUS_TOKEN" || k == "AGENTBUS_ASKED_BY_SESSION" || k == "AGENTBUS_ASKED_BY_TURN":
 			continue
 		case k == "PATH" && apiDir != "":
 			path = true

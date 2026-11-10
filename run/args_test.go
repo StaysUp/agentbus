@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/settings"
 )
@@ -127,9 +128,54 @@ func TestInstructionsFile(t *testing.T) {
 }
 
 func TestTurnEnv(t *testing.T) {
-	got := turnEnv(nil, []string{"A=1", "AGENTBUS_TOKEN=main", "AGENTBUS_URL=x"}, "http://127.0.0.1:1", "abt_1", "")
+	got := turnEnv(nil, []string{"A=1", "AGENTBUS_TOKEN=main", "AGENTBUS_URL=x"}, "http://127.0.0.1:1", "abt_1", "", nil)
 	if strings.Join(got, " ") != "A=1 AGENTBUS_URL=http://127.0.0.1:1 AGENTBUS_TOKEN=abt_1" {
 		t.Errorf("turnEnv: %v", got)
+	}
+}
+
+// Asked work gets the asking session and turn; an earlier value of either
+// in the parent's environment never reaches a turn, asked or not.
+func TestTurnEnvAsked(t *testing.T) {
+	parent := []string{"AGENTBUS_ASKED_BY_SESSION=old", "AGENTBUS_ASKED_BY_TURN=old", "A=1"}
+	got := turnEnv(nil, parent, "u", "t", "", &event.Origin{Kind: event.OriginAsked, Session: "s1", Turn: "t_1"})
+	if strings.Join(got, " ") != "A=1 AGENTBUS_URL=u AGENTBUS_TOKEN=t AGENTBUS_ASKED_BY_SESSION=s1 AGENTBUS_ASKED_BY_TURN=t_1" {
+		t.Errorf("asked: %v", got)
+	}
+	if got := turnEnv(nil, parent, "u", "t", "", nil); strings.Join(got, " ") != "A=1 AGENTBUS_URL=u AGENTBUS_TOKEN=t" {
+		t.Errorf("not asked: %v", got)
+	}
+}
+
+// The line names the asking turn's diff and its session's turns, with
+// agentbus-api or with curl; nothing when the token may not read them, or
+// for a turn nobody asked for.
+func TestAskedLine(t *testing.T) {
+	o := &event.Origin{Kind: event.OriginAsked, Session: "s1", Turn: "t_1"}
+	p := settings.DefaultPolicy()
+	line := askedLine(askedBy(o), p.AgentAPI, true)
+	for _, want := range []string{"session s1, turn t_1", `agentbus-api GET "/api/v0/turns/t_1/diff?session=s1"`, `agentbus-api GET "/api/v0/turns?session=s1"`} {
+		if !strings.Contains(line, want) {
+			t.Errorf("line lacks %q: %s", want, line)
+		}
+	}
+	if line := askedLine(askedBy(o), p.AgentAPI, false); !strings.Contains(line, `"$AGENTBUS_URL/api/v0/turns/t_1/diff?session=s1"`) {
+		t.Errorf("curl: %s", line)
+	}
+	off := false
+	readOff := p.AgentAPI
+	readOff.Read = &off
+	scoped := p.AgentAPI
+	scoped.Scope = settings.ScopeSession
+	for name, api := range map[string]settings.AgentAPI{"read off": readOff, "scope session": scoped} {
+		if line := askedLine(askedBy(o), api, true); line != "" {
+			t.Errorf("%s: %s", name, line)
+		}
+	}
+	for _, o := range []*event.Origin{nil, {Kind: event.OriginResult, Session: "s1", Turn: "t_1"}, {Kind: event.OriginAsked, Session: "s1"}} {
+		if line := askedLine(askedBy(o), p.AgentAPI, true); line != "" {
+			t.Errorf("%v: %s", o, line)
+		}
 	}
 }
 
@@ -155,11 +201,11 @@ func TestWithAPI(t *testing.T) {
 
 // The API client's folder goes first on PATH, or is PATH when there was none.
 func TestTurnEnvAPIDir(t *testing.T) {
-	got := turnEnv([]string{"PATH=/usr/bin:/bin", "B=2"}, nil, "u", "t", "/home/x/bin")
+	got := turnEnv([]string{"PATH=/usr/bin:/bin", "B=2"}, nil, "u", "t", "/home/x/bin", nil)
 	if strings.Join(got, " ") != "PATH=/home/x/bin:/usr/bin:/bin B=2 AGENTBUS_URL=u AGENTBUS_TOKEN=t" {
 		t.Errorf("with PATH: %v", got)
 	}
-	got = turnEnv([]string{"B=2"}, nil, "u", "t", "/home/x/bin")
+	got = turnEnv([]string{"B=2"}, nil, "u", "t", "/home/x/bin", nil)
 	if strings.Join(got, " ") != "B=2 PATH=/home/x/bin AGENTBUS_URL=u AGENTBUS_TOKEN=t" {
 		t.Errorf("without PATH: %v", got)
 	}

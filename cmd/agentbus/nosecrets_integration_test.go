@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/credentials"
+	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/folders"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/store"
@@ -311,7 +312,7 @@ func TestRunnerAgentAsksAnother(t *testing.T) {
 		"spec": map[string]any{"agent": "claude", "folder_ref": ns.ref, "connector": ns.connector, "prompt": "ask someone"}}, &j); code != 201 {
 		t.Fatalf("POST /api/v0/jobs: %d", code)
 	}
-	waitJob(t, ns.server, ns.tok, j.ID)
+	j = waitJob(t, ns.server, ns.tok, j.ID)
 	b, err := os.ReadFile(asked)
 	if err != nil || !strings.HasPrefix(string(b), "202 ") {
 		t.Fatalf("the ask: %v %s", err, b)
@@ -342,6 +343,21 @@ func TestRunnerAgentAsksAnother(t *testing.T) {
 	}
 	if len(snap.Sessions) != 2 {
 		t.Fatalf("the server's record holds %d sessions, want the asking one and the asked one", len(snap.Sessions))
+	}
+	// The asked turn says who asked it, as control's record holds it: the
+	// asking job's session and turn, from the asking turn's token.
+	for _, s := range snap.Sessions {
+		if s.ID == j.Session {
+			continue
+		}
+		list, err := ns.server.store.Turns(store.TurnQuery{Session: s.ID, Limit: 10})
+		if err != nil || len(list.Turns) != 1 {
+			t.Fatalf("the asked session's turns: %v %+v", err, list.Turns)
+		}
+		o := list.Turns[0].Origin
+		if o == nil || o.Kind != event.OriginAsked || o.Session != j.Session || o.Turn != j.Attempt {
+			t.Errorf("the asked turn's origin is %+v, want asked by %s turn %s", o, j.Session, j.Attempt)
+		}
 	}
 }
 

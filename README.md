@@ -230,7 +230,9 @@ chat, in plain words.
 - **Ask other agents.** An agent can hand work to another agent, or to many at once. It does not
   wait: it starts the work and ends its turn. **Each answer comes back as the next turn** of its
   session. Inside a turn the agent uses `agentbus-api`, which sends its turn's own token. You can
-  ask in the chat: "have codex review this", "ask all three".
+  ask in the chat: "have codex review this", "ask all three". The asked agent works in a new copy of
+  your folder, without the asking session's unapplied changes. It is told which session and turn
+  asked it, and reads that turn's changes, with each file's diff, through the API.
 - **A copy per conversation.** Each new session works in its own copy of your folder, made as the
   folder is now, uncommitted edits included. Your folder does not change while agents work.
   Several sessions on one folder never touch each other's files. How the copy is made:
@@ -345,6 +347,10 @@ To be written with the network control work.
 - **A first transfer of a big folder is slow.** A runner on another machine gets a 50,000-file
   folder (414 MB) in about 30 s the first time. Later sessions send only what changed: about 4 s.
 - **Network control is Linux-only.** A runner on macOS has none.
+- **An asked agent reads the asker's changes but cannot run them.** Its copy is made from your
+  folder, so "have codex review this" gets the diff of the asking turn through the API, not those
+  files in its copy. Tests it runs run on your folder as it is. A copy started from the asking
+  session's latest checkpoint is a later option.
 - **codex on a subscription cannot run on a remote runner yet.** Control cannot add codex's
   ChatGPT sign-in, so such a turn is refused before it starts. Use an OpenRouter agent there, or
   `agentbus up`.

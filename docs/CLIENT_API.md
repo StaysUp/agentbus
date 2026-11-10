@@ -200,9 +200,23 @@ one, the request gets **403** saying which and naming its key:
 
 0 for one of the first three refuses all asked work of that kind.
 
-**Asking works where the service runs its turns itself (`agentbus up`).** With `agentbus server`
-and a separate `agentbus runner`, a turn's token reaches the runner's own address, which keeps no
-queue and no saved agents, so asking answers 404 there for now.
+**Asking works on `agentbus up` and on a runner of `agentbus server`.** A runner turn's token is
+the server's own (`abr_…`) and its `AGENTBUS_URL` is the server, so it asks the same way.
+
+**An asked agent is told who asked it.** AgentBus records who asked from the token the request
+came with, never from the body: the asked turn's `origin` is `{"kind":"asked","session":…,"turn":…}`
+in `GET /api/v0/turns` (its own token reads it), and the job's `links.asker` says the same. The
+turn also gets two more variables: `AGENTBUS_ASKED_BY_SESSION` and `AGENTBUS_ASKED_BY_TURN`, the
+asking session and turn. Its instructions get one more paragraph naming them, with the commands that
+read what the asking turn changed (`GET /api/v0/turns/<turn>/diff?session=<session>`) and that
+session's earlier turns (`GET /api/v0/turns?session=<session>`). The paragraph is left out when the
+token could not read them: `read = false` or `scope = "session"` in `[agent_api]`. It goes with the
+instructions, so a codex turn whose person set its own `developer_instructions` gets the variables
+only. An earlier value of either variable in the service's environment is removed.
+
+The asked agent's own copy is a new copy of the person's folder: it does not hold the asking
+session's changes that are not applied yet. It reads them through the API. The asking turn's
+`files` are `null` until that turn ends.
 
 **It stops working when the turn's child process exits**, even if a process it left behind still
 holds its output open, and before the turn's `session.closed` is

@@ -679,7 +679,11 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		childTok = tok
 	}
 	cmd := exec.Command(l.Path)
-	cmd.Env = turnEnv(l.Env, os.Environ(), apiURL, childTok, e.cfg.APIDir)
+	asked := askedBy(t.origin)
+	cmd.Env = turnEnv(l.Env, os.Environ(), apiURL, childTok, e.cfg.APIDir, asked)
+	if line := askedLine(asked, perm.AgentAPI, e.cfg.APIDir != ""); line != "" {
+		hint = strings.TrimLeft(hint+"\n\n"+line, "\n")
+	}
 	perm = withAPI(perm, e.cfg.APIDir != "", t.readOnly)
 	if hint != "" {
 		if why := h.OwnInstructions(cmd.Env, t.folder); why != "" {
@@ -898,6 +902,37 @@ func withAPI(perm settings.Policy, api, readOnly bool) settings.Policy {
 	}
 	perm.Allow = append(append([]string(nil), perm.Allow...), APIClient)
 	return perm
+}
+
+// askedBy is the turn that asked for this one, from its origin; nil for a
+// turn the person started, or one that delivers a result.
+func askedBy(o *event.Origin) *event.Origin {
+	if o == nil || o.Kind != event.OriginAsked || o.Session == "" || o.Turn == "" {
+		return nil
+	}
+	return o
+}
+
+// askedLine tells an asked agent where it was asked from and how to read
+// that session's changes, which its own folder may not hold: a new session
+// gets a copy of the person's folder. "" when its token may not read them
+// ([agent_api] read off, or scope session).
+func askedLine(asked *event.Origin, api settings.AgentAPI, client bool) string {
+	if asked == nil || (api.Read != nil && !*api.Read) || api.Scope == settings.ScopeSession {
+		return ""
+	}
+	get := `agentbus-api GET "%s"`
+	if !client {
+		get = `curl -s -H "Authorization: Bearer $AGENTBUS_TOKEN" "$AGENTBUS_URL%s"`
+	}
+	diff := fmt.Sprintf(get, "/api/v0/turns/"+asked.Turn+"/diff?session="+asked.Session)
+	list := fmt.Sprintf(get, "/api/v0/turns?session="+asked.Session)
+	return "Another agent asked for this work, from session " + asked.Session + ", turn " + asked.Turn +
+		" (also in AGENTBUS_ASKED_BY_SESSION and AGENTBUS_ASKED_BY_TURN, and in your own turn's origin in " +
+		fmt.Sprintf(get, "/api/v0/turns") + "). Your folder may not hold its changes. " +
+		"To read what that turn changed, with each file's diff, run:\n" + diff +
+		"\nIts files are null while that turn still runs; read it again once its state is no longer running. " +
+		"That session's earlier turns, each with its own diff: " + list
 }
 
 // APIClient is the name of the API client on a turn's PATH (Config.APIDir).

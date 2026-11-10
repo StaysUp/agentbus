@@ -36,7 +36,7 @@ func askEnvWith(t *testing.T, perm string) (*env, string) {
 	dir := t.TempDir()
 	script := `for a; do p="$a"; done; echo '{"type":"result","session_id":"sid-'$$'"}'; ` +
 		`case "$p" in "[AgentBus]"*) printf '%s' "$p" > "$D/delivered-$$"; exit 0;; quick|"Review a change"*) exit 0;; esac; ` +
-		`env > "$D/env-$p.tmp"; pwd > "$D/pwd-$p"; mv "$D/env-$p.tmp" "$D/env-$p"; ` +
+		`printf '%s\n' "$@" > "$D/args-$p"; env > "$D/env-$p.tmp"; pwd > "$D/pwd-$p"; mv "$D/env-$p.tmp" "$D/env-$p"; ` +
 		`i=0; while [ ! -e "$D/release-$p" ] && [ $i -lt 1500 ]; do sleep 0.02; i=$((i+1)); done`
 	wire := func(agent, baseURL string, _ run.Access) (run.Launch, error) {
 		return run.Launch{Path: "/bin/sh", Args: []string{"-c", script, "sh"},
@@ -427,5 +427,76 @@ func TestAskFromAWorktree(t *testing.T) {
 		t.Fatalf("the child's folder is %q, the repo's is %q", j.Spec.FolderRef, folders.Ref(repo))
 	}
 	release(dir, "root")
+	release(dir, "child")
+}
+
+// An asked agent is told where it was asked from: the asking session and
+// turn in its environment, and a line in its instructions. With its own
+// token it reads what the asking turn changed, once that turn has ended,
+// although its own copy does not hold the change.
+func TestAskedAgentReadsTheAskersChanges(t *testing.T) {
+	e, dir := askEnv(t)
+	folder := t.TempDir()
+	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\n"), 0o644)
+	root := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"root"}`)
+	tok := tokenOf(t, dir, "root")
+	os.WriteFile(filepath.Join(pwdOf(t, dir, "root"), "a.txt"), []byte("two\n"), 0o644)
+	ask(t, e, tok, `{"agent":"claude","prompt":"child"}`)
+	childTok := tokenOf(t, dir, "child")
+	b, _ := os.ReadFile(filepath.Join(dir, "env-child"))
+	for _, want := range []string{"AGENTBUS_ASKED_BY_SESSION=" + root.ID + "\n", "AGENTBUS_ASKED_BY_TURN=" + root.Turn + "\n"} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("the child's environment lacks %q", want)
+		}
+	}
+	args, _ := os.ReadFile(filepath.Join(dir, "args-child"))
+	if want := "/api/v0/turns/" + root.Turn + "/diff?session=" + root.ID; !strings.Contains(string(args), want) {
+		t.Errorf("the child's instructions do not name %s: %s", want, args)
+	}
+	if got, _ := os.ReadFile(filepath.Join(pwdOf(t, dir, "child"), "a.txt")); string(got) != "one\n" {
+		t.Errorf("the child's copy holds %q, want the person's folder", got)
+	}
+	// The record says the same, from the asking turn's token: the child's
+	// own turn names who asked it.
+	code, out := as(t, e, childTok, "GET", "/api/v0/turns", "")
+	var own struct {
+		Turns []struct {
+			Origin *event.Origin `json:"origin"`
+		} `json:"turns"`
+	}
+	if err := json.Unmarshal([]byte(out), &own); code != 200 || err != nil || len(own.Turns) != 1 || own.Turns[0].Origin == nil ||
+		own.Turns[0].Origin.Kind != event.OriginAsked || own.Turns[0].Origin.Session != root.ID || own.Turns[0].Origin.Turn != root.Turn {
+		t.Errorf("the child's own turn: %d %s", code, out)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "env-root")); strings.Contains(string(b), "AGENTBUS_ASKED_BY") {
+		t.Error("the person's own turn says it was asked")
+	}
+	release(dir, "root")
+	path := "/api/v0/turns/" + root.Turn + "/diff?session=" + root.ID
+	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(50 * time.Millisecond) {
+		code, out := as(t, e, childTok, "GET", path, "")
+		if code != 200 {
+			t.Fatalf("the child reads the root's diff: %d %s", code, out)
+		}
+		var d struct {
+			Files *struct {
+				Changes []struct {
+					Path, Diff string
+				} `json:"changes"`
+			} `json:"files"`
+		}
+		if err := json.Unmarshal([]byte(out), &d); err != nil {
+			t.Fatal(err)
+		}
+		if d.Files != nil {
+			if len(d.Files.Changes) != 1 || d.Files.Changes[0].Path != "a.txt" || !strings.Contains(d.Files.Changes[0].Diff, "+two") {
+				t.Fatalf("the root's diff: %s", out)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the root's diff has no files: %s", out)
+		}
+	}
 	release(dir, "child")
 }
