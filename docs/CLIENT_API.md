@@ -1086,43 +1086,54 @@ Everything the record holds about one turn, in one answer, for the cockpit and f
 - **404** when no `turn.started` carries the id. The main token, the turns token, or a turn token
   for a turn of its request tree.
 
-### `POST /api/v0/turns/<id>/apply` — apply a turn's changes to your folder
+### `POST /api/v0/turns/<id>/apply` — make your folder as the session was at this turn
 
 ```json
-{"state":"applied","turn":"t_5d0c19a2e7b3f481","session":"abc","job":"job_8a…","files":["a.txt","logo.png"],"pruned":true}
+{"state":"applied","turn":"t_5d0c19a2e7b3f481","session":"abc","job":"job_8a…","files":["a.txt","logo.png"]}
 ```
 
-Puts one turn's file changes into the person's folder: the folder the session's copy was made
-from. The runner that holds the session writes each file the turn added or changed, by rename, and
-removes each one it deleted. No body is read.
+Makes the person's folder (the one the session's copy was made from) as the session's copy was at
+the end of this turn. It applies **every turn of the session not yet applied, up to and including
+this one**, in one step. Applying after every turn works as before: each apply then holds one
+turn. No body is read.
 
-- **Refused on a conflict, with nothing written.** Before it writes anything, the runner checks
-  every file the turn changed. A file in the folder that is neither as it was at the turn's start
-  nor already as the turn left it refuses the whole apply: **409**
+The apply is a job (`kind` `apply`) on the folder's **connector**, the part of AgentBus on the
+folder's machine. It does not need the runner that ran the turns: at the end of each turn the
+runner puts what the copy holds that differs from its base (the turn's changeset) and the files it
+names in the control plane's blob store, and the connector reads them from there.
+
+- **All or nothing.** The connector first checks every file the turns changed. A file in the
+  folder must be as the last applied turn left it (or as the copy's base, if none was applied), or
+  already as this turn leaves it. Any other file refuses the whole apply, and nothing is written:
+  **409**
   `{"state":"refused","error":"apply refused: 1 file(s) in your folder changed since the checkpoint: a.txt","conflicts":[{"path":"a.txt","why":"changed in your folder since the checkpoint"}],…}`.
   `why` is one of `changed in your folder since the checkpoint`, `added in your folder since the
   checkpoint`, `removed from your folder since the checkpoint`, or `is a folder or cannot be read in
-  your folder`. An agent reads it and makes another turn that resolves it, then applies that one.
-- **Applying twice is a no-op.** The same turn again answers **200** with `already: true` and the
-  files the first apply wrote; nothing more is written. A refused apply may be asked for again: it
-  is a new apply job. The runner records each apply it did, before it removes any checkpoint, so an
-  apply whose answer was lost answers the same when asked again.
+  your folder`. Then every new file is written out of sight first (in `.agentbus-apply-<n>` at the
+  folder's top, removed after), and only then put in place by rename. A file the store cannot give
+  writes nothing either. Only a failure while files are put in place leaves some written: **409**
+  with `state` `refused`, the error says so, and `files` lists those written. An agent reads a
+  refusal and makes another turn that resolves it, then applies that one.
+- **Applying twice is a no-op.** A turn already applied, by its own apply or by the apply of a
+  later turn, answers **200** with `already: true` and that apply's `turn`, `job` and `files`;
+  nothing more is written. A refused apply may be asked for again: it is a new apply job.
+- **One apply of a session at a time.** Asking for a turn while an apply of the same or a later
+  turn runs answers that apply. Asking for a later turn while an apply of an earlier one runs is
+  **409** `an apply of an earlier turn of this session has not ended`. Two sessions of one folder
+  (or of a folder and one inside it) never both pass the check and write over each other: a
+  connector runs one apply at a time.
 - **A big apply** lists at most what fits the answer: `count` is every file written, and
   `truncated: true` says `files` (or `conflicts`) holds fewer.
-- **Order.** Turns may be applied in any order; each is checked against the folder as it is.
-  A runner runs one apply at a time, so two sessions of one folder (or of a folder and one inside
-  it) never both pass the check and write over each other.
-  Applying the oldest unapplied turn of a session also removes the checkpoints before its end
-  (`pruned: true`).
-- **It waits up to 30 seconds** for the runner. Past that it answers **202** with `state` `queued`
-  or `running`; `GET /api/v0/turns/<id>/diff` shows how it ended, and calling apply again waits for
-  the same job.
+- **It waits up to 30 seconds** for the connector. Past that it answers **202** with `state`
+  `queued` or `running`; `GET /api/v0/turns/<id>/diff` shows how it ended, and calling apply again
+  waits for the same job.
 - **400** for a turn that cannot be applied: its job has not ended, it is not the job's last
-  attempt, it did not run in an isolated copy (`isolation = "none"`, or `isolate: false`), or its
-  session was closed. **404** when no job of this service ran the turn. **409** with `state`
-  `refused` and `error` also when the runner keeps no copy for the session, or the turn's
-  checkpoints are gone; with `state` `failed` when the apply job did not finish (its runner went
+  attempt, it did not run in an isolated copy (`isolation = "none"`, or `isolate: false`), it ran
+  before this build kept changesets, or its session was closed. **404** when no job of this service
+  ran the turn. **409** with `state` `failed` when the apply job did not finish (its connector went
   away): ask again, and a file it already wrote counts as applied.
+- The runner keeps every checkpoint of a session until the session closes: an apply no longer
+  removes any (`pruned` is never set).
 - **A turn token** may apply a turn whose job ran in a session of its request tree, its own session
   included (`scope = "session"`: its own session only), unless `apply = false` in `[agent_api]`. A
   read-only turn's token gets 403.
@@ -1419,9 +1430,11 @@ curl -s -X PUT -H "Authorization: Bearer $(cat ~/.local/share/agentbus/token)" -
 
 ## Jobs
 
-Every turn runs as a job. A job is a requested turn: its `kind` is `turn` or `review`. A third kind,
-`apply`, puts one turn's changes into the person's folder ([Isolation](#isolation)); only
-`POST /api/v0/turns/<id>/apply` makes one. A runner
+Every turn runs as a job. A job is a requested turn: its `kind` is `turn` or `review`. Two more
+kinds run on a folder's connector and start no turn: `apply` makes the person's folder as a
+session was at a turn ([Isolation](#isolation)), and only `POST /api/v0/turns/<id>/apply` makes
+one; `snapshot` takes a snapshot of a folder for a runner on another machine, and only a runner
+asks for one. A runner
 takes it from the queue and runs it as an attempt. **The attempt is the turn**: the attempt id is
 the turn id, `t_` and 16 hex characters, and there is no second id to match. A turn job names its
 session when it is made, so `session` is on the job from the start.
@@ -1557,32 +1570,41 @@ paths; a diff, and the conflict check of an apply, walk only the folders whose h
 between the two checkpoints. With `overlay` a checkpoint does not walk the folder at all: the
 session's upper folder already names every changed path.
 
-What is read, and when. `base` reads no file: it records each file's size, modification time and
-mode, and hashes only links and files written in the two seconds before the copy was made. A later
-checkpoint hashes a file only when its size, time or mode changed, once, from its saved copy; an
-overlay checkpoint looks at the session's upper folder only. A changed file that `base` did not
-hash has its `base` content hashed then, from the person's folder (still with the size and time
-`base` saw) or from its overlay layer, when it is small (its diff shows it) or kept its size (it
-may be only touched). So a file only touched is no change. A big file whose size changed is not
-read again, and its `sha256` as `base` had it is empty in a diff.
+What is read, and when. A copy made on the folder's machine (clone, reflink, overlay) records
+its `base` without reading the files: each file's size, modification time and mode, with only
+links and files written in the two seconds before the copy was made hashed. Hashing every file
+would cost more than the clone (about 2 s at 50,000 files on an APFS Mac). A copy built from a
+snapshot has every file hashed already: its `base` is the snapshot, with its id. A later checkpoint
+hashes a file only when its size, time or mode changed, once, from its saved copy; an overlay
+checkpoint looks at the session's upper folder only. A changed file that `base` did not hash has
+its `base` content hashed then, when it is small (its diff shows it) or kept its size (it may be
+only touched): from its overlay layer, or from the person's folder, read by the folder's connector
+while it still has the size and time `base` saw. So a file only touched is no change. A big file
+whose size changed is not read again, and its `sha256` as `base` had it is empty in a diff.
 
-Applying a turn (`POST /api/v0/turns/<id>/apply`) puts its changed files into the person's folder,
-each one cloned from the checkpoint's copy where the disk can (APFS `clonefileat`, Linux
-`FICLONE`), else copied. It is refused, with the reason and each file, when a file there is
-neither as it was at the turn's start nor already as the turn left it, and then nothing is
-written. How a file there is checked: when the turn's start holds the file unhashed (as `base`
-saw it), a file with the same size, modification time and mode is as it was, and is not read;
-any other is hashed. A file that differs from the start's hash, or whose size or time changed
-while the start has no hash, is a conflict, unless it already is as the turn left it. One edit
-this cannot see: a file rewritten with the same size and its old modification time put back by
-hand, as git's own index cannot. Applying from the oldest
-checkpoint kept also removes what the checkpoints up to it kept. Closing the workspace removes the
-copy and all its checkpoints. `GET /api/v0/turns/<id>/diff` shows a turn's changes, each small
-text file with its own unified diff, read from the turn's checkpoints when it ended.
+A checkpoint whose files are all hashed has a **snapshot id**: the SHA-256 of a Merkle tree of the
+files' contents, modes and sizes, never their times. The same files have the same id on any
+machine, and the trees and files go through the server's blob store by their hashes, so only what
+the other side lacks is sent.
 
-An apply is a job of kind `apply`, which the runner holding the session runs through its isolation
-backend. It starts no turn, waits for no turn of the session, and fails with reason `conflict` when
-a file refused it. A session with an apply that has not ended cannot be closed.
+Applying (`POST /api/v0/turns/<id>/apply`) makes the person's folder as the copy was at that turn:
+every turn not yet applied, up to it. The folder's connector does it, from the turn's changeset
+(what the copy holds that differs from its `base`) and the changeset of the last turn applied.
+Each new file is cloned from the blob store where the disk can (APFS `clonefileat`, Linux
+`FICLONE`), else copied, into a staging folder, and only once every file is staged is any put in
+place. It is refused, with the reason and each file, when a file there is neither as the last
+applied turn left it nor already as this turn leaves it, and then nothing is written. How a file
+there is checked: when `base` holds the file unhashed, a file with the same size, modification time
+and mode is as it was, and is not read; any other is hashed. A file that differs, or whose size or
+time changed while `base` has no hash, is a conflict, unless it already is as the turn left it.
+One edit this cannot see: a file rewritten with the same size and its old modification time put
+back by hand, as git's own index cannot. Closing the workspace removes the copy and all its
+checkpoints. `GET /api/v0/turns/<id>/diff` shows a turn's changes, each small text file with its
+own unified diff, read from the turn's checkpoints when it ended.
+
+An apply is a job of kind `apply`, which the folder's connector runs. It starts no turn, waits for
+no turn of the session, and fails with reason `conflict` when a file refused it. A session with an
+apply that has not ended cannot be closed.
 
 **A known limit: a disk without copy-on-write.** On ext4, and on a folder shared into a container
 from another disk, `copy` copies every byte, so a big folder (a `node_modules`, a build output)
@@ -1659,9 +1681,45 @@ cockpit never calls them.
 | `POST /api/v0/attempts/<id>/heartbeat` | Renew the 30 s lease. Sent every 2 s. `cancel` says stop. |
 | `POST /api/v0/attempts/<id>/events` | A batch numbered from `offset`. A repeat stores nothing new; a gap gets 409 with `next`. |
 | `POST /api/v0/attempts/<id>/finish` | `status`, `reason`, `result`, `last_seq`. The same finish again gets the same answer. |
+| `POST /api/v0/attempts/<id>/snapshot` | For a first turn in an isolated copy of a folder on another machine: the snapshot job, made once, on the folder's connector. Ask again until `snapshot` is set. |
+| `POST /api/v0/blobs` | `{"hashes":[…]}`, at most 10,000: answers `{"missing":[…]}`, the ones the store lacks, so only those are sent. |
+| `PUT /api/v0/blobs/<hash>` | A file's content, streamed, up to 4 GiB: kept only when its SHA-256 is `<hash>`. 204. |
+| `GET /api/v0/blobs/<hash>` | A file's content, streamed. |
 
 Every call after take names its attempt id and number. A call for an attempt that is not current
 gets 409 with `stale: true`, and the runner stops that turn.
+
+**Three roles.** A runner runs agents in copies. A **connector** owns the folders of its machine:
+it enrolls like a runner, with `capabilities.role` `connector` and its `folders`, and takes only
+`snapshot` and `apply` jobs of those folders. Control (the server) never reads or writes a folder;
+it knows one by its reference. File data always goes through the server's blob store, by the hash
+of its content, never from a connector to a runner:
+
+- A first turn in an isolated copy of a folder goes to any runner. A runner on the folder's machine
+  (one that reports the folder's connector: the built-in one of `agentbus up`, or `agentbus runner
+  -folder`) copies the folder by clone or overlay, as before. Any other asks for a snapshot
+  (`POST /api/v0/attempts/<id>/snapshot`): the connector hashes every file, puts each file and
+  each content tree that the store lacks in it, and answers the snapshot id; the runner fetches
+  the blobs it lacks into its own store and builds the copy from them. A folder used as it is
+  (`isolate: false`) and a git worktree (`repo`) run only on the folder's machine.
+- At the end of each turn the runner puts the copy's changeset (what it holds that differs from
+  its base) and the files it names in the store; the job's `result.changeset` names it.
+- An apply job goes to the folder's connector, which reads both changesets and the files from the
+  store, checks the folder and writes it.
+
+The modes:
+
+```sh
+agentbus up                                   # control, a connector and a runner, one process
+agentbus server                               # control alone
+agentbus runner -server URL [-folder DIR]...  # a runner; with -folder, a connector beside it
+agentbus connector -server URL -folder DIR... # a connector alone: no agents, record or gateway
+```
+
+In `agentbus up` the three share the server's blob store on disk: nothing is sent over HTTP and
+copies are made by clone or overlay (the local fast path). A runner or a connector of a server
+keeps its own store in its data folder (`blobs/`) and sends only what the server lacks. Step 4 of
+0.3 runs a runner on another machine; today the three processes are tested on one.
 
 **A runner follows the server's settings.** Before each turn, `agentbus runner -server <url>` reads
 the policy and the instructions from the server (`GET /api/v0/runners/<id>/settings`, with its own
@@ -1914,5 +1972,38 @@ gets a new version path, and the old one stays for a while.
 - A workspace carries `snapshot`: the root hash of its first checkpoint's tree (64 hex digits).
 - `GET /api/v0/harnesses` answers from the runners' reports, with `runners` added; see above.
 - A job's `spec.labels`: only a runner with every label takes it. A runner enrolls and heartbeats
-  with `capabilities` (`os`, `arch`, `isolation`, `harnesses`, `connector`, `folders`); a first job
-  on a harness goes to a runner that has it, unless none seen in the last minute does.
+  with `capabilities` (`os`, `arch`, `isolation`, `harnesses`, `connector`, `folders`, `role`); a
+  first job on a harness goes to a runner that has it, unless none seen in the last minute does.
+- **The connector is split from the runner.** Three roles in one program: control (the API, the
+  queue, the record, the settings, the blob store), the **connector** (owns the folders of its
+  machine: takes their snapshots, applies changes into them) and the **runner** (runs agents in
+  copies). A connector is a runner with `capabilities.role` `connector` that takes only the new job
+  kinds `snapshot` and `apply`, of its own folders. `agentbus up` runs all three in one process;
+  `agentbus connector -server URL -folder DIR...` runs a connector alone ([Modes](#the-runner-protocol)).
+- **Apply goes up to a turn, all or nothing.** `POST /api/v0/turns/<id>/apply` applies every turn of
+  the session not yet applied, up to and including this one, on the folder's connector. It checks
+  every file first and writes nothing on a conflict, then stages every file before putting any in
+  place. Asking for an earlier turn answers the apply that covered it. A new 409 when an apply of an
+  earlier turn of the session runs. `pruned` is gone: the runner keeps a session's checkpoints until
+  it closes. An apply job's `spec` names `folder_ref`, `connector`, and in `apply_from` and
+  `apply_to` the changesets it goes between (blob hashes), not checkpoint names.
+- **Snapshots are content-addressed.** A snapshot id is the SHA-256 of a Merkle tree of the files'
+  contents, modes and sizes, never their times, so the same files have the same id on any machine.
+  A workspace's `snapshot` is that id when every file of the copy's base was hashed: a copy built
+  from a snapshot, a git worktree, a folder used as it is. A copy made on the folder's own machine
+  by clone or overlay records most files by size, time and mode only, as before, to stay as fast
+  (hashing every file of 50,000 costs about 2 s on an APFS Mac), and its `snapshot` is empty.
+- **File data goes through the control plane's blob store.** New runner-protocol routes, with a
+  runner's or a connector's token: `POST /api/v0/blobs` (which of these hashes are missing),
+  `PUT /api/v0/blobs/<hash>` and `GET /api/v0/blobs/<hash>` (a file's content, streamed, up to
+  4 GiB, checked against its hash; the 2 MiB body limit does not apply), and
+  `POST /api/v0/attempts/<id>/snapshot` (a runner asks for the snapshot of its first turn's folder,
+  which the folder's connector takes). A turn job's `result.changeset` names the changeset blob of
+  its copy at the turn's end; a snapshot job's `result.snapshot` is `{id, times, files, git}`:
+  `git` is the folder's `.git`, carried beside the snapshot so git works in the copy, and never
+  part of its id.
+- **No runner path reaches control.** A workspace names a copy by `space` (its id on its runner)
+  and a folder used as it is by `folder_ref`; `folder` is set only for a session made before.
+  `result.folder` is no longer set, and a delivered result no longer quotes the asked session's
+  folder. A turn token's `folder` is checked by the folder's connector (`agentbus up`), or must be
+  its session's own `folder_ref` (`agentbus server`).

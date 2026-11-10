@@ -12,10 +12,16 @@ words is `docs/CLIENT_API.md` in the repository.
 
 ## Modes
 
-`agentbus up` runs everything in one process: the API, the job queue, the record, the gateway and a
-runner. `agentbus server` is the same with no runner. `agentbus runner -server <url>` takes jobs
-from a server and runs them on its machine, with its own record and gateway; its own API has no
-job routes. This file describes the API of `up` and `server`.
+Three roles in one program. Control keeps the API, the job queue, the record, the gateway and a
+blob store of file contents. A connector owns the person's folders on its machine: it takes their
+snapshots and applies changes into them. A runner runs agents in copies. File data goes through
+control's blob store, never straight from a connector to a runner.
+
+`agentbus up` runs all three in one process, and copies a folder by clone or overlay. `agentbus
+server` is control alone. `agentbus runner -server <url>` takes jobs from a server and runs them
+on its machine, with its own record and gateway; its own API has no job routes; with `-folder DIR`
+a connector runs beside it. `agentbus connector -server <url> -folder DIR...` is a connector alone.
+This file describes the API of `up` and `server`.
 
 ## Address and token
 
@@ -118,9 +124,10 @@ and folder, the changed files, a review's verdict, and the agent's final reply.
 4. Ask for a review of a turn's work once its job has ended: `POST /api/v0/jobs/{job}/review` with
    `agent` (the job id is in the reply of step 2, as `job`).
 5. Cancel work you asked for: `POST /api/v0/jobs/{job}/cancel`.
-6. See what a turn did: `GET /api/v0/turns/{turn}/diff`. Put its changes in the person's folder:
-   `POST /api/v0/turns/{turn}/apply`. A 409 lists each file that changed there since the turn
-   started, with why, and nothing is written: read it, then make another turn that resolves it.
+6. See what a turn did: `GET /api/v0/turns/{turn}/diff`. Make the person's folder as the session
+   was at that turn: `POST /api/v0/turns/{turn}/apply` applies every turn not yet applied, up to it.
+   A 409 lists each file that changed there since, with why, and nothing is written: read it,
+   then make another turn that resolves it.
 
 Use `agentbus-api METHOD PATH [BODY]`, which is on your PATH. It sends your token for you, so the
 command holds no variable and needs no approval. curl with the header works too, where your tools
@@ -326,18 +333,21 @@ curl -s -H "Authorization: Bearer $TOKEN" $B/api/v0/turns/t_9f2c01ab4d5e6f70/dif
 
 ### POST /api/v0/turns/{id}/apply
 
-Put one turn's file changes into the person's folder: the folder its session's copy was made from.
-No body. 200 with `state: "applied"` and `files` written. If any file there is neither as it was at
-the turn's start nor already as the turn left it, nothing is written: 409 with `state: "refused"`,
-`error`, and `conflicts` (`path` and `why` for each). Applying the same turn again is a no-op: 200
-with `already: true`. A refused apply may be asked for again. 202 when the runner has not finished
+Make the person's folder (the one its session's copy was made from) as the session was at the end
+of this turn: every turn of the session not yet applied, up to and including this one, in one step,
+on the folder's connector. No body. 200 with `state: "applied"` and `files` written. All or nothing:
+if any file there is neither as the last applied turn left it nor already as this turn leaves it,
+nothing is written: 409 with `state: "refused"`, `error`, and `conflicts` (`path` and `why` for
+each). Every new file is staged before any is put in place. A turn already applied, by its own apply
+or a later turn's, is a no-op: 200 with `already: true`. A refused apply may be asked for again.
+409 while an apply of an earlier turn of the session runs. 202 when the connector has not finished
 within 30 seconds; the turn's diff shows how it ended. 400 for a turn that cannot be applied (still
 running, or not in an isolated copy, or its session closed). A turn token may apply a turn in its
 scope unless `apply = false` in `[agent_api]`; a read-only turn may not.
 
 ```sh
 curl -s -X POST -H "Authorization: Bearer $TOKEN" $B/api/v0/turns/t_9f2c01ab4d5e6f70/apply
-# {"state":"applied","turn":"t_…","session":"abc","job":"job_…","files":["a.txt"],"pruned":true}
+# {"state":"applied","turn":"t_…","session":"abc","job":"job_…","files":["a.txt"]}
 agentbus-api POST /api/v0/turns/t_9f2c01ab4d5e6f70/apply
 # 409 {"state":"refused","conflicts":[{"path":"a.txt","why":"changed in your folder since the checkpoint"}],…}
 ```

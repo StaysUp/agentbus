@@ -230,23 +230,41 @@ and press Review. If it fails, press Fix, then Send, then Review again. With cur
 
 ## Modes
 
-One program, three ways to run it:
+One program, three roles: **control** (the API, the job queue, the record, the gateway, and a store
+of file contents), a **connector** (the folders of one machine: it takes their snapshots and
+applies changes into them) and a **runner** (it runs agents, each session in its own copy). Control
+never reads or writes your folder. Four ways to run them:
 
 | Command | What runs | For |
 |---|---|---|
-| `agentbus up` | The API, the job queue, the record, the gateway and a runner, in one process | One person on one machine. The default. |
-| `agentbus server` | The API, the job queue, the record and the gateway, with no runner | A central queue that runners on other machines pull from. |
-| `agentbus runner -server <url>` | A runner, with its own gateway and record | Any machine that should run jobs for a server. |
+| `agentbus up` | Control, a connector and a runner, in one process | One person on one machine. The default. |
+| `agentbus server` | Control alone | A central queue that runners and connectors on other machines pull from. |
+| `agentbus runner -server <url>` | A runner, with its own gateway and record; with `-folder DIR`, a connector beside it | Any machine that should run jobs for a server. |
+| `agentbus connector -server <url> -folder DIR...` | A connector alone: no agent, record or gateway | The machine that holds the code, when the agents run elsewhere. |
 
-A runner pulls work and is never called, so it works behind NAT. It always talks to the queue
-through the runner protocol over HTTP, the built-in one in `agentbus up` included.
+Runners and connectors pull work and are never called, so they work behind NAT. They always talk
+to the queue through the runner protocol over HTTP, the built-in ones in `agentbus up` included.
+
+File contents go through control's store, by the SHA-256 of each file, so only what the other side
+lacks is sent. A runner on another machine builds a session's copy from a snapshot of the folder,
+which the folder's connector takes. At the end of each turn the runner puts what the copy changed
+in the store, and an apply is a job of the folder's connector, which reads the changes from there.
+In `agentbus up` the three share the store on disk: nothing is sent over HTTP, and the copy is a
+clone or an overlay of the folder, as fast as before.
 
 ```sh
 # On the central machine:
 agentbus server -listen 0.0.0.0
 # On each runner machine, with the server's enroll_token file copied over (mode 0600):
 agentbus runner -server http://central:8787 -enroll-token-file ./enroll_token
+# On the machine with the code (it may be the central one):
+agentbus connector -server http://central:8787 -enroll-token-file ./enroll_token -folder ~/code/app
 ```
+
+A turn then names the folder by its reference, from `GET /api/v0/folders`, with `folder_ref`,
+`connector` and `isolate: true`. A folder used as it is (`isolate: false`) and a git worktree run
+only on the folder's own machine. Running a runner on another machine for real is the next step of
+0.3; today the three roles are tested as three processes on one machine.
 
 The runner's data folder is its own (`AGENTBUS_HOME`, as for `agentbus up`): a runner on the same
 machine as its server needs another one. Its policy and instructions are the server's, read before
@@ -398,7 +416,10 @@ API, and a runner on another machine uses its server's.
 | `queue/` | Jobs, attempts, runners and reviews, in `jobs.db` beside the record |
 | `jobs/` | The jobs API and the runner protocol |
 | `runner/` | Takes jobs through the runner protocol and runs each one with `run/` |
-| `isolation/` | A session's own copy of its folder: checkpoint, diff, apply, close |
+| `isolation/` | The runner's side: a session's own copy, from a clone or a snapshot; checkpoint, diff, changeset, close |
+| `connector/` | The folder side: a folder's snapshot, and applying a session's changes into it |
+| `folders/` | The folders of one machine, known to control by reference only |
+| `blobs/` | The content-addressed store every file travels through, and its HTTP client |
 | `workspace/` | What a job changed, and git worktrees |
 | `gateway/` | The pass-through proxy that feeds adapters |
 | `adapter/` | One adapter per API format: Anthropic, OpenAI |
