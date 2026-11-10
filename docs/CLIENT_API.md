@@ -27,10 +27,23 @@ One program runs three ways. The API is the same in each; what is behind it diff
 | `agentbus runner -server <url>` | its own record and gateway, for its agents only | taken from the server; this API has no job routes (404) |
 
 A runner's turn is recorded by the runner's own service. The server gets the job's result: how the
-turn ended, its reply, its cost and the files it changed. At the turn's end the runner also sends the
-turn's events to the server's record, so a cockpit pointed at the server shows the turn as it shows
-one on its own machine. While the turn runs, the server has only the job's own events. The model
-calls' bodies (`/api/v0/calls/...`) stay on the runner.
+turn ended, its reply, its cost and the files it changed. While the turn runs, the runner also sends
+the turn's events and its model calls (their pieces and replies) to the server's record, so a
+cockpit pointed at the server shows the turn live, as it shows one on its own machine, call bodies
+(`/api/v0/calls/...`) included.
+
+**Runners hold no secrets.** The server mints each runner turn's token (`abr_…`), scoped to that
+attempt of that job: it works while the attempt is current and stops when it ends. The turn's agent
+gets it as `AGENTBUS_TOKEN`, with `AGENTBUS_URL` set to the server, and, on a runner with `-gateway
+server` (the default), as its model credential: the `key_env` variable of an OpenRouter agent, or
+`CLAUDE_CODE_OAUTH_TOKEN` for a claude subscription. The runner's gateway records each call and
+sends it to the server's relay, `/relay/<anthropic|openrouter>/…`, which checks the token, takes the agent the job names (or, for a next turn that names none, the
+session's latest agent as its record holds it, with that saved agent's access and `key_env` from
+the server's own saved agents), and swaps in the real credential: an OpenRouter key from the
+server's environment by its variable's name, or the person's own subscription token, connected on
+the server (`GET /api/v0/subscriptions`), when `subscriptions_on_runners = "own"`. A refusal names
+what to do, as a 401 or 403 the agent shows. codex's ChatGPT sign-in is not relayed yet: such a turn
+is refused on the runner before it starts.
 
 | Path | Who calls it | Sign-in |
 |---|---|---|
@@ -250,6 +263,7 @@ allow = ["go test", "make test", "git commit"]
 forbid = ["git push", "git checkout"]
 edit = "session"
 subagents = true
+subscriptions_on_runners = "off"
 
 [limits]
 max_depth = 2
@@ -299,7 +313,7 @@ apply = true
   the turn's own session folder: its isolated copy, or the folder itself when the session is not
   isolated. `"none"` is nowhere. A read-only turn never edits, and `forbid` still wins.
 - **No turn edits the data folder's own files**: `permissions.toml`, `instructions.md`,
-  `agents.json`, `token`, `turns_token`, `enroll_token`, `events.db`, `jobs.db`, `runner.json` and
+  `agents.json`, `subscriptions/`, `token`, `turns_token`, `enroll_token`, `events.db`, `jobs.db`, `runner.json` and
   `bin/agentbus-api`. claude gets a deny rule on each, which wins over `edit` and over the person's
   own settings. codex has no way to keep one file of its folder out of its sandbox, so a codex
   turn whose folder holds the data folder runs read-only, and the service log says
@@ -309,6 +323,10 @@ apply = true
 - `subagents`: `true` (the default) or `false`. `false` turns off the agent's own subagents for
   every turn, on the command line only (the table below). The person's `~/.claude/settings.json`
   and `~/.codex/config.toml` are never edited.
+- `subscriptions_on_runners`: `"off"` (the default) or `"own"`. Read by the server only. `"own"`
+  lets the server add the person's own subscription, connected once on it, to the model calls of
+  agents on their runners, which hold no sign-in. Only for runners on the person's own machines.
+  `agentbus up` on one machine uses each harness's own sign-in either way.
 - `[limits]`: the caps on work agents ask for (above, "The caps on asked work"). Whole numbers
   from 0 for the first three; dollars from 0 for the cost, where 0 is off.
 - `[agent_api]`: what a turn's token may call (above, "Turn tokens"). `scope` is `"tree"` or
@@ -1170,8 +1188,9 @@ default model.
   `api` (the vendor's API key) is refused: not available yet.
 - `model`: optional for `subscription` (absent: the harness's default). Required for `openrouter`,
   in OpenRouter's naming. Same shape as a turn's `model`.
-- `key_env`, for `openrouter` only: the name of the environment variable on the runner's machine
-  that holds the key, ending in `_KEY`; `OPENROUTER_API_KEY` when absent. **Never the key.**
+- `key_env`, for `openrouter` only: the name of the environment variable that holds the key, ending
+  in `_KEY`; `OPENROUTER_API_KEY` when absent. **Never the key.** It is read where the turn runs on
+  one machine, and by the server for a runner that holds no secrets.
   `key_set` says whether it is set in this service's environment; its value is never sent.
 - `name`: 1 to 100 bytes on one line, unique among the agents ignoring case.
 
@@ -1222,7 +1241,7 @@ its first report, up to 15 seconds.
   `disabled` means not available yet. `key_set` is read on every call.
 - `disabled` on a harness: no agent can be saved on it yet. It is not probed.
 - Never a path, and nothing from the harnesses' configuration.
-- `key_set` is this service's: a runner holds no key.
+- `key_set` is this service's: a runner holds no key, and the server adds it to the runner's calls.
 
 ### `GET /api/v0/folders` — the folders the runners own
 
@@ -1679,12 +1698,13 @@ cockpit never calls them.
 | `POST /api/v0/runners/<id>/heartbeat` | Idle heartbeat with `capacity`. |
 | `POST /api/v0/runners/<id>/removed` | Report a closed workspace removed, or `error`. |
 | `GET /api/v0/runners/<id>/settings` | The policy and the instructions, read fresh, for the turn it is about to start. |
-| `POST /api/v0/attempts/<id>/start` | Taken to running. `cancel` says the job was stopped. |
+| `POST /api/v0/attempts/<id>/start` | Taken to running. `cancel` says the job was stopped. `token` is the attempt's turn token, minted by the server: its agent's API token and model credential, working while the attempt is current. |
 | `POST /api/v0/attempts/<id>/heartbeat` | Renew the 30 s lease. Sent every 2 s. `cancel` says stop. |
 | `POST /api/v0/attempts/<id>/events` | A batch numbered from `offset`. A repeat stores nothing new; a gap gets 409 with `next`. |
 | `POST /api/v0/attempts/<id>/finish` | `status`, `reason`, `result`, `last_seq`. The same finish again gets the same answer. |
 | `POST /api/v0/attempts/<id>/snapshot` | For a first turn in an isolated copy of a folder on another machine: the snapshot job, made once, on the folder's connector. Ask again until `snapshot` is set. |
-| `POST /api/v0/attempts/<id>/record` | A runner of a server, at the turn's end: `{"number": n, "events":[…]}`, at most 500, the turn's events from its own record. The server's record keeps each once, by its id, without its `folder` (the runner's path). Every event must be of the session control assigned the job: a turn job's session, or for a review the one control named when it made the job (`links.review_session`). |
+| `POST /api/v0/attempts/<id>/calls` | A runner of a server, while the turn runs: `{"number": n, "calls":[…], "replies":[…]}`, the turn's model calls as its record kept them, each body as base64 so its bytes arrive as kept (`top`, each piece's `bytes`, a reply's `message`), a piece's `bytes` left out when the server holds it. Answers `{"stored": n, "missing":[…]}`: send the calls whose pieces are missing again, with those pieces' bytes. Each call must be of the session control assigned the job. |
+| `POST /api/v0/attempts/<id>/record` | A runner of a server, while the turn runs and at its end: `{"number": n, "events":[…]}`, at most 500, the turn's events from its own record. The server's record keeps each once, by its id, without its `folder` (the runner's path). Every event must be of the session control assigned the job: a turn job's session, or for a review the one control named when it made the job (`links.review_session`). |
 | `POST /api/v0/blobs` | `{"hashes":[…]}`, at most 10,000: answers `{"missing":[…]}`, the ones the store lacks, so only those are sent. |
 | `PUT /api/v0/blobs/<hash>` | A file's content, streamed, up to 4 GiB: kept only when its SHA-256 is `<hash>`. 204. |
 | `GET /api/v0/blobs/<hash>` | A file's content, streamed. |
@@ -2023,9 +2043,20 @@ gets a new version path, and the old one stays for a while.
 - **Blobs travel many to a request.** `POST /api/v0/packs` takes a pack of blobs and `POST
   /api/v0/packs/fetch` answers one, so a snapshot of 50,000 files is about a hundred requests, not
   50,000. The server removes blobs no open session needs, an hour after their last use.
-- **A runner's turn reaches the server's record** at its end (`POST /api/v0/attempts/<id>/record`),
-  so `GET /api/v0/sessions`, `/turns` and `/turns/<id>/diff` on a server show turns run on other
-  machines.
+- **A runner's turn reaches the server's record** while it runs (`POST /api/v0/attempts/<id>/record`
+  and `/calls`), so `GET /api/v0/sessions`, `/turns`, `/turns/<id>/diff` and `/calls/<id>/context` on
+  a server show turns run on other machines, live.
+- **Runners hold no secrets.** `POST /api/v0/attempts/<id>/start` answers the attempt's `token`,
+  minted by the server; the server's relay (`/relay/...`) swaps it for the real credential on the
+  way out. `agentbus runner -gateway server` is the default; `-gateway local` keeps the runner's own
+  sign-in and keys.
+- **Subscriptions for the person's own runners**: `GET /api/v0/subscriptions`,
+  `POST /api/v0/subscriptions/<harness>/connect` (the harness's own login, run on the server; for
+  claude, `claude setup-token`), `GET` of it, `POST .../connect/input` and
+  `DELETE /api/v0/subscriptions/<harness>`, the main token only. `agentbus connect claude` does the
+  same in a terminal. The policy key `subscriptions_on_runners` (`off` or `own`, default `off`).
+- **An agent on a runner asks other agents** through the server's API with its turn token; the
+  answer comes back as its session's next turn.
 - **`-host`** on `up` and `server`: another name a loopback service answers to, such as
   `host.lima.internal` for a runner in a Lima VM.
 - **No runner path reaches control.** A workspace names a copy by `space` (its id on its runner)

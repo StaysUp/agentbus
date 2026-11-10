@@ -263,8 +263,7 @@ agentbus connector -server http://central:8787 -enroll-token-file ./enroll_token
 
 A turn then names the folder by its reference, from `GET /api/v0/folders`, with `folder_ref`,
 `connector` and `isolate: true`. A folder used as it is (`isolate: false`) and a git worktree run
-only on the folder's own machine. Running a runner on another machine for real is the next step of
-0.3; today the three roles are tested as three processes on one machine.
+only on the folder's own machine. `go run ./tools/remote` runs the whole path with the runner in a Lima VM and the code on a Mac.
 
 The runner's data folder is its own (`AGENTBUS_HOME`, as for `agentbus up`): a runner on the same
 machine as its server needs another one. Its policy and instructions are the server's, read before
@@ -272,14 +271,23 @@ each turn ([Permissions](#permissions)). Its own service listens on a free loopb
 agents only. `-capacity` sets how many jobs it runs at once, 1 to 64, and defaults to `4`, as
 `-max-runs` does for `agentbus up`.
 
-Where agents send model calls is the one setting per mode, `-gateway` on `agentbus runner`:
+Runners hold no secrets. A runner's agent gets its turn's token, which the server minted, as its
+model credential. The runner's own gateway records each call and sends it on to the server's,
+which swaps in the real credential (`-gateway`, on `agentbus runner`):
 
-- `local` (the default): the runner's own gateway, on its machine. The agent signs in as the person
-  on that machine, and the turn's record stays there. The job's result, with the reply, the cost
-  and the changed files, goes to the server.
-- `server`: the server's gateway, so the record is central and runners hold no secrets. **Not yet
-  built**: it needs API keys added by the gateway, and the server's gateway to take calls from
-  other machines.
+- `server` (the default): the runner holds no key and no sign-in. An API-key agent's key is read by
+  the server from its own environment, by the variable's name (`key_env`). A subscription agent
+  uses the person's own subscription, connected once on the server, for runners on their own
+  machines only: `agentbus connect claude` there (or Connect in the cockpit), and
+  `subscriptions_on_runners = "own"` in its `permissions.toml`. codex's ChatGPT sign-in cannot be
+  used on a runner yet.
+- `local`: the runner's own machine signs in, as the person on it, with its own keys.
+
+A runner's turn reaches the server's record while it runs: its events, its model calls and their
+replies, so a cockpit pointed at the server shows it live. Its agent calls the server's API with
+the same token, so it can ask other agents; each answer comes back as its session's next turn.
+
+One machine (`agentbus up`) needs none of this: its runner uses each harness's own sign-in.
 
 ## Docs
 

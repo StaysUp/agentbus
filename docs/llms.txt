@@ -23,6 +23,14 @@ on its machine, with its own record and gateway; its own API has no job routes; 
 a connector runs beside it. `agentbus connector -server <url> -folder DIR...` is a connector alone.
 This file describes the API of `up` and `server`.
 
+A runner holds no secrets. The server mints each runner turn's token, which works while that
+attempt runs: the agent's `AGENTBUS_TOKEN` (with `AGENTBUS_URL` the server), and its model
+credential, which the server's relay swaps for the real one: an OpenRouter key from the server's
+environment, by `key_env`, or the person's own subscription connected on the server
+(`agentbus connect claude`, or `POST /api/v0/subscriptions/claude/connect`) when
+`subscriptions_on_runners = "own"`. A runner turn's events and model calls reach the server's
+record while it runs. `GET /api/v0/subscriptions` lists what is connected; the main token only.
+
 ## Address and token
 
 - The service listens on `http://127.0.0.1:8787` by default. `agentbus up -listen 0.0.0.0`

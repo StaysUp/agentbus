@@ -25,6 +25,34 @@ Flags:
 - `-keep`: keep both scratch folders.
 - `-hold`: after the checks, keep everything running until Ctrl-C, to look at it in a cockpit.
   The token is in `<dir>/server/token`.
+- `-real`: after the checks, a real model turn on a runner that holds no secret (below).
+- `-connect`: with `-real`, first connect your claude subscription on the scratch server: it runs
+  `agentbus connect claude` in this terminal (`claude setup-token`, then you sign in).
+- `-key-env OPENROUTER_API_KEY`: with `-real`, the variable the server reads the OpenRouter key
+  from, by its name. The tool checks only whether it is set; the server inherits it.
+- `-model deepseek/deepseek-v4.1-flash`: with `-real`, the OpenRouter agent's model.
+
+## A real model turn (-real)
+
+A second runner starts in the VM, `-labels real`, with the VM's own `claude` on its `PATH`, by
+`env -i` as the first: no key, no sign-in, a `HOME` of its own. It runs two turns, each asking for
+one word:
+
+1. An OpenRouter agent (`key_env` as `-key-env`). The server reads the key from its environment.
+2. A claude subscription agent, with `subscriptions_on_runners = "own"` set on the scratch server.
+   It uses the subscription connected there (`-connect`), or is refused when none is.
+
+Each turn's agent gets its turn token as its credential. Its model calls go through the runner's
+gateway to the server's relay (`/relay/...`), which adds the real one. The tool prints how each
+job ended, the turn's reply or error, the relay's answers by status, and when the server's record
+first held the turn's model call while it ran. Without the key, or without a connected
+subscription, the relay answers 403 and the turn fails; that still shows the path.
+
+Your own run, with the key exported in your shell under its usual name:
+
+```sh
+go run ./tools/remote -runs 1 -sizes "" -real -connect
+```
 
 Ctrl-C at any point stops what the tool started, on both machines.
 
@@ -36,7 +64,7 @@ Ctrl-C at any point stops what the tool started, on both machines.
   host.lima.internal`, and `agentbus connector` owning those folders. Nothing is installed.
 - In the VM: `agentbus runner -server http://host.lima.internal:<port>`, started with `env -i`, so
   it has only its own `HOME`, `PATH` and data folder: no key or sign-in of the VM's user reaches
-  it. Its `PATH` holds the stand-in `claude`.
+  it. Its `PATH` holds the stand-in `claude`. It holds no secret (`-gateway server`, the default).
 
 `-host host.lima.internal` is needed because the VM reaches the Mac's loopback by that name, and a
 service on loopback refuses a `Host` it does not know.

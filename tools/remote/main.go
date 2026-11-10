@@ -62,6 +62,8 @@ type options struct {
 	runs           int
 	sizes          []int
 	keep, hold     bool
+	real, connect  bool
+	keyEnv, model  string
 }
 
 func main() {
@@ -75,6 +77,10 @@ func main() {
 	flag.StringVar(&sizes, "sizes", "300,3000,50000", "folder sizes, in files, whose snapshot transfer is measured; empty for none")
 	flag.BoolVar(&o.keep, "keep", false, "keep the scratch folders")
 	flag.BoolVar(&o.hold, "hold", false, "after the checks, keep everything running until Ctrl-C (to look at it in a cockpit)")
+	flag.BoolVar(&o.real, "real", false, "after the checks, run the VM's real claude on a runner that holds no secret: an OpenRouter agent, then a subscription agent")
+	flag.BoolVar(&o.connect, "connect", false, "with -real: first connect your claude subscription on the scratch server (runs agentbus connect claude here)")
+	flag.StringVar(&o.keyEnv, "key-env", "OPENROUTER_API_KEY", "with -real: the variable the server reads the OpenRouter key from, by name")
+	flag.StringVar(&o.model, "model", "deepseek/deepseek-v4.1-flash", "with -real: the OpenRouter agent's model")
 	flag.Parse()
 	for _, s := range strings.Split(sizes, ",") {
 		if s = strings.TrimSpace(s); s != "" {
@@ -165,6 +171,11 @@ func run(o options) (err error) {
 			tr = append(tr, t...)
 		}
 		reportTransfer(tr)
+	}
+	if o.real {
+		if err := w.real(); err != nil {
+			return fmt.Errorf("real: %w", err)
+		}
 	}
 	return nil
 }
@@ -575,12 +586,14 @@ func (w *world) stopAll() {
 		d := w.o.vmDir
 		// The runner leads its own process group (setsid): the group gets
 		// TERM, then KILL after 20 s, and the folder goes only once it ended.
-		out, _ := lima(w.o.vm, "test -f "+d+"/runner.pid || exit 0; p=$(cat "+d+"/runner.pid); kill -TERM -- -$p 2>/dev/null; "+
-			"for i in $(seq 1 200); do kill -0 -- -$p 2>/dev/null || exit 0; sleep 0.1; done; kill -KILL -- -$p 2>/dev/null; "+
-			"for i in $(seq 1 50); do kill -0 -- -$p 2>/dev/null || exit 0; sleep 0.1; done; echo still running")
-		if strings.Contains(out, "still running") {
-			fmt.Fprintf(os.Stderr, "remote: the runner in the VM did not stop; %s is kept\n", d)
-			w.o.keep = true
+		for _, pid := range []string{"runner.pid", "runner2.pid"} {
+			out, _ := lima(w.o.vm, "test -f "+d+"/"+pid+" || exit 0; p=$(cat "+d+"/"+pid+"); kill -TERM -- -$p 2>/dev/null; "+
+				"for i in $(seq 1 200); do kill -0 -- -$p 2>/dev/null || exit 0; sleep 0.1; done; kill -KILL -- -$p 2>/dev/null; "+
+				"for i in $(seq 1 50); do kill -0 -- -$p 2>/dev/null || exit 0; sleep 0.1; done; echo still running")
+			if strings.Contains(out, "still running") {
+				fmt.Fprintf(os.Stderr, "remote: a runner in the VM did not stop; %s is kept\n", d)
+				w.o.keep = true
+			}
 		}
 		if !w.o.keep {
 			if out, err := lima(w.o.vm, "rm -rf "+d); err != nil {
@@ -631,6 +644,11 @@ type applyAnswer struct {
 }
 
 func (c *client) call(method, path string, body, out any) (int, string) {
+	return c.callMatch(method, path, body, "", out)
+}
+
+// callMatch is call with If-Match set, for a settings write.
+func (c *client) callMatch(method, path string, body any, match string, out ...any) (int, string) {
 	var rd io.Reader
 	if body != nil {
 		b, _ := json.Marshal(body)
@@ -641,14 +659,17 @@ func (c *client) call(method, path string, body, out any) (int, string) {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	if match != "" {
+		req.Header.Set("If-Match", match)
+	}
 	resp, err := (&http.Client{Timeout: 5 * time.Minute}).Do(req)
 	if err != nil {
 		return 0, "the server could not be reached"
 	}
 	defer resp.Body.Close()
 	b, _ := io.ReadAll(resp.Body)
-	if out != nil {
-		_ = json.Unmarshal(b, out)
+	if len(out) > 0 && out[0] != nil {
+		_ = json.Unmarshal(b, out[0])
 	}
 	return resp.StatusCode, string(b)
 }
