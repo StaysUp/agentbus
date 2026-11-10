@@ -45,7 +45,8 @@ import (
 // standIn is claude for the runner. A turn appends its prompt to a.txt, adds
 // new.txt when it is missing and removes it when it is there, and prints the
 // result line claude prints. It answers the version and sign-in probes. A
-// turn asked "network probe" runs probeScript instead (network.go).
+// turn asked "network probe" runs probeScript instead (network.go). A
+// prompt of "slow" takes 8 s first, for -cases to restart a role meanwhile.
 const standIn = `#!/bin/sh
 case "$1" in
 --version) echo "0.0.0 (agentbus remote stand-in)"; exit 0 ;;
@@ -56,6 +57,7 @@ if [ "$last" = "network probe" ]; then
 ` + probeScript + `echo '{"type":"result","subtype":"success","result":"probed","session_id":"remote-'$$'"}'
 exit 0
 fi
+if [ "$last" = slow ]; then sleep 8; fi
 echo "$last" >> a.txt
 if [ -e new.txt ]; then rm new.txt; else echo "$last" > new.txt; fi
 echo '{"type":"result","subtype":"success","result":"done","session_id":"remote-'$$'"}'
@@ -71,6 +73,9 @@ type options struct {
 	keyEnv, model  string
 	network        bool
 	allow          string
+	cases          bool
+	only           string
+	cutFiles       int
 }
 
 func main() {
@@ -90,6 +95,9 @@ func main() {
 	flag.BoolVar(&o.network, "network", false, "after the checks, probe the runner's network control from a turn: gateway, an allowed host, others refused and recorded")
 	flag.StringVar(&o.allow, "allow", "github.com", "with -network: the one host in the server's [network] allow")
 	flag.StringVar(&o.model, "model", "deepseek/deepseek-v4.1-flash", "with -real: the OpenRouter agent's model")
+	flag.BoolVar(&o.cases, "cases", false, "after the checks, run the step 6 cases: an interrupted transfer, a role restart, a repeated request, a disconnected connector, a file edited before apply")
+	flag.StringVar(&o.only, "only", "", "with -cases: run only the cases whose number starts so, e.g. 4 or 2b")
+	flag.IntVar(&o.cutFiles, "cut-files", 10000, "with -cases: files in each folder whose transfer is stopped midway")
 	flag.Parse()
 	for _, s := range strings.Split(sizes, ",") {
 		if s = strings.TrimSpace(s); s != "" {
@@ -116,6 +124,8 @@ type world struct {
 	serverLog      string
 	vmStarted      bool
 	ref, connector string
+	bin            string
+	folderArgs     []string
 	folders        map[string]string // folder name → ref
 	skewLo, skewHi time.Duration     // VM clock minus Mac clock, bounds
 	interrupted    chan os.Signal
@@ -186,6 +196,11 @@ func run(o options) (err error) {
 			return fmt.Errorf("network: %w", err)
 		}
 	}
+	if o.cases {
+		if err := w.cases(); err != nil {
+			return fmt.Errorf("cases: %w", err)
+		}
+	}
 	if o.real {
 		if err := w.real(); err != nil {
 			return fmt.Errorf("real: %w", err)
@@ -243,19 +258,23 @@ func (w *world) setup() error {
 		}
 		folderArgs = append(folderArgs, "-folder", f)
 	}
+	if w.o.cases {
+		// Two folders big enough to stop a transfer midway: one for the
+		// connector's upload, one for the runner's fetch.
+		for _, name := range []string{"cut-upload", "cut-fetch"} {
+			f := filepath.Join(w.dir, name)
+			if err := fixture(f, w.o.cutFiles); err != nil {
+				return err
+			}
+			folderArgs = append(folderArgs, "-folder", f)
+		}
+	}
 	// The server, answering the VM by host.lima.internal, and the connector.
-	srvHome, conHome := filepath.Join(w.dir, "server"), filepath.Join(w.dir, "connector")
-	addr := fmt.Sprintf("127.0.0.1:%d", w.o.port)
-	w.serverLog = filepath.Join(srvHome, "logs", "service.log")
-	if w.server, err = start(bin, srvHome, filepath.Join(w.dir, "server.out"), "server", "-listen", addr, "-host", "host.lima.internal", "-replay=false"); err != nil {
+	w.bin, w.folderArgs = bin, folderArgs
+	if err := w.startServer(); err != nil {
 		return err
 	}
-	if w.api, err = waitService("http://"+addr, srvHome, w.server); err != nil {
-		return err
-	}
-	enroll := filepath.Join(srvHome, "enroll_token")
-	if w.conn, err = start(bin, conHome, filepath.Join(w.dir, "connector.out"),
-		append([]string{"connector", "-server", "http://" + addr, "-enroll-token-file", enroll, "-name", "mac"}, folderArgs...)...); err != nil {
+	if err := w.startConnector(); err != nil {
 		return err
 	}
 	// The runner in the VM: its own folder, the stand-in on its PATH, and
@@ -270,22 +289,16 @@ func (w *world) setup() error {
 	if err := os.WriteFile(standInFile, []byte(strings.ReplaceAll(standIn, "$PROBE_ALLOWED", w.o.allow)), 0o755); err != nil {
 		return err
 	}
+	enroll := filepath.Join(w.dir, "server", "enroll_token")
 	for src, dst := range map[string]string{linux: d + "/bin/agentbus", standInFile: d + "/bin/claude", enroll: d + "/home/enroll_token"} {
 		if err := sh("", nil, "limactl", "copy", src, w.o.vm+":"+dst); err != nil {
 			return err
 		}
 	}
-	// Only the runner goes to the background, with every output to its
-	// file: what holds the shell's output open holds the ssh call open.
-	runCmd := "cd " + d + " && chmod 755 bin/agentbus bin/claude && chmod 600 home/enroll_token || exit 1; " +
-		"env -i HOME=" + d + "/home PATH=" + d + "/bin:/usr/bin:/bin AGENTBUS_HOME=" + d + "/home " +
-		"setsid nohup bin/agentbus runner -server http://host.lima.internal:" + strconv.Itoa(w.o.port) +
-		" -enroll-token-file home/enroll_token -name vm -replay=false > runner.out 2>&1 < /dev/null & echo $! > runner.pid"
-	if out, err := lima(w.o.vm, runCmd); err != nil {
-		return fmt.Errorf("the runner did not start in the VM: %s", out)
+	if err := w.startRunner(); err != nil {
+		return err
 	}
-	// The connector's folders, by reference, once it reports them, and the
-	// VM runner once it has enrolled.
+	// The connector's folders, by reference, once it reports them.
 	if err := waitFor(60*time.Second, "the connector's folders", func() bool {
 		var fs struct {
 			Folders []struct{ Ref, Name, Connector string }
@@ -295,18 +308,11 @@ func (w *world) setup() error {
 			w.folders[f.Name] = f.Ref
 			w.connector = f.Connector
 		}
-		return len(w.folders) == 1+len(w.o.sizes)
+		return len(w.folders) == len(w.folderArgs)/2
 	}); err != nil {
 		return err
 	}
 	w.ref = w.folders["project"]
-	if err := waitFor(60*time.Second, "the VM runner", func() bool {
-		out, _ := lima(w.o.vm, "grep -c 'runner taking jobs' "+d+"/runner.out")
-		return strings.TrimSpace(out) != "" && strings.TrimSpace(out) != "0"
-	}); err != nil {
-		out, _ := lima(w.o.vm, "cat "+d+"/runner.out")
-		return fmt.Errorf("%w: %s", err, out)
-	}
 	w.skewLo, w.skewHi = skew(w.o.vm)
 	fmt.Printf("VM clock minus Mac clock: %s to %s\n", w.skewLo.Round(time.Millisecond), w.skewHi.Round(time.Millisecond))
 	return nil
@@ -610,7 +616,8 @@ func (w *world) stopAll() {
 			}
 		}
 		if !w.o.keep {
-			if out, err := lima(w.o.vm, "rm -rf "+d); err != nil {
+			// An overlay's work folder is left with mode 000 by the kernel.
+			if out, err := lima(w.o.vm, "chmod -R u+rwx "+d+"; rm -rf "+d); err != nil {
 				fmt.Fprintf(os.Stderr, "remote: %s in the VM was not removed: %s\n", d, out)
 			}
 		}
@@ -651,10 +658,10 @@ type job struct {
 }
 
 type applyAnswer struct {
-	State     string
-	Already   bool
-	Files     []string
-	Conflicts []struct{ Path, Why string }
+	State, Job string
+	Already    bool
+	Files      []string
+	Conflicts  []struct{ Path, Why string }
 }
 
 func (c *client) call(method, path string, body, out any) (int, string) {
@@ -744,7 +751,8 @@ func start(bin, home, logPath string, args ...string) (*proc, error) {
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		return nil, err
 	}
-	logf, err := os.Create(logPath)
+	// Appended to: -cases starts a role again on the same log.
+	logf, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return nil, err
 	}

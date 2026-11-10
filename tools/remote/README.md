@@ -33,6 +33,9 @@ Flags:
 - `-key-env OPENROUTER_API_KEY`: with `-real`, the variable the server reads the OpenRouter key
   from, by its name. The tool checks only whether it is set; the server inherits it.
 - `-model deepseek/deepseek-v4.1-flash`: with `-real`, the OpenRouter agent's model.
+- `-cases`: after the checks, the failure cases below, each once.
+- `-only 4`: with `-cases`, only the cases whose number starts so (`1`, `2b`, `4`).
+- `-cut-files 10000`: with `-cases`, files in each folder whose transfer is stopped midway.
 
 ## A real model turn (-real)
 
@@ -73,6 +76,34 @@ Each line is `<name> <http code>/<CONNECT code>`; `000` is no answer. Then the t
 turn's `network.refused` rows from the server's record. On a runner that cannot close an agent off,
 the turn is refused, and the tool prints the job's reason instead. With `-real`, each real turn also
 lists its refusals by host.
+
+## Failure cases (-cases)
+
+Each case runs once. Each must end with a clear error or a clean result, never with work half
+applied. The tool prints what happened and the text the person sees, then a table. It fails if a
+case did not end so.
+
+```sh
+go run ./tools/remote -runs 1 -sizes "" -cases
+```
+
+1. **An interrupted transfer.** (a) The connector is stopped (KILL) while it sends a new session's
+   snapshot. (b) The runner is stopped (KILL) while it fetches a new session's copy. Each turn
+   fails with a reason; once the role is started again, a new session's turn builds a whole copy
+   (its diff holds only the stand-in's two files).
+2. **A role restart.** Control restarts while a turn runs; then the connector and the runner
+   restart between turns. The session goes on, and its apply holds every turn. (2b) The runner is
+   stopped (KILL) during a turn: the turn fails, and the session goes on once it is back.
+3. **A repeated request.** One turn request with an idempotency key, sent twice at once: one turn.
+   One apply, sent twice at once: one apply job.
+4. **A disconnected connector.** Once control has not seen it for a minute, an apply answers 503
+   and writes nothing, and a new session's turn is refused, both saying the connector is not
+   connected. Started again, the apply asked again goes through.
+5. **A file edited on the Mac before apply.** An edit to a file the turn changed refuses the
+   apply and writes nothing; an edit to a file it did not change is kept, and the apply goes
+   through.
+
+A lease runs out after 30 seconds, so the run takes some minutes.
 
 ## What it sets up
 
