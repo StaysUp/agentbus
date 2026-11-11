@@ -43,16 +43,16 @@ func (w *world) network() error {
 	}
 	out, _ := lima(w.o.vm, "grep -i 'network' "+w.o.vmDir+"/runner.out | tail -1")
 	fmt.Printf("  the runner said at start: %s\n", strings.TrimSpace(out))
-	var created job
+	var created started
 	t0 := time.Now()
-	if code, out := w.api.call("POST", "/api/v0/jobs", map[string]any{"kind": "turn", "spec": map[string]any{"agent": "claude",
-		"folder_ref": w.ref, "connector": w.connector, "isolate": true, "prompt": "network probe"}}, &created); code != 201 {
-		return fmt.Errorf("POST /api/v0/jobs: %d %s", code, out)
+	if code, out := w.api.call("POST", "/api/v0/turns", map[string]any{"agent": "claude",
+		"folder_ref": w.ref, "connector": w.connector, "isolate": true, "prompt": "network probe"}, &created); code/100 != 2 {
+		return fmt.Errorf("POST /api/v0/turns: %d %s", code, out)
 	}
 	var j job
 	if err := waitFor(2*time.Minute, "the probe turn", func() bool {
 		j = job{}
-		w.api.call("GET", "/api/v0/jobs/"+created.ID, nil, &j)
+		w.api.jobOfTurn(created.Turn, &j)
 		return j.Ended != nil
 	}); err != nil {
 		return err
@@ -69,7 +69,7 @@ func (w *world) network() error {
 	var r struct {
 		Events []json.RawMessage
 	}
-	if code, out := w.api.call("GET", "/api/v0/turns/"+j.Attempt+"/events?limit=1000", nil, &r); code != 200 {
+	if code, out := w.api.call("GET", "/api/v0/sessions/"+created.ID+"/events?turn="+j.Turn+"&limit=1000", nil, &r); code != 200 {
 		return fmt.Errorf("the turn's events: %d %s", code, out)
 	}
 	fmt.Println("  network.refused rows in the server's record:")
@@ -81,7 +81,7 @@ func (w *world) network() error {
 		}
 	}
 	if n == 0 {
-		return fmt.Errorf("no network.refused row in the server's record for %s", j.Attempt)
+		return fmt.Errorf("no network.refused row in the server's record for %s", j.Turn)
 	}
 	return nil
 }

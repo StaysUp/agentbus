@@ -220,11 +220,15 @@ func (q *Queue) Runners(team string) ([]Runner, error) {
 }
 
 // addColumns adds the columns a queue made by an earlier build lacks:
-// runners.caps and sessions.snapshot. They start empty.
+// runners.caps, sessions.snapshot and jobs.turn. The first two start empty.
+// jobs.turn is filled for the turn and review jobs made before it: the id of
+// the attempt that started the turn, which was the turn's id then, or a new
+// id for a job whose turn no runner has started.
 func addColumns(db *sql.DB) error {
 	for _, c := range []struct{ table, column, decl string }{
 		{"runners", "caps", "TEXT"},
 		{"sessions", "snapshot", "TEXT NOT NULL DEFAULT ''"},
+		{"jobs", "turn", "TEXT"},
 	} {
 		var n int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, c.table, c.column).Scan(&n); err != nil {
@@ -236,6 +240,20 @@ func addColumns(db *sql.DB) error {
 		if _, err := db.Exec(`ALTER TABLE ` + c.table + ` ADD COLUMN ` + c.column + ` ` + c.decl); err != nil {
 			return fmt.Errorf("queue: add %s.%s: %w", c.table, c.column, err)
 		}
+		if c.column == "turn" {
+			// The attempt that started the turn named it then. Expiry clears
+			// jobs.attempt, so the attempt is found by its turn.created.
+			if _, err := db.Exec(`UPDATE jobs SET turn = COALESCE(
+					(SELECT a.id FROM attempts a WHERE a.job = jobs.id AND EXISTS (SELECT 1 FROM attempt_events e
+						WHERE e.attempt = a.id AND e.kind = 'turn.created') ORDER BY a.number DESC LIMIT 1),
+					attempt, 't_' || lower(hex(randomblob(8))))
+				WHERE turn IS NULL AND kind IN ('turn', 'review')`); err != nil {
+				return fmt.Errorf("queue: fill jobs.turn: %w", err)
+			}
+		}
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS jobs_turn ON jobs(turn) WHERE turn IS NOT NULL`); err != nil {
+		return fmt.Errorf("queue: index jobs.turn: %w", err)
 	}
 	return nil
 }

@@ -78,7 +78,7 @@ func TestRunKeepsChildOutputInItsOwnLogAndItsExitInServiceLog(t *testing.T) {
 	if code != http.StatusAccepted {
 		t.Fatalf("run: %d %s", code, raw)
 	}
-	id := out["id"].(string)
+	id := out["session"].(string)
 	waitClosed(t, svc.store, id)
 
 	runLog := filepath.Join(home, "logs", "runs", id+".log")
@@ -121,7 +121,7 @@ func TestRunKeepsChildOutputInItsOwnLogAndItsExitInServiceLog(t *testing.T) {
 	if code != http.StatusAccepted {
 		t.Fatalf("run: %d %s", code, raw)
 	}
-	id2 := out["id"].(string)
+	id2 := out["session"].(string)
 	waitClosed(t, svc.store, id2)
 	if code, _, raw := postMessage(t, svc, tok, id2, map[string]any{"prompt": "MESSAGE-MARK"}); code != http.StatusAccepted {
 		t.Fatalf("message: %d %s", code, raw)
@@ -151,7 +151,7 @@ func TestRunLogKeepsOnlyTheLastMiB(t *testing.T) {
 	if code != http.StatusAccepted {
 		t.Fatalf("run: %d %s", code, raw)
 	}
-	id := out["id"].(string)
+	id := out["session"].(string)
 	waitClosed(t, svc.store, id)
 	fi, err := os.Stat(filepath.Join(home, "logs", "runs", id+".log"))
 	if err != nil {

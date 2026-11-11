@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/body"
+	"github.com/staysup/agentbus/event"
 )
 
 func call(exchange string, pieces ...string) body.Call {
@@ -110,5 +111,35 @@ func TestKeepSentAsksForMissingPieces(t *testing.T) {
 	c.Pieces[0].JSON = json.RawMessage(`{"forged":true}`)
 	if _, err := s.KeepSent(c); err == nil {
 		t.Fatal("a piece that does not match its hash was taken")
+	}
+}
+
+// A call is a turn's in one session: the same turn id in another session
+// does not make it that one's. OtherTurns names a call another turn holds.
+func TestInTurnAndOtherTurns(t *testing.T) {
+	s := newStore(t)
+	now := time.Now().UTC()
+	for _, e := range []event.Event{
+		{ID: "e1", Kind: event.ModelRequested, Time: now, Session: "s_a", Turn: "t_1", Exchange: "x_a"},
+		{ID: "e2", Kind: event.ModelRequested, Time: now, Session: "s_b", Turn: "t_1", Exchange: "x_b"},
+	} {
+		if _, _, err := s.Append(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, c := range []struct {
+		x, session, turn string
+		in, other        bool
+	}{
+		{"x_a", "s_a", "t_1", true, false},
+		{"x_b", "s_a", "t_1", false, false},
+		{"x_b", "s_b", "t_1", true, false},
+		{"x_a", "s_a", "t_2", false, true},
+	} {
+		in, err := s.InTurn(c.x, c.session, c.turn)
+		other, err2 := s.OtherTurns(c.x, c.session, c.turn)
+		if err != nil || err2 != nil || in != c.in || other != c.other {
+			t.Errorf("%+v: in %v other %v (%v %v)", c, in, other, err, err2)
+		}
 	}
 }

@@ -32,18 +32,16 @@ func TestRecordRoute(t *testing.T) {
 	srv := httptest.NewServer(s)
 	t.Cleanup(func() { srv.Close(); q.Close(); st.Close() })
 	a, b := enroll(t, srv, 1), enroll(t, srv, 1)
-	if code := send(t, srv, mainTok, "POST", "/api/v0/jobs", JobRequest{Kind: "turn", Spec: queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"}}, nil); code != 201 {
-		t.Fatalf("create: %d", code)
-	}
+	makeJob(t, q, queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"})
 	var taken TakenWork
-	if code := send(t, srv, a.Token, "POST", "/api/v0/runners/"+a.Runner.ID+"/take", TakeRequest{}, &taken); code != 200 {
+	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{}, &taken); code != 200 {
 		t.Fatalf("take: %d", code)
 	}
-	turn, session := taken.Attempt.ID, taken.Job.Session
-	if session == "" {
-		t.Fatal("the turn job has no session")
+	turn, session := taken.Job.Turn, taken.Job.Session
+	if session == "" || turn == "" || turn == taken.Attempt.ID {
+		t.Fatalf("the turn job's session %q and turn %q", session, turn)
 	}
-	path := "/api/v0/attempts/" + turn + "/record"
+	path := "/api/v0/runner/attempts/" + taken.Attempt.ID + "/record"
 	evIn := func(id string, kind event.Kind, session, turn string) json.RawMessage {
 		b, _ := json.Marshal(event.Event{ID: id, Kind: kind, Time: time.Now().UTC(), Session: session, Turn: turn,
 			Folder: "/runner/worktrees/job_1", FolderRef: "fld_0123456789abcdef", Text: "p1"})
@@ -93,6 +91,53 @@ func TestRecordRoute(t *testing.T) {
 	}
 }
 
+// A runner's calls and replies are of its attempt's own turn: a call whose
+// exchange an earlier turn of the session carries is refused, and its reply
+// is not stored. Codex found it on the api04 round (evt_5193378050d8d465).
+func TestCallsOfAnotherTurnRefused(t *testing.T) {
+	q, err := queue.Open(filepath.Join(t.TempDir(), "jobs.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fr, _ := testFolders(t)
+	s, err := New(Config{Queue: q, Token: mainTok, EnrollToken: enrollTok, MaxWait: 200 * time.Millisecond, Folders: fr, Record: st})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(s)
+	t.Cleanup(func() { srv.Close(); q.Close(); st.Close() })
+	a := enroll(t, srv, 1)
+	makeJob(t, q, queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"})
+	var taken TakenWork
+	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{}, &taken); code != 200 {
+		t.Fatalf("take: %d", code)
+	}
+	session := taken.Job.Session
+	// An earlier turn of the session made the call x_prior.
+	if _, _, err := st.Append(event.Event{ID: "evt_p", Kind: event.ModelRequested, Time: time.Now().UTC(), Session: session,
+		Turn: "t_prior", Exchange: "x_prior", Model: "m"}); err != nil {
+		t.Fatal(err)
+	}
+	path := "/api/v0/runner/attempts/" + taken.Attempt.ID + "/calls"
+	call := func(x string) SentCall {
+		return SentCall{Exchange: x, Session: session, Vendor: "anthropic", Time: time.Now().UTC(), Top: []byte(`{}`), Pieces: []SentPiece{}}
+	}
+	if code := send(t, srv, a.Token, "POST", path, CallBatch{Number: 1, Calls: []SentCall{call("x_prior")}}, nil); code != 400 {
+		t.Fatalf("a call of another turn: %d, want 400", code)
+	}
+	if _, found, _ := st.CallSession("x_prior"); found {
+		t.Fatal("the other turn's call was stored")
+	}
+	var ack CallAck
+	if code := send(t, srv, a.Token, "POST", path, CallBatch{Number: 1, Calls: []SentCall{call("x_own")}}, &ack); code != 200 || ack.Stored != 1 {
+		t.Fatalf("a call of its own turn: %d %+v", code, ack)
+	}
+}
+
 // A review's turn runs in the session control named for it when it made the
 // job (Links.ReviewSession): its record goes there and nowhere else. Each
 // case is a reproducer an earlier review round found.
@@ -113,28 +158,27 @@ func TestRecordRouteReview(t *testing.T) {
 	srv := httptest.NewServer(s)
 	t.Cleanup(func() { srv.Close(); q.Close(); st.Close() })
 	a := enroll(t, srv, 3)
-	var author queue.Job
-	if code := send(t, srv, mainTok, "POST", "/api/v0/jobs", JobRequest{Kind: "turn", Spec: queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"}}, &author); code != 201 {
-		t.Fatalf("create: %d", code)
-	}
+	author := makeJob(t, q, queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"})
 	var taken TakenWork
-	send(t, srv, a.Token, "POST", "/api/v0/runners/"+a.Runner.ID+"/take", TakeRequest{}, &taken)
-	send(t, srv, a.Token, "POST", "/api/v0/attempts/"+taken.Attempt.ID+"/start", AttemptCall{Number: 1}, nil)
+	send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{}, &taken)
+	send(t, srv, a.Token, "POST", "/api/v0/runner/attempts/"+taken.Attempt.ID+"/start", AttemptCall{Number: 1}, nil)
 	ev := func(id, session, turn string, kind event.Kind) json.RawMessage {
 		b, _ := json.Marshal(event.Event{ID: id, Kind: kind, Time: time.Now().UTC(), Session: session, Turn: turn})
 		return b
 	}
+	// attempts are each turn's attempt, by the turn id.
+	attempts := map[string]string{author.Turn: taken.Attempt.ID}
 	record := func(turn string, evs ...json.RawMessage) int {
-		return send(t, srv, a.Token, "POST", "/api/v0/attempts/"+turn+"/record", RecordBatch{Number: 1, Events: evs}, nil)
+		return send(t, srv, a.Token, "POST", "/api/v0/runner/attempts/"+attempts[turn]+"/record", RecordBatch{Number: 1, Events: evs}, nil)
 	}
-	if code := record(taken.Attempt.ID, ev("evt_a", author.Session, taken.Attempt.ID, event.TurnStarted)); code != 200 {
+	if code := record(author.Turn, ev("evt_a", author.Session, author.Turn, event.TurnStarted)); code != 200 {
 		t.Fatalf("the author's record: %d", code)
 	}
 	// 1#4: a turn's runner renames another session.
-	if code := record(taken.Attempt.ID, ev("evt_a2", "s_other", taken.Attempt.ID, event.SessionRenamed)); code != 400 {
+	if code := record(author.Turn, ev("evt_a2", "s_other", author.Turn, event.SessionRenamed)); code != 400 {
 		t.Fatalf("a turn's event in another session: %d", code)
 	}
-	if code := send(t, srv, a.Token, "POST", "/api/v0/attempts/"+taken.Attempt.ID+"/finish",
+	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/attempts/"+taken.Attempt.ID+"/finish",
 		FinishCall{Number: 1, Status: queue.Finished, Session: author.Session, Workspace: &queue.Workspace{Kind: queue.WorkspaceFolder, Folder: "/x"},
 			Result: json.RawMessage(`{"state":"finished","changes":{"kind":"snapshot","files":[{"path":"a.txt","change":"modified","diff":"-a\n+b\n"}],"count":1}}`)}, nil); code != 200 {
 		t.Fatalf("finish: %d", code)
@@ -155,10 +199,11 @@ func TestRecordRouteReview(t *testing.T) {
 	turns := map[string]string{}
 	for range 2 {
 		var w TakenWork
-		if code := send(t, srv, a.Token, "POST", "/api/v0/runners/"+a.Runner.ID+"/take", TakeRequest{}, &w); code != 200 {
+		if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{}, &w); code != 200 {
 			t.Fatalf("take a review: %d", code)
 		}
-		turns[w.Job.ID] = w.Attempt.ID
+		turns[w.Job.ID] = w.Job.Turn
+		attempts[w.Job.Turn] = w.Attempt.ID
 	}
 	ta, tb := turns[revA.ID], turns[revB.ID]
 	// 2#1: a review's events in its own session are taken; in the reviewed
@@ -167,10 +212,7 @@ func TestRecordRouteReview(t *testing.T) {
 		t.Fatalf("a review's event in the reviewed session: %d", code)
 	}
 	// 3#1: in a session a queued job names, with nothing recorded yet.
-	var queued queue.Job
-	if code := send(t, srv, mainTok, "POST", "/api/v0/jobs", JobRequest{Kind: "turn", Spec: queue.Spec{Harness: "claude", Folder: "/y", Prompt: "later"}}, &queued); code != 201 {
-		t.Fatalf("create: %d", code)
-	}
+	queued := makeJob(t, q, queue.Spec{Harness: "claude", Folder: "/y", Prompt: "later"})
 	if code := record(ta, ev("evt_r2", queued.Session, ta, event.SessionRenamed)); code != 400 {
 		t.Fatalf("a review's event in a queued job's session: %d", code)
 	}
@@ -184,7 +226,7 @@ func TestRecordRouteReview(t *testing.T) {
 		t.Fatal(err)
 	}
 	created, _ := json.Marshal(map[string]string{"session": "s_taken", "turn": ta})
-	send(t, srv, a.Token, "POST", "/api/v0/attempts/"+ta+"/events", EventBatch{Number: 1, Offset: 1,
+	send(t, srv, a.Token, "POST", "/api/v0/runner/attempts/"+attempts[ta]+"/events", EventBatch{Number: 1, Offset: 1,
 		Events: []queue.AttemptEvent{{Seq: 1, Time: time.Now().UTC(), Kind: "turn.created", Data: created}}}, nil)
 	if code := record(ta, ev("evt_r4", "s_taken", ta, event.SessionRenamed)); code != 400 {
 		t.Fatalf("a review's event in a session it named itself: %d", code)
@@ -234,7 +276,7 @@ func TestCloseLost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var turns []string
+	var turns, attempts []string
 	var sessions []string
 	for range 2 {
 		j, _, err := q.Create(queue.DefaultTeam, queue.KindTurn, "", queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"}, queue.Links{})
@@ -248,17 +290,18 @@ func TestCloseLost(t *testing.T) {
 		if _, _, err := q.Start(rn.ID, a.ID, a.Number, 30*time.Second); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := st.Append(event.Event{ID: queue.NewID("evt_"), Kind: event.SessionOpened, Time: now, Session: j.Session, Turn: a.ID}); err != nil {
+		if _, _, err := st.Append(event.Event{ID: queue.NewID("evt_"), Kind: event.SessionOpened, Time: now, Session: j.Session, Turn: j.Turn}); err != nil {
 			t.Fatal(err)
 		}
-		turns, sessions = append(turns, a.ID), append(sessions, j.Session)
+		attempts = append(attempts, a.ID)
+		turns, sessions = append(turns, j.Turn), append(sessions, j.Session)
 	}
 	if n, err := CloseLost(q, st, now); err != nil || n != 0 {
 		t.Fatalf("before any lease ran out: %d %v", n, err)
 	}
 	// The second turn's runner still beats; the first's does not.
 	now = now.Add(20 * time.Second)
-	if _, _, err := q.Heartbeat(rn.ID, turns[1], 1, 30*time.Second); err != nil {
+	if _, _, err := q.Heartbeat(rn.ID, attempts[1], 1, 30*time.Second); err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(20 * time.Second)

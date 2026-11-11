@@ -20,10 +20,10 @@ import (
 )
 
 // BlobPath is the prefix of the blob routes.
-const BlobPath = "/api/v0/blobs/"
+const BlobPath = "/api/v0/runner/blobs/"
 
 // PackPath is the route that takes a pack of blobs.
-const PackPath = "/api/v0/packs"
+const PackPath = "/api/v0/runner/packs"
 
 func (s *Server) blobsMissing(w http.ResponseWriter, r *http.Request, _ queue.Runner) {
 	if s.cfg.Blobs == nil {

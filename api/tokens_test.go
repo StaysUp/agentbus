@@ -66,9 +66,27 @@ func TestSearchRoute(t *testing.T) {
 	}
 }
 
-// GET /api/v0/calls/{id}/pieces/{n} answers the stored bytes, unchanged.
+// inTurn stores the turn's turn.started and a model.requested of the call in
+// it, as a run and the gateway do: GET /api/v0/turns/{id}/calls/{call}
+// answers only a turn's own calls, in the turn's own session.
+func inTurn(t *testing.T, e *env, session, turn, exchange string) {
+	t.Helper()
+	if _, err := e.store.AppendOnce(event.Event{ID: "ts-" + session + "-" + turn, Kind: event.TurnStarted, Time: time.Now().UTC(),
+		Session: session, Turn: turn}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := e.store.Append(event.Event{ID: "req-" + exchange, Kind: event.ModelRequested, Time: time.Now().UTC(),
+		Session: session, Turn: turn, Exchange: exchange}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// GET /api/v0/turns/{id}/calls/{call}/pieces/{n} answers the stored bytes,
+// unchanged, for a call of that turn only.
 func TestCallPieceRoute(t *testing.T) {
 	e := newEnv(t)
+	inTurn(t, e, "s1", "t_1", "x-1")
+	inTurn(t, e, "s1", "t_2", "x-2")
 	msg := `{"role":"user", "content":"<a> & é"}`
 	if err := e.store.KeepCall(body.Call{Exchange: "x-1", Session: "s1", Vendor: "anthropic", Time: time.Now(),
 		Request: body.Request{Top: json.RawMessage(`{}`), Pieces: []body.Piece{
@@ -76,7 +94,7 @@ func TestCallPieceRoute(t *testing.T) {
 			{Kind: body.Message, Label: "user", JSON: json.RawMessage(msg)}}}}); err != nil {
 		t.Fatal(err)
 	}
-	resp, out := do(t, e.req(t, "GET", "/api/v0/calls/x-1/pieces/1", nil))
+	resp, out := do(t, e.req(t, "GET", "/api/v0/turns/t_1/calls/x-1/pieces/1", nil))
 	sum := sha256.Sum256([]byte(msg))
 	h := resp.Header
 	if resp.StatusCode != 200 || out != msg || h.Get("Content-Type") != "application/json" ||
@@ -84,11 +102,12 @@ func TestCallPieceRoute(t *testing.T) {
 		h.Get("X-Piece-Label") != "user" || h.Get("X-Piece-Count") != "2" {
 		t.Fatalf("piece 1: %d %q %v", resp.StatusCode, out, h)
 	}
-	if resp, out := do(t, e.req(t, "GET", "/api/v0/calls/x-1/pieces/0", nil)); resp.StatusCode != 200 || out != `"Be brief."` {
+	if resp, out := do(t, e.req(t, "GET", "/api/v0/turns/t_1/calls/x-1/pieces/0", nil)); resp.StatusCode != 200 || out != `"Be brief."` {
 		t.Errorf("piece 0: %d %q", resp.StatusCode, out)
 	}
-	for _, p := range []string{"/api/v0/calls/x-1/pieces/2", "/api/v0/calls/x-1/pieces/reply", "/api/v0/calls/x-2/pieces/0",
-		"/api/v0/calls/x-1/pieces/01", "/api/v0/calls/x-1/pieces/-1"} {
+	for _, p := range []string{"/api/v0/turns/t_1/calls/x-1/pieces/2", "/api/v0/turns/t_1/calls/x-1/pieces/reply",
+		"/api/v0/turns/t_1/calls/x-2/pieces/0", "/api/v0/turns/t_2/calls/x-1/pieces/0", "/api/v0/turns/t_1/calls/x-3/pieces/0",
+		"/api/v0/turns/t_1/calls/x-1/pieces/01", "/api/v0/turns/t_1/calls/x-1/pieces/-1"} {
 		if resp, out := do(t, e.req(t, "GET", p, nil)); resp.StatusCode != 404 {
 			t.Errorf("%s: %d %s, want 404", p, resp.StatusCode, out)
 		}
@@ -97,7 +116,7 @@ func TestCallPieceRoute(t *testing.T) {
 	if err := e.store.KeepReply(body.Reply{Exchange: "x-1", Status: 200, Stop: "end_turn", Time: time.Now(), Message: json.RawMessage(reply)}); err != nil {
 		t.Fatal(err)
 	}
-	if resp, out := do(t, e.req(t, "GET", "/api/v0/calls/x-1/pieces/reply", nil)); resp.StatusCode != 200 || out != reply ||
+	if resp, out := do(t, e.req(t, "GET", "/api/v0/turns/t_1/calls/x-1/pieces/reply", nil)); resp.StatusCode != 200 || out != reply ||
 		resp.Header.Get("X-Piece-Label") != "assistant" {
 		t.Errorf("reply: %d %q", resp.StatusCode, out)
 	}
@@ -107,11 +126,12 @@ func TestCallPieceRoute(t *testing.T) {
 // browser cockpit; without one, nothing is exposed.
 func TestCallPieceExposesHeadersToOrigin(t *testing.T) {
 	e := newEnv(t) // configured with origin
+	inTurn(t, e, "s1", "t_1", "x-1")
 	if err := e.store.KeepCall(body.Call{Exchange: "x-1", Session: "s1", Vendor: "anthropic", Time: time.Now(),
 		Request: body.Request{Top: json.RawMessage(`{}`), Pieces: []body.Piece{{Kind: body.Message, Label: "user", JSON: json.RawMessage(`{"role":"user","content":"hi"}`)}}}}); err != nil {
 		t.Fatal(err)
 	}
-	r := e.req(t, "GET", "/api/v0/calls/x-1/pieces/0", nil)
+	r := e.req(t, "GET", "/api/v0/turns/t_1/calls/x-1/pieces/0", nil)
 	r.Header.Set("Origin", origin)
 	resp, _ := do(t, r)
 	exp := resp.Header.Get("Access-Control-Expose-Headers")
@@ -123,7 +143,7 @@ func TestCallPieceExposesHeadersToOrigin(t *testing.T) {
 			t.Errorf("Access-Control-Expose-Headers %q lacks %s", exp, h)
 		}
 	}
-	r = e.req(t, "GET", "/api/v0/calls/x-1/pieces/0", nil)
+	r = e.req(t, "GET", "/api/v0/turns/t_1/calls/x-1/pieces/0", nil)
 	r.Header.Set("Origin", "http://evil.example")
 	if resp, _ := do(t, r); resp.Header.Get("Access-Control-Expose-Headers") != "" {
 		t.Error("headers exposed to an origin that is not allowed")
@@ -133,11 +153,12 @@ func TestCallPieceExposesHeadersToOrigin(t *testing.T) {
 // Without -origin, every origin gets the piece's headers exposed.
 func TestCallPieceExposesHeadersToAnyOrigin(t *testing.T) {
 	e := newEnvOrigin(t, filepath.Join(t.TempDir(), "events.db"), "")
+	inTurn(t, e, "s1", "t_1", "x-1")
 	if err := e.store.KeepCall(body.Call{Exchange: "x-1", Session: "s1", Vendor: "anthropic", Time: time.Now(),
 		Request: body.Request{Top: json.RawMessage(`{}`), Pieces: []body.Piece{{Kind: body.Message, Label: "user", JSON: json.RawMessage(`{"role":"user","content":"hi"}`)}}}}); err != nil {
 		t.Fatal(err)
 	}
-	r := e.req(t, "GET", "/api/v0/calls/x-1/pieces/0", nil)
+	r := e.req(t, "GET", "/api/v0/turns/t_1/calls/x-1/pieces/0", nil)
 	r.Header.Set("Origin", "http://example.test")
 	resp, _ := do(t, r)
 	if resp.StatusCode != 200 || resp.Header.Get("Access-Control-Allow-Origin") != "*" ||

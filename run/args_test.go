@@ -59,13 +59,15 @@ func TestInstructionsDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const want = "Your session's earlier turns are stored by AgentBus. To look something up, run:\n" +
-		`agentbus-api GET "/api/v0/sessions/abc/search?q=<text>"` + "\n" +
-		`with <text> URL-encoded. Each hit's "read" is a path you can GET the same way, for the whole of what matched.` + "\n" +
-		`You can also ask other agents with the same command: start a turn on any saved agent, continue one, or ask for a review. ` +
-		`Do not wait for them: each result comes back to you as a later turn. ` +
-		`How: agentbus-api GET /docs/llms.txt, section "Ask other agents".` + "\n" +
-		`AgentBus agents are not your harness's own agents or subagents. To list them: agentbus-api GET /api/v0/agents`
+	want := strings.TrimSpace(strings.ReplaceAll(settings.DefaultInstructions, "{session}", "abc"))
+	// What the baseline found agents miss: their copy is not the person's
+	// folder, how to apply, and how to ask for a review.
+	for _, line := range []string{"in session abc", "own copy of the person's folder", "agentbus-api POST /api/v0/turns/T/apply",
+		"agentbus-api POST /api/v0/turns/T/review", `"/api/v0/sessions/abc/search?q=<text>"`, "not your harness's own agents"} {
+		if !strings.Contains(got, line) {
+			t.Errorf("instructions lack %q", line)
+		}
+	}
 	if got != want {
 		t.Fatalf("instructions\n got %q\nwant %q", got, want)
 	}

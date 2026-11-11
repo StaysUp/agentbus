@@ -69,7 +69,7 @@ func TestSwitchAgentPerMessage(t *testing.T) {
 	if code != http.StatusAccepted {
 		t.Fatalf("turn 1: %d %s", code, raw)
 	}
-	session := out["id"].(string)
+	session := out["session"].(string)
 	waitClosedN(t, svc, session, 1)
 	t.Setenv("AGENTBUS_FAKE_CALL", "")
 

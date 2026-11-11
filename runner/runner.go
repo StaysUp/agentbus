@@ -17,6 +17,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -46,9 +47,13 @@ type Config struct {
 	Engine *run.Engine
 	Store  *store.Store
 
-	// Workdir holds the isolated copies this runner makes, one per session
-	// (package isolation).
+	// Workdir holds the isolated copies this runner makes, one per session,
+	// each named after its session (package isolation).
 	Workdir string
+	// OldWorkdir is where a build before 0.4 made its copies, each named
+	// after the job that opened it. Copies there are still found, used and
+	// removed; new ones go to Workdir. Empty: none.
+	OldWorkdir string
 	// Settings say which isolation a new session gets. Nil: the defaults.
 	Settings settings.Store
 	// StateFile keeps the runner's id and token across restarts, so a
@@ -79,7 +84,7 @@ type Config struct {
 	Environ  func() []string
 
 	// Forward sends each turn's record to the control plane while the turn
-	// runs (POST /api/v0/attempts/{id}/record and /calls): a runner of a
+	// runs (POST /api/v0/runner/attempts/{id}/record and /calls): a runner of a
 	// server, whose Store is its own. Its agents then call control's API,
 	// at Queue, with the turn token control minted. In agentbus up Store is
 	// the control plane's, nothing is sent, and the engine mints the token.
@@ -149,7 +154,7 @@ func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 	// A saved identity is used again when the control plane still knows it.
 	if st, ok := loadState(cfg.StateFile); ok {
 		var rn queue.Runner
-		status, err := call(ctx, r.short, cfg.Queue+"/api/v0/runners/"+st.Runner+"/heartbeat", st.Token,
+		status, err := call(ctx, r.short, cfg.Queue+"/api/v0/runner/heartbeat", st.Token,
 			jobs.RunnerBeat{Capacity: cfg.Capacity, Labels: cfg.Labels, Capabilities: r.caps(nil)}, &rn)
 		if err != nil {
 			return nil, err
@@ -164,7 +169,7 @@ func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 		}
 	}
 	var e jobs.Enrolled
-	status, err := call(ctx, cfg.HTTP, cfg.Queue+"/api/v0/runners", cfg.EnrollToken,
+	status, err := call(ctx, cfg.HTTP, cfg.Queue+"/api/v0/runner/register", cfg.EnrollToken,
 		jobs.EnrollRequest{Name: cfg.Name, Labels: cfg.Labels, Capacity: cfg.Capacity, Protocol: jobs.ProtocolVersion,
 			Capabilities: r.caps(nil)}, &e)
 	if err != nil {
@@ -245,22 +250,46 @@ func (r *Runner) Run(ctx context.Context) {
 // unmount unmounts every overlay copy in the runner's workdir. A copy's
 // files stay where they are.
 func (r *Runner) unmount(when string) {
-	if r.cfg.Workdir == "" {
-		return
+	for _, wd := range r.workdirs() {
+		n, err := isolation.Unmount(wd)
+		if n > 0 {
+			r.cfg.Logf("isolation.unmounted n=%d when=%s", n, when)
+		}
+		if err != nil {
+			r.cfg.Logf("isolation.unmount_failed when=%s error=%q", when, err.Error())
+		}
 	}
-	n, err := isolation.Unmount(r.cfg.Workdir)
-	if n > 0 {
-		r.cfg.Logf("isolation.unmounted n=%d when=%s", n, when)
+}
+
+// workdirs are the folders this runner's copies may be in: Workdir, then
+// OldWorkdir.
+func (r *Runner) workdirs() []string {
+	var out []string
+	for _, wd := range []string{r.cfg.Workdir, r.cfg.OldWorkdir} {
+		if wd != "" {
+			out = append(out, wd)
+		}
 	}
-	if err != nil {
-		r.cfg.Logf("isolation.unmount_failed when=%s error=%q", when, err.Error())
+	return out
+}
+
+// loadIn loads the space load finds in the first of the runner's workdirs
+// that holds it.
+func (r *Runner) loadIn(load func(workdir string) (*isolation.Space, error)) (*isolation.Space, error) {
+	err := isolation.ErrNoSpace
+	for _, wd := range r.workdirs() {
+		var s *isolation.Space
+		if s, err = load(wd); err == nil {
+			return s, nil
+		}
 	}
+	return nil, err
 }
 
 func (r *Runner) loop(ctx context.Context) {
 	for ctx.Err() == nil {
 		var t jobs.TakenWork
-		status, err := call(ctx, r.cfg.HTTP, r.cfg.Queue+"/api/v0/runners/"+r.id+"/take", r.token,
+		status, err := call(ctx, r.cfg.HTTP, r.cfg.Queue+"/api/v0/runner/take", r.token,
 			jobs.TakeRequest{WaitMS: jobs.MaxWait.Milliseconds()}, &t)
 		switch {
 		case ctx.Err() != nil:
@@ -310,7 +339,7 @@ func (r *Runner) clean(ctx context.Context, w queue.Workspace) {
 	if err := r.cfg.Engine.RemoveHome(w.Session); err != nil && msg == "" {
 		msg = "the session's home could not be removed"
 	}
-	status, err := call(context.WithoutCancel(ctx), r.short, r.cfg.Queue+"/api/v0/runners/"+r.id+"/removed", r.token,
+	status, err := call(context.WithoutCancel(ctx), r.short, r.cfg.Queue+"/api/v0/runner/removed", r.token,
 		jobs.RemovedReport{Session: w.Session, Error: msg}, nil)
 	r.cfg.Logf("session %s closed: workspace %s %s (control plane %d, %v)", w.Session, w.Kind, w.Space+w.Folder, status, err)
 	if err == nil && (status == http.StatusNoContent || status == http.StatusNotFound) {
@@ -330,7 +359,11 @@ func (r *Runner) remove(w queue.Workspace) error {
 	case err == nil:
 		return isolation.Close(s)
 	case w.Kind == queue.WorkspaceWorktree:
-		return isolation.RemoveWorktree(r.cfg.Workdir, w.Repo, w.Folder)
+		wd := r.cfg.Workdir
+		if r.cfg.OldWorkdir != "" && strings.HasPrefix(w.Folder, r.cfg.OldWorkdir+string(filepath.Separator)) {
+			wd = r.cfg.OldWorkdir
+		}
+		return isolation.RemoveWorktree(wd, w.Repo, w.Folder)
 	}
 	return nil // a copy with no record: nothing of it is left
 }
@@ -372,7 +405,7 @@ type attempt struct {
 }
 
 func (at *attempt) path(op string) string {
-	return at.r.cfg.Queue + "/api/v0/attempts/" + at.a.ID + "/" + op
+	return at.r.cfg.Queue + "/api/v0/runner/attempts/" + at.a.ID + "/" + op
 }
 
 func (at *attempt) event(kind string, data any) {
@@ -462,7 +495,7 @@ func (at *attempt) addChanges(ctx context.Context, f *queue.Finish) {
 		}
 	}
 	res.Folder, res.Changes = "", nil
-	// The whole finish must fit the jobs API's body limit, so the changes get
+	// The whole finish must fit the runner protocol's body limit, so the changes get
 	// what the rest leaves, less a margin for the fields added after this.
 	f.Result = mustJSON(res)
 	c.Fit(jobs.MaxBody - len(mustJSON(f)) - finishMargin)
@@ -487,7 +520,7 @@ func (at *attempt) changes() (workspace.Changes, bool) {
 	if !ok {
 		return workspace.Changes{}, false
 	}
-	end, err := b.Checkpoint(s, at.a.ID)
+	end, err := b.Checkpoint(s, at.job.Turn)
 	if err != nil {
 		return workspace.Changes{}, false
 	}
@@ -630,12 +663,12 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	}
 }
 
-// request is the turn the attempt runs. Its id is the attempt's. A turn
+// request is the turn the attempt runs. Its id is the job's turn. A turn
 // job's first turn opens the session the queue named for it; a review opens
 // one of its own, read-only, in the reviewed job's folder.
 func (r *Runner) request(at *attempt) run.Request {
 	sp := at.job.Spec
-	req := run.Request{Turn: at.a.ID, Prompt: sp.Prompt, Model: sp.Model, ReadOnly: sp.ReadOnly,
+	req := run.Request{Turn: at.job.Turn, Prompt: sp.Prompt, Model: sp.Model, ReadOnly: sp.ReadOnly,
 		IdempotencyKey: at.job.IdempotencyKey}
 	if r.cfg.Forward && at.token != "" {
 		req.Token, req.APIURL, req.Placeholder = at.token, r.cfg.Queue, r.cfg.NoSecrets
@@ -666,7 +699,7 @@ func (r *Runner) request(at *attempt) run.Request {
 	switch {
 	case l.ResultOf != nil:
 		req.Origin = &event.Origin{Kind: event.OriginResult, Session: l.ResultOf.Session, Turn: l.ResultOf.Turn,
-			Job: l.ResultOf.Job, JobKind: l.ResultOf.Kind, Agent: l.ResultOf.Agent}
+			TurnKind: l.ResultOf.Kind, Agent: l.ResultOf.Agent}
 	case l.Asker != nil:
 		req.Origin = &event.Origin{Kind: event.OriginAsked, Session: l.Asker.Session, Turn: l.Asker.Turn}
 	}
@@ -781,7 +814,7 @@ const folderNotHere = "the folder is on another machine, so this runner can only
 func (r *Runner) workspaceDir(w queue.Workspace) string {
 	switch {
 	case w.Space != "":
-		if s, err := isolation.LoadID(r.cfg.Workdir, w.Space); err == nil {
+		if s, err := r.loadIn(func(wd string) (*isolation.Space, error) { return isolation.LoadID(wd, w.Space) }); err == nil {
 			return s.Dir
 		}
 		return ""
@@ -801,9 +834,9 @@ func (r *Runner) loadSpace(w queue.Workspace) (*isolation.Space, error) {
 	var s *isolation.Space
 	var err error
 	if w.Space != "" {
-		s, err = isolation.LoadID(r.cfg.Workdir, w.Space)
+		s, err = r.loadIn(func(wd string) (*isolation.Space, error) { return isolation.LoadID(wd, w.Space) })
 	} else {
-		s, err = isolation.Load(r.cfg.Workdir, w.Folder)
+		s, err = r.loadIn(func(wd string) (*isolation.Space, error) { return isolation.Load(wd, w.Folder) })
 	}
 	if err != nil {
 		return nil, err
@@ -832,7 +865,9 @@ func (r *Runner) isolate(at *attempt, b isolation.Backend, req isolation.Request
 	if r.cfg.Workdir == "" {
 		return &queue.Result{Refused: "this runner has no workdir for isolated copies"}
 	}
-	req.ID, req.Workdir = at.job.ID, r.cfg.Workdir
+	// The copy is named after its session, so the folder name an agent
+	// sees is the session the cockpit shows.
+	req.ID, req.Workdir = at.job.Session, r.cfg.Workdir
 	s, err := b.Open(req)
 	var rf *isolation.Refusal
 	switch {
@@ -925,10 +960,7 @@ func (r *Runner) checkpointStart(at *attempt) *queue.Result {
 // session, or a session that named such a folder, continues there. After a
 // restart the copy's mount is gone until then.
 func (r *Runner) remount(at *attempt, folder string) *queue.Result {
-	if r.cfg.Workdir == "" {
-		return nil
-	}
-	s, err := isolation.Load(r.cfg.Workdir, folder)
+	s, err := r.loadIn(func(wd string) (*isolation.Space, error) { return isolation.Load(wd, folder) })
 	if err != nil {
 		return nil // not in a copy
 	}

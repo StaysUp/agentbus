@@ -186,10 +186,11 @@ table of what `auto` picks, the AppArmor step Ubuntu 24.04 needs for overlay wit
 model keeps this first turn cheap. `read_only` gives the agent read tools only. For codex, use
 `"agent":"codex"` and one of its models, or leave `model` out.
 
-The reply names the new session (`id`), the turn (`turn`) and the job that runs it (`job`):
+The reply names the new session (`session`), the turn (`turn`) and its state (`running`, or
+`queued` while it waits for a runner):
 
 ```json
-{"id":"8c1f…","turn":"t_5d0c19a2e7b3f481","job":"job_3b3d…","base_url":"http://127.0.0.1:8787/s/8c1f…/t/t_5d0c19a2e7b3f481"}
+{"session":"8c1f…","turn":"t_5d0c19a2e7b3f481","state":"running","base_url":"http://127.0.0.1:8787/s/8c1f…/t/t_5d0c19a2e7b3f481"}
 ```
 
 If the service cannot find the agent's program, the reply is HTTP 400 and nothing is stored:
@@ -249,7 +250,9 @@ chat, in plain words.
   the work, ask for it. A review runs read-only in the author's copy, on another agent, and ends
   with a verdict (pass, fail or unknown) and its findings. Any P1 makes it fail.
 
-A turn is a job, so programs and CI can do all this too: [Jobs](docs/CLIENT_API.md#jobs).
+Programs and CI can do all this too, through the same turns: ask for a review with
+`POST /api/v0/turns/<turn>/review`, and read its verdict on the review turn
+([The client API](docs/CLIENT_API.md)).
 
 With curl, using the session from step 3:
 
@@ -427,10 +430,12 @@ The contract in words is [docs/CLIENT_API.md](docs/CLIENT_API.md).
 Everything stays on your machine, in the data folder: `events.db` (a SQLite file, the record),
 `jobs.db` (the job queue), `token`, `turns_token`, `enroll_token`, `runner.json`,
 `connector.json`, `folders.json`, `permissions.toml`, `instructions.md`, `agents.json`, `blobs/`,
-`worktrees/`, `homes/` (a runner's) and `logs/`. `turns_token` is a second token for a program that only starts, stops
+`sessions/`, `homes/` (a runner's) and `logs/`. `turns_token` is a second token for a program that only starts, stops
 and reads turns. `enroll_token` adds a runner or a connector; the built-in ones read it, and keep
 their identities in `runner.json` and `connector.json`. `blobs/` is control's store of file
-contents. `worktrees/` holds the copies and git worktrees sessions run in. `subscriptions/`
+contents. `sessions/` holds the copies and git worktrees sessions run in, each named after its
+session. A data folder from before 0.4 may also hold `worktrees/`, with its older copies, which
+are still used and removed there. `subscriptions/`
 appears once you connect a subscription; its files are readable by you only. Nothing is sent
 anywhere except the model calls themselves, to the vendor your agent already uses.
 
@@ -461,7 +466,7 @@ max_cost_usd_per_tree = 0.0  # dollars that work may cost before asking stops; 0
 
 [agent_api]                  # what a turn's own token may do
 scope = "tree"               # "tree": its request tree; "session": its own session only
-read = true                  # read sessions, turns, calls and jobs
+read = true                  # read sessions, turns and calls
 list_agents = true           # list saved agents and harnesses
 start = true                 # start a session on a saved agent
 continue = true              # continue a session its tree started
@@ -482,7 +487,7 @@ change the policy. Details: [docs/CLIENT_API.md](docs/CLIENT_API.md#settings).
 
 **On a runner.** `agentbus runner -server <url>` reads the server's policy before each turn, not a
 file of its own, so one policy holds on every machine. If it cannot reach the server, the turn
-does not start and the job fails with that reason. It never runs on an older copy.
+does not start and fails with that reason. It never runs on an older copy.
 
 **Edits.** With `edit = "session"`, a turn edits files in its own session folder (its copy)
 without asking: claude gets `Edit(//<folder>/**)`, codex runs with `--sandbox workspace-write`.
@@ -553,7 +558,7 @@ API, and a runner on another machine uses its server's.
 | `api/` | The client API and its generated docs |
 | `run/` | Starts one turn of a stock agent CLI, watches it and stops it |
 | `queue/` | Jobs, attempts, runners and reviews, in `jobs.db` beside the record |
-| `jobs/` | The jobs API and the runner protocol |
+| `jobs/` | The runner protocol, under `/api/v0/runner/` |
 | `runner/` | Takes jobs through the runner protocol and runs each one with `run/` |
 | `isolation/` | The runner's side: a session's own copy, from a clone or a snapshot; checkpoint, diff, changeset, close |
 | `connector/` | The folder side: a folder's snapshot, and applying a session's changes into it |

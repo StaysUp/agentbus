@@ -102,9 +102,9 @@ type Config struct {
 	// names. Nil lists none, saves none, and lets a turn name a harness only.
 	Agents *agents.Store
 
-	// Jobs serves the job queue's routes (api/jobs.go): package jobs. Nil
-	// answers them 404.
-	Jobs http.Handler
+	// Jobs serves the runner protocol (api/jobs.go), and closes a session's
+	// copy: package jobs. Nil answers the runner protocol 404.
+	Jobs *jobs.Server
 	// RunnerTokens says what the turn token of a runner's turn may do,
 	// while its attempt is current: control minted it (jobs.Server.TurnGrant).
 	// Nil: only this process's own turns have tokens.
@@ -138,8 +138,9 @@ type API struct {
 	// streams admits at most MaxStreams at once.
 	streams chan struct{}
 
-	// spec is the OpenAPI description, built from the route table.
-	spec []byte
+	// spec is the OpenAPI description, built from the route table, and
+	// runnerSpec the runner protocol's.
+	spec, runnerSpec []byte
 }
 
 // New returns the API.
@@ -171,7 +172,11 @@ func New(cfg Config) (*API, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &API{cfg: cfg, token: sha256.Sum256([]byte(cfg.Token)), spec: desc,
+	runnerDesc, err := runnerSpec()
+	if err != nil {
+		return nil, err
+	}
+	a := &API{cfg: cfg, token: sha256.Sum256([]byte(cfg.Token)), spec: desc, runnerSpec: runnerDesc,
 		hosts:   []string{"127.0.0.1:" + cfg.Port, "localhost:" + cfg.Port, "[::1]:" + cfg.Port},
 		streams: make(chan struct{}, MaxStreams)}
 	for _, h := range cfg.Hosts {
@@ -210,8 +215,8 @@ const MaxBody = 64 << 10
 // file of a snapshot or of a turn's changes.
 const BlobTimeout = 30 * time.Minute
 
-// bodyLimit is MaxBody, except for a run, which carries a prompt, and a
-// program's own event.
+// bodyLimit is MaxBody, except for a turn, which carries a prompt, a
+// program's own event, the settings and the runner protocol.
 func bodyLimit(r *http.Request) int64 {
 	switch p := r.URL.Path; {
 	case p == "/api/v0/turns":
@@ -226,9 +231,9 @@ func bodyLimit(r *http.Request) int64 {
 	case p == jobs.PackPath:
 		// Many small blobs, streamed to disk (package jobs).
 		return blobs.MaxPackBody
-	case strings.HasPrefix(p, "/api/v0/jobs") || strings.HasPrefix(p, "/api/v0/attempts") || strings.HasPrefix(p, "/api/v0/runners") ||
-		p == "/api/v0/blobs" || strings.HasPrefix(p, jobs.BlobPath) || strings.HasPrefix(p, jobs.PackPath):
-		// A job carries a prompt, and a finish a result with the reply.
+	case strings.HasPrefix(p, "/api/v0/runner/"):
+		// The runner protocol: a finish carries a result with the reply,
+		// and a record batch a turn's events.
 		return jobs.MaxBody
 	}
 	return MaxBody
@@ -539,8 +544,17 @@ const (
 )
 
 // GET /api/v0/sessions/<id>/events: one session's events, oldest first, a page
-// at a time.
+// at a time. turn keeps one turn's.
 func (a *API) sessionEvents(w http.ResponseWriter, r *http.Request, session string) {
+	if q := r.URL.Query(); q.Has("turn") {
+		turn := q.Get("turn")
+		if !sessionID.MatchString(turn) {
+			writeError(w, http.StatusBadRequest, "turn must match "+sessionID.String())
+			return
+		}
+		a.eventPage(w, r, store.Filter{Turn: turn, TurnSession: session})
+		return
+	}
 	a.eventPage(w, r, store.Filter{Session: session, Only: true})
 }
 
@@ -581,91 +595,6 @@ type Page struct {
 	Store     string            `json:"store"`
 	Events    []json.RawMessage `json:"events" doc:"Events, oldest first."`
 	NextAfter *int64            `json:"next_after" doc:"The after for the next page, or null when there are no more events right now."`
-}
-
-const (
-	defaultTurnLimit = 100
-	maxTurnLimit     = 1000
-)
-
-// GET /api/v0/turns: a page of turns, newest first.
-func (a *API) turns(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	tq := store.TurnQuery{Limit: defaultTurnLimit}
-	if q.Has("session") {
-		tq.Session = q.Get("session")
-		if !sessionID.MatchString(tq.Session) {
-			writeError(w, http.StatusBadRequest, "session must match "+sessionID.String())
-			return
-		}
-	}
-	if q.Has("before") {
-		n, err := strconv.ParseInt(q.Get("before"), 10, 64)
-		if err != nil || n < 1 {
-			writeError(w, http.StatusBadRequest, "before must be a whole number, 1 or more")
-			return
-		}
-		tq.Before = n
-	}
-	if q.Has("limit") {
-		n, err := strconv.Atoi(q.Get("limit"))
-		if err != nil || n < 1 || n > maxTurnLimit {
-			writeError(w, http.StatusBadRequest, "limit must be from 1 to 1000")
-			return
-		}
-		tq.Limit = n
-	}
-	list, err := a.cfg.Store.Turns(tq)
-	if err != nil {
-		a.internal(w)
-		return
-	}
-	writeJSON(w, http.StatusOK, list)
-}
-
-// GET /api/v0/turns/<id>: one turn, as GET /api/v0/turns lists it. session
-// picks one session's turn: the same turn id can be in two. Without it the
-// newest is answered.
-func (a *API) getTurn(w http.ResponseWriter, r *http.Request, id string) {
-	tq := store.TurnQuery{Turn: id, Limit: 1}
-	if q := r.URL.Query(); q.Has("session") {
-		tq.Session = q.Get("session")
-		if !sessionID.MatchString(tq.Session) {
-			writeError(w, http.StatusBadRequest, "session must match "+sessionID.String())
-			return
-		}
-	}
-	list, err := a.cfg.Store.Turns(tq)
-	if err != nil {
-		a.internal(w)
-		return
-	}
-	if len(list.Turns) == 0 {
-		writeError(w, http.StatusNotFound, noTurn)
-		return
-	}
-	writeJSON(w, http.StatusOK, OneTurn{list.Store, list.Seq, list.Turns[0]})
-}
-
-// OneTurn is the answer to GET /api/v0/turns/<id>.
-type OneTurn struct {
-	Store string     `json:"store" doc:"The store id. Send it back as store."`
-	Seq   int64      `json:"seq" doc:"The seq the turn was computed at. Send it back as after to stream from here."`
-	Turn  store.Turn `json:"turn"`
-}
-
-// GET /api/v0/turns/<id>/events: one turn's events, oldest first, a page at a
-// time. session keeps one session's: the same turn id can be in two.
-func (a *API) turnEvents(w http.ResponseWriter, r *http.Request, turn string) {
-	f := store.Filter{Turn: turn}
-	if q := r.URL.Query(); q.Has("session") {
-		f.TurnSession = q.Get("session")
-		if !sessionID.MatchString(f.TurnSession) {
-			writeError(w, http.StatusBadRequest, "session must match "+sessionID.String())
-			return
-		}
-	}
-	a.eventPage(w, r, f)
 }
 
 // noBody refuses a stream request that carries a body. Such a request stays

@@ -106,25 +106,35 @@ func TestOpenAPIResponsesMatch(t *testing.T) {
 		t.Error("GET /api/v0/turns listed no turn to check")
 	}
 	check(t, doc, e, "GET", "/api/v0/turns?session=s1&limit=1", "", true, 200)
-	check(t, doc, e, "GET", "/api/v0/turns/t_1/events"+q, "", true, 200)
-	check(t, doc, e, "GET", "/api/v0/turns/t_1/events"+q+"&session=s1", "", true, 200)
-	check(t, doc, e, "GET", "/api/v0/turns/t_1/events?session=a.b", "", true, 400)
+	check(t, doc, e, "GET", "/api/v0/sessions/s1/events"+q+"&turn=t_1", "", true, 200)
+	check(t, doc, e, "GET", "/api/v0/sessions/s1/events?turn=a.b", "", true, 400)
+	check(t, doc, e, "GET", "/api/v0/turns/t_1", "", true, 200)
+	check(t, doc, e, "GET", "/api/v0/turns/t_1?session=s1", "", true, 200)
+	check(t, doc, e, "GET", "/api/v0/turns/t_none", "", true, 404)
+	check(t, doc, e, "GET", "/api/v0/turns/t_1/diff", "", true, 200)
+	check(t, doc, e, "GET", "/api/v0/sessions/s1", "", true, 200)
+	check(t, doc, e, "GET", "/api/v0/sessions/nobody", "", true, 404)
+	check(t, doc, e, "PATCH", "/api/v0/sessions/s1", `{"title":"Named"}`, true, 200)
+	check(t, doc, e, "PATCH", "/api/v0/sessions/s1", `{"closed":false}`, true, 400)
+	check(t, doc, e, "POST", "/api/v0/turns/t_1/review", `{"agent":"-x"}`, true, 400)
+	check(t, doc, e, "POST", "/api/v0/turns/t_none/review", `{"agent":"claude"}`, true, 404)
+	check(t, doc, e, "POST", "/api/v0/turns/t_none/stop", "", true, 404)
 	check(t, doc, e, "GET", "/api/v0/turns?limit=0", "", true, 400)
-	check(t, doc, e, "GET", "/api/v0/turns/t_1/events?store=st_other&after=0", "", true, 409)
+	check(t, doc, e, "GET", "/api/v0/sessions/s1/events?turn=t_1&store=st_other&after=0", "", true, 409)
 	if err := e.store.KeepCall(body.Call{Exchange: "x-1", Session: "s1", Vendor: "anthropic", Time: time.Now(), Size: 60,
 		Request: body.Request{Top: json.RawMessage(`{"model":"claude-sonnet-5-5"}`), Pieces: []body.Piece{
 			{Kind: body.System, Label: "text", JSON: json.RawMessage(`"Be brief."`)},
 			{Kind: body.Message, Label: "user", JSON: json.RawMessage(`{"role":"user","content":"hi"}`)}}}}); err != nil {
 		t.Fatal(err)
 	}
-	check(t, doc, e, "GET", "/api/v0/calls/x-1/context", "", true, 200)
-	check(t, doc, e, "GET", "/api/v0/calls/x-1/context?full=false", "", true, 200)
-	check(t, doc, e, "GET", "/api/v0/calls/x-2/context", "", true, 404)
-	check(t, doc, e, "GET", "/api/v0/calls/x-1/context?full=maybe", "", true, 400)
-	check(t, doc, e, "GET", "/api/v0/calls/x-1/pieces/1", "", true, 200)
-	check(t, doc, e, "GET", "/api/v0/calls/x-1/pieces/0", "", true, 200)
-	check(t, doc, e, "GET", "/api/v0/calls/x-1/pieces/2", "", true, 404)
-	check(t, doc, e, "GET", "/api/v0/calls/x-1/pieces/reply", "", true, 404)
+	check(t, doc, e, "GET", "/api/v0/turns/t_1/calls/x-1", "", true, 200)
+	check(t, doc, e, "GET", "/api/v0/turns/t_1/calls/x-1?full=false", "", true, 200)
+	check(t, doc, e, "GET", "/api/v0/turns/t_1/calls/x-2", "", true, 404)
+	check(t, doc, e, "GET", "/api/v0/turns/t_1/calls/x-1?full=maybe", "", true, 400)
+	check(t, doc, e, "GET", "/api/v0/turns/t_1/calls/x-1/pieces/1", "", true, 200)
+	check(t, doc, e, "GET", "/api/v0/turns/t_1/calls/x-1/pieces/0", "", true, 200)
+	check(t, doc, e, "GET", "/api/v0/turns/t_1/calls/x-1/pieces/2", "", true, 404)
+	check(t, doc, e, "GET", "/api/v0/turns/t_1/calls/x-1/pieces/reply", "", true, 404)
 	var found store.SearchResult
 	if err := json.Unmarshal(check(t, doc, e, "GET", "/api/v0/sessions/s1/search?q=login&limit=5", "", true, 200), &found); err != nil {
 		t.Fatal(err)

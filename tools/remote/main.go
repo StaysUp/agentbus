@@ -40,6 +40,8 @@ import (
 	"syscall"
 	"text/tabwriter"
 	"time"
+
+	"github.com/staysup/agentbus/queue"
 )
 
 // standIn is claude for the runner. A turn appends its prompt to a.txt, adds
@@ -394,33 +396,37 @@ func (w *world) path(i int) ([]phases, error) {
 	return []phases{p1, p2}, nil
 }
 
-type started struct{ ID, Turn, Job string }
+// started is the answer to POST /api/v0/turns: ID is the session.
+type started struct {
+	ID   string `json:"session"`
+	Turn string
+}
 
 // turn starts a turn, waits for its job to end finished, and reads its
-// phases from the job, its attempt's events and the snapshot job.
+// phases from the job, its attempt's events and the snapshot job, in the
+// server's queue.
 func (w *world) turn(body map[string]any, name string) (started, phases, error) {
 	var s started
 	t0 := time.Now()
-	if code, out := w.api.call("POST", "/api/v0/turns", body, &s); code/100 != 2 || s.Job == "" {
+	if code, out := w.api.call("POST", "/api/v0/turns", body, &s); code/100 != 2 || s.Turn == "" {
 		return s, phases{}, fmt.Errorf("POST /api/v0/turns: %d %s", code, out)
 	}
 	var j job
 	if err := waitFor(5*time.Minute, "the turn's job", func() bool {
 		j = job{}
-		w.api.call("GET", "/api/v0/jobs/"+s.Job, nil, &j)
+		w.api.jobOfTurn(s.Turn, &j)
 		return j.Ended != nil
 	}); err != nil {
 		return s, phases{}, err
 	}
 	total := time.Since(t0)
 	if j.State != "finished" || len(j.Attempts) == 0 {
-		return s, phases{}, fmt.Errorf("job %s ended %s %s", s.Job, j.State, j.Reason)
+		return s, phases{}, fmt.Errorf("turn %s's job ended %s %s", s.Turn, j.State, j.Reason)
 	}
-	s.Turn = j.Attempt
 	p := phases{name: name, ms: map[string]float64{"total (client)": ms(total)}}
 	at := j.Attempts[len(j.Attempts)-1]
 	p.ms["queue (created → taken)"] = ms(at.Taken.Sub(j.Created))
-	ev, snapID, err := w.api.events(s.Turn)
+	ev, snapID, err := w.api.events(at.ID)
 	if err != nil {
 		return s, p, err
 	}
@@ -530,18 +536,18 @@ func (w *world) transfer(n int) ([]transfer, error) {
 		t := transfer{files: n, kind: kind, snapMS: p.ms["snapshot (connector: hash, send)"], copyMS: p.ms["copy (runner: fetch, build)"], totalMS: p.ms["total (client)"]}
 		for _, l := range lines(w.serverLog)[len(before):] {
 			switch {
-			case strings.Contains(l, "path=/api/v0/packs/fetch "):
+			case strings.Contains(l, "path=/api/v0/runner/packs/fetch "):
 				t.gets++
-			case strings.Contains(l, "path=/api/v0/packs "):
+			case strings.Contains(l, "path=/api/v0/runner/packs "):
 				t.packs++
 			}
-			if strings.Contains(l, "path=/api/v0/blobs") || strings.Contains(l, "path=/api/v0/packs") {
+			if strings.Contains(l, "path=/api/v0/runner/blobs") || strings.Contains(l, "path=/api/v0/runner/packs") {
 				t.requests++
 			}
 		}
 		out = append(out, t)
 		// The session closed: its copy goes from the VM.
-		w.api.call("POST", "/api/v0/workspaces/"+s.ID+"/close", nil, nil)
+		w.api.call("PATCH", "/api/v0/sessions/"+s.ID, map[string]any{"closed": true}, nil)
 	}
 	return out, nil
 }
@@ -646,13 +652,20 @@ func (w *world) stopAll() {
 // folder and never printed.
 type client struct {
 	base, token string
+	// home is the server's data folder, where its queue is (queue).
+	home  string
+	qOnce sync.Once
+	q     *queue.Queue
+	qErr  error
 }
 
+// job is a job as the server's queue holds it: internal, read from its
+// jobs.db (client.queue), never through the client API.
 type job struct {
-	ID, State, Reason, Attempt string
-	Created                    time.Time
-	Ended                      *time.Time
-	Attempts                   []struct {
+	ID, State, Reason, Attempt, Turn, Session string
+	Created                                   time.Time
+	Ended                                     *time.Time
+	Attempts                                  []struct {
 		ID    string
 		Taken time.Time
 	}
@@ -660,10 +673,10 @@ type job struct {
 }
 
 type applyAnswer struct {
-	State, Job string
-	Already    bool
-	Files      []string
-	Conflicts  []struct{ Path, Why string }
+	State     string
+	Already   bool
+	Files     []string
+	Conflicts []struct{ Path, Why string }
 }
 
 func (c *client) call(method, path string, body, out any) (int, string) {
@@ -703,27 +716,106 @@ func (c *client) apply(turn string) (int, applyAnswer) {
 	return code, a
 }
 
+// queue is the server's job queue, opened from its data folder. Jobs and
+// their attempts are internal: the client API names turns, and the runner
+// reports its attempts' events through the runner protocol only.
+func (c *client) queue() (*queue.Queue, error) {
+	c.qOnce.Do(func() { c.q, c.qErr = queue.Open(filepath.Join(c.home, "jobs.db"), nil) })
+	return c.q, c.qErr
+}
+
+// asJob reads a queue job into out, as JSON: the shape this tool reads.
+func asJob(j queue.Job, out *job) {
+	b, _ := json.Marshal(j)
+	_ = json.Unmarshal(b, out)
+}
+
+// jobByID reads job id into out, and says whether it was found.
+func (c *client) jobByID(id string, out *job) bool {
+	q, err := c.queue()
+	if err != nil {
+		return false
+	}
+	j, err := q.Get(queue.DefaultTeam, id)
+	if err != nil {
+		return false
+	}
+	asJob(j, out)
+	return true
+}
+
+// jobOfTurn reads the job of turn into out, and says whether it was found.
+func (c *client) jobOfTurn(turn string, out *job) bool {
+	q, err := c.queue()
+	if err != nil {
+		return false
+	}
+	j, err := q.JobByTurn(queue.DefaultTeam, turn)
+	if err != nil {
+		return false
+	}
+	asJob(j, out)
+	return true
+}
+
+// queueTurn makes a turn job in the server's queue, for a spec the client
+// API does not take (labels). spec's agent names a saved agent, read
+// through the API. The server's runner takes it on its next poll, within
+// 30 seconds: the queue wakes its own process's waiters only.
+func (c *client) queueTurn(spec map[string]any) (job, error) {
+	b, _ := json.Marshal(spec)
+	var sp queue.Spec
+	if err := json.Unmarshal(b, &sp); err != nil {
+		return job{}, err
+	}
+	var ag struct {
+		ID      string `json:"id"`
+		Harness string `json:"harness"`
+		Access  string `json:"access"`
+		Model   string `json:"model"`
+		KeyEnv  string `json:"key_env"`
+	}
+	if code, out := c.call("GET", "/api/v0/agents/"+sp.Harness, nil, &ag); code != 200 {
+		return job{}, fmt.Errorf("GET /api/v0/agents/%s: %d %s", sp.Harness, code, out)
+	}
+	sp.Harness, sp.AgentID, sp.Access, sp.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
+	if sp.Model == "" {
+		sp.Model = ag.Model
+	}
+	q, err := c.queue()
+	if err != nil {
+		return job{}, err
+	}
+	j, _, err := q.Create(queue.DefaultTeam, queue.KindTurn, "", sp, queue.Links{})
+	if err != nil {
+		return job{}, err
+	}
+	var out job
+	asJob(j, &out)
+	return out, nil
+}
+
 // events are the first time of each kind of the attempt's events, and the
 // snapshot job its workspace.snapshot names.
 func (c *client) events(attempt string) (map[string]time.Time, string, error) {
-	var r struct {
-		Events []struct {
-			Kind string
-			Time time.Time
-			Data struct{ Job string }
-		}
+	q, err := c.queue()
+	if err != nil {
+		return nil, "", err
 	}
-	if code, out := c.call("GET", "/api/v0/attempts/"+attempt+"/events", nil, &r); code != 200 {
-		return nil, "", fmt.Errorf("the attempt's events: %d %s", code, out)
+	list, err := q.Events(queue.DefaultTeam, attempt)
+	if err != nil {
+		return nil, "", fmt.Errorf("the attempt's events: %v", err)
 	}
 	m := map[string]time.Time{}
 	snap := ""
-	for _, e := range r.Events {
+	for _, e := range list {
 		if _, ok := m[e.Kind]; !ok {
 			m[e.Kind] = e.Time
 		}
 		if e.Kind == "workspace.snapshot" {
-			snap = e.Data.Job
+			var d struct{ Job string }
+			_ = json.Unmarshal(e.Data, &d)
+			snap = d.Job
 		}
 	}
 	return m, snap, nil
@@ -735,7 +827,7 @@ func (c *client) snapshotJob(id string) (job, bool) {
 		return job{}, false
 	}
 	var j job
-	if code, _ := c.call("GET", "/api/v0/jobs/"+id, nil, &j); code != 200 || j.Ended == nil {
+	if !c.jobByID(id, &j) || j.Ended == nil {
 		return job{}, false
 	}
 	return j, true
@@ -777,7 +869,7 @@ func start(bin, home, logPath string, args ...string) (*proc, error) {
 }
 
 func waitService(base, home string, p *proc) (*client, error) {
-	c := &client{base: base}
+	c := &client{base: base, home: home}
 	err := waitFor(30*time.Second, "the server", func() bool {
 		b, err := os.ReadFile(filepath.Join(home, "token"))
 		if err != nil {

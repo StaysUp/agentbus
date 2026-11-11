@@ -38,24 +38,20 @@ R = {
     "agents": "/api/v0/agents",
     "agent": "/api/v0/agents/{id}",
     "turns": "/api/v0/turns",
+    "all_turns": "/api/v0/turns?limit=1000",
     "session_turns": "/api/v0/turns?session={session}",
     "turn": "/api/v0/turns/{id}",
     "turn_diff": "/api/v0/turns/{id}/diff",
-    "turn_events": "/api/v0/turns/{id}/events",
+    "turn_events": "/api/v0/sessions/{session}/events?turn={id}",
     "turn_stop": "/api/v0/turns/{id}/stop",
-    "jobs": "/api/v0/jobs",
-    "session_jobs": "/api/v0/jobs?session={session}",
-    "reviews_of": "/api/v0/jobs?reviews={job}",
-    "job": "/api/v0/jobs/{id}",
-    "job_cancel": "/api/v0/jobs/{id}/cancel",
 }
 # The seed commands that make work asked by the session (tasks 4 and 5). A
 # turn token's asked work can only be made by an agent, so a seed turn runs
 # these words as given.
 SEED_ASK_TURN = "agentbus-api POST /api/v0/turns '{{\"agent\":\"{agent}\",\"prompt\":\"Run the shell command sleep 1800, then reply done.\"}}'"
-SEED_ASK_REVIEW = "agentbus-api POST /api/v0/jobs/{job}/review '{{\"agent\":\"{agent}\"}}'"
+SEED_ASK_REVIEW = "agentbus-api POST /api/v0/turns/{turn}/review '{{\"agent\":\"{agent}\"}}'"
 
-ENDED = ("finished", "failed", "stopped", "cancelled", "refused")
+ENDED = ("finished", "failed", "stopped")
 LIVE = ("queued", "running")
 
 
@@ -110,7 +106,6 @@ class Client:
         t0, quiet = time.time(), None
         while time.time() - t0 < limit:
             busy = [t for t in self.turns_of(session) if t.get("state") not in ENDED]
-            busy += [j for j in self.get("session_jobs", session=session).get("jobs", []) if j.get("state") in LIVE]
             if busy:
                 quiet = None
             elif quiet is None:
@@ -120,13 +115,22 @@ class Client:
             time.sleep(3)
         return False
 
+    def all_turns(self):
+        return self.get("all_turns").get("turns", [])
+
     def asked_by(self, session=None, turn=None):
+        """The turns work in session, or turn, asked for: their origin says so."""
         out = []
-        for j in self.get("jobs").get("jobs", []):
-            a = (j.get("links") or {}).get("asker") or {}
-            if (session and a.get("session") == session) or (turn and a.get("turn") == turn):
-                out.append(j)
+        for t in self.all_turns():
+            o = t.get("origin") or {}
+            if o.get("kind") != "asked":
+                continue
+            if (session and o.get("session") == session) or (turn and o.get("turn") == turn):
+                out.append(t)
         return out
+
+    def reviews_of(self, turn):
+        return [t for t in self.all_turns() if t.get("kind") == "review" and t.get("reviews") == turn]
 
 
 def flag(args, name, default=None, takes=True):
@@ -243,11 +247,11 @@ def setup(c, task, folder, hid):
     facts = {}
     if task == 1:
         r = seed(c, "Add a function add(a, b) to calc.py that returns a + b." + ONE, hid, folder=folder)
-        facts.update(last_turn=r["turn"], last_job=r["job"])
-        return r["id"], facts
+        facts.update(last_turn=r["turn"])
+        return r["session"], facts
     if task == 2:
         r = seed(c, "Create a.txt with the single line: one." + ONE, hid, folder=folder)
-        sid, turns = r["id"], [r["turn"]]
+        sid, turns = r["session"], [r["turn"]]
         for p in ("Add a second line to a.txt: two.", "Create b.txt with the single line: three.",
                   "Create c.txt with the single line: four."):
             turns.append(seed(c, p + ONE, hid, session=sid)["turn"])
@@ -257,7 +261,7 @@ def setup(c, task, folder, hid):
         r = seed(c, "Before we write any code, a decision for the record: the cache will use SQLite in WAL mode, "
                  "not Redis, because the service runs on a single machine and we want no extra server. "
                  "Reply only: noted.", hid, folder=folder)
-        sid = r["id"]
+        sid = r["session"]
         seed(c, "Add a function sub(a, b) to calc.py that returns a - b." + ONE, hid, session=sid)
         seed(c, "Add a one-line docstring to every function in calc.py." + ONE, hid, session=sid)
         facts["decision"] = "SQLite in WAL mode, not Redis; one machine, no extra server"
@@ -265,36 +269,36 @@ def setup(c, task, folder, hid):
     if task == 4:
         r = seed(c, "Run this command exactly, then end your turn with one line saying you did: "
                  + SEED_ASK_TURN.format(agent=hid), hid, folder=folder)
-        sid = r["id"]
+        sid = r["session"]
         t0, long = time.time(), None
         while time.time() - t0 < 240:
-            js = [j for j in c.asked_by(session=sid) if j.get("kind") == "turn"]
-            if js and js[0].get("state") == "running" and js[0].get("attempt"):
-                d = c.get("turn_diff", id=js[0]["attempt"])
+            ts = [t for t in c.asked_by(session=sid) if t.get("kind") == "turn"]
+            if ts and ts[0].get("state") == "running":
+                d = c.get("turn_diff", id=ts[0]["id"])
                 if any("sleep" in " ".join(x.get("commands") or []) for x in d["tools"]["calls"]):
-                    long = js[0]
+                    long = ts[0]
                     break
             time.sleep(3)
         if long is None:
             raise RuntimeError("the long turn did not start its sleep")
-        facts.update(long_job=long["id"], long_turn=long["attempt"], long_session=long.get("session"))
+        facts.update(long_turn=long["id"], long_session=long.get("session"))
         return sid, facts
     if task == 5:
         r = seed(c, "Add a function sub(a, b) to calc.py that returns a - b." + ONE, hid, folder=folder)
-        sid, job = r["id"], r["job"]
+        sid, turn = r["session"], r["turn"]
         seed(c, "Run this command exactly, then end your turn with one line saying you did: "
-             + SEED_ASK_REVIEW.format(job=job, agent=hid), hid, session=sid)
+             + SEED_ASK_REVIEW.format(turn=turn, agent=hid), hid, session=sid)
         t0, rev = time.time(), None
         while time.time() - t0 < 600 and rev is None:
-            revs = c.get("reviews_of", job=job).get("jobs", [])
-            if revs and revs[0].get("state") not in LIVE:
+            revs = c.reviews_of(turn)
+            if revs and revs[0].get("state") in ENDED:
                 rev = revs[0]
             time.sleep(3)
-        if rev is None or not rev.get("attempt"):
+        if rev is None:
             raise RuntimeError("the review did not end")
         c.wait_idle(sid)  # its result comes back as a turn
-        rt = c.get("turn", id=rev["attempt"])["turn"]
-        facts.update(review_job=rev["id"], review_turn=rev["attempt"], review_cost_usd=rt.get("cost_usd"))
+        rt = c.get("turn", id=rev["id"])["turn"]
+        facts.update(review_turn=rev["id"], review_cost_usd=rt.get("cost_usd"))
         return sid, facts
     raise SystemExit("TASK is 1 to 5")
 
@@ -316,10 +320,10 @@ def check(c, task, folder, tid, reply, facts):
     reply against the record (3, 5)."""
     k = {}
     if task == 1:
-        revs = c.get("reviews_of", job=facts["last_job"]).get("jobs", [])
-        k["reviews_of_last_turn"] = [{"id": j["id"], "agent": (j.get("spec") or {}).get("agent_id"), "state": j.get("state")} for j in revs]
-        k["asked_by_test_turn"] = [{"id": j["id"], "kind": j.get("kind"), "agent": (j.get("spec") or {}).get("agent_id")}
-                                   for j in c.asked_by(turn=tid)]
+        revs = c.reviews_of(facts["last_turn"])
+        k["reviews_of_last_turn"] = [{"id": t["id"], "agent": t.get("agent_id"), "state": t.get("state")} for t in revs]
+        k["asked_by_test_turn"] = [{"id": t["id"], "kind": t.get("kind"), "agent": t.get("agent_id")}
+                                   for t in c.asked_by(turn=tid)]
         k["done"] = bool(revs)
     elif task == 2:
         files = {n: read(os.path.join(folder, n)) for n in ("a.txt", "b.txt", "c.txt")}
@@ -331,9 +335,9 @@ def check(c, task, folder, tid, reply, facts):
         low = (reply or "").lower()
         k["done"] = "sqlite" in low and "wal" in low and ("machine" in low or "server" in low)
     elif task == 4:
-        j, t = c.get("job", id=facts["long_job"]), c.get("turn", id=facts["long_turn"])["turn"]
-        k.update(long_job_state=j.get("state"), long_turn_state=t.get("state"))
-        k["done"] = j.get("state") == "cancelled" or t.get("state") == "stopped"
+        t = c.get("turn", id=facts["long_turn"])["turn"]
+        k.update(long_turn_state=t.get("state"))
+        k["done"] = t.get("state") == "stopped"
     elif task == 5:
         cost = facts.get("review_cost_usd") or 0
         k["review_cost_usd"] = cost
@@ -362,10 +366,10 @@ def run(args):
     if timed_out:  # stop it, and say so in the result
         c.post("turn_stop", id=tid)
         t = c.wait_turn(tid, 120)
-    diff, events = c.get("turn_diff", id=tid), c.get("turn_events", id=tid)
+    diff, events = c.get("turn_diff", id=tid), c.get("turn_events", id=tid, session=sid)
     k = check(c, task, folder, tid, (t or {}).get("reply"), facts)
     res = dict(agent=agent, model=model, task=task, label=label, prompt=PROMPTS[task], session=sid, test_turn=tid,
-               test_job=r.get("job"), facts=facts, turn=t, timed_out=timed_out, diff=diff, events=events, check=k,
+               facts=facts, turn=t, timed_out=timed_out, diff=diff, events=events, check=k,
                seed_seconds=round(t1 - t0), test_seconds=round(time.time() - t1))
     if task == 4 and not k["done"]:
         try:
@@ -377,14 +381,14 @@ def run(args):
         # turns its results start in the session. Measured above, before this.
         stopped = []
         for _ in range(10):
-            for j in c.get("jobs").get("jobs", []):
-                mine = ((j.get("links") or {}).get("asker") or {}).get("turn") == tid or j.get("session") == sid
-                if mine and j.get("state") in LIVE and j["id"] != r.get("job"):
+            for t in c.all_turns():
+                mine = ((t.get("origin") or {}).get("turn") == tid) or t.get("session") == sid
+                if mine and t.get("state") in LIVE and t["id"] != tid:
                     try:
-                        c.post("job_cancel", id=j["id"])
-                        stopped.append(j["id"])
+                        c.post("turn_stop", id=t["id"])
+                        stopped.append(t["id"])
                     except RuntimeError as e:
-                        stopped.append(f"{j['id']}: {e}")
+                        stopped.append(f"{t['id']}: {e}")
             time.sleep(3)
         res["stopped_followups"] = stopped
     res["idle_after"] = c.wait_idle(sid, limit=600)

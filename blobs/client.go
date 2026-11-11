@@ -17,14 +17,14 @@ import (
 
 // The control plane's blob routes (package jobs serves them):
 //
-//	POST /api/v0/blobs  {"hashes": [...]} → {"missing": [...]}
-//	PUT  /api/v0/blobs/{hash}   the content, streamed; 204 once kept
-//	GET  /api/v0/blobs/{hash}   the content, streamed
+//	POST /api/v0/runner/blobs  {"hashes": [...]} → {"missing": [...]}
+//	PUT  /api/v0/runner/blobs/{hash}   the content, streamed; 204 once kept
+//	GET  /api/v0/runner/blobs/{hash}   the content, streamed
 //
 // A body of a blob is not bound by the runner protocol's 2 MiB: it is
 // streamed to disk and checked against its hash as it arrives.
 
-// MissingRequest and MissingReply are the bodies of POST /api/v0/blobs.
+// MissingRequest and MissingReply are the bodies of POST /api/v0/runner/blobs.
 type MissingRequest struct {
 	Hashes []string `json:"hashes"`
 }
@@ -69,7 +69,7 @@ func (c Client) Missing(ctx context.Context, hs []string) ([]string, error) {
 		return nil, nil
 	}
 	b, _ := json.Marshal(MissingRequest{Hashes: hs})
-	resp, err := c.do(ctx, http.MethodPost, "/api/v0/blobs", bytes.NewReader(b), int64(len(b)), "application/json")
+	resp, err := c.do(ctx, http.MethodPost, "/api/v0/runner/blobs", bytes.NewReader(b), int64(len(b)), "application/json")
 	if err != nil {
 		return nil, err
 	}
@@ -95,7 +95,7 @@ func (c Client) Put(ctx context.Context, h string, r io.Reader) error {
 			size = fi.Size()
 		}
 	}
-	resp, err := c.do(ctx, http.MethodPut, "/api/v0/blobs/"+h, r, size, "application/octet-stream")
+	resp, err := c.do(ctx, http.MethodPut, "/api/v0/runner/blobs/"+h, r, size, "application/octet-stream")
 	if err != nil {
 		return err
 	}
@@ -112,7 +112,7 @@ func (c Client) Open(ctx context.Context, h string) (io.ReadCloser, error) {
 	if !Valid(h) {
 		return nil, ErrNotFound
 	}
-	resp, err := c.do(ctx, http.MethodGet, "/api/v0/blobs/"+h, nil, -1, "")
+	resp, err := c.do(ctx, http.MethodGet, "/api/v0/runner/blobs/"+h, nil, -1, "")
 	if err != nil {
 		return nil, err
 	}

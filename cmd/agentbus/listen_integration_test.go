@@ -114,7 +114,7 @@ func TestNonLoopbackHandsAgentsLoopback(t *testing.T) {
 	if code != http.StatusAccepted {
 		t.Fatalf("status %d: %s", code, raw)
 	}
-	id, _ := out["id"].(string)
+	id, _ := out["session"].(string)
 	base, _ := out["base_url"].(string)
 	if !strings.HasPrefix(base, want+"/s/"+id+"/t/") {
 		t.Fatalf("base_url %q, want under %s", base, want)

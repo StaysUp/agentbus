@@ -173,32 +173,38 @@ func (c *client) call(method, path string, body, out any) (int, string) {
 }
 
 type started struct {
-	ID, Turn, Job string
+	Session, Turn string
 }
 
-// turn starts a turn and waits for its job to end, finished.
+// turn starts a turn and waits for it to end, finished, with its changes
+// recorded.
 func (c *client) turn(body map[string]any) started {
 	c.t.Helper()
 	var s started
-	if code, out := c.call("POST", "/api/v0/turns", body, &s); code/100 != 2 || s.Job == "" {
+	if code, out := c.call("POST", "/api/v0/turns", body, &s); code/100 != 2 || s.Turn == "" {
 		c.t.Fatalf("POST /api/v0/turns %v: %d %s", body, code, out)
 	}
 	for deadline := time.Now().Add(time.Minute); ; time.Sleep(20 * time.Millisecond) {
-		var j struct {
-			State, Reason, Attempt string
-			Ended                  *time.Time
-			Result                 json.RawMessage
-		}
-		c.call("GET", "/api/v0/jobs/"+s.Job, nil, &j)
-		if j.Ended != nil {
-			if j.State != "finished" {
-				c.t.Fatalf("job %s ended %s %s: %s", s.Job, j.State, j.Reason, j.Result)
+		var one struct {
+			Turn struct {
+				State, Error string
 			}
-			s.Turn = j.Attempt
-			return s
+		}
+		c.call("GET", "/api/v0/turns/"+s.Turn, nil, &one)
+		switch one.Turn.State {
+		case "finished":
+			// The record says finished as the agent exits; the turn's
+			// changes are known once its job has ended too: its diff's
+			// files are null until then, and an apply is refused.
+			var d struct{ Files *struct{} }
+			if c.call("GET", "/api/v0/turns/"+s.Turn+"/diff", nil, &d); d.Files != nil {
+				return s
+			}
+		case "failed", "stopped":
+			c.t.Fatalf("turn %s ended %s: %s", s.Turn, one.Turn.State, one.Turn.Error)
 		}
 		if time.Now().After(deadline) {
-			c.t.Fatalf("job %s did not end", s.Job)
+			c.t.Fatalf("turn %s did not end", s.Turn)
 		}
 	}
 }
@@ -258,54 +264,18 @@ func fileText(t *testing.T, p string) string {
 	return string(b)
 }
 
-// jobFiles is a turn job's changes as its result holds them, in the shape
-// diffFiles answers: what a runner reports, where the turn's record stays
-// on the runner (agentbus server, until the record is central).
-func (c *client) jobFiles(job string) map[string]string {
-	c.t.Helper()
-	var j struct {
-		Result struct {
-			Changes struct {
-				From, To string
-				Files    []struct {
-					Path, Change string
-					Diff         *string
-				}
-			}
-		}
-	}
-	if code, out := c.call("GET", "/api/v0/jobs/"+job, nil, &j); code != 200 || j.Result.Changes.To == "" {
-		c.t.Fatalf("job %s: %d %s", job, code, out)
-	}
-	got := map[string]string{}
-	for _, f := range j.Result.Changes.Files {
-		s := f.Change
-		if f.Diff != nil {
-			s += "\n" + *f.Diff
-		}
-		got[f.Path] = s
-	}
-	return got
-}
-
 // filesFlow runs the pinned flow against c, with folder as the person's
-// folder, named by body (a path in agentbus up, a reference otherwise).
-// record: the service keeps the turns' record, so their diffs are read
-// from GET /api/v0/turns/{id}/diff; else from their jobs.
-func filesFlow(t *testing.T, c *client, folder string, body map[string]any, record bool) {
+// folder, named by body (a path in agentbus up, a reference otherwise). The
+// turns' diffs are read from GET /api/v0/turns/{id}/diff.
+func filesFlow(t *testing.T, c *client, folder string, body map[string]any) {
 	t.Helper()
 	t1 := c.turn(merge(body, map[string]any{"agent": "claude", "prompt": "p1"}))
-	t2 := c.turn(map[string]any{"session": t1.ID, "prompt": "p2"})
+	t2 := c.turn(map[string]any{"session": t1.Session, "prompt": "p2"})
 	// The person's folder is untouched until an apply.
 	if got := fileText(t, filepath.Join(folder, "a.txt")); got != "one\n" {
 		t.Fatalf("a.txt before any apply: %q", got)
 	}
-	diff := func(s started) map[string]string {
-		if record {
-			return c.diffFiles(s.Turn)
-		}
-		return c.jobFiles(s.Job)
-	}
+	diff := func(s started) map[string]string { return c.diffFiles(s.Turn) }
 	if got, want := diff(t1), map[string]string{
 		"a.txt":   "modified\n--- a/a.txt\n+++ b/a.txt\n@@ -1 +1,2 @@\n one\n+p1\n",
 		"new.txt": "added\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+p1\n",
@@ -343,7 +313,9 @@ func filesFlow(t *testing.T, c *client, folder string, body map[string]any, reco
 	code, a := c.apply(t3.Turn)
 	if code != http.StatusConflict || a.State != "refused" || len(a.Conflicts) != 1 || a.Conflicts[0].Path != "a.txt" ||
 		a.Conflicts[0].Why != "changed in your folder since the checkpoint" {
-		t.Fatalf("apply over the person's change: %d %+v", code, a)
+		_, d := c.call("GET", "/api/v0/turns/"+t3.Turn+"/diff", nil, nil)
+		_, ss := c.call("GET", "/api/v0/sessions/"+t3.Session, nil, nil)
+		t.Fatalf("apply over the person's change: %d %+v\ndiff %s\nsession %s", code, a, d, ss)
 	}
 	if got := fileText(t, filepath.Join(folder, "a.txt")) + fileText(t, filepath.Join(folder, "new.txt")); got != "mine\n<missing>" {
 		t.Fatalf("after the refused apply: %q", got)
@@ -359,7 +331,7 @@ func restoreFlow(t *testing.T, c *client, folder string, body map[string]any) {
 	if code, a := c.apply(t1.Turn); code != 200 || a.State != "applied" {
 		t.Fatalf("apply of the first turn: %d %+v", code, a)
 	}
-	t2 := c.turn(map[string]any{"session": t1.ID, "prompt": "restore"})
+	t2 := c.turn(map[string]any{"session": t1.Session, "prompt": "restore"})
 	if code, a := c.apply(t2.Turn); code != 200 || a.State != "applied" {
 		t.Fatalf("apply of the turn that puts a.txt back: %d %+v", code, a)
 	}
@@ -423,7 +395,7 @@ func TestOneMachineFilesPinned(t *testing.T) {
 	p := startProc(t, bin, home, bins, "up", "-listen", addr, "-replay=false")
 	c := waitService(t, p, addr, home)
 	folder := personFolder(t)
-	filesFlow(t, c, folder, map[string]any{"folder": folder}, true)
+	filesFlow(t, c, folder, map[string]any{"folder": folder})
 	other := personFolder(t)
 	restoreFlow(t, c, other, map[string]any{"folder": other})
 }
@@ -457,7 +429,7 @@ func TestThreeProcesses(t *testing.T) {
 		}
 		return ref != ""
 	})
-	filesFlow(t, c, folder, map[string]any{"folder_ref": ref, "connector": connector, "isolate": true}, true)
+	filesFlow(t, c, folder, map[string]any{"folder_ref": ref, "connector": connector, "isolate": true})
 	// The same folder again, now as filesFlow left it.
 	if err := os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\n"), 0o644); err != nil {
 		t.Fatal(err)

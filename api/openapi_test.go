@@ -35,6 +35,17 @@ import (
 // OpenAPI.
 func loadSpec(t *testing.T) *openapi3.T {
 	t.Helper()
+	return loadDoc(t, spec)
+}
+
+// loadRunnerSpec loads the runner protocol's description.
+func loadRunnerSpec(t *testing.T) *openapi3.T {
+	t.Helper()
+	return loadDoc(t, runnerSpec)
+}
+
+func loadDoc(t *testing.T, spec func() ([]byte, error)) *openapi3.T {
+	t.Helper()
 	data, err := spec()
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +131,7 @@ func TestOpenAPIRefusesUnlistedTag(t *testing.T) {
 	was := routes[0].tag
 	t.Cleanup(func() { routes[0].tag = was })
 	routes[0].tag = "Nowhere"
-	if _, err := describe(); err == nil || !strings.Contains(err.Error(), "Nowhere") {
+	if _, err := describe(false); err == nil || !strings.Contains(err.Error(), "Nowhere") {
 		t.Errorf("describe() = %v, want it to refuse the tag Nowhere", err)
 	}
 }
@@ -130,7 +141,7 @@ func specOps(doc *openapi3.T) []string {
 	var ops []string
 	for p, item := range doc.Paths.Map() {
 		for m := range item.Operations() {
-			ops = append(ops, m+" "+strings.NewReplacer("{id}", "abc", "{n}", "0").Replace(p))
+			ops = append(ops, m+" "+strings.NewReplacer("{id}", "abc", "{call}", "abc", "{n}", "0").Replace(p))
 		}
 	}
 	sort.Strings(ops)
@@ -163,7 +174,7 @@ func routeLiterals(t *testing.T) (paths, prefixes, words []string) {
 				return true
 			}
 			s, _ := strconv.Unquote(lit.Value)
-			s = strings.ReplaceAll(s, "{id}", "abc")
+			s = strings.NewReplacer("{id}", "abc", "{call}", "abc").Replace(s)
 			switch {
 			case strings.HasPrefix(s, "/api/") && strings.HasSuffix(s, "/"):
 				prefixes = append(prefixes, s)
@@ -205,13 +216,10 @@ func served(t *testing.T, e *env, method, path string) bool {
 	return true
 }
 
-// Every route the code serves is in the spec, and every operation in the spec
-// is served.
-// One endpoint starts every turn: POST /api/v0/turns,
-// with session for a session's next turn. /sessions is read-only but for the
-// rename, PATCH /sessions/{id}, which starts nothing. The turn is
-// the one resource that is written: POST /turns starts one, GET /turns lists
-// them, GET /turns/{id}/events reads one; /runs is gone with no alias.
+// One endpoint starts every turn: POST /api/v0/turns, with session for a
+// session's next turn. /sessions is read-only but for PATCH /sessions/{id},
+// which renames or closes and starts nothing. Every action is on a turn.
+// /runs, /jobs, /attempts, /workspaces and /calls are gone with no alias.
 func TestOneEndpointStartsEveryTurn(t *testing.T) {
 	doc := loadSpec(t)
 	var ops []string
@@ -219,21 +227,29 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 		for m := range item.Operations() {
 			ops = append(ops, m+" "+p)
 			if strings.HasPrefix(p, "/api/v0/sessions") && m != http.MethodGet && m+" "+p != "PATCH /api/v0/sessions/{id}" {
-				t.Errorf("%s %s: /sessions takes only GET, and PATCH to rename", m, p)
+				t.Errorf("%s %s: /sessions takes only GET, and PATCH to rename or close", m, p)
 			}
 		}
 	}
-	if len(ops) != 58 {
-		t.Errorf("%d endpoints, want 58: %v", len(ops), ops)
+	if len(ops) != 34 {
+		t.Errorf("%d endpoints, want 34: %v", len(ops), ops)
 	}
-	for _, want := range []string{"POST /api/v0/turns", "GET /api/v0/turns", "GET /api/v0/turns/{id}", "GET /api/v0/turns/{id}/events", "POST /api/v0/turns/{id}/stop",
-		"GET /api/v0/turns/{id}/diff", "POST /api/v0/turns/{id}/apply"} {
+	for _, want := range []string{"POST /api/v0/turns", "GET /api/v0/turns", "GET /api/v0/turns/{id}", "POST /api/v0/turns/{id}/stop",
+		"GET /api/v0/turns/{id}/diff", "POST /api/v0/turns/{id}/apply", "POST /api/v0/turns/{id}/review",
+		"GET /api/v0/turns/{id}/calls/{call}", "GET /api/v0/turns/{id}/calls/{call}/pieces/{n}", "GET /api/v0/sessions/{id}/events"} {
 		if !slices.Contains(ops, want) {
 			t.Errorf("%s is not in the description", want)
 		}
 	}
-	if doc.Paths.Find("/api/v0/runs") != nil {
-		t.Error("/api/v0/runs is still described")
+	for p := range doc.Paths.Map() {
+		for _, gone := range []string{"/api/v0/runs", "/api/v0/jobs", "/api/v0/attempts", "/api/v0/workspaces", "/api/v0/calls", "/api/v0/runner", "/api/v0/blobs", "/api/v0/packs"} {
+			if p == gone || strings.HasPrefix(p, gone+"/") {
+				t.Errorf("%s is still described in the client API", p)
+			}
+		}
+		if strings.HasSuffix(p, "/events") && p != "/api/v0/events" && p != "/api/v0/sessions/{id}/events" {
+			t.Errorf("%s: one way to read events, by session", p)
+		}
 	}
 	run := doc.Paths.Find("/api/v0/turns").Post
 	if run.OperationID != "startTurn" || run.Responses.Status(http.StatusConflict) == nil || run.Responses.Status(http.StatusNotFound) == nil {
@@ -267,7 +283,8 @@ func TestOpenAPIRoutesMatchCode(t *testing.T) {
 			candidates[pre+"abc/"+w] = true
 		}
 	}
-	for _, op := range specOps(doc) {
+	runnerDoc := loadRunnerSpec(t)
+	for _, op := range append(specOps(doc), specOps(runnerDoc)...) {
 		_, p, _ := strings.Cut(op, " ")
 		candidates[p] = true
 	}
@@ -280,7 +297,7 @@ func TestOpenAPIRoutesMatchCode(t *testing.T) {
 		}
 	}
 	sort.Strings(code)
-	spec := specOps(doc)
+	spec := append(specOps(doc), specOps(runnerDoc)...)
 	for _, op := range code {
 		if !slices.Contains(spec, op) {
 			t.Errorf("the code serves %s, which the description does not name", op)
@@ -293,11 +310,12 @@ func TestOpenAPIRoutesMatchCode(t *testing.T) {
 	}
 }
 
-// jsonFields lists the JSON names of a struct's fields.
+// jsonFields lists the JSON names of a struct's fields, an embedded
+// struct's among them.
 func jsonFields(typ reflect.Type) []string {
 	var names []string
-	for i := range typ.NumField() {
-		name, _, _ := strings.Cut(typ.Field(i).Tag.Get("json"), ",")
+	for _, f := range fieldsOf(typ) {
+		name, _, _ := strings.Cut(f.Tag.Get("json"), ",")
 		if name != "" && name != "-" {
 			names = append(names, name)
 		}
@@ -310,23 +328,28 @@ func jsonFields(typ reflect.Type) []string {
 func TestOpenAPISchemasMatchTypes(t *testing.T) {
 	doc := loadSpec(t)
 	for schema, typ := range map[string]reflect.Type{
-		"EventFields":  reflect.TypeFor[event.Event](),
-		"Usage":        reflect.TypeFor[event.Usage](),
-		"Unexpected":   reflect.TypeFor[event.Unexpected](),
-		"Snapshot":     reflect.TypeFor[store.Snapshot](),
-		"Session":      reflect.TypeFor[store.Session](),
-		"Harness":      reflect.TypeFor[Harness](),
-		"AccessOption": reflect.TypeFor[AccessOption](),
-		"SavedAgent":   reflect.TypeFor[SavedAgent](),
-		"AgentRequest": reflect.TypeFor[AgentRequest](),
-		"Page":         reflect.TypeFor[Page](),
-		"TurnRequest":  reflect.TypeFor[TurnRequest](),
-		"TurnList":     reflect.TypeFor[store.TurnList](),
-		"Turn":         reflect.TypeFor[store.Turn](),
-		"Started":      reflect.TypeFor[Started](),
-		"EventRequest": reflect.TypeFor[EventRequest](),
-		"CallContext":  reflect.TypeFor[store.CallContext](),
-		"Piece":        reflect.TypeFor[store.Piece](),
+		"EventFields":   reflect.TypeFor[event.Event](),
+		"Usage":         reflect.TypeFor[event.Usage](),
+		"Unexpected":    reflect.TypeFor[event.Unexpected](),
+		"Snapshot":      reflect.TypeFor[store.Snapshot](),
+		"Session":       reflect.TypeFor[store.Session](),
+		"Harness":       reflect.TypeFor[Harness](),
+		"AccessOption":  reflect.TypeFor[AccessOption](),
+		"SavedAgent":    reflect.TypeFor[SavedAgent](),
+		"AgentRequest":  reflect.TypeFor[AgentRequest](),
+		"Page":          reflect.TypeFor[Page](),
+		"TurnRequest":   reflect.TypeFor[TurnRequest](),
+		"TurnList":      reflect.TypeFor[TurnList](),
+		"Turn":          reflect.TypeFor[Turn](),
+		"OneTurn":       reflect.TypeFor[OneTurn](),
+		"OneSession":    reflect.TypeFor[OneSession](),
+		"SessionCopy":   reflect.TypeFor[SessionCopy](),
+		"ReviewRequest": reflect.TypeFor[ReviewRequest](),
+		"SessionUpdate": reflect.TypeFor[SessionUpdate](),
+		"Started":       reflect.TypeFor[Started](),
+		"EventRequest":  reflect.TypeFor[EventRequest](),
+		"CallContext":   reflect.TypeFor[store.CallContext](),
+		"Piece":         reflect.TypeFor[store.Piece](),
 	} {
 		s := doc.Components.Schemas[schema].Value
 		fields := jsonFields(typ)

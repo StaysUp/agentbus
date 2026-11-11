@@ -1,8 +1,8 @@
 package api
 
 // GET /api/v0/sessions/{id}/search: text search over a session's stored
-// history. GET /api/v0/calls/{id}/pieces/{n}: one piece of a call, byte for
-// byte. Both are what a turn reads of its own session with its turn token
+// history. GET /api/v0/turns/{id}/calls/{call}/pieces/{n}: one piece of a
+// call, byte for byte. Both are what a turn reads of its own session with its turn token
 // (tokens.go), and what a cockpit reads without fetching a whole call.
 
 import (
@@ -32,9 +32,10 @@ const searchDoc = "Searches the session's stored history: the messages and input
 	"and the text of the session's turn.started events (the prompt as sent), of a program's own events, and of a " +
 	"model.responded whose reply is not searched as a reply (none is kept, or its call's request is not stored). System blocks, instructions and tool definitions (codex's additional_tools and tool_search_output items included) are not searched. " +
 	"Only the string values inside a piece are read, decoded from JSON; ids, types, signatures and base64 data are skipped. " +
-	"Case is ignored. Each hit names its turn, call and piece, and read is the path that returns the whole of it."
+	"Case is ignored. Each hit names its turn, call and piece, and read is the path that returns the whole of it. " +
+	"A turn token's search leaves out its own turn, so the search call itself is never a hit."
 
-const callPieceDoc = "One piece of a stored call: n is the piece's index in GET /api/v0/calls/{id}/context's pieces, " +
+const callPieceDoc = "One piece of a stored call: n is the piece's index in GET /api/v0/turns/{id}/calls/{call}'s pieces, " +
 	"from 0, or reply for the call's kept reply. The body is the piece's bytes exactly as stored, so their SHA-256 is the " +
 	"piece's hash, served as application/json. X-Piece-Kind, X-Piece-Hash and X-Piece-Count (the request's number of " +
 	"pieces) describe it, and X-Piece-Label holds its label when that is printable ASCII."
@@ -56,8 +57,14 @@ func (a *API) search(w http.ResponseWriter, r *http.Request, session string) {
 		}
 		limit = n
 	}
+	// A turn's own search is never a hit of it: in its own session, its own
+	// turn is left out, which the turn holds in its context anyway.
+	skip := ""
+	if g := grantOf(r); g != nil && g.Session == session {
+		skip = g.Turn
+	}
 	res, err := a.cfg.Store.Search(store.SearchQuery{Session: session, Q: text, Before: q.Get("before"), Limit: limit,
-		MaxBytes: store.SearchPageBytes, MaxScan: store.SearchScanBytes})
+		SkipTurn: skip, MaxBytes: store.SearchPageBytes, MaxScan: store.SearchScanBytes})
 	if errors.Is(err, store.ErrSearchCursor) {
 		writeError(w, http.StatusBadRequest, "before must be the next_before of a previous page")
 		return
@@ -72,7 +79,7 @@ func (a *API) search(w http.ResponseWriter, r *http.Request, session string) {
 // printable is a label a header can carry as it is.
 var printable = regexp.MustCompile(`^[ -~]{1,256}$`)
 
-// GET /api/v0/calls/<id>/pieces/<n>
+// GET /api/v0/turns/<id>/calls/<call>/pieces/<n>
 func (a *API) callPiece(w http.ResponseWriter, r *http.Request, exchange string) {
 	which := path.Base(r.URL.Path) // the router matched it against pieceNumber
 	n, _ := strconv.Atoi(which)

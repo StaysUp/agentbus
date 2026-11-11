@@ -19,11 +19,16 @@ const MaxInstructions = 64 << 10
 
 // DefaultInstructions is the text of a missing file, and what the file store
 // writes when the file is missing. An empty file gives no instructions.
-const DefaultInstructions = `Your session's earlier turns are stored by AgentBus. To look something up, run:
-agentbus-api GET "/api/v0/sessions/{session}/search?q=<text>"
-with <text> URL-encoded. Each hit's "read" is a path you can GET the same way, for the whole of what matched.
-You can also ask other agents with the same command: start a turn on any saved agent, continue one, or ask for a review. Do not wait for them: each result comes back to you as a later turn. How: agentbus-api GET /docs/llms.txt, section "Ask other agents".
-AgentBus agents are not your harness's own agents or subagents. To list them: agentbus-api GET /api/v0/agents
+const DefaultInstructions = `You work through AgentBus, in session {session}. A turn is one message to you, your reply and your changes.
+Your folder is usually your session's own copy of the person's folder. Your edits stay in the copy. They reach the person's folder only when a turn is applied.
+Call AgentBus with agentbus-api METHOD PATH [JSON]. Replace T with a turn id.
+- List this session's turns, with each id, number, state and cost: agentbus-api GET /api/v0/turns
+- Apply a turn to the person's folder (its changes and the earlier turns' that are not applied yet): agentbus-api POST /api/v0/turns/T/apply
+- Ask another agent to review a turn: agentbus-api POST /api/v0/turns/T/review '{"agent":"<agent id>"}'. Pick an agent other than the one that did the turn. List the agents: agentbus-api GET /api/v0/agents. These are AgentBus agents, not your harness's own agents or subagents.
+- Read a turn, its state, cost and a review's verdict: agentbus-api GET /api/v0/turns/T
+- Stop a turn: agentbus-api POST /api/v0/turns/T/stop
+- Search this session's history: agentbus-api GET "/api/v0/sessions/{session}/search?q=<text>", with <text> URL-encoded.
+Work you ask for comes back to you as a later turn: do not wait for it. More: agentbus-api GET /docs/llms.txt
 `
 
 // CheckInstructions refuses text a turn cannot carry.

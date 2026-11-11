@@ -2,8 +2,9 @@ package api
 
 // The API describes itself: GET /api/v0/openapi.json is its OpenAPI 3.1
 // description, generated from the route table at startup (spec.go), /docs an
-// interactive reference built from it, and
-// /docs/llms.txt a plain guide for coding agents. All of it is in the binary,
+// interactive reference built from it, /docs/llms.txt a short page for coding
+// agents and /docs/reference.md the long one. The runner protocol has its own
+// description, /api/v0/runner/openapi.json, and page, /docs/runner. All of it is in the binary,
 // served without the token (none of it holds session data) and without the
 // internet. The viewer is Redoc's standalone bundle, vendored in viewer/
 // (THIRD_PARTY.md). Redoc has no "try it", so the page never handles the
@@ -11,6 +12,7 @@ package api
 
 import (
 	_ "embed"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -32,11 +34,11 @@ const docsPage = `<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>agentbus client API</title>
+<title>%s</title>
 <style>body { margin: 0; padding: 0; }</style>
 </head>
 <body>
-<redoc spec-url="/api/v0/openapi.json" hide-hostname path-in-middle-panel side-nav-style="summary-only" disable-search></redoc>
+<redoc spec-url="%s" hide-hostname path-in-middle-panel side-nav-style="summary-only" disable-search></redoc>
 <script src="/docs/redoc.standalone.js"></script>
 </body>
 </html>
@@ -57,11 +59,18 @@ func (a *API) public(w http.ResponseWriter, r *http.Request) bool {
 	switch r.URL.Path {
 	case "/api/v0/openapi.json":
 		body, ctype = a.spec, "application/json"
+	case "/api/v0/runner/openapi.json":
+		body, ctype = a.runnerSpec, "application/json"
 	case "/docs":
-		body, ctype = []byte(docsPage), "text/html; charset=utf-8"
+		body, ctype = []byte(fmt.Sprintf(docsPage, "agentbus client API", "/api/v0/openapi.json")), "text/html; charset=utf-8"
+		w.Header().Set("Content-Security-Policy", docsPolicy)
+	case "/docs/runner":
+		body, ctype = []byte(fmt.Sprintf(docsPage, "agentbus runner protocol", "/api/v0/runner/openapi.json")), "text/html; charset=utf-8"
 		w.Header().Set("Content-Security-Policy", docsPolicy)
 	case "/docs/llms.txt":
 		body, ctype = docs.LLMs, "text/markdown; charset=utf-8"
+	case "/docs/reference.md":
+		body, ctype = docs.Reference, "text/markdown; charset=utf-8"
 	case "/docs/redoc.standalone.js":
 		body, ctype = redocJS, "text/javascript; charset=utf-8"
 	default:

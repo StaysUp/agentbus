@@ -38,8 +38,9 @@ For each size it writes one fixture of text files (200 B to 16 KB, the same on e
 as `gNN/dN/fNNN.txt`). Each run clones the fixture into a new folder (`cp -c` on macOS,
 `cp --reflink=auto` on Linux) and runs one session there:
 
-1. `POST /api/v0/turns` with a new session. The bench polls `GET /api/v0/jobs/{id}` every 2 ms
-   until the job has ended.
+1. `POST /api/v0/turns` with a new session. The bench polls the turn's job every 2 ms until it has
+   ended, in the service's own queue (`jobs.db` in its data folder): the job and its attempt are
+   internal, not in the client API.
 2. `POST /api/v0/turns` with that session: the later turn.
 3. `GET /api/v0/turns/{id}/diff` for each turn.
 4. `POST /api/v0/turns/{id}/apply` for the first turn, then the later one. The bench checks the
@@ -55,8 +56,8 @@ Each cell is the median of the runs, with the worst in brackets.
 
 - **total**: from sending `POST /turns` to seeing the job ended, on the client's clock.
 - **POST reply**: until the `POST /turns` reply, which comes once the runner has started the turn.
-- The rest come from the job's own times and its attempt's events
-  (`GET /api/v0/attempts/{id}/events`), on the service's clock:
+- The rest come from the job's own times and its attempt's events, which the runner reports and
+  the queue keeps (read from `jobs.db`), on the service's clock:
   - **queue**: job created to taken by the runner.
   - **copy** (first turn only): attempt started to `workspace.ready`. The session's copy of the
     folder and its first checkpoint.

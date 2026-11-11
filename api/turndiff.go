@@ -28,12 +28,11 @@ type TurnDiff struct {
 	Agent      string     `json:"agent" doc:"The harness that ran the turn, from its turn.started."`
 	AgentID    string     `json:"agent_id,omitempty" doc:"The saved agent that ran the turn, from its turn.started."`
 	Model      string     `json:"model" doc:"The model the turn's last call asked for. Empty when it made no calls."`
-	State      string     `json:"state" doc:"running, finished or failed, as GET /api/v0/turns/{id} says."`
+	State      string     `json:"state" doc:"running, finished, failed or stopped, as GET /api/v0/turns/{id} says."`
 	Started    time.Time  `json:"started"`
 	Ended      *time.Time `json:"ended,omitempty" doc:"Absent while running."`
 	DurationMS *int64     `json:"duration_ms" doc:"From started to ended. Null while running."`
-	Job        string     `json:"job,omitempty" doc:"The turn's job. Absent for a turn no job of this service ran."`
-	Files      *TurnFiles `json:"files" doc:"What the turn changed in its workspace. Null when the record holds none: the turn is running, or no job of this service ran it."`
+	Files      *TurnFiles `json:"files" doc:"What the turn changed in its session's copy, or in the folder it ran in. Null when the record holds none: the turn is running, or this service did not run it."`
 	ModelCalls TurnCalls  `json:"model_calls"`
 	Tools      TurnTools  `json:"tools"`
 	Commands   []string   `json:"commands" doc:"The shell commands the agent asked to run, in order, as the gateway's guard reads them. A command built at run time, or run from a script, is not seen."`
@@ -84,7 +83,7 @@ type ModelCount struct {
 
 // ModelCall is one model call of a turn.
 type ModelCall struct {
-	Exchange  string       `json:"exchange" doc:"GET /api/v0/calls/{exchange}/context shows what the call sent."`
+	Exchange  string       `json:"exchange" doc:"GET /api/v0/turns/{id}/calls/{exchange} shows what the call sent."`
 	Model     string       `json:"model"`
 	Status    int          `json:"status,omitempty" doc:"The HTTP status of the vendor's reply. Absent until it came."`
 	Usage     *event.Usage `json:"usage,omitempty"`
@@ -104,7 +103,7 @@ type ToolCall struct {
 	ID          string          `json:"id"`
 	Name        string          `json:"name"`
 	Input       json.RawMessage `json:"input,omitempty" doc:"The tool's input as the model sent it, when it is at most 4 KiB."`
-	InputCut    bool            `json:"input_left_out,omitempty" doc:"The input is over 4 KiB: GET /api/v0/turns/{id}/events has it whole."`
+	InputCut    bool            `json:"input_left_out,omitempty" doc:"The input is over 4 KiB: GET /api/v0/sessions/{id}/events?turn={turn} has it whole."`
 	Commands    []string        `json:"commands,omitempty" doc:"The shell commands the call runs, when it runs any."`
 	Error       *bool           `json:"error,omitempty" doc:"From the call's tool.completed. Absent until it came, or when the vendor did not say."`
 	RefusedRule string          `json:"refused_rule,omitempty" doc:"The forbid entry the gateway refused the call by."`
@@ -113,10 +112,9 @@ type ToolCall struct {
 // ApplyState is an apply of a turn: the answer to POST /api/v0/turns/{id}/apply,
 // and apply in GET /api/v0/turns/{id}/diff.
 type ApplyState struct {
-	State     string                `json:"state" doc:"none (never asked for), queued, running, applied, refused (a file in your folder changed, or the turn cannot be applied: error says why), or failed (the apply job did not finish)."`
+	State     string                `json:"state" doc:"none (never asked for), queued, running, applied, refused (a file in your folder changed, or the turn cannot be applied: error says why), or failed (the apply did not finish)."`
 	Turn      string                `json:"turn,omitempty"`
 	Session   string                `json:"session,omitempty"`
-	Job       string                `json:"job,omitempty" doc:"The apply job."`
 	Already   bool                  `json:"already,omitempty" doc:"The turn was applied before this request: nothing more was written, and files are what that apply wrote."`
 	Files     []string              `json:"files,omitempty" doc:"The files the apply wrote or removed in the person's folder, sorted."`
 	Count     int                   `json:"count,omitempty" doc:"How many files the apply wrote or removed. files may list fewer, with truncated."`
@@ -165,14 +163,18 @@ func (a *API) turnDiff(w http.ResponseWriter, r *http.Request, id string) {
 		d.DurationMS = &ms
 	}
 	if a.cfg.Queue != nil {
-		j, err := a.cfg.Queue.JobByAttempt(queue.DefaultTeam, id)
+		j, err := a.cfg.Queue.JobByTurn(queue.DefaultTeam, id)
 		switch {
 		case err == nil:
 			res, _ := queue.ReadResult(j.Result)
 			if j.Session == t.Session || res.Session == t.Session {
-				d.Job = j.ID
 				if j.Ended != nil && res.Changes != nil {
 					d.Files = turnFiles(*res.Changes)
+				}
+				if j.Ended == nil && d.State != queue.TurnStopped {
+					// As GET /api/v0/turns/{id}: running until its job has
+					// ended, unless it was stopped.
+					d.State, d.Ended, d.DurationMS = queue.TurnRunning, nil, nil
 				}
 				if st, err := a.applyState(id); err != nil {
 					a.internal(w)
@@ -287,10 +289,10 @@ func (a *API) turnActivity(d *TurnDiff) error {
 
 // Refusals of an apply. Fixed wording.
 const (
-	applyNotApplicable = "this turn's changes cannot be applied: its job has not ended, it is not the job's last attempt, " +
+	applyNotApplicable = "this turn's changes cannot be applied: it has not ended, " +
 		"or it did not run in an isolated copy of a folder"
 	applySessionClosed = "this turn's session was closed, so its copy and checkpoints are gone"
-	applyNoJob         = "no job of this service ran this turn"
+	applyNoJob         = "no turn of this service has this id"
 	applyBusy          = "an apply of an earlier turn of this session has not ended; ask again once it has"
 	applyNoConnector   = "the folder's connector is not connected, so nothing was written: start agentbus connector on the folder's machine, then ask again"
 )
@@ -320,7 +322,7 @@ func (a *API) applyTurn(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, http.StatusServiceUnavailable, applyNoConnector)
 		return
 	case errors.Is(err, queue.ErrFull):
-		writeError(w, http.StatusTooManyRequests, "too many jobs are waiting; retry later")
+		writeError(w, http.StatusTooManyRequests, "too many turns and applies are waiting; retry later")
 		return
 	case err != nil:
 		a.internal(w)
@@ -386,7 +388,7 @@ func (a *API) applyState(turn string) (*ApplyState, error) {
 
 // applyStateOf is an apply job as the API shows it.
 func applyStateOf(j queue.Job) ApplyState {
-	st := ApplyState{Turn: j.Links.AppliesTurn, Session: j.Session, Job: j.ID}
+	st := ApplyState{Turn: j.Links.AppliesTurn, Session: j.Session}
 	res, _ := queue.ReadResult(j.Result)
 	if res.Apply != nil {
 		st.Files, st.Pruned, st.Conflicts = res.Apply.Files, res.Apply.Pruned, res.Apply.Conflicts
@@ -406,7 +408,7 @@ func applyStateOf(j queue.Job) ApplyState {
 		st.State, st.Error = "refused", res.Refused
 	default:
 		st.State = "failed"
-		st.Error = "the apply did not finish: its job ended " + j.State
+		st.Error = "the apply did not finish: it ended " + queue.TurnState(j.State)
 		if j.Reason != "" {
 			st.Error += " (" + j.Reason + ")"
 		}

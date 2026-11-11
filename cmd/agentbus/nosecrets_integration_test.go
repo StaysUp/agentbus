@@ -141,11 +141,7 @@ func TestRunnerAgentClosedOff(t *testing.T) {
 	if code != http.StatusCreated {
 		t.Fatalf("create: %d %v", code, ag)
 	}
-	var j queue.Job
-	if code := callAPI(t, ns.server, ns.tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn",
-		"spec": map[string]any{"agent": ag["id"], "folder_ref": ns.ref, "connector": ns.connector, "prompt": "hello"}}, &j); code != 201 {
-		t.Fatalf("POST /api/v0/jobs: %d", code)
-	}
+	j := queueTurn(t, ns.server, ns.tok, map[string]any{"agent": ag["id"], "folder_ref": ns.ref, "connector": ns.connector, "prompt": "hello"})
 	jj := waitJob(t, ns.server, ns.tok, j.ID)
 	if jj.State != queue.Finished {
 		t.Fatalf("job %s %s %s", jj.State, jj.Reason, jj.Result)
@@ -156,7 +152,7 @@ func TestRunnerAgentClosedOff(t *testing.T) {
 	if got := ns.or.seen(); len(got) != 1 {
 		t.Fatalf("OpenRouter saw %v", got)
 	}
-	turn := jj.Attempts[0].ID
+	turn := jj.Turn
 	waitFor(t, "network.refused in the server's record", func() bool {
 		recs, _ := ns.server.store.After(0, store.Filter{Turn: turn}, 1000)
 		for _, r := range recs {
@@ -200,11 +196,7 @@ func TestRunnerHoldsNoKey(t *testing.T) {
 	if code != http.StatusCreated {
 		t.Fatalf("create: %d %v", code, ag)
 	}
-	var j queue.Job
-	if code := callAPI(t, ns.server, ns.tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn",
-		"spec": map[string]any{"agent": ag["id"], "folder_ref": ns.ref, "connector": ns.connector, "prompt": "hello"}}, &j); code != 201 {
-		t.Fatalf("POST /api/v0/jobs: %d", code)
-	}
+	j := queueTurn(t, ns.server, ns.tok, map[string]any{"agent": ag["id"], "folder_ref": ns.ref, "connector": ns.connector, "prompt": "hello"})
 	// While the turn runs, the server's record holds it and its model call.
 	var turn, exchange string
 	waitFor(t, "the running turn in the server's record", func() bool {
@@ -212,7 +204,7 @@ func TestRunnerHoldsNoKey(t *testing.T) {
 		if len(jj.Attempts) == 0 {
 			return false
 		}
-		turn = jj.Attempts[0].ID
+		turn = jj.Turn
 		recs, _ := ns.server.store.After(0, store.Filter{Turn: turn}, 1000)
 		for _, r := range recs {
 			var e struct{ Exchange string }
@@ -223,7 +215,7 @@ func TestRunnerHoldsNoKey(t *testing.T) {
 		return exchange != ""
 	})
 	waitFor(t, "the call's context on the server", func() bool {
-		code, raw := getAPI(t, ns.server, ns.tok, "/api/v0/calls/"+exchange+"/context")
+		code, raw := getAPI(t, ns.server, ns.tok, "/api/v0/turns/"+turn+"/calls/"+exchange)
 		return code == 200 && strings.Contains(raw, "fake turn") && strings.Contains(raw, "hello from the fake")
 	})
 	if st := waitState(t, ns.server, ns.tok, j.ID); st.State != queue.Running {
@@ -297,11 +289,7 @@ func TestRunnerHoldsNoKey(t *testing.T) {
 func TestRunnerUsesConnectedSubscription(t *testing.T) {
 	ns := startNoSecrets(t)
 	run := func() queue.Job {
-		var j queue.Job
-		if code := callAPI(t, ns.server, ns.tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn",
-			"spec": map[string]any{"agent": "claude", "folder_ref": ns.ref, "connector": ns.connector, "prompt": "hello"}}, &j); code != 201 {
-			t.Fatalf("POST /api/v0/jobs: %d", code)
-		}
+		j := queueTurn(t, ns.server, ns.tok, map[string]any{"agent": "claude", "folder_ref": ns.ref, "connector": ns.connector, "prompt": "hello"})
 		return waitJob(t, ns.server, ns.tok, j.ID)
 	}
 	// Off by default: the relay refuses, and the vendor sees nothing.
@@ -368,11 +356,7 @@ func TestRunnerUsesConnectedCodexSubscription(t *testing.T) {
 	t.Setenv("AGENTBUS_FAKE_THREAD", "fake-thread-1")
 	t.Setenv("AGENTBUS_FAKE_WAIT", ns.release)
 	run := func() queue.Job {
-		var j queue.Job
-		if code := callAPI(t, ns.server, ns.tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn",
-			"spec": map[string]any{"agent": "codex", "folder_ref": ns.ref, "connector": ns.connector, "prompt": "hello"}}, &j); code != 201 {
-			t.Fatalf("POST /api/v0/jobs: %d", code)
-		}
+		j := queueTurn(t, ns.server, ns.tok, map[string]any{"agent": "codex", "folder_ref": ns.ref, "connector": ns.connector, "prompt": "hello"})
 		return j
 	}
 	// Not connected: refused, and the vendor sees nothing.
@@ -450,11 +434,7 @@ func TestRunnerAgentAsksAnother(t *testing.T) {
 	t.Setenv("AGENTBUS_FAKE_ASKED", asked)
 	// A resume id, so the asking session can take its next turn.
 	t.Setenv("AGENTBUS_FAKE_STDOUT", `{"type":"result","subtype":"success","result":"done","session_id":"fake-resume-1"}`+"\n")
-	var j queue.Job
-	if code := callAPI(t, ns.server, ns.tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn",
-		"spec": map[string]any{"agent": "claude", "folder_ref": ns.ref, "connector": ns.connector, "prompt": "ask someone"}}, &j); code != 201 {
-		t.Fatalf("POST /api/v0/jobs: %d", code)
-	}
+	j := queueTurn(t, ns.server, ns.tok, map[string]any{"agent": "claude", "folder_ref": ns.ref, "connector": ns.connector, "prompt": "ask someone"})
 	j = waitJob(t, ns.server, ns.tok, j.ID)
 	b, err := os.ReadFile(asked)
 	if err != nil || !strings.HasPrefix(string(b), "202 ") {
@@ -463,17 +443,15 @@ func TestRunnerAgentAsksAnother(t *testing.T) {
 	// The result comes back as the asking session's next turn.
 	defer func() {
 		if t.Failed() {
-			var all struct{ Jobs []queue.Job }
-			callAPI(t, ns.server, ns.tok, "GET", "/api/v0/jobs", nil, &all)
-			for _, x := range all.Jobs {
+			all, _ := ns.server.queue.List(queue.DefaultTeam, queue.Filter{}, 100)
+			for _, x := range all {
 				t.Logf("job %s %s %s session %s links %+v result %s", x.ID, x.Kind, x.State, x.Session, x.Links, x.Result)
 			}
 		}
 	}()
 	waitFor(t, "the result delivered to the asking session", func() bool {
-		var jobs struct{ Jobs []queue.Job }
-		callAPI(t, ns.server, ns.tok, "GET", "/api/v0/jobs?session="+j.Session, nil, &jobs)
-		for _, x := range jobs.Jobs {
+		jobs, _ := ns.server.queue.List(queue.DefaultTeam, queue.Filter{Session: j.Session}, 100)
+		for _, x := range jobs {
 			if x.ID != j.ID && x.Links.ResultOf != nil && x.State == queue.Finished {
 				return true
 			}
@@ -498,8 +476,8 @@ func TestRunnerAgentAsksAnother(t *testing.T) {
 			t.Fatalf("the asked session's turns: %v %+v", err, list.Turns)
 		}
 		o := list.Turns[0].Origin
-		if o == nil || o.Kind != event.OriginAsked || o.Session != j.Session || o.Turn != j.Attempt {
-			t.Errorf("the asked turn's origin is %+v, want asked by %s turn %s", o, j.Session, j.Attempt)
+		if o == nil || o.Kind != event.OriginAsked || o.Session != j.Session || o.Turn != j.Turn {
+			t.Errorf("the asked turn's origin is %+v, want asked by %s turn %s", o, j.Session, j.Turn)
 		}
 	}
 }
@@ -510,17 +488,13 @@ func TestRunnerTurnShownBeforeItsFirstCall(t *testing.T) {
 	ns := startNoSecrets(t)
 	t.Setenv("AGENTBUS_FAKE_CALL", "")
 	t.Setenv("AGENTBUS_FAKE_WAIT", ns.release)
-	var j queue.Job
-	if code := callAPI(t, ns.server, ns.tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn",
-		"spec": map[string]any{"agent": "claude", "folder_ref": ns.ref, "connector": ns.connector, "prompt": "hello"}}, &j); code != 201 {
-		t.Fatalf("POST /api/v0/jobs: %d", code)
-	}
+	j := queueTurn(t, ns.server, ns.tok, map[string]any{"agent": "claude", "folder_ref": ns.ref, "connector": ns.connector, "prompt": "hello"})
 	waitFor(t, "the waiting turn in the server's record", func() bool {
 		jj := waitState(t, ns.server, ns.tok, j.ID)
 		if len(jj.Attempts) == 0 {
 			return false
 		}
-		list, _ := ns.server.store.Turns(store.TurnQuery{Turn: jj.Attempts[0].ID, Limit: 1})
+		list, _ := ns.server.store.Turns(store.TurnQuery{Turn: jj.Turn, Limit: 1})
 		return len(list.Turns) == 1 && list.Turns[0].State == "running"
 	})
 	os.WriteFile(ns.release, nil, 0o600)
@@ -547,10 +521,7 @@ func TestRunnerHomePerSession(t *testing.T) {
 	}
 	turn := func(spec map[string]any) (queue.Job, fakeReport) {
 		t.Helper()
-		var j queue.Job
-		if code := callAPI(t, ns.server, ns.tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn", "spec": spec}, &j); code != 201 {
-			t.Fatalf("POST /api/v0/jobs: %d", code)
-		}
+		j := queueTurn(t, ns.server, ns.tok, spec)
 		if jj := waitJob(t, ns.server, ns.tok, j.ID); jj.State != queue.Finished {
 			t.Fatalf("job %s %s %s", jj.State, jj.Reason, jj.Result)
 		}
@@ -589,8 +560,8 @@ func TestRunnerHomePerSession(t *testing.T) {
 		t.Fatalf("session B: home %q, seen %q", homeOf(repB), repB.Seen)
 	}
 	// A review runs in a home of its own too, removed once it ends.
-	var rev queue.Job
-	if code := callAPI(t, ns.server, ns.tok, "POST", "/api/v0/jobs/"+a.ID+"/review", map[string]any{"agent": ag["id"]}, &rev); code != http.StatusCreated {
+	code, rev := reviewTurn(t, ns.server, ns.tok, a.Turn, map[string]any{"agent": ag["id"]})
+	if code != http.StatusAccepted {
 		t.Fatalf("review: %d", code)
 	}
 	if rev = waitJob(t, ns.server, ns.tok, rev.ID); rev.State != queue.Finished {
@@ -607,7 +578,7 @@ func TestRunnerHomePerSession(t *testing.T) {
 	if left, _ := os.ReadDir(realHome); len(left) != 0 {
 		t.Fatalf("the runner user's home holds %v", left)
 	}
-	if code := callAPI(t, ns.server, ns.tok, "POST", "/api/v0/workspaces/"+a.Session+"/close", nil, nil); code != 200 {
+	if code := callAPI(t, ns.server, ns.tok, "PATCH", "/api/v0/sessions/"+a.Session, map[string]any{"closed": true}, nil); code != 200 {
 		t.Fatalf("close A: %d", code)
 	}
 	waitFor(t, "session A's home removed", func() bool { _, err := os.Stat(homeA); return os.IsNotExist(err) })

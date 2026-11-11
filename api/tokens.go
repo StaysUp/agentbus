@@ -10,7 +10,7 @@ package api
 // What a turn token must never do: read or change the settings (the policy
 // and the instructions: every /api/v0/settings route is main-token only),
 // change or remove saved agents, see or make tokens (none is
-// ever in a reply), close workspaces, write program events, or read or write
+// ever in a reply), close sessions, write program events, or read or write
 // sessions outside its request tree. A read-only turn's token only reads.
 // Its own session and the person's session, the tree's root, are never
 // continued by it: results reach them by delivery only.
@@ -31,9 +31,7 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strings"
 
-	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/settings"
@@ -50,23 +48,16 @@ const (
 	// token's request tree. Absent, it is set to the token's own, so the
 	// reply holds that session only.
 	treeSessionQuery
-	// treeCall: {id} is a model call whose stored request belongs to a
-	// session in the token's request tree.
-	treeCall
-	// treeJob: {id} is a job of a session in the token's request tree.
-	treeJob
-	// treeAttempt: {id} is an attempt of a job in the token's request tree.
-	treeAttempt
+	// treeTurn: {id} is a turn of a session in the token's request tree:
+	// the session query's when sent, else the turn's newest.
+	treeTurn
 	// askTurn: POST /api/v0/turns. The handler checks the rest (askChecks).
 	askTurn
-	// askReview: {id} is a job of a session in the token's request tree, to
+	// askReview: {id} is a turn of a session in the token's request tree, to
 	// review. Not for a read-only turn.
 	askReview
-	// askedJob: {id} is a job that work in the token's request tree asked
-	// for, to cancel. Not for a read-only turn.
-	askedJob
-	// askedTurn: {id} is a turn of such a job, to stop. Not for a read-only
-	// turn.
+	// askedTurn: {id} is a turn that work in the token's request tree asked
+	// for, to stop. Not for a read-only turn.
 	askedTurn
 	// anyRead: a read that holds no session's data, such as the saved
 	// agents.
@@ -74,24 +65,24 @@ const (
 	// renameSession: {id} is a session in the token's scope, to rename. Not
 	// for a read-only turn.
 	renameSession
-	// applyTurnTok: {id} is a turn of a job of a session in the token's
-	// scope, whose changes to apply. Not for a read-only turn.
+	// applyTurnTok: {id} is a turn of a session in the token's scope, whose
+	// changes to apply. Not for a read-only turn.
 	applyTurnTok
 )
 
 // Refusals a turn token gets. Fixed wording: they never quote the request.
 const (
 	turnWriteRefused = "a turn token cannot call this route; it takes the main token. " +
-		"A turn token reads its request tree's sessions, turns and jobs, lists agents, " +
-		"and asks for work with POST /api/v0/turns and POST /api/v0/jobs/{id}/review"
+		"A turn token reads its request tree's sessions and turns, lists agents, " +
+		"and asks for work with POST /api/v0/turns and POST /api/v0/turns/{id}/review"
 	turnSessionRefused  = "a turn token reads only its own session and the sessions its request tree started"
 	turnCallRefused     = "a turn token reads only the calls of its own session and the sessions its request tree started"
-	turnReadOnly        = "this turn is read-only, so its token only reads; it cannot start, continue, review, cancel or stop work, rename sessions or apply changes"
+	turnReadOnly        = "this turn is read-only, so its token only reads; it cannot start, continue, review or stop work, rename sessions or apply changes"
 	turnContinueRefused = "a turn token continues only sessions its request tree started, never its own or the person's; " +
 		"results come back to your session as later turns"
 	turnFolderRefused  = "a turn token starts sessions only in its own session's folder, or a folder inside it"
 	turnIsolateRefused = "a session a turn token starts always gets its own isolated copy of its folder; leave isolate out"
-	turnAskedRefused   = "a turn token cancels and stops only work its request tree asked for"
+	turnAskedRefused   = "a turn token stops only turns its request tree asked for"
 )
 
 // The refusal when [agent_api] turns a kind of call off. Fixed wording.
@@ -168,7 +159,7 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 	}
 	failed := func(err error) (*http.Request, bool) {
 		if errors.Is(err, queue.ErrNotFound) {
-			writeError(w, http.StatusNotFound, "no such job")
+			writeError(w, http.StatusNotFound, noTurn)
 		} else {
 			a.internal(w)
 		}
@@ -183,21 +174,21 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 		return nil, false
 	}
 	switch rt.turn {
-	case askTurn, askReview, askedJob, askedTurn, renameSession, applyTurnTok:
+	case askTurn, askReview, askedTurn, renameSession, applyTurnTok:
 		if g.ReadOnly {
 			return refuse(turnReadOnly)
 		}
 	}
 	api := perm.AgentAPI
 	switch {
-	case (rt.turn == treeSessionPath || rt.turn == treeSessionQuery || rt.turn == treeCall || rt.turn == treeJob || rt.turn == treeAttempt) && !*api.Read:
-		return refuse(turnSwitchedOff("read sessions, turns, calls or jobs", "read"))
+	case (rt.turn == treeSessionPath || rt.turn == treeSessionQuery || rt.turn == treeTurn) && !*api.Read:
+		return refuse(turnSwitchedOff("read sessions, turns or calls", "read"))
 	case rt.turn == anyRead && !*api.ListAgents:
 		return refuse(turnSwitchedOff("list agents or harnesses", "list_agents"))
 	case rt.turn == askReview && !*api.Review:
 		return refuse(turnSwitchedOff("ask for reviews", "review"))
-	case (rt.turn == askedJob || rt.turn == askedTurn) && !*api.Cancel:
-		return refuse(turnSwitchedOff("cancel jobs or stop turns", "cancel"))
+	case rt.turn == askedTurn && !*api.Cancel:
+		return refuse(turnSwitchedOff("stop turns", "cancel"))
 	case rt.turn == renameSession && !*api.Rename:
 		return refuse(turnSwitchedOff("rename sessions", "rename"))
 	case rt.turn == applyTurnTok && !*api.Apply:
@@ -227,55 +218,46 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 		}
 		q.Set("session", g.Session)
 		r.URL.RawQuery = q.Encode()
-	case treeCall:
-		session, found, err := a.cfg.Store.CallSession(id)
+	case treeTurn:
+		session := ""
+		if q := r.URL.Query(); q.Has("session") {
+			if vs := q["session"]; len(vs) != 1 {
+				return refuse(turnSessionRefused)
+			}
+			session = q.Get("session")
+		}
+		session, err := a.sessionOfTurn(id, session)
 		if err != nil {
 			a.internal(w)
 			return nil, false
 		}
-		if !found {
-			writeError(w, http.StatusNotFound, "no request body is stored for this call")
+		if session == "" {
+			writeError(w, http.StatusNotFound, noTurn)
 			return nil, false
 		}
 		if ok, err := inScope(session); err != nil {
 			return failed(err)
 		} else if !ok {
-			return refuse(turnCallRefused)
+			return refuse(turnSessionRefused)
 		}
-	case treeJob, askReview:
-		j, err := a.queueJob(id)
+	case askReview, applyTurnTok:
+		if a.cfg.Queue == nil {
+			return failed(queue.ErrNotFound)
+		}
+		j, err := a.cfg.Queue.JobByTurn(queue.DefaultTeam, id)
 		if err != nil {
 			return failed(err)
 		}
-		if ok, err := inScope(j.Session); err != nil {
+		if ok, err := inScope(turnSession(j)); err != nil {
 			return failed(err)
 		} else if !ok {
 			return refuse(turnSessionRefused)
 		}
-	case treeAttempt, applyTurnTok:
+	case askedTurn:
 		if a.cfg.Queue == nil {
 			return failed(queue.ErrNotFound)
 		}
-		j, err := a.cfg.Queue.JobByAttempt(queue.DefaultTeam, id)
-		if err != nil {
-			return failed(err)
-		}
-		if ok, err := inScope(j.Session); err != nil {
-			return failed(err)
-		} else if !ok {
-			return refuse(turnSessionRefused)
-		}
-	case askedJob, askedTurn:
-		if a.cfg.Queue == nil {
-			return failed(queue.ErrNotFound)
-		}
-		var j queue.Job
-		var err error
-		if rt.turn == askedJob {
-			j, err = a.cfg.Queue.Get(queue.DefaultTeam, id)
-		} else {
-			j, err = a.cfg.Queue.JobByAttempt(queue.DefaultTeam, id)
-		}
+		j, err := a.cfg.Queue.JobByTurn(queue.DefaultTeam, id)
 		if err != nil {
 			return failed(err)
 		}
@@ -310,18 +292,7 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 		}
 	}
 	ctx := context.WithValue(r.Context(), grantKey{}, &turnCall{g: g, perm: perm})
-	if rt.serve != nil && isJobsRoute(rt) {
-		// The jobs API checks the main token itself. This request passed the
-		// turn token's checks; a review it asks for names the asking turn,
-		// and is held to [limits].
-		ctx = jobs.Admit(ctx, askedLinks(g), queueLimits(perm))
-	}
 	return r.WithContext(ctx), true
-}
-
-// isJobsRoute says rt is served by the jobs API (Config.Jobs).
-func isJobsRoute(rt *route) bool {
-	return strings.HasPrefix(rt.path, "/api/v0/jobs") || strings.HasPrefix(rt.path, "/api/v0/attempts")
 }
 
 // askedLinks are the links of work g's turn asks for: the asking turn, and one

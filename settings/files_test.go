@@ -214,9 +214,10 @@ func TestFilesInit(t *testing.T) {
 func TestRemote(t *testing.T) {
 	var status int
 	var sawToken string
+	var gone bool // the server has no settings route
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sawToken = r.Header.Get("Authorization")
-		if r.URL.Path != "/api/v0/runners/rn_1/settings" || r.Method != "GET" {
+		if gone || r.URL.Path != "/api/v0/runner/settings" || r.Method != "GET" {
 			http.NotFound(w, r)
 			return
 		}
@@ -265,7 +266,7 @@ func TestRemote(t *testing.T) {
 	if _, _, err := r.Policy(); !errors.As(err, &se) || !strings.Contains(se.Why, "line 2") || se.Where != remoteWhere {
 		t.Fatalf("broken on the server: %v", err)
 	}
-	r.Enrolled("rn_2", "rt_secret")
+	gone = true
 	if _, _, err := r.Instructions(); !errors.As(err, &se) || !strings.Contains(se.Why, "404") {
 		t.Fatalf("no route: %v", err)
 	}

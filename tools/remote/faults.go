@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"text/tabwriter"
 	"time"
+
+	"github.com/staysup/agentbus/queue"
 )
 
 // outcome is one case: what happened, the text the person sees, and whether
@@ -82,7 +84,7 @@ func (w *world) caseUploadCut() (outcome, error) {
 	ref := w.folders["cut-upload"]
 	before := len(lines(w.serverLog))
 	done := w.turnAsync(map[string]any{"agent": "claude", "folder_ref": ref, "connector": w.connector, "isolate": true, "prompt": "cut"})
-	if err := waitFor(2*time.Minute, "the connector's first pack", func() bool { return w.logHas(before, "path=/api/v0/packs ") }); err != nil {
+	if err := waitFor(2*time.Minute, "the connector's first pack", func() bool { return w.logHas(before, "path=/api/v0/runner/packs ") }); err != nil {
 		return outcome{}, err
 	}
 	stopProc(w.conn, syscall.SIGKILL)
@@ -114,7 +116,7 @@ func (w *world) caseFetchCut() (outcome, error) {
 	before := len(lines(w.serverLog))
 	body := map[string]any{"agent": "claude", "folder_ref": ref, "connector": w.connector, "isolate": true, "prompt": "cut"}
 	done := w.turnAsync(body)
-	if err := waitFor(2*time.Minute, "the runner's first fetch", func() bool { return w.logHas(before, "path=/api/v0/packs/fetch ") }); err != nil {
+	if err := waitFor(2*time.Minute, "the runner's first fetch", func() bool { return w.logHas(before, "path=/api/v0/runner/packs/fetch ") }); err != nil {
 		return outcome{}, err
 	}
 	if err := w.stopRunner("KILL"); err != nil {
@@ -135,13 +137,13 @@ func (w *world) caseFetchCut() (outcome, error) {
 	// The same session again, when it has one: a clear error or a whole copy.
 	if r.ID != "" {
 		r2 := <-w.turnAsync(map[string]any{"session": r.ID, "prompt": "next"})
-		if r2.Job == "" {
+		if r2.Turn == "" {
 			happened += "; the session's next turn refused: " + r2.code
 			ok = ok && strings.HasPrefix(r2.code, "409") && strings.Contains(r2.raw, "start a new session")
-		} else if j2, err := w.waitJob(r2.Job, 3*time.Minute); err != nil {
+		} else if j2, err := w.waitJob(r2.Turn, 3*time.Minute); err != nil {
 			return outcome{}, err
 		} else if j2.State == "finished" {
-			whole, why := w.onlyStandIn(j2.Attempt)
+			whole, why := w.onlyStandIn(j2.Turn)
 			happened += "; the session's next turn finished, its diff " + why
 			ok = ok && whole
 		} else {
@@ -173,7 +175,7 @@ func (w *world) caseRestart() (outcome, error) {
 	// A slow turn; control restarts while it runs.
 	done := w.turnAsync(map[string]any{"session": t1.ID, "prompt": "slow"})
 	r := <-done
-	if r.Job == "" {
+	if r.Turn == "" {
 		return outcome{}, fmt.Errorf("the slow turn: %s", r.code)
 	}
 	time.Sleep(2 * time.Second)
@@ -182,7 +184,7 @@ func (w *world) caseRestart() (outcome, error) {
 		return outcome{}, err
 	}
 	fmt.Println("  control restarted while the slow turn ran")
-	j2, err := w.waitJob(r.Job, 3*time.Minute)
+	j2, err := w.waitJob(r.Turn, 3*time.Minute)
 	if err != nil {
 		return outcome{}, err
 	}
@@ -235,7 +237,7 @@ func (w *world) caseRunnerCut() (outcome, error) {
 		return outcome{}, err
 	}
 	r := <-w.turnAsync(map[string]any{"session": t1.ID, "prompt": "slow"})
-	if r.Job == "" {
+	if r.Turn == "" {
 		return outcome{}, fmt.Errorf("the slow turn: %s", r.code)
 	}
 	time.Sleep(2 * time.Second)
@@ -243,7 +245,7 @@ func (w *world) caseRunnerCut() (outcome, error) {
 		return outcome{}, err
 	}
 	fmt.Println("  runner stopped (KILL) while the slow turn ran")
-	j, err := w.waitJob(r.Job, 3*time.Minute)
+	j, err := w.waitJob(r.Turn, 3*time.Minute)
 	if err != nil {
 		return outcome{}, err
 	}
@@ -289,36 +291,37 @@ func (w *world) caseRepeat() (outcome, error) {
 	body := map[string]any{"agent": "claude", "folder_ref": w.ref, "connector": w.connector, "isolate": true, "prompt": "twice", "idempotency_key": key}
 	a, b := w.turnAsync(body), w.turnAsync(body)
 	ra, rb := <-a, <-b
-	if ra.Job == "" || rb.Job == "" {
+	if ra.Turn == "" || rb.Turn == "" {
 		return outcome{happened: "a request was refused: " + ra.code + " / " + rb.code}, nil
 	}
-	j, err := w.waitJob(ra.Job, 3*time.Minute)
+	j, err := w.waitJob(ra.Turn, 3*time.Minute)
 	if err != nil {
 		return outcome{}, err
 	}
 	var turns struct{ Turns []struct{ ID string } }
 	w.api.call("GET", "/api/v0/turns?session="+ra.ID, nil, &turns)
-	steps := []string{fmt.Sprintf("turn requests: jobs %s and %s, existing %t/%t, session turns %d, job %s",
-		ra.Job, rb.Job, ra.Existing, rb.Existing, len(turns.Turns), j.State)}
-	ok := ra.Job == rb.Job && ra.ID == rb.ID && ra.Existing != rb.Existing && len(turns.Turns) == 1 && j.State == "finished"
+	steps := []string{fmt.Sprintf("turn requests: turns %s and %s, existing %t/%t, session turns %d, job %s",
+		ra.Turn, rb.Turn, ra.Existing, rb.Existing, len(turns.Turns), j.State)}
+	ok := ra.Turn == rb.Turn && ra.ID == rb.ID && ra.Existing != rb.Existing && len(turns.Turns) == 1 && j.State == "finished"
 	// The same apply twice at once.
 	var wg sync.WaitGroup
 	var codes [2]int
 	var answers [2]applyAnswer
 	for i := range 2 {
 		wg.Add(1)
-		go func() { defer wg.Done(); codes[i], answers[i] = w.api.apply(j.Attempt) }()
+		go func() { defer wg.Done(); codes[i], answers[i] = w.api.apply(j.Turn) }()
 	}
 	wg.Wait()
-	var applies struct{ Jobs []struct{ ID, State string } }
-	w.api.call("GET", "/api/v0/jobs?kind=apply&session="+ra.ID, nil, &applies)
+	var applies struct{ Jobs []queue.Job }
+	if q, err := w.api.queue(); err == nil {
+		applies.Jobs, _ = q.List(queue.DefaultTeam, queue.Filter{Kind: queue.KindApply, Session: ra.ID}, 100)
+	}
 	got := text(filepath.Join(w.dir, "project", "a.txt"))
 	steps = append(steps, fmt.Sprintf("applies: %d %s and %d %s, apply jobs %d, a.txt %q",
 		codes[0], answers[0].State, codes[1], answers[1].State, len(applies.Jobs), got))
 	ok = ok && codes[0] == 200 && codes[1] == 200 && answers[0].State == "applied" && answers[1].State == "applied" &&
-		answers[0].Job != "" && answers[0].Job == answers[1].Job &&
 		len(applies.Jobs) == 1 && got == "one\ntwice\n"
-	return outcome{happened: strings.Join(steps, "; "), seen: "one turn and one apply; the second answer says existing (turn) or the same job (apply)", ok: ok}, nil
+	return outcome{happened: strings.Join(steps, "; "), seen: "one turn and one apply; the second answer says existing (turn) or applied again (apply)", ok: ok}, nil
 }
 
 // caseNoConnector stops the connector and, once control has not seen it for
@@ -351,7 +354,7 @@ func (w *world) caseNoConnector() (outcome, error) {
 	}
 	steps = append(steps, fmt.Sprintf("its job %s %s", j.State, j.Reason))
 	// Refused before the turn started: 503 with the reason, and no job.
-	ok = ok && r.Job == "" && strings.HasPrefix(r.code, "503") && strings.Contains(r.raw, "connector is not connected")
+	ok = ok && r.Turn == "" && strings.HasPrefix(r.code, "503") && strings.Contains(r.raw, "connector is not connected")
 	if err := w.startConnector(); err != nil {
 		return outcome{}, err
 	}
@@ -406,11 +409,13 @@ func (w *world) resetProject() {
 	os.Remove(filepath.Join(proj, "new.txt"))
 }
 
-// turnReply is the answer to POST /api/v0/turns, sent in the background.
+// turnReply is the answer to POST /api/v0/turns, sent in the background. ID
+// is the session.
 type turnReply struct {
-	ID, Turn, Job string
-	Existing      bool
-	code, raw     string
+	ID        string `json:"session"`
+	Turn      string
+	Existing  bool
+	code, raw string
 }
 
 func (w *world) turnAsync(body map[string]any) <-chan turnReply {
@@ -430,9 +435,10 @@ type fullJob struct {
 	refused, err string
 }
 
-func (w *world) getJob(id string) fullJob {
+// getJob is the job of turn, from the server's queue.
+func (w *world) getJob(turn string) fullJob {
 	var j job
-	w.api.call("GET", "/api/v0/jobs/"+id, nil, &j)
+	w.api.jobOfTurn(turn, &j)
 	var res struct{ Refused, Error string }
 	if len(j.Result) > 0 {
 		_ = json.Unmarshal(j.Result, &res)
@@ -444,18 +450,19 @@ func (w *world) getJob(id string) fullJob {
 // before its turn started answers an error and no job: then the job is
 // empty, and seen reports the answer.
 func (w *world) ended(r turnReply) (fullJob, error) {
-	if r.Job == "" {
+	if r.Turn == "" {
 		if strings.HasPrefix(r.code, "2") {
-			return fullJob{}, fmt.Errorf("POST /api/v0/turns answered %s without a job", r.code)
+			return fullJob{}, fmt.Errorf("POST /api/v0/turns answered %s without a turn", r.code)
 		}
 		return fullJob{job: job{State: "refused"}}, nil
 	}
-	return w.waitJob(r.Job, 3*time.Minute)
+	return w.waitJob(r.Turn, 3*time.Minute)
 }
 
-func (w *world) waitJob(id string, limit time.Duration) (fullJob, error) {
+// waitJob waits for the job of turn to end.
+func (w *world) waitJob(turn string, limit time.Duration) (fullJob, error) {
 	var j fullJob
-	err := waitFor(limit, "job "+id, func() bool { j = w.getJob(id); return j.Ended != nil })
+	err := waitFor(limit, "turn "+turn, func() bool { j = w.getJob(turn); return j.Ended != nil })
 	return j, err
 }
 

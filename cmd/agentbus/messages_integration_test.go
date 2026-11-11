@@ -111,7 +111,7 @@ func startRun(t *testing.T, svc *service, tok, agent, stdout string) (string, st
 	if code != http.StatusAccepted {
 		t.Fatalf("run: %d %s", code, raw)
 	}
-	id := out["id"].(string)
+	id := out["session"].(string)
 	waitClosed(t, svc.store, id)
 	return id, out["base_url"].(string)
 }
@@ -263,10 +263,9 @@ func TestRunWithSessionRunsNextTurnInSameSession(t *testing.T) {
 		}
 		code, out, raw := postMessage(t, svc, tok, id, body)
 		next, _ := out["turn"].(string)
-		job, _ := out["job"].(string)
 		session := strings.Split(base, "/t/")[0]
-		if code != http.StatusAccepted || next == "" || job == "" || strings.HasSuffix(base, "/t/"+next) ||
-			strings.TrimSpace(raw) != `{"base_url":"`+session+`/t/`+next+`","id":"`+id+`","turn":"`+next+`","job":"`+job+`"}` {
+		if code != http.StatusAccepted || next == "" || strings.HasSuffix(base, "/t/"+next) ||
+			strings.TrimSpace(raw) != `{"session":"`+id+`","turn":"`+next+`","state":"running","base_url":"`+session+`/t/`+next+`"}` {
 			t.Fatalf("%s: %d %s, want 202 with the same id, a new turn, and the session's base URL with it", name, code, raw)
 		}
 		base = out["base_url"].(string) // this turn's own
@@ -349,7 +348,7 @@ func TestRunWithSessionRefusals(t *testing.T) {
 	// A message sent while it runs is queued behind it, and runs next.
 	before = svc.store.Last()
 	if code, out, raw := postMessage(t, svc, tok, id, map[string]any{"prompt": "three"}); code != http.StatusAccepted ||
-		out["queued"] != true || out["ahead"] != float64(1) || out["turn"] != "" {
+		out["state"] != "queued" || out["ahead"] != float64(1) || out["turn"] == "" || out["base_url"] != nil {
 		t.Errorf("while running: %d %s, want 202 queued with ahead 1", code, raw)
 	}
 	if svc.store.Last() != before {
@@ -369,9 +368,9 @@ func TestRunWithSessionRefusals(t *testing.T) {
 	if code != http.StatusAccepted {
 		t.Fatalf("run %d %s", code, raw)
 	}
-	running := out["id"].(string)
+	running := out["session"].(string)
 	if code, out, raw := postMessage(t, svc, tok, running, map[string]any{"prompt": "x"}); code != http.StatusAccepted ||
-		out["queued"] != true {
+		out["state"] != "queued" {
 		t.Errorf("first run running: %d %s, want 202 queued", code, raw)
 	}
 	os.WriteFile(release2, nil, 0o600)
@@ -475,7 +474,7 @@ func TestRunWithSessionOneTurnAtATime(t *testing.T) {
 			defer wg.Done()
 			var out map[string]any
 			codes[i], out, _ = postMessage(t, svc, tok, id, map[string]any{"prompt": "two"})
-			queued[i] = out["queued"] == true
+			queued[i] = out["state"] == "queued"
 		}(i)
 	}
 	wg.Wait()

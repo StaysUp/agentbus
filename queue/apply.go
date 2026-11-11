@@ -61,7 +61,7 @@ func (q *Queue) appliesWhere(team, where string, arg any) ([]Job, error) {
 }
 
 // sessionTurn is one turn of a session whose changes can be applied: the
-// turn (its job's last attempt) and its changeset, in the session's order.
+// turn and its changeset, in the session's order.
 type sessionTurn struct {
 	turn, changeset string
 }
@@ -70,7 +70,7 @@ type sessionTurn struct {
 // they ran: a session's turn jobs run one at a time, so the order they
 // ended in, which labels can make differ from the order they were made in.
 func (q *Queue) appliableTurns(team, session string) ([]sessionTurn, error) {
-	rows, err := q.db.Query(`SELECT attempt, COALESCE(json_extract(result, '$.changeset'), '') FROM jobs
+	rows, err := q.db.Query(`SELECT turn, COALESCE(json_extract(result, '$.changeset'), '') FROM jobs
 		WHERE team = ? AND session = ? AND kind = 'turn' AND ended IS NOT NULL AND attempt IS NOT NULL
 		ORDER BY ended, rowid`, team, session)
 	if err != nil {
@@ -104,7 +104,7 @@ func indexOf(turns []sessionTurn, turn string) int {
 // apply up to a turn applies every turn before it. Else the newest apply of
 // turn, refused or not ended; ok is false when there is none.
 func (q *Queue) AppliedBy(team, turn string) (job Job, ok bool, err error) {
-	j, err := q.JobByAttempt(team, turn)
+	j, err := q.JobByTurn(team, turn)
 	if err != nil {
 		return Job{}, false, err
 	}
@@ -145,11 +145,11 @@ func (q *Queue) Apply(team, turn string) (job Job, created bool, err error) {
 	// two at once must not both start from the same last applied turn.
 	q.applyMu.Lock()
 	defer q.applyMu.Unlock()
-	j, err := q.JobByAttempt(team, turn)
+	j, err := q.JobByTurn(team, turn)
 	if err != nil {
 		return Job{}, false, err
 	}
-	if j.Kind != KindTurn || j.Ended == nil || j.Attempt != turn {
+	if j.Kind != KindTurn || j.Ended == nil || j.Attempt == "" {
 		return Job{}, false, ErrNotApplicable
 	}
 	r, _ := ReadResult(j.Result)

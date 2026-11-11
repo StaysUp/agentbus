@@ -122,7 +122,7 @@ func TestSearchFindsEachPlaceOnceNewestFirst(t *testing.T) {
 	if h.Block != "tool_result" || h.Role != "user" || h.Kind != body.Message || h.Snippet != "package a // the Needle is here" {
 		t.Errorf("tool_result hit %+v", h)
 	}
-	if h.Read != "/api/v0/calls/x-2/pieces/3" || res.Hits[2].Read != "/api/v0/calls/x-1/pieces/reply" {
+	if h.Read != "/api/v0/turns/t_1/calls/x-2/pieces/3" || res.Hits[2].Read != "/api/v0/turns/t_1/calls/x-1/pieces/reply" {
 		t.Errorf("read paths %q %q", h.Read, res.Hits[2].Read)
 	}
 	if r := res.Hits[2]; r.Block != "tool_use" || r.Snippet != "/a/needle.go" {
@@ -378,7 +378,7 @@ func TestSearchCodexReplyItemsOnce(t *testing.T) {
 	}
 	roles := map[string]bool{}
 	for _, h := range res.Hits {
-		if h.Source != "reply" || h.Kind != "input_item" || h.Read != "/api/v0/calls/x-1/pieces/reply" {
+		if h.Source != "reply" || h.Kind != "input_item" || h.Read != "/api/v0/turns/t_1/calls/x-1/pieces/reply" {
 			t.Errorf("hit %+v, want a reply item", h)
 		}
 		roles[h.Role] = true

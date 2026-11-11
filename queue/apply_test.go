@@ -79,7 +79,7 @@ func TestApplyUpToATurn(t *testing.T) {
 		makeJob(t, q, Spec{Session: first.Session})
 		turns = append(turns, run(t, q, rn, Result{Changeset: hexOf(c)}))
 	}
-	a2, created, err := q.Apply(DefaultTeam, turns[1].Attempt)
+	a2, created, err := q.Apply(DefaultTeam, turns[1].Turn)
 	if err != nil || !created || a2.Spec.ApplyFrom != "" || a2.Spec.ApplyTo != hexOf('2') || a2.Spec.Connector != conA || a2.Spec.FolderRef != refX {
 		t.Fatalf("apply up to turn 2: %+v %v %v", a2.Spec, created, err)
 	}
@@ -88,24 +88,24 @@ func TestApplyUpToATurn(t *testing.T) {
 		t.Fatalf("the runner took %s", got)
 	}
 	// While it runs, an apply of turn 1 is that apply; of turn 3, busy.
-	if j, created, err := q.Apply(DefaultTeam, turns[0].Attempt); err != nil || created || j.ID != a2.ID {
+	if j, created, err := q.Apply(DefaultTeam, turns[0].Turn); err != nil || created || j.ID != a2.ID {
 		t.Fatalf("turn 1 while turn 2's apply runs: %s %v %v", j.ID, created, err)
 	}
-	if _, _, err := q.Apply(DefaultTeam, turns[2].Attempt); err != ErrApplyBusy {
+	if _, _, err := q.Apply(DefaultTeam, turns[2].Turn); err != ErrApplyBusy {
 		t.Fatalf("turn 3 while turn 2's apply runs: %v", err)
 	}
 	run(t, q, conn, Result{Apply: &ApplyResult{Files: []string{"a.txt"}}})
-	if j, ok, err := q.AppliedBy(DefaultTeam, turns[0].Attempt); err != nil || !ok || j.ID != a2.ID {
+	if j, ok, err := q.AppliedBy(DefaultTeam, turns[0].Turn); err != nil || !ok || j.ID != a2.ID {
 		t.Fatalf("turn 1 applied by %s %v %v", j.ID, ok, err)
 	}
-	if j, created, err := q.Apply(DefaultTeam, turns[0].Attempt); err != nil || created || j.ID != a2.ID {
+	if j, created, err := q.Apply(DefaultTeam, turns[0].Turn); err != nil || created || j.ID != a2.ID {
 		t.Fatalf("turn 1 after turn 2's apply: %s %v %v", j.ID, created, err)
 	}
-	a3, created, err := q.Apply(DefaultTeam, turns[2].Attempt)
+	a3, created, err := q.Apply(DefaultTeam, turns[2].Turn)
 	if err != nil || !created || a3.Spec.ApplyFrom != hexOf('2') || a3.Spec.ApplyTo != hexOf('3') {
 		t.Fatalf("apply up to turn 3: %+v %v %v", a3.Spec, created, err)
 	}
-	if _, ok, _ := q.AppliedBy(DefaultTeam, turns[2].Attempt); !ok {
+	if _, ok, _ := q.AppliedBy(DefaultTeam, turns[2].Turn); !ok {
 		t.Fatal("turn 3 has no apply")
 	}
 }
@@ -180,7 +180,7 @@ func TestApplyAtOnce(t *testing.T) {
 	}
 	out := make(chan answer, 2)
 	for _, tn := range []Job{turns[1], turns[2]} {
-		go func() { j, c, err := q.Apply(DefaultTeam, tn.Attempt); out <- answer{j, c, err} }()
+		go func() { j, c, err := q.Apply(DefaultTeam, tn.Turn); out <- answer{j, c, err} }()
 	}
 	made := 0
 	for range 2 {
@@ -246,7 +246,7 @@ func TestFolderJobsNeedTheirConnector(t *testing.T) {
 		t.Fatal(err)
 	}
 	c.add(RunnerFresh + time.Second)
-	if _, _, err := q.Apply(DefaultTeam, a.ID); !errors.Is(err, ErrNoConnector) {
+	if _, _, err := q.Apply(DefaultTeam, j.Turn); !errors.Is(err, ErrNoConnector) {
 		t.Fatalf("apply without its connector: %v", err)
 	}
 	if applies, _ := q.sessionApplies(DefaultTeam, j.Session); len(applies) != 0 {
@@ -255,7 +255,7 @@ func TestFolderJobsNeedTheirConnector(t *testing.T) {
 	if _, err := q.RunnerBeat(conn.ID, 1, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, created, err := q.Apply(DefaultTeam, a.ID); err != nil || !created {
+	if _, created, err := q.Apply(DefaultTeam, j.Turn); err != nil || !created {
 		t.Fatalf("apply with its connector back: %v %v", created, err)
 	}
 }

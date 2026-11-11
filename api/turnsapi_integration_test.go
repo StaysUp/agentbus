@@ -62,7 +62,7 @@ func TestIdempotentStartStartsOneChild(t *testing.T) {
 	wg.Wait()
 	fresh := 0
 	for i := range n {
-		if codes[i] != 202 || got[i].Turn != got[0].Turn || got[i].ID != got[0].ID {
+		if codes[i] != 202 || got[i].Turn != got[0].Turn || got[i].Session != got[0].Session {
 			t.Fatalf("request %d: %d %+v, first %+v", i, codes[i], got[i], got[0])
 		}
 		if !got[i].Existing {
@@ -88,7 +88,9 @@ func TestIdempotentStartStartsOneChild(t *testing.T) {
 		t.Fatalf("while running: %d %s", code, out)
 	}
 	os.WriteFile(filepath.Join(dir, "release"), nil, 0o600)
-	waitSessionClosed(t, e.store, got[0].ID)
+	waitSessionClosed(t, e.store, got[0].Session)
+	// It reads running until its job has ended too.
+	waitEnded(t, e, got[0].Turn)
 	code, out := asTok(t, e, turnsTok, "GET", path, "")
 	var one OneTurn
 	_ = json.Unmarshal([]byte(out), &one)
@@ -119,15 +121,15 @@ func TestIdempotencyKey(t *testing.T) {
 	resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(body)))
 	var first Started
 	_ = json.Unmarshal([]byte(out), &first)
-	if resp.StatusCode != 202 || first.Turn == "" || first.Existing || first.Job == "" ||
-		first.BaseURL != e.api.cfg.BaseURL+"/s/"+first.ID+"/t/"+first.Turn {
+	if resp.StatusCode != 202 || first.Turn == "" || first.Existing || first.State != "running" ||
+		first.BaseURL != e.api.cfg.BaseURL+"/s/"+first.Session+"/t/"+first.Turn {
 		t.Fatalf("first: %d %s", resp.StatusCode, out)
 	}
-	waitSessionClosed(t, e.store, first.ID)
+	waitSessionClosed(t, e.store, first.Session)
 	resp, out = do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(body)))
 	var s Started
 	_ = json.Unmarshal([]byte(out), &s)
-	if resp.StatusCode != 202 || s.ID != first.ID || s.Turn != first.Turn || !s.Existing || s.Job != first.Job {
+	if resp.StatusCode != 202 || s.Session != first.Session || s.Turn != first.Turn || !s.Existing {
 		t.Fatalf("retry: %d %s, first %+v", resp.StatusCode, out, first)
 	}
 	// The turns token gets the same answer.
@@ -141,7 +143,7 @@ func TestIdempotencyKey(t *testing.T) {
 		"another prompt": `{"agent":"claude","folder":"` + dir + `","prompt":"other","idempotency_key":"job-7:a1"}`,
 		"another model":  `{"agent":"claude","folder":"` + dir + `","prompt":"hello","model":"haiku","idempotency_key":"job-7:a1"}`,
 		"read_only":      `{"agent":"claude","folder":"` + dir + `","prompt":"hello","read_only":true,"idempotency_key":"job-7:a1"}`,
-		"with a session": `{"session":"` + first.ID + `","prompt":"hello","idempotency_key":"job-7:a1"}`,
+		"with a session": `{"session":"` + first.Session + `","prompt":"hello","idempotency_key":"job-7:a1"}`,
 	} {
 		if resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(b))); resp.StatusCode != 409 {
 			t.Errorf("%s: %d %s, want 409", name, resp.StatusCode, out)
@@ -159,7 +161,7 @@ func TestIdempotencyKey(t *testing.T) {
 }
 
 // With MaxRuns 1 a second turn is queued while the first runs: the answer
-// says queued, with its job and session and no turn. The turns token may stop
+// says queued, with its turn and session. The turns token may stop
 // a turn. Once the first has ended the second runs, and the same request
 // with its key then names its turn.
 func TestMaxRunsQueuesAndStopWithTurnsToken(t *testing.T) {
@@ -175,23 +177,24 @@ func TestMaxRunsQueuesAndStopWithTurnsToken(t *testing.T) {
 	code, out = asTok(t, e, turnsTok, "POST", "/api/v0/turns", second)
 	var queued Started
 	_ = json.Unmarshal([]byte(out), &queued)
-	if code != 202 || !queued.Queued || queued.Turn != "" || queued.Job == "" || queued.ID == "" {
-		t.Fatalf("second: %d %s, want 202 queued", code, out)
+	if code != 202 || queued.State != "queued" || queued.Turn == "" || queued.Session == "" {
+		t.Fatalf("second: %d %s, want 202 queued with its turn", code, out)
 	}
 	if code, out := asTok(t, e, turnsTok, "POST", "/api/v0/turns/"+first.Turn+"/stop", ""); code != 202 {
 		t.Fatalf("stop: %d %s", code, out)
 	}
-	waitSessionClosed(t, e.store, first.ID)
+	waitSessionClosed(t, e.store, first.Session)
 	code, out = asTok(t, e, turnsTok, "POST", "/api/v0/turns", second)
 	var s Started
 	_ = json.Unmarshal([]byte(out), &s)
-	if code != 202 || s.Queued || s.Turn == "" || !s.Existing || s.ID != queued.ID || s.Job != queued.Job {
+	if code != 202 || s.State != "running" || s.Turn != queued.Turn || !s.Existing || s.Session != queued.Session {
 		t.Fatalf("second, after the first ended: %d %s", code, out)
 	}
-	if _, one := asTok(t, e, turnsTok, "GET", "/api/v0/turns/"+first.Turn, ""); !strings.Contains(one, `"stopped":true`) {
+	// A stopped turn reads stopped: one word, whichever side is asked.
+	if _, one := asTok(t, e, turnsTok, "GET", "/api/v0/turns/"+first.Turn, ""); !strings.Contains(one, `"stopped":true`) || !strings.Contains(one, `"state":"stopped"`) {
 		t.Fatalf("the stopped turn: %s", one)
 	}
-	if j, _ := e.q.Get(queue.DefaultTeam, first.Job); j.State != queue.Cancelled {
+	if j := waitEnded(t, e, first.Turn); j.State != queue.Cancelled || queue.TurnState(j.State) != "stopped" {
 		t.Fatalf("the stopped turn's job: %s", j.State)
 	}
 	// A stop of a turn that has ended gets 409; of no turn, 404.

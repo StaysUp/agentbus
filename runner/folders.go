@@ -46,7 +46,7 @@ const errPartial = "the changes could not all be written to your folder; files l
 const maxApplyMessage = 4 << 10
 
 // applyFinish is an apply job's finish, its result sized so the finish fits
-// the jobs API's body limit.
+// the runner protocol's body limit.
 func applyFinish(status, reason string, res queue.Result) queue.Finish {
 	if res.Apply != nil {
 		res.Apply.Count = len(res.Apply.Files)

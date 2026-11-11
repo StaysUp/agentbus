@@ -144,7 +144,7 @@ func TestDeliver(t *testing.T) {
 		t.Fatal("no delivery")
 	}
 	if d.State != Queued || d.Spec.Session != parent.Session || d.Spec.Harness != "" || d.Links.ResultOf.Job != child.ID ||
-		d.Links.ResultOf.Session != child.Session || d.Links.ResultOf.Turn != ca.ID || d.Links.ResultOf.Agent != "claude" ||
+		d.Links.ResultOf.Session != child.Session || d.Links.ResultOf.Turn != child.Turn || d.Links.ResultOf.Agent != "claude" ||
 		d.Links.Chain == nil || d.Links.Chain.Depth != 1 || d.Links.Asker != nil {
 		t.Fatalf("delivery: %+v %+v", d, d.Links)
 	}
@@ -236,8 +236,9 @@ func TestAskedRetryAcrossTurns(t *testing.T) {
 	}
 }
 
-// An asked review's own session joins its tree once its turn has started,
-// while it still runs.
+// An asked review's own session is in its tree from the moment it is asked
+// for: control names that session when it makes the job, so the asking turn
+// can read its queued review.
 func TestSessionRootOfReview(t *testing.T) {
 	q, _ := open(t)
 	r := runner(t, q, 5)
@@ -255,25 +256,22 @@ func TestSessionRootOfReview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	own := rv.Links.ReviewSession
+	if root, err := q.SessionRoot(DefaultTeam, own); err != nil || root != j.Session {
+		t.Fatalf("queued review's session root: %q %v", root, err)
+	}
 	_, ra := take(t, q, r)
 	if _, _, err := q.Start(r.ID, ra.ID, ra.Number, lease); err != nil {
 		t.Fatal(err)
 	}
-	if root, err := q.SessionRoot(DefaultTeam, "rev1"); err != nil || root != "" {
-		t.Fatalf("before its turn started: %q %v", root, err)
-	}
-	if _, _, err := q.AddEvents(r.ID, ra.ID, ra.Number, 1, []AttemptEvent{{Seq: 1, Time: time.Now(), Kind: "turn.created",
-		Data: json.RawMessage(`{"session":"rev1","turn":"` + ra.ID + `"}`)}}); err != nil {
+	if _, err := q.End(r.ID, ra.ID, ra.Number, Finish{Status: Finished, Result: json.RawMessage(`{"session":"` + own + `","reply_text":"x"}`)}); err != nil {
 		t.Fatal(err)
 	}
-	if root, err := q.SessionRoot(DefaultTeam, "rev1"); err != nil || root != j.Session {
-		t.Fatalf("review session root while it runs: %q %v (review %s)", root, err, rv.ID)
-	}
-	if _, err := q.End(r.ID, ra.ID, ra.Number, Finish{Status: Finished, Result: json.RawMessage(`{"session":"rev1","reply_text":"x"}`)}); err != nil {
-		t.Fatal(err)
-	}
-	if root, err := q.SessionRoot(DefaultTeam, "rev1"); err != nil || root != j.Session {
+	if root, err := q.SessionRoot(DefaultTeam, own); err != nil || root != j.Session {
 		t.Fatalf("review session root after: %q %v", root, err)
+	}
+	if root, err := q.SessionRoot(DefaultTeam, "s_other"); err != nil || root != "" {
+		t.Fatalf("a session no job names: %q %v", root, err)
 	}
 }
 

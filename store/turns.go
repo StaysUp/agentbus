@@ -16,6 +16,7 @@ const (
 	TurnRunning  = "running"
 	TurnFinished = "finished"
 	TurnFailed   = "failed"
+	TurnStopped  = "stopped"
 )
 
 // TurnList is a page of turns as the stored events up to Seq describe them.
@@ -32,17 +33,18 @@ type TurnList struct {
 type Turn struct {
 	ID      string `json:"id"`
 	Session string `json:"session"`
+	Number  int    `json:"number,omitempty" doc:"The turn's place in its session, counted from 1 in the order the turns started: turn 3 is the session's third. Absent until the turn starts."`
 	Harness string `json:"agent" doc:"From the turn's turn.started. Empty for a turn no run started."`
 	AgentID string `json:"agent_id,omitempty" doc:"From the turn's turn.started: the saved agent that ran it, as GET /api/v0/agents names it. Turns of one session may name different agents. Absent for a turn started by harness name alone, or no run started."`
 	Folder  string `json:"folder" doc:"From the turn's turn.started. Empty for a turn no run started."`
 	// Prompt is a preview: the list holds many turns, and one prompt can be
 	// 256 KiB (100 turns answered 26 MB).
-	Prompt          string `json:"prompt" doc:"The person's words from the turn's turn.started: the first 500 characters. The whole prompt is that turn.started's text, in GET /api/v0/turns/{id}/events."`
+	Prompt          string `json:"prompt" doc:"The person's words from the turn's turn.started: the first 500 characters. The whole prompt is that turn.started's text, in GET /api/v0/sessions/{id}/events?turn={id}."`
 	PromptTruncated bool   `json:"prompt_truncated,omitempty" doc:"True when prompt was cut to its first 500 characters."`
 	// Reply, Model and ModelCalls let a list show a turn without its events.
 	// The last call is the turn's model.requested with the highest seq; its
 	// reply is the model.responded of the same exchange.
-	Reply          string `json:"reply" doc:"The text of the reply to the turn's last model call: the first 500 characters. Empty while that reply has not come, when it carried no text, or when the turn has no calls. The whole text is that model.responded's text, in GET /api/v0/turns/{id}/events."`
+	Reply          string `json:"reply" doc:"The text of the reply to the turn's last model call: the first 500 characters. Empty while that reply has not come, when it carried no text, or when the turn has no calls. The whole text is that model.responded's text, in GET /api/v0/sessions/{id}/events?turn={id}."`
 	ReplyTruncated bool   `json:"reply_truncated,omitempty" doc:"True when reply was cut to its first 500 characters."`
 	Model          string `json:"model" doc:"The model the turn's last model call asked for: its model.requested's model. Empty when the turn has no calls."`
 	ModelCalls     int    `json:"model_calls" doc:"How many model calls the turn made: its model.requested events."`
@@ -50,10 +52,10 @@ type Turn struct {
 	StartedSeq int64      `json:"started_seq" doc:"The seq of the turn's turn.started. Send it as before for older turns."`
 	Started    time.Time  `json:"started"`
 	Ended      *time.Time `json:"ended,omitempty" doc:"A run's turn: when its child exited. Another turn: its latest turn.completed. Absent while running."`
-	State      string     `json:"state" doc:"running, finished or failed. A run's turn: running until its child exits, then finished on exit code 0, else failed. Another turn: finished once it has a turn.completed, else running."`
+	State      string     `json:"state" doc:"queued, running, finished, failed or stopped. queued: asked for, and no runner has started it yet. A run's turn: running until its child exits, then finished on exit code 0, stopped when someone stopped it, else failed. Another turn: finished once it has a turn.completed, else running."`
 	Outcome    string     `json:"outcome,omitempty" doc:"The outcome of the turn's latest turn.completed, when it has one."`
 	ExitCode   *int       `json:"exit_code,omitempty" doc:"A run's turn: its child's exit code, once it exited. Absent for a child the service closed on restart."`
-	Stopped    bool       `json:"stopped,omitempty" doc:"A run's turn: the person stopped it with POST /api/v0/turns/{id}/stop. Its state is failed unless its child still exited 0."`
+	Stopped    bool       `json:"stopped,omitempty" doc:"A run's turn: someone stopped it with POST /api/v0/turns/{id}/stop. Its state is then stopped."`
 	Unsettled  bool       `json:"unsettled,omitempty" doc:"A run's turn: its session.closed says the gateway could not confirm that every model call was stored, as for a turn the service closed on restart. Own replay does not continue from it."`
 	Error      string     `json:"error,omitempty" doc:"A run's turn: why its child could not start, from its session.closed. Its state is then failed."`
 	// Origin, from the turn's turn.started: who started it when the person
@@ -169,7 +171,8 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 			length(CAST(COALESCE(json_extract(s.data, '$.text'), '') AS BLOB)),
 			u.calls, COALESCE(json_extract(q.data, '$.model'), ''),
 			substr(CAST(COALESCE(json_extract(r.data, '$.text'), '') AS BLOB), 1, ?),
-			length(CAST(COALESCE(json_extract(r.data, '$.text'), '') AS BLOB))
+			length(CAST(COALESCE(json_extract(r.data, '$.text'), '') AS BLOB)),
+			(SELECT COUNT(*) FROM events n WHERE n.session = s.session AND n.kind = 'turn.started' AND n.turn <> '' AND n.seq <= s.seq)
 		FROM u JOIN events s ON s.seq = u.seq
 			LEFT JOIN events q ON q.seq = u.last_call
 			LEFT JOIN events r ON r.seq = u.reply
@@ -194,7 +197,7 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 		var head, replyHead []byte
 		var origin string
 		if err := rows.Scan(&t.StartedSeq, &t.Session, &t.ID, &tm, &t.Harness, &t.AgentID, &t.Folder, &t.IdempotencyKey, &origin,
-			&head, &promptLen, &t.ModelCalls, &t.Model, &replyHead, &replyLen); err != nil {
+			&head, &promptLen, &t.ModelCalls, &t.Model, &replyHead, &replyLen, &t.Number); err != nil {
 			rows.Close()
 			return list, fmt.Errorf("store: read turns: %w", err)
 		}
@@ -308,9 +311,13 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 			t.Stopped = stopped
 			t.Unsettled = unsettled
 			t.Error = closeErr.String
-			t.State = TurnFailed
-			if exitCode.Valid && exitCode.Int64 == 0 && closeErr.String == "" {
+			switch {
+			case stopped:
+				t.State = TurnStopped
+			case exitCode.Valid && exitCode.Int64 == 0 && closeErr.String == "":
 				t.State = TurnFinished
+			default:
+				t.State = TurnFailed
 			}
 		case opened == 0 && completedAt.Valid:
 			ended := time.Unix(0, completedAt.Int64).UTC()

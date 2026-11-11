@@ -53,7 +53,7 @@ func startToolRun(t *testing.T, svc *service, tok string, setsid bool) (string, 
 		return err == nil && func() bool { _, err := fmt.Sscanf(string(b), "%d %d", &agent, &toolPID); return err == nil }()
 	})
 	t.Cleanup(func() { syscall.Kill(toolPID, syscall.SIGKILL) })
-	return out["id"].(string), agent, toolPID, other.Process.Pid
+	return out["session"].(string), agent, toolPID, other.Process.Pid
 }
 
 func waitGone(t *testing.T, what string, pid int) {
@@ -142,7 +142,7 @@ func TestFinishedTurnKeepsItsTools(t *testing.T) {
 	if code != http.StatusAccepted {
 		t.Fatalf("%d %s", code, raw)
 	}
-	waitClosed(t, svc.store, out["id"].(string))
+	waitClosed(t, svc.store, out["session"].(string))
 	var agent, pid int
 	b, _ := os.ReadFile(tool)
 	if _, err := fmt.Sscanf(string(b), "%d %d", &agent, &pid); err != nil {
@@ -216,8 +216,8 @@ func TestStopRouteEndsTheTurnsTree(t *testing.T) {
 			if !alive(other) {
 				t.Fatal("a process outside the turn's tree was stopped")
 			}
-			if tr := turnOf(t, svc, tok, id); !tr.Stopped || tr.State != store.TurnFailed {
-				t.Errorf("listed turn %+v, want stopped and failed", tr)
+			if tr := turnOf(t, svc, tok, id); !tr.Stopped || tr.State != store.TurnStopped {
+				t.Errorf("listed turn %+v, want stopped", tr)
 			}
 			if code, _, raw := postAPI(t, svc, tok, "/api/v0/turns/"+turn+"/stop", nil); code != http.StatusConflict {
 				t.Errorf("stop after it ended: %d %s, want 409", code, raw)

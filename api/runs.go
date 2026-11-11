@@ -55,20 +55,19 @@ type TurnRequest struct {
 	ReadOnly  *bool  `json:"read_only,omitempty" doc:"False unless true. True: claude gets Read, Grep and Glob only; codex runs with --sandbox read-only. False: claude keeps its own tools and permission settings, plus the edit rule of permissions.toml (by default it edits its session's folder without asking); with edit = \"session\" codex runs with --sandbox workspace-write and network access on, so it can edit the folder and reach the network, and with edit = \"none\" read-only. Read-only codex has no network."`
 	// IdempotencyKey makes a retry safe: a client whose request timed out
 	// sends it again with the same key and gets the same turn.
-	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"Optional, 1 to 128 characters of A-Z, a-z, 0-9 and . _ : -. It is the turn job's key. A retry with the same key and the same fields answers 202 with the turn the key first started, existing true, and starts nothing. The same key with other fields gets 409. A request refused with 400 used no key."`
+	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"Optional, 1 to 128 characters of A-Z, a-z, 0-9 and . _ : -. A retry with the same key and the same fields answers 202 with the turn the key first started, existing true, and starts nothing. The same key with other fields gets 409. A request refused with 400 used no key."`
 }
 
-// Started is the answer to a turn's start.
+// Started is the answer to a turn's start, and to a review's.
 type Started struct {
-	BaseURL string `json:"base_url" doc:"The address the agent uses, <service>/s/<id>/t/<turn>. Empty while queued."`
-	ID      string `json:"id" doc:"The session id: a new one, or the session sent."`
-	Turn    string `json:"turn" doc:"The new turn's id: the id of the job's attempt that runs it. Every event of the turn carries it in turn, and GET /api/v0/turns lists it. Empty while queued."`
+	Session string `json:"session" doc:"The turn's session: a new one, or the session sent. A review's is a session of its own."`
+	Turn    string `json:"turn" doc:"The turn's id. Every event of the turn carries it in turn; GET /api/v0/turns/{id} follows it from now on."`
+	State   string `json:"state" doc:"running: a runner started it. queued: it waits behind the session's earlier turns (ahead says how many), or for a runner. It runs next, in order."`
+	BaseURL string `json:"base_url,omitempty" doc:"The address the agent uses, <service>/s/<session>/t/<turn>. Absent while queued."`
 	// Existing marks the answer to a retry: the idempotency key had already
-	// made this turn's job.
-	Existing bool   `json:"existing,omitempty" doc:"True when idempotency_key had already made this turn's job, so nothing new was made."`
-	Job      string `json:"job" doc:"The turn job that runs the turn. GET /api/v0/jobs/{id} reads it."`
-	Queued   bool   `json:"queued,omitempty" doc:"True when the turn has not started: it waits behind the session's earlier turns (ahead says how many), or no runner started it within 30 seconds. The job stays queued and runs next, in order; the turn then shows in the session. turn and base_url are empty."`
-	Ahead    int    `json:"ahead,omitempty" doc:"With queued: how many turns of the session, running or waiting, are before this one. Absent when the turn waits only for a runner."`
+	// made this turn.
+	Existing bool `json:"existing,omitempty" doc:"True when idempotency_key had already made this turn, so nothing new was made."`
+	Ahead    int  `json:"ahead,omitempty" doc:"With state queued: how many turns of the session, running or waiting, are before this one. Absent when the turn waits only for a runner."`
 }
 
 // idempotencyKey is the shape of TurnRequest.IdempotencyKey.
@@ -222,7 +221,7 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, queue.SessionEnded)
 		return
 	case errors.Is(err, queue.ErrFull):
-		writeError(w, http.StatusTooManyRequests, "too many jobs are waiting; wait for some to end and retry")
+		writeError(w, http.StatusTooManyRequests, "too many turns are waiting; wait for some to end and retry")
 		return
 	case err != nil:
 		a.internal(w)
@@ -272,7 +271,7 @@ func (a *API) resolveAgent(id string) (agents.Agent, error) {
 	return ag, nil
 }
 
-const noTurns = "this service starts no turns: it keeps no job queue"
+const noTurns = "this service starts no turns: it keeps no queue"
 
 // awaitTurn answers once the job's turn has started: 202 with the turn. A job
 // that ended before its turn started answers why, with the status the runner
@@ -291,7 +290,7 @@ func (a *API) awaitTurn(w http.ResponseWriter, ctx context.Context, job queue.Jo
 			return
 		}
 		if ahead > 0 {
-			writeJSON(w, http.StatusAccepted, Started{ID: job.Session, Existing: existing, Job: job.ID, Queued: true, Ahead: ahead})
+			writeJSON(w, http.StatusAccepted, Started{Session: job.Session, Turn: job.Turn, State: queue.TurnQueued, Existing: existing, Ahead: ahead})
 			return
 		}
 	}
@@ -306,7 +305,8 @@ func (a *API) awaitTurn(w http.ResponseWriter, ctx context.Context, job queue.Jo
 			return
 		}
 		if turn := startedTurn(j); turn != "" {
-			writeJSON(w, http.StatusAccepted, Started{BaseURL: a.cfg.BaseURL + "/s/" + j.Session + "/t/" + turn, ID: j.Session, Turn: turn, Existing: existing, Job: j.ID})
+			writeJSON(w, http.StatusAccepted, Started{BaseURL: a.cfg.BaseURL + "/s/" + j.Session + "/t/" + turn, Session: j.Session, Turn: turn,
+				State: queue.TurnRunning, Existing: existing})
 			return
 		}
 		if j.Ended != nil {
@@ -317,7 +317,7 @@ func (a *API) awaitTurn(w http.ResponseWriter, ctx context.Context, job queue.Jo
 		case <-ctx.Done():
 			return
 		case <-deadline.C:
-			writeJSON(w, http.StatusAccepted, Started{ID: j.Session, Existing: existing, Job: j.ID, Queued: true})
+			writeJSON(w, http.StatusAccepted, Started{Session: j.Session, Turn: j.Turn, State: queue.TurnQueued, Existing: existing})
 			return
 		case <-tick.C:
 		}
@@ -334,7 +334,7 @@ func (a *API) turnsAhead(job string) (int, error) {
 	}
 	n := 0
 	for _, j := range jobs {
-		if turn := startedTurn(j); turn != "" && j.Attempt == turn && a.turnEnded(turn) {
+		if turn := startedTurn(j); turn != "" && a.turnEnded(turn) {
 			continue
 		}
 		n++
@@ -342,11 +342,11 @@ func (a *API) turnsAhead(job string) (int, error) {
 	return n, nil
 }
 
-// startedTurn is the job's newest attempt whose turn has started, else "".
+// startedTurn is the job's turn once an attempt has started it, else "".
 func startedTurn(j queue.Job) string {
-	for i := len(j.Attempts) - 1; i >= 0; i-- {
-		if j.Attempts[i].TurnStarted {
-			return j.Attempts[i].ID
+	for _, at := range j.Attempts {
+		if at.TurnStarted {
+			return j.Turn
 		}
 	}
 	return ""
@@ -364,9 +364,9 @@ func (a *API) notStarted(w http.ResponseWriter, j queue.Job) {
 		}
 		writeError(w, status, res.Refused)
 	case j.State == queue.Cancelled:
-		writeError(w, http.StatusConflict, "the turn's job was cancelled before its turn started")
+		writeError(w, http.StatusConflict, "the turn was stopped before it started")
 	default:
-		writeError(w, http.StatusInternalServerError, "the turn's job ended before its turn started: "+j.State+" "+j.Reason)
+		writeError(w, http.StatusInternalServerError, "the turn ended before it started: "+queue.TurnState(j.State)+" "+j.Reason)
 	}
 }
 
@@ -380,27 +380,27 @@ func (a *API) turnEnded(id string) bool {
 
 // Stopping is the answer to a stop.
 type Stopping struct {
-	ID   string `json:"id" doc:"The turn's session."`
-	Turn string `json:"turn" doc:"The turn being stopped. Its session.closed, with stopped true, comes once its process tree has ended."`
+	Session string `json:"session" doc:"The turn's session."`
+	Turn    string `json:"turn" doc:"The turn being stopped. It reads stopped once its process tree has ended; a queued turn at once."`
 }
 
 const (
-	turnNotRunning = "this turn is not running: it has ended, or it is not a job of this service"
+	turnNotRunning = "this turn has ended, or it is not a turn of this service"
 	noTurn         = "no such turn"
 )
 
-// POST /api/v0/turns/<id>/stop: a turn is its job's attempt, so a stop
-// cancels the job. Its runner hears it on its next heartbeat and stops the
-// turn's whole process tree.
+// POST /api/v0/turns/<id>/stop: a stop cancels the turn's job. A queued one
+// ends at once; a running one's runner hears it on its next heartbeat and
+// stops the turn's whole process tree.
 func (a *API) stopTurn(w http.ResponseWriter, _ *http.Request, id string) {
 	if a.cfg.Queue == nil {
 		writeError(w, http.StatusNotFound, noTurns)
 		return
 	}
-	j, err := a.cfg.Queue.JobByAttempt(queue.DefaultTeam, id)
+	j, err := a.cfg.Queue.JobByTurn(queue.DefaultTeam, id)
 	switch {
 	case err == nil:
-		if j.Ended != nil || j.Attempt != id || a.turnEnded(id) {
+		if j.Ended != nil || (started(j) && a.turnEnded(id)) {
 			writeError(w, http.StatusConflict, turnNotRunning)
 			return
 		}
@@ -408,7 +408,7 @@ func (a *API) stopTurn(w http.ResponseWriter, _ *http.Request, id string) {
 			a.internal(w)
 			return
 		}
-		writeJSON(w, http.StatusAccepted, Stopping{j.Session, id})
+		writeJSON(w, http.StatusAccepted, Stopping{turnSession(j), id})
 		return
 	case !errors.Is(err, queue.ErrNotFound):
 		a.internal(w)

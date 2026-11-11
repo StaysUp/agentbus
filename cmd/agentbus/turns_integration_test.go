@@ -66,7 +66,7 @@ func TestRunTurnIDOnEveryEvent(t *testing.T) {
 	if code != http.StatusAccepted {
 		t.Fatalf("start %d %s", code, raw)
 	}
-	session, _ := out["id"].(string)
+	session, _ := out["session"].(string)
 	turn, _ := out["turn"].(string)
 	waitClosed(t, svc.store, session)
 	var evs []turnEvent
@@ -95,7 +95,7 @@ func TestRunTurnIDOnEveryEvent(t *testing.T) {
 	t.Setenv("AGENTBUS_FAKE_CALL", "1")
 	b, _ = json.Marshal(map[string]any{"session": session, "prompt": "second words"})
 	code, out, raw = postAPI(t, svc, tok, turnsPath, b)
-	if code != http.StatusAccepted || out["id"] != session {
+	if code != http.StatusAccepted || out["session"] != session {
 		t.Fatalf("next %d %s", code, raw)
 	}
 	second, _ := out["turn"].(string)
@@ -151,12 +151,12 @@ func TestRunTurnIDOnEveryEvent(t *testing.T) {
 		t.Fatalf("GET /turns: %+v, want three, the hand-pointed one first", list.Turns)
 	}
 
-	// GET /turns/{id}/events: only that turn's events, in order.
+	// GET /sessions/{id}/events?turn=: only that turn's events, in order.
 	var page struct {
 		Store  string            `json:"store"`
 		Events []json.RawMessage `json:"events"`
 	}
-	getJSON(t, svc, tok, turnsPath+"/"+turn+"/events", &page)
+	getJSON(t, svc, tok, "/api/v0/sessions/"+session+"/events?turn="+turn, &page)
 	want := 0
 	for _, e := range evs {
 		if e.Turn == turn {
@@ -164,7 +164,7 @@ func TestRunTurnIDOnEveryEvent(t *testing.T) {
 		}
 	}
 	if page.Store != svc.store.ID() || len(page.Events) != want {
-		t.Fatalf("GET /turns/%s/events: %d events, want %d", turn, len(page.Events), want)
+		t.Fatalf("GET /sessions/%s/events?turn=%s: %d events, want %d", session, turn, len(page.Events), want)
 	}
 	last := 0.0
 	for _, raw := range page.Events {

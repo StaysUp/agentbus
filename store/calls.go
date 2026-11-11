@@ -227,6 +227,30 @@ func (s *Store) CallContext(exchange string, full bool) (c CallContext, found bo
 	return c, true, nil
 }
 
+// InTurn says the model call exchange is one of the turn's, in session: an
+// event of that session's turn carries it.
+func (s *Store) InTurn(exchange, session, turn string) (bool, error) {
+	var n int
+	err := s.r.QueryRow(`SELECT COUNT(*) FROM (SELECT 1 FROM events WHERE session = ? AND turn = ? AND kind IN ('model.requested', 'model.responded')
+		AND json_extract(data, '$.exchange') = ? LIMIT 1)`, session, turn, exchange).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("store: read a call: %w", err)
+	}
+	return n > 0, nil
+}
+
+// OtherTurns says an event of a turn other than turn, in session, carries the
+// model call exchange: the call is that turn's.
+func (s *Store) OtherTurns(exchange, session, turn string) (bool, error) {
+	var n int
+	err := s.r.QueryRow(`SELECT COUNT(*) FROM (SELECT 1 FROM events WHERE session = ? AND turn <> ? AND kind IN ('model.requested', 'model.responded')
+		AND json_extract(data, '$.exchange') = ? LIMIT 1)`, session, turn, exchange).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("store: read a call: %w", err)
+	}
+	return n > 0, nil
+}
+
 // CallSession is the session a stored call belongs to. found is false when no
 // request body is stored for exchange.
 func (s *Store) CallSession(exchange string) (session string, found bool, err error) {

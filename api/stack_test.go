@@ -97,7 +97,7 @@ func stackEnv(t *testing.T, s stack) *env {
 		t.Fatal(err)
 	}
 	rn, err := runner.Enroll(ctx, runner.Config{Queue: base, EnrollToken: enrollTok, Name: "test", Capacity: s.maxRuns,
-		Engine: eng, Store: st, Workdir: filepath.Join(dir, "worktrees"), Settings: cfgStore, Logf: t.Logf, Folders: fr,
+		Engine: eng, Store: st, Workdir: filepath.Join(dir, "sessions"), Settings: cfgStore, Logf: t.Logf, Folders: fr,
 		Lender: conn, Blobs: bs, BlobSink: bs})
 	if err != nil {
 		t.Fatal(err)
@@ -114,5 +114,5 @@ func stackEnv(t *testing.T, s stack) *env {
 		q.Close()
 		st.Close()
 	})
-	return &env{srv: srv, api: a, store: st, port: port, q: q, eng: eng, workdir: filepath.Join(dir, "worktrees")}
+	return &env{srv: srv, api: a, store: st, port: port, q: q, eng: eng, workdir: filepath.Join(dir, "sessions")}
 }

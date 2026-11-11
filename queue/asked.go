@@ -37,7 +37,7 @@ type ResultOf struct {
 	Job     string `json:"job"`
 	Kind    string `json:"kind"`              // turn or review
 	Session string `json:"session,omitempty"` // the session the work ran in
-	Turn    string `json:"turn,omitempty"`    // the work's turn: its job's last attempt
+	Turn    string `json:"turn,omitempty"`    // the work's turn
 	Agent   string `json:"agent,omitempty"`   // the saved agent, or harness, that did it
 }
 
@@ -101,15 +101,13 @@ func (q *Queue) CreateTurnLinked(team, key string, spec Spec, links Links, lim L
 
 // SessionRoot is the root of the request tree a session was started in: the
 // Chain.Root of its first turn job that has one, or of the asked review that
-// runs in it: a review runs in a session of its own, which its runner names
-// in the attempt's turn.created event as soon as the review's turn starts.
+// runs in it: a review runs in a session of its own, which control names when
+// it makes the job (Links.ReviewSession).
 // "" for a session the person started, or one the queue does not know.
 func (q *Queue) SessionRoot(team, session string) (string, error) {
 	var root sql.NullString
 	err := q.db.QueryRow(`SELECT json_extract(links, '$.chain.root') FROM jobs j WHERE team = ?
-		AND ((kind = 'turn' AND session = ?) OR (kind = 'review' AND EXISTS (SELECT 1 FROM attempts a
-			JOIN attempt_events e ON e.attempt = a.id WHERE a.job = j.id AND e.kind = 'turn.created'
-			AND json_extract(e.data, '$.session') = ?)))
+		AND ((kind = 'turn' AND session = ?) OR (kind = 'review' AND json_extract(links, '$.review_session') = ?))
 		AND json_extract(links, '$.chain.root') IS NOT NULL ORDER BY created, id LIMIT 1`, team, session, session).Scan(&root)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", nil
@@ -197,7 +195,7 @@ func (q *Queue) Deliver(team string, name func(id string) string) (int, error) {
 			return n, err
 		}
 		spec := Spec{Session: j.Links.Asker.Session, Prompt: ResultPrompt(j, name)}
-		res := &ResultOf{Job: j.ID, Kind: j.Kind, Session: resultSession(j), Turn: j.Attempt, Agent: agentName(j.Spec)}
+		res := &ResultOf{Job: j.ID, Kind: j.Kind, Session: resultSession(j), Turn: j.Turn, Agent: agentName(j.Spec)}
 		links := Links{ResultOf: res}
 		if j.Links.Chain != nil {
 			links.Chain = &Chain{Root: j.Links.Chain.Root, Depth: j.Links.Chain.Depth}
@@ -314,17 +312,13 @@ func ResultPrompt(j Job, name func(id string) string) string {
 		fmt.Fprintf(&b, " (%s)", short(strings.Join(about, ", ")))
 	}
 	b.WriteString("\n")
-	state := j.State
+	state := TurnState(j.State)
 	if j.Reason != "" {
 		state += " (" + j.Reason + ")"
 	}
-	fmt.Fprintf(&b, "Job: %s, %s\n", j.ID, state)
+	fmt.Fprintf(&b, "Turn: %s, %s\n", j.Turn, state)
 	if s := resultSession(j); s != "" {
-		fmt.Fprintf(&b, "Session: %s", s)
-		if j.Attempt != "" {
-			fmt.Fprintf(&b, ", turn %s", j.Attempt)
-		}
-		b.WriteString("\n")
+		fmt.Fprintf(&b, "Session: %s\n", s)
 	}
 	if r.Folder != "" {
 		fmt.Fprintf(&b, "Folder: %s\n", short(r.Folder))
@@ -376,7 +370,7 @@ func ResultPrompt(j Job, name func(id string) string) string {
 	// Every part is bounded, and a turn's prompt holds no NUL byte.
 	out := strings.ReplaceAll(b.String(), "\x00", "")
 	if len(out) > MaxResultPrompt {
-		out = strings.ToValidUTF8(out[:MaxResultPrompt], "") + "\n(cut here; the whole result is in its job)\n"
+		out = strings.ToValidUTF8(out[:MaxResultPrompt], "") + "\n(cut here; the whole result is in its turn)\n"
 	}
 	return out
 }

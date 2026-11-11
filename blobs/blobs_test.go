@@ -63,21 +63,21 @@ func TestClient(t *testing.T) {
 	ctx := context.Background()
 	s, _ := Open(t.TempDir())
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/v0/blobs", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/v0/runner/blobs", func(w http.ResponseWriter, r *http.Request) {
 		var req MissingRequest
 		_ = jsonDecode(r.Body, &req)
 		m, _ := s.Missing(ctx, req.Hashes)
 		jsonWrite(w, MissingReply{Missing: m})
 	})
 	packRoutes(mux, s, nil)
-	mux.HandleFunc("PUT /api/v0/blobs/{h}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("PUT /api/v0/runner/blobs/{h}", func(w http.ResponseWriter, r *http.Request) {
 		if err := s.Put(ctx, r.PathValue("h"), r.Body); err != nil {
 			w.WriteHeader(400)
 			return
 		}
 		w.WriteHeader(204)
 	})
-	mux.HandleFunc("GET /api/v0/blobs/{h}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/v0/runner/blobs/{h}", func(w http.ResponseWriter, r *http.Request) {
 		if r.PathValue("h") == strings.Repeat("0", 64) {
 			io.WriteString(w, "not its content")
 			return

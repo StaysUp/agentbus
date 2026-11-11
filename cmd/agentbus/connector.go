@@ -90,13 +90,13 @@ func startConnector(ctx context.Context, cc connectorConfig, done func()) (*conn
 	// A folder inside a session's overlay copy on this machine (a session
 	// started in another's copy) is mounted again before it is read or
 	// written: after a restart the copy's mount is gone.
-	workdir := filepath.Join(cc.home, "worktrees")
 	c.Prepare = func(path string) error {
-		s, err := isolation.Load(workdir, path)
-		if err != nil {
-			return nil // not in a copy
+		for _, dir := range []string{copiesDir, oldCopiesDir} {
+			if s, err := isolation.Load(filepath.Join(cc.home, dir), path); err == nil {
+				return isolation.Remount(s)
+			}
 		}
-		return isolation.Remount(s)
+		return nil // not in a copy
 	}
 	remote := cc.store == nil
 	if remote && cc.own != nil {

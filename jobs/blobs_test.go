@@ -74,7 +74,7 @@ func TestBlobPacks(t *testing.T) {
 		t.Fatalf("a blob under another's hash: %v %v", resp, err)
 	}
 	// The main token is not a runner's.
-	if code := send(t, srv, mainTok, "POST", "/api/v0/packs/fetch", blobs.FetchRequest{Hashes: hs[:1]}, nil); code != 401 && code != 403 {
+	if code := send(t, srv, mainTok, "POST", "/api/v0/runner/packs/fetch", blobs.FetchRequest{Hashes: hs[:1]}, nil); code != 401 && code != 403 {
 		t.Fatalf("the main token fetched blobs: %d", code)
 	}
 }

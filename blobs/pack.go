@@ -8,8 +8,8 @@ package blobs
 //
 // The control plane's pack routes (package jobs serves them):
 //
-//	POST /api/v0/packs    a pack → {"kept": n}
-//	POST /api/v0/packs/fetch   {"hashes": [...]} → a pack of them, in that
+//	POST /api/v0/runner/packs    a pack → {"kept": n}
+//	POST /api/v0/runner/packs/fetch   {"hashes": [...]} → a pack of them, in that
 //	                           order; 404 with {"missing": [...]} when one is
 //	                           not held
 //
@@ -48,12 +48,12 @@ const (
 // ErrBadPack says a pack is not frames of blobs as asked.
 var ErrBadPack = errors.New("blobs: the pack is not well formed")
 
-// FetchRequest is the body of POST /api/v0/packs/fetch.
+// FetchRequest is the body of POST /api/v0/runner/packs/fetch.
 type FetchRequest struct {
 	Hashes []string `json:"hashes"`
 }
 
-// PackReply is the answer to POST /api/v0/packs.
+// PackReply is the answer to POST /api/v0/runner/packs.
 type PackReply struct {
 	Kept int `json:"kept"`
 }
@@ -203,7 +203,7 @@ func (c Client) PutPack(ctx context.Context, items []Item) error {
 	if err != nil {
 		return err
 	}
-	resp, err := c.do(ctx, http.MethodPost, "/api/v0/packs", bytes.NewReader(body.Bytes()), int64(body.Len()), "application/octet-stream")
+	resp, err := c.do(ctx, http.MethodPost, "/api/v0/runner/packs", bytes.NewReader(body.Bytes()), int64(body.Len()), "application/octet-stream")
 	if err != nil {
 		return err
 	}
@@ -222,7 +222,7 @@ func (c Client) GetPack(ctx context.Context, hs []string, keep func(h string, r 
 		return nil
 	}
 	b, _ := json.Marshal(FetchRequest{Hashes: hs})
-	resp, err := c.do(ctx, http.MethodPost, "/api/v0/packs/fetch", bytes.NewReader(b), int64(len(b)), "application/json")
+	resp, err := c.do(ctx, http.MethodPost, "/api/v0/runner/packs/fetch", bytes.NewReader(b), int64(len(b)), "application/json")
 	if err != nil {
 		return err
 	}

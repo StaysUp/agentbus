@@ -56,7 +56,7 @@ func TestTurnSinkNamesTurnsAfterChildExits(t *testing.T) {
 		if err := json.Unmarshal([]byte(body), &out); err != nil {
 			t.Fatal(err)
 		}
-		ids = append(ids, out.ID)
+		ids = append(ids, out.Session)
 	}
 	for _, id := range ids {
 		deadline := time.Now().Add(5 * time.Second)

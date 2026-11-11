@@ -1,6 +1,6 @@
 package api
 
-// GET /api/v0/calls/{id}/context: one model call's request, as pieces.
+// GET /api/v0/turns/{id}/calls/{call}: one model call's request, as pieces.
 
 import (
 	"bytes"

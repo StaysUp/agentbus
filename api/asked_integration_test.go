@@ -156,12 +156,12 @@ func TestAskFanOutAndDeliver(t *testing.T) {
 	}
 	// The asked turns say who asked.
 	for _, c := range []Started{c1, c2} {
-		list, err := e.store.Turns(store.TurnQuery{Session: c.ID, Limit: 5})
+		list, err := e.store.Turns(store.TurnQuery{Session: c.Session, Limit: 5})
 		if err != nil || len(list.Turns) != 1 {
-			t.Fatalf("child %s: %v %+v", c.ID, err, list)
+			t.Fatalf("child %s: %v %+v", c.Session, err, list)
 		}
-		if o := list.Turns[0].Origin; o == nil || o.Kind != event.OriginAsked || o.Session != p.ID || o.Turn != p.Turn {
-			t.Errorf("child %s origin %+v", c.ID, o)
+		if o := list.Turns[0].Origin; o == nil || o.Kind != event.OriginAsked || o.Session != p.Session || o.Turn != p.Turn {
+			t.Errorf("child %s origin %+v", c.Session, o)
 		}
 	}
 	// Reads across the tree work both ways; nothing outside it.
@@ -169,17 +169,16 @@ func TestAskFanOutAndDeliver(t *testing.T) {
 		tok, method, path, body string
 		want                    int
 	}{
-		{ptok, "GET", "/api/v0/sessions/" + c1.ID + "/events", "", 200},
-		{ptok, "GET", "/api/v0/turns?session=" + c2.ID, "", 200},
-		{ptok, "GET", "/api/v0/jobs/" + c1.Job, "", 200},
-		{ptok, "GET", "/api/v0/jobs?session=" + c1.ID, "", 200},
-		{ctok, "GET", "/api/v0/sessions/" + p.ID + "/events", "", 200},
-		{ctok, "GET", "/api/v0/sessions/" + c2.ID + "/events", "", 200},
+		{ptok, "GET", "/api/v0/sessions/" + c1.Session + "/events", "", 200},
+		{ptok, "GET", "/api/v0/turns?session=" + c2.Session, "", 200},
+		{ptok, "GET", "/api/v0/turns/" + c1.Turn, "", 200},
+		{ptok, "GET", "/api/v0/sessions/" + c1.Session, "", 200},
+		{ctok, "GET", "/api/v0/sessions/" + p.Session + "/events", "", 200},
+		{ctok, "GET", "/api/v0/sessions/" + c2.Session + "/events", "", 200},
 		// The asked turn never writes to its asker's session, nor its own.
-		{ctok, "POST", "/api/v0/turns", `{"session":"` + p.ID + `","prompt":"x"}`, 403},
-		{ctok, "POST", "/api/v0/turns", `{"session":"` + c1.ID + `","prompt":"x"}`, 403},
-		// It may not cancel or stop the person's work, nor its own.
-		{ctok, "POST", "/api/v0/jobs/" + p.Job + "/cancel", "", 403},
+		{ctok, "POST", "/api/v0/turns", `{"session":"` + p.Session + `","prompt":"x"}`, 403},
+		{ctok, "POST", "/api/v0/turns", `{"session":"` + c1.Session + `","prompt":"x"}`, 403},
+		// It may not stop the person's work.
 		{ctok, "POST", "/api/v0/turns/" + p.Turn + "/stop", "", 403},
 		{ptok, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"x","isolate":false}`, 403},
 		{ptok, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"x","folder":"` + filepath.Dir(repo) + `"}`, 403},
@@ -192,56 +191,58 @@ func TestAskFanOutAndDeliver(t *testing.T) {
 	release(dir, "parent")
 	release(dir, "one")
 	release(dir, "two")
-	got := deliverUntil(t, e, p.ID, 2)
-	byJob := map[string]store.Turn{}
+	got := deliverUntil(t, e, p.Session, 2)
+	byTurn := map[string]store.Turn{}
 	for _, tn := range got {
-		byJob[tn.Origin.Job] = tn
+		byTurn[tn.Origin.Turn] = tn
 	}
 	for c, w := range map[Started]string{c1: w1, c2: w2} {
-		tn, ok := byJob[c.Job]
+		tn, ok := byTurn[c.Turn]
 		if !ok {
-			t.Fatalf("no result of %s delivered; got %+v", c.Job, got)
+			t.Fatalf("no result of %s delivered; got %+v", c.Turn, got)
 		}
-		if tn.Origin.Session != c.ID || tn.Origin.Turn != c.Turn || tn.Origin.JobKind != "turn" ||
-			!strings.HasPrefix(tn.Prompt, "[AgentBus]") || strings.Contains(tn.Prompt, "worktrees/") ||
-			!strings.HasSuffix(w, "worktrees/"+c.Job) {
-			t.Errorf("result of %s: %+v\n%s", c.Job, tn.Origin, tn.Prompt)
+		// Each copy is named after its session.
+		if tn.Origin.Session != c.Session || tn.Origin.TurnKind != "turn" ||
+			!strings.HasPrefix(tn.Prompt, "[AgentBus]") || !strings.Contains(tn.Prompt, "Turn: "+c.Turn+", finished") ||
+			strings.Contains(tn.Prompt, "sessions/") || !strings.HasSuffix(w, "sessions/"+c.Session) {
+			t.Errorf("result of %s in %s: %+v\n%s", c.Turn, w, tn.Origin, tn.Prompt)
 		}
 		// On the parent's own agent.
 		if tn.Harness != "claude" {
-			t.Errorf("result of %s ran on %s", c.Job, tn.Harness)
+			t.Errorf("result of %s ran on %s", c.Turn, tn.Harness)
 		}
 	}
 
 	// The parent's token is gone; the result turn's own token asks for a
 	// review of a child's work, and that comes back too.
-	j1, err := e.q.Get(queue.DefaultTeam, c1.Job)
+	j1, err := e.q.JobByTurn(queue.DefaultTeam, c1.Turn)
 	if err != nil || j1.Ended == nil {
 		t.Fatalf("child job: %v %+v", err, j1)
 	}
-	p2 := startTurn(t, e, `{"session":"`+p.ID+`","prompt":"again"}`)
+	p2 := startTurn(t, e, `{"session":"`+p.Session+`","prompt":"again"}`)
 	atok := tokenOf(t, dir, "again")
-	code, out := as(t, e, atok, "POST", "/api/v0/jobs/"+c1.Job+"/review", `{"agent":"codex"}`)
-	if code != 201 {
+	code, out := as(t, e, atok, "POST", "/api/v0/turns/"+c1.Turn+"/review", `{"agent":"codex"}`)
+	if code != 202 {
 		t.Fatalf("review: %d %s", code, out)
 	}
-	var rj queue.Job
-	_ = json.Unmarshal([]byte(out), &rj)
-	if rj.Links.Asker == nil || rj.Links.Asker.Turn != p2.Turn || rj.Links.Chain == nil || rj.Links.Chain.Root != p.ID {
-		t.Errorf("review links: %+v", rj.Links)
+	var rs Started
+	_ = json.Unmarshal([]byte(out), &rs)
+	rj, err := e.q.JobByTurn(queue.DefaultTeam, rs.Turn)
+	if err != nil || rj.Links.Asker == nil || rj.Links.Asker.Turn != p2.Turn || rj.Links.Chain == nil || rj.Links.Chain.Root != p.Session {
+		t.Errorf("review %+v: %v %+v", rs, err, rj.Links)
 	}
-	// A cancel of asked work in the tree is allowed.
+	// A stop of asked work in the tree is allowed.
 	c3 := ask(t, e, atok, `{"agent":"claude","prompt":"three"}`)
-	if code, out := as(t, e, atok, "POST", "/api/v0/jobs/"+c3.Job+"/cancel", ""); code != 202 {
-		t.Errorf("cancel asked work: %d %s", code, out)
+	if code, out := as(t, e, atok, "POST", "/api/v0/turns/"+c3.Turn+"/stop", ""); code != 202 {
+		t.Errorf("stop asked work: %d %s", code, out)
 	}
 	release(dir, "again")
 	release(dir, "three")
-	got = deliverUntil(t, e, p.ID, 4)
+	got = deliverUntil(t, e, p.Session, 4)
 	review := false
 	for _, tn := range got {
-		if tn.Origin.Job == rj.ID {
-			review = tn.Origin.JobKind == "review" && strings.Contains(tn.Prompt, "the review you asked for") && strings.Contains(tn.Prompt, "Verdict:")
+		if tn.Origin.Turn == rs.Turn {
+			review = tn.Origin.TurnKind == "review" && strings.Contains(tn.Prompt, "the review you asked for") && strings.Contains(tn.Prompt, "Verdict:")
 		}
 	}
 	if !review {
@@ -275,7 +276,7 @@ func TestAskCaps(t *testing.T) {
 	if code != 403 || !strings.Contains(out, "read-only") {
 		t.Errorf("read-only turn asking: %d %s", code, out)
 	}
-	code, out = as(t, e, tokenOf(t, dir, "ro"), "PATCH", "/api/v0/sessions/"+root.ID, `{"title":"x"}`)
+	code, out = as(t, e, tokenOf(t, dir, "ro"), "PATCH", "/api/v0/sessions/"+root.Session, `{"title":"x"}`)
 	if code != 403 || !strings.Contains(out, "read-only") {
 		t.Errorf("read-only turn renaming: %d %s", code, out)
 	}
@@ -319,17 +320,17 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 		tok                                  string
 	}{
 		{"start off", "[agent_api]\nstart = false\n", "POST", "/api/v0/turns", `{"agent":"claude","prompt":"quick"}`, "start is false", tok},
-		{"read off", "[agent_api]\nread = false\n", "GET", "/api/v0/sessions/" + root.ID + "/search?q=x", "", "read is false", tok},
+		{"read off", "[agent_api]\nread = false\n", "GET", "/api/v0/sessions/" + root.Session + "/search?q=x", "", "read is false", tok},
 		{"list_agents off", "[agent_api]\nlist_agents = false\n", "GET", "/api/v0/harnesses", "", "list_agents is false", tok},
-		{"cancel off", "[agent_api]\ncancel = false\n", "POST", "/api/v0/jobs/job_x/cancel", "", "cancel is false", tok},
-		{"review off", "[agent_api]\nreview = false\n", "POST", "/api/v0/jobs/job_x/review", `{}`, "review is false", tok},
-		{"rename off", "[agent_api]\nrename = false\n", "PATCH", "/api/v0/sessions/" + root.ID, `{"title":"x"}`, "rename is false", tok},
-		{"scope session, rename", "[agent_api]\nscope = \"session\"\n", "PATCH", "/api/v0/sessions/" + root.ID, `{"title":"x"}`, "only its own session", child},
+		{"cancel off", "[agent_api]\ncancel = false\n", "POST", "/api/v0/turns/t_x/stop", "", "cancel is false", tok},
+		{"review off", "[agent_api]\nreview = false\n", "POST", "/api/v0/turns/t_x/review", `{}`, "review is false", tok},
+		{"rename off", "[agent_api]\nrename = false\n", "PATCH", "/api/v0/sessions/" + root.Session, `{"title":"x"}`, "rename is false", tok},
+		{"scope session, rename", "[agent_api]\nscope = \"session\"\n", "PATCH", "/api/v0/sessions/" + root.Session, `{"title":"x"}`, "only its own session", child},
 		// scope = "session": the child's token reads its own session only,
 		// not the person's.
-		{"scope session", "[agent_api]\nscope = \"session\"\n", "GET", "/api/v0/sessions/" + root.ID + "/search?q=x", "", "only its own session", child},
-		{"scope session, by query", "[agent_api]\nscope = \"session\"\n", "GET", "/api/v0/turns?session=" + root.ID, "", "only its own session", child},
-		{"scope session, events by query", "[agent_api]\nscope = \"session\"\n", "GET", "/api/v0/turns/" + root.Turn + "/events?session=" + root.ID, "", "only its own session", child},
+		{"scope session", "[agent_api]\nscope = \"session\"\n", "GET", "/api/v0/sessions/" + root.Session + "/search?q=x", "", "only its own session", child},
+		{"scope session, by query", "[agent_api]\nscope = \"session\"\n", "GET", "/api/v0/turns?session=" + root.Session, "", "only its own session", child},
+		{"scope session, events by query", "[agent_api]\nscope = \"session\"\n", "GET", "/api/v0/sessions/" + root.Session + "/events?turn=" + root.Turn, "", "only its own session", child},
 		{"broken file", "[agent_api]\nscope = all\n", "GET", "/api/v0/harnesses", "", "cannot be used", tok},
 	} {
 		write(tc.file)
@@ -342,7 +343,7 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 	// token: they take the main token, always. rename is on by default, in
 	// the tree.
 	write("")
-	if code, out := as(t, e, tok, "PATCH", "/api/v0/sessions/"+root.ID, `{"title":"Named by a turn"}`); code != 200 || !strings.Contains(out, "Named by a turn") {
+	if code, out := as(t, e, tok, "PATCH", "/api/v0/sessions/"+root.Session, `{"title":"Named by a turn"}`); code != 200 || !strings.Contains(out, "Named by a turn") {
 		t.Errorf("rename in the tree: %d %s", code, out)
 	}
 	for _, r := range [][3]string{
@@ -365,7 +366,7 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 	first := ask(t, e, child, keyed)
 	cost := 0.30
 	if _, _, err := e.store.Append(event.Event{ID: "evt_cost", Kind: event.ModelResponded, Time: time.Now().UTC(),
-		Session: root.ID, Turn: root.Turn, Exchange: "x-cost", Status: 200, CostUSD: &cost}); err != nil {
+		Session: root.Session, Turn: root.Turn, Exchange: "x-cost", Status: 200, CostUSD: &cost}); err != nil {
 		t.Fatal(err)
 	}
 	write("[limits]\nmax_cost_usd_per_tree = 0.25\n")
@@ -373,8 +374,8 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 	if code != 403 || !strings.Contains(out, "max_cost_usd_per_tree") || !strings.Contains(out, "$0.30") {
 		t.Errorf("past the cost cap: %d %s", code, out)
 	}
-	if again := ask(t, e, child, keyed); !again.Existing || again.Job != first.Job {
-		t.Errorf("a retry past the cost cap: %+v, want job %s again", again, first.Job)
+	if again := ask(t, e, child, keyed); !again.Existing || again.Turn != first.Turn {
+		t.Errorf("a retry past the cost cap: %+v, want turn %s again", again, first.Turn)
 	}
 	write("[limits]\nmax_cost_usd_per_tree = 0\n")
 	ask(t, e, child, `{"agent":"claude","prompt":"quick"}`)
@@ -413,13 +414,17 @@ func TestAskInOwnCopy(t *testing.T) {
 func TestAskFromAWorktree(t *testing.T) {
 	e, dir := askEnv(t)
 	repo := gitRepo(t)
-	code, out := as(t, e, token, "POST", "/api/v0/jobs", `{"kind":"turn","spec":{"agent":"claude","repo":"`+repo+`","base":"HEAD","prompt":"root"}}`)
-	if code != 201 {
-		t.Fatalf("job: %d %s", code, out)
+	// No route takes a repo and base any more; the queue still does.
+	spec := queue.Spec{Harness: "claude", Repo: repo, Base: "HEAD", Prompt: "root"}
+	if msg := queue.ResolveFolders(&spec, e.api.cfg.Folders); msg != "" {
+		t.Fatal(msg)
+	}
+	if _, _, err := e.q.Create(queue.DefaultTeam, queue.KindTurn, "", spec, queue.Links{}); err != nil {
+		t.Fatal(err)
 	}
 	tok := tokenOf(t, dir, "root")
 	child := ask(t, e, tok, `{"agent":"claude","prompt":"child"}`)
-	j, err := e.q.Get(queue.DefaultTeam, child.Job)
+	j, err := e.q.JobByTurn(queue.DefaultTeam, child.Turn)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,13 +449,13 @@ func TestAskedAgentReadsTheAskersChanges(t *testing.T) {
 	ask(t, e, tok, `{"agent":"claude","prompt":"child"}`)
 	childTok := tokenOf(t, dir, "child")
 	b, _ := os.ReadFile(filepath.Join(dir, "env-child"))
-	for _, want := range []string{"AGENTBUS_ASKED_BY_SESSION=" + root.ID + "\n", "AGENTBUS_ASKED_BY_TURN=" + root.Turn + "\n"} {
+	for _, want := range []string{"AGENTBUS_ASKED_BY_SESSION=" + root.Session + "\n", "AGENTBUS_ASKED_BY_TURN=" + root.Turn + "\n"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("the child's environment lacks %q", want)
 		}
 	}
 	args, _ := os.ReadFile(filepath.Join(dir, "args-child"))
-	if want := "/api/v0/turns/" + root.Turn + "/diff?session=" + root.ID; !strings.Contains(string(args), want) {
+	if want := "/api/v0/turns/" + root.Turn + "/diff?session=" + root.Session; !strings.Contains(string(args), want) {
 		t.Errorf("the child's instructions do not name %s: %s", want, args)
 	}
 	if got, _ := os.ReadFile(filepath.Join(pwdOf(t, dir, "child"), "a.txt")); string(got) != "one\n" {
@@ -465,14 +470,14 @@ func TestAskedAgentReadsTheAskersChanges(t *testing.T) {
 		} `json:"turns"`
 	}
 	if err := json.Unmarshal([]byte(out), &own); code != 200 || err != nil || len(own.Turns) != 1 || own.Turns[0].Origin == nil ||
-		own.Turns[0].Origin.Kind != event.OriginAsked || own.Turns[0].Origin.Session != root.ID || own.Turns[0].Origin.Turn != root.Turn {
+		own.Turns[0].Origin.Kind != event.OriginAsked || own.Turns[0].Origin.Session != root.Session || own.Turns[0].Origin.Turn != root.Turn {
 		t.Errorf("the child's own turn: %d %s", code, out)
 	}
 	if b, _ := os.ReadFile(filepath.Join(dir, "env-root")); strings.Contains(string(b), "AGENTBUS_ASKED_BY") {
 		t.Error("the person's own turn says it was asked")
 	}
 	release(dir, "root")
-	path := "/api/v0/turns/" + root.Turn + "/diff?session=" + root.ID
+	path := "/api/v0/turns/" + root.Turn + "/diff?session=" + root.Session
 	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(50 * time.Millisecond) {
 		code, out := as(t, e, childTok, "GET", path, "")
 		if code != 200 {

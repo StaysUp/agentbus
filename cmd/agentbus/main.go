@@ -251,7 +251,7 @@ func start(c config) (*service, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The turns token: it may only start, stop and read turns, for a job
+	// The turns token: it may only start, stop, review and read turns, for a job
 	// queue or a runner that should not hold the main token.
 	turnsToken, err := loadToken(filepath.Join(c.home, "turns_token"), turnsTokenPrefix)
 	if err != nil {
@@ -308,8 +308,7 @@ func start(c config) (*service, error) {
 	// nothing about jobs. Opened after the store, which refuses a second
 	// service on this folder.
 	var q *queue.Queue
-	var jobsAPI http.Handler // nil, not a nil *jobs.Server, without a queue
-	var runnerJobs *jobs.Server
+	var runnerJobs *jobs.Server     // nil without a queue
 	var logins *credentials.Manager // connects subscriptions, where the queue is
 	closeQ := func() {
 		if q != nil {
@@ -388,7 +387,7 @@ func start(c config) (*service, error) {
 			st.Close()
 			return nil, err
 		}
-		jobsAPI, runnerJobs = js, js
+		runnerJobs = js
 		logins = subscriptionLogins(c, subs)
 	}
 	// The logs are opened after the store, which refuses a second service on
@@ -522,7 +521,7 @@ func start(c config) (*service, error) {
 	}
 	acfg := api.Config{Store: st, Token: token, TurnsToken: turnsToken, Port: port, AnyHost: !loopback,
 		BaseURL: baseURL, Origin: c.origin, Hosts: c.hosts, Environ: c.environ, Folders: issuer, Build: build(debug.ReadBuildInfo()),
-		Queue: q, Jobs: jobsAPI, Engine: eng, TurnWait: c.turnWait, Agents: saved, Settings: cfgStore, Subscriptions: logins,
+		Queue: q, Jobs: runnerJobs, Engine: eng, TurnWait: c.turnWait, Agents: saved, Settings: cfgStore, Subscriptions: logins,
 		Logf: svcLog.Printf}
 	var relayHandler http.Handler
 	if runnerJobs != nil {
@@ -764,7 +763,7 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 	cfg := runner.Config{Queue: self, EnrollToken: enrollToken, Name: name, Capacity: capacity,
 		Engine: s.eng, Store: s.store, Logf: svcLog.Printf, Labels: c.labels,
 		LookPath: c.lookPath, Environ: c.environ,
-		Workdir: filepath.Join(c.home, "worktrees"), StateFile: filepath.Join(c.home, "runner.json"), Settings: s.settings,
+		Workdir: filepath.Join(c.home, copiesDir), OldWorkdir: filepath.Join(c.home, oldCopiesDir), StateFile: filepath.Join(c.home, "runner.json"), Settings: s.settings,
 		Forward: c.mode == modeRunner, NoSecrets: c.noSecrets()}
 	// A runner of a server keeps its own store; a connector beside it
 	// shares the one handle.
@@ -829,6 +828,14 @@ const subscriptionsDir = "subscriptions"
 // homesDir is where a runner that holds no secrets keeps each session's own
 // home, in its data folder (engine.Config.Homes).
 const homesDir = "homes"
+
+// copiesDir holds a runner's isolated copies, each named after its session.
+// oldCopiesDir is where builds before 0.4 made them, named after a job: a
+// runner still finds, uses and removes those there.
+const (
+	copiesDir    = "sessions"
+	oldCopiesDir = "worktrees"
+)
 
 // getenvOr is c.getenv, or the process's own environment.
 func (c config) getenvOr() func(string) string {

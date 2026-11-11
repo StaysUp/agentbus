@@ -196,7 +196,7 @@ func usernsInside(home string, logf func(string, ...any)) (int, bool) {
 	if home == "" {
 		return refuse("the data folder could not be found")
 	}
-	workdir := filepath.Join(home, "worktrees")
+	workdir := filepath.Join(home, copiesDir)
 	if err := os.MkdirAll(workdir, 0o700); err != nil {
 		return refuse("the workdir could not be made")
 	}

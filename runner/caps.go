@@ -51,7 +51,7 @@ func (r *Runner) report(ctx context.Context, wg *sync.WaitGroup) {
 		if ctx.Err() != nil {
 			return
 		}
-		status, err := call(ctx, r.short, r.cfg.Queue+"/api/v0/runners/"+r.id+"/heartbeat", r.token,
+		status, err := call(ctx, r.short, r.cfg.Queue+"/api/v0/runner/heartbeat", r.token,
 			jobs.RunnerBeat{Capacity: r.cfg.Capacity, Labels: r.cfg.Labels, Capabilities: r.caps(hs)}, nil)
 		if err != nil || status != http.StatusOK {
 			r.cfg.Logf("runner.report_failed status=%d", status)

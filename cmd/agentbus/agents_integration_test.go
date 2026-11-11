@@ -99,7 +99,7 @@ func TestOpenRouterAgentTurnGoesThroughTheGateway(t *testing.T) {
 	if code != http.StatusAccepted {
 		t.Fatalf("turn: %d %s", code, raw)
 	}
-	session, base := out["id"].(string), out["base_url"].(string)
+	session, base := out["session"].(string), out["base_url"].(string)
 	waitClosed(t, svc.store, session)
 
 	r := readReport(t, report)
@@ -177,7 +177,7 @@ func TestOpenRouterCodexArgs(t *testing.T) {
 	if code != http.StatusAccepted {
 		t.Fatalf("turn: %d %s", code, raw)
 	}
-	waitClosed(t, svc.store, out["id"].(string))
+	waitClosed(t, svc.store, out["session"].(string))
 	args := strings.Join(readReport(t, report).Args, " ")
 	base := out["base_url"].(string)
 	want := `-c model_provider=agentbus_openrouter -c model_providers.agentbus_openrouter.name="OpenRouter" ` +
@@ -257,10 +257,11 @@ func TestNewSessionIsolated(t *testing.T) {
 		}
 		svc := runService(t, home, nil, 0)
 		tok := readToken(t, home)
-		copied := func(job string) string { return filepath.Join(home, "worktrees", job) }
+		// A copy is named after its session.
+		copied := func(session string) string { return filepath.Join(home, "sessions", session) }
 		inRepo := copied
 		if setting == "git" {
-			inRepo = func(job string) string { return filepath.Join(home, "worktrees", job, "sub") }
+			inRepo = func(session string) string { return filepath.Join(home, "sessions", session, "sub") }
 		}
 		mine := func(f string) func(string) string { return func(string) string { return f } }
 		if setting == "none" {
@@ -270,7 +271,7 @@ func TestNewSessionIsolated(t *testing.T) {
 			name    string
 			folder  string
 			isolate any
-			want    func(job string) string
+			want    func(session string) string
 		}{
 			{"repo subfolder", filepath.Join(repo, "sub"), nil, inRepo},
 			{"isolate false", filepath.Join(repo, "sub"), false, mine(filepath.Join(repo, "sub"))},
@@ -287,10 +288,10 @@ func TestNewSessionIsolated(t *testing.T) {
 			if code != http.StatusAccepted {
 				t.Fatalf("%s: %d %s", name, code, raw)
 			}
-			waitClosed(t, svc.store, out["id"].(string))
+			waitClosed(t, svc.store, out["session"].(string))
 			r := readReport(t, report)
-			if real(r.Cwd) != real(tc.want(out["job"].(string))) {
-				t.Errorf("%s: ran in %s, want %s", name, r.Cwd, tc.want(out["job"].(string)))
+			if real(r.Cwd) != real(tc.want(out["session"].(string))) {
+				t.Errorf("%s: ran in %s, want %s", name, r.Cwd, tc.want(out["session"].(string)))
 			}
 			if b, err := os.ReadFile(filepath.Join(r.Cwd, "a.txt")); err != nil || string(b) != "uncommitted" {
 				t.Errorf("%s: the session does not start from the folder as it is: %q %v", name, b, err)
@@ -307,9 +308,10 @@ func TestNewSessionIsolated(t *testing.T) {
 	}
 }
 
-// A copied session keeps its copy across turns; the job's result names the
-// checkpoints each turn ran between; closing the workspace removes the copy
-// and its record; the person's folder is never changed.
+// A copied session keeps its copy, named after the session, across turns;
+// the job's result names the checkpoints each turn ran between; closing the
+// session removes the copy and its record; the person's folder is never
+// changed.
 func TestCopiedSessionKeptAcrossTurnsAndRemovedOnClose(t *testing.T) {
 	home := t.TempDir()
 	svc := runService(t, home, nil, 0)
@@ -317,45 +319,43 @@ func TestCopiedSessionKeptAcrossTurnsAndRemovedOnClose(t *testing.T) {
 	folder := t.TempDir()
 	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("v1"), 0o600)
 	t.Setenv("AGENTBUS_FAKE_STDOUT", `{"type":"result","session_id":"sess-1"}`+"\n")
-	var j queue.Job
-	if code := callAPI(t, svc, tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn",
-		"spec": map[string]any{"agent": "claude", "folder": folder, "isolate": true, "prompt": "one"}}, &j); code != http.StatusCreated {
-		t.Fatalf("make job: %d", code)
+	code, j := startTurn(t, svc, tok, map[string]any{"agent": "claude", "folder": folder, "isolate": true, "prompt": "one"})
+	if code != http.StatusAccepted {
+		t.Fatalf("start: %d", code)
 	}
 	j = waitJob(t, svc, tok, j.ID)
-	want := filepath.Join(home, "worktrees", j.ID)
+	want := filepath.Join(home, "sessions", j.Session)
 	// The control plane knows the copy by its space, never by a path.
-	if j.State != queue.Finished || j.Workspace == nil || j.Workspace.Kind != queue.WorkspaceCopy || j.Workspace.Space != j.ID ||
+	if j.State != queue.Finished || j.Workspace == nil || j.Workspace.Kind != queue.WorkspaceCopy || j.Workspace.Space != j.Session ||
 		j.Workspace.Folder != "" {
-		t.Fatalf("first job %s, workspace %+v, want a copy %s at %s", j.State, j.Workspace, j.ID, want)
+		t.Fatalf("first job %s, workspace %+v, want a copy %s at %s", j.State, j.Workspace, j.Session, want)
 	}
 	if fi, err := os.Stat(want); err != nil || !fi.IsDir() {
 		t.Fatalf("no copy at %s: %v", want, err)
 	}
 	// The second turn writes a file in the copy, through the fake agent.
 	t.Setenv("AGENTBUS_FAKE_MARK", filepath.Join(want, "made.txt"))
-	var next queue.Job
-	if code := callAPI(t, svc, tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn",
-		"spec": map[string]any{"session": j.Session, "prompt": "two"}}, &next); code != http.StatusCreated {
-		t.Fatalf("next job: %d", code)
+	code, next := startTurn(t, svc, tok, map[string]any{"session": j.Session, "prompt": "two"})
+	if code != http.StatusAccepted {
+		t.Fatalf("next turn: %d", code)
 	}
 	if next = waitJob(t, svc, tok, next.ID); next.State != queue.Finished {
 		t.Fatalf("next job %s %s %s", next.State, next.Reason, next.Result)
 	}
 	res, err := queue.ReadResult(next.Result)
 	if err != nil || res.Changes == nil || res.Changes.Count != 1 || res.Changes.Files[0].Path != "made.txt" ||
-		res.Changes.From != "base" || res.Changes.To != next.Attempt {
+		res.Changes.From != "base" || res.Changes.To != next.Turn {
 		t.Fatalf("second turn's changes %+v %v", res.Changes, err)
 	}
 	if _, err := os.Stat(filepath.Join(folder, "made.txt")); err == nil {
 		t.Fatal("the turn changed the person's folder")
 	}
-	if code := callAPI(t, svc, tok, "POST", "/api/v0/workspaces/"+j.Session+"/close", nil, nil); code/100 != 2 {
+	if code := callAPI(t, svc, tok, "PATCH", "/api/v0/sessions/"+j.Session, map[string]any{"closed": true}, nil); code/100 != 2 {
 		t.Fatalf("close: %d", code)
 	}
 	waitFor(t, "the copy removed", func() bool {
 		_, err1 := os.Stat(want)
-		_, err2 := os.Stat(filepath.Join(home, "worktrees", ".isolation", j.ID))
+		_, err2 := os.Stat(filepath.Join(home, "sessions", ".isolation", j.Session))
 		return os.IsNotExist(err1) && os.IsNotExist(err2)
 	})
 }
@@ -394,7 +394,7 @@ func TestSavedAgentsKeptAndDefaultsSeeded(t *testing.T) {
 	if code != http.StatusAccepted {
 		t.Fatalf("turn: %d %s", code, raw)
 	}
-	waitClosed(t, svc.store, out["id"].(string))
+	waitClosed(t, svc.store, out["session"].(string))
 	if args := strings.Join(readReport(t, report).Args, " "); !strings.Contains(args, "--model haiku -- hi") {
 		t.Errorf("the agent's model is not used: %s", args)
 	}
@@ -402,12 +402,12 @@ func TestSavedAgentsKeptAndDefaultsSeeded(t *testing.T) {
 	if code != http.StatusAccepted {
 		t.Fatalf("removed default: %d %s", code, raw)
 	}
-	waitClosed(t, svc.store, out["id"].(string))
+	waitClosed(t, svc.store, out["session"].(string))
 }
 
 // An isolated session in a repo's subfolder keeps that subfolder: its next
 // turn runs there, its job's workspace names it, a review reads it, and
-// closing the workspace removes the whole worktree.
+// closing the session removes the whole worktree.
 func TestIsolatedSubfolderKeptAcrossTurnsAndReview(t *testing.T) {
 	home := t.TempDir()
 	isolationSetting(t, home, "git")
@@ -425,15 +425,14 @@ func TestIsolatedSubfolderKeptAcrossTurnsAndReview(t *testing.T) {
 	t.Setenv("AGENTBUS_FAKE_OUT", report)
 	// A resume id, so the session's next turn can continue (replay is off).
 	t.Setenv("AGENTBUS_FAKE_STDOUT", `{"type":"result","session_id":"sess-1"}`+"\n")
-	var j queue.Job
-	if code := callAPI(t, svc, tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn",
-		"spec": map[string]any{"agent": "claude", "folder": filepath.Join(repo, "sub"), "isolate": true, "prompt": "one"}}, &j); code != http.StatusCreated {
-		t.Fatalf("make job: %d", code)
+	code, j := startTurn(t, svc, tok, map[string]any{"agent": "claude", "folder": filepath.Join(repo, "sub"), "isolate": true, "prompt": "one"})
+	if code != http.StatusAccepted {
+		t.Fatalf("start: %d", code)
 	}
 	j = waitJob(t, svc, tok, j.ID)
-	want := filepath.Join(home, "worktrees", j.ID, "sub")
-	if j.State != queue.Finished || j.Workspace == nil || j.Workspace.Space != j.ID || j.Workspace.Folder != "" {
-		t.Fatalf("first job %s, workspace %+v, want space %s", j.State, j.Workspace, j.ID)
+	want := filepath.Join(home, "sessions", j.Session, "sub")
+	if j.State != queue.Finished || j.Workspace == nil || j.Workspace.Space != j.Session || j.Workspace.Folder != "" {
+		t.Fatalf("first job %s, workspace %+v, want space %s", j.State, j.Workspace, j.Session)
 	}
 	if fi, err := os.Stat(want); err != nil || !fi.IsDir() {
 		t.Fatalf("no worktree folder at %s: %v", want, err)
@@ -448,10 +447,9 @@ func TestIsolatedSubfolderKeptAcrossTurnsAndReview(t *testing.T) {
 		t.Fatalf("the record's folder_ref %q, want %q (%v)", c.FolderRef, j.Spec.FolderRef, err)
 	}
 	os.Remove(report)
-	var next queue.Job
-	if code := callAPI(t, svc, tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn",
-		"spec": map[string]any{"session": j.Session, "prompt": "two"}}, &next); code != http.StatusCreated {
-		t.Fatalf("next job: %d", code)
+	code, next := startTurn(t, svc, tok, map[string]any{"session": j.Session, "prompt": "two"})
+	if code != http.StatusAccepted {
+		t.Fatalf("next turn: %d", code)
 	}
 	if next = waitJob(t, svc, tok, next.ID); next.State != queue.Finished {
 		t.Fatalf("next job %s %s %s", next.State, next.Reason, next.Result)
@@ -459,20 +457,20 @@ func TestIsolatedSubfolderKeptAcrossTurnsAndReview(t *testing.T) {
 	if r := readReport(t, report); real(r.Cwd) != real(want) {
 		t.Fatalf("next turn ran in %s, want %s", r.Cwd, want)
 	}
-	var rev queue.Job
-	if code := callAPI(t, svc, tok, "POST", "/api/v0/jobs/"+next.ID+"/review", map[string]any{"agent": "codex"}, &rev); code != http.StatusCreated {
+	code, rev := reviewTurn(t, svc, tok, next.Turn, map[string]any{"agent": "codex"})
+	if code != http.StatusAccepted {
 		t.Fatalf("review: %d", code)
 	}
 	// The review names no folder: it reads the reviewed session's workspace.
-	if rev.Spec.Folder != "" || rev.Workspace == nil || rev.Workspace.Space != j.ID {
+	if rev.Spec.Folder != "" || rev.Workspace == nil || rev.Workspace.Space != j.Session {
 		t.Fatalf("review spec folder %q, workspace %+v, want %s", rev.Spec.Folder, rev.Workspace, want)
 	}
 	waitJob(t, svc, tok, rev.ID)
-	if code := callAPI(t, svc, tok, "POST", "/api/v0/workspaces/"+j.Session+"/close", nil, nil); code/100 != 2 {
+	if code := callAPI(t, svc, tok, "PATCH", "/api/v0/sessions/"+j.Session, map[string]any{"closed": true}, nil); code/100 != 2 {
 		t.Fatalf("close: %d", code)
 	}
 	waitFor(t, "the worktree removed", func() bool {
-		_, err := os.Stat(filepath.Join(home, "worktrees", j.ID))
+		_, err := os.Stat(filepath.Join(home, "sessions", j.Session))
 		return os.IsNotExist(err)
 	})
 }
@@ -495,7 +493,7 @@ func TestRetryAfterAgentEditGetsTheSameTurn(t *testing.T) {
 	if code != http.StatusAccepted {
 		t.Fatalf("first: %d %s", code, raw)
 	}
-	waitClosed(t, svc.store, first["id"].(string))
+	waitClosed(t, svc.store, first["session"].(string))
 	if code, _ := sendAPI(t, svc, tok, "PUT", "/api/v0/agents/"+id, map[string]any{"name": "fast", "harness": "claude",
 		"access": "subscription", "model": "sonnet"}); code != 200 {
 		t.Fatalf("edit: %d", code)
@@ -504,29 +502,14 @@ func TestRetryAfterAgentEditGetsTheSameTurn(t *testing.T) {
 	if code != http.StatusAccepted || again["existing"] != true || again["turn"] != first["turn"] {
 		t.Fatalf("retry: %d %s, want the first turn %v", code, raw, first["turn"])
 	}
-	// Jobs too.
-	jb := map[string]any{"kind": "turn", "idempotency_key": "k-2", "spec": map[string]any{"agent": id, "folder": t.TempDir(), "prompt": "hi"}}
-	var j1, j2, j3 queue.Job
-	if code := callAPI(t, svc, tok, "POST", "/api/v0/jobs", jb, &j1); code != http.StatusCreated || j1.Spec.Model != "sonnet" {
-		t.Fatalf("job: %d %+v", code, j1.Spec)
-	}
-	sendAPI(t, svc, tok, "PUT", "/api/v0/agents/"+id, map[string]any{"name": "fast", "harness": "claude", "access": "subscription"})
-	if code := callAPI(t, svc, tok, "POST", "/api/v0/jobs", jb, &j2); code != http.StatusOK || j2.ID != j1.ID {
-		t.Fatalf("job retry: %d %s, want %s", code, j2.ID, j1.ID)
-	}
-	waitJob(t, svc, tok, j1.ID)
-
-	// And after the agent is removed: the retry still gets the first turn
-	// and job; a new key is refused.
+	// And after the agent is removed: the retry still gets the first turn;
+	// a new key is refused.
 	if code, _ := sendAPI(t, svc, tok, "DELETE", "/api/v0/agents/"+id, nil); code != http.StatusNoContent {
 		t.Fatalf("remove: %d", code)
 	}
 	code, again, raw = postRun(t, svc, tok, body)
 	if code != http.StatusAccepted || again["existing"] != true || again["turn"] != first["turn"] {
 		t.Fatalf("retry after remove: %d %s", code, raw)
-	}
-	if code := callAPI(t, svc, tok, "POST", "/api/v0/jobs", jb, &j3); code != http.StatusOK || j3.ID != j1.ID {
-		t.Fatalf("job retry after remove: %d %s, want %s", code, j3.ID, j1.ID)
 	}
 	body["idempotency_key"] = "k-3"
 	if code, _, raw := postRun(t, svc, tok, body); code != http.StatusBadRequest {
@@ -552,9 +535,9 @@ func TestIsolatedFolderNotInCommitRefused(t *testing.T) {
 	if code != http.StatusBadRequest || !strings.Contains(out["error"].(string), "not in its repo's last commit") {
 		t.Fatalf("%d %s", code, raw)
 	}
-	entries, _ := os.ReadDir(filepath.Join(home, "worktrees"))
+	entries, _ := os.ReadDir(filepath.Join(home, "sessions"))
 	if len(entries) != 0 {
-		t.Fatalf("worktrees left: %v", entries)
+		t.Fatalf("copies left: %v", entries)
 	}
 }
 
@@ -569,14 +552,13 @@ func TestReviewBySavedAgent(t *testing.T) {
 	if code != http.StatusCreated {
 		t.Fatalf("create: %d %v", code, ag)
 	}
-	var j queue.Job
-	if code := callAPI(t, svc, tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn",
-		"spec": map[string]any{"agent": "claude", "folder": t.TempDir(), "prompt": "one"}}, &j); code != http.StatusCreated {
-		t.Fatalf("job: %d", code)
+	code, j := startTurn(t, svc, tok, map[string]any{"agent": "claude", "folder": t.TempDir(), "isolate": false, "prompt": "one"})
+	if code != http.StatusAccepted {
+		t.Fatalf("turn: %d", code)
 	}
 	waitJob(t, svc, tok, j.ID)
-	var rev queue.Job
-	if code := callAPI(t, svc, tok, "POST", "/api/v0/jobs/"+j.ID+"/review", map[string]any{"agent": ag["id"]}, &rev); code != http.StatusCreated {
+	code, rev := reviewTurn(t, svc, tok, j.Turn, map[string]any{"agent": ag["id"]})
+	if code != http.StatusAccepted {
 		t.Fatalf("review: %d", code)
 	}
 	if rev.Spec.Harness != "codex" || rev.Spec.AgentID != ag["id"] || rev.Spec.Access != "subscription" || rev.Spec.Model != "gpt-5.5" {
@@ -585,20 +567,20 @@ func TestReviewBySavedAgent(t *testing.T) {
 	if rev = waitJob(t, svc, tok, rev.ID); rev.State != queue.Finished {
 		t.Fatalf("review %s %s %s", rev.State, rev.Reason, rev.Result)
 	}
-	if code := callAPI(t, svc, tok, "POST", "/api/v0/jobs/"+j.ID+"/review", map[string]any{"agent": "a_nobody"}, nil); code != http.StatusBadRequest {
+	if code, _ := reviewTurn(t, svc, tok, j.Turn, map[string]any{"agent": "a_nobody"}); code != http.StatusBadRequest {
 		t.Fatalf("unknown reviewer: %d", code)
 	}
 	// A keyed review, its reviewer removed, then the same request: the first review.
-	var k1, k2 queue.Job
 	req := map[string]any{"agent": ag["id"], "idempotency_key": "rev-1"}
-	if code := callAPI(t, svc, tok, "POST", "/api/v0/jobs/"+j.ID+"/review", req, &k1); code != http.StatusCreated {
+	code, k1 := reviewTurn(t, svc, tok, j.Turn, req)
+	if code != http.StatusAccepted {
 		t.Fatalf("keyed review: %d", code)
 	}
 	waitJob(t, svc, tok, k1.ID)
 	if code, _ := sendAPI(t, svc, tok, "DELETE", "/api/v0/agents/"+ag["id"].(string), nil); code != http.StatusNoContent {
 		t.Fatalf("remove: %d", code)
 	}
-	if code := callAPI(t, svc, tok, "POST", "/api/v0/jobs/"+j.ID+"/review", req, &k2); code != http.StatusOK || k2.ID != k1.ID {
+	if code, k2 := reviewTurn(t, svc, tok, j.Turn, req); code != http.StatusAccepted || k2.ID != k1.ID {
 		t.Fatalf("retry after remove: %d %s, want %s", code, k2.ID, k1.ID)
 	}
 }
@@ -628,7 +610,7 @@ func TestIsolatedSymlinkOutRefused(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(outside, "ran")); err == nil {
 		t.Fatal("the agent ran outside the worktree")
 	}
-	if entries, _ := os.ReadDir(filepath.Join(home, "worktrees")); len(entries) != 0 {
-		t.Fatalf("worktrees left: %v", entries)
+	if entries, _ := os.ReadDir(filepath.Join(home, "sessions")); len(entries) != 0 {
+		t.Fatalf("copies left: %v", entries)
 	}
 }

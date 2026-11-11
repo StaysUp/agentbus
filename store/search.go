@@ -51,6 +51,9 @@ type SearchQuery struct {
 	// Before is the NextBefore of the previous page; empty for the newest.
 	Before string
 	Limit  int
+	// SkipTurn leaves out the hits of this turn: the turn that searches, so
+	// its own search call is never a hit. Empty: none is left out.
+	SkipTurn string
 	// MaxBytes bounds the hits' JSON on one page. A page holds at least one
 	// hit.
 	MaxBytes int
@@ -82,7 +85,7 @@ type SearchHit struct {
 	Source  string `json:"source" doc:"request: a message or input item of a call's request. reply: a call's kept reply. event: an event's text."`
 	Turn    string `json:"turn" doc:"The turn of the call or event. Empty for traffic no turn id names."`
 	Call    string `json:"call,omitempty" doc:"The model call, the exchange of its events. Absent on an event hit without one."`
-	Piece   *int   `json:"piece,omitempty" doc:"On a request hit: the piece's index in the call's request, as GET /api/v0/calls/{id}/pieces/{n} takes it."`
+	Piece   *int   `json:"piece,omitempty" doc:"On a request hit: the piece's index in the call's request, as GET /api/v0/turns/{id}/calls/{call}/pieces/{n} takes it."`
 	Seq     int64  `json:"seq" doc:"The event the hit is ordered by: the call's model.requested for a request hit, its model.responded for a reply hit (model.requested when none is stored), the event itself for an event hit."`
 	Kind    string `json:"kind" doc:"On a request or reply hit: the piece's kind, message or input_item. On an event hit: the event's kind."`
 	Role    string `json:"role,omitempty" doc:"On a request or reply hit: the piece's label, a message's role or an input item's role or type."`
@@ -165,6 +168,10 @@ func (s *Store) Search(q SearchQuery) (SearchResult, error) {
 		if len(res.Hits) == q.Limit || (last != nil && scanned >= q.MaxScan) {
 			stop()
 			return res, nil
+		}
+		if q.SkipTurn != "" && c.turn == q.SkipTurn {
+			last = &c.key
+			continue
 		}
 		text, n, err := s.candidateText(c)
 		if err != nil {
@@ -399,11 +406,12 @@ func itemLabel(raw json.RawMessage) string {
 
 // readPath is the API path that returns the whole of c.
 func (s *Store) readPath(session string, c *candidate) string {
-	switch c.source {
-	case "request":
-		return "/api/v0/calls/" + c.call + "/pieces/" + strconv.Itoa(c.piece)
-	case "reply":
-		return "/api/v0/calls/" + c.call + "/pieces/reply"
+	switch {
+	case c.turn == "":
+	case c.source == "request":
+		return "/api/v0/turns/" + c.turn + "/calls/" + c.call + "/pieces/" + strconv.Itoa(c.piece)
+	case c.source == "reply":
+		return "/api/v0/turns/" + c.turn + "/calls/" + c.call + "/pieces/reply"
 	}
 	return "/api/v0/sessions/" + session + "/events?store=" + s.id + "&after=" + strconv.FormatInt(c.seq-1, 10) + "&limit=1"
 }

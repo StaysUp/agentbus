@@ -97,7 +97,7 @@ var Kinds = []KindInfo{
 	{NetworkRefused, "A turn's agent runs closed off from the network ([network] of permissions.toml), and asked its runner's proxy for a host the policy does not allow: host (host:port as asked) and error (why). The connection was refused. Each refusal is its own event. Show it as a warning.", []string{"host"}},
 	{SubscriptionConnected, "Control kept a token from the person's own login for a subscription (POST /api/v0/subscriptions/{id}/connect): agent is the harness. No session. The token is never in the record.", []string{"agent"}},
 	{SubscriptionFailed, "A subscription's connect ended without a token: agent is the harness, error says why, such as a wrong code or the login waiting too long. No session. Show it as an error.", []string{"agent", "error"}},
-	{RunnerEnrolled, "A runner or a connector enrolled with control: runner is its id (GET /api/v0/runners). No session.", []string{"runner"}},
+	{RunnerEnrolled, "A runner or a connector enrolled with control: runner is its id . No session.", []string{"runner"}},
 	{RunnerGone, "A runner or a connector stopped asking control for work for a minute: runner is its id. It may come back; a turn it was running whose lease runs out ends as runner_lost. No session. Show it as a warning.", []string{"runner"}},
 	{SettingsChanged, "A settings file was written through the API: file is permissions.toml or instructions.md. Never its content. No session.", []string{"file"}},
 	{SessionRenamed, "The session was given a name with PATCH /api/v0/sessions/{id}: title is the new name, old_title the one it had before (absent when it had none). The latest names the session in GET /api/v0/sessions; earlier names stay in the record.", []string{"session", "title"}},
@@ -292,9 +292,10 @@ type Origin struct {
 	// and turn of the work whose result this is.
 	Session string `json:"session,omitempty" doc:"asked: the session of the turn that asked. result: the session the work ran in."`
 	Turn    string `json:"turn,omitempty" doc:"asked: the turn that asked. result: the work's turn."`
-	Job     string `json:"job,omitempty" doc:"result: the job whose result this is. GET /api/v0/jobs/{id} reads it."`
-	JobKind string `json:"job_kind,omitempty" doc:"result: turn or review."`
-	Agent   string `json:"agent,omitempty" doc:"result: the saved agent, or harness, that did the work."`
+	// TurnKind, for result: the kind of the work's turn. A turn.started
+	// stored before 0.4 holds job and job_kind instead.
+	TurnKind string `json:"turn_kind,omitempty" doc:"result: turn or review: the kind of the work's turn."`
+	Agent    string `json:"agent,omitempty" doc:"result: the saved agent, or harness, that did the work."`
 }
 
 // Origin kinds.

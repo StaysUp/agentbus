@@ -250,15 +250,15 @@ func TestJobsRunAsTurns(t *testing.T) {
 			len(j.Attempts) != 1 || res.Session != j.Session || j.Session == "" {
 			t.Fatalf("job %s: %+v %s", id, j, j.Result)
 		}
-		turn := j.Attempts[0].ID
-		if !strings.HasPrefix(turn, "t_") {
-			t.Fatalf("attempt id %q is not a turn id", turn)
+		turn := j.Turn
+		if !strings.HasPrefix(turn, "t_") || turn == j.Attempts[0].ID {
+			t.Fatalf("turn id %q, attempt %q: want the job's own turn id", turn, j.Attempts[0].ID)
 		}
 		list, err := w.st.Turns(store.TurnQuery{Session: j.Session, Turn: turn, Limit: 1})
 		if err != nil || len(list.Turns) != 1 || list.Turns[0].State != "finished" {
 			t.Fatalf("the record has no finished turn %s in session %s: %+v", turn, j.Session, list)
 		}
-		evs, _ := w.q.Events(queue.DefaultTeam, turn)
+		evs, _ := w.q.Events(queue.DefaultTeam, j.Attempts[0].ID)
 		var kinds []string
 		for _, e := range evs {
 			kinds = append(kinds, e.Kind)
@@ -360,13 +360,14 @@ func TestWorktreeSession(t *testing.T) {
 	if err := json.Unmarshal(got.Result, &res); err != nil {
 		t.Fatal(err)
 	}
-	wantDir := filepath.Join(w.r.cfg.Workdir, first.ID)
-	if res.Folder != "" || got.Workspace == nil || got.Workspace.Space != first.ID || w.runs()[0].Cwd != wantDir && !sameDir(w.runs()[0].Cwd, wantDir) {
+	// The copy is named after its session.
+	wantDir := filepath.Join(w.r.cfg.Workdir, first.Session)
+	if res.Folder != "" || got.Workspace == nil || got.Workspace.Space != first.Session || w.runs()[0].Cwd != wantDir && !sameDir(w.runs()[0].Cwd, wantDir) {
 		t.Fatalf("folder %q, turn ran in %q, want %q", res.Folder, w.runs()[0].Cwd, wantDir)
 	}
 	m := byPath(res.Changes)
 	if res.Changes.Kind != "snapshot" || res.Changes.Count != 2 || m["app.txt"].Change != "modified" || m["app.txt"].Diff == nil ||
-		m["test.log"].Change != "added" || res.Changes.From != isolation.Base || res.Changes.To != got.Attempts[0].ID {
+		m["test.log"].Change != "added" || res.Changes.From != isolation.Base || res.Changes.To != got.Turn {
 		t.Fatalf("changes %+v", res.Changes)
 	}
 	if got.Workspace == nil || got.Workspace.Kind != queue.WorkspaceWorktree || got.Workspace.Runner != w.r.ID() {
@@ -445,7 +446,7 @@ func TestReviewRunsInTheAuthorsWorktree(t *testing.T) {
 		if len(j.Attempts) == 0 || len(w.runs()) < 2 {
 			return false
 		}
-		revTurn = j.Attempts[0].ID
+		revTurn = j.Turn
 		return true
 	})
 	list, _ := w.st.Turns(store.TurnQuery{Turn: revTurn, Limit: 1})
@@ -465,7 +466,7 @@ func TestReviewRunsInTheAuthorsWorktree(t *testing.T) {
 	}
 	r := w.runs()[1]
 	args := strings.Join(r.Args, " ")
-	if !sameDir(r.Cwd, filepath.Join(w.r.cfg.Workdir, author.ID)) || !strings.Contains(args, "--tools Read,Grep,Glob") ||
+	if !sameDir(r.Cwd, filepath.Join(w.r.cfg.Workdir, author.Session)) || !strings.Contains(args, "--tools Read,Grep,Glob") ||
 		!strings.Contains(args, "--model sonnet") || strings.Contains(args, "--resume") {
 		t.Fatalf("review ran in %q with %q", r.Cwd, args)
 	}
@@ -481,7 +482,7 @@ func TestStaleAttemptStopsTheTurn(t *testing.T) {
 	w := newWorld(t, 1)
 	j := w.create(t, queue.Spec{Harness: "claude", Prompt: "hold"})
 	waitFor(t, "a turn", func() bool { return len(w.runs()) == 1 })
-	turn := w.job(t, j.ID).Attempts[0].ID
+	turn := w.job(t, j.ID).Turn
 	w.skew.Store(int64(time.Minute)) // the queue's clock passes the lease
 	waitFor(t, "the turn stopped", func() bool {
 		list, _ := w.st.Turns(store.TurnQuery{Turn: turn, Limit: 1})
@@ -514,7 +515,7 @@ func TestCopyWrittenBetweenTurnsIsInTheNextDiff(t *testing.T) {
 	if f.State != queue.Finished {
 		t.Fatalf("first: %s %s", f.State, f.Reason)
 	}
-	write(t, filepath.Join(w.r.cfg.Workdir, first.ID, "stray.txt"), "left behind\n")
+	write(t, filepath.Join(w.r.cfg.Workdir, first.Session, "stray.txt"), "left behind\n")
 	next := w.create(t, queue.Spec{Session: first.Session, Prompt: "write second.txt two"})
 	waitFor(t, "finished", func() bool { return w.job(t, next.ID).Ended != nil })
 	var res struct {
@@ -524,7 +525,7 @@ func TestCopyWrittenBetweenTurnsIsInTheNextDiff(t *testing.T) {
 	_ = json.Unmarshal(n.Result, &res)
 	m := byPath(res.Changes)
 	if n.State != queue.Finished || res.Changes.Count != 2 || m["second.txt"].Change != "added" || m["stray.txt"].Change != "added" ||
-		res.Changes.From != f.Attempts[0].ID {
+		res.Changes.From != f.Turn {
 		t.Fatalf("second: %s, changes %+v", n.State, res.Changes)
 	}
 }

@@ -1,18 +1,20 @@
-// Package jobs is the HTTP API of the job queue: the jobs API a client
-// calls, and the runner protocol a runner calls.
+// Package jobs is the runner protocol, under /api/v0/runner/: how runners and
+// connectors take jobs from control and report them. The client API (package
+// api) makes and reads the jobs; this package never answers a client.
 //
-// Three tokens:
-//   - the main token (Config.Token): the jobs API.
-//   - the enrollment token (Config.EnrollToken): POST /api/v0/runners only.
-//   - a runner token, made when a runner enrolls and returned once: take for
-//     its own runner id, and the attempt calls for attempts it holds.
+// Two tokens:
+//   - the enrollment token (Config.EnrollToken): POST /api/v0/runner/register only.
+//   - a runner token, made when a runner registers and returned once: every
+//     other call, for its own runner and the attempts it holds.
+//
+// The main token (Config.Token) is not taken here; it only keys the turn
+// tokens control signs for runners' turns (tokens.go).
 //
 // Tokens are compared by their SHA-256. A runner token is kept only as its
 // hash. Error replies use fixed wording and never quote the request.
 package jobs
 
 import (
-	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
@@ -20,9 +22,6 @@ import (
 	"github.com/staysup/agentbus/agents"
 	"io"
 	"net/http"
-	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -30,7 +29,6 @@ import (
 	"github.com/staysup/agentbus/credentials"
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/queue"
-	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/settings"
 )
 
@@ -51,13 +49,14 @@ const (
 	MaxBatch = 500
 )
 
-// ProtocolVersion is the runner protocol this server speaks.
-const ProtocolVersion = 1
+// ProtocolVersion is the runner protocol this server speaks. 2: the routes
+// under /api/v0/runner/, and a job's turn named when the job is made.
+const ProtocolVersion = 2
 
 // Config is what the server needs.
 type Config struct {
 	Queue       *queue.Queue
-	Token       string // the main token: the jobs API
+	Token       string // the main token: it keys the turn tokens of runners' turns (tokens.go)
 	EnrollToken string // adds a runner
 	// Lease and Heartbeat override the defaults, for tests. Zero keeps them.
 	Lease, Heartbeat, MaxWait time.Duration
@@ -65,7 +64,7 @@ type Config struct {
 	// spec.agent as a harness name, as before saved agents.
 	Agents *agents.Store
 	// Settings are the policy and the instructions a runner reads for each
-	// turn (GET /api/v0/runners/{id}/settings). Nil sends the defaults.
+	// turn (GET /api/v0/runner/settings). Nil sends the defaults.
 	Settings settings.Store
 	// Folders is this machine's connector, in agentbus up: a job's folder
 	// path becomes its reference there (queue.ResolveFolders). Nil, as in
@@ -117,36 +116,38 @@ func New(cfg Config) (*Server, error) {
 	}
 	s := &Server{cfg: cfg, token: sha256.Sum256([]byte(cfg.Token)), enrol: sha256.Sum256([]byte(cfg.EnrollToken)), mux: http.NewServeMux(),
 		tokenKey: sha256.Sum256([]byte("agentbus runner turn tokens\x00" + cfg.Token))}
-	main := s.main
-	s.mux.HandleFunc("POST /api/v0/jobs", main(s.createJob))
-	s.mux.HandleFunc("GET /api/v0/jobs", main(s.listJobs))
-	s.mux.HandleFunc("GET /api/v0/jobs/{id}", main(s.getJob))
-	s.mux.HandleFunc("POST /api/v0/jobs/{id}/cancel", main(s.cancelJob))
-	s.mux.HandleFunc("POST /api/v0/jobs/{id}/review", main(s.reviewJob))
-	s.mux.HandleFunc("GET /api/v0/attempts/{id}/events", main(s.attemptEvents))
-	s.mux.HandleFunc("GET /api/v0/workspaces", main(s.listWorkspaces))
-	s.mux.HandleFunc("POST /api/v0/workspaces/{id}/close", main(s.closeWorkspace))
-	s.mux.HandleFunc("POST /api/v0/runners/{id}/removed", s.runner(s.removed))
-	s.mux.HandleFunc("POST /api/v0/runners/{id}/heartbeat", s.runner(s.runnerBeat))
-	s.mux.HandleFunc("POST /api/v0/runners", s.enroll)
-	s.mux.HandleFunc("GET /api/v0/runners/{id}/settings", s.runner(s.runnerSettings))
-	s.mux.HandleFunc("POST /api/v0/runners/{id}/take", s.runner(s.take))
-	s.mux.HandleFunc("POST /api/v0/attempts/{id}/start", s.runner(s.start))
-	s.mux.HandleFunc("POST /api/v0/attempts/{id}/heartbeat", s.runner(s.heartbeat))
-	s.mux.HandleFunc("POST /api/v0/attempts/{id}/events", s.runner(s.events))
-	s.mux.HandleFunc("POST /api/v0/attempts/{id}/finish", s.runner(s.finish))
-	s.mux.HandleFunc("POST /api/v0/attempts/{id}/snapshot", s.runner(s.snapshot))
-	s.mux.HandleFunc("POST /api/v0/attempts/{id}/record", s.runner(s.record))
-	s.mux.HandleFunc("POST /api/v0/attempts/{id}/calls", s.runner(s.calls))
-	s.mux.HandleFunc("POST /api/v0/blobs", s.runner(s.blobsMissing))
-	s.mux.HandleFunc("POST /api/v0/packs", s.runner(s.blobPack))
-	s.mux.HandleFunc("POST /api/v0/packs/fetch", s.runner(s.blobFetch))
-	s.mux.HandleFunc("PUT /api/v0/blobs/{id}", s.runner(s.blobPut))
-	s.mux.HandleFunc("GET /api/v0/blobs/{id}", s.runner(s.blobGet))
+	s.mux.HandleFunc("POST /api/v0/runner/register", s.enroll)
+	s.mux.HandleFunc("POST /api/v0/runner/removed", s.runner(s.removed))
+	s.mux.HandleFunc("POST /api/v0/runner/heartbeat", s.runner(s.runnerBeat))
+	s.mux.HandleFunc("GET /api/v0/runner/settings", s.runner(s.runnerSettings))
+	s.mux.HandleFunc("POST /api/v0/runner/take", s.runner(s.take))
+	s.mux.HandleFunc("POST /api/v0/runner/attempts/{id}/start", s.runner(s.start))
+	s.mux.HandleFunc("POST /api/v0/runner/attempts/{id}/heartbeat", s.runner(s.heartbeat))
+	s.mux.HandleFunc("POST /api/v0/runner/attempts/{id}/events", s.runner(s.events))
+	s.mux.HandleFunc("POST /api/v0/runner/attempts/{id}/finish", s.runner(s.finish))
+	s.mux.HandleFunc("POST /api/v0/runner/attempts/{id}/snapshot", s.runner(s.snapshot))
+	s.mux.HandleFunc("POST /api/v0/runner/attempts/{id}/record", s.runner(s.record))
+	s.mux.HandleFunc("POST /api/v0/runner/attempts/{id}/calls", s.runner(s.calls))
+	s.mux.HandleFunc("POST /api/v0/runner/blobs", s.runner(s.blobsMissing))
+	s.mux.HandleFunc("POST /api/v0/runner/packs", s.runner(s.blobPack))
+	s.mux.HandleFunc("POST /api/v0/runner/packs/fetch", s.runner(s.blobFetch))
+	s.mux.HandleFunc("PUT /api/v0/runner/blobs/{id}", s.runner(s.blobPut))
+	s.mux.HandleFunc("GET /api/v0/runner/blobs/{id}", s.runner(s.blobGet))
 	return s, nil
 }
 
-// ServeHTTP serves the jobs API and the runner protocol. The API in front of
+// CloseSession closes a session: it takes no more jobs, and its runner
+// removes its copy and its home. A session with a job that has not ended is
+// refused (queue.ErrSessionBusy).
+func (s *Server) CloseSession(session string) (queue.Workspace, error) {
+	ws, err := s.cfg.Queue.CloseSession(queue.DefaultTeam, session)
+	if err == nil {
+		s.cfg.Sweeper.Kick() // its blobs may go now
+	}
+	return ws, err
+}
+
+// ServeHTTP serves the runner protocol. The API in front of
 // it (package api) has already checked the Host, answered CORS and bounded
 // the body; this checks the tokens.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -189,46 +190,6 @@ func bearer(r *http.Request) (string, bool) {
 func same(tok string, want [32]byte) bool {
 	sum := sha256.Sum256([]byte(tok))
 	return subtle.ConstantTimeCompare(sum[:], want[:]) == 1
-}
-
-// admitKey marks a request package api admitted for a turn token.
-type admitKey struct{}
-
-// admission is what Admit carries.
-type admission struct {
-	links queue.Links
-	lim   queue.Limits
-}
-
-// Admit marks a request that package api has admitted for a turn token, on a
-// route and job its checks allow, with the links work it asks for gets (the
-// asking turn and its request tree) and the caps it is held to. Only code in
-// this binary can set it.
-func Admit(ctx context.Context, l queue.Links, lim queue.Limits) context.Context {
-	return context.WithValue(ctx, admitKey{}, admission{l, lim})
-}
-
-// admitted is the links and caps of a request Admit marked.
-func admitted(r *http.Request) (queue.Links, queue.Limits, bool) {
-	a, ok := r.Context().Value(admitKey{}).(admission)
-	return a.links, a.lim, ok
-}
-
-// main admits the main token, and a request package api admitted for a turn
-// token (Admit).
-func (s *Server) main(h func(http.ResponseWriter, *http.Request)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if _, _, ok := admitted(r); ok {
-			h(w, r)
-			return
-		}
-		tok, ok := bearer(r)
-		if !ok || !same(tok, s.token) {
-			fail(w, http.StatusUnauthorized, "the main token is required")
-			return
-		}
-		h(w, r)
-	}
 }
 
 // runner admits a runner token, and hands the handler its runner.
@@ -286,198 +247,7 @@ func (s *Server) queueError(w http.ResponseWriter, err error) {
 	}
 }
 
-// JobRequest is the body of POST /api/v0/jobs.
-type JobRequest struct {
-	Kind           string      `json:"kind"`
-	IdempotencyKey string      `json:"idempotency_key,omitempty"`
-	Spec           queue.Spec  `json:"spec"`
-	Links          queue.Links `json:"links"`
-}
-
-func validKey(k string) bool {
-	if len(k) < 1 || len(k) > 128 {
-		return false
-	}
-	for _, c := range k {
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("._:-", c)) {
-			return false
-		}
-	}
-	return true
-}
-
-func (s *Server) createJob(w http.ResponseWriter, r *http.Request) {
-	var b JobRequest
-	if !decode(r, &b) {
-		fail(w, http.StatusBadRequest, "the body must be one JSON object with kind, spec, and optionally idempotency_key and links")
-		return
-	}
-	if b.Kind != queue.KindTurn && b.Kind != queue.KindReview {
-		fail(w, http.StatusBadRequest, "kind must be turn or review")
-		return
-	}
-	if b.IdempotencyKey != "" && !validKey(b.IdempotencyKey) {
-		fail(w, http.StatusBadRequest, "idempotency_key must be 1 to 128 of A-Z, a-z, 0-9 and . _ : -")
-		return
-	}
-	if !run.PromptOK(b.Spec.Prompt) {
-		fail(w, http.StatusBadRequest, "spec.prompt must be from 1 byte to 256 KiB, with no NUL byte")
-		return
-	}
-	if b.Spec.AgentID != "" || b.Spec.Access != "" || b.Spec.KeyEnv != "" {
-		fail(w, http.StatusBadRequest, "spec.agent_id, spec.access and spec.key_env come from the saved agent; name it in spec.agent")
-		return
-	}
-	if msg := checkSpec(b.Spec); msg != "" {
-		fail(w, http.StatusBadRequest, msg)
-		return
-	}
-	if msg := queue.ResolveFolders(&b.Spec, s.cfg.Folders); msg != "" {
-		fail(w, http.StatusBadRequest, msg)
-		return
-	}
-	if s.cfg.Agents != nil && (b.Spec.Session == "" || b.Spec.Harness != "") {
-		// A retry of a request whose agent was removed since gets the first
-		// job (Spec.asked).
-		ag, why, err := agents.Lookup(b.Spec.Harness, s.cfg.Agents.Resolve, s.retried(b.IdempotencyKey))
-		if err != nil {
-			s.internal(w)
-			return
-		}
-		if why != nil {
-			fail(w, http.StatusBadRequest, "spec.agent "+strconv.Quote(b.Spec.Harness)+" is not a saved agent; GET /api/v0/agents lists them")
-			return
-		}
-		b.Spec.Harness, b.Spec.AgentID, b.Spec.Access, b.Spec.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
-		switch {
-		case b.Spec.Model != "":
-		case b.Spec.Session != "":
-			// A session's next turn: the runner uses the agent's model only
-			// if the turn switches agent (run.Request.AgentModel).
-			b.Spec.AgentModel = ag.Model
-		case ag.Model != "":
-			b.Spec.Model, b.Spec.ModelFromAgent = ag.Model, true
-		}
-	}
-	if b.Kind == queue.KindReview {
-		// A review never writes. The framework enforces it below the prompt.
-		b.Spec.ReadOnly = true
-	}
-	j, created, err := s.cfg.Queue.Create(queue.DefaultTeam, b.Kind, b.IdempotencyKey, b.Spec, b.Links)
-	switch {
-	case errors.Is(err, queue.ErrKeyConflict):
-		fail(w, http.StatusConflict, "idempotency_key already names a job with other fields")
-		return
-	case errors.Is(err, queue.ErrSessionClosed):
-		fail(w, http.StatusConflict, "the session is closed")
-		return
-	case errors.Is(err, queue.ErrSessionEnded):
-		fail(w, http.StatusConflict, queue.SessionEnded)
-		return
-	case errors.Is(err, queue.ErrFull):
-		fail(w, http.StatusTooManyRequests, "too many jobs are waiting; wait for some to end")
-		return
-	case err != nil:
-		s.internal(w)
-		return
-	}
-	status := http.StatusCreated
-	if !created {
-		status = http.StatusOK
-	}
-	writeJSON(w, status, j)
-}
-
-// baseShape is a branch, tag or commit: no leading dash, so it is never read
-// as a flag, and no spaces.
-func baseShape(b string) bool {
-	if b == "" || len(b) > 200 || b[0] == '-' || strings.Contains(b, "..") {
-		return false
-	}
-	for _, c := range b {
-		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.ContainsRune("._/-@^~", c)) {
-			return false
-		}
-	}
-	return true
-}
-
-// checkSpec says what is wrong with a job's spec, or "". A session's first
-// job names agent and a workspace: folder, or repo and base. A later job
-// names session, and may name agent: its turn runs on that agent.
-func checkSpec(sp queue.Spec) string {
-	if len(sp.Labels) > 16 {
-		return "spec.labels holds at most 16 labels"
-	}
-	for _, l := range sp.Labels {
-		if !queue.LabelOK(l) {
-			return "each of spec.labels is 1 to 64 of A-Z, a-z, 0-9 and . _ : -, starting with a letter or digit"
-		}
-	}
-	folder, repo := sp.Folder != "" || sp.FolderRef != "", sp.Repo != "" || sp.RepoRef != ""
-	if sp.Session != "" {
-		if folder || repo || sp.Connector != "" || sp.Base != "" || sp.Isolate {
-			return "spec with session takes no folder, isolate, repo or base: they are the session's"
-		}
-		return ""
-	}
-	if sp.Connector != "" && sp.FolderRef == "" && sp.RepoRef == "" {
-		return "spec.connector goes with spec.folder_ref or spec.repo_ref"
-	}
-	if sp.Isolate && !folder {
-		return "spec.isolate goes with spec.folder"
-	}
-	if sp.Harness == "" {
-		return "spec needs agent with folder, or with repo and base; or session"
-	}
-	switch {
-	case folder && !repo && sp.Base == "":
-		if sp.Folder != "" && !filepath.IsAbs(sp.Folder) {
-			return "spec.folder must be an absolute path"
-		}
-	case !folder && repo:
-		if sp.Repo != "" && (!filepath.IsAbs(sp.Repo) || len(sp.Repo) > 4096) {
-			return "spec.repo must be an absolute path"
-		}
-		if !baseShape(sp.Base) {
-			return "spec.base must be a branch, tag or commit: 1 to 200 of A-Z, a-z, 0-9 and . _ / - @ ^ ~, not starting with -"
-		}
-	default:
-		return "spec needs folder, or repo and base, not both"
-	}
-	return ""
-}
-
-// WorkspaceList is the answer to GET /api/v0/workspaces: each session's workspace and runner.
-type WorkspaceList struct {
-	Sessions []queue.Workspace `json:"sessions"`
-}
-
-func (s *Server) listWorkspaces(w http.ResponseWriter, r *http.Request) {
-	list, err := s.cfg.Queue.Sessions(queue.DefaultTeam, 1000)
-	if err != nil {
-		s.internal(w)
-		return
-	}
-	writeJSON(w, http.StatusOK, WorkspaceList{list})
-}
-
-func (s *Server) closeWorkspace(w http.ResponseWriter, r *http.Request) {
-	ws, err := s.cfg.Queue.CloseSession(queue.DefaultTeam, r.PathValue("id"))
-	switch {
-	case errors.Is(err, queue.ErrNotFound):
-		fail(w, http.StatusNotFound, "no such session")
-	case errors.Is(err, queue.ErrSessionBusy):
-		fail(w, http.StatusConflict, "the session has a job that has not ended; wait for it or cancel it")
-	case err != nil:
-		s.internal(w)
-	default:
-		s.cfg.Sweeper.Kick() // its blobs may go now
-		writeJSON(w, http.StatusOK, ws)
-	}
-}
-
-// RemovedReport is the body of POST /api/v0/runners/{id}/removed. Error says the
+// RemovedReport is the body of POST /api/v0/runner/removed. Error says the
 // workspace could not be removed.
 type RemovedReport struct {
 	Session string `json:"session"`
@@ -493,10 +263,6 @@ type RunnerBeat struct {
 }
 
 func (s *Server) runnerBeat(w http.ResponseWriter, r *http.Request, rn queue.Runner) {
-	if r.PathValue("id") != rn.ID {
-		fail(w, http.StatusNotFound, "no such runner for this token")
-		return
-	}
 	var b RunnerBeat
 	if !decode(r, &b) || b.Capacity < 1 || b.Capacity > MaxCapacity {
 		fail(w, http.StatusBadRequest, "the body must be one JSON object with capacity, 1 to 64, and optionally capabilities")
@@ -523,10 +289,6 @@ func (s *Server) runnerBeat(w http.ResponseWriter, r *http.Request, rn queue.Run
 // runnerSettings sends a runner the policy and the instructions, read fresh,
 // for the turn it is about to start: every runner follows the server's.
 func (s *Server) runnerSettings(w http.ResponseWriter, r *http.Request, rn queue.Runner) {
-	if r.PathValue("id") != rn.ID {
-		fail(w, http.StatusNotFound, "no such runner for this token")
-		return
-	}
 	snap := settings.RunnerSettings{Permissions: settings.DefaultPolicy(), Instructions: settings.DefaultInstructions}
 	if st := s.cfg.Settings; st != nil {
 		var err error
@@ -547,10 +309,6 @@ func (s *Server) runnerSettings(w http.ResponseWriter, r *http.Request, rn queue
 }
 
 func (s *Server) removed(w http.ResponseWriter, r *http.Request, rn queue.Runner) {
-	if r.PathValue("id") != rn.ID {
-		fail(w, http.StatusNotFound, "no such runner for this token")
-		return
-	}
 	var b RemovedReport
 	if !decode(r, &b) || b.Session == "" || len(b.Error) > 1000 {
 		fail(w, http.StatusBadRequest, "the body must be one JSON object with session")
@@ -566,165 +324,7 @@ func (s *Server) removed(w http.ResponseWriter, r *http.Request, rn queue.Runner
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// JobList is the answer to GET /api/v0/jobs.
-type JobList struct {
-	Jobs []queue.Job `json:"jobs"`
-}
-
-func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
-	q := r.URL.Query()
-	f := queue.Filter{State: q.Get("state"), Kind: q.Get("kind"), Session: q.Get("session"), Reviews: q.Get("reviews")}
-	switch f.State {
-	case "", queue.Queued, queue.Taken, queue.Running, queue.Finished, queue.Failed, queue.Cancelled:
-	default:
-		fail(w, http.StatusBadRequest, "state must be queued, taken, running, finished, failed or cancelled")
-		return
-	}
-	switch f.Kind {
-	case "", queue.KindTurn, queue.KindReview, queue.KindApply:
-	default:
-		fail(w, http.StatusBadRequest, "kind must be turn, review or apply")
-		return
-	}
-	if len(f.Session) > 128 || len(f.Reviews) > 128 {
-		fail(w, http.StatusBadRequest, "session and reviews are at most 128 bytes")
-		return
-	}
-	limit := 100
-	if v := q.Get("limit"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 1 || n > 1000 {
-			fail(w, http.StatusBadRequest, "limit must be from 1 to 1000")
-			return
-		}
-		limit = n
-	}
-	jobs, err := s.cfg.Queue.List(queue.DefaultTeam, f, limit)
-	if err != nil {
-		s.internal(w)
-		return
-	}
-	writeJSON(w, http.StatusOK, JobList{jobs})
-}
-
-func (s *Server) getJob(w http.ResponseWriter, r *http.Request) {
-	j, err := s.cfg.Queue.Get(queue.DefaultTeam, r.PathValue("id"))
-	if errors.Is(err, queue.ErrNotFound) {
-		fail(w, http.StatusNotFound, "no such job")
-		return
-	}
-	if err != nil {
-		s.internal(w)
-		return
-	}
-	writeJSON(w, http.StatusOK, j)
-}
-
-func (s *Server) cancelJob(w http.ResponseWriter, r *http.Request) {
-	j, err := s.cfg.Queue.Cancel(queue.DefaultTeam, r.PathValue("id"))
-	if errors.Is(err, queue.ErrNotFound) {
-		fail(w, http.StatusNotFound, "no such job")
-		return
-	}
-	if err != nil {
-		s.internal(w)
-		return
-	}
-	writeJSON(w, http.StatusAccepted, j)
-}
-
-// ReviewRequest is the body of POST /api/v0/jobs/{id}/review.
-type ReviewRequest struct {
-	// Agent and Model: the reviewer, any agent the framework can run.
-	Agent          string `json:"agent"`
-	Model          string `json:"model,omitempty"`
-	IdempotencyKey string `json:"idempotency_key,omitempty"`
-	// IncludeReply puts the author's reply in the prompt. Off by default:
-	// a reviewer handed the author's conclusion tends to confirm it.
-	IncludeReply bool `json:"include_reply,omitempty"`
-}
-
-func (s *Server) reviewJob(w http.ResponseWriter, r *http.Request) {
-	var b ReviewRequest
-	if !decode(r, &b) {
-		fail(w, http.StatusBadRequest, "the body must be one JSON object with agent, and optionally model, idempotency_key and include_reply")
-		return
-	}
-	if !agentShape.MatchString(b.Agent) || (b.Model != "" && !run.ModelShape.MatchString(b.Model)) {
-		fail(w, http.StatusBadRequest, "agent must match "+agentShape.String()+" and model "+run.ModelShape.String())
-		return
-	}
-	// The reviewer is a saved agent, as for a turn; without saved agents its
-	// name is the harness.
-	as := queue.Spec{Harness: b.Agent, Model: b.Model}
-	if s.cfg.Agents != nil {
-		// A retry of a review whose reviewer was removed since gets the
-		// first review job, as a turn's retry does.
-		ag, why, err := agents.Lookup(b.Agent, s.cfg.Agents.Resolve, s.retried(b.IdempotencyKey))
-		if err != nil {
-			s.internal(w)
-			return
-		}
-		if why != nil {
-			fail(w, http.StatusBadRequest, "agent "+strconv.Quote(b.Agent)+" is not a saved agent; GET /api/v0/agents lists them")
-			return
-		}
-		as.Harness, as.AgentID, as.Access, as.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
-		if as.Model == "" && ag.Model != "" {
-			as.Model, as.ModelFromAgent = ag.Model, true
-		}
-	}
-	if b.IdempotencyKey != "" && !validKey(b.IdempotencyKey) {
-		fail(w, http.StatusBadRequest, "idempotency_key must be 1 to 128 of A-Z, a-z, 0-9 and . _ : -")
-		return
-	}
-	links, lim, _ := admitted(r) // a review a turn asked for names that turn, within its caps
-	j, created, err := s.cfg.Queue.ReviewLinked(queue.DefaultTeam, r.PathValue("id"), as, b.IdempotencyKey, b.IncludeReply, links, lim)
-	var limit *queue.LimitError
-	switch {
-	case errors.As(err, &limit):
-		fail(w, http.StatusForbidden, limit.Msg)
-	case errors.Is(err, queue.ErrNotFound):
-		fail(w, http.StatusNotFound, "no such job")
-	case errors.Is(err, queue.ErrNotReviewable):
-		fail(w, http.StatusConflict, "this job cannot be reviewed: it must be a turn that has ended and recorded its changed files in a known workspace")
-	case errors.Is(err, queue.ErrSessionClosed):
-		fail(w, http.StatusConflict, "the job's session is closed, so its workspace is gone")
-	case errors.Is(err, queue.ErrKeyConflict):
-		fail(w, http.StatusConflict, "idempotency_key already names a job with other fields")
-	case errors.Is(err, queue.ErrFull):
-		fail(w, http.StatusTooManyRequests, "too many jobs are waiting; wait for some to end")
-	case err != nil:
-		s.internal(w)
-	case created:
-		writeJSON(w, http.StatusCreated, j)
-	default:
-		writeJSON(w, http.StatusOK, j)
-	}
-}
-
-// agentShape is a reviewer: a saved agent's id or a harness name.
-var agentShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$`)
-
-// AttemptEventList is the answer to GET /api/v0/attempts/{id}/events.
-type AttemptEventList struct {
-	Events []queue.AttemptEvent `json:"events"`
-}
-
-func (s *Server) attemptEvents(w http.ResponseWriter, r *http.Request) {
-	evs, err := s.cfg.Queue.Events(queue.DefaultTeam, r.PathValue("id"))
-	if errors.Is(err, queue.ErrNotFound) {
-		fail(w, http.StatusNotFound, "no such attempt")
-		return
-	}
-	if err != nil {
-		s.internal(w)
-		return
-	}
-	writeJSON(w, http.StatusOK, AttemptEventList{evs})
-}
-
-// EnrollRequest is the body of POST /api/v0/runners.
+// EnrollRequest is the body of POST /api/v0/runner/register.
 type EnrollRequest struct {
 	Name     string   `json:"name"`
 	Labels   []string `json:"labels,omitempty"`
@@ -797,7 +397,7 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, Enrolled{rn, rt, s.cfg.Heartbeat.Milliseconds(), s.cfg.Lease.Milliseconds()})
 }
 
-// TakeRequest is the body of POST /api/v0/runners/{id}/take.
+// TakeRequest is the body of POST /api/v0/runner/take.
 type TakeRequest struct {
 	// WaitMS is how long to wait for a job, up to 30000. Zero answers at
 	// once.
@@ -814,10 +414,6 @@ type TakenWork struct {
 }
 
 func (s *Server) take(w http.ResponseWriter, r *http.Request, rn queue.Runner) {
-	if r.PathValue("id") != rn.ID {
-		fail(w, http.StatusNotFound, "no such runner for this token")
-		return
-	}
 	var b TakeRequest
 	if !decode(r, &b) || b.WaitMS < 0 {
 		fail(w, http.StatusBadRequest, "the body must be one JSON object with wait_ms, 0 or more")
@@ -980,15 +576,6 @@ func (s *Server) finish(w http.ResponseWriter, r *http.Request, rn queue.Runner)
 		return
 	}
 	writeJSON(w, http.StatusOK, j)
-}
-
-// retried says whether a request's idempotency key was used before, for
-// agents.Lookup; nil for a request without one.
-func (s *Server) retried(key string) func() (bool, error) {
-	if key == "" {
-		return nil
-	}
-	return func() (bool, error) { return s.cfg.Queue.HasKey(queue.DefaultTeam, key) }
 }
 
 // checkLabels says what is wrong with a runner's labels, or "".

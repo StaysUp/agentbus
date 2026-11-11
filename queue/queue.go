@@ -42,6 +42,27 @@ const (
 	Cancelled = "cancelled"
 )
 
+// Turn states: what the API says of a turn, whose job is in the queue.
+const (
+	TurnQueued   = "queued"
+	TurnRunning  = "running"
+	TurnFinished = "finished"
+	TurnFailed   = "failed"
+	TurnStopped  = "stopped"
+)
+
+// TurnState is the state of a turn whose job is in state: queued until a
+// runner starts it, stopped when it was cancelled.
+func TurnState(state string) string {
+	switch state {
+	case Queued, Taken:
+		return TurnQueued
+	case Cancelled:
+		return TurnStopped
+	}
+	return state
+}
+
 // Attempt states, besides Taken, Running, Finished, Failed and Cancelled.
 const (
 	// Lost: the attempt's lease expired. Its job went back to the queue
@@ -102,6 +123,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 	spec         TEXT NOT NULL,
 	links        TEXT NOT NULL,
 	attempt      TEXT,
+	turn         TEXT,
 	session      TEXT,
 	cancel       INTEGER NOT NULL DEFAULT 0,
 	reason       TEXT NOT NULL DEFAULT '',
@@ -209,7 +231,7 @@ func (e *GapError) Error() string { return fmt.Sprintf("queue: events must start
 // agent: its turn then runs on that agent, in the session's workspace.
 //
 // Harness is the harness, the program that runs the turn, such as claude; its
-// JSON name is agent, as the jobs API has always named it. AgentID, Access
+// JSON name is agent, as the runner protocol has always named it. AgentID, Access
 // and KeyEnv come from the saved agent the job was made for; the API fills
 // them, never the caller.
 type Spec struct {
@@ -296,14 +318,18 @@ type Links struct {
 
 // Job is one requested turn.
 type Job struct {
-	ID              string `json:"id"`
-	Team            string `json:"team"`
-	Kind            string `json:"kind"`
-	State           string `json:"state"`
-	IdempotencyKey  string `json:"idempotency_key,omitempty"`
-	Spec            Spec   `json:"spec"`
-	Links           Links  `json:"links"`
-	Attempt         string `json:"attempt,omitempty"`
+	ID             string `json:"id"`
+	Team           string `json:"team"`
+	Kind           string `json:"kind"`
+	State          string `json:"state"`
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	Spec           Spec   `json:"spec"`
+	Links          Links  `json:"links"`
+	Attempt        string `json:"attempt,omitempty"`
+	// Turn, for a turn or review job: the id of the turn it runs, named when
+	// the job is made, so the turn is known while it waits. The runner
+	// starts the turn with this id, whichever attempt runs it.
+	Turn            string `json:"turn,omitempty"`
 	CancelRequested bool   `json:"cancel_requested,omitempty"`
 	Reason          string `json:"reason,omitempty"`
 	// Verdict, for a review: pass, fail or unknown, read by the control
@@ -761,6 +787,10 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, lim Limit
 		}
 		now := nanos(q.now())
 		job.ID = NewID("job_")
+		var turn any
+		if kind == KindTurn || kind == KindReview {
+			turn = NewID("t_")
+		}
 		sb, _ := json.Marshal(spec)
 		lb, _ := json.Marshal(links)
 		var k, sess any
@@ -770,8 +800,8 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, lim Limit
 		if session != "" {
 			sess = session
 		}
-		if _, err := tx.Exec(`INSERT INTO jobs(id, team, kind, state, idem_key, request_hash, spec, links, session, created, updated)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?)`, job.ID, team, kind, Queued, k, hash, string(sb), string(lb), sess, now, now); err != nil {
+		if _, err := tx.Exec(`INSERT INTO jobs(id, team, kind, state, idem_key, request_hash, spec, links, turn, session, created, updated)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, job.ID, team, kind, Queued, k, hash, string(sb), string(lb), turn, sess, now, now); err != nil {
 			return fmt.Errorf("queue: write job: %w", err)
 		}
 		created = true
@@ -787,7 +817,7 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, lim Limit
 	return job, created, err
 }
 
-const jobCols = `id, team, kind, state, COALESCE(idem_key, ''), spec, links, COALESCE(attempt, ''), cancel, reason, verdict, findings, result, COALESCE(session, ''), created, updated, ended`
+const jobCols = `id, team, kind, state, COALESCE(idem_key, ''), spec, links, COALESCE(attempt, ''), COALESCE(turn, ''), cancel, reason, verdict, findings, result, COALESCE(session, ''), created, updated, ended`
 
 type scanner interface{ Scan(...any) error }
 
@@ -797,7 +827,7 @@ func scanJob(s scanner) (Job, error) {
 	var verdict, findings, result sql.NullString
 	var created, updated int64
 	var ended sql.NullInt64
-	if err := s.Scan(&j.ID, &j.Team, &j.Kind, &j.State, &j.IdempotencyKey, &spec, &links, &j.Attempt, &j.CancelRequested,
+	if err := s.Scan(&j.ID, &j.Team, &j.Kind, &j.State, &j.IdempotencyKey, &spec, &links, &j.Attempt, &j.Turn, &j.CancelRequested,
 		&j.Reason, &verdict, &findings, &result, &j.Session, &created, &updated, &ended); err != nil {
 		return j, err
 	}
@@ -1229,12 +1259,16 @@ func endSessionsTx(tx *sql.Tx, now time.Time) error {
 	return nil
 }
 
-// Lost says which of these attempts ended because their lease ran out.
+// Lost says which of these turns ended because the lease of the attempt
+// that ran them ran out. A turn starts only under a running attempt, so that
+// is a lost attempt of the turn's job that had started; a lost one that was
+// only taken ran no turn. The job no longer names its attempt once it
+// expired (expire), so the attempt is found by its job.
 func (q *Queue) Lost(ids []string) (map[string]bool, error) {
 	out := map[string]bool{}
 	for _, id := range ids {
 		var n int
-		if err := q.db.QueryRow(`SELECT COUNT(*) FROM attempts WHERE id = ? AND state = ?`, id, Lost).Scan(&n); err != nil {
+		if err := q.db.QueryRow(`SELECT COUNT(*) FROM jobs j JOIN attempts a ON a.job = j.id WHERE j.turn = ? AND a.state = ? AND a.started IS NOT NULL`, id, Lost).Scan(&n); err != nil {
 			return nil, fmt.Errorf("queue: read attempt: %w", err)
 		}
 		if n > 0 {
@@ -1494,16 +1528,76 @@ func (q *Queue) End(runnerID, attemptID string, number int, f Finish) (Job, erro
 	return q.Get(team, jobID)
 }
 
-// JobByAttempt reads the job of team whose attempt, or turn, has this id.
-func (q *Queue) JobByAttempt(team, attemptID string) (Job, error) {
+// Waiting reads team's turn and review jobs that no runner has started yet,
+// newest first.
+func (q *Queue) Waiting(team string) ([]Job, error) {
+	return q.jobsWhere(`SELECT `+jobCols+` FROM jobs WHERE team = ? AND kind IN ('turn', 'review') AND state IN ('queued', 'taken')
+		ORDER BY created DESC, rowid DESC LIMIT ?`, team, MaxQueued)
+}
+
+// JobsByTurns reads the jobs of team that run these turns, by turn id,
+// without their attempts.
+func (q *Queue) JobsByTurns(team string, turns []string) (map[string]Job, error) {
+	out := map[string]Job{}
+	for len(turns) > 0 {
+		n := min(len(turns), 500)
+		args := []any{team}
+		marks := strings.Repeat(",?", n)[1:]
+		for _, t := range turns[:n] {
+			args = append(args, t)
+		}
+		turns = turns[n:]
+		list, err := q.jobsWhere(`SELECT `+jobCols+` FROM jobs WHERE team = ? AND turn IN (`+marks+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for _, j := range list {
+			out[j.Turn] = j
+		}
+	}
+	return out, nil
+}
+
+// jobsWhere reads the jobs a query of jobCols picks, without their attempts.
+func (q *Queue) jobsWhere(query string, args ...any) ([]Job, error) {
+	rows, err := q.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("queue: read jobs: %w", err)
+	}
+	defer rows.Close()
+	var out []Job
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, fmt.Errorf("queue: read jobs: %w", err)
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
+// Workspace reads the workspace of a session of team; ok is false when the
+// queue holds none.
+func (q *Queue) Workspace(team, session string) (w Workspace, ok bool, err error) {
+	w, err = scanWorkspace(q.db.QueryRow(`SELECT `+workspaceCols+` FROM sessions WHERE id = ? AND team = ?`, session, team))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Workspace{}, false, nil
+	}
+	if err != nil {
+		return Workspace{}, false, fmt.Errorf("queue: read session: %w", err)
+	}
+	return w, true, nil
+}
+
+// JobByTurn reads the job of team that runs the turn with this id.
+func (q *Queue) JobByTurn(team, turn string) (Job, error) {
 	var id string
-	err := q.db.QueryRow(`SELECT a.job FROM attempts a JOIN jobs j ON j.id = a.job WHERE a.id = ? AND j.team = ?`,
-		attemptID, team).Scan(&id)
+	err := q.db.QueryRow(`SELECT id FROM jobs WHERE turn = ? AND team = ?`, turn, team).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Job{}, ErrNotFound
 	}
 	if err != nil {
-		return Job{}, fmt.Errorf("queue: read attempt: %w", err)
+		return Job{}, fmt.Errorf("queue: read job: %w", err)
 	}
 	return q.Get(team, id)
 }

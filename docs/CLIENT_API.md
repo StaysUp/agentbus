@@ -1,12 +1,19 @@
 # The client API
 
-Status: **v0**, as built in AgentBus 0.2. Paths under `/api/v0` may still change before 1.0.
-What 0.2 changed for a 0.1 client is listed under [Versions](#versions).
+Status: **v0**, as built in AgentBus 0.4. Paths under `/api/v0` may still change before 1.0.
+What 0.4 and 0.2 changed for an earlier client is listed under [Versions](#versions).
+
+**Three nouns: agent, session, turn.** An agent is a saved setup. A session is a conversation. A
+turn is one message, its reply and its changes. Every action is on a turn: start it, stop it, read
+its diff, apply it, ask for a review of it, read its model calls. A turn exists from the moment it
+is asked for: `queued`, then `running`, then `finished`, `failed` or `stopped`. Folders are what a
+turn points at. Settings and subscriptions are configuration.
 
 **The service describes this API itself**, without the token and without internet: an interactive
 reference at `/docs`, the OpenAPI 3.1 description at `/api/v0/openapi.json` (generated from the
-route table and the Go types when the service starts, `api/routes.go` and `api/spec.go`), and one plain file for coding agents at `/docs/llms.txt`
-(`docs/llms.txt`). `/docs` and everything under it is answered by the service, like `/api`, and never
+route table and the Go types when the service starts, `api/routes.go` and `api/spec.go`), a short
+page for coding agents at `/docs/llms.txt` (`docs/llms.txt`), and the long reference in one plain
+file at `/docs/reference.md` (`docs/reference.md`). `/docs` and everything under it is answered by the service, like `/api`, and never
 forwarded to a vendor. There are no client SDKs: generate one from the description.
 
 A cockpit is any program that uses this API: a browser app, a terminal app, a script. The framework
@@ -20,26 +27,26 @@ The client API shares the gateway's address: `agentbus up` starts one service on
 
 One program runs three ways. The API is the same in each; what is behind it differs:
 
-| Command | Behind the API | Jobs |
+| Command | Behind the API | Turns |
 |---|---|---|
-| `agentbus up` | the job queue, the record, the gateway and a built-in runner | made and run here |
-| `agentbus server` | the job queue, the record and the gateway | made here, run by runners on other machines |
-| `agentbus runner -server <url>` | its own record and gateway, for its agents only | taken from the server; this API has no job routes (404) |
+| `agentbus up` | the queue, the record, the gateway and a built-in runner | asked for and run here |
+| `agentbus server` | the queue, the record and the gateway | asked for here, run by runners on other machines |
+| `agentbus runner -server <url>` | its own record and gateway, for its agents only | taken from the server; this API starts no turns (404) |
 
-A runner's turn is recorded by the runner's own service. The server gets the job's result: how the
+A runner's turn is recorded by the runner's own service. The server gets the turn's result: how the
 turn ended, its reply, its cost and the files it changed. While the turn runs, the runner also sends
 the turn's events and its model calls (their pieces and replies) to the server's record, so a
 cockpit pointed at the server shows the turn live, as it shows one on its own machine, call bodies
-(`/api/v0/calls/...`) included.
+(`/api/v0/turns/<id>/calls/...`) included.
 
 **Runners hold no secrets.** The server mints each runner turn's token (`abr_…`), scoped to that
-attempt of that job: it works while the attempt is current and stops when it ends. The turn's agent
+turn's attempt on that runner: it works while the attempt is current and stops when it ends. The turn's agent
 gets it as `AGENTBUS_TOKEN`, with `AGENTBUS_URL` set to the server, and, on a runner with `-gateway
 server` (the default), as its model credential: the `key_env` variable of an OpenRouter agent, or
 `CLAUDE_CODE_OAUTH_TOKEN` for a claude subscription, or `AGENTBUS_CODEX_TOKEN` for a codex one
 (codex reads it as the key of a provider set on its command line for the turn, below). The
 runner's gateway records each call and sends it to the server's relay,
-`/relay/<anthropic|chatgpt|openrouter>/…`, which checks the token, takes the agent the job names (or, for a next turn that names none, the
+`/relay/<anthropic|chatgpt|openrouter>/…`, which checks the token, takes the agent the turn names (or, for a next turn that names none, the
 session's latest agent as its record holds it, with that saved agent's access and `key_env` from
 the server's own saved agents), and swaps in the real credential: an OpenRouter key from the
 server's environment by its variable's name, or the person's own subscription token, connected on
@@ -122,16 +129,17 @@ what to do, as a 401 or 403 the agent shows.
 ### The turns token: start, stop and read turns, nothing else
 
 A program that only starts and follows turns should not hold the main token. It uses the
-**turns token** instead. The runners of the job queue do not use it: they take the enrollment
-token and their own runner tokens ([The runner protocol](#the-runner-protocol)).
+**turns token** instead. Runners do not use it: they take the enrollment token and their own
+runner tokens ([The runner protocol](RUNNER_PROTOCOL.md)).
 
 - `agentbus up` makes it on first start, beside `token`: the file `turns_token` in the data folder,
   mode 0600, `abq_` and 64 hex characters. It stays the same across restarts.
 - To replace it, stop the service, delete the file and start again. The old one then gets 401.
 - It works on these operations only: `POST /api/v0/turns`, `GET /api/v0/turns`,
-  `GET /api/v0/turns/<id>`, `GET /api/v0/turns/<id>/events` and `POST /api/v0/turns/<id>/stop`.
+  `GET /api/v0/turns/<id>`, `GET /api/v0/turns/<id>/diff`, `POST /api/v0/turns/<id>/stop`,
+  `POST /api/v0/turns/<id>/review` and `GET /api/v0/sessions/<id>/events`.
   It sees every session's turns, as the main token does.
-- Everything else gets **403** with `the turns token may only start, stop and read turns; this
+- Everything else gets **403** with `the turns token may only start, stop, review and read turns; this
   route takes the main token`.
 - Like the main token, it never reaches a turn's child and is never written to an event, a log
   or an error.
@@ -158,34 +166,31 @@ to the asking session as a later turn** (see "Results come back as the next turn
 
 | Operation | Limit |
 |---|---|
-| `GET /api/v0/turns?session=<id>`, `GET /api/v0/turns/<id>`, `GET /api/v0/turns/<id>/events` | a session in the tree; without `session`, its own |
-| `GET /api/v0/sessions/<id>/events`, `GET /api/v0/sessions/<id>/search` | a session in the tree |
-| `GET /api/v0/calls/<exchange>/context`, `.../pieces/<n>` | a call of a session in the tree |
-| `GET /api/v0/jobs?session=<id>`, `GET /api/v0/jobs/<id>`, `GET /api/v0/attempts/<id>/events` | a job of a session in the tree; without `session`, its own |
+| `GET /api/v0/turns?session=<id>` | a session in the tree; without `session`, its own |
+| `GET /api/v0/turns/<id>`, `GET /api/v0/turns/<id>/diff`, `GET /api/v0/turns/<id>/calls/<call>`, `.../pieces/<n>` | a turn of a session in the tree, by its id alone; `session` is optional |
+| `GET /api/v0/sessions/<id>`, `GET /api/v0/sessions/<id>/events`, `GET /api/v0/sessions/<id>/search` | a session in the tree |
 | `GET /api/v0/agents`, `GET /api/v0/agents/<id>`, `GET /api/v0/harnesses` | none |
 | `POST /api/v0/turns`, new session | `agent` and `prompt`; `folder` is the turn's own folder or one inside it (the person's folder when absent); always isolated, so `isolate: false` gets 403 |
 | `POST /api/v0/turns` with `session` | a session the tree started; never its own, never the person's (the root) |
-| `POST /api/v0/jobs/<id>/review` | a job of a session in the tree |
-| `POST /api/v0/jobs/<id>/cancel`, `POST /api/v0/turns/<id>/stop` | only work the tree asked for |
-| `PATCH /api/v0/sessions/<id>` (rename) | a session in the tree |
-| `GET /api/v0/turns/<id>/diff` | a turn of a session in the tree; without `session`, its own |
-| `POST /api/v0/turns/<id>/apply` | a turn whose job ran in a session in the tree, its own session included |
+| `POST /api/v0/turns/<id>/review` | a turn of a session in the tree, its own session's included |
+| `POST /api/v0/turns/<id>/stop` | only a turn the tree asked for |
+| `PATCH /api/v0/sessions/<id>` (rename only; never close) | a session in the tree |
+| `POST /api/v0/turns/<id>/apply` | a turn of a session in the tree, its own session's included |
 
 The writes are refused for a **read-only** turn (`read_only: true`): its token only reads.
 
 Each row is also a switch of `[agent_api]`, read for every request: `read` (the reads of the first
-five rows, and the diff), `list_agents`, `start` (a new session), `continue` (with `session`), `review`,
-`cancel`, `rename` and `apply`. Each is on unless the file says `false`; a call switched off gets **403** naming the
-switch. `scope = "session"` keeps the token to its own session: it reads only that session's turns,
-calls and jobs, reviews only its jobs, cancels only what its own turns asked for, renames only its
+three rows), `list_agents`, `start` (a new session), `continue` (with `session`), `review`,
+`cancel` (stop), `rename` and `apply`. Each is on unless the file says `false`; a call switched off gets **403** naming the
+switch. `scope = "session"` keeps the token to its own session: it reads only that session's turns
+and calls, reviews only its turns, stops only what its own turns asked for, renames only its
 own session, applies only its own session's turns, and continues no session. A `permissions.toml` that cannot be used refuses every turn token's request with **503**.
 
 **What a turn token never does**, each a **403** with a plain reason, whatever `[agent_api]` says:
-read or change the settings (every `/api/v0/settings` route takes the main token), save, edit or remove agents, see or make a token (no reply holds one), make a
-job with `POST /api/v0/jobs` (it starts work with `POST /api/v0/turns`), close a workspace, write a
-program event, read the snapshot `GET /api/v0/sessions`, the stream `GET /api/v0/events` or
-`GET /api/v0/workspaces`, read `GET /api/v0/version`, and read or write any session outside its
-tree. The description and the docs need no token at all.
+read or change the settings (every `/api/v0/settings` route takes the main token), save, edit or
+remove agents, see or make a token (no reply holds one), close a session, write a program event,
+read the snapshot `GET /api/v0/sessions` or the stream `GET /api/v0/events`, read
+`GET /api/v0/version`, and read or write any session outside its tree. The description and the docs need no token at all.
 
 **The caps on asked work** are `[limits]` in [permissions.toml](#permissionstoml), read for every
 request, so a change applies to the next one. They keep a chain of agents from running away. Past
@@ -208,7 +213,7 @@ the server's own (`abr_…`) and its `AGENTBUS_URL` is the server, so it asks th
 
 **An asked agent is told who asked it.** AgentBus records who asked from the token the request
 came with, never from the body: the asked turn's `origin` is `{"kind":"asked","session":…,"turn":…}`
-in `GET /api/v0/turns` (its own token reads it), and the job's `links.asker` says the same. The
+in `GET /api/v0/turns` (its own token reads it). The
 turn also gets two more variables: `AGENTBUS_ASKED_BY_SESSION` and `AGENTBUS_ASKED_BY_TURN`, the
 asking session and turn. Its instructions get one more paragraph naming them, with the commands that
 read what the asking turn changed (`GET /api/v0/turns/<turn>/diff?session=<session>`) and that
@@ -241,10 +246,10 @@ already has (`ANTHROPIC_BASE_URL` for claude). `GET /api/v0/turns` without `sess
 
 ### Results come back as the next turn
 
-When a turn or review a turn asked for ends (finished, failed or cancelled), AgentBus starts the
+When a turn or review a turn asked for ends (finished, failed or stopped), AgentBus starts the
 next turn of the **asking session**, on that session's own agent, after the turn running there now.
 Its prompt is the result, and it starts `[AgentBus] This message is from AgentBus, not from the
-person`. It names the agent, the job and its state, the session and turn the work ran in, its folder
+person`. It names the agent, the turn and its state, the session the work ran in, its folder
 (each new session gets its own isolated copy, so results of a fan-out can be compared), the changed files
 (count and paths, at most 50), a review's verdict and findings, and the work's final reply (at most
 8 KiB). Each result is its own turn; three asked turns bring three.
@@ -252,18 +257,21 @@ person`. It names the agent, the job and its state, the session and turn the wor
 Such a turn's `turn.started`, and its row in `GET /api/v0/turns`, carry `origin`:
 `{"kind":"result","job":…,"job_kind":"turn"|"review","session":…,"turn":…,"agent":…}`. A turn
 another turn asked for carries `{"kind":"asked","session":…,"turn":…}`, naming who asked. A turn the
-person started has no `origin`. The service checks for ended work every second. On the job,
-`links.asker`, `links.chain` and `links.result_of` say the same.
+person started has no `origin`. The service checks for ended work every second. In `origin` of
+kind `result`, `job` and `job_kind` name the queue's work behind the result; read the turn, never
+the job.
 
 ## The data folder
 
 `$AGENTBUS_HOME` if set, otherwise `$XDG_DATA_HOME/agentbus`, otherwise `~/.local/share/agentbus`.
 It holds `events.db` (the store: events, and since this version every model request's body, see
-`GET /api/v0/calls/<exchange>/context`), `jobs.db` (the job queue: jobs, attempts, runners and
-workspaces, in a file of its own so the record knows nothing about jobs), `token`, `turns_token`
-(above), `enroll_token` (adds a runner, [The runner protocol](#the-runner-protocol)),
-`runner.json` (the built-in runner's id and token, mode 0600), `worktrees/` (each isolated
-session's copy or git worktree, and in `worktrees/.isolation/` its checkpoints), `homes/` (a
+`GET /api/v0/turns/<id>/calls/<call>`), `jobs.db` (the queue: the work asked for, runners and
+each session's copy, in a file of its own so the record knows nothing about the queue), `token`,
+`turns_token` (above), `enroll_token` (adds a runner, [The runner protocol](RUNNER_PROTOCOL.md)),
+`runner.json` (the built-in runner's id and token, mode 0600), `sessions/` (each isolated session's
+copy or git worktree, named after the session, and in `sessions/.isolation/` its checkpoints;
+copies made before 0.4 stay in `worktrees/`, named `job_<id>`, and are still found, used and
+removed there), `homes/` (a
 runner's, each session's own home, below), `permissions.toml` (below), `instructions.md` (below), `agents.json`
 (the saved agents), `bin/agentbus-api` (below), `logs/` (below), and `events.db.lock`,
 which one service holds while it runs, so a second `agentbus up` on the same folder refuses to
@@ -512,21 +520,56 @@ Sessions are newest activity first. Every field is computed from stored events u
   before cost was wired); or an `events.dropped` event names this session or says `all_sessions`.
 - `cost_usd` sums `cost_usd` over the session's `model.responded` events.
 
-### `PATCH /api/v0/sessions/<id>` — rename a session
+### `GET /api/v0/sessions/<id>` — one session and its copy
+
+```json
+{"store":"st_9f2c…","seq":1041,"session":{"id":"abc","agent":"claude", …},
+ "copy":{"runner":"run_…","kind":"copy","name":"abc"}}
+```
+
+`session` is the session as `GET /api/v0/sessions` lists it. `copy` is where its turns run, which
+is how to see a session's copy when debugging:
+
+- `runner`: the runner that holds it.
+- `kind`: `copy` or `worktree`, an isolated copy of the person's folder, removed when the session
+  closes; or `folder`, the person's folder used as it is, never removed.
+- `name`: the copy's folder on its runner, `sessions/<name>` under the runner's data folder. It is
+  the session id for a copy made by 0.4 or later.
+- `folder_ref`: for kind `folder`, the folder's reference.
+- `closed`, `removed` and `error`: when the session was closed, when its runner removed the copy,
+  and why it could not.
+
+`copy` is `null` until a turn of this service has run in the session. **404** when neither the
+record nor the queue knows the session. A turn token reads a session in its tree.
+
+### `PATCH /api/v0/sessions/<id>` — rename or close a session
 
 ```sh
 curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"title":"Login fix"}' $B/api/v0/sessions/abc
-# {"seq":1042,"id":"evt_7a1b…","title":"Login fix","old_title":"Fix the login bug on the settings page"}
+# {"id":"abc","seq":1042,"title":"Login fix","old_title":"Fix the login bug on the settings page"}
+curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"closed":true}' $B/api/v0/sessions/abc
+# {"id":"abc","closed":true}
 ```
 
-It stores a `session.renamed` event with `title`, the new name, and `old_title`, the name the
+The body sends `title`, `closed`, or both.
+
+**`closed: true` closes the session.** It takes no more turns, and its runner removes the session's
+isolated copy and its home. Apply what you want to keep first. The person's folder is never
+removed. **409** while a turn of the session has not ended: wait for it or stop it. **404** for a
+session no runner of this service holds. `closed: false` is refused with **400**: a closed session
+stays closed. Only the main token closes a session; a turn token gets **403**. This replaces
+`POST /api/v0/workspaces/<id>/close`, removed in 0.4.
+
+**`title` renames it.** It stores a `session.renamed` event with `title`, the new name, and `old_title`, the name the
 session had just before (its latest rename, else its first message as `title` above; absent when it
 had none). From then on `GET /api/v0/sessions` names the session by its latest rename. Earlier names
 stay in the record: every rename is one of the session's events, so
 `GET /api/v0/sessions/<id>/events` lists them all, in order.
 
-- The body is one JSON object with `title` and nothing else. Spaces at either end are dropped.
+- The body is one JSON object with `title`, `closed`, or both, and nothing else. Spaces at either
+  end of `title` are dropped.
   What is left must be 1 to 120 characters (runes), on one line: a newline, tab, Unicode line or
   paragraph separator, or other control character is refused. Each refusal is **400** with the reason; nothing is stored.
 - **404** for a session the store has no events for.
@@ -534,11 +577,14 @@ stay in the record: every rename is one of the session's events, so
 - With the main token, any session. With a turn token, a session in its scope (its request tree,
   or its own session with `scope = "session"`), unless `rename = false` in `[agent_api]`. A
   read-only turn's token may not rename. The turns token may not.
-- The answer is the stored event: `seq`, `id`, `title` and `old_title`.
+- The answer is `id`, the stored rename's `seq`, `title` and `old_title`, and `closed` when the
+  session was closed.
 
 ### `GET /api/v0/events?store=<store>&after=<seq>&session=<id>`
 
-A live stream, `text/event-stream`. Each message is one event:
+The one record-wide read: every session's events, for a cockpit, an export or a program. Main token
+only. It stays a route of its own, beside `POST /api/v0/events`, because exports and programs work
+across sessions. A live stream, `text/event-stream`. Each message is one event:
 
 ```
 id: st_9f2c…/1042
@@ -553,9 +599,10 @@ data: {"seq":1042,"id":"evt_…","kind":"tool.requested", …}
   that session or says `all_sessions`**, so a cockpit watching one session still learns its costs are incomplete.
 - A comment line (`: ping`) every 15 seconds keeps idle connections open.
 
-### `GET /api/v0/sessions/<id>/events?store=<store>&after=<seq>&limit=<n>`
+### `GET /api/v0/sessions/<id>/events?store=<store>&after=<seq>&turn=<turn>&limit=<n>`
 
-One session's stored events, oldest first. `limit` defaults to 1000, at most 10000. A page also
+One session's stored events, oldest first. **This is the one way to read stored events by page.**
+With `turn`, only that turn's events, and no `events.dropped` (a drop names sessions, never turns). `limit` defaults to 1000, at most 10000. A page also
 stops before its event JSON passes 8 MiB, but always holds at least one event, so a single larger
 event still pages forward; `next_after` is then the last seq in the page.
 
@@ -564,17 +611,18 @@ event still pages forward; `next_after` is then the last seq in the page.
 ```
 
 `next_after` is the cursor for the next page, or `null` when there are no more events right now.
-`store` and `after` go together, as on the stream; leaving both out starts from the beginning. The
-events include every `events.dropped` that lists the session or says `all_sessions`, as the stream's
-session filter does.
+`store` and `after` go together, as on the stream; leaving both out starts from the beginning.
+Without `turn` the events include every `events.dropped` that lists the session or says
+`all_sessions`, as the stream's session filter does. A turn token reads a session in its tree; the
+turns token may call it too.
 
 ### `POST /api/v0/turns` — start a turn
 
 **One endpoint starts a turn.** Without `session`, the turn opens a new
-session; with `session`, it is the next turn of that session (below). **Every turn runs as a
-job** ([Jobs](#jobs)): this makes a turn job in the queue and answers once a runner has started
-its turn. The jobs API does the same with more choices: a worktree, a review, a cancel. A program reads the work from
-the event stream, or from `GET /api/v0/turns/<turn>/events`. It was `POST /api/v0/runs` until
+session; with `session`, it is the next turn of that session (below). **A turn exists from the
+moment it is asked for**: the reply names it at once, and waits up to 30 seconds for a runner to
+start it ([The queue](#the-queue)). A program reads the work from the event stream, or from
+`GET /api/v0/sessions/<session>/events?turn=<turn>`. It was `POST /api/v0/runs` until
 2026-11-05, renamed with no alias: the turn is the one resource, and a run is only the
 process that does it.
 
@@ -588,31 +636,32 @@ process that does it.
   turn as before. When the person has removed one of those two, the name still starts that harness
   on its own subscription.
 - **Isolation is automatic.** A new session runs in its own copy of `folder`, made as the
-  `isolation` setting says ([Isolation](#isolation)), under `worktrees/` in the data folder. It
+  `isolation` setting says ([Isolation](#isolation)), under `sessions/<session>` in the runner's
+  data folder, named after the session. It
   starts from the folder exactly as it is, uncommitted edits included, and nothing the turns do
   reaches the folder. The session's `folder` in its events is the copy's folder.
   `"isolate": false`, or the setting `"none"`, uses the folder as it is.
-  `isolate` with `session` is refused: a session keeps its workspace.
+  `isolate` with `session` is refused: a session keeps its copy.
 - **A folder is kept by its reference.** In `agentbus up` the built-in connector keeps the path of
-  `folder` in `folders.json` in the data folder, and the turn's job keeps only `folder_ref` and
+  `folder` in `folders.json` in the data folder, and the queue keeps only `folder_ref` and
   `connector`. Send those two in place of `folder` to name a folder another machine owns, from
   `GET /api/v0/folders`; `agentbus server` takes only those. The turn runs on the runner that owns
   the folder.
 
-The reply is **202** `{"id":"abc","turn":"t_5d0c19a2e7b3f481","base_url":"http://127.0.0.1:8787/s/abc/t/t_5d0c19a2e7b3f481","job":"job_1f…"}`,
-sent as soon as the agent has started. `id` is the session, `turn` the new turn, `job` the turn
-job that runs it. The agent's work arrives later, as events of that session, **every one carrying
-`turn`** (below).
+The reply is **202** `{"session":"abc","turn":"t_5d0c19a2e7b3f481","state":"running","base_url":"http://127.0.0.1:8787/s/abc/t/t_5d0c19a2e7b3f481"}`,
+sent as soon as the agent has started. `session` is the session, `turn` the new turn. The agent's
+work arrives later, as events of that session, **every one carrying `turn`** (below). No public
+answer names a job: the queue's jobs are internal.
 
-- **The turn is the job's attempt**: `turn` is the attempt's id. The queue names the session when
-  the job is made.
-- **A turn no runner starts within 30 seconds** answers **202** with `"queued":true`, the `job`
-  and the session `id`, and no `turn` or `base_url`. The job stays queued and runs when a runner
-  is free; its turn then shows in the session. A retry with the same `idempotency_key` names the
-  turn once it has started.
+- **The turn id is named when the turn is asked for**, with its session. It stays the same whichever
+  runner attempt runs it.
+- **A turn no runner starts within 30 seconds** answers **202** with `"state":"queued"`, its
+  `session` and `turn`, and no `base_url`. It stays queued and runs when a runner is free.
+  `GET /api/v0/turns/<turn>` follows it from now on, and `POST /api/v0/turns/<turn>/stop` takes it
+  back out.
 
-- **The run is the turn.** The queue makes the turn id when a runner takes the job: the attempt's
-  id, `t_` and 16 random hex characters (the same shape as the gateway's hashed ids). The runner
+- **The run is the turn.** The turn id is `t_` and 16 random hex characters (the same shape as the
+  gateway's hashed ids). The runner
   puts it in the agent's base URL,
   `<service>/s/<session>/t/<turn>`. The gateway reads it from every request on that URL, so each
   model call the agent makes, and every event read from it, carries that turn, however its
@@ -665,14 +714,20 @@ job that runs it. The agent's work arrives later, as events of that session, **e
   file gives no instructions, and a file over 64 KiB, not UTF-8 or holding a NUL byte stops the
   turn with 400, as a broken `permissions.toml` does. `GET` and `PUT /api/v0/settings/instructions`
   read and write it ([Settings](#settings)); a runner on another machine uses the server's. Keep the
-  text the same within a session: own replay and the prompt cache rely on it. The default is five lines:
+  text the same within a session: own replay and the prompt cache rely on it. The default says
+  plainly that the agent works in a copy, and how to apply, review, stop and search:
 
   ```
-  Your session's earlier turns are stored by AgentBus. To look something up, run:
-  agentbus-api GET "/api/v0/sessions/<session>/search?q=<text>"
-  with <text> URL-encoded. Each hit's "read" is a path you can GET the same way, for the whole of what matched.
-  You can also ask other agents with the same command: start a turn on any saved agent, continue one, or ask for a review. Do not wait for them: each result comes back to you as a later turn. How: agentbus-api GET /docs/llms.txt, section "Ask other agents".
-  AgentBus agents are not your harness's own agents or subagents. To list them: agentbus-api GET /api/v0/agents
+  You work through AgentBus, in session <session>. A turn is one message to you, your reply and your changes.
+  Your folder is usually your session's own copy of the person's folder. Your edits stay in the copy. They reach the person's folder only when a turn is applied.
+  Call AgentBus with agentbus-api METHOD PATH [JSON]. Replace T with a turn id.
+  - List this session's turns, with each id, number, state and cost: agentbus-api GET /api/v0/turns
+  - Apply a turn to the person's folder (its changes and the earlier turns' that are not applied yet): agentbus-api POST /api/v0/turns/T/apply
+  - Ask another agent to review a turn: agentbus-api POST /api/v0/turns/T/review '{"agent":"<agent id>"}'. Pick an agent other than the one that did the turn. List the agents: agentbus-api GET /api/v0/agents. These are AgentBus agents, not your harness's own agents or subagents.
+  - Read a turn, its state, cost and a review's verdict: agentbus-api GET /api/v0/turns/T
+  - Stop a turn: agentbus-api POST /api/v0/turns/T/stop
+  - Search this session's history: agentbus-api GET "/api/v0/sessions/<session>/search?q=<text>", with <text> URL-encoded.
+  Work you ask for comes back to you as a later turn: do not wait for it. More: agentbus-api GET /docs/llms.txt
   ```
 
   `agentbus-api METHOD PATH [BODY]` is the API client. It is a link to the running program, kept
@@ -715,7 +770,7 @@ job that runs it. The agent's work arrives later, as events of that session, **e
   that `HOME`. The home is made empty at the session's first turn and kept for its next ones, so a
   vendor's resume finds its transcript. A session started before this version has no home and
   keeps the service's own `HOME`, where its transcript is. Nothing is written into it: the turn's credential is the
-  placeholder control's gateway swaps. It is removed when the session's workspace is closed, a
+  placeholder control's gateway swaps. It is removed when the session is closed, a
   review's when the review ends, and a first turn's when that turn does not start. `agentbus up`
   and `agentbus runner -gateway local` run turns in the service's own `HOME`, because the
   harness's own sign-in is there.
@@ -761,21 +816,21 @@ job that runs it. The agent's work arrives later, as events of that session, **e
 - **At most 4 turns running at once**, unless `agentbus up -max-runs <n>` sets another number
   (1 to 64): it is the built-in runner's capacity. One more waits in the queue.
 - **Every turn queues.** A turn sent while the session has a turn running, or turns still waiting
-  (a person's message or a delivered result), is never refused: its job waits behind them and runs
+  (a person's message or a delivered result), is never refused: it waits behind them and runs
   next, one at a time, in the order they were sent. The reply comes at once: **202** with
-  `"queued":true`, the `job`, the session `id`, `ahead` (how many of the session's turns are before
-  it) and no `turn`. Its `turn.started` is stored when it starts; `GET /api/v0/jobs/<id>` follows it
-  meanwhile, and `POST /api/v0/jobs/<id>/cancel` takes it back out.
+  `"state":"queued"`, its `session` and `turn`, and `ahead` (how many of the session's turns are
+  before it). Its `turn.started` is stored when it starts; `GET /api/v0/turns/<turn>` follows it
+  meanwhile, and `POST /api/v0/turns/<turn>/stop` takes it back out.
 - **`idempotency_key` makes a retry safe.** It is optional: 1 to 128 characters of `A-Z`, `a-z`,
   `0-9` and `. _ : -`. A client whose request timed out sends the same body again.
-  - It is the turn job's key. The turn's `turn.started` carries it as `idempotency_key`.
-  - A later request with the same key and the same fields answers **202** with that turn's `id`,
-    `turn` and `base_url`, plus `"existing":true`. It makes no job and starts nothing, even after
-    the turn has ended. Requests sent at once with one key make one job.
+  - It is the turn's key. The turn's `turn.started` carries it as `idempotency_key`.
+  - A later request with the same key and the same fields answers **202** with that turn's
+    `session`, `turn`, `state` and `base_url`, plus `"existing":true`. It starts nothing, even after
+    the turn has ended. Requests sent at once with one key make one turn.
   - The same key with other fields (`session`, `agent`, `folder`, `prompt`, `model` or
     `read_only`) gets **409**.
-  - A request refused before it is queued (a 400 from the checks below) uses no key. A job whose
-    turn the runner could not start keeps it: a retry gets the same refusal.
+  - A request refused before it is queued (a 400 from the checks below) uses no key. A turn the
+    runner could not start keeps it: a retry gets the same refusal.
   - Keys are compared across the whole service, not per token. Use a new key for each new turn.
 - **When the service stops**, it sends each running child SIGTERM, then SIGKILL after 5 seconds,
   and stores each `session.closed` before the store closes. One turn is stopped the same way with
@@ -817,7 +872,7 @@ macOS has no such per-argument limit.
 {"session":"abc","prompt":"Now fix the second one","read_only":true}
 ```
 
-The reply is **202** `{"id":"abc","turn":"t_91ee…","base_url":"http://127.0.0.1:8787/s/abc/t/t_91ee…","job":"job_…"}`,
+The reply is **202** `{"session":"abc","turn":"t_91ee…","state":"running","base_url":"http://127.0.0.1:8787/s/abc/t/t_91ee…"}`,
 the same shape as a new session's first turn, with the session's own id and a new turn id. It is
 sent as soon as the agent has started. The turn's work arrives as events of the same session,
 carrying the new turn id, since the agent's base URL names both.
@@ -973,8 +1028,9 @@ carrying the new turn id, since the agent's base URL names both.
 - Refused:
   - **404** `no such session`: the store has no events for it.
   - A turn sent while one runs is not refused: it is queued behind it (above). Only a hold the
-    record shows open with no job of this service behind it (a turn this service did not start)
-    gets **409** `a turn is already running in this session`, at once, before any job is made.
+    record shows open with no queued work of this service behind it (a turn this service did not
+    start) gets **409** `a turn is already running in this session`, at once, before anything is
+    queued.
   - **409** `this session cannot be continued from here`: it has no `resume_id` (with replay off,
     or by the fallback above), such as a session pointed at the gateway by hand, or one whose agent
     is not `claude` or `codex`. With own replay, the version adds `: ` and the reason the newest
@@ -1013,10 +1069,22 @@ takes only `GET`.
  "next_before":null}
 ```
 
-**Turns are what the cockpit reads; a session is the label that groups them.** A turn is what a
-`turn.started` with a `turn` id starts. Newest first, by that `turn.started`'s seq. Every field is
-computed from stored events up to `seq`, so a client streams from `store` and `seq` exactly as after
-the sessions snapshot.
+**Turns are what the cockpit reads; a session is the label that groups them.** A turn exists from
+the moment it is asked for. **The first page starts with the turns still queued**, newest first;
+then the turns that started, newest first by their `turn.started`'s seq. Later pages hold started
+turns only. A started turn's fields are computed from stored events up to `seq`, so a client
+streams from `store` and `seq` exactly as after the sessions snapshot.
+
+Besides the record's fields, each turn has:
+
+- `number`: its place in its session, counted from 1 in the order the turns started. Turn 3 is the
+  session's third. Absent until the turn starts.
+- `kind`: `turn`, or `review` for a turn that reviews another (`POST /api/v0/turns/<id>/review`).
+- `reviews`: for a review, the turn it reviews.
+- `verdict` and `findings`: for a review that has ended. `verdict` is `pass`, `fail` or `unknown`;
+  any P1 finding makes it `fail`. Each finding has `severity`, `file`, `line` and `summary`.
+- `asked`: when the turn was asked for. Absent for a turn this service did not run.
+- `ahead`: for a queued turn, how many of its session's turns are before it.
 
 - `session=<id>` lists one session's turns. `limit` is 1 to 1000, 100 when absent. **A page also
   stops before its rows pass 4 MiB of JSON**, but always holds at least one turn. When more turns
@@ -1025,7 +1093,7 @@ the sessions snapshot.
 - `prompt` is a preview: the first 500 characters (runes, never a split one) of the person's words
   from the turn's `turn.started`. `prompt_truncated: true` says it was cut; it is absent when not.
   **The whole prompt is that `turn.started`'s `text`**, the first event of
-  `GET /api/v0/turns/<id>/events`. A list of many 256 KiB prompts would otherwise be hundreds of MB. `agent` and `folder` come from the same `turn.started`, empty for a
+  `GET /api/v0/sessions/<session>/events?turn=<id>`. A list of many 256 KiB prompts would otherwise be hundreds of MB. `agent` and `folder` come from the same `turn.started`, empty for a
   turn not started through `POST /api/v0/turns`, and so does `agent_id`, the saved agent that ran
   the turn (absent for a turn started by harness name alone). Turns of one session may name
   different agents.
@@ -1038,14 +1106,17 @@ the sessions snapshot.
   several; the vendor's own name for the model is on the `model.responded`), empty with no calls.
   `model_calls` counts the turn's `model.requested` events. Both previews count toward the 4 MiB
   page bound.
-- `state`:
+- `state`, one of `queued`, `running`, `finished`, `failed` or `stopped`:
+  - a turn asked for and not yet started by a runner: `queued`. One that ended before it started
+    reads `stopped` (it was stopped) or `failed`, with `error` saying why.
   - a turn started through `POST /api/v0/turns`: `running` until its agent's `session.closed`, then
-    `finished` on `exit_code` 0, else `failed` (another code, an agent that would not start, or one
-    the service closed on restart, which has no `exit_code`). `ended` is that `session.closed`'s time.
+    `stopped` when someone stopped it, `finished` on `exit_code` 0, else `failed` (another code, an
+    agent that would not start, or one the service closed on restart, which has no `exit_code`).
+    `ended` is that `session.closed`'s time.
   - any other turn (traffic pointed at the gateway by hand): `finished` once it has a
     `turn.completed`, else `running`. `ended` is its latest `turn.completed`.
-- `stopped` is `true` when the person stopped the turn with `POST /api/v0/turns/<id>/stop`, absent
-  otherwise.
+- `stopped` is `true` when someone stopped the turn with `POST /api/v0/turns/<id>/stop`, absent
+  otherwise. Its `state` is then `stopped`.
 - `outcome` is the latest `turn.completed`'s, when there is one. A one-shot agent can end several
   model calls with `turn.completed`; `state` is what says the turn is over.
 - `usage`, `cost_usd` and `cost_complete` follow the session rules above, over the turn's own
@@ -1053,7 +1124,7 @@ the sessions snapshot.
   false.
 - Events with a turn id and no `turn.started` are not listed: such as a hashed id codex's compaction
   started mid-turn in hand-pointed traffic (see [Turns](#turns)). Their events are still in
-  `/turns/<id>/events`.
+  `GET /api/v0/sessions/<session>/events?turn=<id>`.
 
 ### `GET /api/v0/turns/<id>?session=<id>` — one turn
 
@@ -1062,35 +1133,41 @@ the sessions snapshot.
  "turn":{"id":"t_5d0c…","session":"abc","agent":"claude","folder":"/Users/ana/Sites/x",
    "prompt":"Review this diff: …","reply":"Two findings.","model":"claude-haiku-4-5","model_calls":3,
    "started_seq":980,"started":"2026-11-05T09:12:03Z","ended":"2026-11-05T09:12:41Z",
+   "number":1,"kind":"turn","asked":"2026-11-05T09:12:02Z",
    "state":"finished","exit_code":0,"idempotency_key":"job-42",
    "usage":{"input_tokens":1200,"output_tokens":540,"cache_read_tokens":0,"cache_write_tokens":0},
    "cost_usd":0.01,"cost_complete":true}}
 ```
 
-One turn, with the same fields as a row of `GET /api/v0/turns`. A program polls it to wait for a
-turn to end: `state` leaves `running`, and `ended`, `exit_code`, `stopped`, `unsettled` and `error`
-say how it ended. To follow it live, stream `GET /api/v0/events` from `store` and `seq`.
+One turn, in any state from the moment it is asked for, with the same fields as a row of
+`GET /api/v0/turns`. A program polls it to wait for a turn to end: `state` leaves `queued` and
+`running`, and `ended`, `exit_code`, `stopped`, `unsettled` and `error` say how it ended. To follow
+it live, stream `GET /api/v0/events` from `store` and `seq`.
 
 - The same turn id can be in two sessions (only in traffic pointed at the gateway by hand).
   `session=<id>` picks that session's turn; without it the newest is answered.
-- **404** when no `turn.started` carries the id.
-- A turn token may read the turns of its request tree only, as on `GET /api/v0/turns`.
+- **404** when no turn has the id.
+- A turn token reads any turn of its request tree **by its id alone**: it needs no `session`. A
+  turn outside the tree gets **403**.
 
 Three fields are added to every turn row, here and in the list:
 
 - `unsettled: true` when the turn's `session.closed` says the gateway could not confirm that every
   model call was stored, as for a turn the service closed on restart. Own replay does not continue
   from such a turn.
-- `error` when the turn's agent could not start, from its `session.closed`. Its `state` is `failed`.
+- `error` when the turn's agent could not start, from its `session.closed`, or why the runner
+  refused it before it started. Its `state` is `failed`.
 - `idempotency_key`, when the turn was started with one.
 
 ### `POST /api/v0/turns/<id>/stop` — stop a turn
 
-Stops one running turn, the way the service stops every turn when it shuts down. The reply is
-**202** `{"id":"abc","turn":"t_5d0c19a2e7b3f481"}` (`id` is the session), sent at once.
+Stops one queued or running turn. A running one stops the way the service stops every turn when
+it shuts down. The reply is **202** `{"session":"abc","turn":"t_5d0c19a2e7b3f481"}`, sent at once.
+Stop is the one verb: there is no cancel.
 
-- **A stop cancels the turn's job.** The runner hears it on its next heartbeat, within 2 seconds,
-  and stops the turn. The job ends `cancelled`.
+- **A queued turn** never starts. It reads `stopped` at once.
+- **A running turn**: its runner hears the stop on its next heartbeat, within 2 seconds, and stops
+  the turn.
 
 - **What ends:** the turn's agent and every process it started. The service sends SIGTERM to the
   agent's process group and to every process its tree counts (a tool in a process group or session
@@ -1098,8 +1175,7 @@ Stops one running turn, the way the service stops every turn when it shuts down.
   turn's tree are never signalled.
 - **What is recorded:** the turn's `session.closed` carries `stopped: true` with the agent's
   `exit_code` (143 for SIGTERM, 137 for SIGKILL). It is stored once the tree has ended, as for any
-  turn. `GET /api/v0/turns` shows the turn with `stopped: true` and `state` `failed` (`finished`
-  only if the agent still exited 0). The service log gets `run.stop session=… turn=…`, and the
+  turn. `GET /api/v0/turns` shows the turn with `stopped: true` and `state` `stopped`. The service log gets `run.stop session=… turn=…`, and the
   turn's `run.exit` line says `stopped=true`.
 - **What the next turn sees:** the session's next turn continues by own replay as after any turn
   that did not finish: what the stopped turn did, an error result for each tool call that got no
@@ -1110,10 +1186,9 @@ Stops one running turn, the way the service stops every turn when it shuts down.
   the stop is on its `session.closed` and in the turn list.
 - **Twice:** a stop while the turn is already stopping gets **202** again and sends nothing more.
   Two stops at once both get 202; the turn is stopped once.
-- **409** when the turn's job has ended, or the turn is not a job of this service (a turn of
-  traffic pointed at the gateway by hand, or one from before the job queue).
-- **404** when no job and no stored event carries the turn id, and when the service keeps no job
-  queue.
+- **409** when the turn has ended, or it is not a turn of this service (a turn of traffic pointed at
+  the gateway by hand, or one from before the queue).
+- **404** when no turn has the id, and when the service keeps no queue.
 - **The main token or the turns token.** A turn token may stop only a turn of work its request tree
   asked for; any other turn, its own included, gets **403**.
 - No body is read.
@@ -1123,7 +1198,6 @@ Stops one running turn, the way the service stops every turn when it shuts down.
 ```json
 {"turn":"t_5d0c19a2e7b3f481","session":"abc","agent":"claude","agent_id":"claude","model":"claude-haiku-4-5",
  "state":"finished","started":"2026-11-09T09:12:03Z","ended":"2026-11-09T09:12:41Z","duration_ms":38000,
- "job":"job_7f…",
  "files":{"isolated":true,"from":"base","to":"t_5d0c19a2e7b3f481","kind":"snapshot","count":2,
    "changes":[
      {"path":"a.txt","change":"modified","size":12,"sha256":"…",
@@ -1140,7 +1214,7 @@ Stops one running turn, the way the service stops every turn when it shuts down.
 
 Everything the record holds about one turn, in one answer, for the cockpit and for a reviewer.
 
-- **`files`** comes from the turn's job result: each file it added, modified or deleted, with size
+- **`files`** comes from the turn's result: each file it added, modified or deleted, with size
   and SHA-256. In an isolated copy each changed text file has its own unified `diff`, from the
   turn's start checkpoint to its end one, made when the turn ended. A file's earlier content is the
   checkpoint's saved copy, or for the first turn the person's folder while that file is still as it
@@ -1149,10 +1223,11 @@ Everything the record holds about one turn, in one answer, for the cockpit and f
   longer kept. A turn in a folder used as it is (`none`, or `isolate: false`) is checkpointed the
   same way, in the folder itself: `from` and `to` are absent, `isolated` is false, and a modified
   file has no diff, since its earlier content is not kept. Nothing here comes from git. `files` is
-  `null` while the turn runs, and for a turn no job of this service ran. `files.isolated` says
+  `null` while the turn runs, and for a turn this service did not run. `files.isolated` says
   whether `POST /api/v0/turns/<id>/apply` can apply it.
 - **`model_calls`**: the count, usage and cost as `GET /api/v0/turns/<id>` has them, calls per
-  model, and each call (at most 500) with its `exchange`, for `GET /api/v0/calls/<exchange>/context`.
+  model, and each call (at most 500) with its `exchange`, for
+  `GET /api/v0/turns/<id>/calls/<exchange>`.
 - **`tools`**: each tool call (at most 1000), with its input when it is at most 4 KiB
   (`input_left_out` past that), the shell commands it runs, `error` from its `tool.completed`, and
   `refused_rule` when the gateway's guard refused it.
@@ -1163,20 +1238,21 @@ Everything the record holds about one turn, in one answer, for the cockpit and f
 - **`apply`**: the turn's latest apply, as `POST /api/v0/turns/<id>/apply` answers it, or
   `{"state":"none"}`.
 - **404** when no `turn.started` carries the id. The main token, the turns token, or a turn token
-  for a turn of its request tree.
+  for a turn of its request tree, by its id alone.
 
 ### `POST /api/v0/turns/<id>/apply` — make your folder as the session was at this turn
 
 ```json
-{"state":"applied","turn":"t_5d0c19a2e7b3f481","session":"abc","job":"job_8a…","files":["a.txt","logo.png"]}
+{"state":"applied","turn":"t_5d0c19a2e7b3f481","session":"abc","files":["a.txt","logo.png"]}
 ```
 
-Makes the person's folder (the one the session's copy was made from) as the session's copy was at
-the end of this turn. It applies **every turn of the session not yet applied, up to and including
+A turn works in its session's copy, so its changes reach the person's folder only by an apply.
+This makes the person's folder (the one the session's copy was made from) as the session's copy
+was at the end of this turn. It applies **every turn of the session not yet applied, up to and including
 this one**, in one step. Applying after every turn works as before: each apply then holds one
 turn. No body is read.
 
-The apply is a job (`kind` `apply`) on the folder's **connector**, the part of AgentBus on the
+The apply runs on the folder's **connector**, the part of AgentBus on the
 folder's machine. It does not need the runner that ran the turns: at the end of each turn the
 runner puts what the copy holds that differs from its base (the turn's changeset) and the files it
 names in the control plane's blob store, and the connector reads them from there.
@@ -1194,8 +1270,8 @@ names in the control plane's blob store, and the connector reads them from there
   with `state` `refused`, the error says so, and `files` lists those written. An agent reads a
   refusal and makes another turn that resolves it, then applies that one.
 - **Applying twice is a no-op.** A turn already applied, by its own apply or by the apply of a
-  later turn, answers **200** with `already: true` and that apply's `turn`, `job` and `files`;
-  nothing more is written. A refused apply may be asked for again: it is a new apply job.
+  later turn, answers **200** with `already: true` and that apply's `turn` and `files`;
+  nothing more is written. A refused apply may be asked for again: it is a new apply.
 - **One apply of a session at a time.** Asking for a turn while an apply of the same or a later
   turn runs answers that apply. Asking for a later turn while an apply of an earlier one runs is
   **409** `an apply of an earlier turn of this session has not ended`. Two sessions of one folder
@@ -1205,30 +1281,47 @@ names in the control plane's blob store, and the connector reads them from there
   `truncated: true` says `files` (or `conflicts`) holds fewer.
 - **It waits up to 30 seconds** for the connector. Past that it answers **202** with `state`
   `queued` or `running`; `GET /api/v0/turns/<id>/diff` shows how it ended, and calling apply again
-  waits for the same job.
-- **400** for a turn that cannot be applied: its job has not ended, it is not the job's last
-  attempt, it did not run in an isolated copy (`isolation = "none"`, or `isolate: false`), it ran
-  before this build kept changesets, or its session was closed. **404** when no job of this service
-  ran the turn. **409** with `state` `failed` when the apply job did not finish (its connector went
+  waits for the same apply.
+- **400** for a turn that cannot be applied: it has not ended, it did not run in an isolated copy (`isolation = "none"`, or `isolate: false`), it ran
+  before this build kept changesets, or its session was closed. **404** when no turn of this service has the id
+  ran the turn. **409** with `state` `failed` when the apply did not finish (its connector went
   away): ask again, and a file it already wrote counts as applied.
 - **503** when the folder's connector has not asked for work for a minute: `the folder's connector
   is not connected, so nothing was written: start agentbus connector on the folder's machine, then
-  ask again`. No apply job is made.
+  ask again`. No apply is made.
 - The runner keeps every checkpoint of a session until the session closes: an apply no longer
   removes any (`pruned` is never set).
-- **A turn token** may apply a turn whose job ran in a session of its request tree, its own session
+- **A turn token** may apply a turn of a session of its request tree, its own session
   included (`scope = "session"`: its own session only), unless `apply = false` in `[agent_api]`. A
   read-only turn's token gets 403.
 
-### `GET /api/v0/turns/<id>/events?store=<store>&after=<seq>&limit=<n>`
+### `POST /api/v0/turns/<id>/review` — ask another agent to review a turn
 
-One turn's stored events, oldest first, paged as `GET /api/v0/sessions/<id>/events` is: the same
-`limit`, 8 MiB page bound, `store` and `after`, and `next_after`. **A turn id is unique only within
-its session**: a client can name the same turn in two sessions' base URLs. `session=<id>` keeps
-only that session's events of the turn, and a client that knows the session should send it. Without
-it, every session's events of the turn are sent. Only events carrying that `turn`:
-`events.dropped` names sessions, never turns, so it is not among them; read the session's events, or
-its `cost_complete`, for those.
+```sh
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"agent":"claude","model":"sonnet"}' $B/api/v0/turns/t_5d0c19a2e7b3f481/review
+# {"session":"7a2c…","turn":"t_c4d1…","state":"queued"}
+```
+
+**A review is a turn.** This starts a turn by `agent`: read-only, in a session of its own, in the
+reviewed turn's copy as it is. The answer has the shape of `POST /api/v0/turns`, with the review's
+own session and turn.
+
+- Body: `agent` (a saved agent's id; pick another agent than the one that did the turn), optional
+  `model`, `idempotency_key` (a retry with the same key and fields answers the same review turn,
+  with `existing: true`) and `include_reply`.
+- The review's prompt holds the reviewed turn's task, its changed files and its diff. The author's
+  own reply goes in only with `include_reply: true`: a reviewer handed the author's conclusion
+  tends to confirm it.
+- **The verdict is on the review turn.** When it ends, `GET /api/v0/turns/<review turn>` has
+  `kind: "review"`, `reviews` (the reviewed turn), `verdict` (`pass`, `fail` or `unknown`) and
+  `findings`, read from the reviewer's reply. Any P1 finding makes it `fail`.
+- **409** when the turn cannot be reviewed: it has not ended, it recorded no changed files, its
+  session is closed, or the key names another turn. **404** for no such turn. **400** for a bad
+  body.
+- The main token, the turns token, or a turn token for a turn of its request tree, its own
+  session's included, unless the turn is read-only or `review = false` in `[agent_api]`. The
+  review's result comes back to the asking session as a later turn, within the caps of `[limits]`.
 
 ### Agents
 
@@ -1281,7 +1374,9 @@ Routes, all with the main token only:
   {"name":"opencode","label":"opencode","disabled":true,"found":false,"access":[]}]}
 ```
 
-It was `GET /api/v0/agents` in 0.1, renamed in 0.2 when agents became saved objects.
+It was `GET /api/v0/agents` in 0.1, renamed in 0.2 when agents became saved objects. It stays a
+route of its own, not a field of `GET /api/v0/agents`: it is what the runners find on their
+machines, and an agent is a saved setup.
 
 Each runner probes its own machine and reports it: when it starts, and once a minute after. This
 service never runs an agent's program to answer. Just after a runner starts, the answer waits for
@@ -1389,7 +1484,9 @@ now is tried again. `renews` is true for such a sign-in.
  "data":{"file":"a.go","line":12,"severity":"high"}}
 ```
 
-The reply is **201** `{"seq":1043,"id":"evt_…"}`.
+The reply is **201** `{"seq":1043,"id":"evt_…"}`. Main token only. This and
+`GET /api/v0/events` are the record-wide routes, kept for programs and exports; they are listed
+under Events.
 
 - **`kind` must match `^x\.[a-z0-9][a-z0-9_-]{0,31}\.[a-z0-9][a-z0-9_.-]{0,63}$`**: `x.`, then the
   program's name, then the event's name. A program can never write a framework kind such as
@@ -1402,9 +1499,11 @@ The reply is **201** `{"seq":1043,"id":"evt_…"}`.
 - Refused with **400** and fixed wording: a body that is not one JSON object with only these fields,
   or over 128 KiB; a bad kind; a field over its bound; `data` that is not an object.
 
-### `GET /api/v0/calls/<exchange>/context?full=<bool>` — what one model call sent
+### `GET /api/v0/turns/<id>/calls/<call>?full=<bool>` — what one model call sent
 
-`<exchange>` is the `exchange` field of the call's events. The reply is **200**:
+`<call>` is the `exchange` field of the call's events, as the turn's diff lists it in
+`model_calls`. It must be one of the turn's calls: **404** otherwise. A turn token reads a call of a
+turn in its request tree. The reply is **200**:
 
 ```json
 {"exchange":"x-9f2c01ab-7","session":"abc","vendor":"anthropic","time":"2026-11-05T09:00:00Z","size":99554,
@@ -1461,7 +1560,7 @@ Text search over what the store holds of one session. The reply is **200**:
 ```json
 {"store":"st_9f2c…","hits":[
   {"source":"request","turn":"t_5d0c…","call":"x-9f2c01ab-7","piece":12,"seq":1042,"kind":"message","role":"user",
-   "block":"tool_result","snippet":"…func Login(user string) error {…","read":"/api/v0/calls/x-9f2c01ab-7/pieces/12"},
+   "block":"tool_result","snippet":"…func Login(user string) error {…","read":"/api/v0/turns/t_5d0c…/calls/x-9f2c01ab-7/pieces/12"},
   {"source":"event","turn":"t_5d0c…","seq":1001,"kind":"turn.started",
    "snippet":"Fix the login bug","read":"/api/v0/sessions/abc/events?store=st_9f2c…&after=1000&limit=1"}],
  "next_before":"1001.0"}
@@ -1502,13 +1601,17 @@ seq and no turn).
   older is left. `limit` is 1 to 200, 20 when absent. A page also stops at 1 MiB of hits or after
   reading 64 MiB of text, so a page can hold fewer than `limit` hits, even none, and still have a
   `next_before`. A `before` that no page gave gets **400**.
-- `read` is the path that returns the whole of what matched.
+- `read` is the path that returns the whole of what matched: a piece of the turn's call, or a
+  one-event page of the session's events for a hit with no turn.
+- **A turn token's search leaves out its own turn.** The search call itself would else be its first
+  hit. The turn holds its own work in its context anyway. The main token's search leaves out
+  nothing.
 
-### `GET /api/v0/calls/<exchange>/pieces/<n>` — one piece of a call
+### `GET /api/v0/turns/<id>/calls/<call>/pieces/<n>` — one piece of a call
 
 One piece of a stored call, so a client reads one tool result without the whole request. `n` is
-the piece's index in the `pieces` of `GET /api/v0/calls/<exchange>/context`, from 0, or `reply`
-for the call's kept reply.
+the piece's index in the `pieces` of `GET /api/v0/turns/<id>/calls/<call>`, from 0, or `reply`
+for the call's kept reply. The call must be one of the turn's.
 
 - **200**: the body is the piece's bytes **exactly as stored**, with `Content-Type:
   application/json`, so their SHA-256 is the piece's hash. The headers describe it:
@@ -1516,13 +1619,14 @@ for the call's kept reply.
   `X-Piece-Label` when the label is printable ASCII.
   A reply to an allowed origin (any origin, unless `-origin` locks it) also carries
   `Access-Control-Expose-Headers` naming them, so a browser cockpit can read them.
-- **404** when no body is stored for the call, when it has no piece `n`, or, for `reply`, when no
+- **404** when the call is not one of the turn's, when no body is stored for it, when it has no piece `n`, or, for `reply`, when no
   reply is kept. An `n` that is not a whole number without leading zeros, or `reply`, gets the
   unknown-path 404.
 
 ### `/api/v0/actions` — reserved
 
-Refusing, holding and starting a review are planned for a later version.
+Refusing and holding a tool call are planned for a later version. A review is a turn:
+`POST /api/v0/turns/<id>/review`.
 
 ## Settings
 
@@ -1562,63 +1666,55 @@ curl -s -X PUT -H "Authorization: Bearer $(cat ~/.local/share/agentbus/token)" -
   -d '{"forbid":["git push"]}' http://127.0.0.1:8787/api/v0/settings/permissions
 ```
 
-## Jobs
+## The queue
 
-Every turn runs as a job. A job is a requested turn: its `kind` is `turn` or `review`. Two more
-kinds run on a folder's connector and start no turn: `apply` makes the person's folder as a
-session was at a turn ([Isolation](#isolation)), and only `POST /api/v0/turns/<id>/apply` makes
-one; `snapshot` takes a snapshot of a folder for a runner on another machine, and only a runner
-asks for one. A runner
-takes it from the queue and runs it as an attempt. **The attempt is the turn**: the attempt id is
-the turn id, `t_` and 16 hex characters, and there is no second id to match. A turn job names its
-session when it is made, so `session` is on the job from the start.
+**Every turn waits in a queue until a runner runs it.** The queue's word for that work is a
+**job**, and it stays inside AgentBus: no public answer names one. A client sees turns. Inside,
+a turn's job and a review's job each run one turn, and the turn id is named when the job is made.
+Two more kinds run on a folder's connector and start no turn: an apply
+(`POST /api/v0/turns/<id>/apply`) and a snapshot of a folder for a runner on another machine. A
+runner takes a job from the queue and runs it as an **attempt**; the turn keeps its id whichever
+attempt runs it. The runner protocol ([RUNNER_PROTOCOL.md](RUNNER_PROTOCOL.md)) is where jobs and
+attempts are seen.
 
-`POST /api/v0/turns` is the short way to start one turn: it makes a turn job and answers with its
-turn. The jobs API is the whole way: worktrees, reviews, cancel, and the list.
-
-- **States:** `queued`, `taken`, `running`, then `finished`, `failed` or `cancelled`. A failed job
-  says why in `reason`: `setup` (the turn did not start, or an apply was refused; `result.refused` and `result.status` say
-  why), `conflict` (an apply: a file in the person's folder changed since the turn's start; `result.apply.conflicts` lists each), `agent` (the agent exited with a failure), `runner_lost` (its runner stopped answering
-  while the turn ran) or `runner_stopped` (its runner shut down).
-- **A session's turn jobs run one at a time**, in the order they were made. A next turn waits for
-  the one before it. Reviews never wait.
-- **A session's next turn keeps the session's agent and model.** A turn job of a session that names
+- **A turn's states:** `queued` (asked for, not yet started by a runner), `running`, then
+  `finished`, `failed` or `stopped`. A turn that failed before it started says why in `error`: the
+  runner's refusal, such as a folder it does not own.
+- **A session's turns run one at a time**, in the order they were asked for. A next turn waits for
+  the one before it. Reviews never wait: each runs in a session of its own.
+- **A session's next turn keeps the session's agent and model.** A turn of a session that names
   no agent and no model runs on the agent and the model of the session's latest turn, as the record
-  holds them when the turn starts (`agent`, `agent_id` and `model` on its `turn.started`), so a Fix
-  after a review runs on the model the author used. Its `spec.model` stays empty; the turn's
-  `turn.started` shows the model. A job that names a model keeps its own. A job that names another
-  agent than the latest turn's gets that agent's model, or its default; one that names the latest
-  turn's own agent keeps the session's model. The agent's model travels in `spec.agent_model`.
-- **No automatic retry once a job is running.** A lease lost before the turn started puts the job
-  back in the queue; a lease lost while it runs fails it with `runner_lost`.
-- **The job's result** holds how the turn ended (`state`, `exit_code`, `stopped`, `reply`,
-  `model_calls`, `cost_usd`), the session it ran in, and `changes`: every file the job added,
-  modified or deleted in its workspace, files git ignores included, each with size and SHA-256, a
+  holds them when the turn starts (`agent`, `agent_id` and `model` on its `turn.started`), so a fix
+  after a review runs on the model the author used. A turn that names a model keeps its own. A turn
+  that names another agent than the latest turn's gets that agent's model, or its default; one that
+  names the latest turn's own agent keeps the session's model.
+- **No automatic retry once a turn is running.** A lease lost before the turn started puts it back
+  in the queue, with the same turn id; a lease lost while it runs fails it.
+- **A turn's result** is kept in the queue: how the turn ended, the session it ran in, and every
+  file it added, modified or deleted in its session's copy, files git ignores included, each with size and SHA-256, a
   small text file's content, and its own unified diff where its earlier content is kept. They are
   the diff of the turn's start and end checkpoints, the same `GET /api/v0/turns/<id>/diff` shows.
   In an isolated session, `from` and `to` name those checkpoints ([Isolation](#isolation)). A
-  folder used as it is is checkpointed for the one job only, and has no `from` and `to`.
+  folder used as it is is checkpointed for the one turn only, and has no `from` and `to`.
 
-### Workspaces
+### A session's copy
 
-- **A session's first job names its workspace.** Either `repo` and `base` (a branch, tag or
-  commit): the runner makes a git worktree of the repo at that base, under `worktrees/` in its data
-  folder, and the turn runs there. Or `folder`, used as it is. Or `folder` with `isolate: true`:
-  the runner makes the isolated copy the `isolation` setting names ([Isolation](#isolation)).
-  `POST /api/v0/turns` sends `isolate: true` unless told otherwise; the jobs API takes it as sent.
-- **`spec.agent` is a saved agent's id**, as for `POST /api/v0/turns`. The control plane fills
-  `spec.agent` with its harness, and `spec.agent_id`, `spec.access`, `spec.key_env` and, when none
-  is sent, `spec.model` from it. A caller never sends those three: they are refused.
-- **Later jobs name `session`**, and may name `agent`: the turn then runs on that saved agent, in
-  the session's workspace, as for `POST /api/v0/turns` (switching agent). They go to the runner that
-  holds the session's workspace.
-- **A workspace's `folder` is where its turns run.** Its `kind` is `copy`, `worktree` or `folder`
-  (used as it is). For a git worktree of a repo's subfolder, `folder` is the same subfolder inside
-  the worktree; later turns and reviews use it.
+- **A session's first turn names its folder**: `folder` (or `folder_ref` and `connector`). With
+  `isolate: true`, the default of `POST /api/v0/turns`, the runner makes the isolated copy the
+  `isolation` setting names ([Isolation](#isolation)). With `isolate: false` the folder is used as
+  it is. `isolation = "git"` makes a git worktree of the folder's repo.
+- **The copy is named after its session**: `sessions/<session>` in the runner's data folder. The
+  folder name an agent sees is the session the cockpit shows. Copies made by builds before 0.4
+  stay in `worktrees/job_<id>` and are still found, used and removed there.
+- **Later turns name `session`**, and may name `agent`: the turn then runs on that saved agent, in
+  the session's copy (switching agent). They go to the runner that holds the session's copy.
+- **`GET /api/v0/sessions/<id>` shows the copy** in `copy`: its runner, its kind (`copy`,
+  `worktree` or `folder`), its name, and when it was closed and removed.
 - **A retry keeps what was frozen.** The idempotency key is matched against the request as sent,
-  the saved agent by its id, so a retry after the agent was edited gets the first job.
-- **A copy or worktree is removed only when its workspace is closed**, never when a job ends:
-  `POST /api/v0/workspaces/<session>/close`. A folder the job named is never removed.
+  the saved agent by its id, so a retry after the agent was edited gets the first turn.
+- **A copy is removed only when its session is closed**, never when a turn ends:
+  `PATCH /api/v0/sessions/<session>` with `{"closed":true}`. A folder used as it is is never
+  removed.
 
 ### Isolation
 
@@ -1636,7 +1732,7 @@ the copy is made. Every method starts from the folder exactly as it is, uncommit
 | Anything else | `copy` | as above |
 
 When `auto` or `overlay` falls back to `copy`, the session still runs. The runner's log and the
-job's `workspace.ready` event (`fallback`) say why, for example that AppArmor refused the
+runner's `workspace.ready` report on the attempt (`fallback`) say why, for example that AppArmor refused the
 namespace and which step allows it.
 
 - **`auto`** (the default): the table above.
@@ -1675,9 +1771,9 @@ namespace and which step allows it.
   uncommitted edits (changed, removed and untracked files) carried in. Ignored files are not, which
   keeps a big build folder out. The turn runs in the same subfolder inside it. A subfolder the
   last commit does not have is refused with 400. Outside git, a copy.
-- **`none`**: the folder itself. Each job's changes still come from checkpoints, taken of the
-  folder at the turn's start and end and removed when the job ends. Nothing can be applied.
-- **Git runs only for `git`** (and for a job that names `repo` and `base`). Every diff, of every
+- **`none`**: the folder itself. Each turn's changes still come from checkpoints, taken of the
+  folder at the turn's start and end and removed when the turn ends. Nothing can be applied.
+- **Git runs only for `git`**. Every diff, of every
   backend, compares the checkpoints' SHA-256s; `.git` is never part of a checkpoint.
 
 **Shared dependency folders (`share_read_only`, off by default).** On macOS a clone costs per
@@ -1694,7 +1790,7 @@ Each turn starts from a checkpoint and ends with one, named by the turn's id (th
 `.start`, and is the last turn's end when nothing changed in between). A checkpoint records every
 file's size, modification time, mode and hash, and keeps its own copy of each file that changed
 (a clone where the disk has them), so one turn's changes can be applied after later turns changed
-the same file again. A job's `changes` name the two checkpoints in `from` and `to`. The first
+the same file again. A turn's `files` in its diff name the two checkpoints in `from` and `to`. The first
 checkpoint is `base`: the folder as the session began.
 
 Checkpoints are a Merkle tree, kept by the session and used by every method: each folder is
@@ -1732,13 +1828,12 @@ there is checked: when `base` holds the file unhashed, a file with the same size
 and mode is as it was, and is not read; any other is hashed. A file that differs, or whose size or
 time changed while `base` has no hash, is a conflict, unless it already is as the turn left it.
 One edit this cannot see: a file rewritten with the same size and its old modification time put
-back by hand, as git's own index cannot. Closing the workspace removes the copy and all its
+back by hand, as git's own index cannot. Closing the session removes the copy and all its
 checkpoints. `GET /api/v0/turns/<id>/diff` shows a turn's changes, each small text file with its
 own unified diff, read from the turn's checkpoints when it ended.
 
-An apply is a job of kind `apply`, which the folder's connector runs. It starts no turn, waits for
-no turn of the session, and fails with reason `conflict` when a file refused it. A session with an
-apply that has not ended cannot be closed.
+An apply runs on the folder's connector. It starts no turn, waits for no turn of the session, and
+is refused when a file conflicts. A session with an apply that has not ended cannot be closed.
 
 **A known limit: a disk without copy-on-write.** On ext4, and on a folder shared into a container
 from another disk, `copy` copies every byte, so a big folder (a `node_modules`, a build output)
@@ -1788,16 +1883,17 @@ agents reach any host. `contain = "on"` refuses every turn there.
 
 ### Reviews
 
-- **Ask for one:** `POST /api/v0/jobs/<id>/review` with `{"agent":"claude","model":"sonnet"}`.
-  `model`, `idempotency_key` and `include_reply` are optional. `agent` is a saved agent's id, as
-  for a turn: the review job's `spec` carries its harness, `agent_id`, `access`, `key_env`, and its
-  model when none is sent. An unknown id is refused with 400. The reviewed job must be a turn job
-  that has ended, in a workspace that is not closed. Several reviews of one job may run at once.
-- **Where it runs:** read-only, in the reviewed job's workspace, on the runner that holds it, in a
-  session of its own. The reviewer sees the files as the author left them.
-- **Its prompt** is built by the queue and kept in the review job's `spec.prompt`: the author's
-  task, the changed files, each file's diff, and the content of small text files that have no diff. It asks for a
-  review that ends with this block:
+- **Ask for one:** `POST /api/v0/turns/<id>/review` with `{"agent":"claude","model":"sonnet"}`
+  ([the route](#post-apiv0turnsidreview--ask-another-agent-to-review-a-turn)). `model`,
+  `idempotency_key` and `include_reply` are optional. `agent` is a saved agent's id, as for a turn.
+  An unknown id is refused with 400. The reviewed turn must have ended, in a session that is not
+  closed. Several reviews of one turn may run at once.
+- **A review is a turn**, with `kind` `review` and `reviews` naming the reviewed turn. It runs
+  read-only, in the reviewed session's copy, on the runner that holds it, in a session of its own.
+  The reviewer sees the files as the author left them.
+- **Its prompt** is built by the queue: the author's task, the changed files, each file's diff, and
+  the content of small text files that have no diff. It asks for a review that ends with this
+  block:
 
   ```json
   {"verdict":"pass","findings":[{"severity":"P2","file":"path/to/file","line":12,"summary":"what is wrong and why"}]}
@@ -1805,139 +1901,16 @@ agents reach any host. `contain = "on"` refuses every turn there.
 
   The author's reply is left out unless `include_reply` is true: a reviewer handed the author's
   conclusion tends to confirm it.
-- **The verdict** is read from the reviewer's whole last reply when the review finishes: `pass` or
-  `fail` as the reviewer wrote it, with any P1 making it `fail`; `unknown` when the reply has no
-  block of that shape (never a pass); `null` while it runs, and for a review that failed or was
-  cancelled.
-
-### Endpoints
-
-All take the main token. The turns token gets 403. A turn token may read the jobs of its request
-tree, ask for a review of one, and cancel work the tree asked for (see "The turn token" above);
-the rest get 403.
-
-| Call | What it does |
-|---|---|
-| `POST /api/v0/jobs` | Make a job: `kind`, `spec`, and optionally `idempotency_key` and `links`. 201, or 200 for a retry with the same key and fields. Other fields under the key get 409. |
-| `GET /api/v0/jobs?state=&kind=&session=&reviews=&limit=` | Jobs, newest first, with their attempts. `reviews=<job>` keeps the reviews of that job. |
-| `GET /api/v0/jobs/<id>` | One job, with its attempts. |
-| `POST /api/v0/jobs/<id>/review` | Make a review job of this job. 201, or 200 for a retry. 409 when it cannot be reviewed. |
-| `POST /api/v0/jobs/<id>/cancel` | A queued job ends at once. A running one stops on its runner's next heartbeat, within 2 seconds. |
-| `GET /api/v0/attempts/<id>/events` | Every event the runner reported for the attempt. |
-| `GET /api/v0/workspaces` | Each session's workspace: its runner, folder, and closed and removed times. |
-| `POST /api/v0/workspaces/<session>/close` | Close a workspace. 409 while a job of it has not ended. Its runner then removes a worktree it made. |
-
-```sh
-T=$(cat ~/.local/share/agentbus/token)
-curl -s http://127.0.0.1:8787/api/v0/jobs -H "Authorization: Bearer $T" \
-  -d '{"kind":"turn","idempotency_key":"job-1","spec":{"agent":"claude","repo":"'"$PWD"'","base":"main","prompt":"Say hello.","model":"haiku"}}'
-# The next turn of that session, in the same worktree:
-curl -s http://127.0.0.1:8787/api/v0/jobs -H "Authorization: Bearer $T" \
-  -d '{"kind":"turn","spec":{"session":"<session of the first job>","prompt":"Now add a test."}}'
-# A review of the first job:
-curl -s http://127.0.0.1:8787/api/v0/jobs/<job id>/review -H "Authorization: Bearer $T" -d '{"agent":"claude","model":"sonnet"}'
-```
+- **The verdict** is read from the reviewer's whole last reply when the review finishes, and shown
+  on the review turn: `pass` or `fail` as the reviewer wrote it, with any P1 making it `fail`;
+  `unknown` when the reply has no block of that shape (never a pass); absent while it runs, and for
+  a review that failed or was stopped.
 
 ### The runner protocol
 
-`agentbus runner -server <url>` is a runner; so is the one built into `agentbus up`. Both speak this
-protocol over HTTP. A runner pulls work and is never called, so it works behind NAT. These calls take the enrollment
-token (`enroll_token` in the data folder) or the runner's own token, never the main token. The
-cockpit never calls them.
-
-| Call | What it does |
-|---|---|
-| `POST /api/v0/runners` | Enroll with name, labels, capacity and protocol 1. Returns the runner and its token, once. |
-| `POST /api/v0/runners/<id>/take` | Long poll, up to 30 s: a job with its new attempt and lease, or a cleanup. 204 when there is nothing. |
-| `POST /api/v0/runners/<id>/heartbeat` | Idle heartbeat with `capacity`. |
-| `POST /api/v0/runners/<id>/removed` | Report a closed workspace removed, or `error`. |
-| `GET /api/v0/runners/<id>/settings` | The policy and the instructions, read fresh, for the turn it is about to start. |
-| `POST /api/v0/attempts/<id>/start` | Taken to running. `cancel` says the job was stopped. `token` is the attempt's turn token, minted by the server: its agent's API token and model credential, working while the attempt is current. |
-| `POST /api/v0/attempts/<id>/heartbeat` | Renew the 30 s lease. Sent every 2 s. `cancel` says stop. |
-| `POST /api/v0/attempts/<id>/events` | A batch numbered from `offset`. A repeat stores nothing new; a gap gets 409 with `next`. |
-| `POST /api/v0/attempts/<id>/finish` | `status`, `reason`, `result`, `last_seq`. The same finish again gets the same answer. |
-| `POST /api/v0/attempts/<id>/snapshot` | For a first turn in an isolated copy of a folder on another machine: the snapshot job, made once, on the folder's connector. Ask again until `snapshot` is set. |
-| `POST /api/v0/attempts/<id>/calls` | A runner of a server, while the turn runs: `{"number": n, "calls":[…], "replies":[…]}`, the turn's model calls as its record kept them, each body as base64 so its bytes arrive as kept (`top`, each piece's `bytes`, a reply's `message`), a piece's `bytes` left out when the server holds it. Answers `{"stored": n, "missing":[…]}`: send the calls whose pieces are missing again, with those pieces' bytes. Each call must be of the session control assigned the job. |
-| `POST /api/v0/attempts/<id>/record` | A runner of a server, while the turn runs and at its end: `{"number": n, "events":[…]}`, at most 500, the turn's events from its own record. The server's record keeps each once, by its id, without its `folder` (the runner's path). Every event must be of the session control assigned the job: a turn job's session, or for a review the one control named when it made the job (`links.review_session`). |
-| `POST /api/v0/blobs` | `{"hashes":[…]}`, at most 10,000: answers `{"missing":[…]}`, the ones the store lacks, so only those are sent. |
-| `PUT /api/v0/blobs/<hash>` | A file's content, streamed, up to 4 GiB: kept only when its SHA-256 is `<hash>`. 204. |
-| `GET /api/v0/blobs/<hash>` | A file's content, streamed. |
-| `POST /api/v0/packs` | Many blobs in one body, a **pack**: frames of `<hash> <size>\n` and then that many bytes, at most 1,000 blobs and 8 MiB of them. Each is checked against its hash. `{"kept": n}`. |
-| `POST /api/v0/packs/fetch` | `{"hashes":[…]}`, 1 to 1,000: their blobs as one pack, in that order, streamed. 404 with `{"missing":[…]}` when one is not held. |
-
-Every call after take names its attempt id and number. A call for an attempt that is not current
-gets 409 with `stale: true`, and the runner stops that turn.
-
-**Three roles.** A runner runs agents in copies. A **connector** owns the folders of its machine:
-it enrolls like a runner, with `capabilities.role` `connector` and its `folders`, and takes only
-`snapshot` and `apply` jobs of those folders. Control (the server) never reads or writes a folder;
-it knows one by its reference. File data always goes through the server's blob store, by the hash
-of its content, never from a connector to a runner:
-
-- A first turn in an isolated copy of a folder goes to any runner. A runner on the folder's machine
-  (one that reports the folder's connector: the built-in one of `agentbus up`, or `agentbus runner
-  -folder`) copies the folder by clone or overlay, as before. Any other asks for a snapshot
-  (`POST /api/v0/attempts/<id>/snapshot`): the connector hashes every file, puts each file and
-  each content tree that the store lacks in it, and answers the snapshot id; the runner fetches
-  the blobs it lacks into its own store and builds the copy from them. A folder used as it is
-  (`isolate: false`) and a git worktree (`repo`) run only on the folder's machine.
-- At the end of each turn the runner puts the copy's changeset (what it holds that differs from
-  its base) and the files it names in the store; the job's `result.changeset` names it.
-- An apply job goes to the folder's connector, which reads both changesets and the files from the
-  store, checks the folder and writes it.
-- A connector that takes work asks for it about once a second. One not seen for a minute is gone:
-  a turn that needs a snapshot of its folder is refused (`the folder's connector is not connected:
-  start agentbus connector on the folder's machine, then send the turn again`), and so is an apply
-  (503). A connector stopped while it takes a snapshot ends that turn: `the folder's connector
-  stopped while it took the snapshot; send the turn again`.
-- A turn whose runner stops answering ends with `runner_lost` once its lease runs out. Control
-  closes the turn in its record (unsettled), so the cockpit shows it ended and the session takes
-  its next turn when the runner is back. A later turn's diff starts at the end of the session's
-  latest turn whose changes control holds (the job's `workspace.diff_from`), so anything written
-  to the copy since (by a lost turn, or what it left running) shows in that diff, as an apply up to
-  it writes it. A session whose first turn ends without an accepted finish (stopped while
-  queued, its runner lost, its finish refused) is ended: a turn already queued behind it ends,
-  and a new one gets **409**, both with `the session is ended; start a new session`.
-
-The modes:
-
-```sh
-agentbus up                                   # control, a connector and a runner, one process
-agentbus server                               # control alone
-agentbus runner -server URL [-folder DIR]...  # a runner; with -folder, a connector beside it
-agentbus connector -server URL -folder DIR... # a connector alone: no agents, record or gateway
-```
-
-In `agentbus up` the three share the server's blob store on disk: nothing is sent over HTTP and
-copies are made by clone or overlay (the local fast path). A runner or a connector of a server
-keeps its own store in its data folder (`blob-cache/`, apart from a server's `blobs/`) and sends
-only what the server lacks: blobs under
-1 MiB go a pack at a time, four packs at once, and a bigger one alone by `PUT`. A runner fetches a
-snapshot's trees a level at a time and its files a pack at a time.
-
-**The blob store is cleaned.** The server keeps every blob that a snapshot or a changeset of an open
-session reaches: every job's but those of a closed session. Once a session closes, the server
-sweeps (also at start and every hour) and removes each blob nothing reaches that is older than an
-hour. A blob just sent, or just answered as held by `POST /api/v0/blobs`, counts as new, so a
-snapshot still being sent loses nothing. A runner's or a connector's own store is a cache of the
-server's: what it lacks it fetches again, so every blob in it older than an hour may go.
-
-**A runner in a VM on the same machine.** A Lima VM reaches the Mac's loopback as
-`host.lima.internal`. A service on loopback refuses another name in `Host`, so start it with
-`-host host.lima.internal` (repeat `-host` for more names). The token still guards every request.
-
-**A runner follows the server's settings.** Before each turn, `agentbus runner -server <url>` reads
-the policy and the instructions from the server (`GET /api/v0/runners/<id>/settings`, with its own
-token), never from its own data folder. So a `forbid` rule set on the server holds on every runner
-from the next turn. Folders in `read_folders` must exist on the runner, with `~` the runner's home.
-
-**When the server's settings cannot be had, the turn does not start.** That is a server that
-cannot be reached, a server whose files are broken, or a server too old to serve the route. The job
-fails with reason `setup`, and its result says why, such as `the server's settings cannot be used,
-so the turn did not start: the server could not be reached`. A runner never falls back to a policy
-it read before: a `forbid` rule just added on the server must hold, and an old copy would miss it.
-A server that cannot be reached cannot hand out jobs either, so this costs at most the jobs a
-runner held when the server went away.
+Runners and connectors talk to control through their own protocol, under `/api/v0/runner/`. It is
+in [RUNNER_PROTOCOL.md](RUNNER_PROTOCOL.md), and a running service describes it at
+`/api/v0/runner/openapi.json` and `/docs/runner`. It is not a public promise.
 
 ## Who writes each kind
 
@@ -1977,10 +1950,10 @@ Two kinds do not follow the subject by writer: `turn.completed` is observed, tho
 `"program"`. The API refuses any other kind there, so a program can never write a built-in kind,
 and a built-in kind is never mistaken for a program's.
 
-**A job attempt's own events** are a separate stream, `GET /api/v0/attempts/<id>/events`, written by
-the runner that ran it: `attempt.started`, `workspace.ready`, `workspace.changes`,
-`workspace.removed`, `turn.created`, `turn.refused`, `turn.stop`, `turn.unended` and `turn.ended`.
-They are not in the store's event stream. A turn's own events, such as `turn.started`, are.
+**A runner's own reports about an attempt** (`attempt.started`, `workspace.ready`,
+`workspace.changes`, `workspace.removed`, `turn.created`, `turn.refused`, `turn.stop`,
+`turn.unended` and `turn.ended`) stay in the queue, apart from the record ([RUNNER_PROTOCOL.md](RUNNER_PROTOCOL.md)).
+The client API does not read them. A turn's own events, such as `turn.started`, are in the record.
 
 ## What changes in the event
 
@@ -2140,8 +2113,47 @@ Invalid API key · Please run /login
 
 ## Versions
 
-`v0` may change without notice until the November demo. After that, a change that breaks a cockpit
-gets a new version path, and the old one stays for a while.
+`v0` may change without notice. **The prefix stays `/api/v0` through 0.4**: v0 allows breaking
+changes, and the 0.4 cleanup is one. `/api/v1` comes when third parties depend on the API; from
+then on, a change that breaks a client gets a new version path, and the old one stays for a while.
+
+**What 0.4 changes after 0.3.** The API is now three nouns, agent, session and turn, and every
+action is on a turn. The old routes are removed with no alias: 0.3 had no outside users.
+
+- **A turn exists from the moment it is asked for.** `POST /api/v0/turns` answers
+  `{session, turn, state, base_url, existing, ahead}`; `state` is `running` or `queued`, and `turn`
+  is always there. `id` (the session), `job` and `queued` are gone. `GET /api/v0/turns/<id>` and
+  `GET /api/v0/turns` show a queued turn.
+- **Turn states are `queued`, `running`, `finished`, `failed` and `stopped`.** A stopped turn was
+  `failed` with `stopped: true`; it now reads `stopped`.
+- **Turns gain** `number` (its place in its session, from 1), `kind` (`turn` or `review`),
+  `reviews`, `verdict`, `findings`, `asked` and `ahead`.
+- **Stop replaces cancel.** `POST /api/v0/turns/<id>/stop` stops a queued or running turn, and
+  answers `{session, turn}`.
+- **Review is on the turn.** `POST /api/v0/turns/<id>/review` starts a review turn; its verdict
+  and findings are on that turn.
+- **Model calls hang off their turn.** `GET /api/v0/turns/<id>/calls/<call>` and
+  `.../pieces/<n>` replace `/api/v0/calls/<exchange>/context` and `/pieces/<n>`. Search hits' `read`
+  paths follow.
+- **One way to read events by page.** `GET /api/v0/sessions/<id>/events?turn=<turn>` replaces
+  `GET /api/v0/turns/<id>/events` and `GET /api/v0/attempts/<id>/events`. `GET /api/v0/events`
+  (the record-wide stream) and `POST /api/v0/events` (a program's event) stay, main token only.
+- **New `GET /api/v0/sessions/<id>`**, with the session's `copy`. **`PATCH /api/v0/sessions/<id>`**
+  takes `closed: true`, which replaces `POST /api/v0/workspaces/<id>/close`.
+- **Removed from the client API:** `/api/v0/jobs` and everything under it, `/api/v0/attempts/…`,
+  `/api/v0/workspaces…`, `/api/v0/turns/<id>/events` and `/api/v0/calls/…`. `TurnDiff` and the apply
+  answer have no `job`. `POST /api/v0/turns` takes no `repo`, `base` or `labels`: those were only on
+  `POST /api/v0/jobs`. Use `isolation = "git"` for a worktree.
+- **A turn token reads a turn of its tree by id alone**, with no `session`. Its search leaves out
+  its own turn.
+- **The runner protocol moved** under `/api/v0/runner/` (`register`, `heartbeat`, `take`,
+  `settings`, `removed`, `attempts/<id>/…`, `blobs`, `packs`), with no runner id in the path. It is
+  protocol 2, described on its own at `/api/v0/runner/openapi.json` ([RUNNER_PROTOCOL.md](RUNNER_PROTOCOL.md)).
+- **Copies are named after their session**: `sessions/<session>` in a runner's data folder.
+  Copies made before stay in `worktrees/job_<id>` and are still used and removed there.
+- **`/docs/llms.txt` is short**, for an agent to read in one go. The long reference is
+  `/docs/reference.md`. The default `instructions.md` says plainly that the agent works in a copy,
+  and how to apply, review, stop and search.
 
 **0.2 was never published.** A 0.1 client moving to 0.3 reads both lists below: what 0.2 changed,
 then what 0.3 changed after it.
@@ -2152,16 +2164,16 @@ then what 0.3 changed after it.
   same process. `POST /api/v0/turns` answers `job` beside `id` and `turn`. New, main token only:
   `POST` and `GET /api/v0/jobs`, `GET /api/v0/jobs/<id>`, `POST /api/v0/jobs/<id>/cancel`,
   `POST /api/v0/jobs/<id>/review`, `GET /api/v0/workspaces` and
-  `POST /api/v0/workspaces/<id>/close` ([Jobs](#jobs)).
+  `POST /api/v0/workspaces/<id>/close` (removed in 0.4).
 - **The runner protocol**, for runners only: `POST /api/v0/runners`, `POST
   /api/v0/runners/<id>/take`, `/heartbeat` and `/removed`, and `POST
   /api/v0/attempts/<id>/start`, `/heartbeat`, `/events` and `/finish`; `GET
   /api/v0/attempts/<id>/events` reads an attempt's runner events ([The runner
-  protocol](#the-runner-protocol)). `agentbus server` and `agentbus runner -server <url>` are new
+  protocol](RUNNER_PROTOCOL.md)). `agentbus server` and `agentbus runner -server <url>` are new
   modes.
 - `GET /api/v0/turns/<id>` reads one turn. `idempotency_key` on `POST /api/v0/turns` makes a retry
   safe: the same body again answers the same turn, with `existing: true`, and starts nothing.
-- **The turns token** (`turns_token`, `abq_…`) may only start, stop and read turns.
+- **The turns token** (`turns_token`, `abq_…`) may only start, stop, review and read turns.
 - `agentbus up -max-runs` sets how many turns run at once (1 to 64, default 4).
 - **Every message queues.** A next turn sent while one runs waits behind it. Only an open hold
   still answers 409 `a turn is already running in this session`.

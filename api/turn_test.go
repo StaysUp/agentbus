@@ -66,8 +66,20 @@ func TestNextTurnQueuesWhileAnotherIsStarting(t *testing.T) {
 	<-entered
 	code, body := postNext(t, e)
 	var out Started
-	if err := json.Unmarshal([]byte(body), &out); err != nil || code != http.StatusAccepted || !out.Queued || out.Ahead != 1 || out.Turn != "" || out.Job == "" {
-		t.Fatalf("second turn while the first starts: %d %s, want 202 queued with ahead 1", code, body)
+	if err := json.Unmarshal([]byte(body), &out); err != nil || code != http.StatusAccepted || out.State != "queued" || out.Ahead != 1 ||
+		out.Turn == "" || out.Session != "s1" || out.BaseURL != "" {
+		t.Fatalf("second turn while the first starts: %d %s, want 202 queued with ahead 1 and its turn id", code, body)
+	}
+	// The queued turn is known by its id from now on, and listed first.
+	var one OneTurn
+	if resp, b := do(t, e.req(t, "GET", "/api/v0/turns/"+out.Turn, nil)); resp.StatusCode != 200 || json.Unmarshal([]byte(b), &one) != nil ||
+		one.Turn.State != "queued" || one.Turn.Session != "s1" || one.Turn.Prompt != "next" || one.Turn.Ahead != 1 || one.Turn.Kind != "turn" || one.Turn.Asked == nil {
+		t.Fatalf("GET the queued turn: %d %s", resp.StatusCode, b)
+	}
+	var list TurnList
+	if resp, b := do(t, e.req(t, "GET", "/api/v0/turns?session=s1", nil)); resp.StatusCode != 200 || json.Unmarshal([]byte(b), &list) != nil ||
+		len(list.Turns) == 0 || list.Turns[0].ID != out.Turn || list.Turns[0].State != "queued" {
+		t.Fatalf("GET /turns: %d %s, want the queued turn first", resp.StatusCode, b)
 	}
 	if n := starts.Load(); n != 1 {
 		t.Fatalf("%d starts while the first runs, want 1", n)
@@ -79,7 +91,7 @@ func TestNextTurnQueuesWhileAnotherIsStarting(t *testing.T) {
 	// The queued job runs next, and is refused the same way.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		j, err := e.q.Get(queue.DefaultTeam, out.Job)
+		j, err := e.q.JobByTurn(queue.DefaultTeam, out.Turn)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -96,6 +108,11 @@ func TestNextTurnQueuesWhileAnotherIsStarting(t *testing.T) {
 	}
 	if n := starts.Load(); n != 2 {
 		t.Fatalf("%d starts, want 2", n)
+	}
+	// A turn that ended before it started says so, and why.
+	if resp, b := do(t, e.req(t, "GET", "/api/v0/turns/"+out.Turn, nil)); resp.StatusCode != 200 || json.Unmarshal([]byte(b), &one) != nil ||
+		one.Turn.State != "failed" || one.Turn.Error == "" || one.Turn.Ended == nil {
+		t.Fatalf("GET the refused turn: %d %s", resp.StatusCode, b)
 	}
 	// Nothing is ahead now: a third turn waits for its own start.
 	if code, body := postNext(t, e); code != http.StatusBadRequest {
@@ -116,10 +133,9 @@ func TestNextTurnRefusedWhileAChildIsOpen(t *testing.T) {
 	}
 }
 
-// GET /turns/{id}/events?session= keeps one session's events of a turn id
-// that two sessions share; without it both are sent, and a session that is
-// not an id shape is refused.
-func TestTurnEventsSessionQuery(t *testing.T) {
+// GET /sessions/{id}/events?turn= keeps one session's events of a turn id
+// that two sessions share, and a turn that is not an id shape is refused.
+func TestSessionEventsTurnQuery(t *testing.T) {
 	e := newEnv(t)
 	for _, s := range []string{"s1", "s2"} {
 		for _, k := range []event.Kind{event.TurnStarted, event.ModelRequested} {
@@ -128,11 +144,11 @@ func TestTurnEventsSessionQuery(t *testing.T) {
 			}
 		}
 	}
-	sessions := func(query string) []string {
+	sessions := func(session string) []string {
 		t.Helper()
-		resp, body := do(t, e.req(t, "GET", "/api/v0/turns/t_same/events"+query, nil))
+		resp, body := do(t, e.req(t, "GET", "/api/v0/sessions/"+session+"/events?turn=t_same", nil))
 		if resp.StatusCode != http.StatusOK {
-			t.Fatalf("%s: %d %s", query, resp.StatusCode, body)
+			t.Fatalf("%s: %d %s", session, resp.StatusCode, body)
 		}
 		var page struct{ Events []event.Event }
 		if err := json.Unmarshal([]byte(body), &page); err != nil {
@@ -144,16 +160,16 @@ func TestTurnEventsSessionQuery(t *testing.T) {
 		}
 		return out
 	}
-	if got := strings.Join(sessions(""), " "); got != "s1 s1 s2 s2" {
-		t.Errorf("no session: %s", got)
+	if got := strings.Join(sessions("s1"), " "); got != "s1 s1" {
+		t.Errorf("s1: %s", got)
 	}
-	if got := strings.Join(sessions("?session=s2"), " "); got != "s2 s2" {
-		t.Errorf("session=s2: %s", got)
+	if got := strings.Join(sessions("s2"), " "); got != "s2 s2" {
+		t.Errorf("s2: %s", got)
 	}
-	if got := sessions("?session=nobody"); len(got) != 0 {
-		t.Errorf("session=nobody: %v", got)
+	if got := sessions("nobody"); len(got) != 0 {
+		t.Errorf("nobody: %v", got)
 	}
-	if resp, body := do(t, e.req(t, "GET", "/api/v0/turns/t_same/events?session=a.b", nil)); resp.StatusCode != http.StatusBadRequest {
-		t.Errorf("session=a.b: %d %s, want 400", resp.StatusCode, body)
+	if resp, body := do(t, e.req(t, "GET", "/api/v0/sessions/s1/events?turn=a.b", nil)); resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("turn=a.b: %d %s, want 400", resp.StatusCode, body)
 	}
 }

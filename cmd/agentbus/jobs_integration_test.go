@@ -43,12 +43,91 @@ func callAPI(t *testing.T, svc *service, tok, method, path string, body, out any
 	return resp.StatusCode
 }
 
+// startTurn sends POST /api/v0/turns and answers its status and the job
+// that runs the turn, read from svc's own queue: the job is internal, and the
+// tests read its result and attempts there.
+func startTurn(t *testing.T, svc *service, tok string, body map[string]any) (int, queue.Job) {
+	t.Helper()
+	var st struct {
+		Session, Turn, State string
+	}
+	code := callAPI(t, svc, tok, "POST", "/api/v0/turns", body, &st)
+	if code/100 != 2 {
+		return code, queue.Job{}
+	}
+	if st.Turn == "" {
+		t.Fatalf("POST /api/v0/turns: %d with no turn", code)
+	}
+	return code, jobOfTurn(t, svc, st.Turn)
+}
+
+// queueTurn makes a turn job in svc's own queue, as the runner protocol
+// carries it: spec is a queue.Spec as JSON, whose agent may name a saved
+// agent, read through the API. It is for a test of what a runner does with a
+// job, whatever its turn's start answers; POST /api/v0/turns waits for it.
+func queueTurn(t *testing.T, svc *service, tok string, spec map[string]any) queue.Job {
+	t.Helper()
+	b, _ := json.Marshal(spec)
+	var sp queue.Spec
+	if err := json.Unmarshal(b, &sp); err != nil {
+		t.Fatal(err)
+	}
+	if sp.Harness != "" {
+		if code, raw := getAPI(t, svc, tok, "/api/v0/agents/"+sp.Harness); code == 200 {
+			var ag struct {
+				ID      string `json:"id"`
+				Harness string `json:"harness"`
+				Access  string `json:"access"`
+				Model   string `json:"model"`
+				KeyEnv  string `json:"key_env"`
+			}
+			json.Unmarshal([]byte(raw), &ag)
+			sp.Harness, sp.AgentID, sp.Access, sp.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
+			if sp.Model == "" {
+				sp.Model = ag.Model
+			}
+		}
+	}
+	if svc.folders != nil {
+		if msg := queue.ResolveFolders(&sp, svc.folders); msg != "" {
+			t.Fatal(msg)
+		}
+	}
+	j, _, err := svc.queue.Create(queue.DefaultTeam, queue.KindTurn, "", sp, queue.Links{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return j
+}
+
+// reviewTurn sends POST /api/v0/turns/{turn}/review and answers its status
+// and the review's job, from svc's own queue.
+func reviewTurn(t *testing.T, svc *service, tok, turn string, body map[string]any) (int, queue.Job) {
+	t.Helper()
+	var st struct{ Turn string }
+	code := callAPI(t, svc, tok, "POST", "/api/v0/turns/"+turn+"/review", body, &st)
+	if code/100 != 2 {
+		return code, queue.Job{}
+	}
+	return code, jobOfTurn(t, svc, st.Turn)
+}
+
+// jobOfTurn is the job of a turn, from svc's own queue.
+func jobOfTurn(t *testing.T, svc *service, turn string) queue.Job {
+	t.Helper()
+	j, err := svc.queue.JobByTurn(queue.DefaultTeam, turn)
+	if err != nil {
+		t.Fatalf("the job of turn %s: %v", turn, err)
+	}
+	return j
+}
+
 func waitJob(t *testing.T, svc *service, tok, id string) queue.Job {
 	t.Helper()
-	var j queue.Job
 	for deadline := time.Now().Add(20 * time.Second); ; {
-		if code := callAPI(t, svc, tok, "GET", "/api/v0/jobs/"+id, nil, &j); code != 200 {
-			t.Fatalf("GET job: %d", code)
+		j, err := svc.queue.Get(queue.DefaultTeam, id)
+		if err != nil {
+			t.Fatalf("GET job: %v", err)
 		}
 		if j.Ended != nil {
 			return j
@@ -69,11 +148,10 @@ func TestUpRunsAJobOnItsOwnRunner(t *testing.T) {
 	folder := t.TempDir()
 	t.Setenv("AGENTBUS_FAKE_MARK", filepath.Join(folder, "made.txt"))
 
-	var j queue.Job
-	code := callAPI(t, svc, tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn", "idempotency_key": "one",
-		"spec": map[string]any{"agent": "claude", "folder": folder, "prompt": "hello", "model": "haiku"}}, &j)
-	if code != http.StatusCreated {
-		t.Fatalf("POST /api/v0/jobs: %d", code)
+	code, j := startTurn(t, svc, tok, map[string]any{"idempotency_key": "one", "isolate": false,
+		"agent": "claude", "folder": folder, "prompt": "hello", "model": "haiku"})
+	if code != http.StatusAccepted {
+		t.Fatalf("POST /api/v0/turns: %d", code)
 	}
 	j = waitJob(t, svc, tok, j.ID)
 	if j.State != queue.Finished {
@@ -130,9 +208,8 @@ func TestServerAndRunner(t *testing.T) {
 
 	// The server has no folders of its own: a path is refused. The runner
 	// owns the folder (-folder), and the server knows it by its reference.
-	if code := callAPI(t, server, tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn",
-		"spec": map[string]any{"agent": "claude", "folder": folder, "prompt": "hello"}}, nil); code != 400 {
-		t.Fatalf("POST /api/v0/jobs with a path on the server: %d, want 400", code)
+	if code, _ := startTurn(t, server, tok, map[string]any{"agent": "claude", "folder": folder, "prompt": "hello"}); code != 400 {
+		t.Fatalf("POST /api/v0/turns with a path on the server: %d, want 400", code)
 	}
 	fr, err := folders.Open(filepath.Join(runnerHome, "folders.json"))
 	if err != nil {
@@ -141,10 +218,10 @@ func TestServerAndRunner(t *testing.T) {
 	ref, connector := folders.Ref(folder), fr.Connector()
 
 	// With no runner yet, a turn waits in the server's queue.
-	var queued queue.Job
-	if code := callAPI(t, server, tok, "POST", "/api/v0/jobs", map[string]any{"kind": "turn",
-		"spec": map[string]any{"agent": "claude", "folder_ref": ref, "connector": connector, "prompt": "hello", "model": "haiku"}}, &queued); code != 201 {
-		t.Fatalf("POST /api/v0/jobs: %d", code)
+	code, queued := startTurn(t, server, tok, map[string]any{"agent": "claude", "folder_ref": ref, "connector": connector,
+		"prompt": "hello", "model": "haiku", "isolate": false})
+	if code != 202 {
+		t.Fatalf("POST /api/v0/turns: %d", code)
 	}
 	if strings.Contains(fmt.Sprint(queued.Spec), folder) {
 		t.Fatalf("the server keeps the folder's path: %+v", queued.Spec)
@@ -176,7 +253,7 @@ func TestServerAndRunner(t *testing.T) {
 		res.Session != j.Session || res.Changes.Count != 1 || len(j.Attempts) != 1 || !j.Attempts[0].TurnStarted {
 		t.Fatalf("job %s %s: %s", j.State, j.Reason, j.Result)
 	}
-	turn := j.Attempts[0].ID
+	turn := j.Turn
 	if list, _ := r.store.Turns(store.TurnQuery{Turn: turn, Limit: 1}); len(list.Turns) != 1 || list.Turns[0].Session != j.Session {
 		t.Fatalf("the runner's record lacks turn %s", turn)
 	}
@@ -189,7 +266,7 @@ func TestServerAndRunner(t *testing.T) {
 	// POST /api/v0/turns on the server runs on the runner too, and answers
 	// with the turn.
 	code, out, raw := postRun(t, server, tok, map[string]any{"agent": "claude", "folder_ref": ref, "connector": connector, "prompt": "again"})
-	if code != 202 || out["turn"] == "" || out["queued"] == true {
+	if code != 202 || out["turn"] == "" || out["state"] != "running" {
 		t.Fatalf("POST /api/v0/turns on the server: %d %s", code, raw)
 	}
 	// The runner reported its folder by reference and its name, never its path.
@@ -210,9 +287,9 @@ func TestServerAndRunner(t *testing.T) {
 
 func waitState(t *testing.T, svc *service, tok, id string) queue.Job {
 	t.Helper()
-	var j queue.Job
-	if code := callAPI(t, svc, tok, "GET", "/api/v0/jobs/"+id, nil, &j); code != 200 {
-		t.Fatalf("GET job: %d", code)
+	j, err := svc.queue.Get(queue.DefaultTeam, id)
+	if err != nil {
+		t.Fatalf("GET job: %v", err)
 	}
 	return j
 }

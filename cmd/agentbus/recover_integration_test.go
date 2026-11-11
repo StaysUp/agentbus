@@ -302,7 +302,7 @@ func TestRecoverAfterFirstTurnWithNoCall(t *testing.T) {
 	if code != http.StatusAccepted {
 		t.Fatalf("run: %d %s", code, raw)
 	}
-	id, t1 := out["id"].(string), out["turn"].(string)
+	id, t1 := out["session"].(string), out["turn"].(string)
 	waitClosedN(t, svc, id, 1)
 
 	t.Setenv("AGENTBUS_FAKE_EXIT", "0")

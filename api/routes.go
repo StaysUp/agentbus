@@ -19,8 +19,9 @@ import (
 // route is one operation: a method on a path.
 type route struct {
 	method string
-	// path may hold {id}: a session, turn or call id, matched by sessionID.
-	// Any other id shape gets 404.
+	// path may hold {id}: a session, turn, agent or runner id, and {call}: a
+	// model call, both matched by sessionID; {n}: a piece. Any other shape
+	// gets 404. The handler reads {call} and {n} with r.PathValue.
 	path  string
 	idDoc string // what {id} names, for the description; empty means a session id
 	op    string // the operationId
@@ -114,62 +115,201 @@ const streamDoc = "Server-sent events. Every stored event after the cursor, in o
 	"A `: ping` comment comes every 15 seconds. To resume, reconnect with the last store and seq you saw."
 
 // tags are the sections of the docs, in the order they are read: a new
-// user starts a turn first. Every route names one.
-var tags = []struct{ name, doc string }{
-	{"Turns", "Start an agent and follow what it does. A turn is one prompt and the work it starts."},
-	{"Agents", "Saved agents: a harness, how it reaches its model, the model and a name. A turn names one."},
-	{"Jobs", "Turns and reviews as jobs in a queue, each run by a runner, and the workspaces they run in."},
-	{"Sessions", "The sessions the service has seen, and each one's stored history."},
-	{"Events", "The live stream of every event, and a program's own events."},
-	{"Calls", "What one model call sent to the vendor, piece by piece, and the reply it got."},
-	{"Service", "What this service can start, and this description."},
-	{"Settings", "The policy and the instructions every turn gets: permissions.toml and instructions.md in the data folder. The main token only."},
-	{"Runners", "The protocol a runner uses to take jobs and report them. The cockpit never calls it."},
+// user starts a turn first. Every route names one. A runner tag is in the
+// runner protocol's description, never the client API's.
+var tags = []struct {
+	name, doc string
+	runner    bool
+}{
+	{name: "Turns", doc: "A turn is one message to an agent, its reply and its changes. Every action is on a turn: start it, stop it, read its diff, apply its changes to the person's folder, ask another agent to review it, and read its model calls."},
+	{name: "Sessions", doc: "A session is a conversation: its turns, in order. Read its history, search it, name it or close it."},
+	{name: "Agents", doc: "Saved agents: a harness, how it reaches its model, the model and a name. A turn names one. And the harnesses and folders a turn can use."},
+	{name: "Settings", doc: "The policy and the instructions every turn gets, and the subscriptions control holds for runners. The main token only."},
+	{name: "Events", doc: "The record as a live stream, for a cockpit, an export or a program, and a program's own events. The main token only."},
+	{name: "Service", doc: "Which build this is, and this description."},
+	{name: "Runners", doc: "Register a runner or a connector, and take work.", runner: true},
+	{name: "Attempts", doc: "Report an attempt: its start, lease, events, record, model calls and end.", runner: true},
+	{name: "Blobs", doc: "Files by their SHA-256: a snapshot's, and a turn's changes. A runner's or a connector's token.", runner: true},
 }
 
+const (
+	turnIDDoc = "A turn id, as POST /api/v0/turns named it. Another shape gets 404."
+	// turnSessionQuery is the session query of a route on one turn.
+	turnSessionDoc = "Only this session's turn of that id. The same turn id can be in two sessions; without session the newest is used."
+)
+
 var routes = slices.Concat([]route{
+	{method: "POST", path: "/api/v0/turns", op: "startTurn",
+		tag:     "Turns",
+		summary: "Start a turn",
+		doc: "Start a turn: in a new session, or with session the next turn of that one. The reply names the turn at once; every event of the turn carries its id.\n\n" +
+			"Without session, agent, folder and prompt are required and the turn opens a new session. " +
+			"With session, prompt is required and the turn continues that session in its own agent and folder; " +
+			"an agent or folder sent that differs from the session's is refused with 400. " +
+			"The turn's turn.started, with the prompt, is stored before the reply.\n\n" +
+			"The reply waits up to 30 seconds for a runner to start the turn. A turn no runner starts by then answers 202 with state queued: " +
+			"it runs when a runner is free, and GET /api/v0/turns/{id} follows it.\n\n" +
+			"A session whose turn runs, or has turns waiting, is never refused: the new turn queues behind them and runs next, in order. " +
+			"It answers 202 at once with state queued and ahead, how many of the session's turns are before it.",
+		body: TurnRequest{},
+		turn: askTurn,
+		replies: []reply{ok(202, Started{}, "The turn: running, or queued behind the session's earlier turns or for a runner."), turnRefused,
+			fail(403, "A turn token's request is refused: error says why, such as a cap on asked work."),
+			fail(404, "This service keeps no queue, or the session sent has no events."),
+			fail(409, "The session sent cannot be continued from here, it is closed, or the idempotency key names another turn. A session whose turn is running is not refused: the new turn waits behind it (queued)."),
+			fail(http.StatusTooManyRequests, "Too many turns are waiting; wait for some to end."), turnFailed, stopping},
+		turns: true,
+		serve: plain((*API).run)},
+	{method: "GET", path: "/api/v0/turns", op: "listTurns",
+		tag:     "Turns",
+		summary: "List turns",
+		doc: "The turns, newest first, and the seq they were computed at.\n\n" +
+			"The first page starts with the turns still queued, then the turns that started, newest first. " +
+			"Page older turns with before set to the next_before of the page before. Stream from the list's store and seq to follow new events.",
+		query: []param{
+			{name: "session", doc: "Only this session's turns."},
+			{name: "before", doc: "Only turns whose started_seq is below it: the next_before of the previous page.", integer: true, min: 1},
+			{name: "limit", doc: "Turns per page. 100 when absent.", integer: true, min: 1, max: maxTurnLimit}},
+		replies: []reply{ok(200, TurnList{}, "A page of turns."), badRequest, storeFailed},
+		turn:    treeSessionQuery,
+		turns:   true,
+		serve:   plain((*API).turns)},
+	{method: "GET", path: "/api/v0/turns/{id}", op: "getTurn",
+		idDoc:   turnIDDoc,
+		tag:     "Turns",
+		summary: "Get a turn",
+		doc: "One turn, from the moment it is asked for: its state (queued, running, finished, failed or stopped), its agent, prompt and reply, its cost, and for a review its verdict and findings.\n\n" +
+			"Poll it to wait for a turn to end, or stream from its store and seq.",
+		query:   []param{{name: "session", doc: turnSessionDoc}},
+		replies: []reply{ok(200, OneTurn{}, "The turn."), badRequest, fail(404, "No such turn."), storeFailed},
+		turn:    treeTurn,
+		turns:   true,
+		serve:   (*API).getTurn},
+	{method: "POST", path: "/api/v0/turns/{id}/stop", op: "stopTurn",
+		idDoc:   turnIDDoc,
+		tag:     "Turns",
+		summary: "Stop a turn",
+		doc: "Stop a queued or running turn. A queued turn never starts. A running turn's agent and every process it started end, as when the service stops.\n\n" +
+			"Its runner hears the stop within 2 seconds, sends SIGTERM to the turn's whole process tree, then SIGKILL after 5 seconds to what still runs. " +
+			"The reply comes at once; the turn reads stopped once the tree has ended. " +
+			"The session's next turn continues after it, and the model is told that the person stopped it. " +
+			"A second stop while it is stopping gets 202 again and sends nothing more. No body is read.",
+		replies: []reply{ok(202, Stopping{}, "The turn is stopping."),
+			fail(404, "This service keeps no queue, or no turn has this id."),
+			fail(409, "The turn has ended, or it is not a turn of this service."),
+			storeFailed},
+		turn:  askedTurn,
+		turns: true,
+		serve: (*API).stopTurn},
+	{method: "GET", path: "/api/v0/turns/{id}/diff", op: "turnDiff",
+		idDoc:   turnIDDoc,
+		tag:     "Turns",
+		summary: "Get a turn's diff",
+		doc: "Everything the record holds about what one turn did, in one answer: the files it changed, its model calls, its tool calls and the commands it ran, its agent and its timing, and whether its changes were applied.\n\n" +
+			"files: each changed file with its change (added, modified or deleted), size and SHA-256, and, in an isolated copy, its own unified diff for small text files. " +
+			"A file with no diff whose content changed says diff_left_out. files is null while the turn runs, and for a turn this service did not run. " +
+			"Commands are what the gateway's guard reads from the agent's shell tool calls; network calls and processes are not recorded yet.",
+		query:   []param{{name: "session", doc: turnSessionDoc}},
+		replies: []reply{ok(200, TurnDiff{}, "The turn's diff."), badRequest, fail(404, "No such turn, or it has not started."), storeFailed},
+		turn:    treeTurn,
+		turns:   true,
+		serve:   (*API).turnDiff},
+	{method: "POST", path: "/api/v0/turns/{id}/apply", op: "applyTurn",
+		idDoc:   turnIDDoc,
+		tag:     "Turns",
+		summary: "Apply a turn's changes",
+		doc: "Put a turn's file changes into the person's folder: the folder its session's copy was made from. A turn works in its own copy, so its changes reach the person's folder only by an apply. No body is read.\n\n" +
+			"The apply writes the session's changes up to and including this turn: each file added or changed, and removes each one deleted. " +
+			"Before it writes anything it checks every file in the folder: one that is neither as it was at the turn's start nor already as the turn left it refuses the whole apply, " +
+			"with 409, state refused, and each file in conflicts with why. Nothing is written then, so the agent can read why and make another turn. " +
+			"Applying the same turn again is a no-op: 200 with already true and the files the first apply wrote. " +
+			"An apply that was refused may be asked for again. " +
+			"The reply waits up to 30 seconds; past that it is 202 with state queued or running, and GET /api/v0/turns/{id}/diff shows how it ended.",
+		replies: []reply{ok(200, ApplyState{}, "Applied: files lists what was written. already true: applied before, and nothing more was written."),
+			ok(202, ApplyState{}, "The apply has not finished yet."),
+			badRequest,
+			fail(404, "This service keeps no queue, or no turn of this service has this id."),
+			ok(409, ApplyState{}, "Refused or failed: error says why, and conflicts names each file in your folder that changed. Nothing was written on a conflict."),
+			tooMany, fail(503, "The folder's connector has not been seen for a minute. Nothing was written and no apply was made."), storeFailed},
+		turn:  applyTurnTok,
+		serve: (*API).applyTurn},
+	{method: "POST", path: "/api/v0/turns/{id}/review", op: "reviewTurn",
+		idDoc:   "The id of the turn to review. Another shape gets 404.",
+		tag:     "Turns",
+		summary: "Review a turn",
+		doc: "Ask another agent to review a turn: this starts a review turn, by agent, read-only, in a session of its own, in the reviewed turn's copy as it is.\n\n" +
+			"The review's prompt holds the reviewed turn's task, its changed files and its diff; the author's reply only with include_reply. " +
+			"When the review ends, its verdict (pass, fail or unknown) and findings are on it: GET /api/v0/turns/{id} of the review turn. Any P1 finding makes it fail. " +
+			"The reviewed turn must have ended, with its changed files recorded. " +
+			"A retry with the same idempotency_key and fields answers with the same review turn.",
+		body: ReviewRequest{},
+		replies: []reply{ok(202, Started{}, "The review turn, queued."),
+			badRequest, fail(403, "A turn token's request is refused: error says why, such as a cap on asked work."),
+			fail(404, "This service keeps no queue, or no turn of this service has this id."),
+			fail(409, "The turn cannot be reviewed: it has not ended, it recorded no changed files, its session is closed, or the key names another turn."),
+			fail(http.StatusTooManyRequests, "Too many turns are waiting; wait for some to end."), storeFailed},
+		turn:  askReview,
+		turns: true,
+		serve: (*API).reviewTurn},
+	{method: "GET", path: "/api/v0/turns/{id}/calls/{call}", op: "callContext",
+		idDoc:   turnIDDoc,
+		tag:     "Turns",
+		summary: "Read a model call",
+		doc:     "Everything one model call of the turn sent, piece by piece, with sizes, and its reply.\n\n" + callContextDoc,
+		query:   []param{{name: "full", doc: "false leaves out each piece's json, for sizes and labels only. true when absent."}},
+		replies: []reply{ok(200, store.CallContext{}, "The call's request."), badRequest,
+			fail(404, "The turn has no such call, or no request body is stored for it."), storeFailed},
+		turn:  treeTurn,
+		serve: callOfTurn((*API).callContext)},
+	{method: "GET", path: "/api/v0/turns/{id}/calls/{call}/pieces/{n}", op: "callPiece",
+		idDoc:   turnIDDoc,
+		tag:     "Turns",
+		summary: "Read a call's piece",
+		doc:     "One piece of a model call's request, or its reply, byte for byte.\n\n" + callPieceDoc,
+		replies: []reply{{status: 200, doc: "The piece's bytes, exactly as stored.", raw: true},
+			fail(404, "The turn has no such call, no request body is stored for it, it has no piece n, or no reply is kept."), storeFailed},
+		turn:  treeTurn,
+		serve: callOfTurn((*API).callPiece)},
+
 	{method: "GET", path: "/api/v0/sessions", op: "listSessions",
 		tag:     "Sessions",
 		summary: "List sessions",
 		doc:     "The sessions, and the seq they were computed at.",
 		replies: []reply{ok(200, store.Snapshot{}, "The snapshot."), storeFailed},
 		serve:   plain((*API).sessions)},
-	{method: "PATCH", path: "/api/v0/sessions/{id}", op: "renameSession",
+	{method: "GET", path: "/api/v0/sessions/{id}", op: "getSession",
 		tag:     "Sessions",
-		summary: "Rename a session",
-		doc: "Give a session a name: it stores a session.renamed with the new title and the old one.\n\n" +
-			"GET /api/v0/sessions then names the session by its latest rename; without one, by its first message. " +
-			"Earlier names stay in the record, as the session's events. A rename does not change the session's last activity. " +
-			"A turn token may rename a session in its scope unless rename is false in [agent_api] of permissions.toml; a read-only turn's token may not.",
-		body: RenameRequest{},
-		replies: []reply{ok(200, Renamed{}, "Renamed."), badRequest,
-			fail(403, "A turn token's request is refused: error says why."), noSession, storeFailed},
+		summary: "Get a session",
+		doc: "One session, as GET /api/v0/sessions lists it, and its copy: the runner that holds the session's isolated copy of its folder, " +
+			"and whether it is closed and removed. A session that runs in the person's folder as it is has no copy.",
+		replies: []reply{ok(200, OneSession{}, "The session."), noSession, storeFailed},
+		turn:    treeSessionPath,
+		serve:   (*API).getSession},
+	{method: "PATCH", path: "/api/v0/sessions/{id}", op: "updateSession",
+		tag:     "Sessions",
+		summary: "Rename or close a session",
+		doc: "Give a session a name, or close it. Send title, closed, or both.\n\n" +
+			"title stores a session.renamed with the new name and the old one. GET /api/v0/sessions then names the session by its latest rename; without one, by its first message. " +
+			"Earlier names stay in the record, as the session's events. A rename does not change the session's last activity.\n\n" +
+			"closed true closes the session: it takes no more turns, and its runner removes the session's isolated copy and its home. " +
+			"Apply what you want to keep first. The person's folder is never removed. A session with a turn that has not ended is refused with 409. Only the main token closes a session.",
+		body: SessionUpdate{},
+		replies: []reply{ok(200, Renamed{}, "Done."), badRequest,
+			fail(403, "A turn token's request is refused: error says why."), noSession,
+			fail(409, "A turn of the session has not ended, so it cannot be closed."), storeFailed},
 		turn:  renameSession,
-		serve: (*API).rename},
-	{method: "GET", path: "/api/v0/events", op: "streamEvents",
-		tag:     "Events",
-		summary: "Stream events",
-		doc:     "A live stream of events.\n\n" + streamDoc,
-		query: []param{qStore, qAfter,
-			{name: "session", doc: "Only this session's events, plus the drops that name it."}},
-		replies: []reply{streamReply("The stream.", eventsExample), badRequest, mismatch, tooMany,
-			fail(500, "This connection cannot stream.")},
-		serve: plain((*API).stream)},
-	{method: "POST", path: "/api/v0/events", op: "writeEvent",
-		tag:     "Events",
-		summary: "Write a program event",
-		doc:     "A program writes its own event.",
-		body:    EventRequest{},
-		replies: []reply{ok(201, Written{}, "Stored."), badRequest, noSession, storeFailed},
-		serve:   plain((*API).writeEvent)},
+		serve: (*API).updateSession},
 	{method: "GET", path: "/api/v0/sessions/{id}/events", op: "sessionEvents",
 		tag:     "Sessions",
 		summary: "Read a session's events",
-		doc:     "One session's stored events, oldest first, a page at a time.",
+		doc: "One session's stored events, oldest first, a page at a time. With turn, only that turn's events.\n\n" +
+			"Without turn, the page also holds each events.dropped that names the session.",
 		query: []param{qStore, qAfter,
+			{name: "turn", doc: "Only this turn's events."},
 			{name: "limit", doc: "Events per page. 1000 when absent.", integer: true, min: 1, max: maxLimit}},
 		replies: []reply{ok(200, Page{}, "A page."), badRequest, mismatch, storeFailed},
 		turn:    treeSessionPath,
+		turns:   true,
 		serve:   (*API).sessionEvents},
 	{method: "GET", path: "/api/v0/sessions/{id}/search", op: "searchSession",
 		tag:     "Sessions",
@@ -182,128 +322,12 @@ var routes = slices.Concat([]route{
 		replies: []reply{ok(200, store.SearchResult{}, "A page of hits."), badRequest, storeFailed},
 		turn:    treeSessionPath,
 		serve:   (*API).search},
-	{method: "POST", path: "/api/v0/turns", op: "startTurn",
-		tag:     "Turns",
-		summary: "Start a turn",
-		doc: "Start a turn: in a new session, or with session the next turn of that one; its events carry the turn id the reply names.\n\n" +
-			"Without session, agent, folder and prompt are required and the turn opens a new session. " +
-			"With session, prompt is required and the turn continues that session in its own agent and folder; " +
-			"an agent or folder sent that differs from the session's is refused with 400. " +
-			"The turn's turn.started, with the prompt, is stored before the reply.\n\n" +
-			"Every turn runs as a job: this makes a turn job and answers once a runner has started its turn. " +
-			"The turn id is the id of the job's attempt. A turn no runner starts within 30 seconds answers 202 with queued true, " +
-			"its job and its session, and no turn: the job runs when a runner is free.\n\n" +
-			"A session whose turn runs, or has turns waiting, is never refused: the new turn queues behind them and runs next, in order. " +
-			"It answers 202 at once with queued true and ahead, how many of the session's turns are before it.",
-		body: TurnRequest{},
-		turn: askTurn,
-		replies: []reply{ok(202, Started{}, "The agent has started, or the turn's job is queued: behind the session's earlier turns, or waiting for a runner."), turnRefused,
-			fail(403, "A turn token's request is refused: error says why, such as a cap on asked work."),
-			fail(404, "This service keeps no job queue, or the session sent has no events."),
-			fail(409, "The session sent cannot be continued from here, its workspace is closed, or the idempotency key names another turn. A session whose turn is running is not refused: the new turn waits behind it (queued)."),
-			fail(http.StatusTooManyRequests, "Too many jobs are waiting; wait for some to end."), turnFailed, stopping},
-		turns: true,
-		serve: plain((*API).run)},
-	{method: "GET", path: "/api/v0/turns", op: "listTurns",
-		tag:     "Turns",
-		summary: "List turns",
-		doc: "The turns, newest first, and the seq they were computed at.\n\n" +
-			"A turn is what a turn.started with a turn id starts. Page older turns with before set to the " +
-			"next_before of the page before. Stream from the list's store and seq to follow new events.",
-		query: []param{
-			{name: "session", doc: "Only this session's turns."},
-			{name: "before", doc: "Only turns whose started_seq is below it: the next_before of the previous page.", integer: true, min: 1},
-			{name: "limit", doc: "Turns per page. 100 when absent.", integer: true, min: 1, max: maxTurnLimit}},
-		replies: []reply{ok(200, store.TurnList{}, "A page of turns."), badRequest, storeFailed},
-		turn:    treeSessionQuery,
-		turns:   true,
-		serve:   plain((*API).turns)},
-	{method: "GET", path: "/api/v0/turns/{id}", op: "getTurn",
-		idDoc:   "A turn id, as POST /api/v0/turns named it. Another shape gets 404.",
-		tag:     "Turns",
-		summary: "Get a turn",
-		doc: "One turn, with the same fields GET /api/v0/turns lists: state, exit code, stopped, unsettled, started and ended.\n\n" +
-			"Poll it to wait for a turn to end, or stream from its store and seq. " +
-			"The same turn id can be in two sessions; without session the newest is answered.",
-		query: []param{
-			{name: "session", doc: "Only this session's turn of that id."}},
-		replies: []reply{ok(200, OneTurn{}, "The turn."), badRequest,
-			fail(404, "No turn.started carries this turn id."), storeFailed},
-		turn:  treeSessionQuery,
-		turns: true,
-		serve: (*API).getTurn},
-	{method: "GET", path: "/api/v0/turns/{id}/events", op: "turnEvents",
-		idDoc:   "A turn id: the turn field of its events. Another shape gets 404.",
-		tag:     "Turns",
-		summary: "Read a turn's events",
-		doc: "One turn's stored events, oldest first, a page at a time.\n\n" +
-			"Only events that carry the turn id: events.dropped names sessions, never turns, so it is not among them.",
-		query: []param{qStore, qAfter,
-			{name: "session", doc: "Only this session's events of the turn. The same turn id can be in two sessions; without session both are sent."},
-			{name: "limit", doc: "Events per page. 1000 when absent.", integer: true, min: 1, max: maxLimit}},
-		replies: []reply{ok(200, Page{}, "A page."), badRequest, mismatch, storeFailed},
-		turn:    treeSessionQuery,
-		turns:   true,
-		serve:   (*API).turnEvents},
-	{method: "POST", path: "/api/v0/turns/{id}/stop", op: "stopTurn",
-		idDoc:   "A turn id, as POST /api/v0/turns named it. Another shape gets 404.",
-		tag:     "Turns",
-		summary: "Stop a turn",
-		doc: "Stop a running turn: its agent and every process it started end, as when the service stops.\n\n" +
-			"A stop cancels the turn's job; its runner hears it within 2 seconds. " +
-			"The runner sends SIGTERM to the turn's whole process tree, then SIGKILL after 5 seconds to what still runs. " +
-			"The reply comes at once; the turn's session.closed, with stopped true, comes once the tree has ended. " +
-			"The session's next turn continues after it, and the model is told that the person stopped it. " +
-			"A second stop while it is stopping gets 202 again and sends nothing more. Takes the main token or the turns token; a turn token may stop only a turn of work its request tree asked for. No body is read.",
-		replies: []reply{ok(202, Stopping{}, "The turn is stopping."),
-			fail(404, "This service keeps no job queue, or no job or event carries this turn id."),
-			fail(409, "The turn is not running: its job has ended, or it is not a job of this service."),
-			storeFailed},
-		turn:  askedTurn,
-		turns: true,
-		serve: (*API).stopTurn},
-	{method: "GET", path: "/api/v0/turns/{id}/diff", op: "turnDiff",
-		idDoc:   "A turn id, as POST /api/v0/turns named it. Another shape gets 404.",
-		tag:     "Turns",
-		summary: "Get a turn's diff",
-		doc: "Everything the record holds about what one turn did, in one answer: the files it changed, its model calls, its tool calls and the commands it ran, its agent and its timing, and whether its changes were applied.\n\n" +
-			"files comes from the turn's job: each changed file with its change (added, modified or deleted), size and SHA-256, and, in an isolated copy, its own unified diff for small text files. " +
-			"A file with no diff whose content changed says diff_left_out. files is null while the turn runs, and for a turn no job of this service ran. " +
-			"Commands are what the gateway's guard reads from the agent's shell tool calls; network calls and processes are not recorded yet. " +
-			"The same turn id can be in two sessions; without session the newest is answered.",
-		query: []param{
-			{name: "session", doc: "Only this session's turn of that id."}},
-		replies: []reply{ok(200, TurnDiff{}, "The turn's diff."), badRequest,
-			fail(404, "No turn.started carries this turn id."), storeFailed},
-		turn:  treeSessionQuery,
-		turns: true,
-		serve: (*API).turnDiff},
-	{method: "POST", path: "/api/v0/turns/{id}/apply", op: "applyTurn",
-		idDoc:   "A turn id, as POST /api/v0/turns named it. Another shape gets 404.",
-		tag:     "Turns",
-		summary: "Apply a turn's changes",
-		doc: "Put one turn's file changes into the person's folder: the folder its isolated copy was made from. No body is read.\n\n" +
-			"The runner that holds the turn's session writes each file the turn added or changed, and removes each one it deleted. " +
-			"Before it writes anything it checks every file in the folder: one that is neither as it was at the turn's start nor already as the turn left it refuses the whole apply, " +
-			"with 409, state refused, and each file in conflicts with why. Nothing is written then, so the agent can read why and make another turn. " +
-			"Applying the same turn again is a no-op: 200 with already true and the files the first apply wrote. " +
-			"An apply that was refused may be asked for again. " +
-			"The reply waits up to 30 seconds for the runner; past that it is 202 with state queued or running, and GET /api/v0/turns/{id}/diff shows how it ended. " +
-			"A turn token may apply a turn of a session in its scope, unless apply is false in [agent_api] of permissions.toml; a read-only turn's token may not.",
-		replies: []reply{ok(200, ApplyState{}, "Applied: files lists what was written. already true: applied before, and nothing more was written."),
-			ok(202, ApplyState{}, "The runner has not finished the apply yet."),
-			badRequest,
-			fail(404, "This service keeps no job queue, or no job ran this turn."),
-			ok(409, ApplyState{}, "Refused or failed: error says why, and conflicts names each file in your folder that changed. Nothing was written on a conflict."),
-			tooMany, fail(503, "The folder's connector has not been seen for a minute. Nothing was written and no apply was made."), storeFailed},
-		turn:  applyTurnTok,
-		serve: (*API).applyTurn},
+
 	{method: "GET", path: "/api/v0/agents", op: "listAgents",
 		tag:     "Agents",
 		summary: "List agents",
 		doc: "The saved agents, in the order they were made. A turn names one by id in agent.\n\n" +
-			"A new data folder starts with two: claude (Claude Code) and codex (Codex), each on its own subscription with its default model. " +
-			"Before 0.2 this route listed the harnesses this service finds; that is now GET /api/v0/harnesses.",
+			"A new data folder starts with two: claude (Claude Code) and codex (Codex), each on its own subscription with its default model.",
 		replies: []reply{ok(200, AgentList{}, "The agents."), badRequest},
 		turn:    anyRead,
 		serve:   plain((*API).listSaved)},
@@ -360,6 +384,24 @@ var routes = slices.Concat([]route{
 			"In agentbus up every folder a turn was started in is listed, newest first, within a minute of its first turn. No body is read.",
 		replies: []reply{ok(200, FolderList{}, "The folders."), badRequest},
 		serve:   plain((*API).listFolders)},
+
+	{method: "GET", path: "/api/v0/events", op: "streamEvents",
+		tag:     "Events",
+		summary: "Stream events",
+		doc:     "A live stream of the record's events: every session's, or one session's. A cockpit follows it; an export reads it from the start.\n\n" + streamDoc,
+		query: []param{qStore, qAfter,
+			{name: "session", doc: "Only this session's events, plus the drops that name it."}},
+		replies: []reply{streamReply("The stream.", eventsExample), badRequest, mismatch, tooMany,
+			fail(500, "This connection cannot stream.")},
+		serve: plain((*API).stream)},
+	{method: "POST", path: "/api/v0/events", op: "writeEvent",
+		tag:     "Events",
+		summary: "Write a program event",
+		doc:     "A program writes its own event, of a kind x.<program>.<name>, into a session's record.",
+		body:    EventRequest{},
+		replies: []reply{ok(201, Written{}, "Stored."), badRequest, noSession, storeFailed},
+		serve:   plain((*API).writeEvent)},
+
 	{method: "GET", path: "/api/v0/version", op: "getVersion",
 		tag:     "Service",
 		summary: "Get the version",
@@ -367,59 +409,52 @@ var routes = slices.Concat([]route{
 			"Takes the main token only. No body is read.",
 		replies: []reply{ok(200, Version{}, "The version."), badRequest},
 		serve:   plain((*API).version)},
-	{method: "GET", path: "/api/v0/calls/{id}/context", op: "callContext",
-		idDoc:   "A model call: the exchange field of its events. Another shape gets 404.",
-		tag:     "Calls",
-		summary: "Read a call's request",
-		doc:     "Everything one model call's request carried, piece by piece, with sizes.\n\n" + callContextDoc,
-		query:   []param{{name: "full", doc: "false leaves out each piece's json, for sizes and labels only. true when absent."}},
-		replies: []reply{ok(200, store.CallContext{}, "The call's request."), badRequest,
-			fail(404, "No request body is stored for this call."), storeFailed},
-		turn:  treeCall,
-		serve: (*API).callContext},
-	{method: "GET", path: "/api/v0/calls/{id}/pieces/{n}", op: "callPiece",
-		idDoc:   "A model call: the exchange field of its events. Another shape gets 404.",
-		tag:     "Calls",
-		summary: "Read a call's piece",
-		doc:     "One piece of a model call's request, or its reply, byte for byte.\n\n" + callPieceDoc,
-		replies: []reply{{status: 200, doc: "The piece's bytes, exactly as stored.", raw: true},
-			fail(404, "No request body is stored for this call, it has no piece n, or no reply is kept."), storeFailed},
-		turn:  treeCall,
-		serve: (*API).callPiece},
 	{method: "GET", path: "/api/v0/openapi.json", op: "openapi",
 		tag:     "Service",
 		summary: "Get this description",
-		doc:     "This description.",
+		doc:     "This description. The runner protocol's is at /api/v0/runner/openapi.json.",
 		replies: []reply{ok(200, map[string]any{}, "This document.")},
 		public:  true},
-}, jobRoutes, settingsRoutes, subscriptionRoutes)
+}, runnerRoutes, settingsRoutes, subscriptionRoutes)
 
-// match reports whether p is rt's path, and the id in it.
-func (rt *route) match(p string) (id string, ok bool) {
+// match reports whether p is rt's path, the id in it, and the values of its
+// other parameters, by name.
+func (rt *route) match(p string) (id string, vals map[string]string, ok bool) {
 	want, got := strings.Split(rt.path, "/"), strings.Split(p, "/")
 	if len(want) != len(got) {
-		return "", false
+		return "", nil, false
 	}
 	for i, w := range want {
 		switch {
 		case w == "{id}":
 			if !sessionID.MatchString(got[i]) {
-				return "", false
+				return "", nil, false
 			}
 			id = got[i]
-		case w == "{n}":
-			if !pieceNumber.MatchString(got[i]) {
-				return "", false
+		case w == "{call}" || w == "{n}":
+			if (w == "{call}" && !sessionID.MatchString(got[i])) || (w == "{n}" && !pieceNumber.MatchString(got[i])) {
+				return "", nil, false
 			}
+			if vals == nil {
+				vals = map[string]string{}
+			}
+			vals[strings.Trim(w, "{}")] = got[i]
 		case w != got[i]:
-			return "", false
+			return "", nil, false
 		}
 	}
-	return id, true
+	return id, vals, true
+}
+
+// withValues hands a route's parameters to its handler, as r.PathValue.
+func withValues(r *http.Request, vals map[string]string) {
+	for k, v := range vals {
+		r.SetPathValue(k, v)
+	}
 }
 
 // turnsRefused is the 403 for the turns token on a route it may not call.
-const turnsRefused = "the turns token may only start, stop and read turns; this route takes the main token"
+const turnsRefused = "the turns token may only start, stop, review and read turns; this route takes the main token"
 
 // route serves a request that has passed the Host, CORS and token checks. g is
 // the grant of a turn token, nil for the main token and the turns token;
@@ -431,11 +466,12 @@ func (a *API) route(w http.ResponseWriter, r *http.Request, g *run.Grant, turnsO
 		if rt.public || rt.self {
 			continue
 		}
-		id, ok := rt.match(r.URL.Path)
+		id, vals, ok := rt.match(r.URL.Path)
 		if !ok {
 			continue
 		}
 		if rt.method == r.Method {
+			withValues(r, vals)
 			if g != nil {
 				if r, ok = a.allowTurn(w, r, rt, id, *g); !ok {
 					return
@@ -465,7 +501,8 @@ func (a *API) self(w http.ResponseWriter, r *http.Request) bool {
 		if !rt.self || rt.method != r.Method {
 			continue
 		}
-		if id, ok := rt.match(r.URL.Path); ok {
+		if id, vals, ok := rt.match(r.URL.Path); ok {
+			withValues(r, vals)
 			rt.serve(a, w, r, id)
 			return true
 		}

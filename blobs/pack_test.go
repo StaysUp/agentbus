@@ -24,7 +24,7 @@ func packRoutes(mux *http.ServeMux, s *Store, n *atomic.Int64) {
 			n.Add(1)
 		}
 	}
-	mux.HandleFunc("POST /api/v0/packs", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/v0/runner/packs", func(w http.ResponseWriter, r *http.Request) {
 		count()
 		kept, err := ReadPack(r.Body, nil, PackCount, func(h string, b io.Reader) error { return s.Put(r.Context(), h, b) })
 		if err != nil {
@@ -33,7 +33,7 @@ func packRoutes(mux *http.ServeMux, s *Store, n *atomic.Int64) {
 		}
 		jsonWrite(w, PackReply{Kept: kept})
 	})
-	mux.HandleFunc("POST /api/v0/packs/fetch", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/v0/runner/packs/fetch", func(w http.ResponseWriter, r *http.Request) {
 		count()
 		var req FetchRequest
 		_ = jsonDecode(r.Body, &req)
@@ -58,13 +58,13 @@ func TestCopyByPacks(t *testing.T) {
 	var packs, puts atomic.Int64
 	mux := http.NewServeMux()
 	packRoutes(mux, server, &packs)
-	mux.HandleFunc("POST /api/v0/blobs", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /api/v0/runner/blobs", func(w http.ResponseWriter, r *http.Request) {
 		var req MissingRequest
 		_ = jsonDecode(r.Body, &req)
 		m, _ := server.Missing(ctx, req.Hashes)
 		jsonWrite(w, MissingReply{Missing: m})
 	})
-	mux.HandleFunc("PUT /api/v0/blobs/{h}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("PUT /api/v0/runner/blobs/{h}", func(w http.ResponseWriter, r *http.Request) {
 		puts.Add(1)
 		if err := server.Put(ctx, r.PathValue("h"), r.Body); err != nil {
 			w.WriteHeader(400)

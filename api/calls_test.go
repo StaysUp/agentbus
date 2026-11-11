@@ -31,7 +31,7 @@ const contextRequest = `{"model":"claude-sonnet-5-5","max_tokens":32000,` +
 	`"stream":false}`
 
 // A request sent through the gateway comes back from GET
-// /api/v0/calls/{id}/context in the request's order, each piece the bytes the
+// /api/v0/turns/{id}/calls/{call} in the request's order, each piece the bytes the
 // vendor received, and no header value is in the store's files.
 func TestCallContextThroughGateway(t *testing.T) {
 	dir := t.TempDir()
@@ -73,7 +73,8 @@ func TestCallContextThroughGateway(t *testing.T) {
 		t.Fatal("no model.requested")
 	}
 
-	r, body := do(t, e.req(t, "GET", "/api/v0/calls/"+exchange+"/context", nil))
+	inTurn(t, e, "sess-1", "t_1", exchange)
+	r, body := do(t, e.req(t, "GET", "/api/v0/turns/t_1/calls/"+exchange, nil))
 	if r.StatusCode != 200 {
 		t.Fatalf("%d %s", r.StatusCode, body)
 	}
@@ -105,7 +106,7 @@ func TestCallContextThroughGateway(t *testing.T) {
 	}
 
 	// full=false: the same pieces without their JSON.
-	_, slim := do(t, e.req(t, "GET", "/api/v0/calls/"+exchange+"/context?full=false", nil))
+	_, slim := do(t, e.req(t, "GET", "/api/v0/turns/t_1/calls/"+exchange+"?full=false", nil))
 	var s store.CallContext
 	if err := json.Unmarshal([]byte(slim), &s); err != nil {
 		t.Fatal(err)
@@ -118,10 +119,10 @@ func TestCallContextThroughGateway(t *testing.T) {
 			t.Errorf("piece %d differs without bodies", i)
 		}
 	}
-	if r, _ := do(t, e.req(t, "GET", "/api/v0/calls/"+exchange+"/context?full=maybe", nil)); r.StatusCode != 400 {
+	if r, _ := do(t, e.req(t, "GET", "/api/v0/turns/t_1/calls/"+exchange+"?full=maybe", nil)); r.StatusCode != 400 {
 		t.Errorf("full=maybe: %d", r.StatusCode)
 	}
-	if r, _ := do(t, e.req(t, "GET", "/api/v0/calls/x-none-1/context", nil)); r.StatusCode != 404 {
+	if r, _ := do(t, e.req(t, "GET", "/api/v0/turns/t_1/calls/x-none-1", nil)); r.StatusCode != 404 {
 		t.Errorf("unknown call: %d", r.StatusCode)
 	}
 
@@ -161,7 +162,8 @@ func TestCallContextBytesUnchanged(t *testing.T) {
 	if err := e.store.KeepCall(c); err != nil {
 		t.Fatal(err)
 	}
-	r, got := do(t, e.req(t, "GET", "/api/v0/calls/x-raw-1/context", nil))
+	inTurn(t, e, "s1", "t_1", "x-raw-1")
+	r, got := do(t, e.req(t, "GET", "/api/v0/turns/t_1/calls/x-raw-1", nil))
 	if r.StatusCode != 200 {
 		t.Fatalf("%d %s", r.StatusCode, got)
 	}

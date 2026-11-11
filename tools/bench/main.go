@@ -34,6 +34,8 @@ import (
 	"syscall"
 	"text/tabwriter"
 	"time"
+
+	"github.com/staysup/agentbus/queue"
 )
 
 // The stand-in for claude. It answers the version and sign-in checks, and on
@@ -260,6 +262,10 @@ type service struct {
 	done    chan struct{}
 	once    sync.Once
 	client  *http.Client
+	// queue is the service's job queue, opened from its data folder: a
+	// turn's job and its attempt's events, which the runner reports, are
+	// internal and not in the client API. They time each phase.
+	queue *queue.Queue
 }
 
 func startService(bin, dir string, port int) (*service, error) {
@@ -328,6 +334,9 @@ func (s *service) interrupt() { s.cmd.Process.Signal(syscall.SIGTERM) }
 // 15 seconds.
 func (s *service) stop() {
 	s.once.Do(func() {
+		if s.queue != nil {
+			s.queue.Close()
+		}
 		s.cmd.Process.Signal(syscall.SIGTERM)
 		select {
 		case <-s.done:
@@ -474,57 +483,46 @@ type turnDone struct {
 // turn starts a turn and waits for its job to end.
 func (s *service) turn(body map[string]any, method *string) (turnDone, string, error) {
 	var st struct {
-		ID     string `json:"id"`
-		Turn   string `json:"turn"`
-		Job    string `json:"job"`
-		Queued bool   `json:"queued"`
-		Error  string `json:"error"`
+		Session string `json:"session"`
+		Turn    string `json:"turn"`
+		Error   string `json:"error"`
 	}
 	t0 := time.Now()
 	code, err := s.call("POST", "/api/v0/turns", body, &st)
 	reply := time.Since(t0)
-	if err != nil || code != http.StatusAccepted || st.Job == "" {
+	if err != nil || code != http.StatusAccepted || st.Turn == "" {
 		return turnDone{}, "", fmt.Errorf("POST /turns: %d %v %s", code, err, st.Error)
 	}
-	var job struct {
-		State    string          `json:"state"`
-		Created  time.Time       `json:"created"`
-		Ended    *time.Time      `json:"ended"`
-		Result   json.RawMessage `json:"result"`
-		Attempts []struct {
-			ID    string    `json:"id"`
-			Taken time.Time `json:"taken"`
-		} `json:"attempts"`
+	if s.queue == nil {
+		if s.queue, err = queue.Open(filepath.Join(s.home, "jobs.db"), nil); err != nil {
+			return turnDone{}, "", err
+		}
 	}
+	var job queue.Job
 	var total time.Duration
 	for deadline := t0.Add(5 * time.Minute); ; time.Sleep(2 * time.Millisecond) {
-		if code, err := s.call("GET", "/api/v0/jobs/"+st.Job, nil, &job); err != nil || code != 200 {
-			return turnDone{}, "", fmt.Errorf("GET /jobs: %d %v", code, err)
+		j, err := s.queue.JobByTurn(queue.DefaultTeam, st.Turn)
+		if err != nil {
+			return turnDone{}, "", fmt.Errorf("the turn's job: %v", err)
 		}
-		if job.Ended != nil {
-			total = time.Since(t0)
+		if j.Ended != nil {
+			total, job = time.Since(t0), j
 			break
 		}
 		if time.Now().After(deadline) {
 			return turnDone{}, "", errors.New("the turn did not end within 5 minutes")
 		}
 	}
-	if job.State != "finished" || len(job.Attempts) == 0 {
+	if job.State != queue.Finished || len(job.Attempts) == 0 {
 		return turnDone{}, "", fmt.Errorf("the turn's job ended %s", job.State)
 	}
 	at := job.Attempts[len(job.Attempts)-1]
-	var evs struct {
-		Events []struct {
-			Time time.Time       `json:"time"`
-			Kind string          `json:"kind"`
-			Data json.RawMessage `json:"data"`
-		} `json:"events"`
-	}
-	if code, err := s.call("GET", "/api/v0/attempts/"+at.ID+"/events", nil, &evs); err != nil || code != 200 {
-		return turnDone{}, "", fmt.Errorf("GET /attempts/events: %d %v", code, err)
+	list, err := s.queue.Events(queue.DefaultTeam, at.ID)
+	if err != nil {
+		return turnDone{}, "", fmt.Errorf("the attempt's events: %v", err)
 	}
 	when := map[string]time.Time{}
-	for _, e := range evs.Events {
+	for _, e := range list {
 		when[e.Kind] = e.Time
 		if e.Kind == "workspace.ready" && method != nil {
 			var d struct{ Method, Kind string }
@@ -554,9 +552,7 @@ func (s *service) turn(body map[string]any, method *string) (turnDone, string, e
 		t.Copy, startFrom = ready.Sub(when["attempt.started"]), ready
 	}
 	t.Start = when["turn.created"].Sub(startFrom)
-	// The attempt's id is the turn's, also when the reply was queued and
-	// named no turn.
-	return turnDone{id: at.ID, times: t}, st.ID, nil
+	return turnDone{id: st.Turn, times: t}, st.Session, nil
 }
 
 // rss is the resident memory of the service's own processes, in KB: the one

@@ -2,7 +2,7 @@ package settings
 
 // Remote is the store of a runner on another machine: the server's
 // settings, read through the runner protocol (GET
-// /api/v0/runners/{id}/settings) with the runner's own token, fresh for each
+// /api/v0/runner/settings) with the runner's own token, fresh for each
 // turn. So a policy changed on the server, by the API or by hand, holds for
 // the next turn on every runner, and a runner's own files are never read.
 //
@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-// RunnerSettings is the reply of GET /api/v0/runners/{id}/settings: what a runner
+// RunnerSettings is the reply of GET /api/v0/runner/settings: what a runner
 // needs to start a turn.
 type RunnerSettings struct {
 	Permissions         Policy  `json:"permissions" doc:"The policy, every value filled. Folders are as written: the runner reads ~ as its own home."`
@@ -112,7 +112,7 @@ func (r *Remote) fetch(setting string) (RunnerSettings, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.Server+"/api/v0/runners/"+id+"/settings", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, r.Server+"/api/v0/runner/settings", nil)
 	if err != nil {
 		return fail("the server's URL is not one this runner can call")
 	}

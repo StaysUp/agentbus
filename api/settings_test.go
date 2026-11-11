@@ -202,7 +202,7 @@ func TestSettingsInstructionsReadWrite(t *testing.T) {
 	}
 }
 
-// The turns token, which may only start, stop and read turns, never reads or
+// The turns token, which may only start, stop, review and read turns, never reads or
 // writes settings. (A turn's own token: TestAskPolicyFromPermissions.)
 func TestSettingsTurnsTokenRefused(t *testing.T) {
 	e, dir := settingsEnv(t)

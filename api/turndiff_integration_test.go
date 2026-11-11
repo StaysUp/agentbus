@@ -39,11 +39,11 @@ func diffEnv(t *testing.T, perm string) (*env, string) {
 	return stackEnv(t, stack{wire: wire, permissions: perm}), dir
 }
 
-// waitEnded waits for the job to end.
-func waitEnded(t *testing.T, e *env, job string) queue.Job {
+// waitEnded waits for the turn's job to end.
+func waitEnded(t *testing.T, e *env, turn string) queue.Job {
 	t.Helper()
 	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
-		j, err := e.q.Get(queue.DefaultTeam, job)
+		j, err := e.q.JobByTurn(queue.DefaultTeam, turn)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -51,7 +51,7 @@ func waitEnded(t *testing.T, e *env, job string) queue.Job {
 			return j
 		}
 	}
-	t.Fatalf("job %s did not end", job)
+	t.Fatalf("turn %s did not end", turn)
 	return queue.Job{}
 }
 
@@ -102,7 +102,7 @@ func TestTurnDiffAndApply(t *testing.T) {
 	}
 
 	first := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"edit1"}`)
-	waitEnded(t, e, first.Job)
+	waitEnded(t, e, first.Turn)
 	if read("a.txt") != "one\ntwo\n" || read("b.txt") != "<missing>" {
 		t.Fatal("the turn's edits reached the person's folder before an apply")
 	}
@@ -126,8 +126,8 @@ func TestTurnDiffAndApply(t *testing.T) {
 			t.Errorf("%s: %q, want %q", p, diffs[p], w)
 		}
 	}
-	if d.Agent != "claude" || d.State != "finished" || d.DurationMS == nil || d.Job != first.Job || d.Apply.State != "none" {
-		t.Errorf("diff header: agent %q state %q duration %v job %q apply %+v", d.Agent, d.State, d.DurationMS, d.Job, d.Apply)
+	if d.Agent != "claude" || d.State != "finished" || d.DurationMS == nil || d.Apply.State != "none" {
+		t.Errorf("diff header: agent %q state %q duration %v apply %+v", d.Agent, d.State, d.DurationMS, d.Apply)
 	}
 
 	code, st := applyAs(t, e, token, first.Turn)
@@ -138,16 +138,16 @@ func TestTurnDiffAndApply(t *testing.T) {
 		t.Fatalf("after the apply: a %q b %q gone %q", read("a.txt"), read("b.txt"), read("gone.txt"))
 	}
 	again, st2 := applyAs(t, e, token, first.Turn)
-	if again != 200 || st2.State != "applied" || !st2.Already || st2.Job != st.Job {
+	if again != 200 || st2.State != "applied" || !st2.Already || st2.Turn != st.Turn {
 		t.Fatalf("second apply: %d %+v", again, st2)
 	}
-	if d := diffOf(t, e, first.Turn); d.Apply.State != "applied" || d.Apply.Job != st.Job {
+	if d := diffOf(t, e, first.Turn); d.Apply.State != "applied" || d.Apply.Turn != first.Turn {
 		t.Errorf("diff after the apply: %+v", d.Apply)
 	}
 
 	// The next turn changes a.txt, and so does the person.
-	second := startTurn(t, e, `{"session":"`+first.ID+`","prompt":"edit2"}`)
-	waitEnded(t, e, second.Job)
+	second := startTurn(t, e, `{"session":"`+first.Session+`","prompt":"edit2"}`)
+	waitEnded(t, e, second.Turn)
 	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("mine\n"), 0o644)
 	code, st = applyAs(t, e, token, second.Turn)
 	if code != 409 || st.State != "refused" || len(st.Conflicts) != 1 || st.Conflicts[0].Path != "a.txt" ||
@@ -161,7 +161,7 @@ func TestTurnDiffAndApply(t *testing.T) {
 	// Resolved, and applied by a turn of the session with its own token.
 	// With apply off in [agent_api], the token is refused first.
 	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\nTWO\n"), 0o644)
-	third := startTurn(t, e, `{"session":"`+first.ID+`","prompt":"hold"}`)
+	third := startTurn(t, e, `{"session":"`+first.Session+`","prompt":"hold"}`)
 	tok := tokenOf(t, dir, "hold")
 	os.WriteFile(perm, []byte("[agent_api]\napply = false\n"), 0o600)
 	if code, out := as(t, e, tok, "POST", "/api/v0/turns/"+second.Turn+"/apply", ""); code != 403 || !strings.Contains(out, "apply is false") {
@@ -177,7 +177,7 @@ func TestTurnDiffAndApply(t *testing.T) {
 		t.Errorf("apply of a running turn: %d %s", code, out)
 	}
 	release(dir, "hold")
-	waitEnded(t, e, third.Job)
+	waitEnded(t, e, third.Turn)
 	if code, out := as(t, e, token, "POST", "/api/v0/turns/t_0000000000000000/apply", ""); code != 404 {
 		t.Errorf("apply of an unknown turn: %d %s", code, out)
 	}
@@ -217,14 +217,14 @@ func TestTurnChangesAreTheCheckpointDiff(t *testing.T) {
 				}
 			}
 			first := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"edit1"}`)
-			waitEnded(t, e, first.Job)
-			second := startTurn(t, e, `{"session":"`+first.ID+`","prompt":"edit2"}`)
-			waitEnded(t, e, second.Job)
+			waitEnded(t, e, first.Turn)
+			second := startTurn(t, e, `{"session":"`+first.Session+`","prompt":"edit2"}`)
+			waitEnded(t, e, second.Turn)
 			for _, c := range []struct {
 				st    Started
 				count int
 			}{{first, 3}, {second, 1}} {
-				j := waitEnded(t, e, c.st.Job)
+				j := waitEnded(t, e, c.st.Turn)
 				res, err := queue.ReadResult(j.Result)
 				if err != nil || res.Changes == nil || res.Changes.Count != c.count {
 					t.Fatalf("turn %s: result %s", c.st.Turn, j.Result)

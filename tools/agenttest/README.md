@@ -12,10 +12,10 @@ Each run is one new session in a new folder (`calc.py`, `README.md`). Seed turns
 
 | Task | Seed turns | Test prompt | Done when |
 |---|---|---|---|
-| 1 | one turn adds `add()` to `calc.py` | Ask another agent to review your last turn. | a review job of the seed turn's job exists |
+| 1 | one turn adds `add()` to `calc.py` | Ask another agent to review your last turn. | a review turn of the seed turn exists |
 | 2 | four turns: `a.txt` "one", a line "two", `b.txt` "three", `c.txt` "four" | Apply turn 3 of this session to my folder. | the person's folder has `a.txt` (one, two) and `b.txt`, and no `c.txt` |
 | 3 | a decision for the record (SQLite in WAL mode, not Redis, one machine), then two edits | What did we decide earlier in this session about the cache, and why? | the reply names SQLite, WAL and the reason |
-| 4 | the session asks for a turn that runs `sleep 1800` | A turn is running away: it has been going far too long. Stop it. | that turn's job is cancelled, or the turn stopped |
+| 4 | the session asks for a turn that runs `sleep 1800` | A turn is running away: it has been going far too long. Stop it. | that turn reads stopped |
 | 5 | one edit, then the session asks Claude Haiku to review it, and the result comes back | How much did the review cost? | the reply holds the review turn's `cost_usd`, within 5% |
 
 Tasks 4 and 5 need work the session itself asked for, which only an agent's turn token can make, so
@@ -59,4 +59,5 @@ it. Say so in any result from a machine where that file exists.
 
 The prompts and the seeds' words stay the same, so the numbers compare. The routes this tool calls
 as the person are in `R`, and the two seed commands in `SEED_ASK_TURN` and `SEED_ASK_REVIEW`: port
-those and `check`.
+those and `check`. Ported to the 0.4 API (agent, session, turn) on 2026-11-11: the review seed asks
+`POST /api/v0/turns/{turn}/review`, and every check reads turns, not jobs.

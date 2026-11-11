@@ -101,7 +101,8 @@ func TestGetTurn(t *testing.T) {
 	}
 }
 
-// The turns token starts, stops and reads turns, and gets 403 everywhere else.
+// The turns token starts, stops, reviews and reads turns, and their events,
+// and gets 403 everywhere else.
 // A wrong token still gets 401.
 func TestTurnsTokenScope(t *testing.T) {
 	e := turnsEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) { return run.Launch{}, run.ErrNotFound })
@@ -114,18 +115,20 @@ func TestTurnsTokenScope(t *testing.T) {
 		{"GET", "/api/v0/turns", "", 200},
 		{"GET", "/api/v0/turns?session=s1", "", 200},
 		{"GET", "/api/v0/turns/t_a", "", 200},
-		{"GET", "/api/v0/turns/t_a/events", "", 200},
+		{"GET", "/api/v0/sessions/s1/events?turn=t_a", "", 200},
+		{"GET", "/api/v0/sessions/s1/events", "", 200},
 		{"POST", "/api/v0/turns/t_a/stop", "", 409},
 		// Reached the handler: the agent is not found, so 400 and nothing stored.
 		{"POST", "/api/v0/turns", `{"agent":"claude","folder":"` + t.TempDir() + `","prompt":"x"}`, 400},
 		{"GET", "/api/v0/sessions", "", 403},
-		{"GET", "/api/v0/sessions/s1/events", "", 403},
 		{"GET", "/api/v0/sessions/s1/search?q=hi", "", 403},
 		{"GET", "/api/v0/events", "", 403},
 		{"POST", "/api/v0/events", `{"kind":"x.p.n","session":"s1"}`, 403},
 		{"GET", "/api/v0/agents", "", 403},
 		{"GET", "/api/v0/version", "", 403},
-		{"GET", "/api/v0/calls/x1/context", "", 403},
+		{"GET", "/api/v0/turns/t_a/calls/x1", "", 403},
+		{"POST", "/api/v0/turns/t_a/apply", "", 403},
+		{"PATCH", "/api/v0/sessions/s1", `{"closed":true}`, 403},
 	} {
 		got, out := asTok(t, e, turnsTok, c.method, c.path, c.body)
 		if got != c.want {

@@ -2,9 +2,11 @@ package queue
 
 import (
 	"database/sql"
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/staysup/agentbus/harness"
 )
@@ -254,6 +256,51 @@ func TestMigrateFoldersAndColumns(t *testing.T) {
 	}
 	if n, _ := q.MigrateFolders(f); n != 0 {
 		t.Fatalf("a second run rewrote %d", n)
+	}
+}
+
+// A queue made before jobs.turn gets it filled: the id of the attempt that
+// started the turn, even after its lease ran out and expiry cleared
+// jobs.attempt, so Lost still finds that turn.
+func TestFillTurnFromStartedAttempt(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "jobs.db")
+	q, err := Open(path, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := runner(t, q, 5)
+	j := job(t, q, "")
+	_, a := take(t, q, r)
+	if _, _, err := q.Start(r.ID, a.ID, a.Number, lease); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := q.AddEvents(r.ID, a.ID, a.Number, 1, []AttemptEvent{{Seq: 1, Time: time.Now(), Kind: "turn.created",
+		Data: json.RawMessage(`{"session":"` + j.Session + `","turn":"` + a.ID + `"}`)}}); err != nil {
+		t.Fatal(err)
+	}
+	queued := job(t, q, "")
+	// As an earlier build left it: the lease ran out, expiry cleared
+	// jobs.attempt, and there is no turn column.
+	for _, s := range []string{`UPDATE attempts SET state = 'lost'`, `UPDATE jobs SET attempt = NULL, state = 'failed', ended = 1 WHERE id = '` + j.ID + `'`,
+		`DROP INDEX jobs_turn`, `ALTER TABLE jobs DROP COLUMN turn`} {
+		if _, err := q.db.Exec(s); err != nil {
+			t.Fatal(s, err)
+		}
+	}
+	q.Close()
+	if q, err = Open(path, nil); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { q.Close() })
+	if got := state(t, q, j.ID); got.Turn != a.ID {
+		t.Fatalf("turn %q, want the started attempt %s", got.Turn, a.ID)
+	}
+	if got := state(t, q, queued.ID); got.Turn == "" || got.Turn == a.ID {
+		t.Fatalf("the queued job's turn %q", got.Turn)
+	}
+	if lost, err := q.Lost([]string{a.ID}); err != nil || !lost[a.ID] {
+		t.Fatalf("Lost after the fill: %v %v", lost, err)
 	}
 }
 

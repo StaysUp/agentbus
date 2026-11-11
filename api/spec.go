@@ -35,14 +35,16 @@ const specIntro = "agentbus runs on your machine, between your coding agents and
 	"and takes a program's own events.\n\n" +
 	"This document is generated from the code at startup. The contract in words is `docs/CLIENT_API.md`; " +
 	"a short guide for coding agents is at `/docs/llms.txt`.\n\n" +
+	"- Three nouns: an agent is a saved setup, a session is a conversation, and a turn is one message, its reply and its changes. " +
+	"Every action is on a turn: start, stop, diff, apply, review and its model calls.\n" +
 	"- Every request but this document sends `Authorization: Bearer <token>`: the file `token` in the data folder. Never put it in a URL.\n" +
-	"- Every turn runs as a job: `POST /api/v0/turns` makes one, and the jobs API (`/api/v0/jobs`) makes, reviews and cancels them. " +
-	"The runner protocol (`/api/v0/runners`, `/api/v0/attempts`) is for runners and takes its own tokens.\n" +
+	"- A turn exists from the moment it is asked for: `queued`, then `running`, then `finished`, `failed` or `stopped`.\n" +
+	"- Runners talk to this service through the runner protocol, under `/api/v0/runner/`. It is described on its own, at `/api/v0/runner/openapi.json`, and is not a public promise.\n" +
 	"- A turn started by `POST /api/v0/turns` gets its own token in `$AGENTBUS_TOKEN`, and this service's address in `$AGENTBUS_URL`. " +
 	"With it the agent reads its session and asks other agents: it starts turns, continues the sessions it started, asks for reviews and reads their results, on the operations that say so. " +
 	"Each result comes back to the asking session as a later turn. It never changes policy or saved agents, never sees a token, " +
 	"and stops working when the turn's child exits. A read-only turn's token only reads.\n" +
-	"- The turns token, the file `turns_token` in the data folder, may only start, stop and read turns, on the operations that say so. " +
+	"- The turns token, the file `turns_token` in the data folder, may only start, stop, review and read turns, on the operations that say so. " +
 	"A program that only starts and follows turns uses it in place of the main token.\n" +
 	"- On loopback, the default, the `Host` must be `127.0.0.1`, `localhost` or `[::1]` with the service's port, or the answer is 403. " +
 	"On another address, such as `0.0.0.0`, any `Host` is accepted and the token is the guard.\n" +
@@ -58,24 +60,21 @@ const turnsTokenDoc = "The turns token (the file `turns_token` in the data folde
 
 // runnerTokenDoc is what an operation of the runner protocol adds to its
 // description: it checks its own token.
-const runnerTokenDoc = "Runner protocol: called by a runner, never by the cockpit. Takes the enrollment token (enroll) or the runner's own token (every other call), not the main token."
+const runnerTokenDoc = "Runner protocol: called by a runner or a connector, never by the cockpit. Takes the enrollment token (register) or the runner's own token (every other call), not the main token."
 
 // turnTokenDoc is what each turn-token rule adds to an operation's
 // description.
 var turnTokenDoc = map[int]string{
 	treeSessionPath:  "A turn token may call this for a session in its request tree: its own, the person's session it started from, or one work in that tree started.",
 	treeSessionQuery: "A turn token may call this for a session in its request tree: without session, its own is used.",
-	treeCall:         "A turn token may call this for the calls of a session in its request tree.",
-	treeJob:          "A turn token may call this for a job of a session in its request tree.",
-	treeAttempt:      "A turn token may call this for an attempt of a job in its request tree.",
+	treeTurn:         "A turn token may call this for a turn of a session in its request tree, by the turn id alone.",
 	askTurn: "A turn token may call this to ask another agent, unless its turn is read-only. " +
 		"A new session must be in the turn's own folder or one inside it (the person's folder when absent), always isolated. " +
 		"A session it continues must be one its request tree started, never its own or the person's. " +
 		"The turn's result comes back to the asking session as a later turn. Caps: " + askCaps,
-	askReview: "A turn token may call this for a job of a session in its request tree, unless its turn is read-only. " +
+	askReview: "A turn token may call this for a turn of a session in its request tree, its own session's turns included, unless its turn is read-only. " +
 		"The review's result comes back to the asking session as a later turn. Caps: " + askCaps,
-	askedJob:  "A turn token may cancel only a job its request tree asked for, unless its turn is read-only.",
-	askedTurn: "A turn token may stop only a turn of a job its request tree asked for, unless its turn is read-only.",
+	askedTurn: "A turn token may stop only a turn its request tree asked for, unless its turn is read-only.",
 	anyRead:   "A turn token may call this too.",
 }
 
@@ -86,7 +85,11 @@ var askCaps = fmt.Sprintf("[limits] in permissions.toml: by default at most %d l
 
 // spec is the description as served, built on first use. New builds it, so a
 // table or type it cannot describe stops the service from starting.
-var spec = sync.OnceValues(buildSpec)
+// runnerSpec is the runner protocol's, served on its own.
+var (
+	spec       = sync.OnceValues(func() ([]byte, error) { return buildSpec(false) })
+	runnerSpec = sync.OnceValues(func() ([]byte, error) { return buildSpec(true) })
+)
 
 // constraints hold what a Go type cannot say, keyed by "Type" for the schema
 // of a type and "Type.field" for one of its fields.
@@ -181,8 +184,7 @@ func customize(_ string, t reflect.Type, tag reflect.StructTag, s *openapi3.Sche
 	if t.Kind() == reflect.Struct && t != timeType {
 		// A struct becomes a shared component: a field's description and
 		// nullability belong to the field, so components.finish sets them.
-		for i := range t.NumField() {
-			f := t.Field(i)
+		for _, f := range fieldsOf(t) {
 			if n := jsonName(f); n != "" && n != "-" && !omitempty(f.Tag) {
 				s.Required = append(s.Required, n)
 			}
@@ -248,9 +250,24 @@ func (c *components) collect(t reflect.Type) {
 		return
 	}
 	c.types[typeName(t)] = t
-	for i := range t.NumField() {
-		c.collect(t.Field(i).Type)
+	for _, f := range fieldsOf(t) {
+		c.collect(f.Type)
 	}
+}
+
+// fieldsOf is t's fields, with an embedded struct's fields in its place, as
+// encoding/json sends them.
+func fieldsOf(t reflect.Type) []reflect.StructField {
+	var out []reflect.StructField
+	for i := range t.NumField() {
+		f := t.Field(i)
+		if f.Anonymous && f.Tag.Get("json") == "" && f.Type.Kind() == reflect.Struct {
+			out = append(out, fieldsOf(f.Type)...)
+			continue
+		}
+		out = append(out, f)
+	}
+	return out
 }
 
 // finish gives each component's fields their descriptions and constraints.
@@ -264,8 +281,7 @@ func (c *components) finish() error {
 			return fmt.Errorf("api: no schema for %s", name)
 		}
 		s := sr.Value
-		for i := range t.NumField() {
-			f := t.Field(i)
+		for _, f := range fieldsOf(t) {
 			n := jsonName(f)
 			p := s.Properties[n]
 			if p == nil {
@@ -351,10 +367,14 @@ func (c *components) kindSchemas() {
 }
 
 // describe builds the description as a document.
-func describe() (*openapi3.T, error) {
+// describe is the description of the client API, or with runner of the
+// runner protocol: the routes that check their own token.
+func describe(runner bool) (*openapi3.T, error) {
 	c := &components{schemas: openapi3.Schemas{}, types: map[string]reflect.Type{}}
-	if _, err := c.ref(event.Event{}); err != nil {
-		return nil, err
+	if !runner {
+		if _, err := c.ref(event.Event{}); err != nil {
+			return nil, err
+		}
 	}
 	errRef, err := c.ref(Error{})
 	if err != nil {
@@ -364,7 +384,7 @@ func describe() (*openapi3.T, error) {
 		OpenAPI:           "3.1.0",
 		JSONSchemaDialect: "https://spec.openapis.org/oas/3.1/dialect/base",
 		Info: &openapi3.Info{Title: "agentbus client API", Version: "v0",
-			Summary:     "What cockpits and programs call on a local agentbus service.",
+			Summary:     "What agents, cockpits and programs call on an agentbus service.",
 			Description: specIntro, License: &openapi3.License{Name: "Functional Source License 1.1, ALv2 Future License", Identifier: "FSL-1.1-ALv2"}},
 		Servers:  openapi3.Servers{{URL: "http://127.0.0.1:8787", Description: "The default address. Use your service's port."}},
 		Security: openapi3.SecurityRequirements{{"bearerToken": {}}},
@@ -380,12 +400,21 @@ func describe() (*openapi3.T, error) {
 	}
 	// Each tag's routes, counted, so a route cannot name a tag that is not
 	// listed and a listed tag cannot be empty.
+	if runner {
+		doc.Info.Title, doc.Info.Summary, doc.Info.Description = "agentbus runner protocol", "What runners and connectors call on control.", runnerIntro
+	}
 	tagged := map[string]int{}
 	for _, t := range tags {
+		if t.runner != runner {
+			continue
+		}
 		doc.Tags = append(doc.Tags, &openapi3.Tag{Name: t.name, Description: t.doc})
 		tagged[t.name] = 0
 	}
 	for _, rt := range routes {
+		if rt.self != runner {
+			continue
+		}
 		if _, ok := tagged[rt.tag]; !ok {
 			return nil, fmt.Errorf("api: %s %s names tag %q, which is not in tags", rt.method, rt.path, rt.tag)
 		}
@@ -409,6 +438,11 @@ func describe() (*openapi3.T, error) {
 			}
 			op.Parameters = append(op.Parameters, &openapi3.ParameterRef{Value: openapi3.NewPathParameter("id").
 				WithDescription(idDoc).
+				WithSchema(&openapi3.Schema{Type: &openapi3.Types{"string"}, Pattern: sessionID.String()})})
+		}
+		if strings.Contains(rt.path, "{call}") {
+			op.Parameters = append(op.Parameters, &openapi3.ParameterRef{Value: openapi3.NewPathParameter("call").
+				WithDescription("A model call of the turn: the exchange field of its events, as the turn's diff lists it in model_calls.").
 				WithSchema(&openapi3.Schema{Type: &openapi3.Types{"string"}, Pattern: sessionID.String()})})
 		}
 		if strings.Contains(rt.path, "{n}") {
@@ -477,7 +511,7 @@ func describe() (*openapi3.T, error) {
 		if !rt.public && !rt.self {
 			forbidden += " Or a turn token was sent where it may not read: another session, or an operation that does not take one."
 			if !rt.turns {
-				forbidden += " Or the turns token was sent: it may only start, stop and read turns."
+				forbidden += " Or the turns token was sent: it may only start, stop, review and read turns."
 			}
 		}
 		op.Responses.Set("403", errorReply(forbidden))
@@ -497,23 +531,31 @@ func describe() (*openapi3.T, error) {
 		item.SetOperation(rt.method, op)
 	}
 	for _, t := range tags {
-		if tagged[t.name] == 0 {
+		if t.runner == runner && tagged[t.name] == 0 {
 			return nil, fmt.Errorf("api: tag %q has no route", t.name)
 		}
 	}
 	if err := c.finish(); err != nil {
 		return nil, err
 	}
-	if err := c.checkConstraints(); err != nil {
-		return nil, err
+	if !runner {
+		if err := c.checkConstraints(); err != nil {
+			return nil, err
+		}
+		c.kindSchemas()
 	}
-	c.kindSchemas()
 	return doc, nil
 }
 
+// runnerIntro opens the runner protocol's description.
+const runnerIntro = "How a runner and a connector talk to control: register, take jobs, report their attempts, and move files as blobs. " +
+	"A job is the queue's word for work: a turn, a review, an apply or a snapshot. A runner takes a job as an attempt, and every call after take names the attempt and its number. " +
+	"This protocol is our own code's, between our own binaries. It is not a public promise and may change in any release. " +
+	"The client API, for people, programs and agents, is at `/api/v0/openapi.json`."
+
 // buildSpec is describe, as the bytes served.
-func buildSpec() ([]byte, error) {
-	doc, err := describe()
+func buildSpec(runner bool) ([]byte, error) {
+	doc, err := describe(runner)
 	if err != nil {
 		return nil, err
 	}

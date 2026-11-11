@@ -92,7 +92,7 @@ func (at *attempt) forward(ctx context.Context, session string, final bool) {
 	if final {
 		tries = 3
 	}
-	filter := store.Filter{Turn: at.a.ID, TurnSession: session}
+	filter := store.Filter{Turn: at.job.Turn, TurnSession: session}
 	for range 10000 {
 		recs, more, err := at.r.cfg.Store.Page(s.after, filter, jobs.MaxBatch, MaxRecordBatch)
 		if err != nil || len(recs) == 0 {

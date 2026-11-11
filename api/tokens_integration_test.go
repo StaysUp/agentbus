@@ -141,21 +141,21 @@ func TestTurnToken(t *testing.T) {
 	if vars["AGENTBUS_URL"] != e.srv.URL || !strings.HasPrefix(tok, "abt_") || len(tok) != len("abt_")+64 {
 		t.Fatalf("child AGENTBUS_URL %q, AGENTBUS_TOKEN of %d bytes", vars["AGENTBUS_URL"], len(tok))
 	}
-	if vars["ANTHROPIC_BASE_URL"] != e.srv.URL+"/s/"+s.ID+"/t/"+s.Turn {
+	if vars["ANTHROPIC_BASE_URL"] != e.srv.URL+"/s/"+s.Session+"/t/"+s.Turn {
 		t.Errorf("child ANTHROPIC_BASE_URL %q", vars["ANTHROPIC_BASE_URL"])
 	}
 
 	// A stored call of the turn's own session.
-	if _, _, err := e.store.Append(event.Event{ID: "m1", Kind: event.ModelRequested, Time: time.Now(), Session: s.ID, Turn: s.Turn, Exchange: "x-own"}); err != nil {
+	if _, _, err := e.store.Append(event.Event{ID: "m1", Kind: event.ModelRequested, Time: time.Now(), Session: s.Session, Turn: s.Turn, Exchange: "x-own"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := e.store.KeepCall(body.Call{Exchange: "x-own", Session: s.ID, Vendor: "anthropic", Time: time.Now(),
+	if err := e.store.KeepCall(body.Call{Exchange: "x-own", Session: s.Session, Vendor: "anthropic", Time: time.Now(),
 		Request: body.Request{Top: json.RawMessage(`{}`), Pieces: []body.Piece{{Kind: body.Message, Label: "user",
 			JSON: json.RawMessage(`{"role":"user","content":"the first needle"}`)}}}}); err != nil {
 		t.Fatal(err)
 	}
 
-	own, other := s.ID, "other"
+	own, other := s.Session, "other"
 	for _, tc := range []struct {
 		method, path, body string
 		want               int
@@ -164,17 +164,26 @@ func TestTurnToken(t *testing.T) {
 		{"GET", "/api/v0/turns?session=" + own, "", 200},
 		{"GET", "/api/v0/turns?session=" + other, "", 403},
 		{"GET", "/api/v0/turns?session=" + own + "&session=" + other, "", 403},
-		{"GET", "/api/v0/turns/" + s.Turn + "/events", "", 200},
-		{"GET", "/api/v0/turns/t_other/events?session=" + other, "", 403},
+		{"GET", "/api/v0/turns/" + s.Turn, "", 200},
+		{"GET", "/api/v0/turns/t_other", "", 403},
+		{"GET", "/api/v0/turns/t_other?session=" + other, "", 403},
+		{"GET", "/api/v0/turns/t_none", "", 404},
+		{"GET", "/api/v0/turns/t_other/diff", "", 403},
+		{"GET", "/api/v0/sessions/" + own + "/events?turn=" + s.Turn, "", 200},
+		{"GET", "/api/v0/sessions/" + other + "/events?turn=t_other", "", 403},
+		{"GET", "/api/v0/sessions/" + own, "", 200},
+		{"GET", "/api/v0/sessions/" + other, "", 403},
 		{"GET", "/api/v0/sessions/" + own + "/events", "", 200},
 		{"GET", "/api/v0/sessions/" + other + "/events", "", 403},
 		{"GET", "/api/v0/sessions/" + own + "/search?q=needle", "", 200},
 		{"GET", "/api/v0/sessions/" + other + "/search?q=secret", "", 403},
-		{"GET", "/api/v0/calls/x-own/context", "", 200},
-		{"GET", "/api/v0/calls/x-own/pieces/0", "", 200},
-		{"GET", "/api/v0/calls/x-other/context", "", 403},
-		{"GET", "/api/v0/calls/x-other/pieces/0", "", 403},
-		{"GET", "/api/v0/calls/x-none/pieces/0", "", 404},
+		{"GET", "/api/v0/turns/" + s.Turn + "/calls/x-own", "", 200},
+		{"GET", "/api/v0/turns/" + s.Turn + "/calls/x-own/pieces/0", "", 200},
+		{"GET", "/api/v0/turns/t_other/calls/x-other", "", 403},
+		{"GET", "/api/v0/turns/t_other/calls/x-other/pieces/0", "", 403},
+		// A call of another turn is not this turn's.
+		{"GET", "/api/v0/turns/" + s.Turn + "/calls/x-other", "", 404},
+		{"GET", "/api/v0/turns/" + s.Turn + "/calls/x-none/pieces/0", "", 404},
 		{"GET", "/api/v0/openapi.json", "", 200},
 		{"GET", "/docs/llms.txt", "", 200},
 		// The writes it may not make, and every read beyond its request
@@ -189,10 +198,11 @@ func TestTurnToken(t *testing.T) {
 		{"GET", "/api/v0/events?session=" + own, "", 403},
 		{"GET", "/api/v0/version", "", 403},
 		{"POST", "/api/v0/agents", `{"harness":"claude","access":"subscription","name":"x"}`, 403},
-		{"GET", "/api/v0/workspaces", "", 403},
-		{"POST", "/api/v0/workspaces/" + own + "/close", "", 403},
-		{"POST", "/api/v0/jobs", `{"agent":"claude","folder":"` + folder + `","prompt":"x"}`, 403},
-		{"GET", "/api/v0/jobs?session=" + other, "", 403},
+		// Only the person closes a session.
+		{"PATCH", "/api/v0/sessions/" + own, `{"closed":true}`, 403},
+		// Gone from the API.
+		{"GET", "/api/v0/workspaces", "", 404},
+		{"GET", "/api/v0/jobs", "", 404},
 		// Reads that hold no session's data.
 		{"GET", "/api/v0/agents", "", 200},
 		{"GET", "/api/v0/harnesses", "", 200},
@@ -207,12 +217,12 @@ func TestTurnToken(t *testing.T) {
 	}
 	// Without session, GET /turns lists the token's own session only.
 	_, out := as(t, e, tok, "GET", "/api/v0/turns", "")
-	var list store.TurnList
+	var list TurnList
 	if err := json.Unmarshal([]byte(out), &list); err != nil || len(list.Turns) != 1 || list.Turns[0].Session != own {
 		t.Errorf("GET /turns with a turn token: %s", out)
 	}
 	// The main token still reads everything, with or without a turn running.
-	for _, p := range []string{"/api/v0/sessions", "/api/v0/turns?session=other", "/api/v0/calls/x-other/pieces/0", "/api/v0/sessions/other/search?q=secret"} {
+	for _, p := range []string{"/api/v0/sessions", "/api/v0/turns?session=other", "/api/v0/turns/t_other", "/api/v0/turns/t_other/calls/x-other/pieces/0", "/api/v0/sessions/other/search?q=secret"} {
 		if resp, out := do(t, e.req(t, "GET", p, nil)); resp.StatusCode != 200 {
 			t.Errorf("main token GET %s: %d %s", p, resp.StatusCode, out)
 		}
@@ -237,7 +247,7 @@ func TestTurnToken(t *testing.T) {
 	if tok2 == "" || tok2 == tok {
 		t.Fatal("the second turn did not get a new token")
 	}
-	if code, _ := as(t, e, tok2, "GET", "/api/v0/sessions/"+s2.ID+"/events", ""); code != 200 {
+	if code, _ := as(t, e, tok2, "GET", "/api/v0/sessions/"+s2.Session+"/events", ""); code != 200 {
 		t.Errorf("the second turn's token: %d", code)
 	}
 	if code, _ := as(t, e, tok2, "GET", "/api/v0/sessions/"+own+"/events", ""); code != 403 {
@@ -261,7 +271,7 @@ func TestTurnTokenRevokedAtProcessExitNotPipeClose(t *testing.T) {
 	tok := childVars(t, dir, 0)["AGENTBUS_TOKEN"]
 	revoked := false
 	for deadline := time.Now().Add(1500 * time.Millisecond); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
-		if code, _ := as(t, e, tok, "GET", "/api/v0/sessions/"+s.ID+"/events", ""); code == http.StatusUnauthorized {
+		if code, _ := as(t, e, tok, "GET", "/api/v0/sessions/"+s.Session+"/events", ""); code == http.StatusUnauthorized {
 			revoked = true
 			break
 		}
@@ -271,7 +281,7 @@ func TestTurnTokenRevokedAtProcessExitNotPipeClose(t *testing.T) {
 	}
 	// The left-behind sleep still holds the output, so the turn is not
 	// closed yet: the token ended with the process, not with the pipes.
-	recs, err := e.store.After(0, store.Filter{Session: s.ID, Only: true}, 100)
+	recs, err := e.store.After(0, store.Filter{Session: s.Session, Only: true}, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,5 +290,5 @@ func TestTurnTokenRevokedAtProcessExitNotPipeClose(t *testing.T) {
 			t.Fatal("session.closed already stored; the test no longer holds the pipes open")
 		}
 	}
-	waitSessionClosed(t, e.store, s.ID)
+	waitSessionClosed(t, e.store, s.Session)
 }

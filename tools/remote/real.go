@@ -144,11 +144,13 @@ func (w *world) subscriptionsOn() error {
 // server saw while it ran and how it ended.
 func (w *world) realTurn(agent string) error {
 	before := len(lines(w.serverLog))
-	var created job
 	t0 := time.Now()
-	if code, out := w.api.call("POST", "/api/v0/jobs", map[string]any{"kind": "turn", "spec": map[string]any{"agent": agent,
-		"folder_ref": w.ref, "connector": w.connector, "isolate": true, "labels": []string{"real"}, "prompt": realPrompt}}, &created); code != 201 {
-		return fmt.Errorf("POST /api/v0/jobs: %d %s", code, out)
+	// Labels pick the real runner; the client API's POST /turns takes none,
+	// so the turn's job is made in the server's queue.
+	created, err := w.api.queueTurn(map[string]any{"agent": agent,
+		"folder_ref": w.ref, "connector": w.connector, "isolate": true, "labels": []string{"real"}, "prompt": realPrompt})
+	if err != nil {
+		return err
 	}
 	type turnView struct {
 		Turn struct {
@@ -163,10 +165,10 @@ func (w *world) realTurn(agent string) error {
 	live := time.Duration(-1) // when the server first held a model call of the turn while its job ran
 	if err := waitFor(5*time.Minute, "the real turn", func() bool {
 		j = job{}
-		w.api.call("GET", "/api/v0/jobs/"+created.ID, nil, &j)
+		w.api.jobByID(created.ID, &j)
 		if j.Attempt != "" {
 			t = turnView{}
-			w.api.call("GET", "/api/v0/turns/"+j.Attempt, nil, &t)
+			w.api.call("GET", "/api/v0/turns/"+j.Turn, nil, &t)
 			if live < 0 && j.Ended == nil && t.Turn.ModelCalls > 0 {
 				live = time.Since(t0)
 			}
@@ -178,7 +180,7 @@ func (w *world) realTurn(agent string) error {
 	total := time.Since(t0)
 	// The turn as the server's record holds it once the job ended.
 	t = turnView{}
-	w.api.call("GET", "/api/v0/turns/"+j.Attempt, nil, &t)
+	w.api.call("GET", "/api/v0/turns/"+j.Turn, nil, &t)
 	relay := map[string]int{}
 	for _, l := range lines(w.serverLog)[before:] {
 		if i := strings.Index(l, "path=/relay/"); i >= 0 {
@@ -208,7 +210,7 @@ func (w *world) realTurn(agent string) error {
 	var r struct {
 		Events []struct{ Kind, Host string }
 	}
-	w.api.call("GET", "/api/v0/turns/"+j.Attempt+"/events?limit=1000", nil, &r)
+	w.api.call("GET", "/api/v0/sessions/"+j.Session+"/events?turn="+j.Turn+"&limit=1000", nil, &r)
 	refused := map[string]int{}
 	for _, e := range r.Events {
 		if e.Kind == "network.refused" {

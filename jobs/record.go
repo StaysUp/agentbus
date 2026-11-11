@@ -19,11 +19,11 @@ import (
 	"github.com/staysup/agentbus/store"
 )
 
-// RecordBatch is the body of POST /api/v0/attempts/{id}/record: events of
+// RecordBatch is the body of POST /api/v0/runner/attempts/{id}/record: events of
 // the attempt's turn, as the runner's own record stored them.
 type RecordBatch struct {
 	Number int               `json:"number" doc:"The attempt's number."`
-	Events []json.RawMessage `json:"events" doc:"The turn's events, at most 500, each with its id and the attempt's turn id as turn."`
+	Events []json.RawMessage `json:"events" doc:"The turn's events, at most 500, each with its id and the job's turn id as turn."`
 }
 
 // RecordAck answers a RecordBatch: how many events were new.
@@ -37,10 +37,11 @@ type Recorder interface {
 	KeepSent(c store.CallContext) (missing []string, err error)
 	KeepReply(r body.Reply) error
 	CallSession(exchange string) (session string, found bool, err error)
+	OtherTurns(exchange, session, turn string) (bool, error)
 	Continuation(session string) (store.Continuation, error)
 }
 
-// CallBatch is the body of POST /api/v0/attempts/{id}/calls: model calls of
+// CallBatch is the body of POST /api/v0/runner/attempts/{id}/calls: model calls of
 // the attempt's turn as the runner's own record kept them, and the replies
 // kept for them. A piece may come without its bytes when the runner sent
 // them before; control answers with the hashes it lacks. Every body is sent
@@ -140,8 +141,18 @@ func (s *Server) calls(w http.ResponseWriter, r *http.Request, rn queue.Runner) 
 			return
 		}
 	}
+	// And of the job's turn: a call or reply whose exchange an event of
+	// another turn of the session carries is that turn's, and is not stored.
+	other := func(exchange string) (bool, error) { return s.cfg.Record.OtherTurns(exchange, assigned, j.Turn) }
 	ack := CallAck{Missing: []string{}}
 	for _, c := range b.Calls {
+		if o, err := other(c.Exchange); err != nil {
+			s.internal(w)
+			return
+		} else if o {
+			fail(w, http.StatusBadRequest, "every call must be of the attempt's own turn")
+			return
+		}
 		missing, err := s.cfg.Record.KeepSent(c.context())
 		if err != nil {
 			fail(w, http.StatusBadRequest, "a call could not be stored: its pieces must match their hashes")
@@ -156,6 +167,9 @@ func (s *Server) calls(w http.ResponseWriter, r *http.Request, rn queue.Runner) 
 	for _, rp := range b.Replies {
 		// A reply belongs to a call already held for this session.
 		if sess, found, err := s.cfg.Record.CallSession(rp.Exchange); err != nil || !found || sess != assigned {
+			continue
+		}
+		if o, err := other(rp.Exchange); err != nil || o {
 			continue
 		}
 		if err := s.cfg.Record.KeepReply(body.Reply{Exchange: rp.Exchange, Status: rp.Status, Stop: rp.Stop, Time: rp.Time, Message: json.RawMessage(rp.Message)}); err != nil {
@@ -176,17 +190,17 @@ func (s *Server) record(w http.ResponseWriter, r *http.Request, rn queue.Runner)
 		fail(w, http.StatusBadRequest, "the body must be one JSON object with number and at most 500 events")
 		return
 	}
-	turn := r.PathValue("id")
-	j, err := s.cfg.Queue.Current(rn.ID, turn, b.Number)
+	j, err := s.cfg.Queue.Current(rn.ID, r.PathValue("id"), b.Number)
 	if err != nil {
 		s.queueError(w, err)
 		return
 	}
+	turn := j.Turn
 	evs := make([]event.Event, 0, len(b.Events))
 	for _, raw := range b.Events {
 		var e event.Event
-		if json.Unmarshal(raw, &e) != nil || e.ID == "" || e.Kind == "" || len(e.Kind) > 64 || e.Turn != turn || e.Session == "" {
-			fail(w, http.StatusBadRequest, "every event needs an id, a kind, a session, and the attempt's turn as turn")
+		if json.Unmarshal(raw, &e) != nil || e.ID == "" || e.Kind == "" || len(e.Kind) > 64 || turn == "" || e.Turn != turn || e.Session == "" {
+			fail(w, http.StatusBadRequest, "every event needs an id, a kind, a session, and the job's turn as turn")
 			return
 		}
 		// A drop marks other sessions' events as missing: it is the
@@ -225,7 +239,7 @@ func (s *Server) record(w http.ResponseWriter, r *http.Request, rn queue.Runner)
 }
 
 // CloseLost stores session.closed, unsettled, for each hold the record has
-// open whose turn is an attempt whose lease ran out. Its runner stopped
+// open whose turn's attempt lease ran out. Its runner stopped
 // during the turn, so nothing else closes it: the cockpit would show the
 // turn running, and the session would take no next turn. It is what
 // store.CloseStaleHolds does at start for this process's own turns.

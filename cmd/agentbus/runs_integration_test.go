@@ -137,7 +137,7 @@ func TestRunSetsBaseURLInChildOnlyAndClosesWithExitCode(t *testing.T) {
 	if code != http.StatusAccepted {
 		t.Fatalf("status %d: %s", code, raw)
 	}
-	id, _ := out["id"].(string)
+	id, _ := out["session"].(string)
 	turn, _ := out["turn"].(string)
 	base, _ := out["base_url"].(string)
 	if id == "" || turn == "" || base != "http://"+svc.addr+"/s/"+id+"/t/"+turn {
@@ -200,7 +200,7 @@ func TestRunHoldsSessionOpenUntilChildExits(t *testing.T) {
 	if code != http.StatusAccepted {
 		t.Fatalf("status %d: %s", code, raw)
 	}
-	id := out["id"].(string)
+	id := out["session"].(string)
 	time.Sleep(150 * time.Millisecond)
 	if closedEvent(runEvents(t, svc.store, id)) != nil {
 		t.Fatal("session.closed while the child runs")
@@ -250,14 +250,14 @@ func TestRunReadOnlyFlags(t *testing.T) {
 		}
 		want := strings.ReplaceAll(tc.want, "BASE", out["base_url"].(string))
 		rep := readReport(t, report)
-		if got := argsOf(t, rep.Args, out["id"].(string)); got != want {
+		if got := argsOf(t, rep.Args, out["session"].(string)); got != want {
 			t.Errorf("%s read_only %v: args %q, want %q", tc.agent, tc.readOnly, got, want)
 		}
 		// Both agents get a turn token, read-only or not.
 		if v, _ := envValue(rep.Env, "AGENTBUS_TOKEN"); !strings.HasPrefix(v, "abt_") || v == tok {
 			t.Errorf("%s read_only %v: no turn token in the child's environment", tc.agent, tc.readOnly)
 		}
-		waitClosed(t, svc.store, out["id"].(string))
+		waitClosed(t, svc.store, out["session"].(string))
 	}
 }
 
@@ -326,7 +326,7 @@ func TestRunRefusals(t *testing.T) {
 	if code, out, raw := postAPI(t, svc, tok, "/api/v0/turns", ok(map[string]any{"prompt": "-x"})); code != http.StatusAccepted {
 		t.Fatalf("a prompt starting with - was refused: %d %s", code, raw)
 	} else {
-		waitClosed(t, svc.store, out["id"].(string))
+		waitClosed(t, svc.store, out["session"].(string))
 	}
 }
 
@@ -363,14 +363,18 @@ func TestRunConcurrencyBound(t *testing.T) {
 		if code != http.StatusAccepted {
 			t.Fatalf("run %d: %d %s", i+1, code, raw)
 		}
-		ids = append(ids, out["id"].(string))
+		ids = append(ids, out["session"].(string))
 	}
-	// A fifth waits in the queue: 202 queued, with its session and job,
-	// and nothing stored for it yet.
+	// A fifth waits in the queue: 202 queued, with its session and its
+	// turn's id, and nothing stored for it yet. The turn reads queued.
 	before := svc.store.Last()
 	code, out, raw := postRun(t, svc, tok, body)
-	if code != http.StatusAccepted || out["queued"] != true || out["turn"] != "" || out["job"] == "" {
+	if code != http.StatusAccepted || out["state"] != "queued" || out["turn"] == "" || out["session"] == "" {
 		t.Fatalf("fifth run: %d %s, want 202 queued", code, raw)
+	}
+	if code, one := sendAPI(t, svc, tok, "GET", "/api/v0/turns/"+out["turn"].(string), nil); code != 200 ||
+		one["turn"].(map[string]any)["state"] != "queued" {
+		t.Fatalf("the queued turn: %d %v", code, one)
 	}
 	if svc.store.Last() != before {
 		t.Fatal("the queued fifth run stored events")
@@ -380,7 +384,7 @@ func TestRunConcurrencyBound(t *testing.T) {
 		waitClosed(t, svc.store, id)
 	}
 	// It runs once a slot is free, in the session its answer named.
-	waitClosed(t, svc.store, out["id"].(string))
+	waitClosed(t, svc.store, out["session"].(string))
 }
 
 func TestServiceStopEndsRuns(t *testing.T) {
@@ -415,7 +419,7 @@ func TestServiceStopEndsRuns(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer st.Close()
-			c := closedEvent(runEvents(t, st, out["id"].(string)))
+			c := closedEvent(runEvents(t, st, out["session"].(string)))
 			if c == nil || c.ExitCode == nil || *c.ExitCode != tc.want {
 				t.Fatalf("session.closed %+v, want exit_code %d", c, tc.want)
 			}
@@ -459,7 +463,7 @@ func TestRunTurnCarriesAgentAndFolder(t *testing.T) {
 	if code != http.StatusAccepted {
 		t.Fatalf("run %d %s", code, raw)
 	}
-	waiting := out["id"].(string)
+	waiting := out["session"].(string)
 	if s := snapSession(t, svc, tok, waiting); s["agent"] != "claude" || s["folder"] != folder || s["open"] != true {
 		t.Fatalf("a running child's session before any model call: %v", s)
 	}
@@ -473,7 +477,7 @@ func TestRunTurnCarriesAgentAndFolder(t *testing.T) {
 	if code != http.StatusAccepted {
 		t.Fatalf("run %d %s", code, raw)
 	}
-	id := out["id"].(string)
+	id := out["session"].(string)
 	waitClosed(t, svc.store, id)
 	var turn *storedEvent
 	waitFor(t, "the run's turn.started", func() bool {
@@ -582,10 +586,10 @@ func TestCodexOwnInstructionsLeaveOutTheHint(t *testing.T) {
 		if code != http.StatusAccepted {
 			t.Fatalf("%s: %d %s", agent, code, raw)
 		}
-		got := argsOf(t, readReport(t, report).Args, out["id"].(string))
+		got := argsOf(t, readReport(t, report).Args, out["session"].(string))
 		if strings.Contains(got, "HINT") != want {
 			t.Errorf("%s: args %q, want the hint %v", agent, got, want)
 		}
-		waitClosed(t, svc.store, out["id"].(string))
+		waitClosed(t, svc.store, out["session"].(string))
 	}
 }
