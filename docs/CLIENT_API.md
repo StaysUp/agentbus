@@ -46,13 +46,14 @@ server` (the default), as its model credential: the `key_env` variable of an Ope
 `CLAUDE_CODE_OAUTH_TOKEN` for a claude subscription, or `AGENTBUS_CODEX_TOKEN` for a codex one
 (codex reads it as the key of a provider set on its command line for the turn, below). The
 runner's gateway records each call and sends it to the server's relay,
-`/relay/<anthropic|chatgpt|openrouter>/…`, which checks the token, takes the agent the turn names (or, for a next turn that names none, the
+`/relay/<anthropic|chatgpt|cloudcode|openrouter>/…`, which checks the token, takes the agent the turn names (or, for a next turn that names none, the
 session's latest agent as its record holds it, with that saved agent's access and `key_env` from
 the server's own saved agents), and swaps in the real credential: an OpenRouter key from the
 server's environment by its variable's name, or the person's own subscription token, connected on
 the server (`GET /api/v0/subscriptions`), when `subscriptions_on_runners = "own"`. A subscription
 goes only to its own vendor: claude's on `/relay/anthropic`, codex's ChatGPT sign-in on
-`/relay/chatgpt`, with its account in `ChatGPT-Account-ID`, as codex sends it. A refusal names
+`/relay/chatgpt`, with its account in `ChatGPT-Account-ID`, as codex sends it, and agy's Google
+sign-in on `/relay/cloudcode`, for Code Assist's methods (`/relay/cloudcode/v1internal:…`) only. A refusal names
 what to do, as a 401 or 403 the agent shows.
 
 | Path | Who calls it | Sign-in |
@@ -1506,7 +1507,19 @@ waited on the vendor stands. When the vendor
 refuses a renewal, `expired` is true and `error` says to connect again; a renewal that fails for
 now is tried again. `renews` is true for such a sign-in.
 
-`agentbus connect claude` and `agentbus connect codex` do the same in a terminal.
+agy's is its Google sign-in, which agy keeps and renews itself. Its login, `agy acp --login`, runs
+with `HOME` set to a new folder of control's own inside `subscriptions/`, with a D-Bus address that reaches no bus,
+so agy keeps the sign-in in a file there and not in a keyring. It prints a link; the person sends
+the code the browser shows with `connect/input`. When it ends, the folder becomes
+`subscriptions/agy-home/`, as agy wrote it, and `subscriptions/agy.json` holds only when it was
+connected. Control reads only the access token and its expiry from agy's file, never the refresh
+token. When less than four minutes are left, before a relayed call and once a minute between
+turns, control runs `agy models` in that home: it runs no model turn, and agy renews its own file
+(it does so only in its last five minutes). One runs at a time. When agy says the renewal was
+refused, or the token's time is up unrenewed, `expired` is true and `error` says to connect again.
+Connecting agy needs control on Linux.
+
+`agentbus connect claude`, `agentbus connect codex` and `agentbus connect agy` do the same in a terminal.
 
 ### `GET /api/v0/version` — which build this service is
 
@@ -2309,16 +2322,17 @@ then what 0.3 changed after it.
 - **Runners hold no secrets.** `POST /api/v0/attempts/<id>/start` answers the attempt's `token`
   (`abr_…`), minted by the server and working while that attempt is current. The runner's agent
   uses it as `AGENTBUS_TOKEN` and as its model credential. The server's relay,
-  `/relay/anthropic/…`, `/relay/chatgpt/…` and `/relay/openrouter/…`, swaps it for the real credential on the way out
+  `/relay/anthropic/…`, `/relay/chatgpt/…`, `/relay/cloudcode/…` and `/relay/openrouter/…`, swaps it for the real credential on the way out
   ([Where it listens](#where-it-listens)). `agentbus runner -gateway server` is the default; `-gateway local` keeps the runner's own
   sign-in and keys.
 - **Subscriptions for the person's own runners**: `GET /api/v0/subscriptions`,
   `POST /api/v0/subscriptions/<harness>/connect` (the harness's own login, run on the server; for
-  claude, `claude setup-token`; for codex, `codex login --device-auth`), `GET` of it (the login's
+  claude, `claude setup-token`; for codex, `codex login --device-auth`; for agy, `agy acp --login`), `GET` of it (the login's
   state, links and one-time code),
   `POST /api/v0/subscriptions/<harness>/connect/input` (what the person types) and
   `DELETE /api/v0/subscriptions/<harness>`, the main token only. `agentbus connect claude` and
-  `agentbus connect codex` do the same in a terminal. Control renews codex's ChatGPT sign-in itself. The policy key `subscriptions_on_runners` (`off` or `own`, default `off`).
+  `agentbus connect codex` do the same in a terminal, and `agentbus connect agy`. Control renews codex's ChatGPT
+  sign-in itself; agy renews its own, which control runs on control. The policy key `subscriptions_on_runners` (`off` or `own`, default `off`).
 - **An agent on a runner asks other agents** through the server's API with its turn token; the
   answer comes back as its session's next turn.
 - **`-host`** on `up` and `server`: another name a loopback service answers to, such as

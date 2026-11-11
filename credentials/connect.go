@@ -21,6 +21,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"sync"
 	"syscall"
@@ -52,6 +53,25 @@ type Login struct {
 	// access token's own expiry says how long it works.
 	Home, File                       string
 	TokenKey, RefreshKey, AccountKey string
+	// Keep, when set, keeps the login's folder as the harness's own home on
+	// control, named Keep in the subscriptions folder, where the harness
+	// renews its own sign-in (own.go). Only TokenKey and ExpiryKey, the
+	// dotted path of the token's RFC 3339 expiry, are read from File.
+	Keep, ExpiryKey string
+	// Unset are variables the login runs without; Set are NAME=value pairs
+	// it runs with.
+	Unset, Set []string
+	// OnlyOn is the one GOOS the login can be used on, or "" for any;
+	// OnlyOnWhy says why, for the person.
+	OnlyOn, OnlyOnWhy string
+}
+
+// usable says why l cannot be used on this machine, or "".
+func (l Login) usable() string {
+	if l.OnlyOn != "" && l.OnlyOn != runtime.GOOS {
+		return l.OnlyOnWhy
+	}
+	return ""
 }
 
 // Connect states.
@@ -206,6 +226,9 @@ func (m *Manager) Connect(harness string) (View, error) {
 	if !ok {
 		return View{}, ErrNoLogin
 	}
+	if why := l.usable(); why != "" {
+		return View{}, &Missing{Why: why}
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if c := m.running[harness]; c != nil && c.view().State == Running {
@@ -274,15 +297,18 @@ func (m *Manager) Connect(harness string) (View, error) {
 		c.text = nil
 		wasLate, wasRefused := c.late, c.refused
 		c.mu.Unlock()
-		removeHome(home)
 		state, why := Failed, ""
-		switch {
-		case ok:
+		if ok {
+			// Keep takes a kept login's folder; what is left is removed.
 			if m.Store.Keep(harness, si) != nil {
 				why = "the token could not be kept in the data folder"
 			} else {
 				state = Connected
 			}
+		}
+		removeHome(home)
+		switch {
+		case ok:
 		case wasRefused:
 			why = "the login did not accept the code: it may be incomplete, expired, already used, or from an earlier sign-in; connect again for a new link"
 		case wasLate:
@@ -358,6 +384,9 @@ func (m *Manager) Stop() {
 // sign-in the login gave. When ctx ends (the person stopped it), the login
 // is stopped and its folder removed.
 func Run(ctx context.Context, l Login, dir string, now time.Time, in io.Reader, out io.Writer) (Signin, error) {
+	if why := l.usable(); why != "" {
+		return Signin{}, errors.New(why)
+	}
 	c := &connecting{login: l}
 	cmd := exec.CommandContext(ctx, l.Path, l.Args...)
 	// Stopped, the login is asked to end, as Ctrl-C asks it, and a child it
@@ -367,7 +396,14 @@ func Run(ctx context.Context, l Login, dir string, now time.Time, in io.Reader, 
 	if err != nil {
 		return Signin{}, err
 	}
-	defer removeHome(home)
+	// A kept login's folder goes to the caller with the sign-in, for
+	// Subscriptions.Keep; any other is removed here.
+	handed := false
+	defer func() {
+		if !handed {
+			removeHome(home)
+		}
+	}()
 	cmd.Env, cmd.Stdin = env, in
 	r, w, err := os.Pipe()
 	if err != nil {
@@ -404,6 +440,7 @@ func Run(ctx context.Context, l Login, dir string, now time.Time, in io.Reader, 
 		}
 		return Signin{}, errors.New(l.ended())
 	}
+	handed = si.Home != ""
 	return si, nil
 }
 

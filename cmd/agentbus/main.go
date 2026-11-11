@@ -281,8 +281,13 @@ func start(c config) (*service, error) {
 	subs := subscriptionStore(c.home)
 	if c.hasQueue() {
 		for _, h := range harness.All() {
-			if h.Info().Login != nil {
+			if l := h.Info().Login; l != nil {
 				protect = append(protect, filepath.Join(subs.Dir, h.Info().Name+".json"))
+				if l.Keep != "" {
+					// The harness's own home there, and its sign-in by
+					// its own name, as every harness's rules take a file.
+					protect = append(protect, filepath.Join(subs.Dir, l.Keep), filepath.Join(subs.Dir, l.Keep, l.File))
+				}
 			}
 		}
 	}
@@ -376,8 +381,11 @@ func start(c config) (*service, error) {
 			orUp, _ = url.Parse(openrouter)
 		}
 		relay := map[string]jobs.Upstream{
-			relayAnthropic:  {URL: c.upstream, Access: credentials.AccessSubscription, Harness: "claude"},
-			relayChatGPT:    {URL: c.chatgpt, Access: credentials.AccessSubscription, Harness: "codex"},
+			relayAnthropic: {URL: c.upstream, Access: credentials.AccessSubscription, Harness: "claude"},
+			relayChatGPT:   {URL: c.chatgpt, Access: credentials.AccessSubscription, Harness: "codex"},
+			// agy's Code Assist methods only: the Google sign-in reaches
+			// nothing else of that host.
+			relayCloudCode:  {URL: c.cloudCodeOr(), Access: credentials.AccessSubscription, Harness: "agy", Under: "v1internal:"},
 			relayOpenRouter: {URL: orUp, Access: credentials.AccessOpenRouter},
 		}
 		creds := credentials.Plug{credentials.AccessOpenRouter: credentials.Env{Getenv: c.getenvOr()}, credentials.AccessSubscription: subs}
@@ -539,7 +547,7 @@ func start(c config) (*service, error) {
 	// Every model.responded is priced, and every turn.started of a run's
 	// session gets the run's agent and folder, before it is stored.
 	sink := cost.Sink{Table: cost.Default(), Next: engine.TurnSink(st, st)}
-	anthURL, chatURL, orURL := c.upstream, c.chatgpt, c.openrouter
+	anthURL, chatURL, orURL, ccURL := c.upstream, c.chatgpt, c.openrouter, c.cloudCodeOr()
 	if orURL == nil {
 		orURL, _ = url.Parse(openrouter)
 	}
@@ -549,23 +557,15 @@ func start(c config) (*service, error) {
 	if c.noSecrets() {
 		srv := strings.TrimSuffix(c.server, "/") + jobs.RelayPrefix
 		anthURL, orURL = mustParse(srv+relayAnthropic), mustParse(srv+relayOpenRouter)
-		chatURL = mustParse(srv + relayChatGPT)
+		chatURL, ccURL = mustParse(srv+relayChatGPT), mustParse(srv+relayCloudCode)
 	}
 	anth := gateway.New(anthURL, anthropic.Adapter{}, sink)
 	oai := gateway.New(chatURL, openai.Adapter{}, sink)
-	gws := []*gateway.Gateway{anth, oai}
-	// agy's Code Assist calls, on its own Google sign-in. A runner that
-	// holds no secret has none: the relay keeps no Google sign-in, so its
-	// agy turns are refused before they start (wire.go).
-	var gem *gateway.Gateway
-	if !c.noSecrets() {
-		ccURL := c.cloudCode
-		if ccURL == nil {
-			ccURL, _ = url.Parse(cloudCode)
-		}
-		gem = gateway.New(ccURL, gemini.Adapter{}, sink)
-		gws = append(gws, gem)
-	}
+	// agy's Code Assist calls, on its own Google sign-in: on this machine's
+	// sign-in, or, on a runner that holds no secret, the one connected on
+	// control, which the relay adds.
+	gem := gateway.New(ccURL, gemini.Adapter{}, sink)
+	gws := []*gateway.Gateway{anth, oai, gem}
 	// An OpenRouter agent's calls, under /openrouter of its base URL: one
 	// gateway per API format, both to OpenRouter.
 	orAnth := gateway.New(orURL, anthropic.Adapter{}, sink)
@@ -819,8 +819,17 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 const (
 	relayAnthropic  = "anthropic"
 	relayChatGPT    = "chatgpt"
+	relayCloudCode  = "cloudcode"
 	relayOpenRouter = "openrouter"
 )
+
+// cloudCodeOr is c.cloudCode, or agy's own Code Assist host.
+func (c config) cloudCodeOr() *url.URL {
+	if c.cloudCode != nil {
+		return c.cloudCode
+	}
+	return mustParse(cloudCode)
+}
 
 // subscriptionsDir is where control keeps connected subscriptions, in its
 // data folder.
@@ -855,11 +864,26 @@ func mustParse(s string) *url.URL {
 }
 
 // subscriptionStore is control's connected subscriptions in home, with how
-// each harness's OAuth sign-in is renewed (harness.Login).
+// each harness's OAuth sign-in is renewed (harness.Login): by control, or by
+// the harness itself in its own home on control, found on PATH.
 func subscriptionStore(home string) *credentials.Subscriptions {
-	s := &credentials.Subscriptions{Dir: filepath.Join(home, subscriptionsDir), OAuth: map[string]credentials.OAuth{}}
+	s := &credentials.Subscriptions{Dir: filepath.Join(home, subscriptionsDir), OAuth: map[string]credentials.OAuth{}, Own: map[string]credentials.Own{}}
 	for _, h := range harness.All() {
-		if l := h.Info().Login; l != nil && l.RenewURL != "" {
+		l := h.Info().Login
+		switch {
+		case l == nil:
+		case l.Keep != "":
+			path, err := exec.LookPath(h.Info().Name)
+			if err != nil {
+				path = h.Info().Name // the renewal says it could not start
+			}
+			o := credentials.Own{Home: l.Keep, File: l.File, TokenKey: l.TokenKey, ExpiryKey: l.ExpiryKey,
+				Within: time.Duration(l.RenewWithinMinutes) * time.Minute, Path: path, Args: l.RenewArgs, Unset: l.Unset, Set: l.Set}
+			if l.RenewRefused != "" {
+				o.Refused = regexp.MustCompile(l.RenewRefused)
+			}
+			s.Own[h.Info().Name] = o
+		case l.RenewURL != "":
 			s.OAuth[h.Info().Name] = credentials.OAuth{URL: l.RenewURL, ClientID: l.ClientID, AccountHeader: l.AccountHeader}
 		}
 	}
@@ -884,7 +908,8 @@ func subscriptionLogins(c config, subs *credentials.Subscriptions) *credentials.
 			path = h.Info().Name // the connect says it could not start
 		}
 		login := credentials.Login{Path: path, Args: l.Args, Prefix: l.Prefix, Valid: time.Duration(l.ValidDays) * 24 * time.Hour,
-			Home: l.Home, File: l.File, TokenKey: l.TokenKey, RefreshKey: l.RefreshKey, AccountKey: l.AccountKey}
+			Home: l.Home, File: l.File, TokenKey: l.TokenKey, RefreshKey: l.RefreshKey, AccountKey: l.AccountKey,
+			Keep: l.Keep, ExpiryKey: l.ExpiryKey, Unset: l.Unset, Set: l.Set, OnlyOn: l.OnlyOn, OnlyOnWhy: l.OnlyOnWhy}
 		if l.Token != "" {
 			login.Token = regexp.MustCompile(l.Token)
 		}
@@ -929,12 +954,19 @@ func runConnect(args []string, home string, stdin io.Reader, stdout, stderr io.W
 		fmt.Fprintf(stderr, "agentbus connect: %v\n", err)
 		return 1
 	}
-	if err := subs.Keep(args[0], si); err != nil {
+	err = subs.Keep(args[0], si)
+	if si.Home != "" {
+		_ = os.RemoveAll(si.Home) // kept, it is no longer there
+	}
+	if err != nil {
 		fmt.Fprintf(stderr, "agentbus connect: the sign-in could not be kept in %s\n", subs.Dir)
 		return 1
 	}
 	how := fmt.Sprintf("for %d days", int(l.Valid.Hours()/24))
-	if si.Refresh != "" {
+	switch {
+	case l.Keep != "":
+		how = "in " + args[0] + "'s own home there, and control runs " + args[0] + " to renew it before it expires"
+	case si.Refresh != "":
 		how = "and control renews it before it expires"
 	}
 	fmt.Fprintf(stdout, "\nConnected: %s's sign-in is kept in %s, readable by you only, %s.\n"+
@@ -1001,8 +1033,8 @@ type vendors struct {
 	// jobs.RelayPrefix; nil without a queue. A runner's turn token guards
 	// it, so it answers callers on other machines.
 	relay http.Handler
-	// gemini is agy's Code Assist gateway; nil on a runner that holds no
-	// secret.
+	// gemini is agy's Code Assist gateway: to Google, or on a runner that
+	// holds no secret, to control's relay. Nil: none.
 	gemini http.Handler
 }
 

@@ -70,6 +70,11 @@ type Launch struct {
 	Path string
 	Env  []string
 	Args []string
+	// HomeFiles are files the child needs in the session's own home, by
+	// path in it, such as agy's placeholder sign-in (harness.HomeFiles).
+	// They are written before every turn, and a turn with them that has no
+	// home of its own does not start: they would land in this user's home.
+	HomeFiles map[string][]byte
 }
 
 // Wire returns the Launch for agent, with baseURL reaching it through the
@@ -709,6 +714,12 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		if err != nil {
 			e.cfg.Logf("run.refused agent=%s reason=home", t.harness)
 			return nil, refuse(http.StatusInternalServerError, "the turn's home folder could not be made, so the turn did not start")
+		}
+	}
+	if len(l.HomeFiles) > 0 {
+		if why, err := e.writeHome(t.session, l.HomeFiles); err != nil {
+			e.cfg.Logf("run.refused agent=%s reason=%s", t.harness, why)
+			return nil, refuse(http.StatusBadRequest, err.Error())
 		}
 	}
 	// The tool server ([agent_api] tools), for a harness that takes it, unless

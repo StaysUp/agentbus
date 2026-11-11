@@ -112,6 +112,34 @@ type Login struct {
 	// endpoint and its CLI's client id. AccountHeader names the header that
 	// carries the account on a model call.
 	RenewURL, ClientID, AccountHeader string
+	// A login whose folder control keeps as the harness's own home, where
+	// the harness itself renews its sign-in (agy). Keep is the folder's name
+	// in control's subscriptions folder. ExpiryKey is the dotted JSON path
+	// of the access token's expiry, an RFC 3339 time. Control reads only the
+	// access token and that expiry, never the refresh token.
+	Keep, ExpiryKey string
+	// RenewArgs are the harness's arguments that make it renew its own
+	// sign-in in that home without a model turn. It does so only when less
+	// than RenewWithinMinutes are left. RenewRefused matches what it prints
+	// when the vendor refused the renewal.
+	RenewArgs          []string
+	RenewWithinMinutes int
+	RenewRefused       string
+	// Unset are variables the login and the renewal run without; Set are
+	// NAME=value pairs they run with, such as a D-Bus address that reaches
+	// no bus, so the sign-in never goes to a keyring.
+	Unset, Set []string
+	// OnlyOn is the one GOOS this login keeps its sign-in in a file on, or
+	// "" for every one. OnlyOnWhy says why, for the person.
+	OnlyOn, OnlyOnWhy string
+}
+
+// HomeFiles is a harness that, on a runner that holds no secret, needs files
+// in the turn's own home to start: a placeholder sign-in, for one. Paths are
+// relative to the home. The engine writes them before every turn, and only
+// into a home of the session's own.
+type HomeFiles interface {
+	RelayHome(placeholder string) map[string][]byte
 }
 
 // Access is one way a harness reaches a model.

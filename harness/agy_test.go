@@ -119,3 +119,33 @@ func TestAgyContext(t *testing.T) {
 		t.Error("access")
 	}
 }
+
+// On a runner that holds no secret, agy is pointed at the service as on its
+// own sign-in, and its home gets a placeholder sign-in: the placeholder as
+// its access token, no refresh token, so it never renews it, and agy's own
+// sign-in method.
+func TestAgyRelay(t *testing.T) {
+	h := agy{}
+	env, args := h.WireRelay("http://127.0.0.1:9/s/x/t/t_1", "abr_placeholder")
+	if !slices.Equal(env, []string{"CLOUD_CODE_URL=http://127.0.0.1:9/s/x/t/t_1"}) || len(args) != 0 {
+		t.Fatalf("%q %q", env, args)
+	}
+	files := h.RelayHome("abr_placeholder")
+	b, ok := files[".gemini/antigravity-cli/antigravity-oauth-token"]
+	if len(files) != 1 || !ok {
+		t.Fatalf("%v", files)
+	}
+	var f struct {
+		Token  map[string]string `json:"token"`
+		Method string            `json:"auth_method"`
+	}
+	if err := json.Unmarshal(b, &f); err != nil || f.Token["access_token"] != "abr_placeholder" || f.Token["token_type"] != "Bearer" ||
+		f.Token["refresh_token"] != "" || f.Token["expiry"] != "2099-01-01T00:00:00Z" || f.Method != "consumer" {
+		t.Fatalf("%s", b)
+	}
+	l := h.Info().Login
+	if l == nil || l.Keep == "" || l.File != ".gemini/antigravity-cli/antigravity-oauth-token" || l.RefreshKey != "" ||
+		!slices.Equal(l.RenewArgs, []string{"models"}) || l.RenewWithinMinutes >= 5 || !slices.Equal(l.Set, []string{"DBUS_SESSION_BUS_ADDRESS=disabled:"}) {
+		t.Fatalf("%+v", l)
+	}
+}

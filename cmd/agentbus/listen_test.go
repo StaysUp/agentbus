@@ -95,8 +95,8 @@ func TestRouteOpenRouter(t *testing.T) {
 	}
 }
 
-// A runner that holds no secret has no agy gateway: its Code Assist path is
-// answered 404 and sent nowhere.
+// With no agy gateway, the Code Assist path is answered 404 and sent
+// nowhere.
 func TestRouteNoGemini(t *testing.T) {
 	hit := false
 	gw := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hit = true })

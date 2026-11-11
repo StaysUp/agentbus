@@ -6,10 +6,12 @@ package credentials
 // Never the Mac Keychain, never a runner. Only used when the policy says
 // subscriptions_on_runners = "own".
 //
-// Two kinds of sign-in. A long-lived token works until it expires (claude
+// Three kinds of sign-in. A long-lived token works until it expires (claude
 // setup-token: a year). An OAuth sign-in (codex's ChatGPT sign-in) is an
 // access token that expires soon, with a refresh token that gets a new one:
-// control renews it itself, by the vendor's own rule, before it expires.
+// control renews it itself, by the vendor's own rule, before it expires. A
+// sign-in the harness keeps in a home of control's own (agy's) is renewed by
+// the harness itself, which control runs there (own.go).
 
 import (
 	"bytes"
@@ -35,9 +37,13 @@ type Subscriptions struct {
 	OAuth map[string]OAuth
 	// Client makes the renewals' calls. Nil: a client with a 30 s limit.
 	Client *http.Client
+	// Own is each harness that keeps and renews its own sign-in in a home
+	// of control's (own.go).
+	Own map[string]Own
 
-	renewing sync.Mutex // one renewal at a time: a refresh token works once
-	mu       sync.Mutex // one write of a harness's file at a time
+	renewing sync.Mutex   // one renewal at a time: a refresh token works once
+	mu       sync.Mutex   // one write of a harness's file at a time
+	homes    sync.RWMutex // a harness's own home: written by it under the write lock
 }
 
 // OAuth is how a harness's OAuth sign-in is renewed and sent.
@@ -55,6 +61,9 @@ type OAuth struct {
 type Signin struct {
 	Token, Refresh, Account string
 	Expires                 time.Time
+	// Home is the login's folder, for a harness that keeps its own sign-in
+	// there (Own): Keep makes it the harness's home on control.
+	Home string
 }
 
 // kept is one harness's file.
@@ -75,7 +84,7 @@ type Status struct {
 	Connected   bool       `json:"connected" doc:"A token is kept for it."`
 	ConnectedAt *time.Time `json:"connected_at,omitempty" doc:"When it was connected."`
 	ExpiresAt   *time.Time `json:"expires_at,omitempty" doc:"When the token stops working, as the vendor says. With renews, control gets a new one before then."`
-	Renews      bool       `json:"renews" doc:"Control renews the token itself before it expires, with what the login gave it (codex's ChatGPT sign-in)."`
+	Renews      bool       `json:"renews" doc:"Control renews the token itself before it expires, with what the login gave it (codex's ChatGPT sign-in), or runs the harness to renew its own (agy's Google sign-in)."`
 	Expired     bool       `json:"expired" doc:"The sign-in cannot be used: its time is up, or the vendor refused to renew it. Connect again."`
 	Error       string     `json:"error,omitempty" doc:"Why it cannot be used, when it cannot."`
 }
@@ -110,11 +119,19 @@ func (s *Subscriptions) Put(harness, token string, valid time.Duration) error {
 	return s.Keep(harness, Signin{Token: token, Expires: s.now().UTC().Add(valid)})
 }
 
-// Keep keeps the sign-in a login gave for harness.
+// Keep keeps the sign-in a login gave for harness. For a harness that keeps
+// its own (Own), the login's folder becomes its home here, and only the
+// connect's time is written beside it.
 func (s *Subscriptions) Keep(harness string, si Signin) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := s.now().UTC()
+	if o, ok := s.Own[harness]; ok {
+		if err := s.keepHome(o, si.Home); err != nil {
+			return err
+		}
+		return s.write(harness, kept{ConnectedAt: now})
+	}
 	return s.write(harness, kept{Token: si.Token, Refresh: si.Refresh, Account: si.Account, ConnectedAt: now, ExpiresAt: si.Expires.UTC()})
 }
 
@@ -122,6 +139,10 @@ func (s *Subscriptions) write(harness string, k kept) error {
 	p, err := s.file(harness)
 	if err != nil {
 		return err
+	}
+	if _, ok := s.Own[harness]; ok {
+		// The sign-in stays in the harness's own file only.
+		k.Token, k.ExpiresAt = "", time.Time{}
 	}
 	b, err := json.Marshal(k)
 	if err != nil {
@@ -157,21 +178,36 @@ func (s *Subscriptions) read(harness string) (kept, error) {
 		return kept{}, errors.New("credentials: the subscription could not be read")
 	}
 	var k kept
-	if json.Unmarshal(b, &k) != nil || k.Token == "" {
+	if json.Unmarshal(b, &k) != nil {
+		return kept{}, errors.New("credentials: the subscription's file cannot be used; connect again")
+	}
+	if o, ok := s.Own[harness]; ok {
+		if k.Token, k.ExpiresAt, err = s.ownSignin(o); err != nil {
+			return kept{}, err
+		}
+		return k, nil
+	}
+	if k.Token == "" {
 		return kept{}, errors.New("credentials: the subscription's file cannot be used; connect again")
 	}
 	return k, nil
 }
 
 // renews says k is renewed by control: it has a refresh token, and harness a
-// way to renew it.
+// way to renew it; or the harness renews its own sign-in, which control runs.
 func (s *Subscriptions) renews(harness string, k kept) bool {
+	if _, ok := s.Own[harness]; ok {
+		return true
+	}
 	_, ok := s.OAuth[harness]
 	return ok && k.Refresh != ""
 }
 
-// due says k should be renewed now, by the vendor's rule.
-func (s *Subscriptions) due(k kept) bool {
+// due says harness's k should be renewed now, by the vendor's rule.
+func (s *Subscriptions) due(harness string, k kept) bool {
+	if o, ok := s.Own[harness]; ok {
+		return k.ExpiresAt.Sub(s.now()) < o.Within
+	}
 	last := k.RenewedAt
 	if last.IsZero() {
 		last = k.ConnectedAt
@@ -192,9 +228,12 @@ func (s *Subscriptions) Status(harness string) (Status, error) {
 	}
 	st.Connected, st.ConnectedAt, st.ExpiresAt = true, &k.ConnectedAt, &k.ExpiresAt
 	st.Renews = s.renews(harness, k)
+	_, own := s.Own[harness]
 	switch {
 	case k.Refused:
 		st.Expired, st.Error = true, "the vendor refused to renew the sign-in: connect again"
+	case own && !s.now().Before(k.ExpiresAt):
+		st.Expired, st.Error = true, "the sign-in's time is up and "+harness+" has not renewed it: connect again"
 	case !st.Renews && !s.now().Before(k.ExpiresAt):
 		st.Expired, st.Error = true, "the token's time is up: connect again"
 	}
@@ -212,6 +251,9 @@ func (s *Subscriptions) Remove(harness string) error {
 	if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return errors.New("credentials: the subscription could not be removed")
 	}
+	if o, ok := s.Own[harness]; ok {
+		return s.removeOwnHome(o)
+	}
 	return nil
 }
 
@@ -225,7 +267,7 @@ func (s *Subscriptions) Credential(n Need) (Cred, error) {
 	case err != nil:
 		return Cred{}, &Missing{Why: "the " + n.Harness + " subscription kept on control cannot be read; connect it again"}
 	}
-	if s.renews(n.Harness, k) && (k.Refused || s.due(k)) {
+	if s.renews(n.Harness, k) && (k.Refused || s.due(n.Harness, k)) {
 		var rerr error
 		k, _, rerr = s.renew(n.Harness)
 		switch {
@@ -254,9 +296,16 @@ func (s *Subscriptions) Credential(n Need) (Cred, error) {
 // renewal it tried, with its error.
 func (s *Subscriptions) RenewDue() map[string]error {
 	tried := map[string]error{}
+	var names []string
 	for h := range s.OAuth {
+		names = append(names, h)
+	}
+	for h := range s.Own {
+		names = append(names, h)
+	}
+	for _, h := range names {
 		k, err := s.read(h)
-		if err != nil || !s.renews(h, k) || k.Refused || !s.due(k) {
+		if err != nil || !s.renews(h, k) || k.Refused || !s.due(h, k) {
 			continue
 		}
 		if _, did, err := s.renew(h); did {
@@ -285,8 +334,14 @@ func (s *Subscriptions) renew(harness string) (kept, bool, error) {
 	if k.Refused {
 		return k, false, errRefused
 	}
+	if own, ok := s.Own[harness]; ok {
+		if !s.due(harness, k) {
+			return k, false, nil // another renewal came first
+		}
+		return s.renewOwn(harness, own, k)
+	}
 	o, ok := s.OAuth[harness]
-	if !ok || k.Refresh == "" || !s.due(k) {
+	if !ok || k.Refresh == "" || !s.due(harness, k) {
 		return k, false, nil // another renewal came first
 	}
 	si, err := refresh(s.client(), o, k.Refresh)

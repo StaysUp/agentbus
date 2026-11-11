@@ -29,6 +29,7 @@ func runWire(getenv func(string) string, environ func() []string, lookPath func(
 			return engine.Launch{}, engine.Refused(http.StatusBadRequest, h.Info().Label+" cannot run on access "+acc.Kind)
 		}
 		var env, pre []string
+		var files map[string][]byte
 		switch {
 		case acc.Placeholder != "" && (acc.Kind == "" || acc.Kind == harness.Subscription):
 			// A runner that holds no secrets: the child's sign-in is the
@@ -39,6 +40,9 @@ func runWire(getenv func(string) string, environ func() []string, lookPath func(
 					" subscription cannot be used on a runner yet; use an OpenRouter agent there, or run this agent with agentbus up")
 			}
 			env, pre = h.WireRelay(baseURL, acc.Placeholder)
+			if f, ok := h.(harness.HomeFiles); ok {
+				files = f.RelayHome(acc.Placeholder)
+			}
 		case acc.Placeholder != "" && acc.Kind == harness.OpenRouter:
 			// The key's variable holds the placeholder; control's gateway
 			// adds the key from its own environment. Nothing of this
@@ -65,7 +69,7 @@ func runWire(getenv func(string) string, environ func() []string, lookPath func(
 		if err != nil {
 			return engine.Launch{}, engine.ErrNotFound
 		}
-		return engine.Launch{Path: bin, Env: childEnv(environ(), env), Args: pre}, nil
+		return engine.Launch{Path: bin, Env: childEnv(environ(), env), Args: pre, HomeFiles: files}, nil
 	}
 }
 

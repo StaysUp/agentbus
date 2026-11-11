@@ -168,3 +168,33 @@ func TestFolderDocPipe(t *testing.T) {
 		}
 	}
 }
+
+// A harness's files go into the session's own home only, readable by its
+// owner, and never outside it. A session with no home gets none.
+func TestWriteHome(t *testing.T) {
+	homes := filepath.Join(t.TempDir(), "homes")
+	e := &Engine{cfg: Config{Homes: homes}}
+	files := map[string][]byte{".gemini/antigravity-cli/antigravity-oauth-token": []byte(`{"token":{}}`)}
+	if why, err := e.writeHome("s1", files); err == nil || why != "home_files_no_home" {
+		t.Fatalf("no home: %q %v", why, err)
+	}
+	if _, err := os.Stat(homes); !os.IsNotExist(err) {
+		t.Fatalf("a home was made: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(homes, "s1"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if why, err := e.writeHome("s1", files); err != nil {
+		t.Fatalf("%q %v", why, err)
+	}
+	fi, err := os.Stat(filepath.Join(homes, "s1", ".gemini", "antigravity-cli", "antigravity-oauth-token"))
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("%v %v", err, fi)
+	}
+	if _, err := e.writeHome("s1", map[string][]byte{"../s2/x": nil}); err == nil {
+		t.Fatal("a file outside the home was written")
+	}
+	if _, err := (&Engine{}).writeHome("s1", files); err == nil {
+		t.Fatal("a service without homes wrote a home's files")
+	}
+}

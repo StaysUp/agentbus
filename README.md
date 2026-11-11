@@ -325,13 +325,17 @@ as its model credential. Control's gateway swaps it for the real one on the way 
 - An OpenRouter agent: control reads the key from its own environment, by the variable's name
   (`key_env`).
 - A subscription agent: your own subscription, for runners on your own machines. Connect it once
-  on control with `agentbus connect claude` or `agentbus connect codex` (or Connect in the
-  cockpit), and set `subscriptions_on_runners = "own"` in control's `permissions.toml`. It is off
-  by default. codex's login shows a link and a one-time code: open the link, sign in to ChatGPT,
-  and enter the code there. Control keeps the ChatGPT sign-in in its own data folder, never in
-  `~/.codex` or the Keychain, and renews it before it expires.
+  on control with `agentbus connect claude`, `agentbus connect codex` or `agentbus connect agy`
+  (or Connect in the cockpit), and set `subscriptions_on_runners = "own"` in control's
+  `permissions.toml`. It is off by default. codex's login shows a link and a one-time code: open
+  the link, sign in to ChatGPT, and enter the code there. Control keeps the ChatGPT sign-in in its
+  own data folder, never in `~/.codex` or the Keychain, and renews it before it expires. agy's
+  login shows a link: sign in to Google, and paste the code the browser shows. Control keeps agy's
+  sign-in in a home of agy's own in its data folder, as agy wrote it, and runs `agy models` there
+  to let agy renew it before it expires. Connecting agy needs control on Linux.
 
-A runner finds `claude` and `codex` on its own `PATH`. A runner started as a service gets the
+A runner finds `claude`, `codex` and `agy` on its own `PATH`, and control finds `agy` on its own
+to connect and renew it. A runner started as a service gets the
 service's `PATH`, which is often short. With codex installed by npm into `~/.npm-global/bin`, a
 systemd user unit needs that folder in its `PATH`:
 
@@ -399,8 +403,8 @@ with the reason. Details: `docs/CLIENT_API.md`, "Network control".
   files in its copy. Tests it runs run on your folder as it is. A copy started from the asking
   session's latest checkpoint is a later option.
 - **agy (Antigravity) runs on its own Google sign-in only.** It speaks the Gemini format, so it has
-  no OpenRouter access. Control has no Google sign-in to relay, so a runner that holds no secrets
-  refuses its turns. It reads the folder's `AGENTS.md` and `GEMINI.md` itself, but it has no flag
+  no OpenRouter access. On a runner that holds no secrets it uses the sign-in connected on control.
+  It reads the folder's `AGENTS.md` and `GEMINI.md` itself, but it has no flag
   for instructions of a run's own, so `instructions.md` and the "asked by" line do not reach it.
   A turn with `forbid` set, or with `subagents = false`, is refused: the gateway's guard does not
   read Gemini replies yet, and agy has no switch for its subagents. Its permissions for a turn
@@ -408,6 +412,14 @@ with the reason. Details: `docs/CLIENT_API.md`, "Network control".
   commands `allow` lists. A tool call no rule allows ends its turn there, since headless agy cannot
   ask and does not tell the model. With network control on, agy cannot reach Google's
   sign-in service. The context view of its model calls is not split into pieces yet.
+- **agy's Google sign-in on runners is your own risk with Google.** Google's Antigravity terms
+  (clause 6) call using third-party tools to access the service a breach, and Google has suspended
+  accounts for it. AgentBus keeps this as close to agy's own use as it can: Google's own,
+  unmodified agy signs in, renews its own sign-in and runs every turn, on your own machines. Control
+  never reads agy's refresh token or its client secret; it passes the access token on to Google's
+  Code Assist only. Google has not said this is allowed. The risk sits on your Google account, and
+  it is off unless you set `subscriptions_on_runners = "own"`. A runner's agy also sends the turn's
+  placeholder to Google's account lookup, which refuses it; that token works only with control.
 - **codex's ChatGPT sign-in on a runner is not yet checked against a live login.** Everything up
   to the login is: codex's device login on control, and codex sending, through a provider of its
   own, the same request it sends chatgpt.com, with no secret on the runner (codex-cli 0.164.0 and

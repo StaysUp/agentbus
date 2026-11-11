@@ -22,7 +22,8 @@ func (agy) Info() Info {
 		// Where agy sends its Code Assist calls when the person points it
 		// elsewhere (Wire).
 		OwnEndpointEnv: "CLOUD_CODE_URL",
-		// Only its own Google sign-in. It speaks the Gemini format only, so
+		// Only its own Google sign-in, on this machine or relayed from
+		// control (Login). It speaks the Gemini format only, so
 		// OpenRouter cannot serve it, and a Gemini API key is not wired yet.
 		Access: []Access{
 			{Kind: Subscription, Label: "Google sign-in", Models: []string{"gemini-3.8-flash-medium", "gemini-4-argon-medium"}},
@@ -33,8 +34,40 @@ func (agy) Info() Info {
 		// $HOME/.gemini; no variable moves that folder. A home of its own
 		// starts signed out (agy then prints a login link and waits).
 		ConfigDir: ".gemini",
+		// agy acp --login, with HOME set to a folder of control's own and a
+		// D-Bus address that reaches no bus, prints a link and reads the pasted code from
+		// its terminal. It keeps the sign-in in a plain JSON file in that
+		// home (0600): token.access_token, token.refresh_token and
+		// token.expiry, an access token of one hour (agy 1.5.5, 2026-11-11,
+		// his own sign-in in a scratch VM). Without a bus it skips the
+		// keyring (changelog 1.1.3). Control keeps that home as it is, and
+		// agy renews its own file there: agy models renews it when less than
+		// five minutes are left, and runs no model turn (measured in a
+		// scratch VM with a dummy refresh token: at four minutes left it
+		// asked oauth2.googleapis.com, at six it did not). A refused renewal
+		// leaves the file as it was and prints "Please sign in to view
+		// available models".
+		//
+		// AgentBus never reads or uses agy's client secret: only agy renews.
+		Login: &Login{Args: []string{"acp", "--login"},
+			Home: "HOME", File: agyTokenFile, Keep: "agy-home",
+			TokenKey: "token.access_token", ExpiryKey: "token.expiry",
+			RenewArgs: []string{"models"}, RenewWithinMinutes: 4, RenewRefused: `(?i)please sign in`,
+			// With no address set, agy still found this user's bus at
+			// /run/user/<uid>/bus and asked it for a keyring; "disabled:" is
+			// an address agy cannot use, so it keeps the sign-in in its file
+			// whatever the machine runs (agy 1.5.5, 2026-11-11, from its log:
+			// "invalid bus address ... falling back to file").
+			Set: []string{"DBUS_SESSION_BUS_ADDRESS=disabled:"},
+			Unset: []string{"XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+				"XDG_STATE_HOME", "XDG_CACHE_HOME", "DISPLAY", "WAYLAND_DISPLAY", "CLOUD_CODE_URL"},
+			OnlyOn: "linux", OnlyOnWhy: "agy keeps its sign-in in a file only on Linux with no D-Bus bus to reach; " +
+				"on macOS its docs say it uses the Keychain, which control never reads. Run control on Linux to connect agy"},
 	}
 }
+
+// agyTokenFile is where agy keeps its Google sign-in, under its HOME.
+const agyTokenFile = ".gemini/antigravity-cli/antigravity-oauth-token"
 
 // Wire: agy sends every Code Assist call, model calls included, to
 // CLOUD_CODE_URL when it is set, else to https://daily-cloudcode-pa.googleapis.com.
@@ -47,8 +80,27 @@ func (agy) Wire(baseURL string) (env, args []string) {
 // WireOpenRouter is never used: agy offers no OpenRouter access (Info).
 func (agy) WireOpenRouter(OpenRouterWire) (env, args []string) { return nil, nil }
 
-// WireRelay is never used: agy has no Login.
-func (agy) WireRelay(string, string) (env, args []string) { return nil, nil }
+// WireRelay: as Wire. The placeholder is in the home's sign-in file
+// (RelayHome), and agy sends it as the bearer of every Code Assist call,
+// which control's relay replaces with the person's own sign-in.
+func (a agy) WireRelay(baseURL, _ string) (env, args []string) { return a.Wire(baseURL) }
+
+// RelayHome: a session's home starts signed out, and agy then waits for a
+// login. This file makes it start signed in on the placeholder: an access
+// token, no refresh token, so agy never tries to renew it, and an expiry far
+// off. auth_method "consumer" is agy's own Google sign-in; any other value
+// was refused ("Unknown auth method"), and without it agy asked for a login.
+// id_token_email spares a lookup of the account (agy 1.5.5, 2026-11-11, in a
+// scratch VM against a local listener: every Code Assist call then carried
+// the placeholder as its bearer).
+func (agy) RelayHome(placeholder string) map[string][]byte {
+	b, _ := json.Marshal(map[string]any{
+		"token":          map[string]string{"access_token": placeholder, "token_type": "Bearer", "expiry": "2099-01-01T00:00:00Z"},
+		"auth_method":    "consumer",
+		"id_token_email": "agentbus@runner.invalid",
+	})
+	return map[string][]byte{agyTokenFile: b}
+}
 
 // Edit: agy's permission rules hold paths, as Claude Code's do; a name that
 // cannot go in one gets no edit rule.

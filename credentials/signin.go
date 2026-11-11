@@ -7,12 +7,17 @@ package credentials
 // login ends, and removes the folder. Never the person's own folder, and
 // never the Keychain. Of what such a login prints, the person sees the links
 // and the one-time code they enter at the link.
+//
+// A login with Keep (agy acp --login) is run the same way, but its folder is
+// kept: it becomes the harness's own home on control, where the harness
+// renews its own sign-in (own.go).
 
 import (
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -29,17 +34,28 @@ func (l Login) home(dir string) (env []string, home string, err error) {
 	if home, err = os.MkdirTemp(dir, ".login-*"); err != nil {
 		return nil, "", errors.New("credentials: the login's folder could not be made")
 	}
+	return l.envWith(home), home, nil
+}
+
+// envWith is the environment l runs in: l.Home set to home, l.Set set, and
+// none of l.Unset.
+func (l Login) envWith(home string) []string {
 	base := l.Env
 	if base == nil {
 		base = os.Environ()
 	}
-	env = make([]string, 0, len(base)+1)
+	drop := append([]string{l.Home}, l.Unset...)
+	for _, kv := range l.Set {
+		k, _, _ := strings.Cut(kv, "=")
+		drop = append(drop, k)
+	}
+	env := make([]string, 0, len(base)+len(l.Set)+1)
 	for _, kv := range base {
-		if k, _, _ := strings.Cut(kv, "="); k != l.Home {
+		if k, _, _ := strings.Cut(kv, "="); !slices.Contains(drop, k) {
 			env = append(env, kv)
 		}
 	}
-	return append(env, l.Home+"="+home), home, nil
+	return append(append(env, l.Set...), l.Home+"="+home)
 }
 
 // signin is what the login gave: the token it printed (printed is its
@@ -58,10 +74,29 @@ func (l Login) signin(printed []byte, home string, now time.Time) (Signin, bool)
 	if json.Unmarshal(b, &v) != nil {
 		return Signin{}, false
 	}
+	if l.Keep != "" {
+		// The harness keeps its sign-in there and renews it itself: only
+		// the access token and its expiry are read, and the folder goes on
+		// to be the harness's home on control (Subscriptions.Keep).
+		tok, exp, ok := ownFields(v, l.TokenKey, l.ExpiryKey)
+		return Signin{Token: tok, Expires: exp, Home: home}, ok
+	}
 	si := Signin{Token: field(v, l.TokenKey), Refresh: field(v, l.RefreshKey), Account: field(v, l.AccountKey)}
 	exp, ok := expiry(si.Token)
 	si.Expires = exp
 	return si, ok && si.Token != ""
+}
+
+// ownFields are the access token and its expiry, at the dotted paths
+// tokenKey and expiryKey of v, a harness's own sign-in file. ok is false when
+// either is missing or the expiry is not an RFC 3339 time.
+func ownFields(v any, tokenKey, expiryKey string) (string, time.Time, bool) {
+	tok := field(v, tokenKey)
+	exp, err := time.Parse(time.RFC3339Nano, field(v, expiryKey))
+	if tok == "" || err != nil {
+		return "", time.Time{}, false
+	}
+	return tok, exp.UTC(), true
 }
 
 // field is the string at a dotted path of a JSON value, or "".

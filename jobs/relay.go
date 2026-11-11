@@ -42,6 +42,10 @@ type Upstream struct {
 	URL     *url.URL
 	Access  string // subscription or openrouter
 	Harness string // for a subscription: the harness whose vendor this is
+	// Under, when set, is how every vendor path relayed here starts, such
+	// as "v1internal:" for agy's Code Assist methods. Any other path gets
+	// no credential.
+	Under string
 }
 
 // Relay answers RelayPrefix. It is nil without Config.Relay.
@@ -58,7 +62,7 @@ var discard = log.New(io.Discard, "", 0)
 func (s *Server) relay(w http.ResponseWriter, r *http.Request) {
 	name, rest, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, RelayPrefix), "/")
 	up, ok := s.cfg.Relay[name]
-	if !ok {
+	if !ok || !strings.HasPrefix(rest, up.Under) {
 		fail(w, http.StatusNotFound, "control relays no model calls on this path")
 		return
 	}

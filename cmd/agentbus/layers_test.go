@@ -138,6 +138,18 @@ var controlAllowed = []string{
 	"credentials/subscriptions.go Subscriptions.write os.Rename",
 	"credentials/subscriptions.go Subscriptions.Remove os.Remove",
 	"credentials/subscriptions.go Subscriptions.read os.ReadFile",
+	// A harness that renews its own sign-in (agy) keeps it in a home inside
+	// the subscriptions folder: control moves the login's folder there,
+	// reads the access token and its expiry, runs the harness there to
+	// renew it, and removes the home on a disconnect.
+	"credentials/own.go Subscriptions.ownSignin os.ReadFile",
+	"credentials/own.go Subscriptions.keepHome os.Lstat",
+	"credentials/own.go Subscriptions.keepHome os.MkdirTemp",
+	"credentials/own.go Subscriptions.keepHome os.Rename",
+	"credentials/own.go Subscriptions.keepHome os.Remove",
+	"credentials/own.go Subscriptions.keepHome os.RemoveAll",
+	"credentials/own.go Subscriptions.removeOwnHome os.RemoveAll",
+	"credentials/own.go Subscriptions.runOwn exec.CommandContext",
 	"agents/agents.go Store.save os.CreateTemp",
 	"agents/agents.go Store.save os.Remove",
 	"agents/agents.go Store.save os.Rename",

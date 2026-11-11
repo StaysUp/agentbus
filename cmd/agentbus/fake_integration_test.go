@@ -129,6 +129,27 @@ func fakeAgent() {
 			}
 		}
 	}
+	// With AGENTBUS_FAKE_AGY_BODY, one model call as agy makes it: to
+	// CLOUD_CODE_URL, with the access token of the sign-in file in its HOME
+	// as the bearer.
+	if b := os.Getenv("AGENTBUS_FAKE_AGY_BODY"); b != "" {
+		var f struct {
+			Token struct {
+				Access string `json:"access_token"`
+			} `json:"token"`
+		}
+		raw, _ := os.ReadFile(filepath.Join(os.Getenv("HOME"), ".gemini", "antigravity-cli", "antigravity-oauth-token"))
+		json.Unmarshal(raw, &f)
+		req, _ := http.NewRequest("POST", os.Getenv("CLOUD_CODE_URL")+"/v1internal:streamGenerateContent?alt=sse", strings.NewReader(b))
+		req.Header.Set("Content-Type", "application/json")
+		if f.Token.Access != "" {
+			req.Header.Set("Authorization", "Bearer "+f.Token.Access)
+		}
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+	}
 	// With AGENTBUS_FAKE_ASK, a turn whose prompt is "ask someone" asks
 	// another agent through the API, with its own token, as agentbus-api
 	// does: POST /api/v0/turns with that body.

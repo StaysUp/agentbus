@@ -115,6 +115,30 @@ func (e *Engine) home(session string, first bool, h harness.Harness, env []strin
 	return setEnv(out, set), made, nil
 }
 
+// writeHome writes files into session's own home, each by its path there,
+// readable by its owner only. A session with no home of its own gets none,
+// so nothing is written into this user's home: why names the reason for the
+// service log, and the error says it for the person.
+func (e *Engine) writeHome(session string, files map[string][]byte) (why string, err error) {
+	if e.cfg.Homes == "" || !SessionShape.MatchString(session) {
+		return "home_files_no_home", errors.New("this agent needs a home of its own on a runner that holds no secrets, and this service gives turns none")
+	}
+	root, err := os.OpenRoot(filepath.Join(e.cfg.Homes, session))
+	if err != nil {
+		return "home_files_no_home", errors.New("this session began before turns had homes of their own, so this agent cannot start in it here; start a new conversation")
+	}
+	defer root.Close()
+	for name, b := range files {
+		if err := root.MkdirAll(filepath.Dir(name), 0o700); err != nil {
+			return "home_files", errors.New("the agent's files could not be written into the turn's home, so the turn did not start")
+		}
+		if err := root.WriteFile(name, b, 0o600); err != nil {
+			return "home_files", errors.New("the agent's files could not be written into the turn's home, so the turn did not start")
+		}
+	}
+	return "", nil
+}
+
 // RemoveHome removes session's home, with everything its turns left in it.
 // Call it when the session is removed. A service without homes, or a session
 // that has none, has nothing to remove.

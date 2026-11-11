@@ -75,6 +75,7 @@ type noSecretsSetup struct {
 	serverHome      string
 	runnerHome      string
 	anth, or, chat  *fakeVendor
+	cc              *fakeVendor // agy's Code Assist
 	report, release string
 }
 
@@ -89,7 +90,7 @@ func startNoSecrets(t *testing.T) *noSecretsSetup {
 	t.Setenv("ANTHROPIC_BASE_URL", "")
 	t.Setenv("OPENAI_BASE_URL", "")
 	t.Setenv("AB_TEST_OR_KEY", "") // in this process only the server's getenv has it
-	ns := &noSecretsSetup{anth: newFakeVendor(t), or: newFakeVendor(t), chat: newFakeVendor(t), serverHome: t.TempDir()}
+	ns := &noSecretsSetup{anth: newFakeVendor(t), or: newFakeVendor(t), chat: newFakeVendor(t), cc: newFakeVendor(t), serverHome: t.TempDir()}
 	look := func(string) (string, error) { return self, nil }
 	// The server's own environment holds the API key.
 	serverEnv := func(k string) string {
@@ -99,7 +100,7 @@ func startNoSecrets(t *testing.T) *noSecretsSetup {
 		return os.Getenv(k)
 	}
 	ns.server, err = start(config{mode: modeServer, listen: "127.0.0.1:0", home: ns.serverHome, upstream: mustURL(ns.anth.URL),
-		chatgpt: mustURL(ns.chat.URL), openrouter: mustURL(ns.or.URL), getenv: serverEnv, logf: t.Logf,
+		chatgpt: mustURL(ns.chat.URL), openrouter: mustURL(ns.or.URL), cloudCode: mustURL(ns.cc.URL), getenv: serverEnv, logf: t.Logf,
 		heartbeat: 100 * time.Millisecond, turnWait: 10 * time.Second})
 	if err != nil {
 		t.Fatal(err)
@@ -322,8 +323,9 @@ func TestRunnerUsesConnectedSubscription(t *testing.T) {
 		}
 	}
 	if code := callAPI(t, ns.server, ns.tok, "GET", "/api/v0/subscriptions", nil, &list); code != 200 || !list.On ||
-		len(list.Subscriptions) != 2 || list.Subscriptions[0].Harness != "claude" || list.Subscriptions[0].Connected ||
-		list.Subscriptions[1].Harness != "codex" || list.Subscriptions[1].Connected {
+		len(list.Subscriptions) != 3 || list.Subscriptions[0].Harness != "agy" || list.Subscriptions[0].Connected ||
+		list.Subscriptions[1].Harness != "claude" || list.Subscriptions[1].Connected ||
+		list.Subscriptions[2].Harness != "codex" || list.Subscriptions[2].Connected {
 		t.Fatalf("subscriptions: %d %+v", code, list)
 	}
 	// Connected: the vendor gets the person's token, the agent a placeholder.
@@ -345,7 +347,7 @@ func TestRunnerUsesConnectedSubscription(t *testing.T) {
 	if strings.Contains(string(b), "fake-subscription-token-for-tests") {
 		t.Fatal("the agent's environment holds the token")
 	}
-	if code := callAPI(t, ns.server, ns.tok, "GET", "/api/v0/subscriptions", nil, &list); code != 200 || !list.Subscriptions[0].Connected {
+	if code := callAPI(t, ns.server, ns.tok, "GET", "/api/v0/subscriptions", nil, &list); code != 200 || list.Subscriptions[1].Harness != "claude" || !list.Subscriptions[1].Connected {
 		t.Fatalf("subscriptions: %d %+v", code, list)
 	}
 }
@@ -461,8 +463,134 @@ func TestRunnerUsesConnectedCodexSubscription(t *testing.T) {
 			Connected, Renews bool
 		}
 	}
-	if code := callAPI(t, ns.server, ns.tok, "GET", "/api/v0/subscriptions", nil, &list); code != 200 || len(list.Subscriptions) != 2 ||
-		!list.Subscriptions[1].Connected || !list.Subscriptions[1].Renews {
+	if code := callAPI(t, ns.server, ns.tok, "GET", "/api/v0/subscriptions", nil, &list); code != 200 || len(list.Subscriptions) != 3 ||
+		list.Subscriptions[2].Harness != "codex" || !list.Subscriptions[2].Connected || !list.Subscriptions[2].Renews {
+		t.Fatalf("subscriptions: %d %+v", code, list)
+	}
+}
+
+// agy on its Google sign-in, connected on the server: agy's own home there
+// holds it, and the relay adds its access token to the runner's Code Assist
+// calls. The runner's agy starts signed in on a placeholder file in the
+// session's own home; its call carries the placeholder, and the vendor sees
+// the person's token. Only Code Assist's methods are relayed, and the
+// sign-in goes to its own vendor only.
+func TestRunnerUsesConnectedAgySubscription(t *testing.T) {
+	ns := startNoSecrets(t)
+	ns.cc.mu.Lock()
+	ns.cc.stream = []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"pong"}]},"finishReason":"STOP"}],` +
+		`"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1,"totalTokenCount":4},"modelVersion":"gemini-3.8-flash","responseId":"r1"}}` + "\r\n\r\n")
+	ns.cc.mu.Unlock()
+	if err := os.WriteFile(filepath.Join(ns.serverHome, "permissions.toml"), []byte("subscriptions_on_runners = \"own\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTBUS_FAKE_CALL", "")
+	t.Setenv("AGENTBUS_FAKE_AGY_BODY", `{"model":"gemini-3.8-flash","project":"p","requestId":"q","request":{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`)
+	t.Setenv("AGENTBUS_FAKE_STDOUT", `{"conversation_id":"fake-conv-1","status":"SUCCESS","response":"pong"}`+"\n")
+	t.Setenv("AGENTBUS_FAKE_WAIT", ns.release)
+	run := func() queue.Job {
+		return queueTurn(t, ns.server, ns.tok, map[string]any{"agent": "agy", "folder_ref": ns.ref, "connector": ns.connector, "prompt": "hello"})
+	}
+	// Not connected: refused, and the vendor sees nothing.
+	os.WriteFile(ns.release, nil, 0o600)
+	t.Setenv("AGENTBUS_FAKE_EXIT", "1")
+	refused := waitJob(t, ns.server, ns.tok, run().ID)
+	if got := ns.cc.seen(); len(got) != 0 {
+		t.Fatalf("with nothing connected the vendor saw %v", got)
+	}
+	waitFor(t, "the refused turn's error", func() bool {
+		code, raw := getAPI(t, ns.server, ns.tok, "/api/v0/turns/"+refused.Turn)
+		return code == 200 && strings.Contains(raw, `"state":"failed"`) && strings.Contains(raw, `no agy subscription is connected`)
+	})
+	t.Setenv("AGENTBUS_FAKE_EXIT", "")
+	os.Remove(ns.release)
+	os.Remove(ns.report)
+	// Connected, as agy acp --login leaves it: a folder of control's own
+	// that holds agy's file.
+	subs := subscriptionStore(ns.serverHome)
+	os.MkdirAll(subs.Dir, 0o700)
+	login, err := os.MkdirTemp(subs.Dir, ".login-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(login, ".gemini", "antigravity-cli", "antigravity-oauth-token")
+	os.MkdirAll(filepath.Dir(file), 0o700)
+	os.WriteFile(file, []byte(`{"token":{"access_token":"fake-agy-access-for-tests","refresh_token":"fake-agy-refresh-for-tests",`+
+		`"expiry":"`+time.Now().Add(time.Hour).UTC().Format(time.RFC3339)+`"},"auth_method":"consumer"}`), 0o600)
+	if err := subs.Keep("agy", credentials.Signin{Home: login}); err != nil {
+		t.Fatal(err)
+	}
+	j := run()
+	waitFor(t, "the agy call at the vendor", func() bool { return len(ns.cc.seen()) == 1 })
+	if got := ns.cc.seen(); got[0] != "/v1internal:streamGenerateContent Bearer fake-agy-access-for-tests" {
+		t.Fatalf("the vendor saw %v", got)
+	}
+	waitFor(t, "the running turn's report", func() bool { _, err := os.Stat(ns.report); return err == nil })
+	env := envOf(t, ns.report)
+	home := filepath.Join(ns.runnerHome, homesDir, j.Session)
+	if env["HOME"] != home || !strings.HasSuffix(env["CLOUD_CODE_URL"], "/s/"+j.Session+"/t/"+j.Turn) {
+		t.Fatalf("HOME %q, CLOUD_CODE_URL %q", env["HOME"], env["CLOUD_CODE_URL"])
+	}
+	// The session's home holds the placeholder sign-in, readable by its
+	// owner only: the turn's token, no refresh token.
+	fi, err := os.Stat(filepath.Join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token"))
+	if err != nil || fi.Mode().Perm() != 0o600 {
+		t.Fatalf("the placeholder file: %v %v", err, fi)
+	}
+	b, _ := os.ReadFile(filepath.Join(home, ".gemini", "antigravity-cli", "antigravity-oauth-token"))
+	var ph struct {
+		Token  map[string]string `json:"token"`
+		Method string            `json:"auth_method"`
+	}
+	if json.Unmarshal(b, &ph) != nil || !strings.HasPrefix(ph.Token["access_token"], "abr_") || ph.Token["refresh_token"] != "" || ph.Method != "consumer" {
+		t.Fatalf("the placeholder file: %s", b)
+	}
+	rb, _ := os.ReadFile(ns.report)
+	if strings.Contains(string(rb), "fake-agy") || strings.Contains(string(b), "fake-agy") {
+		t.Fatal("the agent's environment, arguments or home hold the sign-in")
+	}
+	placeholder := ph.Token["access_token"]
+	for _, tc := range []struct{ path, why string }{
+		{"/relay/cloudcode/v1/projects", "a path outside Code Assist's methods"},
+		{"/relay/anthropic/v1/messages", "the Anthropic path"},
+	} {
+		req, _ := http.NewRequest("POST", "http://"+ns.server.addr+tc.path, strings.NewReader(`{}`))
+		req.Header.Set("Authorization", "Bearer "+placeholder)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode/100 != 4 || len(ns.cc.seen()) != 1 || len(ns.anth.seen()) != 0 {
+			t.Fatalf("%s: %d, %v %v", tc.why, resp.StatusCode, ns.cc.seen(), ns.anth.seen())
+		}
+	}
+	os.WriteFile(ns.release, nil, 0o600)
+	jj := waitJob(t, ns.server, ns.tok, j.ID)
+	if jj.State != queue.Finished {
+		t.Fatalf("job %s %s %s", jj.State, jj.Reason, jj.Result)
+	}
+	waitFor(t, "the agy reply in the server's record", func() bool {
+		recs, _ := ns.server.store.After(0, store.Filter{Turn: jj.Turn}, 1000)
+		for _, r := range recs {
+			var e event.Event
+			if r.Kind == "model.responded" && json.Unmarshal(r.Data, &e) == nil {
+				if e.Error != "" || e.Text != "pong" {
+					t.Fatalf("the agy reply recorded as %s", r.Data)
+				}
+				return true
+			}
+		}
+		return false
+	})
+	var list struct {
+		Subscriptions []struct {
+			Harness           string
+			Connected, Renews bool
+		}
+	}
+	if code := callAPI(t, ns.server, ns.tok, "GET", "/api/v0/subscriptions", nil, &list); code != 200 || len(list.Subscriptions) != 3 ||
+		list.Subscriptions[0].Harness != "agy" || !list.Subscriptions[0].Connected || !list.Subscriptions[0].Renews {
 		t.Fatalf("subscriptions: %d %+v", code, list)
 	}
 }
