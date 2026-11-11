@@ -43,6 +43,8 @@ python3 tools/agenttest/agenttest.py down -dir /tmp/at/data
   diff (tool calls and model calls), its events, and the check. `-no-followup` stops the work the
   test turn asked for and the turns its results start, once the measurement is taken: use it for a
   vendor with little quota.
+- `up -tools` sets `tools = true` under `[agent_api]` in `permissions.toml`: each turn gets the
+  `agentbus` MCP tools in place of the `agentbus-api` lines. Without it, turns use `agentbus-api`.
 - `up -show-own-agents` keeps Claude Code's own agent tools (`Task`, `Agent`, `ListAgents`,
   `SendMessage`) in a turn that has the `agentbus` MCP tools: `bin/claude` takes them out of
   `--disallowedTools`. It tells the tools' effect apart from the hiding's.
@@ -55,7 +57,13 @@ python3 tools/agenttest/agenttest.py down -dir /tmp/at/data
 ## What the agent sees
 
 `bin/claude` and `bin/codex` stand in for the real programs. A turn's claude runs with
-`--setting-sources project,local`: no user settings, hooks or user `CLAUDE.md`. A turn's codex runs
+`--setting-sources project,local`: no user settings, hooks, skills or user `CLAUDE.md`. It also
+runs with `--strict-mcp-config`: no MCP server but the ones AgentBus names. That keeps out the
+person's own MCP servers and their claude.ai connectors (such as Claude Docs), which
+`--setting-sources` does not cover. AgentBus passes `--strict-mcp-config` itself only on a turn
+with its tools or a read-only turn. Before 2026-11-11 the wrapper did not add it, so every tools-off
+claude turn on a signed-in Mac had the connectors. Claude Code's own built-in skills, plugins and
+agents stay: they come with the program, not from the person. A turn's codex runs
 with `--ignore-user-config --disable hooks` and a fixed reasoning effort (`up -effort`, default
 high). The sign-in is not touched. ⚠️ codex still reads `~/.codex/AGENTS.md`: it has no switch for
 it. Say so in any result from a machine where that file exists.

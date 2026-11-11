@@ -6,7 +6,7 @@ then one test turn, on the agent under test, gets one of five plain requests.
 The tool reads the record and the folder afterwards to say whether it was
 done, and keeps the turn's tool calls, model calls and tokens.
 
-  agenttest.py up     -agentbus BIN -dir DIR [-port 8911] [-effort high] [-show-own-agents]
+  agenttest.py up     -agentbus BIN -dir DIR [-port 8911] [-effort high] [-tools] [-show-own-agents]
   agenttest.py agents -dir DIR (-without-codex | -with-codex)
   agenttest.py run    -dir DIR AGENT MODEL TASK LABEL [-no-followup]
   agenttest.py show   RESULT.json...
@@ -151,6 +151,7 @@ def up(args):
     binary, data = os.path.abspath(flag(args, "-agentbus")), os.path.abspath(flag(args, "-dir"))
     port, effort = flag(args, "-port", "8911"), flag(args, "-effort", "high")
     show_own = flag(args, "-show-own-agents", takes=False)
+    tools = flag(args, "-tools", takes=False)
     if subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"], capture_output=True).returncode == 0:
         sys.exit(f"port {port} is in use")
     home = os.path.join(data, "home")
@@ -182,6 +183,10 @@ def up(args):
     text, n = re.subn(r'(?m)^allow = \[\]', 'allow = ["sleep"]', text, count=1)
     if n != 1:
         sys.exit("permissions.toml has no 'allow = []' line to set")
+    if tools:  # the arm with the agentbus MCP tools
+        text, n = re.subn(r'(?m)^tools = false', 'tools = true', text, count=1)
+        if n != 1:
+            sys.exit("permissions.toml has no 'tools = false' line to set")
     with open(perm, "w") as f:
         f.write(text)
     c = Client(data)

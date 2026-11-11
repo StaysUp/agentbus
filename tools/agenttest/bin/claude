@@ -1,9 +1,16 @@
 #!/bin/sh
 # Stands in for claude on the PATH of the service the fresh-agent test starts.
 # A turn's claude (its first argument is -p) loads no user settings and no
-# user CLAUDE.md, so it sees only what AgentBus gives it: a person's
-# ~/.claude can hold their own rules, hooks and MCP servers. The sign-in is
-# untouched. Every other call (the version, the sign-in status) passes through.
+# user CLAUDE.md (--setting-sources project,local), and no MCP server but the
+# ones AgentBus names (--strict-mcp-config): a person's ~/.claude can hold
+# their own rules, hooks, skills and MCP servers, and their claude.ai account
+# can add connectors (such as Claude Docs) that no settings file names.
+# --setting-sources does not keep those connectors out; --strict-mcp-config
+# does (Claude Code 2.1.321, 2026-11-11, read from the init message's
+# mcp_servers). AgentBus passes it only on a turn with its tool server or a
+# read-only turn, so without this a tools-off turn had the connectors. The
+# sign-in is untouched. Every other call (the version, the sign-in status)
+# passes through.
 # AT_REAL_CLAUDE is the real program, set by agenttest.py up.
 # AT_SHOW_OWN_AGENTS (up -show-own-agents) takes Claude Code's own agent tools
 # (Task, Agent, ListAgents, SendMessage) out of --disallowedTools, so a turn
@@ -23,6 +30,7 @@ if [ "$1" = "-p" ]; then
     done
     shift "$n"
   fi
-  exec "${AT_REAL_CLAUDE:?}" --setting-sources project,local "$@"
+  # A second --strict-mcp-config from AgentBus is harmless (checked live).
+  exec "${AT_REAL_CLAUDE:?}" --setting-sources project,local --strict-mcp-config "$@"
 fi
 exec "${AT_REAL_CLAUDE:?}" "$@"
