@@ -176,6 +176,9 @@ type history struct {
 	failed string
 	// model is the model the turn's last request asked for, or "".
 	model string
+	// tools are the tool definitions of the turn's last request (Claude
+	// Code): among them each deferred tool ToolSearch loaded (carryLoaded).
+	tools []json.RawMessage
 }
 
 // memoMax bounds each memo. Past it the memo starts over: an entry is only a
@@ -511,7 +514,7 @@ func (r *Replayer) notReached(session, turn string, ti turnInfo, keep bool) (*hi
 			return nil, err
 		}
 		h.messages = append(h.messages, ph.messages...)
-		h.prior, h.thread, h.model = ph.prior, ph.thread, ph.model
+		h.prior, h.thread, h.model, h.tools = ph.prior, ph.thread, ph.model, ph.tools
 	}
 	why := "it ended before the model was called"
 	switch {
@@ -784,11 +787,31 @@ const (
 	dateMark = "\n\nToday's date is "
 )
 
+// Two parts of the environment that change when the turn's tools change
+// (Claude Code 2.1.321, 2026-11-11, read from a fresh turn's request): the
+// list of deferred tools, one name a line after this header, and the
+// instructions MCP servers give, a section up to the skills listing. An MCP
+// server's tools are deferred, so a tool server new to the session is in
+// both and nowhere else.
+const (
+	deferredMark = "\n\nThe following deferred tools are now available via ToolSearch."
+	mcpMark      = "\n\n# MCP Server Instructions\n"
+	skillsMark   = "\n\nThe following skills are available"
+)
+
 // cutTurnSystem keeps a fresh first system message's hook texts: everything
 // before the environment, and the UserPromptSubmit hook text without the date
 // after it. Without a UserPromptSubmit hook, everything from the environment
 // on goes. It fails when the environment marker is missing.
-func cutTurnSystem(t string) (string, error) {
+//
+// prior is the text of the history's system messages. What the environment
+// adds to it is kept too, between the two hook texts, where the environment
+// was (newInEnv): a turn whose tools changed since the earlier one, such as
+// one given the tool server after [agent_api] tools was turned on, would
+// otherwise see only the earlier turn's copy, and never learn of its new
+// tools (found on his runner, 2026-11-11: the tools were listed and the
+// model never saw their names).
+func cutTurnSystem(t, prior string) (string, error) {
 	i := strings.Index(t, envMark)
 	if strings.HasPrefix(t, envMark[2:]) {
 		// No SessionStart hook text: the message starts with the section.
@@ -806,12 +829,80 @@ func cutTurnSystem(t string) (string, error) {
 		}
 	}
 	var parts []string
-	for _, p := range []string{head, ups} {
+	for _, p := range []string{head, newInEnv(rest, prior), ups} {
 		if p != "" {
 			parts = append(parts, p)
 		}
 	}
 	return strings.Join(parts, "\n\n"), nil
+}
+
+// newInEnv is what env, a fresh environment, tells the model that prior does
+// not: the deferred tools prior never names, under the same header, and the
+// MCP instructions section when prior does not hold it as it is now. It is
+// "" when there is nothing new, so an unchanged turn's request stays as it
+// was. A tool prior names and env does not is not announced as gone: the
+// request's own tools list is the new process's, and a deferred tool that is
+// gone is not found by ToolSearch.
+func newInEnv(env, prior string) string {
+	var parts []string
+	if i := strings.Index(env, deferredMark); i >= 0 {
+		list := env[i+2:]
+		if j := strings.Index(list, "\n\n"); j >= 0 {
+			list = list[:j]
+		}
+		header, names, _ := strings.Cut(list, "\n")
+		known := map[string]bool{}
+		for _, l := range strings.Split(prior, "\n") {
+			known[l] = true
+		}
+		var add []string
+		for _, n := range strings.Split(names, "\n") {
+			if n != "" && !known[n] {
+				add = append(add, n)
+			}
+		}
+		if len(add) > 0 {
+			parts = append(parts, header+"\n"+strings.Join(add, "\n"))
+		}
+	}
+	if i := strings.Index(env, mcpMark); i >= 0 {
+		sec := env[i+2:]
+		end := len(sec)
+		for _, m := range []string{skillsMark, "\n\n# ", upsMark, dateMark} {
+			if j := strings.Index(sec, m); j >= 0 && j < end {
+				end = j
+			}
+		}
+		if sec = sec[:end]; !strings.Contains(prior, sec) {
+			parts = append(parts, sec)
+		}
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// systemText is the text of msgs' role-system messages, one after another:
+// what the history has told the model of its environment.
+func systemText(msgs []json.RawMessage) string {
+	var b strings.Builder
+	for _, m := range msgs {
+		if role(m) != "system" {
+			continue
+		}
+		c := field(m, "content")
+		var s string
+		if json.Unmarshal(c, &s) == nil {
+			b.WriteString(s + "\n")
+			continue
+		}
+		blocks, _ := body.Elements(c)
+		for _, bl := range blocks {
+			if body.Label(bl, "type") == "text" && json.Unmarshal(field(bl, "text"), &s) == nil {
+				b.WriteString(s + "\n")
+			}
+		}
+	}
+	return b.String()
 }
 
 // maxBreakpoints is the API's limit on cache_control blocks ("A maximum of 4
@@ -923,7 +1014,14 @@ func (claude) hasPrompt(msgs []json.RawMessage, prompt string) bool { return has
 // or one that asked for a tool.
 func (claude) replyKept(stop string) bool { return stop != "pause_turn" && stop != "" }
 
-func (claude) carry(h *history, c store.CallContext) { h.prior = priorTurnContext(c.Request) }
+func (claude) carry(h *history, c store.CallContext) {
+	h.prior = priorTurnContext(c.Request)
+	for _, p := range c.Pieces {
+		if p.Kind == body.Tool {
+			h.tools = append(h.tools, p.JSON)
+		}
+	}
+}
 
 func (claude) asHistory(m json.RawMessage) (json.RawMessage, error) { return asHistory(m) }
 
@@ -1019,20 +1117,35 @@ func (claude) build(req request, h *history, prompt string) ([]byte, func(http.H
 	promptText, _ := freshLayout(msgs, prompt)
 	var err error
 
-	// The fresh process's first system message, cut to its hook texts: the
-	// environment it also holds is already in the history's own copy. A
+	// The fresh process's first system message, cut to its hook texts and
+	// what its environment adds to the history's own copy (cutTurnSystem). A
 	// history with no system message has no such copy (no earlier turn
 	// reached the model, as when a session's first turn failed before its
 	// first call), so the message is kept whole, as a fresh process sends it.
 	m1 := msgs[1]
 	if hasSystem(h.messages) {
-		if m1, err = cutMessage(msgs[1]); err != nil {
+		if m1, err = cutMessage(msgs[1], systemText(h.messages)); err != nil {
 			return nil, nil, err
 		}
 	}
 
 	hist := make([]json.RawMessage, len(h.messages))
 	copy(hist, h.messages)
+	// The request's tools, with each tool the history loaded and this
+	// process has put back (carryLoaded). A history reference to a tool still
+	// not among them becomes text (unreferenced): the API refuses the whole
+	// request over one, as it did for a read-only turn after a turn that
+	// loaded the agentbus tools (six 400s, 2026-11-11).
+	var tools json.RawMessage
+	for i, f := range fields {
+		if f.Key == "tools" {
+			fields[i].Value = carryLoaded(f.Value, h, systemText(msgs[1:2]))
+			tools = fields[i].Value
+		}
+	}
+	if hist, err = unreferenced(hist, searchable(tools)); err != nil {
+		return nil, nil, err
+	}
 	// On the turn's first request only (the person's message and Claude
 	// Code's system message, nothing else yet), a breakpoint on the history's
 	// last message, the earlier turn's reply. That is where a resumed
@@ -1080,6 +1193,165 @@ func (claude) build(req request, h *history, prompt string) ([]byte, func(http.H
 		}
 	}
 	return body.Object(fields), nil, nil
+}
+
+// carryLoaded is tools, a fresh request's tool definitions, with each tool the
+// history's ToolSearch loaded put back: a tool_reference block names it, and
+// the API refuses a request whose tools lack it ("Tool reference
+// 'mcp__agentbus__…' not found in available tools", 400, his runner,
+// 2026-11-11). A resumed process keeps what it loaded in its tools, with
+// defer_loading; a fresh one has only its own. So each such tool goes in as
+// the earlier turn's last request had it, when the request has ToolSearch and
+// env, the fresh process's first system message, still lists it as
+// deferred: a tool the new process does not have is never added, and its
+// reference becomes text (unreferenced).
+func carryLoaded(tools json.RawMessage, h *history, env string) json.RawMessage {
+	els, ok := body.Elements(tools)
+	if !ok {
+		return tools
+	}
+	have := map[string]bool{}
+	for _, t := range els {
+		var n string
+		_ = json.Unmarshal(field(t, "name"), &n)
+		have[n] = true
+	}
+	if !have["ToolSearch"] {
+		// No tool search, so nothing is loaded and nothing deferred may be
+		// sent (searchable).
+		return tools
+	}
+	deferred := map[string]bool{}
+	for _, l := range strings.Split(env, "\n") {
+		deferred[l] = true
+	}
+	refs := toolRefs(h.messages)
+	added := false
+	for _, t := range h.tools {
+		var n string
+		_ = json.Unmarshal(field(t, "name"), &n)
+		if refs[n] && !have[n] && deferred[n] {
+			els = append(els, t)
+			have[n] = true
+			added = true
+		}
+	}
+	if !added {
+		return tools
+	}
+	return joinArray(els)
+}
+
+// searchable names the tools a tool_reference may load in a request with
+// tools: every tool there, when ToolSearch is one of them; none without it,
+// since a reference is ToolSearch's answer. Claude Code drops its own
+// references when tool search is off ("Tool references removed - tool search
+// not enabled", 2.1.321, 2026-11-11).
+func searchable(tools json.RawMessage) map[string]bool {
+	els, _ := body.Elements(tools)
+	out := map[string]bool{}
+	for _, t := range els {
+		var n string
+		_ = json.Unmarshal(field(t, "name"), &n)
+		out[n] = true
+	}
+	if !out["ToolSearch"] {
+		return map[string]bool{}
+	}
+	return out
+}
+
+// unreferenced is msgs with each tool_reference block inside a tool_result
+// that names a tool outside offered made a text block saying the tool is not
+// in this turn. A message with none is kept byte for byte.
+func unreferenced(msgs []json.RawMessage, offered map[string]bool) ([]json.RawMessage, error) {
+	out := make([]json.RawMessage, len(msgs))
+	for i, m := range msgs {
+		out[i] = m
+		if !bytes.Contains(m, []byte(`"tool_reference"`)) {
+			continue
+		}
+		fields, err := body.Fields(m)
+		if err != nil {
+			return nil, err
+		}
+		changed := false
+		for j, f := range fields {
+			if f.Key != "content" {
+				continue
+			}
+			blocks, ok := body.Elements(f.Value)
+			if !ok {
+				continue
+			}
+			for k, b := range blocks {
+				if body.Label(b, "type") != "tool_result" {
+					continue
+				}
+				inner, ok := body.Elements(field(b, "content"))
+				if !ok {
+					continue
+				}
+				hit := false
+				for x, ib := range inner {
+					var n string
+					if body.Label(ib, "type") != "tool_reference" || json.Unmarshal(field(ib, "tool_name"), &n) != nil || offered[n] {
+						continue
+					}
+					inner[x] = body.Object([]body.Field{{Key: "type", Value: json.RawMessage(`"text"`)},
+						{Key: "text", Value: jsonString("Tool " + n + " was loaded in an earlier turn. This turn does not have it.")}})
+					hit = true
+				}
+				if !hit {
+					continue
+				}
+				bf, err := body.Fields(b)
+				if err != nil {
+					return nil, err
+				}
+				for y, g := range bf {
+					if g.Key == "content" {
+						bf[y].Value = joinArray(inner)
+					}
+				}
+				blocks[k] = body.Object(bf)
+				changed = true
+			}
+			fields[j].Value = joinArray(blocks)
+		}
+		if changed {
+			out[i] = body.Object(fields)
+		}
+	}
+	return out, nil
+}
+
+// toolRefs names the tools msgs' tool_reference blocks load, at the top of a
+// message's content or inside a tool_result's.
+func toolRefs(msgs []json.RawMessage) map[string]bool {
+	out := map[string]bool{}
+	var walk func(blocks []json.RawMessage)
+	walk = func(blocks []json.RawMessage) {
+		for _, b := range blocks {
+			switch body.Label(b, "type") {
+			case "tool_reference":
+				var n string
+				if json.Unmarshal(field(b, "tool_name"), &n) == nil {
+					out[n] = true
+				}
+			case "tool_result":
+				if inner, ok := body.Elements(field(b, "content")); ok {
+					walk(inner)
+				}
+			}
+		}
+	}
+	for _, m := range msgs {
+		if blocks, ok := body.Elements(field(m, "content")); ok {
+			walk(blocks)
+		}
+	}
+	return out
 }
 
 // otherModel: thinking blocks go, since their signatures belong to the model
@@ -1276,12 +1548,13 @@ func hasPrompt(msgs []json.RawMessage, prompt string) bool {
 	return false
 }
 
-// cutMessage cuts a fresh first system message to its hook texts. Claude Code
+// cutMessage cuts a fresh first system message to its hook texts and what its
+// environment adds to prior (cutTurnSystem). Claude Code
 // sends it as a list of one text block while it is the request's last message
 // (the turn's first request) and as a plain string after that (2.1.319,
 // 2026-11-06; the string case is what broke part 3's first tap). It returns
 // nil when nothing is left.
-func cutMessage(m json.RawMessage) (json.RawMessage, error) {
+func cutMessage(m json.RawMessage, prior string) (json.RawMessage, error) {
 	fields, err := body.Fields(m)
 	if err != nil {
 		return nil, errors.New("the first system message is not an object")
@@ -1292,7 +1565,7 @@ func cutMessage(m json.RawMessage) (json.RawMessage, error) {
 		}
 		var s string
 		if json.Unmarshal(f.Value, &s) == nil {
-			cut, err := cutTurnSystem(s)
+			cut, err := cutTurnSystem(s, prior)
 			if err != nil {
 				return nil, err
 			}
@@ -1314,7 +1587,7 @@ func cutMessage(m json.RawMessage) (json.RawMessage, error) {
 		if json.Unmarshal(field(blocks[0], "text"), &text) != nil {
 			return nil, errors.New("the first system message's text is not a string")
 		}
-		cut, err := cutTurnSystem(text)
+		cut, err := cutTurnSystem(text, prior)
 		if err != nil {
 			return nil, err
 		}

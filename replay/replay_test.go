@@ -411,13 +411,184 @@ func (f *fakeSource) setEnd(turn string, e store.TurnEnd) {
 // Without a UserPromptSubmit hook the cut keeps what comes before the
 // environment; with no hook text at all the system message goes.
 func TestCutWithoutHooks(t *testing.T) {
-	got, err := cutTurnSystem("SessionStart hook additional context: x\n\n# Environment\nenv\n\nToday's date is d.")
+	got, err := cutTurnSystem("SessionStart hook additional context: x\n\n# Environment\nenv\n\nToday's date is d.", "")
 	if err != nil || got != "SessionStart hook additional context: x" {
 		t.Errorf("got %q %v", got, err)
 	}
-	m, err := cutMessage(json.RawMessage(`{"role":"system","content":"# Environment\nenv\n\nToday's date is d."}`))
+	m, err := cutMessage(json.RawMessage(`{"role":"system","content":"# Environment\nenv\n\nToday's date is d."}`), "")
 	if err != nil || m != nil {
 		t.Errorf("got %s %v, want the message dropped", m, err)
+	}
+}
+
+// The environment's parts that the history lacks are kept: a deferred tool
+// it never named, under Claude Code's own header, and an MCP instructions
+// section it does not hold. This is a turn given the tool server after the
+// earlier turn ran without it (his runner, 2026-11-11). What the history
+// already says is not said again.
+func TestCutKeepsWhatTheEnvironmentAdds(t *testing.T) {
+	const header = "The following deferred tools are now available via ToolSearch. Their schemas are NOT loaded."
+	env := func(names, mcp string) string {
+		s := "SessionStart hook additional context: x\n\n# Environment\nenv\n\n" + header + "\n" + names
+		if mcp != "" {
+			s += "\n\n# MCP Server Instructions\n\nThe following MCP servers have provided instructions:\n\n## agentbus\n" + mcp
+		}
+		return s + "\n\nThe following skills are available for use with the Skill tool:\n\n- a\n\n" +
+			"UserPromptSubmit hook additional context: u\n\nToday's date is d."
+	}
+	prior := env("CronCreate\nWebFetch", "")
+	fresh := env("CronCreate\nWebFetch\nmcp__agentbus__list_agents\nmcp__agentbus__ask_agent", "Ask other agents.")
+	got, err := cutTurnSystem(fresh, prior)
+	want := "SessionStart hook additional context: x\n\n" +
+		header + "\nmcp__agentbus__list_agents\nmcp__agentbus__ask_agent\n\n" +
+		"# MCP Server Instructions\n\nThe following MCP servers have provided instructions:\n\n## agentbus\nAsk other agents.\n\n" +
+		"UserPromptSubmit hook additional context: u"
+	if err != nil || got != want {
+		t.Errorf("got  %q %v\nwant %q", got, err, want)
+	}
+	// The next turn's history holds what this one added: nothing again.
+	if got, err := cutTurnSystem(fresh, prior+"\n"+got); err != nil || got != "SessionStart hook additional context: x\n\nUserPromptSubmit hook additional context: u" {
+		t.Errorf("again: got %q %v", got, err)
+	}
+	// An unchanged environment adds nothing.
+	if got, err := cutTurnSystem(prior, prior); err != nil || got != "SessionStart hook additional context: x\n\nUserPromptSubmit hook additional context: u" {
+		t.Errorf("unchanged: got %q %v", got, err)
+	}
+}
+
+// Through the splice: turn 1 ran without the tool server, turn 2 has it. The
+// tools' names reach turn 2's request, in its own system message after the
+// history, and are not lost with the environment it shares with turn 1.
+func TestSpliceAnnouncesNewDeferredTools(t *testing.T) {
+	src := newSource()
+	sysA := `# Environment\nenv\n\nThe following deferred tools are now available via ToolSearch.\nWebFetch\n\nToday's date is d.`
+	sysB := `# Environment\nenv\n\nThe following deferred tools are now available via ToolSearch.\nWebFetch\nmcp__agentbus__list_agents\n\nToday's date is d.`
+	src.addTurn("t1", "hello", "")
+	src.addCall(t, "t1", "x-1", `{"model":"claude-x","messages":[{"role":"user","content":[{"type":"text","text":"hello"}]},`+
+		`{"role":"system","content":"`+sysA+`"}],`+top+`,"stream":true}`, `{"role":"assistant","content":[{"type":"text","text":"hi"}]}`, "end_turn")
+	src.addTurn("t2", "list agents", "t1")
+	req := `{"model":"claude-x","messages":[{"role":"user","content":[{"type":"text","text":"list agents"}]},` +
+		`{"role":"system","content":[{"type":"text","text":"` + sysB + `"}]}],` + top + `,"stream":true}`
+	rw := New(src).Rewrite("s", "t2", []byte(req))
+	if rw.Refuse != nil || rw.Body == nil {
+		t.Fatalf("refused or unchanged: %+v", rw.Events)
+	}
+	msgs := mustElements(t, field(rw.Body, "messages"))
+	last := string(msgs[len(msgs)-1])
+	want := `{"role":"system","content":[{"type":"text","text":"The following deferred tools are now available via ToolSearch.\nmcp__agentbus__list_agents"}]}`
+	if last != want {
+		t.Errorf("last message\n got %s\nwant %s", last, want)
+	}
+}
+
+// A tool the earlier turn loaded with ToolSearch goes back in the request's
+// tools, as that turn sent it: the history's tool_reference names it, and the
+// API refuses a request without it (400 on his runner, 2026-11-11). A tool
+// the new process does not list as deferred is not added.
+func TestSpliceCarriesLoadedTools(t *testing.T) {
+	const def = `{"name":"mcp__agentbus__list_agents","description":"d","input_schema":{"type":"object"},"defer_loading":true}`
+	env := func(names string) string {
+		return `# Environment\nenv\n\nThe following deferred tools are now available via ToolSearch.\n` + names + `\n\nToday's date is d.`
+	}
+	run := func(names string) []string {
+		src := newSource()
+		src.addTurn("t1", "list agents", "")
+		src.addCall(t, "t1", "x-1", `{"model":"claude-x","messages":[{"role":"user","content":[{"type":"text","text":"list agents"}]},`+
+			`{"role":"system","content":"`+env("mcp__agentbus__list_agents")+`"},`+
+			`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"ToolSearch","input":{"query":"select:mcp__agentbus__list_agents"}}]},`+
+			`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"tool_reference","tool_name":"mcp__agentbus__list_agents"}]}]}],`+
+			`"tools":[{"name":"Bash","input_schema":{}},`+def+`],"stream":true}`,
+			`{"role":"assistant","content":[{"type":"text","text":"done"}]}`, "end_turn")
+		src.addTurn("t2", "again", "t1")
+		req := `{"model":"claude-x","messages":[{"role":"user","content":[{"type":"text","text":"again"}]},` +
+			`{"role":"system","content":[{"type":"text","text":"` + env(names) + `"}]}],"tools":[{"name":"Bash","input_schema":{}},{"name":"ToolSearch","input_schema":{}}],"stream":true}`
+		rw := New(src).Rewrite("s", "t2", []byte(req))
+		if rw.Refuse != nil || rw.Body == nil {
+			t.Fatalf("refused or unchanged: %+v", rw.Events)
+		}
+		var out []string
+		for _, e := range mustElements(t, field(rw.Body, "tools")) {
+			out = append(out, string(e))
+		}
+		return out
+	}
+	if got := run("mcp__agentbus__list_agents"); len(got) != 3 || got[2] != def {
+		t.Errorf("tools %v, want Bash, ToolSearch and the loaded tool as turn 1 sent it", got)
+	}
+	if got := run("WebFetch"); len(got) != 2 {
+		t.Errorf("tools %v, want Bash and ToolSearch: the new process has no such tool", got)
+	}
+}
+
+// A turn that never reached the model between them passes the loaded tools
+// on, as it passes the messages that reference them (found in review).
+func TestNotReachedTurnKeepsLoadedTools(t *testing.T) {
+	const def = `{"name":"mcp__agentbus__list_agents","description":"d","input_schema":{"type":"object"},"defer_loading":true}`
+	env := `# Environment\nenv\n\nThe following deferred tools are now available via ToolSearch.\nmcp__agentbus__list_agents\n\nToday's date is d.`
+	src := newSource()
+	src.addTurn("t1", "list agents", "")
+	src.addCall(t, "t1", "x-1", `{"model":"claude-x","messages":[{"role":"user","content":[{"type":"text","text":"list agents"}]},`+
+		`{"role":"system","content":"`+env+`"},`+
+		`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"ToolSearch","input":{"query":"select:mcp__agentbus__list_agents"}}]},`+
+		`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"tool_reference","tool_name":"mcp__agentbus__list_agents"}]}]}],`+
+		`"tools":[{"name":"Bash","input_schema":{}},`+def+`],"stream":true}`,
+		`{"role":"assistant","content":[{"type":"text","text":"done"}]}`, "end_turn")
+	src.setEnd("t1", store.TurnEnd{Closed: true, ExitCode: intp(0)})
+	src.addTurn("t2", "this one failed to start", "t1")
+	src.setEnd("t2", store.TurnEnd{Closed: true, Error: "the agent could not be started"})
+	src.addTurn("t3", "again", "t2")
+	req := `{"model":"claude-x","messages":[{"role":"user","content":[{"type":"text","text":"again"}]},` +
+		`{"role":"system","content":[{"type":"text","text":"` + env + `"}]}],"tools":[{"name":"Bash","input_schema":{}},{"name":"ToolSearch","input_schema":{}}],"stream":true}`
+	rw := New(src).Rewrite("s", "t3", []byte(req))
+	if rw.Refuse != nil || rw.Body == nil {
+		t.Fatalf("refused or unchanged: %+v", rw.Events)
+	}
+	if got := mustElements(t, field(rw.Body, "tools")); len(got) != 3 || string(got[2]) != def {
+		t.Errorf("tools %s, want Bash, ToolSearch and the tool t1 loaded", got)
+	}
+}
+
+// A reference to a tool this turn does not offer becomes text, or the API
+// refuses the request: a read-only turn has no ToolSearch, so every
+// reference goes (six 400s after a turn that loaded the agentbus tools,
+// 2026-11-11); a turn whose process lacks the tool loses that reference
+// only. Messages without one stay byte for byte.
+func TestReferenceToAToolNotOfferedBecomesText(t *testing.T) {
+	const ref = `{"type":"tool_reference","tool_name":"mcp__agentbus__list_agents"}`
+	const text = `{"type":"text","text":"Tool mcp__agentbus__list_agents was loaded in an earlier turn. This turn does not have it."}`
+	env := `# Environment\nenv\n\nToday's date is d.`
+	run := func(tools string) string {
+		src := newSource()
+		src.addTurn("t1", "list agents", "")
+		src.addCall(t, "t1", "x-1", `{"model":"claude-x","messages":[{"role":"user","content":[{"type":"text","text":"list agents"}]},`+
+			`{"role":"system","content":"`+env+`"},`+
+			`{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"ToolSearch","input":{}}]},`+
+			`{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[`+ref+`]}]}],`+
+			`"tools":[{"name":"Bash","input_schema":{}},{"name":"mcp__agentbus__list_agents","input_schema":{},"defer_loading":true}],"stream":true}`,
+			`{"role":"assistant","content":[{"type":"text","text":"done"}]}`, "end_turn")
+		src.addTurn("t2", "again", "t1")
+		req := `{"model":"claude-x","messages":[{"role":"user","content":[{"type":"text","text":"again"}]},` +
+			`{"role":"system","content":[{"type":"text","text":"` + env + `"}]}],"tools":` + tools + `,"stream":true}`
+		rw := New(src).Rewrite("s", "t2", []byte(req))
+		if rw.Refuse != nil || rw.Body == nil {
+			t.Fatalf("refused or unchanged: %+v", rw.Events)
+		}
+		if got := string(field(rw.Body, "tools")); got != tools {
+			t.Errorf("tools %s, want them unchanged: %s", got, tools)
+		}
+		return string(field(rw.Body, "messages"))
+	}
+	for name, tools := range map[string]string{
+		"read-only, no ToolSearch":  `[{"name":"Read","input_schema":{}}]`,
+		"ToolSearch, tool not here": `[{"name":"Bash","input_schema":{}},{"name":"ToolSearch","input_schema":{}}]`,
+	} {
+		msgs := run(tools)
+		if strings.Contains(msgs, ref) || !strings.Contains(msgs, text) {
+			t.Errorf("%s: messages %s, want the reference made text", name, msgs)
+		}
+		if !strings.Contains(msgs, `{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"ToolSearch","input":{}}]}`) {
+			t.Errorf("%s: the tool_use changed: %s", name, msgs)
+		}
 	}
 }
 
