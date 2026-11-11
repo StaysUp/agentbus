@@ -124,3 +124,29 @@ func TestCommandHoldsSessionSlot(t *testing.T) {
 	}
 	e.runs.release(nil, "s1")
 }
+
+// A stop that lands as a command exits ends the command once: RunCommand
+// returns and the session's slot is free again.
+func TestCommandCancelAtExit(t *testing.T) {
+	e := commandEngine(t)
+	dir := t.TempDir()
+	for i := range 200 {
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan struct{})
+		go func() {
+			e.RunCommand(ctx, Command{Session: "s1", Folder: dir, Line: "true"})
+			close(done)
+		}()
+		time.Sleep(time.Duration(i%10) * time.Millisecond)
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("attempt %d: the command did not return", i)
+		}
+	}
+	if code, _ := e.runs.take("s1"); code != 0 {
+		t.Fatal("the slot was not freed")
+	}
+	e.runs.release(nil, "s1")
+}

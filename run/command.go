@@ -151,14 +151,18 @@ func (e *Engine) RunCommand(ctx context.Context, c Command) (event.Event, error)
 	limit := time.NewTimer(c.Timeout)
 	ran := event.Command{ID: c.ID, Line: c.Line}
 	var werr error
+	exited := false
 	select {
 	case werr = <-done:
+		exited = true
 	case <-limit.C:
 		ran.TimedOut = true
 	case <-ctx.Done():
 	}
 	limit.Stop()
-	if ran.TimedOut || ctx.Err() != nil {
+	// The exit is read once: a stop that lands as the command exits finds it
+	// already read, and waiting for it again would never return.
+	if !exited {
 		lt.tree.signal(syscall.SIGKILL)
 		werr = <-done
 	}
