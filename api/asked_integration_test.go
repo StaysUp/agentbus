@@ -307,7 +307,7 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 	ask(t, e, tok, `{"agent":"claude","prompt":"quick"}`)
 	ask(t, e, tok, `{"agent":"claude","prompt":"child"}`)
 	code, out := as(t, e, tok, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"quick"}`)
-	if code != 403 || !strings.Contains(out, "at most 2 jobs") || !strings.Contains(out, "max_jobs_per_turn") {
+	if code != 403 || !strings.Contains(out, "at most 2 turns or reviews") || !strings.Contains(out, "max_jobs_per_turn") {
 		t.Fatalf("past max_jobs_per_turn = 2: %d %s", code, out)
 	}
 	// The file is read again for the next request.

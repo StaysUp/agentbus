@@ -337,3 +337,14 @@ func TestDeliverToALostSession(t *testing.T) {
 		}
 	}
 }
+
+// A limit counts turns and reviews in words, singular for one; a job is the
+// queue's word, not the API's (API test 2026-11-11).
+func TestTurnsOrReviews(t *testing.T) {
+	if got := turnsOrReviews(1); got != "1 turn or review" {
+		t.Errorf("one: %q", got)
+	}
+	if got := turnsOrReviews(10); got != "10 turns or reviews" {
+		t.Errorf("ten: %q", got)
+	}
+}

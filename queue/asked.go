@@ -79,16 +79,25 @@ func checkAsked(tx *sql.Tx, team string, links Links, lim Limits) error {
 		return fmt.Errorf("queue: count asked: %w", err)
 	}
 	if n >= lim.MaxPerTurn {
-		return &LimitError{fmt.Sprintf("one turn may ask for at most %d jobs, and this turn has asked for %d (max_jobs_per_turn in [limits] of permissions.toml)", lim.MaxPerTurn, n)}
+		return &LimitError{fmt.Sprintf("one turn may ask for at most %s, and this turn has asked for %d (max_jobs_per_turn in [limits] of permissions.toml)", turnsOrReviews(lim.MaxPerTurn), n)}
 	}
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND json_extract(links, '$.asker.session') IS NOT NULL
 		AND json_extract(links, '$.chain.root') = ?`, team, links.Chain.Root).Scan(&n); err != nil {
 		return fmt.Errorf("queue: count asked: %w", err)
 	}
 	if n >= lim.MaxPerTree {
-		return &LimitError{fmt.Sprintf("work started from one session may ask for at most %d jobs in all, and %d have been asked for (max_jobs_per_tree in [limits] of permissions.toml)", lim.MaxPerTree, n)}
+		return &LimitError{fmt.Sprintf("work started from one session may ask for at most %s in all, and %d have been asked for (max_jobs_per_tree in [limits] of permissions.toml)", turnsOrReviews(lim.MaxPerTree), n)}
 	}
 	return nil
+}
+
+// turnsOrReviews is n turns or reviews, in words: what an agent may ask
+// for. A job is the queue's word, not the API's.
+func turnsOrReviews(n int) string {
+	if n == 1 {
+		return "1 turn or review"
+	}
+	return fmt.Sprintf("%d turns or reviews", n)
 }
 
 // CreateTurnLinked makes a turn job, with links: for a turn an agent asked
