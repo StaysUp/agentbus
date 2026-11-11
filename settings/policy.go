@@ -101,8 +101,8 @@ subscriptions_on_runners = "off"
 # the request and says which limit.
 [limits]
 max_depth = 2                # levels of asking below the person's turn
-max_jobs_per_turn = 10       # jobs one turn may ask for
-max_jobs_per_tree = 30       # jobs one request tree may ask for in all
+max_jobs_per_turn = 10       # turns and reviews one turn may ask for
+max_jobs_per_tree = 30       # turns and reviews one request tree may ask for in all
 max_cost_usd_per_tree = 0.0  # USD one request tree may cost before asking stops; 0 is off
 
 # What a turn's own token (AGENTBUS_TOKEN, used by agentbus-api) may do.
@@ -111,12 +111,12 @@ max_cost_usd_per_tree = 0.0  # USD one request tree may cost before asking stops
 [agent_api]
 scope = "tree"       # whose sessions it reads, continues and reviews:
                      # "tree" (its request tree) or "session" (its own only)
-read = true          # read sessions, turns, calls and jobs in its scope
+read = true          # read sessions, turns and calls in its scope
 list_agents = true   # list saved agents and harnesses
 start = true         # start a new session on a saved agent
 continue = true      # continue a session its tree started (never its own or the person's)
-review = true        # ask for a review of a job in its scope
-cancel = true        # cancel jobs and stop turns its tree asked for
+review = true        # ask for a review of a turn in its scope
+cancel = true        # stop turns its tree asked for
 rename = true        # rename sessions in its scope
 apply = true         # apply a turn's changes to the person's folder, for a turn in its scope
 tools = false        # true: give each claude and codex turn the agentbus_* tools (MCP), which
@@ -206,8 +206,8 @@ type Policy struct {
 // left out; once read from a store each is set.
 type Limits struct {
 	MaxDepth          *int     `toml:"max_depth" json:"max_depth,omitempty" doc:"Levels of asking below the person's turn. Absent in a PUT: 2."`
-	MaxJobsPerTurn    *int     `toml:"max_jobs_per_turn" json:"max_jobs_per_turn,omitempty" doc:"Jobs one turn may ask for. Absent in a PUT: 10."`
-	MaxJobsPerTree    *int     `toml:"max_jobs_per_tree" json:"max_jobs_per_tree,omitempty" doc:"Jobs one request tree may ask for in all. Absent in a PUT: 30."`
+	MaxJobsPerTurn    *int     `toml:"max_jobs_per_turn" json:"max_jobs_per_turn,omitempty" doc:"Turns and reviews one turn may ask for. Absent in a PUT: 10."`
+	MaxJobsPerTree    *int     `toml:"max_jobs_per_tree" json:"max_jobs_per_tree,omitempty" doc:"Turns and reviews one request tree may ask for in all. Absent in a PUT: 30."`
 	MaxCostUSDPerTree *float64 `toml:"max_cost_usd_per_tree" json:"max_cost_usd_per_tree,omitempty" doc:"USD one request tree may cost before asking stops; 0 is off. Absent in a PUT: 0."`
 }
 
@@ -215,12 +215,12 @@ type Limits struct {
 // left out; once read from a store each is set.
 type AgentAPI struct {
 	Scope      string `toml:"scope" json:"scope,omitempty" doc:"Whose sessions a turn token reaches: tree (its request tree) or session (its own only). Absent in a PUT: tree."`
-	Read       *bool  `toml:"read" json:"read,omitempty" doc:"Read sessions, turns, calls and jobs in its scope. Absent in a PUT: true."`
+	Read       *bool  `toml:"read" json:"read,omitempty" doc:"Read sessions, turns and calls in its scope. Absent in a PUT: true."`
 	ListAgents *bool  `toml:"list_agents" json:"list_agents,omitempty" doc:"List saved agents and harnesses. Absent in a PUT: true."`
 	Start      *bool  `toml:"start" json:"start,omitempty" doc:"Start a new session on a saved agent. Absent in a PUT: true."`
 	Continue   *bool  `toml:"continue" json:"continue,omitempty" doc:"Continue a session its tree started. Absent in a PUT: true."`
-	Review     *bool  `toml:"review" json:"review,omitempty" doc:"Ask for a review of a job in its scope. Absent in a PUT: true."`
-	Cancel     *bool  `toml:"cancel" json:"cancel,omitempty" doc:"Cancel jobs and stop turns its tree asked for. Absent in a PUT: true."`
+	Review     *bool  `toml:"review" json:"review,omitempty" doc:"Ask for a review of a turn in its scope. Absent in a PUT: true."`
+	Cancel     *bool  `toml:"cancel" json:"cancel,omitempty" doc:"Stop turns its tree asked for. Absent in a PUT: true."`
 	Rename     *bool  `toml:"rename" json:"rename,omitempty" doc:"Rename sessions in its scope. Absent in a PUT: true."`
 	Apply      *bool  `toml:"apply" json:"apply,omitempty" doc:"Apply a turn's changes to the person's folder, for a turn of a session in its scope. Absent in a PUT: true."`
 	Tools      *bool  `toml:"tools" json:"tools,omitempty" doc:"Give each turn the agentbus_* tools over MCP (POST /api/v0/mcp), which call this API as its token may. claude's own Task, Agent, ListAgents and SendMessage tools are hidden then. false: agents call the API with agentbus-api only. Absent in a PUT: false."`

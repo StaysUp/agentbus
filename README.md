@@ -460,8 +460,8 @@ subagents = true                       # false: no turn starts the agent's own s
 
 [limits]                     # work agents ask other agents for
 max_depth = 2                # levels of asking below your turn
-max_jobs_per_turn = 10       # jobs one turn may ask for
-max_jobs_per_tree = 30       # jobs everything started from one of your sessions may ask for
+max_jobs_per_turn = 10       # turns and reviews one turn may ask for
+max_jobs_per_tree = 30       # turns and reviews everything started from one of your sessions may ask for
 max_cost_usd_per_tree = 0.0  # dollars that work may cost before asking stops; 0 is off
 
 [agent_api]                  # what a turn's own token may do
@@ -471,12 +471,14 @@ list_agents = true           # list saved agents and harnesses
 start = true                 # start a session on a saved agent
 continue = true              # continue a session its tree started
 review = true                # ask for a review
-cancel = true                # cancel what it asked for
+cancel = true                # stop turns it asked for
 rename = true                # rename sessions
 ```
 
 `agentbus up` makes it with empty lists and every other value at its default, as above. A key you
-leave out reads as its default, so an older file keeps working. Every turn reads the file when it
+leave out reads as its default, so an older file keeps working.
+**Upgrading:** a file made by an earlier version keeps its old comments, which say "jobs" in
+`[limits]` and `[agent_api]`. The keys mean the same; the comments above are the current wording. Every turn reads the file when it
 starts, and the API reads it for every request a turn's token sends, so an edit applies at once.
 A broken file stops the turn with the line and the problem.
 
