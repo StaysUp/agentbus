@@ -283,7 +283,9 @@ start. No version in the name.
 (`agentbus up` or `agentbus server`), holding `events.db.lock`:
 
 1. copies the data folder beside it, named with the date and `before-settings-db`, such as
-   `~/.local/share/agentbus-2026-11-12-before-settings-db` (mode 0700). The copy leaves out
+   `~/.local/share/agentbus-2026-11-12-before-settings-db` (mode 0700). A data folder named through
+   a link, or by a relative path, is copied from its real path, and the copy goes beside that real
+   path. The copy leaves out
    `sessions/`, `worktrees/` and `blobs/`, which the upgrade does not change and which can be as
    large as your folders. A new data folder is not copied. The copy is made as `<name>.partial`
    and renamed when whole;

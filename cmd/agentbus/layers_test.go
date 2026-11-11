@@ -152,6 +152,7 @@ var controlAllowed = []string{
 	// The upgrade to settings.db: it copies the data folder beside itself
 	// and reads its settings files once.
 	"settings/upgrade.go DB.importFiles os.ReadFile",
+	"settings/upgrade.go realPath filepath.EvalSymlinks",
 	"settings/upgrade.go Upgrade.Run os.Stat",
 	"settings/upgrade.go copyFile os.Open",
 	"settings/upgrade.go copyFile os.OpenFile",

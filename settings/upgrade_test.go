@@ -51,6 +51,16 @@ func home(t *testing.T) string {
 	return dir
 }
 
+// copyOf is where the upgrade copies dir: beside its real path.
+func copyOf(t *testing.T, dir string) string {
+	t.Helper()
+	real, err := realPath(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return CopyName(real, fixedNow())
+}
+
 func upgrade(dir string) Upgrade {
 	return Upgrade{Dir: dir, Lock: filepath.Join(dir, "events.db.lock"), Skip: []string{"sessions", "blobs"}, Agents: testAgents, Now: fixedNow}
 }
@@ -111,7 +121,7 @@ func TestUpgradeImportsFiles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := CopyName(dir, fixedNow())
+	want := copyOf(t, dir)
 	if rep.Copy != want || !strings.HasSuffix(want, "agentbus-2026-11-12-before-settings-db") || !rep.Done ||
 		strings.Join(rep.Imported, ",") != "permissions.toml,instructions.md,agents.json" {
 		t.Fatalf("report %+v", rep)
@@ -184,7 +194,7 @@ func TestUpgradeImportsFiles(t *testing.T) {
 func TestUpgradeInterrupted(t *testing.T) {
 	dir := home(t)
 	write(t, filepath.Join(dir, "events.db"), "record")
-	want := CopyName(dir, fixedNow())
+	want := copyOf(t, dir)
 
 	// Stopped half way through the copy.
 	write(t, filepath.Join(want+".partial", "stale"), "half")
@@ -236,7 +246,7 @@ func TestUpgradeInterrupted(t *testing.T) {
 func TestUpgradeCopyBeforeDatabase(t *testing.T) {
 	dir := home(t)
 	write(t, filepath.Join(dir, "events.db"), "record")
-	want := CopyName(dir, fixedNow())
+	want := copyOf(t, dir)
 	write(t, filepath.Join(want, "events.db"), "the first copy")
 	d, rep, err := upgrade(dir).Run()
 	if err != nil {
@@ -272,5 +282,89 @@ func TestUpgradeRefusedWhileAnotherServiceRuns(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, DBFile)); err == nil {
 		t.Fatal("the database was made")
+	}
+}
+
+// A data folder reached through a link is copied as a folder of its own:
+// the copy holds its files, not a link back to the live folder, so a write
+// after the upgrade never shows in the copy.
+func TestUpgradeLinkedFolder(t *testing.T) {
+	real := home(t)
+	write(t, filepath.Join(real, PolicyFile), "forbid = [\"git push\"]\n")
+	link := filepath.Join(t.TempDir(), "linked")
+	if err := os.Symlink(real, link); err != nil {
+		t.Fatal(err)
+	}
+	d, rep, err := upgrade(link).Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if rep.Copy != copyOf(t, real) {
+		t.Fatalf("copy %q, want beside the real folder", rep.Copy)
+	}
+	if fi, err := os.Lstat(rep.Copy); err != nil || !fi.IsDir() {
+		t.Fatalf("the copy is not a folder: %v %v", fi, err)
+	}
+	write(t, filepath.Join(real, "later"), "after the upgrade")
+	if _, err := os.Stat(filepath.Join(rep.Copy, "later")); err == nil {
+		t.Fatal("a write after the upgrade is in the copy")
+	}
+	if _, err := os.Stat(filepath.Join(rep.Copy, DBFile)); err == nil {
+		t.Fatal("the new database is in the copy")
+	}
+	if b, err := os.ReadFile(filepath.Join(rep.Copy, PolicyFile)); err != nil || !strings.Contains(string(b), "git push") {
+		t.Fatalf("the copy's file: %q %v", b, err)
+	}
+}
+
+// A data folder given as "." is copied beside itself, by its own name.
+func TestUpgradeRelativeFolder(t *testing.T) {
+	dir := home(t)
+	write(t, filepath.Join(dir, PolicyFile), "")
+	t.Chdir(dir)
+	u := upgrade(".")
+	u.Lock = "events.db.lock"
+	d, rep, err := u.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if rep.Copy != copyOf(t, dir) || filepath.Base(rep.Copy) != "agentbus-2026-11-12-before-settings-db" {
+		t.Fatalf("copy %q, want beside %q", rep.Copy, dir)
+	}
+	if _, err := os.Stat(filepath.Join(rep.Copy, PolicyFile)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A data folder named through a link inside itself (alias -> data,
+// data/current -> ., AGENTBUS_HOME=alias/current) is copied beside the real
+// folder, never inside it.
+func TestUpgradeFolderNamedThroughItself(t *testing.T) {
+	data := home(t)
+	write(t, filepath.Join(data, PolicyFile), "")
+	if err := os.Symlink(".", filepath.Join(data, "current")); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "alias")
+	if err := os.Symlink(data, alias); err != nil {
+		t.Fatal(err)
+	}
+	named := filepath.Join(alias, "current")
+	u := upgrade(named)
+	d, rep, err := u.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if rep.Copy != copyOf(t, data) {
+		t.Fatalf("copy %q, want beside the real folder", rep.Copy)
+	}
+	if _, err := os.Stat(filepath.Join(rep.Copy, PolicyFile)); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := filepath.Glob(filepath.Join(data, "*"+CopySuffix+"*")); len(m) != 0 {
+		t.Fatalf("a copy inside the folder: %v", m)
 	}
 }

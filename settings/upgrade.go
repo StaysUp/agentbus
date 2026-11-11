@@ -4,8 +4,9 @@ package settings
 // keeps settings in settings.db, control:
 //
 //  1. takes the data folder's lock, so no other service writes it;
-//  2. makes a copy of the data folder beside it, named with the date and
-//     "before-settings-db" (CopyName), unless the folder is new;
+//  2. makes a copy of the data folder beside its real path (links
+//     followed), named with the date and "before-settings-db" (CopyName),
+//     unless the folder is new;
 //  3. imports permissions.toml, instructions.md and agents.json into the
 //     database, in one transaction that also marks the import done.
 //
@@ -60,9 +61,21 @@ type Report struct {
 
 // CopyName is the copy of the data folder dir made at t: beside it, its name
 // with the date and CopySuffix, such as ~/.agentbus-2026-11-12-before-settings-db.
+// dir is the folder's real path (realPath): a sibling in its real parent is
+// never inside it.
 func CopyName(dir string, t time.Time) string {
 	dir = filepath.Clean(dir)
 	return filepath.Join(filepath.Dir(dir), filepath.Base(dir)+"-"+t.Format("2006-01-02")+"-"+CopySuffix)
+}
+
+// realPath is dir absolute, with every link in it followed: the folder
+// itself, however it was named.
+func realPath(dir string) (string, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(abs)
 }
 
 // Run makes the settings database ready and opens it.
@@ -84,7 +97,15 @@ func (u Upgrade) Run() (*DB, Report, error) {
 		return nil, rep, fmt.Errorf("settings: %s could not be read: %w", path, statErr)
 	}
 	if !hasDB && !newFolder(u.Dir) {
-		if rep.Copy, err = copyFolder(u.Dir, CopyName(u.Dir, now()), u.Skip); err != nil {
+		// One rule for where the copy comes from and where it goes: the
+		// data folder's real path, however it was named (relative, or
+		// through links). The walk starts at the folder itself, and the copy
+		// is its sibling in its real parent, which is never inside it.
+		src, err := realPath(u.Dir)
+		if err != nil {
+			return nil, rep, fmt.Errorf("settings: the data folder %s could not be found: %w", u.Dir, err)
+		}
+		if rep.Copy, err = copyFolder(src, CopyName(src, now()), u.Skip); err != nil {
 			return nil, rep, err
 		}
 	}
