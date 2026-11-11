@@ -68,6 +68,9 @@ const (
 	// applyTurnTok: {id} is a turn of a session in the token's scope, whose
 	// changes to apply. Not for a read-only turn.
 	applyTurnTok
+	// toolList: POST /api/v0/mcp, the API as tools. Each tool call is sent
+	// through its own route and checked there (tools.go).
+	toolList
 )
 
 // Refusals a turn token gets. Fixed wording: they never quote the request.
@@ -173,27 +176,10 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 		writeError(w, http.StatusServiceUnavailable, turnPolicyBroken(err))
 		return nil, false
 	}
-	switch rt.turn {
-	case askTurn, askReview, askedTurn, renameSession, applyTurnTok:
-		if g.ReadOnly {
-			return refuse(turnReadOnly)
-		}
+	if msg := turnRefusal(rt.turn, g, perm.AgentAPI); msg != "" {
+		return refuse(msg)
 	}
 	api := perm.AgentAPI
-	switch {
-	case (rt.turn == treeSessionPath || rt.turn == treeSessionQuery || rt.turn == treeTurn) && !*api.Read:
-		return refuse(turnSwitchedOff("read sessions, turns or calls", "read"))
-	case rt.turn == anyRead && !*api.ListAgents:
-		return refuse(turnSwitchedOff("list agents or harnesses", "list_agents"))
-	case rt.turn == askReview && !*api.Review:
-		return refuse(turnSwitchedOff("ask for reviews", "review"))
-	case rt.turn == askedTurn && !*api.Cancel:
-		return refuse(turnSwitchedOff("stop turns", "cancel"))
-	case rt.turn == renameSession && !*api.Rename:
-		return refuse(turnSwitchedOff("rename sessions", "rename"))
-	case rt.turn == applyTurnTok && !*api.Apply:
-		return refuse(turnSwitchedOff("apply a turn's changes", "apply"))
-	}
 	// start and continue are told apart by the body: askChecks.
 	inScope := func(session string) (bool, error) { return a.inScope(g, api.Scope, session) }
 	switch rt.turn {
@@ -265,7 +251,7 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 			(api.Scope == settings.ScopeSession && j.Links.Asker.Session != g.Session) {
 			return refuse(turnAskedRefused)
 		}
-	case askTurn, anyRead:
+	case askTurn, anyRead, toolList:
 	default:
 		return refuse(turnWriteRefused)
 	}
@@ -293,6 +279,39 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 	}
 	ctx := context.WithValue(r.Context(), grantKey{}, &turnCall{g: g, perm: perm})
 	return r.WithContext(ctx), true
+}
+
+// turnRefusal says why a turn token of grant g may not call a route of kind
+// turn at all under [agent_api], or "": the read-only turn and each switch.
+// The rest of the check needs the request (allowTurn). The tool list
+// (tools.go) asks it too, so a tool is listed only where its route would
+// take the call.
+func turnRefusal(turn int, g run.Grant, api settings.AgentAPI) string {
+	switch turn {
+	case askTurn, askReview, askedTurn, renameSession, applyTurnTok:
+		if g.ReadOnly {
+			return turnReadOnly
+		}
+	}
+	switch {
+	case turn == mainOnly:
+		return turnWriteRefused
+	case (turn == treeSessionPath || turn == treeSessionQuery || turn == treeTurn) && !*api.Read:
+		return turnSwitchedOff("read sessions, turns or calls", "read")
+	case turn == anyRead && !*api.ListAgents:
+		return turnSwitchedOff("list agents or harnesses", "list_agents")
+	case turn == askReview && !*api.Review:
+		return turnSwitchedOff("ask for reviews", "review")
+	case turn == askedTurn && !*api.Cancel:
+		return turnSwitchedOff("stop turns", "cancel")
+	case turn == renameSession && !*api.Rename:
+		return turnSwitchedOff("rename sessions", "rename")
+	case turn == applyTurnTok && !*api.Apply:
+		return turnSwitchedOff("apply a turn's changes", "apply")
+	case turn == toolList && !*api.Tools:
+		return turnSwitchedOff("use the agentbus_* tools", "tools")
+	}
+	return ""
 }
 
 // askedLinks are the links of work g's turn asks for: the asking turn, and one

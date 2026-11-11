@@ -141,6 +141,10 @@ type API struct {
 	// spec is the OpenAPI description, built from the route table, and
 	// runnerSpec the runner protocol's.
 	spec, runnerSpec []byte
+	// tools are the API as tools, and their input schemas by name, for
+	// POST /api/v0/mcp (tools.go).
+	tools       []toolRoute
+	toolSchemas map[string]map[string]any
 }
 
 // New returns the API.
@@ -168,7 +172,15 @@ func New(cfg Config) (*API, error) {
 			return nil, errors.New("api: a host is a name, without a port")
 		}
 	}
+	if err := checkTools(); err != nil {
+		return nil, err
+	}
 	desc, err := spec()
+	if err != nil {
+		return nil, err
+	}
+	tools := allTools()
+	schemas, err := toolSchemas(tools, desc)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +188,7 @@ func New(cfg Config) (*API, error) {
 	if err != nil {
 		return nil, err
 	}
-	a := &API{cfg: cfg, token: sha256.Sum256([]byte(cfg.Token)), spec: desc, runnerSpec: runnerDesc,
+	a := &API{cfg: cfg, token: sha256.Sum256([]byte(cfg.Token)), spec: desc, runnerSpec: runnerDesc, tools: tools, toolSchemas: schemas,
 		hosts:   []string{"127.0.0.1:" + cfg.Port, "localhost:" + cfg.Port, "[::1]:" + cfg.Port},
 		streams: make(chan struct{}, MaxStreams)}
 	for _, h := range cfg.Hosts {
@@ -219,7 +231,8 @@ const BlobTimeout = 30 * time.Minute
 // program's own event, the settings and the runner protocol.
 func bodyLimit(r *http.Request) int64 {
 	switch p := r.URL.Path; {
-	case p == "/api/v0/turns":
+	case p == "/api/v0/turns" || p == "/api/v0/mcp":
+		// A tool call can carry a turn's prompt.
 		return MaxRunBody
 	case p == "/api/v0/events":
 		return MaxEventBody

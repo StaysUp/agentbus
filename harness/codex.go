@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+
+	"github.com/BurntSushi/toml"
 )
 
 // codex is the Codex CLI.
@@ -32,6 +35,7 @@ func (codex) Info() Info {
 		// codex keeps its config.toml, sign-in, sessions and memories
 		// under CODEX_HOME, which must exist.
 		ConfigEnv: "CODEX_HOME", ConfigDir: ".codex",
+		ToolServer: true,
 		// codex login --device-auth prints a link and a one-time code
 		// (XXXX-XXXXX), needs no terminal and reads no input, and keeps the
 		// ChatGPT sign-in in $CODEX_HOME/auth.json: tokens.access_token (a
@@ -179,6 +183,13 @@ func (codex) Args(t Turn) []string {
 	if t.Hint != "" {
 		a = append(a, "-c", "developer_instructions="+tomlString(t.Hint))
 	}
+	// The tool server, for this run only: a Streamable HTTP server whose
+	// bearer codex reads from AGENTBUS_TOKEN itself, so the token is in no
+	// argument (codex-cli 0.164.0, 2026-11-11, checked live).
+	if t.Tools != "" {
+		p := "mcp_servers." + ToolServer + "."
+		a = append(a, "-c", p+"url="+tomlString(t.Tools), "-c", p+`bearer_token_env_var="AGENTBUS_TOKEN"`)
+	}
 	// A turn that may write may also reach the network, as Claude Code
 	// can under typical settings: the person's decision, 2026-11-06. Per
 	// turn, on the command line; ~/.codex/config.toml is never edited.
@@ -231,6 +242,50 @@ func (codex) OwnInstructions(env []string, folder string) string {
 }
 
 func codexOwnInstructions(env []string, folder string) bool {
+	return slices.ContainsFunc(codexConfigs(env, folder), func(f string) bool { return topLevelKey(f, "developer_instructions") })
+}
+
+// OwnTools says the person defined a codex MCP server named as the tool
+// server (harness.ToolServer) in a config.toml codex reads, so the turn gets
+// no tool server and its instructions name agentbus-api: their entry wins.
+// A -c override cannot take theirs away. codex merges -c into their table
+// field by field, even given a whole table: a stdio entry with a url then
+// stops codex from loading its config ("url is not supported for stdio"),
+// and enabled = false keeps the server off (codex-cli 0.164.0, 2026-11-11,
+// codex mcp list with a scratch CODEX_HOME; found in review). The file is
+// only read.
+func (codex) OwnTools(env []string, folder string) string {
+	for _, f := range codexConfigs(env, folder) {
+		if codexDefinesServer(f, ToolServer) {
+			return "codex_mcp_server_set"
+		}
+	}
+	return ""
+}
+
+// codexDefinesServer says the TOML file defines mcp_servers.<name>. A
+// missing file defines nothing; one that does not parse is taken to define
+// it, so the person's file is never overridden on a guess.
+func codexDefinesServer(path, name string) bool {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var v struct {
+		MCPServers map[string]any `toml:"mcp_servers"`
+	}
+	if _, err := toml.Decode(string(b), &v); err != nil {
+		return true
+	}
+	_, ok := v.MCPServers[name]
+	return ok
+}
+
+// codexConfigs are the config.toml files codex reads for a turn in folder,
+// with env its environment: $CODEX_HOME/config.toml (~/.codex by default),
+// then the .codex/config.toml of the folder and of every folder above it.
+func codexConfigs(env []string, folder string) []string {
+	var out []string
 	var home, codexHome string
 	for _, kv := range env {
 		k, v, _ := strings.Cut(kv, "=")
@@ -249,8 +304,8 @@ func codexOwnInstructions(env []string, folder string) bool {
 	if codexHome != "" && !filepath.IsAbs(codexHome) {
 		codexHome = filepath.Join(folder, codexHome)
 	}
-	if codexHome != "" && topLevelKey(filepath.Join(codexHome, "config.toml"), "developer_instructions") {
-		return true
+	if codexHome != "" {
+		out = append(out, filepath.Join(codexHome, "config.toml"))
 	}
 	// Both the folder as given and its real path: codex walks the physical
 	// parents of a folder reached through a symlink (found in review).
@@ -260,15 +315,13 @@ func codexOwnInstructions(env []string, folder string) bool {
 	}
 	for _, start := range starts {
 		for dir := start; ; dir = filepath.Dir(dir) {
-			if topLevelKey(filepath.Join(dir, ".codex", "config.toml"), "developer_instructions") {
-				return true
-			}
+			out = append(out, filepath.Join(dir, ".codex", "config.toml"))
 			if filepath.Dir(dir) == dir {
 				break
 			}
 		}
 	}
-	return false
+	return out
 }
 
 // topLevelKey says a TOML file sets key before its first table header. A

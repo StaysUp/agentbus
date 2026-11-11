@@ -76,6 +76,8 @@ var turnTokenDoc = map[int]string{
 		"The review's result comes back to the asking session as a later turn. Caps: " + askCaps,
 	askedTurn: "A turn token may stop only a turn its request tree asked for, unless its turn is read-only.",
 	anyRead:   "A turn token may call this too.",
+	toolList: "A turn token may call this: its list holds the tools its turn may call under [agent_api] (none of them when tools is false), " +
+		"and each call is checked by the operation it names.",
 }
 
 // askCaps names the caps on asked work. A request past one gets 403 saying which.
@@ -431,6 +433,14 @@ func describe(runner bool) (*openapi3.T, error) {
 		}
 		op := &openapi3.Operation{OperationID: rt.op, Tags: []string{rt.tag}, Summary: rt.summary, Description: desc,
 			Responses: openapi3.NewResponsesWithCapacity(len(rt.replies) + 2)}
+		if len(rt.tools) > 0 {
+			// The tools this operation is, for POST /api/v0/mcp (tools.go).
+			var ts []map[string]string
+			for _, t := range rt.tools {
+				ts = append(ts, map[string]string{"name": t.name, "description": t.doc, "effect": t.effect})
+			}
+			op.Extensions = map[string]any{"x-agentbus-tools": ts}
+		}
 		if strings.Contains(rt.path, "{id}") {
 			idDoc := rt.idDoc
 			if idDoc == "" {

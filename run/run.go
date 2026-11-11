@@ -711,13 +711,23 @@ func (e *Engine) start(t turn) (*Turn, error) {
 			return nil, refuse(http.StatusInternalServerError, "the turn's home folder could not be made, so the turn did not start")
 		}
 	}
+	// The tool server ([agent_api] tools), for a harness that takes it, unless
+	// the person's own setting for the harness is in the way.
+	tools := h.Info().ToolServer && perm.AgentAPI.Tools != nil && *perm.AgentAPI.Tools
+	if tools {
+		if why := h.OwnTools(cmd.Env, t.folder); why != "" {
+			tools = false
+			e.cfg.Logf("run.tools session=%s turn=%s left_out=%s", t.session, t.id, why)
+		}
+	}
+	hint = withTools(hint, t.session, tools)
 	// The folder's AGENTS.md, then the instructions, then who asked: the
 	// same for every harness, each once.
 	doc, why := folderDoc(h, t.folder)
 	if why != "" {
 		e.cfg.Logf("run.doc session=%s turn=%s left_out=%s", t.session, t.id, why)
 	}
-	hint = joinText(doc, hint, askedLine(asked, perm.AgentAPI, e.cfg.APIDir != ""))
+	hint = joinText(doc, hint, askedLine(asked, perm.AgentAPI, e.cfg.APIDir != "", tools))
 	perm = withAPI(perm, e.cfg.APIDir != "", t.readOnly)
 	if hint != "" {
 		if why := h.OwnInstructions(cmd.Env, t.folder); why != "" {
@@ -753,6 +763,9 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		e.cfg.Logf("run.edit session=%s turn=%s left_out=%s", t.session, t.id, why)
 	}
 	spec := turnSpec(hint, t.resumeID, t.model, w, perm, t.context+t.prompt)
+	if tools {
+		spec.Tools = strings.TrimSuffix(apiURL, "/") + ToolPath
+	}
 	// A setting the harness has no way to keep refuses the turn, before
 	// anything is stored (harness.Harness.Refuse).
 	if why := h.Refuse(spec); why != "" {
@@ -1055,9 +1068,16 @@ func askedBy(o *event.Origin) *event.Origin {
 // that session's changes, which its own folder may not hold: a new session
 // gets a copy of the person's folder. "" when its token may not read them
 // ([agent_api] read off, or scope session).
-func askedLine(asked *event.Origin, api settings.AgentAPI, client bool) string {
+func askedLine(asked *event.Origin, api settings.AgentAPI, client, tools bool) string {
 	if asked == nil || (api.Read != nil && !*api.Read) || api.Scope == settings.ScopeSession {
 		return ""
+	}
+	if tools {
+		return "Another agent asked for this work, from session " + asked.Session + ", turn " + asked.Turn +
+			" (also in AGENTBUS_ASKED_BY_SESSION and AGENTBUS_ASKED_BY_TURN). Your folder may not hold its changes. " +
+			"To read what that turn changed, with each file's diff, call agentbus_turn_diff with turn " + asked.Turn + " and session " + asked.Session +
+			". Its files are null while that turn still runs; read it again once its state is no longer running. " +
+			"That session's earlier turns: agentbus_list_turns with session " + asked.Session + "."
 	}
 	get := `agentbus-api GET "%s"`
 	if !client {
@@ -1072,6 +1092,10 @@ func askedLine(asked *event.Origin, api settings.AgentAPI, client bool) string {
 		"\nIts files are null while that turn still runs; read it again once its state is no longer running. " +
 		"That session's earlier turns, each with its own diff: " + list
 }
+
+// ToolPath is control's tool server, under a turn's API address: the API as
+// agentbus_* tools over MCP (api/mcp.go), for [agent_api] tools.
+const ToolPath = "/api/v0/mcp"
 
 // APIClient is the name of the API client on a turn's PATH (Config.APIDir).
 const APIClient = settings.APIClient

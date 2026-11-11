@@ -119,6 +119,9 @@ review = true        # ask for a review of a job in its scope
 cancel = true        # cancel jobs and stop turns its tree asked for
 rename = true        # rename sessions in its scope
 apply = true         # apply a turn's changes to the person's folder, for a turn in its scope
+tools = false        # true: give each claude and codex turn the agentbus_* tools (MCP), which
+                     # call this API as its token may, and hide claude's own Task, Agent,
+                     # ListAgents and SendMessage. false: agents call it with agentbus-api
 
 # What a turn's agent may reach on the network. Linux only: macOS has no
 # network control, and its agents reach any host.
@@ -220,6 +223,7 @@ type AgentAPI struct {
 	Cancel     *bool  `toml:"cancel" json:"cancel,omitempty" doc:"Cancel jobs and stop turns its tree asked for. Absent in a PUT: true."`
 	Rename     *bool  `toml:"rename" json:"rename,omitempty" doc:"Rename sessions in its scope. Absent in a PUT: true."`
 	Apply      *bool  `toml:"apply" json:"apply,omitempty" doc:"Apply a turn's changes to the person's folder, for a turn of a session in its scope. Absent in a PUT: true."`
+	Tools      *bool  `toml:"tools" json:"tools,omitempty" doc:"Give each turn the agentbus_* tools over MCP (POST /api/v0/mcp), which call this API as its token may. claude's own Task, Agent, ListAgents and SendMessage tools are hidden then. false: agents call the API with agentbus-api only. Absent in a PUT: false."`
 }
 
 // Network says what a turn's agent may reach ([network]). Read by the
@@ -280,6 +284,12 @@ func (p *Policy) fill() {
 			on := true
 			*b = &on
 		}
+	}
+	// Off until it is shown to help: the fresh-agent test of 2026-11-11
+	// found no gain over agentbus-api.
+	if p.AgentAPI.Tools == nil {
+		off := false
+		p.AgentAPI.Tools = &off
 	}
 }
 
@@ -426,7 +436,7 @@ func FormatPolicy(p Policy) []byte {
 		"agent_api.scope": p.AgentAPI.Scope, "agent_api.read": *p.AgentAPI.Read, "agent_api.list_agents": *p.AgentAPI.ListAgents,
 		"agent_api.start": *p.AgentAPI.Start, "agent_api.continue": *p.AgentAPI.Continue, "agent_api.review": *p.AgentAPI.Review,
 		"agent_api.cancel": *p.AgentAPI.Cancel, "agent_api.rename": *p.AgentAPI.Rename,
-		"agent_api.apply": *p.AgentAPI.Apply,
+		"agent_api.apply": *p.AgentAPI.Apply, "agent_api.tools": *p.AgentAPI.Tools,
 		"network.contain": p.Network.Contain, "network.allow": p.Network.Allow,
 	}
 	var out bytes.Buffer

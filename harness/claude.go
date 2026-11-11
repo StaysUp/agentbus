@@ -2,7 +2,9 @@ package harness
 
 import (
 	"bufio"
+	"encoding/json"
 	"os"
+	"slices"
 	"strings"
 )
 
@@ -24,6 +26,7 @@ func (claude) Info() Info {
 		// Claude Code keeps its settings, memory, plugins, transcripts and
 		// .claude.json under CLAUDE_CONFIG_DIR when it is set.
 		ConfigEnv: "CLAUDE_CONFIG_DIR", ConfigDir: ".claude",
+		ToolServer: true,
 		// claude setup-token prints a long-lived OAuth token "for CI
 		// pipelines, scripts, or other environments", valid one year, which
 		// Claude Code reads from CLAUDE_CODE_OAUTH_TOKEN
@@ -96,6 +99,10 @@ func (claude) Edit(folders, protect []string) ([]string, string) {
 func (claude) Refuse(Turn) string { return "" }
 
 func (claude) OwnInstructions([]string, string) string { return "" }
+
+// OwnTools: --strict-mcp-config loads no server of the person's, so none is
+// in the way.
+func (claude) OwnTools([]string, string) string { return "" }
 
 // Native: Claude Code reads the folder's CLAUDE.md and .claude/CLAUDE.md,
 // and a file such a CLAUDE.md imports with a line "@<file>". With neither
@@ -170,11 +177,8 @@ func (claude) Args(t Turn) []string {
 		// without asking, and the person's settings could approve more.
 		// allow never widens a read-only turn.
 		allowed = append([]string{"Read", "Grep", "Glob"}, allowed...)
+		allowed = append(allowed, claudeTools(t.Tools)...)
 		a = append(a, "--tools", "Read,Grep,Glob", "--allowedTools", strings.Join(allowed, ","))
-		// --tools restricts built-in tools only: an MCP server from the
-		// person's settings could still write. --strict-mcp-config with
-		// no --mcp-config loads no MCP server at all.
-		a = append(a, "--strict-mcp-config")
 	} else {
 		// edit: Edit(<folder>/**) lets Edit and Write change files there
 		// without asking; one Edit rule covers every built-in tool that
@@ -187,9 +191,22 @@ func (claude) Args(t Turn) []string {
 		if len(t.Allow) > 0 {
 			allowed = append(allowed, bashRules(t.Allow))
 		}
+		allowed = append(allowed, claudeTools(t.Tools)...)
 		if len(allowed) > 0 {
 			a = append(a, "--allowedTools", strings.Join(allowed, ","))
 		}
+	}
+	// --tools restricts built-in tools only: an MCP server from the
+	// person's settings could still write in a read-only turn.
+	// --strict-mcp-config loads only the --mcp-config servers: the tool
+	// server, or none at all. A turn with the tool server gets no MCP
+	// server of the person's either, so the agentbus_* tools are the only
+	// MCP tools it sees.
+	if t.Tools != "" {
+		a = append(a, "--mcp-config", claudeMCPConfig(t.Tools))
+	}
+	if readOnly || t.Tools != "" {
+		a = append(a, "--strict-mcp-config")
 	}
 	// forbid: never run, even when allow or the person's settings
 	// approve it; a deny wins over an allow (checked live, 2026-11-07).
@@ -218,6 +235,20 @@ func (claude) Args(t Turn) []string {
 	if t.NoSubagents {
 		denied = append(denied, "Task", "Agent", "Workflow")
 	}
+	// With the tool server, Claude Code's own agents are hidden, so
+	// AgentBus agents are the only agents the turn sees (his call,
+	// 2026-11-10). Claude Code 2.1.321 (2026-11-11, read from the tool list
+	// a haiku -p turn prints): Task starts a subagent (Agent in newer
+	// versions), ListAgents lists other Claude sessions on the machine and
+	// SendMessage writes to them. A turn asked "list other agents" used
+	// ListAgents and answered there were none (2026-11-10).
+	if t.Tools != "" {
+		for _, n := range []string{"Task", "Agent", "ListAgents", "SendMessage"} {
+			if !slices.Contains(denied, n) {
+				denied = append(denied, n)
+			}
+		}
+	}
 	if len(denied) > 0 {
 		a = append(a, "--disallowedTools", strings.Join(denied, ","))
 	}
@@ -225,6 +256,27 @@ func (claude) Args(t Turn) []string {
 		a = append(a, "--model", t.Model)
 	}
 	return append(a, "--", t.Prompt)
+}
+
+// claudeMCPConfig is the --mcp-config value of a turn with the tool server at
+// url: inline JSON, so nothing is written. Claude Code expands
+// ${AGENTBUS_TOKEN} from its own environment when it loads the server
+// (2.1.321, 2026-11-11, checked live), so the token is in no argument.
+func claudeMCPConfig(url string) string {
+	b, _ := json.Marshal(map[string]any{"mcpServers": map[string]any{ToolServer: map[string]any{
+		"type": "http", "url": url,
+		"headers": map[string]string{"Authorization": "Bearer ${AGENTBUS_TOKEN}"}}}})
+	return string(b)
+}
+
+// claudeTools is the --allowedTools rule that lets the tool server's tools run
+// without asking: a -p turn has nobody to ask. What a call may do is the
+// turn token's to say.
+func claudeTools(url string) []string {
+	if url == "" {
+		return nil
+	}
+	return []string{"mcp__" + ToolServer}
 }
 
 // readRules is Claude Code's rules that let Read, Grep and Glob reach each

@@ -307,6 +307,7 @@ review = true
 cancel = true
 rename = true
 apply = true
+tools = false
 
 [network]
 contain = "on"
@@ -714,12 +715,27 @@ answer names a job: the queue's jobs are internal.
   file gives no instructions, and a file over 64 KiB, not UTF-8 or holding a NUL byte stops the
   turn with 400, as a broken `permissions.toml` does. `GET` and `PUT /api/v0/settings/instructions`
   read and write it ([Settings](#settings)); a runner on another machine uses the server's. Keep the
-  text the same within a session: own replay and the prompt cache rely on it. The default says
-  plainly that the agent works in a copy, and how to apply, review, stop and search:
+  text the same within a session: own replay and the prompt cache rely on it. `{tools}` becomes how
+  the turn calls AgentBus: one line naming the `agentbus_*` tools for a turn that has them (below,
+  "The tool server"), else the `agentbus-api` lines. The default says plainly that the agent works
+  in a copy:
 
   ```
   You work through AgentBus, in session <session>. A turn is one message to you, your reply and your changes.
   Your folder is usually your session's own copy of the person's folder. Your edits stay in the copy. They reach the person's folder only when a turn is applied.
+  {tools}
+  ```
+
+  With the tools, `{tools}` is:
+
+  ```
+  Use the agentbus_* tools for AgentBus: list and ask other agents, review, read, apply and stop turns, search this session. AgentBus agents are saved setups across vendors, not your harness's own agents or subagents.
+  Work you ask for comes back to you as a later turn: do not wait for it.
+  ```
+
+  Without them:
+
+  ```
   Call AgentBus with agentbus-api METHOD PATH [JSON]. Replace T with a turn id.
   - List this session's turns, with each id, number, state and cost: agentbus-api GET /api/v0/turns
   - Apply a turn to the person's folder (its changes and the earlier turns' that are not applied yet): agentbus-api POST /api/v0/turns/T/apply
@@ -729,6 +745,33 @@ answer names a job: the queue's jobs are internal.
   - Search this session's history: agentbus-api GET "/api/v0/sessions/<session>/search?q=<text>", with <text> URL-encoded.
   Work you ask for comes back to you as a later turn: do not wait for it. More: agentbus-api GET /docs/llms.txt
   ```
+
+  **The tool server.** With `tools = true` in `[agent_api]` (off by default), a claude or codex turn
+  gets the API as tools of its own, over MCP: `POST /api/v0/mcp` on the turn's API address,
+  stateless Streamable HTTP, with the turn's own token as the bearer. The tools are
+  `agentbus_list_agents`, `agentbus_ask_agent`, `agentbus_continue_session`, `agentbus_list_turns`,
+  `agentbus_get_turn`, `agentbus_turn_diff`, `agentbus_apply_turn`, `agentbus_review_turn`,
+  `agentbus_stop_turn`, `agentbus_search_history` and `agentbus_rename_session`. They are declared
+  in the route table beside the routes they call, and each operation of the OpenAPI description
+  names its tools in `x-agentbus-tools`; a tool's input is built from its route's description. The
+  list a turn sees holds only what its token may call (a read-only turn sees reads only), and is
+  discovery only: each call goes through the same token check, `[agent_api]` and `[limits]` as the
+  HTTP call it names, and a refusal comes back as an error result that starts with its HTTP status.
+  Wired by run flags only, never a settings file:
+  - claude: `--mcp-config` with the server inline, the bearer written as `${AGENTBUS_TOKEN}`, which
+    Claude Code fills in from its own environment, and `--strict-mcp-config`, so the person's own
+    MCP servers are not loaded into the turn. `mcp__agentbus` goes in `--allowedTools`. Claude
+    Code's own `Task` (`Agent` in newer versions), `ListAgents` and `SendMessage` are denied, so
+    AgentBus agents are the only agents the turn sees. Claude Code 2.1.321 loads the tools' schemas
+    on demand (`ToolSearch`).
+  - codex: `-c mcp_servers.agentbus.url=...` and `-c mcp_servers.agentbus.bearer_token_env_var="AGENTBUS_TOKEN"`.
+  - agy: none yet. Its turns call `agentbus-api`, though agy gets no instructions at all today.
+  A codex config of the person's that already defines `mcp_servers.agentbus` wins: that turn gets
+  no tool server (the log says `run.tools ... left_out=codex_mcp_server_set`), since codex merges a
+  `-c` into their entry field by field. `tools = false`, the default, gives no tool server, keeps
+  Claude Code's own agent tools, and the instructions name `agentbus-api`; `POST /api/v0/mcp` then
+  refuses a turn token with 403. The fresh-agent test on 2026-11-11 found no gain from the tools
+  over `agentbus-api`, so they stay off until that changes.
 
   `agentbus-api METHOD PATH [BODY]` is the API client. It is a link to the running program, kept
   at `<data folder>/bin/agentbus-api` and made at every start, and that folder goes first on each

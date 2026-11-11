@@ -53,13 +53,28 @@ func TestIDScanner(t *testing.T) {
 // through the agent's own instruction flag and never inside the prompt: own
 // replay and the vendor's prompt cache need the text the same on every turn.
 // The default is the text turns had before the file existed.
+// With the agentbus_* tools, {tools} is one line that names them, and no
+// agentbus-api command.
+func TestInstructionsWithTools(t *testing.T) {
+	got, err := (&Engine{}).instructions("abc")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got = withTools(got, "abc", true)
+	if !strings.Contains(got, settings.ToolsText) || strings.Contains(got, "agentbus-api") || strings.Contains(got, "{tools}") ||
+		!strings.Contains(got, "own copy of the person's folder") {
+		t.Errorf("instructions with tools:\n%s", got)
+	}
+}
+
 func TestInstructionsDefault(t *testing.T) {
 	e := &Engine{}
 	got, err := e.instructions("abc")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := strings.TrimSpace(strings.ReplaceAll(settings.DefaultInstructions, "{session}", "abc"))
+	got = withTools(got, "abc", false)
+	want := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(settings.DefaultInstructions, "{tools}", settings.APIText), "{session}", "abc"))
 	// What the baseline found agents miss: their copy is not the person's
 	// folder, how to apply, and how to ask for a review.
 	for _, line := range []string{"in session abc", "own copy of the person's folder", "agentbus-api POST /api/v0/turns/T/apply",
@@ -92,7 +107,7 @@ func TestInstructionsDefault(t *testing.T) {
 func TestInstructionsFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), settings.InstructionsFile)
 	e := &Engine{cfg: Config{Settings: settings.NewFiles(filepath.Dir(path))}}
-	if got, err := e.instructions("s1"); err != nil || !strings.Contains(got, "/api/v0/sessions/s1/search") {
+	if got, err := e.instructions("s1"); err != nil || !strings.Contains(withTools(got, "s1", false), "/api/v0/sessions/s1/search") {
 		t.Fatalf("missing: %q %v", got, err)
 	}
 	for _, tc := range []struct{ file, want string }{
@@ -156,13 +171,13 @@ func TestTurnEnvAsked(t *testing.T) {
 func TestAskedLine(t *testing.T) {
 	o := &event.Origin{Kind: event.OriginAsked, Session: "s1", Turn: "t_1"}
 	p := settings.DefaultPolicy()
-	line := askedLine(askedBy(o), p.AgentAPI, true)
+	line := askedLine(askedBy(o), p.AgentAPI, true, false)
 	for _, want := range []string{"session s1, turn t_1", `agentbus-api GET "/api/v0/turns/t_1/diff?session=s1"`, `agentbus-api GET "/api/v0/turns?session=s1"`} {
 		if !strings.Contains(line, want) {
 			t.Errorf("line lacks %q: %s", want, line)
 		}
 	}
-	if line := askedLine(askedBy(o), p.AgentAPI, false); !strings.Contains(line, `"$AGENTBUS_URL/api/v0/turns/t_1/diff?session=s1"`) {
+	if line := askedLine(askedBy(o), p.AgentAPI, false, false); !strings.Contains(line, `"$AGENTBUS_URL/api/v0/turns/t_1/diff?session=s1"`) {
 		t.Errorf("curl: %s", line)
 	}
 	off := false
@@ -171,12 +186,12 @@ func TestAskedLine(t *testing.T) {
 	scoped := p.AgentAPI
 	scoped.Scope = settings.ScopeSession
 	for name, api := range map[string]settings.AgentAPI{"read off": readOff, "scope session": scoped} {
-		if line := askedLine(askedBy(o), api, true); line != "" {
+		if line := askedLine(askedBy(o), api, true, false); line != "" {
 			t.Errorf("%s: %s", name, line)
 		}
 	}
 	for _, o := range []*event.Origin{nil, {Kind: event.OriginResult, Session: "s1", Turn: "t_1"}, {Kind: event.OriginAsked, Session: "s1"}} {
-		if line := askedLine(askedBy(o), p.AgentAPI, true); line != "" {
+		if line := askedLine(askedBy(o), p.AgentAPI, true, false); line != "" {
 			t.Errorf("%v: %s", o, line)
 		}
 	}

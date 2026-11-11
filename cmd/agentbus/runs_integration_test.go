@@ -528,9 +528,21 @@ func TestRunTurnCarriesAgentAndFolder(t *testing.T) {
 func argsOf(t *testing.T, args []string, session string) string {
 	t.Helper()
 	out := append([]string(nil), args...)
-	search := "/api/v0/sessions/" + session + "/search?q="
+	// The hint names the session; with the agentbus_* tools it names no
+	// route, so the session's own words are what is checked.
+	search := "in session " + session + "."
 	for i, a := range out {
 		switch {
+		case i > 0 && out[i-1] == "--mcp-config":
+			if !strings.Contains(a, `"Bearer ${AGENTBUS_TOKEN}"`) || !strings.Contains(a, "/api/v0/mcp") {
+				t.Errorf("claude's tool server: %q", a)
+			}
+			out[i] = "MCP"
+		case strings.HasPrefix(a, "mcp_servers.agentbus.url="):
+			if !strings.HasSuffix(a, `/api/v0/mcp"`) {
+				t.Errorf("codex's tool server: %q", a)
+			}
+			out[i] = "mcp_servers.agentbus.url=TOOLS"
 		case i > 0 && out[i-1] == "--append-system-prompt":
 			if !strings.Contains(a, search) {
 				t.Errorf("claude's hint does not name session %s: %q", session, a)

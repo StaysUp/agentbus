@@ -74,6 +74,10 @@ type Info struct {
 	// settings, memory, plugins and transcripts there only, whatever the
 	// runner's own environment says.
 	ConfigEnv, ConfigDir string
+	// ToolServer says the harness takes the tool server for one run by its
+	// flags (Turn.Tools). False: its turns call the API with agentbus-api
+	// only, and the instructions say so.
+	ToolServer bool
 	// Login is its own login for the person's subscription, so they can
 	// connect it once on control for the runners they own. Nil: its
 	// subscription cannot be used on a runner yet.
@@ -184,10 +188,20 @@ type Turn struct {
 	// its command line (permissions.toml subagents = false). Its own config
 	// files are never edited.
 	NoSubagents bool
+	// Tools, when not empty, is the address of the turn's tool server:
+	// control's POST /api/v0/mcp, which serves the API as agentbus_* tools
+	// ([agent_api] tools). The harness sends the turn's own token from
+	// AGENTBUS_TOKEN, read by the harness itself, so no token is in an
+	// argument or a file. Wired by run flags only, never a settings file.
+	Tools string
 	// Prompt is always last, after "--" or joined to its flag with "=", so
 	// it is never read as a flag.
 	Prompt string
 }
+
+// ToolServer is the name a harness gives the tool server, so its tools read
+// mcp__agentbus__agentbus_list_agents in claude, and the like elsewhere.
+const ToolServer = "agentbus"
 
 // Harness is one program that runs an agent's loop.
 type Harness interface {
@@ -212,6 +226,11 @@ type Harness interface {
 	// themselves, or the harness has no place for them. env is the child's
 	// environment.
 	OwnInstructions(env []string, folder string) (why string)
+	// OwnTools says, with a reason for the service log, that a turn gets no
+	// tool server (Turn.Tools) though it would: the person's own setting
+	// for the harness is in the way, and wins. Only for a harness with
+	// Info.ToolServer.
+	OwnTools(env []string, folder string) (why string)
 	// Native says the harness reads the file name of the turn's folder by
 	// itself, as instructions, so a turn is not given it again. folder is
 	// the turn's folder; nothing outside it is read.

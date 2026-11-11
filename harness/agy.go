@@ -72,6 +72,9 @@ func (agy) Edit(folders, protect []string) ([]string, string) {
 // change the person's own files, so a turn's hint is left out.
 func (agy) OwnInstructions([]string, string) string { return "agy_no_instruction_flag" }
 
+// OwnTools is never asked: agy takes no tool server yet (Info.ToolServer).
+func (agy) OwnTools([]string, string) string { return "" }
+
 // Native: agy reads the AGENTS.md and the GEMINI.md of its working folder,
 // git repository or not, into its system prompt as user rules (checked live
 // with a marker in each, read back from the request).

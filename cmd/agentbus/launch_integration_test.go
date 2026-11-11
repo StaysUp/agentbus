@@ -129,6 +129,17 @@ func TestLaunchGolden(t *testing.T) {
 				turns: []engine.Request{first(h)}},
 		)
 	}
+	toolsOn := "[agent_api]\ntools = true\n"
+	for _, h := range []string{"claude", "codex"} {
+		cases = append(cases,
+			launchCase{name: h + " tools on, then resume", perm: toolsOn, turns: []engine.Request{first(h), next("t_2")}},
+			launchCase{name: h + " tools on, read-only", perm: toolsOn,
+				turns: []engine.Request{with(first(h), func(r *engine.Request) { r.ReadOnly = true })}},
+			launchCase{name: h + " tools on, subagents off, with lists", perm: lists + "subagents = false\n" + toolsOn, turns: []engine.Request{first(h)}},
+			launchCase{name: h + " tools on, asked by another agent", perm: toolsOn,
+				turns: []engine.Request{with(first(h), func(r *engine.Request) { r.Origin = asked })}},
+		)
+	}
 	allowOnly := "read_folders = [\"<readfolder>\"]\nallow = [\"go test\", \"git commit\"]\n"
 	cases = append(cases,
 		launchCase{name: "agy subscription, then resume", turns: []engine.Request{first("agy"), next("t_2")}},
@@ -138,6 +149,9 @@ func TestLaunchGolden(t *testing.T) {
 			turns: []engine.Request{with(first("agy"), func(r *engine.Request) { r.Model = "gemini-3.8-flash-medium" })}},
 		launchCase{name: "agy edit none", perm: "edit = \"none\"\n", turns: []engine.Request{first("agy")}},
 		launchCase{name: "agy forbid", perm: lists, turns: []engine.Request{first("agy")}},
+		// [agent_api] tools = true: the tool server by run flags for claude
+		// and codex, none for agy, whose instructions stay agentbus-api's.
+		launchCase{name: "agy tools on", perm: toolsOn, turns: []engine.Request{first("agy")}},
 		launchCase{name: "agy subagents off", perm: "subagents = false\n", turns: []engine.Request{first("agy")}},
 		launchCase{name: "agy openrouter", env: []string{"OPENROUTER_API_KEY=test-key"},
 			turns: []engine.Request{with(first("agy"), func(r *engine.Request) { or(r); r.Model = "deepseek/deepseek-v4.1-flash" })}},
