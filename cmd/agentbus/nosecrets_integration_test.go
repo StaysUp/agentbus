@@ -35,6 +35,9 @@ type fakeVendor struct {
 	mu       sync.Mutex
 	auths    []string
 	accounts []string // each request's ChatGPT-Account-ID
+	// stream, when set, is the reply instead: written as server-sent events
+	// with no Content-Type, as chatgpt.com answers codex.
+	stream []byte
 }
 
 func newFakeVendor(t *testing.T) *fakeVendor {
@@ -44,7 +47,13 @@ func newFakeVendor(t *testing.T) *fakeVendor {
 		v.mu.Lock()
 		v.auths = append(v.auths, r.URL.Path+" "+r.Header.Get("Authorization"))
 		v.accounts = append(v.accounts, r.Header.Get("ChatGPT-Account-ID"))
+		stream := v.stream
 		v.mu.Unlock()
+		if stream != nil {
+			w.Header()["Content-Type"] = nil // no type at all, not a sniffed one
+			w.Write(stream)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"hello from the fake"}],`+
 			`"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}`)
@@ -345,9 +354,17 @@ func TestRunnerUsesConnectedSubscription(t *testing.T) {
 // gets a placeholder as its key and the runner's gateway as its provider; the
 // relay sends chatgpt.com the sign-in's token and account. The sign-in goes
 // to its own vendor only: the same turn's token on the Anthropic path gets
-// nothing.
+// nothing. chatgpt.com streams its reply with no Content-Type, and the
+// relay passes it on so: the runner's gateway records the reply's text.
 func TestRunnerUsesConnectedCodexSubscription(t *testing.T) {
 	ns := startNoSecrets(t)
+	sample, err := os.ReadFile(filepath.Join("..", "..", "adapter", "openai", "testdata", "plain_response.sse"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ns.chat.mu.Lock()
+	ns.chat.stream = sample
+	ns.chat.mu.Unlock()
 	if err := os.WriteFile(filepath.Join(ns.serverHome, "permissions.toml"), []byte("subscriptions_on_runners = \"own\"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -408,9 +425,29 @@ func TestRunnerUsesConnectedCodexSubscription(t *testing.T) {
 		t.Fatalf("a codex turn's token on the Anthropic path: %d, %v", resp.StatusCode, ns.anth.seen())
 	}
 	os.WriteFile(ns.release, nil, 0o600)
-	if jj := waitJob(t, ns.server, ns.tok, j.ID); jj.State != queue.Finished {
+	jj := waitJob(t, ns.server, ns.tok, j.ID)
+	if jj.State != queue.Finished {
 		t.Fatalf("job %s %s %s", jj.State, jj.Reason, jj.Result)
 	}
+	// The streamed reply is in the server's record: its text, its usage,
+	// and the turn's reply.
+	waitFor(t, "the codex reply in the server's record", func() bool {
+		recs, _ := ns.server.store.After(0, store.Filter{Turn: jj.Turn}, 1000)
+		for _, r := range recs {
+			var e event.Event
+			if r.Kind == "model.responded" && json.Unmarshal(r.Data, &e) == nil {
+				if e.Error != "" || e.Text != "pong" || e.Usage == nil {
+					t.Fatalf("the codex reply recorded as %s", r.Data)
+				}
+				return true
+			}
+		}
+		return false
+	})
+	waitFor(t, "the turn's reply", func() bool {
+		code, raw := getAPI(t, ns.server, ns.tok, "/api/v0/turns/"+jj.Turn)
+		return code == 200 && strings.Contains(raw, `"reply":"pong"`)
+	})
 	var list struct {
 		Subscriptions []struct {
 			Harness           string

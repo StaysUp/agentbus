@@ -128,7 +128,18 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request) {
 			}
 		},
 		FlushInterval: -1, // a streamed reply goes on as it comes
-		ErrorLog:      discard,
+		// chatgpt.com streams codex's reply with no Content-Type. Go's
+		// server would then add one it guessed from the first bytes,
+		// "text/plain; charset=utf-8", and the runner's gateway would read
+		// the stream as one JSON body and record no reply (2026-11-11). A
+		// nil value keeps the header out, as the vendor sent it.
+		ModifyResponse: func(res *http.Response) error {
+			if _, ok := res.Header["Content-Type"]; !ok {
+				w.Header()["Content-Type"] = nil
+			}
+			return nil
+		},
+		ErrorLog: discard,
 		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
 			fail(w, http.StatusBadGateway, "control could not reach the model's vendor")
 		},
