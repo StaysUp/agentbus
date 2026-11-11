@@ -156,10 +156,14 @@ func TestHarnessesListsFoundVersionsAndSignIn(t *testing.T) {
 			} `json:"access"`
 		} `json:"harnesses"`
 	}
-	if err := json.Unmarshal([]byte(raw), &got); err != nil || len(got.Harnesses) != 3 {
+	if err := json.Unmarshal([]byte(raw), &got); err != nil || len(got.Harnesses) != 4 {
 		t.Fatalf("got %s (%v)", raw, err)
 	}
-	cl, cx, oc := got.Harnesses[0], got.Harnesses[1], got.Harnesses[2]
+	cl, cx, ag, oc := got.Harnesses[0], got.Harnesses[1], got.Harnesses[2], got.Harnesses[3]
+	// agy has no sign-in status command: signed_in is left out.
+	if ag.Name != "agy" || ag.Found || ag.SignedIn != nil || len(ag.Access) != 3 || ag.Access[0].Disabled || !ag.Access[1].Disabled {
+		t.Errorf("agy: %+v", ag)
+	}
 	if cl.Name != "claude" || !cl.Found || cl.Version != "2.1.318" || cl.SignedIn == nil || !*cl.SignedIn {
 		t.Errorf("claude: %+v", cl)
 	}

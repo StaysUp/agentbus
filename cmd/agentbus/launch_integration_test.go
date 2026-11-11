@@ -36,7 +36,7 @@ var updateLaunch = flag.Bool("update-launch", false, "rewrite testdata/launch.go
 const launchDirEnv = "AGENTBUS_LAUNCH_DIR"
 
 // fakeLaunch writes its arguments, environment and folder to the next free
-// <dir>/<n>.json, prints a resume id in both harnesses' shapes, and exits 0.
+// <dir>/<n>.json, prints a resume id in each harness's shape, and exits 0.
 func fakeLaunch(dir string) {
 	n := 0
 	for ; ; n++ {
@@ -51,6 +51,7 @@ func fakeLaunch(dir string) {
 	os.Rename(p+".tmp", p)
 	fmt.Printf(`{"type":"thread.started","thread_id":"tid-%d"}`+"\n", n)
 	fmt.Printf(`{"type":"result","session_id":"sid-%d"}`+"\n", n)
+	fmt.Printf(`{"conversation_id":"cid-%d","status":"SUCCESS"}`+"\n", n)
 	os.Exit(0)
 }
 
@@ -128,7 +129,27 @@ func TestLaunchGolden(t *testing.T) {
 				turns: []engine.Request{first(h)}},
 		)
 	}
+	allowOnly := "read_folders = [\"<readfolder>\"]\nallow = [\"go test\", \"git commit\"]\n"
 	cases = append(cases,
+		launchCase{name: "agy subscription, then resume", turns: []engine.Request{first("agy"), next("t_2")}},
+		launchCase{name: "agy read-only with lists", perm: allowOnly,
+			turns: []engine.Request{with(first("agy"), func(r *engine.Request) { r.ReadOnly = true })}},
+		launchCase{name: "agy lists, model, own instructions", perm: allowOnly, instr: strp("Be brief in {session}.\n"),
+			turns: []engine.Request{with(first("agy"), func(r *engine.Request) { r.Model = "gemini-3.8-flash-medium" })}},
+		launchCase{name: "agy edit none", perm: "edit = \"none\"\n", turns: []engine.Request{first("agy")}},
+		launchCase{name: "agy forbid", perm: lists, turns: []engine.Request{first("agy")}},
+		launchCase{name: "agy subagents off", perm: "subagents = false\n", turns: []engine.Request{first("agy")}},
+		launchCase{name: "agy openrouter", env: []string{"OPENROUTER_API_KEY=test-key"},
+			turns: []engine.Request{with(first("agy"), func(r *engine.Request) { or(r); r.Model = "deepseek/deepseek-v4.1-flash" })}},
+		launchCase{name: "agy own endpoint", env: []string{"CLOUD_CODE_URL=http://elsewhere"}, turns: []engine.Request{first("agy")}},
+		launchCase{name: "agy missing", missing: true, turns: []engine.Request{first("agy")}},
+		launchCase{name: "agy odd folder", oddFolder: true, turns: []engine.Request{first("agy")}},
+		launchCase{name: "agy folder holds the data folder", dataInside: true, turns: []engine.Request{first("agy")}},
+		launchCase{name: "agy in a home of its own, then resume", homes: true, turns: []engine.Request{first("agy"), next("t_2")}},
+		launchCase{name: "agy folder with AGENTS.md, asked by another agent", agentsMD: true,
+			turns: []engine.Request{with(first("agy"), func(r *engine.Request) { r.Origin = asked })}},
+		launchCase{name: "switch claude to agy, transcript",
+			turns: []engine.Request{first("claude"), with(next("t_2"), func(r *engine.Request) { r.Harness = "agy" })}},
 		launchCase{name: "switch claude to codex, replay", replay: true,
 			turns: []engine.Request{first("claude"), with(next("t_2"), func(r *engine.Request) { r.Harness = "codex" })}},
 		launchCase{name: "switch codex to claude, resume",

@@ -23,6 +23,11 @@ func runWire(getenv func(string) string, environ func() []string, lookPath func(
 		if v := h.Info().OwnEndpointEnv; v != "" && getenv(v) != "" {
 			return engine.Launch{}, engine.ErrOwnEndpoint
 		}
+		// A harness runs only on the access it offers: agy has no
+		// OpenRouter way, and its Wire would send it to its own sign-in.
+		if !harness.Offers(h.Info(), acc.Kind) {
+			return engine.Launch{}, engine.Refused(http.StatusBadRequest, h.Info().Label+" cannot run on access "+acc.Kind)
+		}
 		var env, pre []string
 		switch {
 		case acc.Placeholder != "" && (acc.Kind == "" || acc.Kind == harness.Subscription):

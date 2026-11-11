@@ -73,7 +73,7 @@ func TestRouteOpenRouter(t *testing.T) {
 	gw := func(name string) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hit = name })
 	}
-	h := route(nil, vendors{gw("anthropic"), gw("openai"), gw("or-anthropic"), gw("or-responses"), nil}, false)
+	h := route(nil, vendors{gw("anthropic"), gw("openai"), gw("or-anthropic"), gw("or-responses"), nil, gw("gemini")}, false)
 	for path, want := range map[string]string{
 		"/s/abc/t/t_1/v1/messages":                         "anthropic",
 		"/s/abc/t/t_1/backend-api/codex/responses":         "openai",
@@ -81,6 +81,9 @@ func TestRouteOpenRouter(t *testing.T) {
 		"/s/abc/t/t_1/openrouter/v1/messages/count_tokens": "or-anthropic",
 		"/s/abc/t/t_1/openrouter/v1/responses":             "or-responses",
 		"/s/abc/t/t_1/openrouter/v1/models":                "or-anthropic",
+		"/s/abc/t/t_1/v1internal:streamGenerateContent":    "gemini",
+		"/v1internal:loadCodeAssist":                       "gemini",
+		"/s/abc/t/t_1/v1internalx:streamGenerateContent":   "",
 	} {
 		hit = ""
 		r := httptest.NewRequest("POST", path, nil)
@@ -89,6 +92,21 @@ func TestRouteOpenRouter(t *testing.T) {
 		if hit != want {
 			t.Errorf("%s reached %q, want %q", path, hit, want)
 		}
+	}
+}
+
+// A runner that holds no secret has no agy gateway: its Code Assist path is
+// answered 404 and sent nowhere.
+func TestRouteNoGemini(t *testing.T) {
+	hit := false
+	gw := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hit = true })
+	h := route(nil, vendors{gw, gw, gw, gw, nil, nil}, false)
+	r := httptest.NewRequest("POST", "/s/abc/t/t_1/v1internal:streamGenerateContent", nil)
+	r.RemoteAddr = "127.0.0.1:5000"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, r)
+	if hit || rec.Code != http.StatusNotFound {
+		t.Fatalf("reached %v, status %d", hit, rec.Code)
 	}
 }
 
@@ -118,7 +136,7 @@ func TestGatewayThisMachineOnly(t *testing.T) {
 		{true, "[::1]:5000", "/s/abc/t/t_1/openrouter/v1/messages", true},
 	} {
 		anth, oai = false, false
-		h := route(nil, vendors{reached("anthropic", &anth), reached("openai", &oai), reached("openrouter", &anth), reached("openrouter", &oai), nil}, tc.open)
+		h := route(nil, vendors{reached("anthropic", &anth), reached("openai", &oai), reached("openrouter", &anth), reached("openrouter", &oai), nil, nil}, tc.open)
 		r := httptest.NewRequest("POST", tc.path, nil)
 		r.RemoteAddr = tc.remote
 		r = r.WithContext(context.WithValue(r.Context(), http.LocalAddrContextKey, net.Addr(local)))
@@ -163,7 +181,7 @@ func TestRootAndUnroutedPaths(t *testing.T) {
 				{"POST", "/s/abc/t/t_1/openrouter/v2/x", http.StatusNotFound, ""},
 			} {
 				reached = false
-				h := route(nil, vendors{gw, gw, gw, gw, nil}, open)
+				h := route(nil, vendors{gw, gw, gw, gw, nil, gw}, open)
 				r := httptest.NewRequest(tc.method, tc.path, nil)
 				r.RemoteAddr = remote
 				r = r.WithContext(context.WithValue(r.Context(), http.LocalAddrContextKey, net.Addr(local)))

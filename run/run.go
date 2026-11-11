@@ -647,7 +647,8 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		return nil, e.unusable(t.harness, "instructions_file", err)
 	}
 	// The gateway refuses a command of this turn that forbid names, for
-	// claude and codex alike (gateway/guard.go).
+	// claude and codex alike (gateway/guard.go). A harness whose format the
+	// guard does not read refuses a turn with forbid (Harness.Refuse).
 	e.turnRules.set(t.session, t.id, perm.Forbid)
 	baseURL := e.cfg.BaseURL + "/s/" + t.session + "/t/" + t.id
 	if e.cfg.Wire == nil {
@@ -751,7 +752,14 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	if why != "" {
 		e.cfg.Logf("run.edit session=%s turn=%s left_out=%s", t.session, t.id, why)
 	}
-	args := turnArgs(h, hint, t.resumeID, t.model, w, perm, t.context+t.prompt)
+	spec := turnSpec(hint, t.resumeID, t.model, w, perm, t.context+t.prompt)
+	// A setting the harness has no way to keep refuses the turn, before
+	// anything is stored (harness.Harness.Refuse).
+	if why := h.Refuse(spec); why != "" {
+		e.cfg.Logf("run.refused agent=%s reason=harness_setting", t.harness)
+		return nil, refuse(http.StatusBadRequest, why)
+	}
+	args := h.Args(spec)
 	all := append(append([]string{}, l.Args...), args...)
 	cmd.Args = append([]string{l.Path}, all...)
 	cmd.Dir = t.folder
@@ -1011,9 +1019,14 @@ func (e *Engine) StopAll() {
 // not empty, goes in as an instruction of the agent's own, never inside the
 // prompt (historyHint). perm is the person's permissions.toml (permissions.go).
 func turnArgs(h harness.Harness, hint, resumeID, model string, w Writes, perm settings.Policy, prompt string) []string {
-	return h.Args(harness.Turn{Hint: hint, ResumeID: resumeID, Model: model, Writes: w,
+	return h.Args(turnSpec(hint, resumeID, model, w, perm, prompt))
+}
+
+// turnSpec is what a turn's command line is built from (turnArgs).
+func turnSpec(hint, resumeID, model string, w Writes, perm settings.Policy, prompt string) harness.Turn {
+	return harness.Turn{Hint: hint, ResumeID: resumeID, Model: model, Writes: w,
 		ReadFolders: perm.ReadFolders, Allow: perm.Allow, Forbid: perm.Forbid,
-		NoSubagents: perm.Subagents != nil && !*perm.Subagents, Prompt: prompt})
+		NoSubagents: perm.Subagents != nil && !*perm.Subagents, Prompt: prompt}
 }
 
 // withAPI is perm with the agent's way to the API allowed without asking,

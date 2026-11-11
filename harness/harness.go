@@ -66,7 +66,9 @@ type Info struct {
 	// replayed history: the turn after gets the earlier turns as text.
 	ReplayOnOpenRouter bool
 	// ConfigEnv names the variable that points the harness at its own
-	// config folder, and ConfigDir is that folder's name in a home. A turn
+	// config folder, and ConfigDir is that folder's name in a home. A
+	// harness that keeps it under HOME with no variable of its own has
+	// ConfigEnv empty. A turn
 	// in a home of its own (run.Config.Homes) gets HOME and
 	// ConfigEnv=<home>/<ConfigDir>, so the harness reads and keeps its
 	// settings, memory, plugins and transcripts there only, whatever the
@@ -115,6 +117,20 @@ type Access struct {
 	Disabled bool     // listed, but no agent can use it yet
 	Models   []string // to offer, first the one to start from
 	AnyModel bool     // any model name is accepted
+}
+
+// Offers says h can run an agent on access kind, "" being Subscription: it
+// lists the kind, and not as disabled.
+func Offers(info Info, kind string) bool {
+	if kind == "" {
+		kind = Subscription
+	}
+	for _, a := range info.Access {
+		if a.Kind == kind {
+			return !a.Disabled
+		}
+	}
+	return false
 }
 
 // OpenRouterModels are offered first for an OpenRouter agent; any OpenRouter
@@ -168,7 +184,8 @@ type Turn struct {
 	// its command line (permissions.toml subagents = false). Its own config
 	// files are never edited.
 	NoSubagents bool
-	// Prompt is always last, after "--", so it is never read as a flag.
+	// Prompt is always last, after "--" or joined to its flag with "=", so
+	// it is never read as a flag.
 	Prompt string
 }
 
@@ -190,9 +207,10 @@ type Harness interface {
 	// its real path) and the files it must never edit. Empty, with why for
 	// the service log, when edits must be left out.
 	Edit(folders, protect []string) (edit []string, why string)
-	// OwnInstructions says, with a reason for the service log, that the
-	// person set this harness's instructions themselves, so a turn's hint is
-	// left out. env is the child's environment.
+	// OwnInstructions says, with a reason for the service log, that a
+	// turn's hint is left out: the person set this harness's instructions
+	// themselves, or the harness has no place for them. env is the child's
+	// environment.
 	OwnInstructions(env []string, folder string) (why string)
 	// Native says the harness reads the file name of the turn's folder by
 	// itself, as instructions, so a turn is not given it again. folder is
@@ -203,10 +221,14 @@ type Harness interface {
 	// ResumeID reads one line of the child's stdout and returns the resume
 	// id so far: current, or the id that line names.
 	ResumeID(line []byte, current string) string
+	// Refuse says why a turn of t's settings cannot run on this harness,
+	// in words fit for the person, or "": a setting of permissions.toml it
+	// has no way to keep. Nothing is started or stored for a refused turn.
+	Refuse(t Turn) string
 }
 
 // registry is every harness turns can start, in the order they are listed.
-var registry = []Harness{claude{}, codex{}}
+var registry = []Harness{claude{}, codex{}, agy{}}
 
 // planned are harnesses listed as coming, which no agent can use yet.
 var planned = []Info{{Name: "opencode", Label: "opencode"}}
@@ -256,6 +278,9 @@ type stdoutLine struct {
 	Type      string `json:"type"`
 	SessionID string `json:"session_id"`
 	ThreadID  string `json:"thread_id"`
+	// agy's: the conversation and the turn's status.
+	ConversationID string `json:"conversation_id"`
+	Status         string `json:"status"`
 }
 
 func decodeLine(line []byte) (stdoutLine, bool) {

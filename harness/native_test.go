@@ -59,11 +59,12 @@ func TestNative(t *testing.T) {
 	}
 }
 
-// Every harness names its config folder's variable, so a turn in a home of
-// its own reads nothing of the runner user's.
+// Every harness names its config folder in a home, so a turn in a home of its
+// own reads nothing of the runner user's. Its variable may be empty: agy has
+// none and keeps its folder under HOME.
 func TestConfigDir(t *testing.T) {
 	for _, h := range All() {
-		if i := h.Info(); i.ConfigEnv == "" || i.ConfigDir == "" || filepath.IsAbs(i.ConfigDir) {
+		if i := h.Info(); i.ConfigDir == "" || filepath.IsAbs(i.ConfigDir) {
 			t.Errorf("%q: config folder %q in %q", i.Name, i.ConfigDir, i.ConfigEnv)
 		}
 	}

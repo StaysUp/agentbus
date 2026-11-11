@@ -368,7 +368,8 @@ func TestSavedAgentsKeptAndDefaultsSeeded(t *testing.T) {
 	tok := readToken(t, home)
 	code, list := sendAPI(t, svc, tok, "GET", "/api/v0/agents", nil)
 	ags, _ := list["agents"].([]any)
-	if code != 200 || len(ags) != 2 || ags[0].(map[string]any)["id"] != "claude" || ags[1].(map[string]any)["id"] != "codex" {
+	if code != 200 || len(ags) != 3 || ags[0].(map[string]any)["id"] != "claude" || ags[1].(map[string]any)["id"] != "codex" ||
+		ags[2].(map[string]any)["id"] != "agy" {
 		t.Fatalf("seeded: %d %v", code, list)
 	}
 	code, made := sendAPI(t, svc, tok, "POST", "/api/v0/agents", map[string]any{"name": "Claude Code · haiku", "harness": "claude",
@@ -384,7 +385,7 @@ func TestSavedAgentsKeptAndDefaultsSeeded(t *testing.T) {
 	svc = runService(t, home, nil, 0)
 	_, list = sendAPI(t, svc, tok, "GET", "/api/v0/agents", nil)
 	ags, _ = list["agents"].([]any)
-	if len(ags) != 2 || ags[0].(map[string]any)["id"] != "codex" || ags[1].(map[string]any)["id"] != made["id"] {
+	if len(ags) != 3 || ags[0].(map[string]any)["id"] != "codex" || ags[2].(map[string]any)["id"] != made["id"] {
 		t.Fatalf("after restart: %v", list)
 	}
 	report := filepath.Join(t.TempDir(), "report")

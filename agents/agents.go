@@ -105,6 +105,8 @@ func Check(f *Fields) string {
 		return "access api is not available yet; use subscription or openrouter"
 	case f.Access != Subscription && f.Access != OpenRouter:
 		return "access must be subscription or openrouter"
+	case !offers(f.Harness, f.Access):
+		return "harness " + f.Harness + " cannot use access " + f.Access + " yet"
 	case f.Model != "" && !run.ModelShape.MatchString(f.Model):
 		return "model must match " + run.ModelShape.String()
 	}
@@ -153,6 +155,12 @@ func Defaults(now time.Time) []Agent {
 func known(name string) bool {
 	_, ok := harness.Get(name)
 	return ok
+}
+
+// offers says the harness name can run on access.
+func offers(name, access string) bool {
+	h, ok := harness.Get(name)
+	return ok && harness.Offers(h.Info(), access)
 }
 
 // planned says name is a harness listed as coming.

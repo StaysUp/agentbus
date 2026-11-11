@@ -157,7 +157,9 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/api/v0/harnesses
 ```
 
 Each one says `found`, its `version` and `signed_in`. `GET /api/v0/agents` lists your saved
-agents; a new data folder has `claude` and `codex`, each on its own subscription.
+agents; a new data folder has `claude`, `codex` and `agy`, each on its own subscription. `agy` is
+Google's Antigravity CLI (Gemini) on its own Google sign-in; it has no sign-in status command, so
+its `signed_in` is left out.
 
 `found` means the harness's program is on the service's `PATH`. `signed_in` is the harness's own
 answer, and it is left out when it gives no clear one. Start a turn only with an agent whose
@@ -393,6 +395,16 @@ with the reason. Details: `docs/CLIENT_API.md`, "Network control".
   folder, so "have codex review this" gets the diff of the asking turn through the API, not those
   files in its copy. Tests it runs run on your folder as it is. A copy started from the asking
   session's latest checkpoint is a later option.
+- **agy (Antigravity) runs on its own Google sign-in only.** It speaks the Gemini format, so it has
+  no OpenRouter access. Control has no Google sign-in to relay, so a runner that holds no secrets
+  refuses its turns. It reads the folder's `AGENTS.md` and `GEMINI.md` itself, but it has no flag
+  for instructions of a run's own, so `instructions.md` and the "asked by" line do not reach it.
+  A turn with `forbid` set, or with `subagents = false`, is refused: the gateway's guard does not
+  read Gemini replies yet, and agy has no switch for its subagents. Its permissions for a turn
+  replace your own agy settings for that turn: it reads and writes its folder, and runs only the
+  commands `allow` lists. A tool call no rule allows ends its turn there, since headless agy cannot
+  ask and does not tell the model. With network control on, agy cannot reach Google's
+  sign-in service. The context view of its model calls is not split into pieces yet.
 - **codex's ChatGPT sign-in on a runner is not yet checked against a live login.** Everything up
   to the login is: codex's device login on control, and codex sending, through a provider of its
   own, the same request it sends chatgpt.com, with no secret on the runner (codex-cli 0.164.0 and
@@ -492,7 +504,8 @@ multi_agent_v2`. Both are flags of that turn only: your `~/.claude/settings.json
 "auto" mode, claude may still write there.
 A `read_only` turn stays read-only.
 
-`forbid` works for claude and codex. The gateway reads each model reply. When a shell command in
+`forbid` works for claude and codex; an agy turn with `forbid` set is refused. The gateway reads
+each model reply. When a shell command in
 it matches an entry, the agent never gets that call, and the model is told a rule refused it. Each
 command in a chain is checked on its own, so `cd repo && git -C repo push` matches `git push`.
 Every refusal is stored as a `tool.refused` event. claude also gets `--disallowedTools`.

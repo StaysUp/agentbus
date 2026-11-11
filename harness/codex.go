@@ -117,6 +117,10 @@ func (codex) WireRelay(baseURL, placeholder string) (env, args []string) {
 	}
 }
 
+// Refuse: every setting of permissions.toml has a flag on codex, or the
+// gateway's guard.
+func (codex) Refuse(Turn) string { return "" }
+
 // codexRelayEnv holds a relayed turn's placeholder.
 const codexRelayEnv = "AGENTBUS_CODEX_TOKEN"
 

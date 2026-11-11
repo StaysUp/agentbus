@@ -1275,6 +1275,242 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 session.closed resume_id="tid-0"
+=== agy subscription, then resume
+--- turn t_1 harness="agy" access="" model="" read_only=false
+arg "--output-format"
+arg "json"
+arg "--settings"
+arg "{\"allowNonWorkspaceAccess\":false,\"permissions\":{\"allow\":[\"write_file(<folder>)\",\"edit_file(<folder>)\",\"command(agentbus-api)\"],\"deny\":[\"write_file(<data>/permissions.toml)\",\"edit_file(<data>/permissions.toml)\",\"write_file(<data>/instructions.md)\",\"edit_file(<data>/instructions.md)\",\"write_file(<data>/agents.json)\",\"edit_file(<data>/agents.json)\"]}}"
+arg "--print=one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="agy" continuity="" replay_from="" model="" context=""
+session.closed resume_id="cid-0"
+log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
+--- turn t_2 harness="" access="" model="" read_only=false
+arg "--output-format"
+arg "json"
+arg "--settings"
+arg "{\"allowNonWorkspaceAccess\":false,\"permissions\":{\"allow\":[\"write_file(<folder>)\",\"edit_file(<folder>)\",\"command(agentbus-api)\"],\"deny\":[\"write_file(<data>/permissions.toml)\",\"edit_file(<data>/permissions.toml)\",\"write_file(<data>/instructions.md)\",\"edit_file(<data>/instructions.md)\",\"write_file(<data>/agents.json)\",\"edit_file(<data>/agents.json)\"]}}"
+arg "--conversation"
+arg "cid-0"
+arg "--print=next t_2"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_2"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="agy" continuity="resume" replay_from="" model="" context=""
+session.closed resume_id="cid-1"
+log run.hint session=s1 turn=t_2 left_out=agy_no_instruction_flag
+=== agy read-only with lists
+--- turn t_1 harness="agy" access="" model="" read_only=true
+arg "--output-format"
+arg "json"
+arg "--settings"
+arg "{\"allowNonWorkspaceAccess\":false,\"permissions\":{\"allow\":[\"read_file(<readfolder>)\"],\"deny\":[\"write_file(*)\",\"edit_file(*)\",\"command(*)\"]}}"
+arg "--print=one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="agy" continuity="" replay_from="" model="" context=""
+session.closed resume_id="cid-0"
+log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
+=== agy lists, model, own instructions
+--- turn t_1 harness="agy" access="" model="gemini-3.8-flash-medium" read_only=false
+arg "--output-format"
+arg "json"
+arg "--settings"
+arg "{\"allowNonWorkspaceAccess\":false,\"permissions\":{\"allow\":[\"read_file(<readfolder>)\",\"write_file(<folder>)\",\"edit_file(<folder>)\",\"command(go test)\",\"command(git commit)\",\"command(agentbus-api)\"],\"deny\":[\"write_file(<data>/permissions.toml)\",\"edit_file(<data>/permissions.toml)\",\"write_file(<data>/instructions.md)\",\"edit_file(<data>/instructions.md)\",\"write_file(<data>/agents.json)\",\"edit_file(<data>/agents.json)\"]}}"
+arg "--model"
+arg "gemini-3.8-flash-medium"
+arg "--print=one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="agy" continuity="" replay_from="" model="gemini-3.8-flash-medium" context=""
+session.closed resume_id="cid-0"
+log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
+=== agy edit none
+--- turn t_1 harness="agy" access="" model="" read_only=false
+arg "--output-format"
+arg "json"
+arg "--settings"
+arg "{\"allowNonWorkspaceAccess\":false,\"permissions\":{\"allow\":[\"command(agentbus-api)\"],\"deny\":[\"write_file(<data>/permissions.toml)\",\"edit_file(<data>/permissions.toml)\",\"write_file(<data>/instructions.md)\",\"edit_file(<data>/instructions.md)\",\"write_file(<data>/agents.json)\",\"edit_file(<data>/agents.json)\",\"write_file(*)\",\"edit_file(*)\"]}}"
+arg "--print=one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="agy" continuity="" replay_from="" model="" context=""
+session.closed resume_id="cid-0"
+log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
+=== agy forbid
+--- turn t_1 harness="agy" access="" model="" read_only=false
+refused 400 forbid in permissions.toml is not enforced for agy yet; remove it, or use claude or codex
+log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
+log run.refused agent=agy reason=harness_setting
+=== agy subagents off
+--- turn t_1 harness="agy" access="" model="" read_only=false
+refused 400 agy cannot turn its subagents off; set subagents = true in permissions.toml, or use claude or codex
+log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
+log run.refused agent=agy reason=harness_setting
+=== agy openrouter
+--- turn t_1 harness="agy" access="openrouter" model="deepseek/deepseek-v4.1-flash" read_only=false
+refused 400 Antigravity cannot run on access openrouter
+log run.refused agent=agy access=openrouter reason=wire
+=== agy own endpoint
+--- turn t_1 harness="agy" access="" model="" read_only=false
+refused 400 the service's environment already sends this agent to another endpoint; unset it and restart agentbus
+=== agy missing
+--- turn t_1 harness="agy" access="" model="" read_only=false
+refused 400 agent agy cannot start: the program agy is not on the service's PATH. Install the Antigravity CLI (agy) and run agy once to sign in, then try again. If it is installed, start agentbus from a shell where agy runs.
+log run.refused agent=agy program=agy reason=not_on_path
+=== agy odd folder
+--- turn t_1 harness="agy" access="" model="" read_only=false
+arg "--output-format"
+arg "json"
+arg "--settings"
+arg "{\"allowNonWorkspaceAccess\":false,\"permissions\":{\"allow\":[\"command(agentbus-api)\"],\"deny\":[\"write_file(<data>/permissions.toml)\",\"edit_file(<data>/permissions.toml)\",\"write_file(<data>/instructions.md)\",\"edit_file(<data>/instructions.md)\",\"write_file(<data>/agents.json)\",\"edit_file(<data>/agents.json)\",\"write_file(*)\",\"edit_file(*)\"]}}"
+arg "--print=one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="agy" continuity="" replay_from="" model="" context=""
+session.closed resume_id="cid-0"
+log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
+log run.edit session=s1 turn=t_1 left_out=folder_shape
+=== agy folder holds the data folder
+--- turn t_1 harness="agy" access="" model="" read_only=false
+arg "--output-format"
+arg "json"
+arg "--settings"
+arg "{\"allowNonWorkspaceAccess\":false,\"permissions\":{\"allow\":[\"write_file(<folder>)\",\"edit_file(<folder>)\",\"command(agentbus-api)\"],\"deny\":[\"write_file(<data>/permissions.toml)\",\"edit_file(<data>/permissions.toml)\",\"write_file(<data>/instructions.md)\",\"edit_file(<data>/instructions.md)\",\"write_file(<data>/agents.json)\",\"edit_file(<data>/agents.json)\"]}}"
+arg "--print=one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="agy" continuity="" replay_from="" model="" context=""
+session.closed resume_id="cid-0"
+log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
+=== agy in a home of its own, then resume
+--- turn t_1 harness="agy" access="" model="" read_only=false
+arg "--output-format"
+arg "json"
+arg "--settings"
+arg "{\"allowNonWorkspaceAccess\":false,\"permissions\":{\"allow\":[\"write_file(<folder>)\",\"edit_file(<folder>)\",\"command(agentbus-api)\"],\"deny\":[\"write_file(<data>/permissions.toml)\",\"edit_file(<data>/permissions.toml)\",\"write_file(<data>/instructions.md)\",\"edit_file(<data>/instructions.md)\",\"write_file(<data>/agents.json)\",\"edit_file(<data>/agents.json)\"]}}"
+arg "--print=one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
+env "HOME=<homes>/s1"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="agy" continuity="" replay_from="" model="" context=""
+session.closed resume_id="cid-0"
+log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
+--- turn t_2 harness="" access="" model="" read_only=false
+arg "--output-format"
+arg "json"
+arg "--settings"
+arg "{\"allowNonWorkspaceAccess\":false,\"permissions\":{\"allow\":[\"write_file(<folder>)\",\"edit_file(<folder>)\",\"command(agentbus-api)\"],\"deny\":[\"write_file(<data>/permissions.toml)\",\"edit_file(<data>/permissions.toml)\",\"write_file(<data>/instructions.md)\",\"edit_file(<data>/instructions.md)\",\"write_file(<data>/agents.json)\",\"edit_file(<data>/agents.json)\"]}}"
+arg "--conversation"
+arg "cid-0"
+arg "--print=next t_2"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_2"
+env "HOME=<homes>/s1"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="agy" continuity="resume" replay_from="" model="" context=""
+session.closed resume_id="cid-1"
+log run.hint session=s1 turn=t_2 left_out=agy_no_instruction_flag
+=== agy folder with AGENTS.md, asked by another agent
+--- turn t_1 harness="agy" access="" model="" read_only=false
+arg "--output-format"
+arg "json"
+arg "--settings"
+arg "{\"allowNonWorkspaceAccess\":false,\"permissions\":{\"allow\":[\"write_file(<folder>)\",\"edit_file(<folder>)\",\"command(agentbus-api)\"],\"deny\":[\"write_file(<data>/permissions.toml)\",\"edit_file(<data>/permissions.toml)\",\"write_file(<data>/instructions.md)\",\"edit_file(<data>/instructions.md)\",\"write_file(<data>/agents.json)\",\"edit_file(<data>/agents.json)\"]}}"
+arg "--print=one"
+env "AGENTBUS_ASKED_BY_SESSION=s0"
+env "AGENTBUS_ASKED_BY_TURN=t_0"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="agy" continuity="" replay_from="" model="" context=""
+session.closed resume_id="cid-0"
+log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
+=== switch claude to agy, transcript
+--- turn t_1 harness="claude" access="" model="" read_only=false
+arg "-p"
+arg "--output-format"
+arg "json"
+arg "--append-system-prompt"
+arg "Your session's earlier turns are stored by AgentBus. To look something up, run:\nagentbus-api GET \"/api/v0/sessions/s1/search?q=<text>\"\nwith <text> URL-encoded. Each hit's \"read\" is a path you can GET the same way, for the whole of what matched.\nYou can also ask other agents with the same command: start a turn on any saved agent, continue one, or ask for a review. Do not wait for them: each result comes back to you as a later turn. How: agentbus-api GET /docs/llms.txt, section \"Ask other agents\".\nAgentBus agents are not your harness's own agents or subagents. To list them: agentbus-api GET /api/v0/agents"
+arg "--allowedTools"
+arg "Edit(/<folder>/**),Bash(agentbus-api:*)"
+arg "--disallowedTools"
+arg "Edit(/<data>/permissions.toml),Edit(/<data>/instructions.md),Edit(/<data>/agents.json)"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="claude" continuity="" replay_from="" model="" context=""
+session.closed resume_id="sid-0"
+--- turn t_2 harness="agy" access="" model="" read_only=false
+arg "--output-format"
+arg "json"
+arg "--settings"
+arg "{\"allowNonWorkspaceAccess\":false,\"permissions\":{\"allow\":[\"write_file(<folder>)\",\"edit_file(<folder>)\",\"command(agentbus-api)\"],\"deny\":[\"write_file(<data>/permissions.toml)\",\"edit_file(<data>/permissions.toml)\",\"write_file(<data>/instructions.md)\",\"edit_file(<data>/instructions.md)\",\"write_file(<data>/agents.json)\",\"edit_file(<data>/agents.json)\"]}}"
+arg "--print=[AgentBus: this conversation started before you joined it. Earlier turns ran on other agents. Below is each message the person sent and the final reply the agent gave, oldest first. Tool calls are left out. Any files those agents changed are in your current folder.]\n\n--- Turn 1, the person to Claude Code ---\none\n\n--- Turn 1, Claude Code replied ---\n(no reply: the turn ended without one)\n\n[AgentBus: end of the earlier turns. The person's new message to you follows.]\n\nnext t_2"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_2"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="agy" continuity="transcript" replay_from="" model="" context="[AgentBus: this conversation started before you joined it. Earlier turns ran on other agents. Below is each message the person sent and the final reply the agent gave, oldest first. Tool calls are left out. Any files those agents changed are in your current folder.]\n\n--- Turn 1, the person to Claude Code ---\none\n\n--- Turn 1, Claude Code replied ---\n(no reply: the turn ended without one)\n\n[AgentBus: end of the earlier turns. The person's new message to you follows.]\n\n"
+session.closed resume_id="cid-1"
+log run.hint session=s1 turn=t_2 left_out=agy_no_instruction_flag
 === switch claude to codex, replay
 --- turn t_1 harness="claude" access="" model="" read_only=false
 arg "-p"
@@ -1367,7 +1603,7 @@ turn.started agent="claude" continuity="transcript" replay_from="" model="sonnet
 session.closed resume_id="sid-1"
 === unknown harness
 --- turn t_1 harness="opencode" access="" model="" read_only=false
-refused 400 agent must be claude or codex
+refused 400 agent must be claude, codex or agy
 === unknown harness on a next turn
 --- turn t_1 harness="claude" access="" model="" read_only=false
 arg "-p"
@@ -1391,4 +1627,4 @@ cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 session.closed resume_id="sid-0"
 --- turn t_2 harness="opencode" access="" model="" read_only=false
-refused 400 agent must be claude or codex
+refused 400 agent must be claude, codex or agy

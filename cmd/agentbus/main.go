@@ -10,7 +10,8 @@
 // to the client API, which needs the token in the data folder. Vendor paths go
 // to that vendor's gateway, which forwards them and stores their events:
 // /backend-api/codex to chatgpt.com (codex), /v1 to api.anthropic.com (Claude
-// Code), each with or without /s/<session> in front. Any other path is
+// Code), /v1internal: to daily-cloudcode-pa.googleapis.com (agy), each with or
+// without /s/<session> in front. Any other path is
 // answered 404 here and sent nowhere. The vendor paths answer only callers on
 // this machine, whatever the address. GET / redirects to /docs.
 package main
@@ -40,6 +41,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/adapter/anthropic"
+	"github.com/staysup/agentbus/adapter/gemini"
 	"github.com/staysup/agentbus/adapter/openai"
 	"github.com/staysup/agentbus/api"
 	"github.com/staysup/agentbus/blobs"
@@ -70,6 +72,12 @@ const (
 	// Messages endpoint for Claude Code and its Responses endpoint for codex,
 	// both under /api/v1 (research note 2026-11-08).
 	openrouter = "https://openrouter.ai/api"
+	// cloudCode is where agy signed in with a Google account sends its Code
+	// Assist calls, model calls under /v1internal: among them (agy 1.5.5,
+	// 2026-11-11, read from its own log). The production host,
+	// cloudcode-pa.googleapis.com, answered every agy model call 429
+	// RESOURCE_EXHAUSTED while this one answered at once.
+	cloudCode = "https://daily-cloudcode-pa.googleapis.com"
 )
 
 func main() {
@@ -156,6 +164,8 @@ type config struct {
 	home     string
 	upstream *url.URL // Anthropic
 	chatgpt  *url.URL // codex's ChatGPT backend
+	// cloudCode is agy's Code Assist host; nil means cloudCode above.
+	cloudCode *url.URL
 	// openrouter is OpenRouter's API; nil means openrouter above.
 	openrouter *url.URL
 	logf       func(string, ...any)
@@ -543,13 +553,26 @@ func start(c config) (*service, error) {
 	}
 	anth := gateway.New(anthURL, anthropic.Adapter{}, sink)
 	oai := gateway.New(chatURL, openai.Adapter{}, sink)
+	gws := []*gateway.Gateway{anth, oai}
+	// agy's Code Assist calls, on its own Google sign-in. A runner that
+	// holds no secret has none: the relay keeps no Google sign-in, so its
+	// agy turns are refused before they start (wire.go).
+	var gem *gateway.Gateway
+	if !c.noSecrets() {
+		ccURL := c.cloudCode
+		if ccURL == nil {
+			ccURL, _ = url.Parse(cloudCode)
+		}
+		gem = gateway.New(ccURL, gemini.Adapter{}, sink)
+		gws = append(gws, gem)
+	}
 	// An OpenRouter agent's calls, under /openrouter of its base URL: one
 	// gateway per API format, both to OpenRouter.
 	orAnth := gateway.New(orURL, anthropic.Adapter{}, sink)
 	orOAI := gateway.New(orURL, openai.Adapter{}, sink)
 	orAnth.SetPrefix(openRouterPrefix)
 	orOAI.SetPrefix(openRouterPrefix)
-	gws := []*gateway.Gateway{anth, oai, orAnth, orOAI}
+	gws = append(gws, orAnth, orOAI)
 	// A turn's session.closed waits for the gateway to write all of the
 	// turn's calls: their events and replies are written off the reply's
 	// path and can land after the child has exited.
@@ -588,7 +611,7 @@ func start(c config) (*service, error) {
 		s.subs = subs
 	}
 	s.srv = &http.Server{
-		Handler:           logRequests(svcLog, route(a, vendors{anth, oai, orAnth, orOAI, relayHandler}, !loopback)),
+		Handler:           logRequests(svcLog, route(a, vendors{anthropic: anth, openai: oai, openrouterAnth: orAnth, openrouterResps: orOAI, gemini: handler(gem), relay: relayHandler}, !loopback)),
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          log.New(io.Discard, "", 0),
 	}
@@ -970,6 +993,9 @@ type vendors struct {
 	// jobs.RelayPrefix; nil without a queue. A runner's turn token guards
 	// it, so it answers callers on other machines.
 	relay http.Handler
+	// gemini is agy's Code Assist gateway; nil on a runner that holds no
+	// secret.
+	gemini http.Handler
 }
 
 func route(a *api.API, v vendors, open bool) http.Handler {
@@ -995,6 +1021,10 @@ func route(a *api.API, v vendors, open bool) http.Handler {
 		switch {
 		case under(rest, "/backend-api/codex"):
 			gw = v.openai
+		case strings.HasPrefix(rest, "/v1internal:") && v.gemini != nil:
+			// Code Assist's methods are a colon after the version, such
+			// as /v1internal:streamGenerateContent.
+			gw = v.gemini
 		case under(rest, "/v1"):
 			gw = v.anthropic
 		case under(rest, openRouterPrefix+"/v1/responses"):
@@ -1255,4 +1285,13 @@ func checkOrigin(o string) error {
 		return fmt.Errorf("-origin %q is not an origin such as http://localhost:5173", o)
 	}
 	return nil
+}
+
+// handler is g as an http.Handler, or nil when there is no g: a nil
+// *gateway.Gateway in an interface would not be nil.
+func handler(g *gateway.Gateway) http.Handler {
+	if g == nil {
+		return nil
+	}
+	return g
 }

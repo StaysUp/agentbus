@@ -91,6 +91,10 @@ func (claude) Edit(folders, protect []string) ([]string, string) {
 
 // OwnInstructions: --append-system-prompt adds to the person's own system
 // prompt, never replaces it, so the hint always goes in.
+// Refuse: every setting of permissions.toml has a flag on claude, or the
+// gateway's guard.
+func (claude) Refuse(Turn) string { return "" }
+
 func (claude) OwnInstructions([]string, string) string { return "" }
 
 // Native: Claude Code reads the folder's CLAUDE.md and .claude/CLAUDE.md,

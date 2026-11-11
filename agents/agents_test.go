@@ -24,8 +24,8 @@ func TestOpenSeedsDefaultsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	l := s.List()
-	if len(l) != 2 || l[0].ID != Claude || l[0].Harness != Claude || l[0].Access != Subscription ||
-		l[1].ID != Codex || l[1].Name != "Codex" || l[1].Model != "" {
+	if len(l) != 3 || l[0].ID != Claude || l[0].Harness != Claude || l[0].Access != Subscription ||
+		l[1].ID != Codex || l[1].Name != "Codex" || l[1].Model != "" || l[2].ID != "agy" || l[2].Access != Subscription {
 		t.Fatalf("defaults %+v", l)
 	}
 	if err := s.Remove(Claude); err != nil {
@@ -36,7 +36,7 @@ func TestOpenSeedsDefaultsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if l := s.List(); len(l) != 1 || l[0].ID != Codex {
+	if l := s.List(); len(l) != 2 || l[0].ID != Codex {
 		t.Fatalf("after reopen %+v", l)
 	}
 }
@@ -87,7 +87,8 @@ func TestCheckRefuses(t *testing.T) {
 		{Fields{Name: "a\nb", Harness: Claude, Access: Subscription}, "name must be"},
 		{Fields{Name: strings.Repeat("a", 101), Harness: Claude, Access: Subscription}, "name must be"},
 		{Fields{Name: "x", Harness: "opencode", Access: Subscription}, "not available yet"},
-		{Fields{Name: "x", Harness: "agy", Access: Subscription}, "harness must be"},
+		{Fields{Name: "x", Harness: "gemini", Access: Subscription}, "harness must be"},
+		{Fields{Name: "x", Harness: "agy", Access: OpenRouter, Model: "m"}, "cannot use access openrouter"},
 		{Fields{Name: "x", Harness: Claude, Access: API}, "not available yet"},
 		{Fields{Name: "x", Harness: Claude, Access: "local"}, "access must be"},
 		{Fields{Name: "x", Harness: Claude, Access: Subscription, Model: "--tools"}, "model must match"},
