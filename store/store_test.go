@@ -644,6 +644,9 @@ func TestSnapshotTitle(t *testing.T) {
 	mustAppend(t, s, ev(event.ModelRequested, "none"))
 	// "exact": exactly 120 runes is not cut.
 	mustAppend(t, s, turn("exact", "t1", strings.Repeat("a", 120)))
+	// "lines": a first message on several lines gives a title on one, as a
+	// rename must be (API test 2026-11-11).
+	mustAppend(t, s, turn("lines", "t1", "\n fix the\nlogin  bug\r\n\tnow\u2028\n"))
 
 	snap, err := s.Snapshot()
 	if err != nil {
@@ -655,6 +658,7 @@ func TestSnapshotTitle(t *testing.T) {
 		"empty":  "second",
 		"none":   "",
 		"exact":  strings.Repeat("a", 120),
+		"lines":  "fix the login bug now",
 	}
 	for _, x := range snap.Sessions {
 		if x.Title != want[x.ID] {
@@ -667,5 +671,9 @@ func TestSnapshotTitle(t *testing.T) {
 	}
 	if len(snap.Sessions) != len(want) {
 		t.Fatalf("%d sessions", len(snap.Sessions))
+	}
+	// A rename's old_title is that one line too.
+	if e, err := s.Rename(event.Event{ID: "rn1", Time: time.Now().UTC(), Session: "lines", Title: "named"}); err != nil || e.OldTitle != "fix the login bug now" {
+		t.Errorf("rename: old title %q, %v", e.OldTitle, err)
 	}
 }

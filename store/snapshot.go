@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/staysup/agentbus/event"
@@ -179,7 +180,7 @@ func (s *Store) Snapshot() (Snapshot, error) {
 	// check, marked probe: true) never does. SQLite takes the bare column
 	// from the row MAX(seq) or MIN(seq) picked. The first query runs first,
 	// so a rename wins.
-	for _, q := range []string{firstText + ` AND seq <= ? GROUP BY session`, latestRename + ` AND seq <= ? GROUP BY session`} {
+	for i, q := range []string{firstText + ` AND seq <= ? GROUP BY session`, latestRename + ` AND seq <= ? GROUP BY session`} {
 		rows, err = s.r.Query(q, hi)
 		if err != nil {
 			return snap, fmt.Errorf("store: snapshot: %w", err)
@@ -192,7 +193,7 @@ func (s *Store) Snapshot() (Snapshot, error) {
 				return snap, fmt.Errorf("store: snapshot: %w", err)
 			}
 			if x := byID[id]; x != nil {
-				x.Title = title(text)
+				x.Title = titleOf(i == 0, text)
 			}
 		}
 		if err := rows.Err(); err != nil {
@@ -273,7 +274,7 @@ func (s *Store) Rename(e event.Event) (event.Event, error) {
 		return e, ErrClosed
 	}
 	old := ""
-	for _, q := range []string{firstText, latestRename} {
+	for i, q := range []string{firstText, latestRename} {
 		var id, text string
 		var seq int64
 		err := s.r.QueryRow(q+` AND session = ? GROUP BY session`, e.Session).Scan(&id, &text, &seq)
@@ -283,12 +284,24 @@ func (s *Store) Rename(e event.Event) (event.Event, error) {
 		if err != nil {
 			return e, fmt.Errorf("store: read title: %w", err)
 		}
-		old = title(text)
+		old = titleOf(i == 0, text)
 	}
 	e.Kind = event.SessionRenamed
 	e.OldTitle = old
 	out, _, err := s.appendLocked(e)
 	return out, err
+}
+
+// titleOf is the title text gives: a rename's as it is, a first message's
+// (first true) on one line, each run of spaces, line breaks and other
+// control characters made one space, as a rename must be.
+func titleOf(first bool, text string) string {
+	if first {
+		text = strings.Join(strings.FieldsFunc(text, func(r rune) bool {
+			return unicode.IsSpace(r) || unicode.IsControl(r) || r == '\u2028' || r == '\u2029'
+		}), " ")
+	}
+	return title(text)
 }
 
 // title is text cut to TitleRunes runes, ending in "…" when cut.
