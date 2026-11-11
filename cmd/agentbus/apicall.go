@@ -15,9 +15,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/staysup/agentbus/api"
 	engine "github.com/staysup/agentbus/run"
 )
 
@@ -75,10 +77,10 @@ func apiCall(args []string, getenv func(string) string, stdin io.Reader, stdout,
 		return 2
 	}
 	method, path := strings.ToUpper(args[0]), args[1]
-	switch method {
-	case "GET", "POST", "PUT", "DELETE":
-	default:
-		fmt.Fprintln(stderr, "agentbus api: METHOD must be GET, POST, PUT or DELETE")
+	// The methods are the route table's, so a route never takes a method
+	// this client cannot send.
+	if methods := api.Methods(); !slices.Contains(methods, method) {
+		fmt.Fprintln(stderr, "agentbus api: METHOD must be one of "+strings.Join(methods, ", "))
 		return 2
 	}
 	if !strings.HasPrefix(path, "/api/") && !strings.HasPrefix(path, "/docs/") {

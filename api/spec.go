@@ -170,9 +170,11 @@ func typeName(t reflect.Type) string {
 	return t.Name()
 }
 
+// omitempty says the field is left out when empty or zero, so it is not
+// required.
 func omitempty(tag reflect.StructTag) bool {
 	_, opts, _ := strings.Cut(tag.Get("json"), ",")
-	return strings.Contains(","+opts+",", ",omitempty,")
+	return strings.Contains(","+opts+",", ",omitempty,") || strings.Contains(","+opts+",", ",omitzero,")
 }
 
 func jsonName(f reflect.StructField) string {

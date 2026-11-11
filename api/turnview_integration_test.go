@@ -109,11 +109,24 @@ func TestReviewIsATurn(t *testing.T) {
 		!strings.Contains(out, rv.Turn) || !strings.Contains(out, `"existing":true`) {
 		t.Errorf("a retry of the review: %d %s", code, out)
 	}
+	// The same key with other fields is another request, and says so.
+	if code, out := as(t, e, token, "POST", "/api/v0/turns/"+w.Turn+"/review", `{"agent":"codex","model":"other-model","idempotency_key":"rv-1"}`); code != 409 ||
+		!strings.Contains(out, "already used for a different request") {
+		t.Errorf("the key with another model: %d %s", code, out)
+	}
 	waitEnded(t, e, rv.Turn)
 	var one OneTurn
 	if code := getJSON(t, e, "/api/v0/turns/"+rv.Turn, &one); code != 200 || one.Turn.Kind != queue.KindReview || one.Turn.Reviews != w.Turn ||
-		one.Turn.Session != rv.Session || one.Turn.Verdict == nil {
+		one.Turn.Session != rv.Session || one.Turn.Verdict == nil || one.Turn.Findings == nil {
 		t.Fatalf("the review turn: %d %+v", code, one.Turn)
+	}
+	// Findings is a list once the review ended, [] when it named nothing,
+	// never null.
+	if _, out := as(t, e, token, "GET", "/api/v0/turns/"+rv.Turn, ""); strings.Contains(out, `"findings":null`) || !strings.Contains(out, `"findings":[`) {
+		t.Errorf("the review's findings: %s", out)
+	}
+	if _, out := as(t, e, token, "GET", "/api/v0/turns/"+w.Turn, ""); strings.Contains(out, `"findings"`) {
+		t.Errorf("a turn that is not a review has findings: %s", out)
 	}
 	var list TurnList
 	if code := getJSON(t, e, "/api/v0/turns?session="+rv.Session, &list); code != 200 || len(list.Turns) != 1 || list.Turns[0].Kind != queue.KindReview {
@@ -138,15 +151,23 @@ func TestCloseSession(t *testing.T) {
 	waitEnded(t, e, s.Turn)
 	var one OneSession
 	if code := getJSON(t, e, "/api/v0/sessions/"+s.Session, &one); code != 200 || one.Session.ID != s.Session || one.Copy == nil ||
-		one.Copy.Kind != queue.WorkspaceCopy || one.Copy.Name != s.Session || one.Copy.Closed != nil {
+		one.Copy.Kind != queue.WorkspaceCopy || one.Copy.Name != s.Session || one.Copy.Closed != nil ||
+		one.Session.Closed != nil || !one.Session.Resumable {
 		t.Fatalf("GET the open session: %d %+v %+v", code, one.Session, one.Copy)
 	}
 	if code, out := as(t, e, token, "PATCH", "/api/v0/sessions/"+s.Session, `{"closed":true,"title":"Done"}`); code != 200 ||
 		!strings.Contains(out, `"closed":true`) || !strings.Contains(out, `"title":"Done"`) {
 		t.Fatalf("close: %d %s", code, out)
 	}
-	if code := getJSON(t, e, "/api/v0/sessions/"+s.Session, &one); code != 200 || one.Copy == nil || one.Copy.Closed == nil {
-		t.Fatalf("GET the closed session: %d %+v", code, one.Copy)
+	// A closed session says so, in the list too, and is not resumable.
+	if code := getJSON(t, e, "/api/v0/sessions/"+s.Session, &one); code != 200 || one.Copy == nil || one.Copy.Closed == nil ||
+		one.Session.Closed == nil || !one.Session.Closed.Equal(*one.Copy.Closed) || one.Session.Resumable {
+		t.Fatalf("GET the closed session: %d %+v %+v", code, one.Session, one.Copy)
+	}
+	var snap Snapshot
+	if code := getJSON(t, e, "/api/v0/sessions", &snap); code != 200 || len(snap.Sessions) != 1 || snap.Sessions[0].ID != s.Session ||
+		snap.Sessions[0].Closed == nil || snap.Sessions[0].Resumable {
+		t.Fatalf("GET /sessions: %d %+v", code, snap.Sessions)
 	}
 	if code, out := as(t, e, token, "POST", "/api/v0/turns", `{"session":"`+s.Session+`","prompt":"more"}`); code != 409 {
 		t.Errorf("a turn of a closed session: %d %s", code, out)

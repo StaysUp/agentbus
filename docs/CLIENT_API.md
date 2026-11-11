@@ -256,11 +256,11 @@ person`. It names the agent, the turn and its state, the session the work ran in
 8 KiB). Each result is its own turn; three asked turns bring three.
 
 Such a turn's `turn.started`, and its row in `GET /api/v0/turns`, carry `origin`:
-`{"kind":"result","job":…,"job_kind":"turn"|"review","session":…,"turn":…,"agent":…}`. A turn
-another turn asked for carries `{"kind":"asked","session":…,"turn":…}`, naming who asked. A turn the
-person started has no `origin`. The service checks for ended work every second. In `origin` of
-kind `result`, `job` and `job_kind` name the queue's work behind the result; read the turn, never
-the job.
+`{"kind":"result","turn_kind":"turn"|"review","session":…,"turn":…,"agent":…}`. `session` and
+`turn` name the work's turn, `turn_kind` says whether it was a turn or a review, and `agent` is the
+saved agent that did it. A turn another turn asked for carries `{"kind":"asked","session":…,"turn":…}`,
+naming who asked. A turn the person started has no `origin`. The service checks for ended work
+every second.
 
 ## The data folder
 
@@ -493,7 +493,7 @@ All responses are `application/json` unless stated.
    "title":"Fix the login bug on the settings page"}]}
 ```
 
-Sessions are newest activity first. Every field is computed from stored events up to `seq`:
+Sessions are newest activity first. Every field but `closed` is computed from stored events up to `seq`:
 - `agent` and `folder` come from the session's latest `turn.started` that names them, else from the
   run's own `session.opened`, so a session whose child has not reached a model call yet still shows
   them. Both name the same run, and the latest of the two is read. A session pointed at the gateway
@@ -504,14 +504,18 @@ Sessions are newest activity first. Every field is computed from stored events u
   Absent for a session no run started.
 - `open`: true while a run's child for this session is running: a `session.opened` whose `hold`
   has no `session.closed` yet (below). A session no run started is never open.
-- `resumable`: the session has a `resume_id` (on a run's `session.closed`, below) and is not
-  `open`. A cockpit enables its prompt box on it; `POST /api/v0/turns` with `session` accepts it.
+- `resumable`: the session has a `resume_id` (on a run's `session.closed`, below), is not
+  `open`, and is not `closed`. A cockpit enables its prompt box on it; `POST /api/v0/turns` with `session` accepts it.
   A claude session continued by own replay can still be refused with 409 when its newest turn's
   history cannot be rebuilt (see `POST /api/v0/turns` with `session`). A turn that was interrupted
   or failed does not cause this: the next turn continues after it.
+- `closed`: when the session was closed (`PATCH /api/v0/sessions/<id>` with `closed: true`,
+  below). It takes no more turns. Absent for an open session. This field comes from the queue, not
+  from stored events.
 - `title`: the `title` of the session's latest `session.renamed` (`PATCH /api/v0/sessions/<id>`,
   below). Without one, the `text` of the session's first `turn.started` that has text, the
-  person's own words. Over 120 characters (runes) that text is cut to 119 on a rune boundary plus
+  person's own words, on one line: each run of spaces, line breaks and other control characters
+  is one space. Over 120 characters (runes) that text is cut to 119 on a rune boundary plus
   `…`, so it is never longer than 120. A `turn.started` with `probe: true` (Claude Code's startup
   quota check) never gives it. Absent when the session has neither.
 - `started` and `last`: the time of the session's first and latest event. A `session.renamed` does
@@ -633,10 +637,10 @@ process that does it.
 ```
 
 - **`agent` is a saved agent's id** ([Agents](#agents)). Its harness, access and model start the
-  turn; a `model` sent here is used in place of the agent's. `claude` and `codex` are the ids of
-  the two agents a new data folder starts with, so a 0.1 client that sends them gets the same
-  turn as before. When the person has removed one of those two, the name still starts that harness
-  on its own subscription.
+  turn; a `model` sent here is used in place of the agent's. `claude`, `codex` and `agy` are the ids of
+  the three agents a new data folder starts with, so a 0.1 client that sends `claude` or `codex`
+  gets the same turn as before. When the person has removed one of those three, the name still
+  starts that harness on its own subscription.
 - **Isolation is automatic.** A new session runs in its own copy of `folder`, made as the
   `isolation` setting says ([Isolation](#isolation)), under `sessions/<session>` in the runner's
   data folder, named after the session. It
@@ -1118,7 +1122,9 @@ takes only `GET`.
 **Turns are what the cockpit reads; a session is the label that groups them.** A turn exists from
 the moment it is asked for. **The first page starts with the turns still queued**, newest first;
 then the turns that started, newest first by their `turn.started`'s seq. Later pages hold started
-turns only. A started turn's fields are computed from stored events up to `seq`, so a client
+turns only. A turn that ended before it started, such as one stopped while queued, has no
+`turn.started`: it is listed among the started turns where it was asked for, on one page only, and
+does not count toward `limit`. A started turn's fields are computed from stored events up to `seq`, so a client
 streams from `store` and `seq` exactly as after the sessions snapshot.
 
 Besides the record's fields, each turn has:
@@ -1128,8 +1134,11 @@ Besides the record's fields, each turn has:
 - `kind`: `turn`, or `review` for a turn that reviews another (`POST /api/v0/turns/<id>/review`).
 - `reviews`: for a review, the turn it reviews.
 - `verdict` and `findings`: for a review that has ended. `verdict` is `pass`, `fail` or `unknown`;
-  any P1 finding makes it `fail`. Each finding has `severity`, `file`, `line` and `summary`.
+  any P1 finding makes it `fail`. `findings` is a list, `[]` when the reviewer named nothing;
+  both are absent for any other turn. Each finding has `severity`, `file`, `line` and `summary`.
 - `asked`: when the turn was asked for. Absent for a turn this service did not run.
+- `started`: when the turn started, the time of its `turn.started`. Absent for a turn that has not
+  started, like `number`.
 - `ahead`: for a queued turn, how many of its session's turns are before it.
 
 - `session=<id>` lists one session's turns. `limit` is 1 to 1000, 100 when absent. **A page also
@@ -1138,8 +1147,9 @@ Besides the record's fields, each turn has:
   `null`. Page until it is `null` and every turn is reached.
 - `prompt` is a preview: the first 500 characters (runes, never a split one) of the person's words
   from the turn's `turn.started`. `prompt_truncated: true` says it was cut; it is absent when not.
-  **The whole prompt is that `turn.started`'s `text`**, the first event of
-  `GET /api/v0/sessions/<session>/events?turn=<id>`. A list of many 256 KiB prompts would otherwise be hundreds of MB. `agent` and `folder` come from the same `turn.started`, empty for a
+  **The whole prompt is that `turn.started`'s `text`**, in
+  `GET /api/v0/sessions/<session>/events?turn=<id>` (its first event is the run's
+  `session.opened`; the `turn.started` follows). A list of many 256 KiB prompts would otherwise be hundreds of MB. `agent` and `folder` come from the same `turn.started`, empty for a
   turn not started through `POST /api/v0/turns`, and so does `agent_id`, the saved agent that ran
   the turn (absent for a turn started by harness name alone). Turns of one session may name
   different agents.
@@ -1246,7 +1256,7 @@ Stop is the one verb: there is no cancel.
  "state":"finished","started":"2026-11-09T09:12:03Z","ended":"2026-11-09T09:12:41Z","duration_ms":38000,
  "files":{"isolated":true,"from":"base","to":"t_5d0c19a2e7b3f481","kind":"snapshot","count":2,
    "changes":[
-     {"path":"a.txt","change":"modified","size":12,"sha256":"…",
+     {"path":"a.txt","change":"modified","size":6,"sha256":"…","content":"one\n2\n",
       "diff":"--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+2\n"},
      {"path":"logo.png","change":"added","size":5120,"sha256":"…","diff_left_out":true}]},
  "model_calls":{"count":3,"usage":{"input_tokens":1200,"output_tokens":540,"cache_read_tokens":0,"cache_write_tokens":0},
@@ -1264,7 +1274,10 @@ Everything the record holds about one turn, in one answer, for the cockpit and f
   and SHA-256. In an isolated copy each changed text file has its own unified `diff`, from the
   turn's start checkpoint to its end one, made when the turn ended. A file's earlier content is the
   checkpoint's saved copy, or for the first turn the person's folder while that file is still as it
-  was. **`diff_left_out: true`** marks a file whose content changed and has no diff here: binary, a
+  was. **`content`** is the whole file at the end of the turn, when it is UTF-8 text of at most
+  8 KiB and the turn's contents together fit in 256 KiB; absent for a deleted file and any other.
+  `files.content_left_out: true` says a small file's content was left out for that budget.
+  **`diff_left_out: true`** marks a file whose content changed and has no diff here: binary, a
   link, over 256 KiB, past the 512 KiB budget of all diffs together, or its earlier content no
   longer kept. A turn in a folder used as it is (`none`, or `isolate: false`) is checkpointed the
   same way, in the folder itself: `from` and `to` are absent, `isolated` is false, and a modified
@@ -1328,7 +1341,7 @@ names in the control plane's blob store, and the connector reads them from there
 - **It waits up to 30 seconds** for the connector. Past that it answers **202** with `state`
   `queued` or `running`; `GET /api/v0/turns/<id>/diff` shows how it ended, and calling apply again
   waits for the same apply.
-- **400** for a turn that cannot be applied: it has not ended, it did not run in an isolated copy (`isolation = "none"`, or `isolate: false`), it ran
+- **400** for a turn that cannot be applied: it has not ended, it ended before it started (stopped while queued), it did not run in an isolated copy (`isolation = "none"`, or `isolate: false`), it ran
   before this build kept changesets, or its session was closed. **404** when no turn of this service has the id
   ran the turn. **409** with `state` `failed` when the apply did not finish (its connector went
   away): ask again, and a file it already wrote counts as applied.
@@ -1374,8 +1387,8 @@ own session and turn.
 **An agent is a saved setup**: a harness, how it reaches its model (its access), the model and a
 name. A turn names one by id. An agent says nothing about where it runs. The agents are kept in
 `agents.json` in the data folder, written whole by an atomic rename. A new data folder starts with
-two, `claude` (Claude Code) and `codex` (Codex), each on its own subscription with the harness's
-default model.
+three, `claude` (Claude Code), `codex` (Codex) and `agy` (Antigravity), each on its own
+subscription with the harness's default model.
 
 ```json
 {"id":"a_3f9c0d1e2b4a5c6d","name":"DeepSeek","harness":"claude","access":"openrouter",
@@ -1383,8 +1396,8 @@ default model.
  "created":"2026-11-08T23:10:00Z","updated":"2026-11-08T23:10:00Z"}
 ```
 
-- `harness`: `claude` or `codex`. `opencode` is listed by `GET /api/v0/harnesses` and refused
-  here: not available yet.
+- `harness`: `claude`, `codex` or `agy`. `agy` takes `subscription` access only. `opencode` is
+  listed by `GET /api/v0/harnesses` and refused here: not available yet.
 - `access`: `subscription` (the harness's own sign-in) or `openrouter` (an OpenRouter key).
   `api` (the vendor's API key) is refused: not available yet.
 - `model`: optional for `subscription` (absent: the harness's default). Required for `openrouter`,

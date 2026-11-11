@@ -8,8 +8,11 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/staysup/agentbus/api"
 )
 
 // agentbus api sends the turn's token to AGENTBUS_URL, prints the reply, and
@@ -50,11 +53,20 @@ func TestAPICall(t *testing.T) {
 	if code, _, _ := call(env, `{"from":"stdin"}`, "PUT", "/api/v0/agents/x", "-"); code != 0 || got.body != `{"from":"stdin"}` {
 		t.Errorf("stdin body: %d %q", code, got.body)
 	}
+	// Every method a route takes, PATCH for a session's rename too.
+	for _, m := range api.Methods() {
+		if code, _, errs := call(env, "", m, "/api/v0/sessions/abc", `{"title":"x"}`); code != 0 || got.method != m {
+			t.Errorf("%s: exit %d %q, sent %s", m, code, errs, got.method)
+		}
+	}
+	if !slices.Contains(api.Methods(), "PATCH") {
+		t.Errorf("methods %v, want PATCH among them", api.Methods())
+	}
 	got.path = ""
 	for _, args := range [][]string{
 		{"GET", "http://elsewhere.example/api/v0/turns"},
 		{"GET", "/s/abc/v1/messages"},
-		{"PATCH", "/api/v0/turns"},
+		{"TRACE", "/api/v0/turns"},
 		{"GET"},
 	} {
 		if code, _, _ := call(env, "", args...); code != 2 {

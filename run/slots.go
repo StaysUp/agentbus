@@ -181,15 +181,15 @@ type turnTokens struct {
 	m  map[[32]byte]Grant
 }
 
-// turnTokenPrefix marks a turn's own token.
-const turnTokenPrefix = "abt_"
+// TurnTokenPrefix marks a turn's own token.
+const TurnTokenPrefix = "abt_"
 
 func (t *turnTokens) mint(g Grant) (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	tok := turnTokenPrefix + hex.EncodeToString(b)
+	tok := TurnTokenPrefix + hex.EncodeToString(b)
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.m == nil {

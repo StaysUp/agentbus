@@ -1535,6 +1535,32 @@ func (q *Queue) Waiting(team string) ([]Job, error) {
 		ORDER BY created DESC, rowid DESC LIMIT ?`, team, MaxQueued)
 }
 
+// NeverStarted reads team's turn and review jobs that ended before their
+// turn started, such as a turn stopped while queued, newest first: those
+// asked for at from or later and before to. A zero from or to is no bound.
+// session, when set, keeps one session's: a review's own session is the one
+// control named for it. The record holds no such turn; only the queue does.
+func (q *Queue) NeverStarted(team, session string, from, to time.Time) ([]Job, error) {
+	where := `team = ? AND kind IN ('turn', 'review') AND ended IS NOT NULL
+		AND NOT EXISTS (SELECT 1 FROM attempts a JOIN attempt_events e ON e.attempt = a.id
+			WHERE a.job = jobs.id AND e.kind = 'turn.created')`
+	args := []any{team}
+	if !from.IsZero() {
+		where += ` AND created >= ?`
+		args = append(args, nanos(from))
+	}
+	if !to.IsZero() {
+		where += ` AND created < ?`
+		args = append(args, nanos(to))
+	}
+	if session != "" {
+		where += ` AND CASE kind WHEN 'review' THEN json_extract(links, '$.review_session') ELSE session END = ?`
+		args = append(args, session)
+	}
+	args = append(args, MaxQueued)
+	return q.jobsWhere(`SELECT `+jobCols+` FROM jobs WHERE `+where+` ORDER BY created DESC, rowid DESC LIMIT ?`, args...)
+}
+
 // JobsByTurns reads the jobs of team that run these turns, by turn id,
 // without their attempts.
 func (q *Queue) JobsByTurns(team string, turns []string) (map[string]Job, error) {
@@ -1647,6 +1673,25 @@ func (q *Queue) Sessions(team string, limit int) ([]Workspace, error) {
 			return nil, fmt.Errorf("queue: list sessions: %w", err)
 		}
 		out = append(out, w)
+	}
+	return out, rows.Err()
+}
+
+// Closed reads when each closed session of team was closed, by session id.
+func (q *Queue) Closed(team string) (map[string]time.Time, error) {
+	rows, err := q.db.Query(`SELECT id, closed FROM sessions WHERE team = ? AND closed IS NOT NULL`, team)
+	if err != nil {
+		return nil, fmt.Errorf("queue: list closed sessions: %w", err)
+	}
+	defer rows.Close()
+	out := map[string]time.Time{}
+	for rows.Next() {
+		var id string
+		var closed int64
+		if err := rows.Scan(&id, &closed); err != nil {
+			return nil, fmt.Errorf("queue: list closed sessions: %w", err)
+		}
+		out[id] = fromNanos(closed)
 	}
 	return out, rows.Err()
 }

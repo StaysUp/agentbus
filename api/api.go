@@ -329,6 +329,10 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	who, g, ok := a.authorized(r)
 	if !ok {
+		if a.turnTokenEnded(r) {
+			writeError(w, http.StatusUnauthorized, turnTokenEnded)
+			return
+		}
 		writeError(w, http.StatusUnauthorized, "a valid bearer token is required")
 		return
 	}
@@ -374,6 +378,30 @@ func (a *API) authorized(r *http.Request) (who int, g run.Grant, ok bool) {
 		return byTurn, g, ok
 	}
 	return byTurn, g, false
+}
+
+// turnTokenEnded is the 401 for a turn's token once its turn has ended, so
+// a process the turn left running can tell what happened.
+const turnTokenEnded = "this token ended with its turn: a turn's token works only while the turn runs"
+
+// turnTokenEnded says the request's token is a turn's token that no longer
+// works: the shape of this process's own turn tokens (they are random, so
+// one that is not live has ended), or a token control minted for an attempt
+// that is no longer current.
+func (a *API) turnTokenEnded(r *http.Request) bool {
+	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+	if !ok {
+		return false
+	}
+	if rest, ok := strings.CutPrefix(got, run.TurnTokenPrefix); ok && len(rest) == 64 && isHex(rest) {
+		return true
+	}
+	return a.cfg.Jobs != nil && a.cfg.Jobs.TurnTokenEnded(got)
+}
+
+func isHex(s string) bool {
+	_, err := hex.DecodeString(s)
+	return err == nil
 }
 
 func notAllowed(w http.ResponseWriter, allow string) {
@@ -432,9 +460,53 @@ func randomHex(n int) string {
 	return hex.EncodeToString(b)
 }
 
+// Snapshot is every session: what the record says of each, and whether it
+// is closed, which the queue holds.
+type Snapshot struct {
+	Store    string    `json:"store" doc:"The store id. Send it back as store."`
+	Seq      int64     `json:"seq" doc:"The seq the snapshot was taken at. Send it back as after."`
+	Sessions []Session `json:"sessions" doc:"Newest activity first."`
+}
+
+// Session is one session: the record's, and when it was closed.
+type Session struct {
+	store.Session
+	Closed *time.Time `json:"closed,omitempty" doc:"When the session was closed with PATCH /api/v0/sessions/{id}. It takes no more turns, and resumable is false."`
+}
+
+// snapshot is every session, each with closed set from the queue. A closed
+// session is never resumable: it takes no more turns.
+func (a *API) snapshot() (Snapshot, error) {
+	snap, err := a.cfg.Store.Snapshot()
+	if err != nil {
+		return Snapshot{}, err
+	}
+	closed := map[string]time.Time{}
+	if a.cfg.Queue != nil {
+		if closed, err = a.cfg.Queue.Closed(queue.DefaultTeam); err != nil {
+			return Snapshot{}, err
+		}
+	}
+	out := Snapshot{Store: snap.Store, Seq: snap.Seq, Sessions: make([]Session, len(snap.Sessions))}
+	for i, s := range snap.Sessions {
+		out.Sessions[i] = a.withClosed(s, closed)
+	}
+	return out, nil
+}
+
+// withClosed is s with when it was closed, from closed.
+func (a *API) withClosed(s store.Session, closed map[string]time.Time) Session {
+	v := Session{Session: s}
+	if c, ok := closed[s.ID]; ok {
+		v.Closed = &c
+		v.Resumable = false
+	}
+	return v
+}
+
 // GET /api/v0/sessions
 func (a *API) sessions(w http.ResponseWriter, _ *http.Request) {
-	snap, err := a.cfg.Store.Snapshot()
+	snap, err := a.snapshot()
 	if err != nil {
 		a.internal(w)
 		return

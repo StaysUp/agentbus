@@ -74,6 +74,21 @@ func (s *Server) turnJob(tok string) (queue.Job, run.Grant, bool) {
 	return j, g, true
 }
 
+// TurnTokenEnded says tok is a turn token control minted whose attempt is
+// no longer current: its turn ended, or another attempt replaced it.
+func (s *Server) TurnTokenEnded(tok string) bool {
+	rest, ok := strings.CutPrefix(tok, TokenPrefix)
+	if !ok {
+		return false
+	}
+	i := strings.LastIndexByte(rest, '.')
+	if i < 0 || !hmac.Equal([]byte(rest[i+1:]), []byte(s.sign(rest[:i]))) || len(strings.Split(rest[:i], ".")) != 3 {
+		return false
+	}
+	_, _, live := s.turnJob(tok)
+	return !live
+}
+
 // TurnGrant says what a runner turn's token may do on the API, while its
 // attempt is current. ok is false for any other token.
 func (s *Server) TurnGrant(tok string) (run.Grant, bool) {

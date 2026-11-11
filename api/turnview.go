@@ -21,19 +21,19 @@ import (
 // Turn is one turn: what the record says of it, and what its job adds.
 type Turn struct {
 	store.Turn
-	Kind     string          `json:"kind" doc:"turn, or review: a turn that reviews another, by POST /api/v0/turns/{id}/review."`
-	Reviews  string          `json:"reviews,omitempty" doc:"For a review: the turn it reviews."`
-	Verdict  *string         `json:"verdict,omitempty" doc:"For a review that has ended: pass, fail or unknown. Any P1 finding makes it fail."`
-	Findings []queue.Finding `json:"findings,omitempty" doc:"For a review that has ended: what the reviewer named."`
-	Asked    *time.Time      `json:"asked,omitempty" doc:"When the turn was asked for. Absent for a turn this service did not run."`
-	Ahead    int             `json:"ahead,omitempty" doc:"For a queued turn: how many of its session's turns are before it."`
+	Kind     string           `json:"kind" doc:"turn, or review: a turn that reviews another, by POST /api/v0/turns/{id}/review."`
+	Reviews  string           `json:"reviews,omitempty" doc:"For a review: the turn it reviews."`
+	Verdict  *string          `json:"verdict,omitempty" doc:"For a review that has ended: pass, fail or unknown. Any P1 finding makes it fail."`
+	Findings *[]queue.Finding `json:"findings,omitempty" doc:"For a review that has ended: what the reviewer named, [] when it named nothing. Absent for any other turn."`
+	Asked    *time.Time       `json:"asked,omitempty" doc:"When the turn was asked for. Absent for a turn this service did not run."`
+	Ahead    int              `json:"ahead,omitempty" doc:"For a queued turn: how many of its session's turns are before it."`
 }
 
 // TurnList is a page of turns.
 type TurnList struct {
 	Store string `json:"store" doc:"The store id. Send it back as store."`
 	Seq   int64  `json:"seq" doc:"The seq the list was computed at. Send it back as after to stream from here."`
-	Turns []Turn `json:"turns" doc:"The first page: the queued turns, then the turns that started, newest first. Later pages: started turns only."`
+	Turns []Turn `json:"turns" doc:"The first page: the queued turns, then the turns that started, newest first. Later pages: started turns only. A turn that ended before it started is among the started turns, by when it was asked for, on one page only; it does not count toward limit."`
 	// NextBefore is the before for the next, older page.
 	NextBefore *int64 `json:"next_before" doc:"The before for the next, older page, or null when there are no older turns. A page stops at limit turns or at 4 MiB of rows, whichever comes first."`
 }
@@ -79,7 +79,15 @@ func (a *API) view(t store.Turn, j *queue.Job) Turn {
 		v.State, v.Ended = queue.TurnRunning, nil
 	}
 	if j.Kind == queue.KindReview {
-		v.Verdict, v.Findings = j.Verdict, j.Findings
+		v.Verdict = j.Verdict
+		if j.Verdict != nil {
+			// A list once the review has ended, empty when it named nothing.
+			f := j.Findings
+			if f == nil {
+				f = []queue.Finding{}
+			}
+			v.Findings = &f
+		}
 		if r, err := a.cfg.Queue.Get(queue.DefaultTeam, j.Links.ReviewsJob); err == nil {
 			v.Reviews = r.Turn
 		}
@@ -91,8 +99,9 @@ func (a *API) view(t store.Turn, j *queue.Job) Turn {
 // before it started, with why.
 func (a *API) waiting(j queue.Job) Turn {
 	sp := j.Spec
+	// No started: it has not started. asked says when it was asked for.
 	t := store.Turn{ID: j.Turn, Session: turnSession(j), Harness: sp.Harness, AgentID: sp.AgentID, Model: sp.Model,
-		Started: j.Created, State: queue.TurnState(j.State)}
+		State: queue.TurnState(j.State)}
 	t.Prompt, t.PromptTruncated = previewText(sp.Prompt)
 	// Who asked for it, as its turn.started will say once it starts. The
 	// job id stays out: it is the queue's, not the API's.
@@ -199,14 +208,63 @@ func (a *API) turns(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	never, err := a.neverStarted(tq, list)
+	if err != nil {
+		a.internal(w)
+		return
+	}
 	for _, t := range list.Turns {
+		// A turn that ended before it started goes where it was asked for,
+		// among the turns that started.
+		for len(never) > 0 && never[0].Created.After(t.Started) {
+			out.Turns = append(out.Turns, a.waiting(never[0]))
+			never = never[1:]
+		}
 		var jp *queue.Job
 		if j, ok := jobs[t.ID]; ok && turnSession(j) == t.Session {
 			jp = &j
 		}
 		out.Turns = append(out.Turns, a.view(t, jp))
 	}
+	for _, j := range never {
+		out.Turns = append(out.Turns, a.waiting(j))
+	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// neverStarted is the jobs whose turn ended before it started, such as a
+// turn stopped while queued, that belong on this page of started turns. A
+// page holds those asked for before the earliest start of every newer page's
+// turns (to), and, when older pages follow, at or after the earliest start of
+// this page's turns and every newer one (from). Pages go down by seq, and a
+// later turn can have an earlier clock, so both bounds are minimums over all
+// turns from the page's oldest up: each only moves back in time from page to
+// page, and each such turn is on exactly one page. The record holds no such
+// turn; the queue does.
+func (a *API) neverStarted(tq store.TurnQuery, list store.TurnList) ([]queue.Job, error) {
+	if a.cfg.Queue == nil {
+		return nil, nil
+	}
+	var from, to time.Time
+	if tq.Before > 0 {
+		t, ok, err := a.cfg.Store.FirstStartSince(tq.Session, tq.Before)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			to = t
+		}
+	}
+	if list.NextBefore != nil {
+		t, ok, err := a.cfg.Store.FirstStartSince(tq.Session, list.Turns[len(list.Turns)-1].StartedSeq)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			from = t
+		}
+	}
+	return a.cfg.Queue.NeverStarted(queue.DefaultTeam, tq.Session, from, to)
 }
 
 // GET /api/v0/turns/<id>: one turn, in any state. session picks one
@@ -313,10 +371,10 @@ func callOfTurn(h func(*API, http.ResponseWriter, *http.Request, string)) func(*
 
 // OneSession is the answer to GET /api/v0/sessions/<id>.
 type OneSession struct {
-	Store   string        `json:"store" doc:"The store id. Send it back as store."`
-	Seq     int64         `json:"seq" doc:"The seq the session was computed at."`
-	Session store.Session `json:"session"`
-	Copy    *SessionCopy  `json:"copy" doc:"Where the session's turns run, on its runner. Null until the session's first turn on this service has ended."`
+	Store   string       `json:"store" doc:"The store id. Send it back as store."`
+	Seq     int64        `json:"seq" doc:"The seq the session was computed at."`
+	Session Session      `json:"session"`
+	Copy    *SessionCopy `json:"copy" doc:"Where the session's turns run, on its runner. Null until the session's first turn on this service has ended."`
 }
 
 // SessionCopy is where a session's turns run: for debugging, and to know
@@ -339,13 +397,15 @@ func (a *API) getSession(w http.ResponseWriter, _ *http.Request, id string) {
 		return
 	}
 	out := OneSession{Store: snap.Store, Seq: snap.Seq}
+	var rec store.Session
 	found := false
 	for _, s := range snap.Sessions {
 		if s.ID == id {
-			out.Session, found = s, true
+			rec, found = s, true
 			break
 		}
 	}
+	closed := map[string]time.Time{}
 	if a.cfg.Queue != nil {
 		ws, ok, err := a.cfg.Queue.Workspace(queue.DefaultTeam, id)
 		if err != nil {
@@ -355,11 +415,15 @@ func (a *API) getSession(w http.ResponseWriter, _ *http.Request, id string) {
 		if ok {
 			out.Copy = &SessionCopy{Runner: ws.Runner, Kind: ws.Kind, Name: ws.Space, Folder: ws.FolderRef,
 				Closed: ws.Closed, Removed: ws.Removed, Error: ws.RemovalError}
+			if ws.Closed != nil {
+				closed[id] = *ws.Closed
+			}
 			if !found {
-				out.Session, found = store.Session{ID: id}, true
+				rec, found = store.Session{ID: id}, true
 			}
 		}
 	}
+	out.Session = a.withClosed(rec, closed)
 	if !found {
 		writeError(w, http.StatusNotFound, "no such session")
 		return

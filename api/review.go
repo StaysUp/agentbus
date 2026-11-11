@@ -42,8 +42,15 @@ func (a *API) reviewTurn(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, http.StatusBadRequest, badReview)
 		return
 	}
-	if !reviewerShape.MatchString(b.Agent) || (b.Model != "" && !run.ModelShape.MatchString(b.Model)) {
-		writeError(w, http.StatusBadRequest, "agent must match "+reviewerShape.String()+" and model "+run.ModelShape.String())
+	switch {
+	case b.Agent == "":
+		writeError(w, http.StatusBadRequest, "agent is required: the saved agent that reviews, as GET /api/v0/agents names it")
+		return
+	case !reviewerShape.MatchString(b.Agent):
+		writeError(w, http.StatusBadRequest, "agent must match "+reviewerShape.String())
+		return
+	case b.Model != "" && !run.ModelShape.MatchString(b.Model):
+		writeError(w, http.StatusBadRequest, "model must match "+run.ModelShape.String())
 		return
 	}
 	if b.IdempotencyKey != "" && !idempotencyKey.MatchString(b.IdempotencyKey) {
@@ -101,7 +108,7 @@ func (a *API) reviewTurn(w http.ResponseWriter, r *http.Request, id string) {
 	case errors.Is(err, queue.ErrSessionClosed):
 		writeError(w, http.StatusConflict, "the turn's session is closed, so its copy is gone")
 	case errors.Is(err, queue.ErrKeyConflict):
-		writeError(w, http.StatusConflict, "idempotency_key already names another turn")
+		writeError(w, http.StatusConflict, "idempotency_key was already used for a different request; send a new key for a new review")
 	case errors.Is(err, queue.ErrFull):
 		writeError(w, http.StatusTooManyRequests, "too many turns are waiting; wait for some to end")
 	case err != nil:

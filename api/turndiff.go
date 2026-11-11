@@ -289,8 +289,9 @@ func (a *API) turnActivity(d *TurnDiff) error {
 
 // Refusals of an apply. Fixed wording.
 const (
-	applyNotApplicable = "this turn's changes cannot be applied: it has not ended, " +
-		"or it did not run in an isolated copy of a folder"
+	applyNotApplicable = "this turn's changes cannot be applied: it did not run in an isolated copy of a folder"
+	applyNotEnded      = "this turn has not ended; apply it once it has"
+	applyNeverStarted  = "this turn ended before it started, so it has no changes to apply"
 	applySessionClosed = "this turn's session was closed, so its copy and checkpoints are gone"
 	applyNoJob         = "no turn of this service has this id"
 	applyBusy          = "an apply of an earlier turn of this session has not ended; ask again once it has"
@@ -310,7 +311,7 @@ func (a *API) applyTurn(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, http.StatusNotFound, applyNoJob)
 		return
 	case errors.Is(err, queue.ErrNotApplicable):
-		writeError(w, http.StatusBadRequest, applyNotApplicable)
+		writeError(w, http.StatusBadRequest, a.whyNotApplicable(id))
 		return
 	case errors.Is(err, queue.ErrSessionClosed):
 		writeError(w, http.StatusBadRequest, applySessionClosed)
@@ -347,6 +348,20 @@ func (a *API) applyTurn(w http.ResponseWriter, r *http.Request, id string) {
 	default:
 		writeJSON(w, http.StatusConflict, st)
 	}
+}
+
+// whyNotApplicable says why turn id's changes cannot be applied: it has not
+// ended, it never started, or it did not run in a copy.
+func (a *API) whyNotApplicable(id string) string {
+	j, err := a.cfg.Queue.JobByTurn(queue.DefaultTeam, id)
+	switch {
+	case err != nil || j.Kind != queue.KindTurn:
+	case j.Ended == nil:
+		return applyNotEnded
+	case !started(j):
+		return applyNeverStarted
+	}
+	return applyNotApplicable
 }
 
 // awaitEnd waits for job to end, up to TurnWait. It answers the job as it

@@ -1,12 +1,12 @@
 # AgentBus: the API for agents
 
-> AgentBus runs coding agents (Claude Code, codex) for a person and records every step.
+> AgentBus runs coding agents (Claude Code, codex, Antigravity) for a person and records every step.
 > This page is short on purpose: read it whole. The long reference is `GET /docs/reference.md`.
 > The full description of every route is `GET /api/v0/openapi.json`.
 
 ## Three nouns
 
-- **Agent**: a saved setup: a harness (claude, codex), its model, a name. `GET /api/v0/agents`.
+- **Agent**: a saved setup: a harness (claude, codex, agy), its model, a name. `GET /api/v0/agents`.
 - **Session**: one conversation: its turns, in order.
 - **Turn**: one message, its reply and its changes. Every action is on a turn.
 

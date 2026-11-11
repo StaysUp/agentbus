@@ -131,7 +131,7 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if body.Isolate != nil {
-			writeError(w, http.StatusBadRequest, "isolate is for a new session; a session keeps its own workspace")
+			writeError(w, http.StatusBadRequest, "isolate is for a new session; a session keeps its own copy")
 			return
 		}
 		if body.FolderRef != "" || body.Connector != "" {
@@ -215,7 +215,7 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "idempotency_key already started a turn with other fields; send a new key for a new turn")
 		return
 	case errors.Is(err, queue.ErrSessionClosed):
-		writeError(w, http.StatusConflict, "this session's workspace is closed; it takes no more turns")
+		writeError(w, http.StatusConflict, "this session is closed; it takes no more turns")
 		return
 	case errors.Is(err, queue.ErrSessionEnded):
 		writeError(w, http.StatusConflict, queue.SessionEnded)

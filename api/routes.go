@@ -186,6 +186,7 @@ var routes = slices.Concat([]route{
 		summary: "List turns",
 		doc: "The turns, newest first, and the seq they were computed at.\n\n" +
 			"The first page starts with the turns still queued, then the turns that started, newest first. " +
+			"A turn that ended before it started, such as one stopped while queued, is listed among them where it was asked for, on one page only. " +
 			"Page older turns with before set to the next_before of the page before. Stream from the list's store and seq to follow new events.",
 		query: []param{
 			{name: "session", doc: "Only this session's turns."},
@@ -313,7 +314,7 @@ var routes = slices.Concat([]route{
 		tag:     "Sessions",
 		summary: "List sessions",
 		doc:     "The sessions, and the seq they were computed at.",
-		replies: []reply{ok(200, store.Snapshot{}, "The snapshot."), storeFailed},
+		replies: []reply{ok(200, Snapshot{}, "The snapshot."), storeFailed},
 		serve:   plain((*API).sessions)},
 	{method: "GET", path: "/api/v0/sessions/{id}", op: "getSession",
 		tag:     "Sessions",
@@ -570,4 +571,16 @@ func (a *API) self(w http.ResponseWriter, r *http.Request) bool {
 		}
 	}
 	return false
+}
+
+// Methods is every HTTP method the client API's routes take, in the order
+// the route table first names them. agentbus-api accepts exactly these.
+func Methods() []string {
+	var out []string
+	for i := range routes {
+		if !slices.Contains(out, routes[i].method) {
+			out = append(out, routes[i].method)
+		}
+	}
+	return out
 }

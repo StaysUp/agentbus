@@ -50,7 +50,7 @@ type Turn struct {
 	ModelCalls     int    `json:"model_calls" doc:"How many model calls the turn made: its model.requested events."`
 	// StartedSeq orders turns and pages them.
 	StartedSeq int64      `json:"started_seq" doc:"The seq of the turn's turn.started. Send it as before for older turns."`
-	Started    time.Time  `json:"started"`
+	Started    time.Time  `json:"started,omitzero" doc:"When the turn started: the time of its turn.started. Absent until it starts; asked is when it was asked for."`
 	Ended      *time.Time `json:"ended,omitempty" doc:"A run's turn: when its child exited. Another turn: its latest turn.completed. Absent while running."`
 	State      string     `json:"state" doc:"queued, running, finished, failed or stopped. queued: asked for, and no runner has started it yet. A run's turn: running until its child exits, then finished on exit code 0, stopped when someone stopped it, else failed. Another turn: finished once it has a turn.completed, else running."`
 	Outcome    string     `json:"outcome,omitempty" doc:"The outcome of the turn's latest turn.completed, when it has one."`
@@ -111,6 +111,27 @@ type TurnQuery struct {
 	Turn    string // only turns with this id; empty for all
 	Before  int64  // only turns whose turn.started seq is below it; 0 for none
 	Limit   int
+}
+
+// FirstStartSince is the earliest start time of the turns whose turn.started
+// seq is from or later, of session when it is set; ok is false when there
+// are none. Pages of Turns go down by seq, so this only moves back in time
+// from one page to the next, whatever order the turns' clocks are in.
+func (s *Store) FirstStartSince(session string, from int64) (t time.Time, ok bool, err error) {
+	q := `SELECT MIN(time) FROM events WHERE kind = 'turn.started' AND turn <> '' AND seq >= ?`
+	args := []any{from}
+	if session != "" {
+		q += ` AND session = ?`
+		args = append(args, session)
+	}
+	var tm sql.NullInt64
+	if err := s.r.QueryRow(q, args...).Scan(&tm); err != nil {
+		return time.Time{}, false, fmt.Errorf("store: read turns: %w", err)
+	}
+	if !tm.Valid {
+		return time.Time{}, false, nil
+	}
+	return time.Unix(0, tm.Int64).UTC(), true, nil
 }
 
 // Turns lists the turns that have a turn.started, newest first. A turn is

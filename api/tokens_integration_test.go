@@ -235,8 +235,9 @@ func TestTurnToken(t *testing.T) {
 	if end, err := e.store.TurnEnd(own, s.Turn); err != nil || end.Stopped || end.ExitCode == nil || *end.ExitCode != 0 {
 		t.Errorf("the turn after a turn token's stop: %+v %v, want exit 0, not stopped", end, err)
 	}
-	if code, _ := as(t, e, tok, "GET", "/api/v0/sessions/"+own+"/events", ""); code != http.StatusUnauthorized {
-		t.Fatalf("the token after session.closed: %d, want 401", code)
+	// The 401 says the token ended with its turn.
+	if code, out := as(t, e, tok, "GET", "/api/v0/sessions/"+own+"/events", ""); code != http.StatusUnauthorized || !strings.Contains(out, turnTokenEnded) {
+		t.Fatalf("the token after session.closed: %d %s, want 401 that says it ended", code, out)
 	}
 	if n := e.eng.LiveTokens(); n != 0 {
 		t.Errorf("%d live tokens after the turn", n)

@@ -115,6 +115,21 @@ func TestTokenRequiredAndNeverEchoed(t *testing.T) {
 		}
 		noToken(t, resp, body)
 	}
+	// A token of a turn's shape that is not live ended with its turn, and
+	// the 401 says so; any other wrong token gets the plain 401.
+	for auth, ended := range map[string]bool{
+		"Bearer abt_" + strings.Repeat("0a", 32): true,
+		"Bearer abt_" + strings.Repeat("0a", 31): false,
+		"Bearer abt_" + strings.Repeat("zz", 32): false,
+		"Bearer abr_r.a.1.wrong":                 false,
+	} {
+		r := e.req(t, "GET", "/api/v0/sessions", nil)
+		r.Header.Set("Authorization", auth)
+		resp, body := do(t, r)
+		if resp.StatusCode != 401 || strings.Contains(body, turnTokenEnded) != ended {
+			t.Errorf("auth %q: %d %s, want ended %v", auth, resp.StatusCode, body, ended)
+		}
+	}
 	// Unknown paths too: no probing of the namespace without the token.
 	r := e.req(t, "GET", "/api/v1/events", nil)
 	r.Header.Del("Authorization")

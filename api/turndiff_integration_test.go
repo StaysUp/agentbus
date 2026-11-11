@@ -173,7 +173,7 @@ func TestTurnDiffAndApply(t *testing.T) {
 		t.Fatalf("apply by a turn token: %d %+v, a.txt %q", code, st, read("a.txt"))
 	}
 	// A running turn cannot be applied.
-	if code, out := as(t, e, token, "POST", "/api/v0/turns/"+third.Turn+"/apply", ""); code != 400 {
+	if code, out := as(t, e, token, "POST", "/api/v0/turns/"+third.Turn+"/apply", ""); code != 400 || !strings.Contains(out, applyNotEnded) {
 		t.Errorf("apply of a running turn: %d %s", code, out)
 	}
 	release(dir, "hold")

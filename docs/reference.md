@@ -201,7 +201,8 @@ is 409 with the current `store` in the body: start over from step 1.
 The sessions, newest activity first, with tokens, cost, open state and title (the latest rename,
 else the first message). `agent` and `folder`
 come from the session's latest turn that names them. `open` is true while a turn's agent for the
-session is running. A session groups turns; `GET /api/v0/turns` lists the turns themselves.
+session is running. `closed` is when the session was closed, absent while it is open; a closed
+session is never `resumable`. A session groups turns; `GET /api/v0/turns` lists the turns themselves.
 
 ```sh
 curl -s -H "Authorization: Bearer $TOKEN" $B/api/v0/sessions
@@ -268,7 +269,7 @@ curl -s -H "Authorization: Bearer $TOKEN" "$B/api/v0/sessions/abc/events?turn=t_
 ### POST /api/v0/turns
 
 Start a turn. The reply names the turn at once, and waits up to 30 seconds for a runner to start
-it. Without `session`: a saved agent (its id from `GET /api/v0/agents`; a new data folder has `claude` and `codex`) with a prompt in a folder, in a new
+it. Without `session`: a saved agent (its id from `GET /api/v0/agents`; a new data folder has `claude`, `codex` and `agy`) with a prompt in a folder, in a new
 session. The agent's harness, access and model start it; `model` sent here wins. A new session works on its own copy of its folder, as the `isolation` setting of `permissions.toml` says (`auto`, the default: an APFS clone on macOS, an overlay mount on Linux where the runner can mount one, root or not (without root the service runs in a user namespace of its own; Ubuntu 24.04 needs install.sh's AppArmor step), else a copy; the session owns its snapshot, checkpoints are a Merkle tree, and closing the session removes all of it; `overlay`; `copy`; `git`, a git worktree in a repo; `none`; `share_read_only` lists top-level folders such as `node_modules` that a copy links read-only instead of copying, and a turn cannot write there), starting from the folder exactly as it is; nothing reaches the folder until a turn is applied (`POST /api/v0/turns/{id}/apply`). Send `"isolate": false` to use the folder as it is. With `session`: the next turn of a session the snapshot marks `resumable`, in its own folder
 (send none, or the session's own; a different one is refused with 400). It runs on the session's
 latest agent, or on the saved agent `agent` names: any message may go to any agent, and later
@@ -330,7 +331,8 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 ### GET /api/v0/turns
 
 The turns, newest first, with `store` and `seq` like the sessions snapshot, so you can stream from
-there. The first page starts with the turns still queued. Each has `id`, `session`, `number` (its
+there. The first page starts with the turns still queued. A turn that ended before it started,
+such as one stopped while queued, is listed where it was asked for. Each has `id`, `session`, `number` (its
 place in the session, from 1, once it started: turn 3 is the session's third), `kind` (`turn` or
 `review`), `agent`, `folder`, `prompt`, `asked`, `started`, `ended` (when done), `state`
 (`queued`, `running`, `finished`, `failed` or `stopped`), `outcome`, `exit_code`, `stopped`,
@@ -409,7 +411,7 @@ each). Every new file is staged before any is put in place. A turn already appli
 or a later turn's, is a no-op: 200 with `already: true`. A refused apply may be asked for again.
 409 while an apply of an earlier turn of the session runs. 202 when the connector has not finished
 within 30 seconds; the turn's diff shows how it ended. 400 for a turn that cannot be applied (still
-running, or not in an isolated copy, or its session closed). A turn works in its session's copy, so
+running, stopped before it started, not in an isolated copy, or its session closed). A turn works in its session's copy, so
 its changes reach the person's folder only by an apply. A turn token may apply a turn in its
 scope unless `apply = false` in `[agent_api]`; a read-only turn may not.
 
@@ -490,7 +492,7 @@ curl -s -H "Authorization: Bearer $TOKEN" -H 'Content-Type: application/json' \
 
 ### Agents: GET, POST /api/v0/agents, GET, PUT, DELETE /api/v0/agents/{id}
 
-Saved agents: `{id, name, harness, access, model, key_env}`. `harness` is `claude` or `codex`;
+Saved agents: `{id, name, harness, access, model, key_env}`. `harness` is `claude`, `codex` or `agy` (subscription only);
 `access` is `subscription` (the harness's own sign-in) or `openrouter` (a key read, when a turn
 starts, from the environment variable `key_env` names, `OPENROUTER_API_KEY` when absent; never the
 key itself). An OpenRouter agent needs `model` in OpenRouter's naming, such as
