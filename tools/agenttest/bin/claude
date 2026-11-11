@@ -5,5 +5,24 @@
 # ~/.claude can hold their own rules, hooks and MCP servers. The sign-in is
 # untouched. Every other call (the version, the sign-in status) passes through.
 # AT_REAL_CLAUDE is the real program, set by agenttest.py up.
-if [ "$1" = "-p" ]; then exec "${AT_REAL_CLAUDE:?}" --setting-sources project,local "$@"; fi
+# AT_SHOW_OWN_AGENTS (up -show-own-agents) takes Claude Code's own agent tools
+# (Task, Agent, ListAgents, SendMessage) out of --disallowedTools, so a turn
+# with the agentbus_* tools still has them: the arm that tells the tools'
+# effect from the hiding's.
+if [ "$1" = "-p" ]; then
+  if [ -n "$AT_SHOW_OWN_AGENTS" ]; then
+    n=$#
+    prev=
+    for a in "$@"; do
+      if [ "$prev" = "--disallowedTools" ]; then
+        a=$(printf '%s\n' "$a" | tr ',' '\n' | grep -vxE 'Task|Agent|ListAgents|SendMessage' | paste -sd, -)
+        [ -z "$a" ] && a=AtNoTool
+      fi
+      set -- "$@" "$a"
+      prev=$a
+    done
+    shift "$n"
+  fi
+  exec "${AT_REAL_CLAUDE:?}" --setting-sources project,local "$@"
+fi
 exec "${AT_REAL_CLAUDE:?}" "$@"

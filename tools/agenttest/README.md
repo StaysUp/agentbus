@@ -43,8 +43,13 @@ python3 tools/agenttest/agenttest.py down -dir /tmp/at/data
   diff (tool calls and model calls), its events, and the check. `-no-followup` stops the work the
   test turn asked for and the turns its results start, once the measurement is taken: use it for a
   vendor with little quota.
-- `table` prints one row per run. `api_calls` counts AgentBus calls; `api_failed` counts the shell
-  commands holding them that answered 400 or more, or that the harness refused to run. Calls that worked but were not needed are judged by hand from `show`.
+- `up -show-own-agents` keeps Claude Code's own agent tools (`Task`, `Agent`, `ListAgents`,
+  `SendMessage`) in a turn that has the `agentbus_*` tools: `bin/claude` takes them out of
+  `--disallowedTools`. It tells the tools' effect apart from the hiding's.
+- `table` prints one row per run. `api_calls` counts AgentBus calls: `agentbus-api` commands and
+  `agentbus_*` tool calls (claude's `mcp__agentbus__…` tools, and those codex runs from its `exec`
+  code). `api_failed` counts the commands that answered 400 or more or that the harness refused to
+  run, and the tool calls whose answer is a refusal. Calls that worked but were not needed are judged by hand from `show`.
 - `down` stops the service by its PID. Remove the data folder yourself once the results are read.
 
 ## What the agent sees

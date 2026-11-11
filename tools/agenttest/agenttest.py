@@ -6,7 +6,7 @@ then one test turn, on the agent under test, gets one of five plain requests.
 The tool reads the record and the folder afterwards to say whether it was
 done, and keeps the turn's tool calls, model calls and tokens.
 
-  agenttest.py up     -agentbus BIN -dir DIR [-port 8911] [-effort high]
+  agenttest.py up     -agentbus BIN -dir DIR [-port 8911] [-effort high] [-show-own-agents]
   agenttest.py agents -dir DIR (-without-codex | -with-codex)
   agenttest.py run    -dir DIR AGENT MODEL TASK LABEL [-no-followup]
   agenttest.py show   RESULT.json...
@@ -150,11 +150,14 @@ def flag(args, name, default=None, takes=True):
 def up(args):
     binary, data = os.path.abspath(flag(args, "-agentbus")), os.path.abspath(flag(args, "-dir"))
     port, effort = flag(args, "-port", "8911"), flag(args, "-effort", "high")
+    show_own = flag(args, "-show-own-agents", takes=False)
     if subprocess.run(["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN"], capture_output=True).returncode == 0:
         sys.exit(f"port {port} is in use")
     home = os.path.join(data, "home")
     os.makedirs(home)  # refuses a folder in use
     env = dict(os.environ, AGENTBUS_HOME=home, AT_CODEX_EFFORT=effort)
+    if show_own:  # bin/claude: Claude Code's own agent tools stay
+        env["AT_SHOW_OWN_AGENTS"] = "1"
     for prog, var in (("claude", "AT_REAL_CLAUDE"), ("codex", "AT_REAL_CODEX")):
         p = shutil.which(prog)
         if p:
@@ -399,14 +402,35 @@ def run(args):
 
 # ---- show, table -----------------------------------------------------------
 
+TOOL = "mcp__agentbus__agentbus_"  # the agentbus_* tools, as both harnesses name them
+
+
+def tool_text(x):
+    """A tool call's input as text: codex runs MCP tools from JavaScript in its
+    exec tool, so the tool names are in that code."""
+    return json.dumps(x.get("input")) if x.get("input") is not None else ""
+
+
 def api_calls(res):
     """Each AgentBus API call the test turn made, with whether it failed. A
-    call is an agentbus-api (or curl to the service) command; a shell line
-    with several counts each."""
+    call is an agentbus-api (or curl to the service) command, a shell line
+    with several counting each, or an agentbus_* tool call: claude's own
+    mcp__agentbus__ tool, or one named in codex's exec code. A tool call
+    failed when its answer is a refusal (it starts with its HTTP status)."""
     outs = {e.get("tool_id"): e.get("tool_output") or "" for e in res["events"]["events"] if e["kind"] == "tool.completed"}
     calls = []
     for x in res["diff"]["tools"]["calls"]:
         o = outs.get(x["id"], "")
+        if x["name"].startswith(TOOL):
+            calls.append(dict(tool=x["name"], command=tool_text(x)[:200], n=1,
+                              failed=bool(re.search(r"HTTP [45]\d\d|is required|takes no input", o)), output=o[:300]))
+            continue
+        if x["name"] == "exec" and TOOL in tool_text(x):
+            n = len(re.findall(r"tools\." + TOOL, tool_text(x)))
+            if n:
+                calls.append(dict(tool="exec", command=tool_text(x)[:200], n=n,
+                                  failed=bool(re.search(r"HTTP [45]\d\d|is required|takes no input", o)), output=o[:300]))
+            continue
         for cmd in x.get("commands") or []:
             n = len(re.findall(r"agentbus-api |agentbus api |curl ", cmd))
             if not n:
@@ -421,6 +445,8 @@ def first_tool(res):
         cmd = " ".join(x.get("commands") or [])
         if re.search(r"agentbus-api |agentbus api |curl ", cmd):
             return "agentbus-api"
+        if x["name"].startswith(TOOL) or (x["name"] in ("ToolSearch", "exec") and "agentbus" in tool_text(x)):
+            return "agentbus_* tool"
         if x["name"] in ("Agent", "Task", "ListAgents", "SendMessage", "spawn_agent", "send_input"):
             return "built-in " + x["name"]
         return x["name"] + (": " + cmd[:40] if cmd else "")
