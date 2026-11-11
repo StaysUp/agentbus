@@ -593,6 +593,7 @@ func start(c config) (*service, error) {
 	keep := keeper{st: st, logf: svcLog.Printf}
 	for _, g := range gws {
 		g.KeepBodies(keep)
+		g.SetLog(svcLog.Printf)
 		// forbid in permissions.toml, applied to each run turn's replies.
 		if eng != nil {
 			g.SetGuard(eng)

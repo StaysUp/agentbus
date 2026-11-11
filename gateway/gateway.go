@@ -60,6 +60,10 @@ type Gateway struct {
 	refused refusals   // which rule refused each call (guard.go)
 	prefix  string     // cut from the vendor path before anything reads it (SetPrefix)
 
+	// logf is the service log, for why an upstream call failed; nil unless
+	// SetLog was called.
+	logf func(format string, args ...any)
+
 	// open counts each run turn's exchanges not yet fully written: their
 	// events delivered to the sink and their reply handed to the keeper.
 	// Settle waits on it.
@@ -169,6 +173,11 @@ func (g *Gateway) SetRewriter(r Rewriter) { g.rewrite = r }
 // /v1/messages. A path not under it is forwarded unchanged. Call it before
 // serving.
 func (g *Gateway) SetPrefix(prefix string) { g.prefix = prefix }
+
+// SetLog gives the gateway the service log, for what an event cannot hold:
+// why an upstream call failed. A line holds ids, Go error types and fixed
+// words, never a header, a body or Go's error text. Call it before serving.
+func (g *Gateway) SetLog(logf func(format string, args ...any)) { g.logf = logf }
 
 func runID() string {
 	b := make([]byte, 4)
@@ -582,7 +591,20 @@ func upstreamFailure(err error) (msg string, status int) {
 
 func (g *Gateway) errorHandler(w http.ResponseWriter, r *http.Request, err error) {
 	msg, status := upstreamFailure(err)
-	if ex, ok := r.Context().Value(exchangeKey{}).(*exchange); ok {
+	ex, ok := r.Context().Value(exchangeKey{}).(*exchange)
+	// The cause goes to the service log, so a 502 can be traced; the agent
+	// and the event get the fixed words. A call the agent closed is no
+	// failure.
+	if g.logf != nil && status != 0 {
+		class, reason := causeOf(err)
+		session, turn, exchange, after := "", "", "", int64(0)
+		if ok {
+			session, turn, exchange, after = ex.session, ex.turn, ex.id, g.now().Sub(ex.start).Milliseconds()
+		}
+		g.logf("gateway.upstream_failed vendor=%s prefix=%s session=%s turn=%s exchange=%s after_ms=%d class=%s reason=%s",
+			g.adapter.Vendor(), g.prefix, session, turn, exchange, after, class, reason)
+	}
+	if ok {
 		g.emit(ex, []event.Event{{Kind: event.ModelResponded, Status: status, Error: msg}})
 		g.flushed(ex.done)
 	}
