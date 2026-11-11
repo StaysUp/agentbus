@@ -55,14 +55,15 @@ func runServiceVendors(t *testing.T, home string, getenv func(string) string, gr
 }
 
 type runEvent struct {
-	Kind     string `json:"kind"`
-	Session  string `json:"session"`
-	Agent    string `json:"agent"`
-	Folder   string `json:"folder"`
-	Hold     string `json:"hold"`
-	ExitCode *int   `json:"exit_code"`
-	ResumeID string `json:"resume_id"`
-	Stopped  bool   `json:"stopped"`
+	Kind      string `json:"kind"`
+	Session   string `json:"session"`
+	Agent     string `json:"agent"`
+	Folder    string `json:"folder"`
+	Hold      string `json:"hold"`
+	ExitCode  *int   `json:"exit_code"`
+	ResumeID  string `json:"resume_id"`
+	Stopped   bool   `json:"stopped"`
+	ErrorTail string `json:"error_tail"`
 }
 
 func runEvents(t *testing.T, st *store.Store, session string) []runEvent {
@@ -185,6 +186,40 @@ func TestRunSetsBaseURLInChildOnlyAndClosesWithExitCode(t *testing.T) {
 	}
 	if v, _ := envValue(r.Env, "AGENTBUS_TOKEN"); !strings.HasPrefix(v, "abt_") || len(v) != 68 {
 		t.Errorf("child AGENTBUS_TOKEN is not a turn token (%d bytes)", len(v))
+	}
+}
+
+// An agent that exits with an error leaves its last stderr lines on its
+// session.closed, and the turn's error says the last one: the record says
+// why it failed, not only that it did. One that exits 0 leaves none.
+func TestRunErrorTailOnSessionClosed(t *testing.T) {
+	home := t.TempDir()
+	svc := runService(t, home, nil, 0)
+	tok := readToken(t, home)
+	t.Setenv("AGENTBUS_FAKE_STDERR", "starting\nError: Eligibility check failed: request failed with status 401\n")
+	for _, exit := range []string{"1", "0"} {
+		t.Setenv("AGENTBUS_FAKE_EXIT", exit)
+		code, out, raw := postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": t.TempDir(), "isolate": false, "prompt": "hi"})
+		if code != http.StatusAccepted {
+			t.Fatalf("status %d: %s", code, raw)
+		}
+		id, _ := out["session"].(string)
+		c := waitClosed(t, svc.store, id)
+		want := ""
+		if exit == "1" {
+			want = "starting\nError: Eligibility check failed: request failed with status 401"
+		}
+		if c.ErrorTail != want {
+			t.Fatalf("exit %s: error_tail %q, want %q", exit, c.ErrorTail, want)
+		}
+		list, err := svc.store.Turns(store.TurnQuery{Session: id, Limit: 1})
+		if err != nil || len(list.Turns) != 1 {
+			t.Fatalf("turns: %+v %v", list, err)
+		}
+		if tr := list.Turns[0]; exit == "1" && (tr.State != store.TurnFailed || tr.ErrorTail != want ||
+			tr.Error != "Error: Eligibility check failed: request failed with status 401") {
+			t.Fatalf("turn %+v", tr)
+		}
 	}
 }
 

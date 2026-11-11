@@ -811,6 +811,9 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	// RunOutputMax bytes, go to the run's own log and nowhere else.
 	ids := &idScanner{harness: h}
 	out := &logfile.Tail{Max: RunOutputMax}
+	// The end of its stderr alone, for session.closed when it exits with
+	// an error (errtail.go).
+	errs := &logfile.Tail{Max: ErrorTailKept}
 	// Its own session, and so its own process group: stopping it reaches
 	// what it started, and the session marks its descendants for procTree,
 	// even those that leave the group, as codex's tools do.
@@ -876,7 +879,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		closeHoldWhy(msg)
 		return nil, refuse(code, msg)
 	}
-	copied := pipes.copy(io.MultiWriter(ids, out), out)
+	copied := pipes.copy(io.MultiWriter(ids, out), io.MultiWriter(out, errs))
 	started = true
 	begun := e.cfg.Now()
 	kind := "run"
@@ -919,9 +922,14 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		}
 		e.cfg.Logf("%s.exit session=%s agent=%s turn=%s hold=%s exit=%d stopped=%t duration=%s", kind, t.session, t.harness, t.id, holdID,
 			code, stopped, ended.Sub(begun).Round(time.Millisecond))
+		var tail string
+		if code != 0 && !stopped {
+			b, _ := errs.Bytes()
+			tail = errorTail(b, append(secretValues(cmd.Env), tok, childTok)...)
+		}
 		if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.SessionClosed,
 			Time: ended.UTC(), Session: t.session, Turn: t.id, Hold: holdID, ExitCode: &code, ResumeID: ids.ID(),
-			Unsettled: unsettled, Stopped: stopped}); err != nil {
+			Unsettled: unsettled, Stopped: stopped, ErrorTail: tail}); err != nil {
 			// The session reads open until the next start.
 			e.cfg.Logf("run.unclosed session=%s turn=%s hold=%s reason=store", t.session, t.id, holdID)
 		}

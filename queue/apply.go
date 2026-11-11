@@ -141,6 +141,11 @@ func (q *Queue) AppliedBy(team, turn string) (job Job, ok bool, err error) {
 // earlier turn still running is ErrApplyBusy. An apply that was refused or
 // failed may be asked for again, as a new job.
 func (q *Queue) Apply(team, turn string) (job Job, created bool, err error) {
+	return q.ApplyAs(team, turn, nil)
+}
+
+// ApplyAs is Apply asked for by by, which the apply's turn.applied names.
+func (q *Queue) ApplyAs(team, turn string, by *By) (job Job, created bool, err error) {
 	// The applies of a session are read and the new one made as one step:
 	// two at once must not both start from the same last applied turn.
 	q.applyMu.Lock()
@@ -208,7 +213,11 @@ func (q *Queue) Apply(team, turn string) (job Job, created bool, err error) {
 	}
 	key := ApplyKey(turn, refused)
 	spec := Spec{Session: j.Session, FolderRef: first.FolderRef, Connector: first.Connector, ApplyFrom: from, ApplyTo: r.Changeset}
-	links := Links{AppliesTurn: turn, AppliesJob: j.ID}
+	carried := make([]string, 0, at-mark)
+	for _, t := range turns[mark+1 : at+1] {
+		carried = append(carried, t.turn)
+	}
+	links := Links{AppliesTurn: turn, AppliesJob: j.ID, AppliesTurns: carried, ApplyBy: by}
 	return q.create(team, KindApply, key, spec, links, Limits{}, j.Session)
 }
 

@@ -1126,7 +1126,8 @@ carrying the new turn id, since the agent's base URL names both.
     resumed: it lacks the turns since, and may be the other vendor's. With replay off, a turn whose
     newest `resume_id` is from before one gets the text instead.
 - Each turn is a run: `session.opened` when the child starts, `session.closed` with `exit_code` and
-  the new `resume_id` when it exits (the vendor can change it). `session.closed` is stored only
+  the new `resume_id` when it exits (the vendor can change it), and `error_tail` (its last stderr
+  lines, secrets hidden) when it exited with an error. `session.closed` is stored only
   once the gateway has written all of the turn's model calls (their events and kept replies, which
   are written after the agent has its last bytes), at most 30 seconds after the exit. So a turn
   that reads closed shows all of its calls. When the gateway cannot confirm that (it gave up, or
@@ -1263,13 +1264,20 @@ it live, stream `GET /api/v0/events` from `store` and `seq`.
 - A turn token reads any turn of its request tree **by its id alone**: it needs no `session`. A
   turn outside the tree gets **403**.
 
-Three fields are added to every turn row, here and in the list:
+Four fields are added to every turn row, here and in the list:
 
 - `unsettled: true` when the turn's `session.closed` says the gateway could not confirm that every
   model call was stored, as for a turn the service closed on restart. Own replay does not continue
   from such a turn.
 - `error` when the turn's agent could not start, from its `session.closed`, or why the runner
-  refused it before it started. Its `state` is `failed`.
+  refused it before it started. Its `state` is `failed`. A failed turn whose agent gave no other
+  reason takes the refusal of its last model call, else the last line of `error_tail`.
+- `error_tail` when the turn's agent exited with an error (not a stop): the last lines it wrote to
+  stderr, from its `session.closed`, at most 20 lines and 2 KiB. Anything shaped like a token or a
+  key (`Bearer …`, `api_key=…`, a long run of key characters, the turn's own token, the values of
+  the agent's secret environment variables) reads `[hidden]`. Example: `Error: Eligibility check
+  failed: request failed with status 401`, which before 0.5 was only in the runner's
+  `logs/runs/<session>.log`.
 - `idempotency_key`, when the turn was started with one.
 
 ### `POST /api/v0/turns/<id>/stop` — stop a turn
@@ -1327,16 +1335,18 @@ Stop is the one verb: there is no cancel.
 
 Everything the record holds about one turn, in one answer, for the cockpit and for a reviewer.
 
-- **`files`** comes from the turn's result: each file it added, modified or deleted, with size
-  and SHA-256. In an isolated copy each changed text file has its own unified `diff`, from the
+- **`files`** comes from the turn's `turn.changed` in the record: each file it added, modified or
+  deleted, with size and SHA-256 at the end (`sha256`) and at the start (`sha256_before`, absent
+  for an added file). A turn from before 0.5 has no `turn.changed`; its files come from its job, as
+  before, without `sha256_before`. In an isolated copy each changed text file has its own unified `diff`, from the
   turn's start checkpoint to its end one, made when the turn ended. A file's earlier content is the
   checkpoint's saved copy, or for the first turn the person's folder while that file is still as it
   was. **`content`** is the whole file at the end of the turn, when it is UTF-8 text of at most
   8 KiB and the turn's contents together fit in 256 KiB; absent for a deleted file and any other.
   `files.content_left_out: true` says a small file's content was left out for that budget.
   **`diff_left_out: true`** marks a file whose content changed and has no diff here: binary, a
-  link, over 256 KiB, past the 512 KiB budget of all diffs together, or its earlier content no
-  longer kept. A turn in a folder used as it is (`none`, or `isolate: false`) is checkpointed the
+  link, over 256 KiB, past the 1 MiB budget of all diffs together (512 KiB before 0.5), or its
+  earlier content no longer kept. `files.diffs_cut: true` says the budget left some out. A turn in a folder used as it is (`none`, or `isolate: false`) is checkpointed the
   same way, in the folder itself: `from` and `to` are absent, `isolated` is false, and a modified
   file has no diff, since its earlier content is not kept. Nothing here comes from git. `files` is
   `null` while the turn runs, and for a turn this service did not run. `files.isolated` says
@@ -1352,7 +1362,8 @@ Everything the record holds about one turn, in one answer, for the cockpit and f
   run from a script, is not seen. Network calls and processes are not recorded yet; a VM backend
   will add them.
 - **`apply`**: the turn's latest apply, as `POST /api/v0/turns/<id>/apply` answers it, or
-  `{"state":"none"}`.
+  `{"state":"none"}`. Once it has ended, what it did is read from its `turn.applied`: `turns` (every
+  turn it carried) and `by` (`person` or `agent`) are there from 0.5.
 - **404** when no `turn.started` carries the id. The main token, the turns token, or a turn token
   for a turn of its request tree, by its id alone.
 
@@ -2099,7 +2110,9 @@ the model did; AgentBus only reads them off the wire.
 | `session.renamed` | the API, on `PATCH /api/v0/sessions/<id>` |
 | `command.queued` | the API, on `POST /api/v0/sessions/<id>/commands` |
 | `command.started` | control, when the session's runner starts the command's job |
-| `command.ran` | the runner that holds the session's copy, when the command ended; control keeps the same event from the job's finish |
+| `command.ran` | the runner that holds the session's copy, when the command ended. Control keeps it once, in its record, from the job's finish; the job keeps only its id |
+| `turn.changed` | control, when it accepts the end of a turn's job: every file the turn changed (path, change, size, `sha256` at the end and `sha256_before` at the start), each small text file's unified `diff` (at most 1 MiB for the turn; `diffs_cut` says some were left out) and `content`. A binary file has its path, size and hashes only. The job keeps only the event's id |
+| `turn.applied` | control, when an apply's job ends with a finish: `applied` holds the `turns` it carried, who asked (`by`: `person` or `agent` with its `session` and `turn`, never a token), the `result` (`applied`, `refused` or `failed`), `files`, `count`, and on a refusal the `conflicts`. Its `turn` is the turn asked for |
 | `command.failed` | control, when the command's job ended without running it, or its runner was lost |
 | `tools.listed` | the API, when the tool server (`POST /api/v0/mcp`) first answers `tools/list` for a turn's token |
 | `session.registered` | older versions only; nothing writes it now |

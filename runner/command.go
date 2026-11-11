@@ -3,7 +3,8 @@ package runner
 // A command job: the person's shell command, run in the session's
 // workspace on this runner (run.Engine.RunCommand). It starts no turn and
 // sends no record while it runs: its one event, command.ran, goes to
-// control in the job's result, and control stores it in its own record.
+// control in the job's finish, and control keeps it once, in its own record
+// (jobs/outcome.go). The job keeps only the event's id.
 
 import (
 	"context"
@@ -55,7 +56,6 @@ func (r *Runner) command(ctx context.Context, at *attempt) queue.Finish {
 	case err != nil:
 		return refused(http.StatusInternalServerError, "the command could not be run")
 	}
-	at.event("command.ran", map[string]any{"exit_code": ev.Command.ExitCode, "timed_out": ev.Command.TimedOut})
 	f := queue.Finish{Status: queue.Finished, Result: mustJSON(queue.Result{Ran: mustJSON(ev)})}
 	select {
 	case <-at.cancel:

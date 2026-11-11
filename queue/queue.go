@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/staysup/agentbus/workspace"
 	_ "modernc.org/sqlite"
 )
 
@@ -335,6 +336,11 @@ type Links struct {
 	// it applies, and that turn's job.
 	AppliesTurn string `json:"applies_turn,omitempty"`
 	AppliesJob  string `json:"applies_job,omitempty"`
+	// AppliesTurns: for an apply job, every turn whose changes it carries,
+	// oldest first: the session's turns after its last apply, up to
+	// AppliesTurn. ApplyBy: who asked for it.
+	AppliesTurns []string `json:"applies_turns,omitempty"`
+	ApplyBy      *By      `json:"apply_by,omitempty"`
 	// ReviewSession: for a review job, the session its turn opens, named
 	// by control when the job is made. The runner opens it, and a runner
 	// may send that turn's record for this session only.
@@ -488,6 +494,37 @@ type Queue struct {
 	// memory only, never in the file (folder.go).
 	typedMu sync.Mutex
 	typed   map[string]string
+	// changes reads a job's changes from the record (ReadChangesWith).
+	changes ChangesReader
+}
+
+// By says who asked for a job, by the kind of token it came with (the
+// record's event.By). Never the token.
+type By struct {
+	Kind    string `json:"kind"` // person or agent
+	Session string `json:"session,omitempty"`
+	Turn    string `json:"turn,omitempty"`
+}
+
+// ChangesReader reads what a turn job changed, from where it is kept.
+type ChangesReader func(j Job) (*workspace.Changes, error)
+
+// ReadChangesWith sets how the queue reads a job's changes kept in the
+// record (Result.ChangesEvent), for the prompts of a review and of asked
+// work's result. Set it before the queue is used.
+func (q *Queue) ReadChangesWith(r ChangesReader) { q.changes = r }
+
+// changesOf is what job j changed: from its result for a job from before
+// 0.5, else from the record. nil when it holds none.
+func (q *Queue) changesOf(j Job) (*workspace.Changes, error) {
+	r, err := ReadResult(j.Result)
+	if err != nil {
+		return nil, err
+	}
+	if r.ChangesEvent == "" || q.changes == nil {
+		return r.Changes, nil
+	}
+	return q.changes(j)
 }
 
 // Open opens or creates the queue at path. now is the clock; nil is time.Now.
@@ -1060,7 +1097,9 @@ func workspaceOf(db querier, j Job) (*Workspace, error) {
 		return nil, fmt.Errorf("queue: read session: %w", err)
 	}
 	// As appliableTurns orders them: the last to end.
-	err = db.QueryRow(`SELECT COALESCE(json_extract(result, '$.changes.to'), '') FROM jobs WHERE team = ? AND session = ? AND kind = 'turn'
+	// The turn's end checkpoint: Result.Checkpoint, or in a result from
+	// before 0.5 its changes' to.
+	err = db.QueryRow(`SELECT COALESCE(json_extract(result, '$.checkpoint'), json_extract(result, '$.changes.to'), '') FROM jobs WHERE team = ? AND session = ? AND kind = 'turn'
 		AND ended IS NOT NULL AND attempt IS NOT NULL AND COALESCE(json_extract(result, '$.changeset'), '') != ''
 		ORDER BY ended DESC, rowid DESC LIMIT 1`, j.Team, session).Scan(&w.DiffFrom)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -1584,6 +1623,35 @@ func (q *Queue) End(runnerID, attemptID string, number int, f Finish) (Job, erro
 	return q.Get(team, jobID)
 }
 
+// Outcomes replaces the result of ended job id with res: the same result
+// with its outcomes moved to control's record and named there (the
+// Result.*Event pointers). It writes the job's result and its last
+// attempt's. A job not ended, or ended by another attempt since, is left as
+// it is: false.
+func (q *Queue) Outcomes(team, id, attempt string, res Result) (bool, error) {
+	b, err := json.Marshal(res)
+	if err != nil {
+		return false, err
+	}
+	var done bool
+	err = q.tx(func(tx *sql.Tx) error {
+		r, err := tx.Exec(`UPDATE jobs SET result = ? WHERE team = ? AND id = ? AND attempt = ? AND ended IS NOT NULL`,
+			string(b), team, id, attempt)
+		if err != nil {
+			return fmt.Errorf("queue: write result: %w", err)
+		}
+		if n, _ := r.RowsAffected(); n == 0 {
+			return nil
+		}
+		if _, err := tx.Exec(`UPDATE attempts SET result = ? WHERE id = ? AND job = ?`, string(b), attempt, id); err != nil {
+			return fmt.Errorf("queue: write result: %w", err)
+		}
+		done = true
+		return nil
+	})
+	return done, err
+}
+
 // Waiting reads team's turn and review jobs that no runner has started yet,
 // newest first.
 func (q *Queue) Waiting(team string) ([]Job, error) {
@@ -1872,7 +1940,11 @@ func (q *Queue) review(team, id string, as Spec, key string, includeReply bool, 
 	if j.Workspace.Closed != nil {
 		return Job{}, false, ErrSessionClosed
 	}
-	prompt, err := ReviewPrompt(j, includeReply)
+	c, err := q.changesOf(j)
+	if err != nil {
+		return Job{}, false, err
+	}
+	prompt, err := ReviewPrompt(j, c, includeReply)
 	if err != nil {
 		return Job{}, false, ErrNotReviewable
 	}

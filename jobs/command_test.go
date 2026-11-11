@@ -79,6 +79,12 @@ func TestCommandFinishKeepsEvent(t *testing.T) {
 	if code := finish(good); code != 200 {
 		t.Fatalf("the same finish again: %d", code)
 	}
+	// The record holds the command's output once; the job keeps its id.
+	if j, err := q.Get(queue.DefaultTeam, taken.Job.ID); err != nil {
+		t.Fatal(err)
+	} else if res, _ := queue.ReadResult(j.Result); len(res.Ran) != 0 || res.RanEvent != "evt_c1" {
+		t.Fatalf("the job keeps %s", j.Result)
+	}
 	// A command cancelled while it ran keeps what ran.
 	if _, _, err := q.Create(queue.DefaultTeam, queue.KindCommand, "", queue.Spec{Session: "s1", Command: "sleep 9"}, queue.Links{}); err != nil {
 		t.Fatal(err)

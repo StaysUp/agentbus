@@ -39,6 +39,7 @@ type Recorder interface {
 	CallSession(exchange string) (session string, found bool, err error)
 	OtherTurns(exchange, session, turn string) (bool, error)
 	Continuation(session string) (store.Continuation, error)
+	Finder
 }
 
 // CallBatch is the body of POST /api/v0/runner/attempts/{id}/calls: model calls of
@@ -207,6 +208,12 @@ func (s *Server) record(w http.ResponseWriter, r *http.Request, rn queue.Runner)
 		// store's own, never a turn's.
 		if e.Kind == event.EventsDropped {
 			fail(w, http.StatusBadRequest, "events.dropped is not a turn's event")
+			return
+		}
+		// What a turn changed and what was applied are control's own
+		// record of a job's end (outcome.go), never a runner's.
+		if e.Kind == event.TurnChanged || e.Kind == event.TurnApplied {
+			fail(w, http.StatusBadRequest, string(e.Kind)+" is control's own event, not a runner's")
 			return
 		}
 		e.Seq, e.Folder = 0, ""

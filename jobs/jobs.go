@@ -30,6 +30,7 @@ import (
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/settings"
+	"github.com/staysup/agentbus/workspace"
 )
 
 // The protocol's timings.
@@ -113,6 +114,15 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.MaxWait == 0 {
 		cfg.MaxWait = MaxWait
+	}
+	if cfg.Record != nil {
+		// The queue reads the changes a turn's review and asked result
+		// describe from the record, where the finish moves them.
+		rec := cfg.Record
+		cfg.Queue.ReadChangesWith(func(j queue.Job) (*workspace.Changes, error) {
+			c, err := Changes(rec, j)
+			return WorkspaceChanges(c), err
+		})
 	}
 	s := &Server{cfg: cfg, token: sha256.Sum256([]byte(cfg.Token)), enrol: sha256.Sum256([]byte(cfg.EnrollToken)), mux: http.NewServeMux(),
 		tokenKey: sha256.Sum256([]byte("agentbus runner turn tokens\x00" + cfg.Token))}
@@ -583,11 +593,12 @@ func (s *Server) finish(w http.ResponseWriter, r *http.Request, rn queue.Runner)
 		s.queueError(w, err)
 		return
 	}
-	// A command's end is kept only once the finish is accepted: the same
-	// finish sent again keeps it once, so a write that fails here is retried
-	// by the runner (and by CloseCommands).
-	if j.Kind == queue.KindCommand && s.cfg.Record != nil {
-		if err := CommandEnded(s.cfg.Record, j, ran); err != nil {
+	// A job's outcomes go to the record only once the finish is accepted
+	// (outcome.go): the same finish sent again keeps each once, so a write
+	// that fails here is retried by the runner (and, for a command, by
+	// CloseCommands).
+	if s.cfg.Record != nil {
+		if err := keepOutcomes(s.cfg.Record, s.cfg.Queue, j, ran); err != nil {
 			s.internal(w)
 			return
 		}

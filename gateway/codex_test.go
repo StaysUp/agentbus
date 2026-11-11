@@ -100,20 +100,32 @@ func TestZstdRequestDecodeIsBounded(t *testing.T) {
 		io.WriteString(w, codexReply)
 	}))
 	defer upstream.Close()
-	gw, mem := newOpenAIGateway(t, upstream.URL)
+	u, _ := url.Parse(upstream.URL)
+	mem := &event.Memory{}
+	g := New(u, openai.Adapter{}, mem)
+	gw := httptest.NewServer(g)
 
+	// No clock: decoding 64 MiB under -race on a loaded machine takes as
+	// long as it takes, and the test's own deadline bounds it. The client
+	// waits for the reply with no timeout, then closing the server waits
+	// for its handlers and closing the gateway delivers every event.
 	req, _ := http.NewRequest("POST", gw.URL+"/backend-api/codex/responses", bytes.NewReader(compressed))
 	req.Header.Set("Content-Encoding", "zstd")
-	resp, err := rawClient().Do(req)
+	resp, err := (&http.Client{Transport: &http.Transport{DisableCompression: true}}).Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}
 	io.ReadAll(resp.Body)
 	resp.Body.Close()
+	gw.Close()
+	g.Close()
 	if gotLen.Load() != int64(len(compressed)) {
 		t.Errorf("upstream got %d bytes, want %d", gotLen.Load(), len(compressed))
 	}
-	evs := waitFor(t, mem, 1)
+	evs := mem.Events()
+	if len(evs) == 0 {
+		t.Fatal("no event")
+	}
 	if evs[0].Kind != event.ModelRequested || !strings.Contains(evs[0].Error, "more than") {
 		t.Errorf("first event = %+v, want model.requested with a size error", evs[0])
 	}

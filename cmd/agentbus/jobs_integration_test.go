@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/folders"
+	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/store"
 )
@@ -159,15 +160,22 @@ func TestUpRunsAJobOnItsOwnRunner(t *testing.T) {
 	}
 	var res struct {
 		Session string `json:"session"`
-		Changes struct {
-			Count int `json:"count"`
-		} `json:"changes"`
 	}
-	if err := json.Unmarshal(j.Result, &res); err != nil || res.Session == "" || res.Changes.Count != 1 {
+	if err := json.Unmarshal(j.Result, &res); err != nil || res.Session == "" {
 		t.Fatalf("result %s", j.Result)
 	}
-	if evs := runEvents(t, svc.store, res.Session); len(evs) < 3 || evs[len(evs)-1].Kind != "session.closed" {
-		t.Fatalf("record of the job's session: %+v", evs)
+	// What the turn changed is in the record (turn.changed); the job names it.
+	if c, err := jobs.Changes(svc.store, j); err != nil || c == nil || c.Count != 1 {
+		t.Fatalf("changes %+v %v, result %s", c, err, j.Result)
+	}
+	var kinds []string
+	for _, e := range runEvents(t, svc.store, res.Session) {
+		if e.Kind != "turn.changed" {
+			kinds = append(kinds, e.Kind)
+		}
+	}
+	if len(kinds) < 3 || kinds[len(kinds)-1] != "session.closed" {
+		t.Fatalf("record of the job's session: %v", kinds)
 	}
 	// The data folder holds the queue beside the record, and the runner's
 	// identity.

@@ -14,6 +14,8 @@ import (
 	"io"
 	"regexp"
 	"strings"
+
+	"github.com/staysup/agentbus/workspace"
 )
 
 // Verdicts.
@@ -134,15 +136,15 @@ const VerdictFormat = "```json\n" +
 	`{"verdict":"pass","findings":[{"severity":"P2","file":"path/to/file","line":12,"summary":"what is wrong and why"}]}` +
 	"\n```"
 
-// ReviewPrompt is the prompt of a review of job j. It says what changed and
-// asks for a review in a fixed format. It carries no conclusion of the
-// author's: with includeReply false, the author's reply is left out.
-func ReviewPrompt(j Job, includeReply bool) (string, error) {
+// ReviewPrompt is the prompt of a review of job j, which changed c. It says
+// what changed and asks for a review in a fixed format. It carries no
+// conclusion of the author's: with includeReply false, the author's reply
+// is left out.
+func ReviewPrompt(j Job, c *workspace.Changes, includeReply bool) (string, error) {
 	r, err := ReadResult(j.Result)
-	if len(j.Result) == 0 || err != nil || r.Changes == nil {
+	if len(j.Result) == 0 || err != nil || c == nil {
 		return "", fmt.Errorf("queue: the job recorded no changed files")
 	}
-	c := r.Changes
 	var b strings.Builder
 	b.WriteString("Review a change another agent made in this folder. You can read every file here; you cannot change any.\n\n")
 	b.WriteString("## The task the author was given\n\n")
