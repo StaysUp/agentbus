@@ -126,7 +126,7 @@ var tags = []struct {
 }{
 	{name: "Turns", doc: "A turn is one message to an agent, its reply and its changes. Every action is on a turn: start it, stop it, read its diff, apply its changes to the person's folder, ask another agent to review it, and read its model calls."},
 	{name: "Sessions", doc: "A session is a conversation: its turns, in order. Read its history, search it, name it or close it."},
-	{name: "Agents", doc: "Saved agents: a harness, how it reaches its model, the model and a name. A turn names one. And the harnesses and folders a turn can use."},
+	{name: "Agents", doc: "Saved agents: a harness, how it reaches its model, the model and a name. A turn names one. And the harnesses, runners and folders a turn can use."},
 	{name: "Settings", doc: "The policy and the instructions every turn gets, and the subscriptions control holds for runners. The main token only."},
 	{name: "Events", doc: "The record as a live stream, for a cockpit, an export or a program, and a program's own events. The main token only."},
 	{name: "Service", doc: "Which build this is, and this description."},
@@ -424,6 +424,14 @@ var routes = slices.Concat([]route{
 		replies: []reply{ok(200, HarnessList{}, "The harnesses."), badRequest},
 		turn:    anyRead,
 		serve:   plain((*API).listHarnesses)},
+	{method: "GET", path: "/api/v0/runners", op: "listRunners",
+		tag:     "Agents",
+		summary: "List runners",
+		doc: "The runners and connectors control knows, for a person: each one's name, id, role, labels, whether it is online, " +
+			"when it was last seen, and its last probe of each harness with its version. Online means it asked for work in the last minute. " +
+			"A runner that stopped stays listed, offline. No token is in the answer. Takes the main token only. No body is read.",
+		replies: []reply{ok(200, RunnerList{}, "The runners."), badRequest, storeFailed},
+		serve:   plain((*API).listRunners)},
 	{method: "GET", path: "/api/v0/folders", op: "listFolders",
 		tag:     "Agents",
 		summary: "List folders",

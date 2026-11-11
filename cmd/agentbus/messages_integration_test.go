@@ -290,7 +290,7 @@ func TestRunWithSessionRunsNextTurnInSameSession(t *testing.T) {
 		for _, e := range runEvents(t, svc.store, id) {
 			kinds = append(kinds, e.Kind)
 		}
-		if got := strings.Join(kinds, " "); got != "session.opened turn.started session.closed session.opened turn.started session.closed" {
+		if got := strings.Join(kinds, " "); got != "session.opened turn.started context.added session.closed session.opened turn.started context.added session.closed" {
 			t.Fatalf("%s: events %s", name, got)
 		}
 		t.Setenv("AGENTBUS_FAKE_OUT", "")

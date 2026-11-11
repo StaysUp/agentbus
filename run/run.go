@@ -738,13 +738,20 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	if why != "" {
 		e.cfg.Logf("run.doc session=%s turn=%s left_out=%s", t.session, t.id, why)
 	}
-	hint = joinText(doc, hint, askedLine(asked, perm.AgentAPI, e.cfg.APIDir != "", tools))
+	askText := askedLine(asked, perm.AgentAPI, e.cfg.APIDir != "", tools)
+	added := addedContext(doc, hint, askText)
+	hint = joinText(doc, hint, askText)
 	perm = withAPI(perm, e.cfg.APIDir != "", t.readOnly)
 	if hint != "" {
 		if why := h.OwnInstructions(cmd.Env, t.folder); why != "" {
-			hint = ""
+			hint, added = "", nil
 			e.cfg.Logf("run.hint session=%s turn=%s left_out=%s", t.session, t.id, why)
 		}
+	}
+	// The tool server gives its own instructions when the agent connects.
+	if tools {
+		added = append(added, event.Added{Kind: event.AddedMCPInstructions, Bytes: len(settings.ToolServerInstructions),
+			Text: settings.ToolServerInstructions})
 	}
 	// Closed off from the network, when the policy says so: before anything
 	// is stored, a runner that cannot do it refuses the turn.
@@ -826,6 +833,15 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		Context: t.context, Model: t.model, Origin: t.origin}); err != nil {
 		closeHold()
 		return nil, storeFailed
+	}
+	// What AgentBus gave the turn besides the person's words, so a screen
+	// can mark it inside the harness's own prompt.
+	if len(added) > 0 {
+		if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.ContextAdded,
+			Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Added: added}); err != nil {
+			closeHold()
+			return nil, storeFailed
+		}
 	}
 	// The output goes through pipes of our own, read by our own goroutines,
 	// so cmd.Wait returns when the child's process exits, not when the last

@@ -101,9 +101,9 @@ func TestRunThatCannotStartIsClosed(t *testing.T) {
 		t.Fatalf("status %d, want a server error for a child that cannot start", code)
 	}
 	evs := storedEvents(t, svc.store)
-	if len(evs) != 3 || evs[0].Kind != "session.opened" || evs[1].Kind != "turn.started" || evs[2].Kind != "session.closed" ||
-		evs[0].Hold == "" || evs[2].Hold != evs[0].Hold || evs[2].Error == "" {
-		t.Fatalf("events %+v, want session.opened, turn.started, then its session.closed with the reason", evs)
+	if len(evs) != 4 || evs[0].Kind != "session.opened" || evs[1].Kind != "turn.started" || evs[2].Kind != "context.added" ||
+		evs[3].Kind != "session.closed" || evs[0].Hold == "" || evs[3].Hold != evs[0].Hold || evs[3].Error == "" {
+		t.Fatalf("events %+v, want session.opened, turn.started, context.added, then its session.closed with the reason", evs)
 	}
 	if snap, err := svc.store.Snapshot(); err != nil || len(snap.Sessions) != 1 || snap.Sessions[0].Open {
 		t.Fatalf("snapshot %+v, %v; want one closed session", snap.Sessions, err)

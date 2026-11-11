@@ -1459,6 +1459,30 @@ its first report, up to 15 seconds.
 - Never a path, and nothing from the harnesses' configuration.
 - `key_set` is this service's: a runner holds no key, and the server adds it to the runner's calls.
 
+### `GET /api/v0/runners` — the runners and connectors control knows
+
+```json
+{"runners":[
+  {"id":"run_…","name":"mac","role":"runner","online":true,"last_seen":"2026-11-11T10:02:41Z",
+   "enrolled":"2026-11-11T09:00:03Z","capacity":4,"labels":["gpu"],"os":"darwin","arch":"arm64",
+   "harnesses":[{"name":"claude","found":true,"version":"2.1.319","signed_in":true},
+                {"name":"codex","found":false}]},
+  {"id":"run_…","name":"mac","role":"connector","online":true,"last_seen":"2026-11-11T10:02:40Z",
+   "enrolled":"2026-11-11T09:00:03Z","capacity":1,"labels":[],"harnesses":[]}]}
+```
+
+For a person: what the runner protocol knows of each machine, read from control's own records.
+The main token only. Newest seen first.
+
+- `role`: `runner` runs turns; `connector` owns folders and takes only their snapshot and apply
+  jobs. `agentbus up` has one of each.
+- `online`: it asked control for work in the last minute. A runner that stopped stays listed,
+  offline, with the `last_seen` it had.
+- `harnesses`: its last probe of each harness (`name`, `found`, `version`, `signed_in`, as in
+  `GET /api/v0/harnesses`). Empty for a connector and before a runner's first probe ends.
+- `os`, `arch`: from its report; absent before its first report.
+- Never a token. A runner's token is kept only as its hash, and that is not sent.
+
 ### `GET /api/v0/folders` — the folders the runners own
 
 ```json
@@ -2008,6 +2032,7 @@ the model did; AgentBus only reads them off the wire.
 |---|---|
 | `turn.started` | the API, for a turn started with `POST /api/v0/turns`, before its agent starts. The store keeps one per turn, so the gateway's copy of the same turn is not stored again |
 | `session.opened`, `session.closed` | the engine, when a turn's agent process starts and exits; the store, at start, for a process the previous service left running |
+| `context.added` | the engine, once per turn, just before its agent starts: what AgentBus gave the turn besides the person's words |
 | `session.renamed` | the API, on `PATCH /api/v0/sessions/<id>` |
 | `tools.listed` | the API, when the tool server (`POST /api/v0/mcp`) first answers `tools/list` for a turn's token |
 | `session.registered` | older versions only; nothing writes it now |
@@ -2053,6 +2078,7 @@ The client API does not read them. A turn's own events, such as `turn.started`, 
 | kind `network.refused` | a closed-off agent asked its runner's proxy for a host the policy does not allow ([Network control](#network-control)): `host` is the `host:port` it asked for, `error` says why. The connection was refused. One event per refusal. Show it as a warning |
 | kind `replay.failed` | a model request of a replayed turn could not be given the earlier turn's history; `error` says why. The gateway answered the agent 400 and sent nothing to the vendor, so the turn fails rather than run without its past. Show it as an error |
 | kind `tools.listed` | control served the turn's tool list: the tool server answered `tools/list` for the turn's token. Stored once per turn, at the first list, however often the agent asks again. `server` is the tool server's name as tool names carry it (`agentbus`: claude calls a tool `mcp__agentbus__<name>`, and codex calls it from its `exec` tool as `tools.mcp__agentbus__<name>(...)`, codex-cli 0.164.0, 2026-11-11); `tools` are the names served, which the turn's token may call (a read-only turn's reads only); `tools_hidden` are the harness's own tools the turn does not get, each a `name` and a `why` (claude: `Task`, `Agent`, `ListAgents`, `SendMessage`, "replaced by AgentBus tools"; codex: none). A turn with no `tools.listed` got no tool server, or its agent never asked for the list. Names only: never an input, a value or a token. The list is what the turn could call, not what its model saw in one request: Claude Code defers MCP tools, so their schemas reach a call only after a `ToolSearch` loads them (read `tools_offered` on `model.requested`) |
+| kind `context.added` | what AgentBus gave the turn besides the person's words, the same way for every harness. Stored once per turn, after its `turn.started`, just before its agent starts. `added` lists each piece in the order the agent got it, each a `kind`, `bytes` (the size of `text`) and `text`, exactly as given. Kinds: `agents_md` (the folder's `AGENTS.md`, with the line that introduces it, when the harness does not read the file by itself), `instructions` (`instructions.md` with `{session}` and `{tools}` filled in), `asked_by` (for an asked agent: who asked, and how to read that turn's changes), and `mcp_instructions` (the tool server's own instructions, which it gives the agent when it connects, for a turn with `[agent_api] tools`). The first three go through the harness's own instruction flag, joined by a blank line: in Claude Code's system prompt they are one block, at its end. A harness whose instructions AgentBus cannot add (agy, or codex with `developer_instructions` set by the person) gets none of them, and they are not listed. No `context.added` when nothing was added. Each text is whole: its source is bounded already (`AGENTS.md` at 32 KiB, `instructions.md` at 64 KiB). These are settings and folder content, never a secret |
 | kind `session.renamed` | the session was given a name with `PATCH /api/v0/sessions/<id>`: `title` is the new name, `old_title` the one before it (absent when it had none). It has no `turn`. The latest names the session in `GET /api/v0/sessions` |
 | kinds `x.<program>.<name>` | a program's own event (`POST /api/v0/events`); `vendor` is `"program"` |
 | `data` | only on a program's own event: the JSON object it sent |
@@ -2205,6 +2231,8 @@ action is on a turn. The old routes are removed with no alias: 0.3 had no outsid
   `reviews`, `verdict`, `findings`, `asked` and `ahead`.
 - **Stop replaces cancel.** `POST /api/v0/turns/<id>/stop` stops a queued or running turn, and
   answers `{session, turn}`.
+- **New in 0.4:** `GET /api/v0/runners` lists the runners and connectors for a person, and the
+  `context.added` event records what AgentBus gave each turn besides the person's words.
 - **Review is on the turn.** `POST /api/v0/turns/<id>/review` starts a review turn; its verdict
   and findings are on that turn.
 - **Model calls hang off their turn.** `GET /api/v0/turns/<id>/calls/<call>` and

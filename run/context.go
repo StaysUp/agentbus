@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/harness"
 )
 
@@ -71,6 +72,21 @@ func folderDoc(h harness.Harness, folder string) (text, why string) {
 		text += "\n\n(" + FolderDoc + " goes on past 32 KiB; read the file for the rest.)"
 	}
 	return text, ""
+}
+
+// addedContext is the context.added pieces of a turn's hint: the folder's
+// AGENTS.md, the instructions and who asked, in the order joinText joins
+// them. A part that is empty is not given, so it is not listed.
+func addedContext(doc, instructions, asked string) []event.Added {
+	var out []event.Added
+	for _, p := range []event.Added{{Kind: event.AddedAgentsMD, Text: doc}, {Kind: event.AddedInstructions, Text: instructions},
+		{Kind: event.AddedAskedBy, Text: asked}} {
+		if p.Text != "" {
+			p.Bytes = len(p.Text)
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // joinText joins the parts that are not empty, with a blank line between.

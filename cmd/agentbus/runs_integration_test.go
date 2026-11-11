@@ -151,7 +151,7 @@ func TestRunSetsBaseURLInChildOnlyAndClosesWithExitCode(t *testing.T) {
 	// Nothing writes session.registered any more: session.opened carries
 	// the agent and folder, and the run stores its turn's turn.started.
 	evs := runEvents(t, svc.store, id)
-	if len(evs) != 3 || evs[0].Kind != "session.opened" || evs[0].Hold != c.Hold || evs[1].Kind != "turn.started" {
+	if len(evs) != 4 || evs[0].Kind != "session.opened" || evs[0].Hold != c.Hold || evs[1].Kind != "turn.started" || evs[2].Kind != "context.added" {
 		t.Fatalf("events %+v", evs)
 	}
 	if evs[0].Agent != "claude" || evs[0].Folder != folder {

@@ -385,6 +385,13 @@ func runLaunchCase(t *testing.T, self string, c launchCase) string {
 						ev.Harness, ev.Continuity, ev.ReplayFrom, ev.Model, strconv.Quote(ev.Context))
 				case event.SessionClosed:
 					fmt.Fprintf(&b, "session.closed resume_id=%q\n", ev.ResumeID)
+				case event.ContextAdded:
+					fmt.Fprintf(&b, "context.added")
+					for _, p := range ev.Added {
+						fmt.Fprintf(&b, " %s=%d", p.Kind, p.Bytes)
+					}
+					b.WriteString("\n")
+					checkAdded(t, c.name, ev.Added, rep.Args)
 				}
 			}
 		}
@@ -398,4 +405,36 @@ func runLaunchCase(t *testing.T, self string, c launchCase) string {
 		mu.Unlock()
 	}
 	return b.String()
+}
+
+// checkAdded fails unless context.added says what the harness got: the
+// pieces of its instruction flag, joined as the engine joins them, are in
+// its arguments as one text, and each piece's bytes is its text's size.
+func checkAdded(t *testing.T, name string, added []event.Added, args []string) {
+	t.Helper()
+	var hint []string
+	for _, p := range added {
+		if p.Bytes != len(p.Text) || p.Text == "" {
+			t.Errorf("%s: context.added %s: bytes %d for %d bytes of text", name, p.Kind, p.Bytes, len(p.Text))
+		}
+		if p.Kind != event.AddedMCPInstructions {
+			hint = append(hint, p.Text)
+		}
+	}
+	if len(hint) == 0 {
+		return
+	}
+	want := strings.Join(hint, "\n\n")
+	for _, a := range args {
+		if a == want {
+			return
+		}
+		// codex: -c developer_instructions="<text>", quoted.
+		if k, v, ok := strings.Cut(a, "="); ok && k != "" {
+			if u, err := strconv.Unquote(v); err == nil && u == want {
+				return
+			}
+		}
+	}
+	t.Errorf("%s: context.added's pieces are not the instruction the harness got: %q", name, want)
 }

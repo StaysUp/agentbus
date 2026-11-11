@@ -21,17 +21,12 @@ import (
 
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/harness"
+	"github.com/staysup/agentbus/settings"
 )
 
 // mcpVersions are the protocol versions this server speaks, newest first. A
 // client asking for another gets the newest, and decides.
 var mcpVersions = []string{"2025-11-25", "2025-06-18", "2025-03-26"}
-
-// mcpInstructions is the server's own instructions, which a client may show
-// its model.
-const mcpInstructions = "AgentBus tools: ask other saved agents (any vendor) for work and reviews, " +
-	"read, stop and apply turns, and search this session's history. Your folder is your session's own copy; " +
-	"apply_turn puts a turn's changes in the person's folder. Work you ask for comes back to your session as a later turn."
 
 // JSON-RPC error codes.
 const (
@@ -139,7 +134,7 @@ func (a *API) mcp(w http.ResponseWriter, r *http.Request) {
 			"protocolVersion": v,
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
 			"serverInfo":      map[string]any{"name": "agentbus", "version": a.cfg.Build.Version},
-			"instructions":    mcpInstructions,
+			"instructions":    settings.ToolServerInstructions,
 		}, nil)
 	case "ping":
 		reply(req.ID, map[string]any{}, nil)

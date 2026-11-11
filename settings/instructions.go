@@ -39,6 +39,12 @@ const APIText = `Call AgentBus with agentbus-api METHOD PATH [JSON]. Replace T w
 - Search this session's history: agentbus-api GET "/api/v0/sessions/{session}/search?q=<text>", with <text> URL-encoded.
 Work you ask for comes back to you as a later turn: do not wait for it. More: agentbus-api GET /docs/llms.txt`
 
+// ToolServerInstructions is the tool server's own instructions (POST
+// /api/v0/mcp, initialize), which a harness may show its model.
+const ToolServerInstructions = "AgentBus tools: ask other saved agents (any vendor) for work and reviews, " +
+	"read, stop and apply turns, and search this session's history. Your folder is your session's own copy; " +
+	"apply_turn puts a turn's changes in the person's folder. Work you ask for comes back to your session as a later turn."
+
 // CheckInstructions refuses text a turn cannot carry.
 func CheckInstructions(b []byte) error {
 	switch {
