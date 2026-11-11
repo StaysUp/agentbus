@@ -538,9 +538,16 @@ func (e *Engine) next(req Request) (*Turn, error) {
 		return fail(refuse(http.StatusBadRequest, "folder is not this session's folder "+strconv.Quote(c.Folder)+
 			"; leave folder out to use the session's"))
 	}
+	// What the person ran in the session since its previous turn, once. It
+	// goes in the turn's context, after any transcript, so the turn.started
+	// holds the whole prompt the agent got, as own replay reads it back.
+	shell, err := e.shellContext(session, MaxPrompt-len(req.Prompt)-len(context))
+	if err != nil {
+		return fail(storeFailed)
+	}
 	t := turn{harness: agent, folder: c.Folder, folderRef: c.FolderRef, session: session, id: req.Turn, resumeID: c.ResumeID, replayFrom: from,
 		recoveredFrom: recovered, recoveredWhy: recoveredWhy, continuity: continuity, model: model,
-		readOnly: req.ReadOnly, prompt: req.Prompt, context: context, key: req.IdempotencyKey,
+		readOnly: req.ReadOnly, prompt: req.Prompt, context: context + shell, shell: shell, key: req.IdempotencyKey,
 		agentID: agentID, access: access, keyEnv: keyEnv, origin: req.Origin, root: req.Root, depth: req.Depth,
 		token: req.Token, apiURL: req.APIURL, placeholder: req.Placeholder}
 	if from != "" || continuity == ByTranscript {
@@ -610,7 +617,8 @@ type turn struct {
 	model                    string
 	readOnly                 bool
 	prompt                   string
-	context                  string // ByTranscript: the earlier turns as text, put before prompt
+	context                  string // put before prompt: the earlier turns as text (ByTranscript), then shell
+	shell                    string // the person's commands since the previous turn (shellContext)
 	key                      string // the caller's idempotency key, or ""
 	agentID, access          string // the saved agent and how it reaches its model
 	keyEnv                   string // for openrouter: the name of the key's variable
@@ -747,6 +755,9 @@ func (e *Engine) start(t turn) (*Turn, error) {
 			hint, added = "", nil
 			e.cfg.Logf("run.hint session=%s turn=%s left_out=%s", t.session, t.id, why)
 		}
+	}
+	if t.shell != "" {
+		added = append(added, event.Added{Kind: event.AddedCommands, Bytes: len(t.shell), Text: t.shell})
 	}
 	// The tool server gives its own instructions when the agent connects.
 	if tools {

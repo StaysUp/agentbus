@@ -44,6 +44,9 @@ type Result struct {
 	// FolderRef, for a folder job: the reference the connector registered
 	// the typed folder under.
 	FolderRef string `json:"folder_ref,omitempty"`
+	// Ran, for a command job: its command.ran event, as the runner's record
+	// stored it. Control stores the same event in its own record.
+	Ran json.RawMessage `json:"ran,omitempty"`
 }
 
 // SnapshotTaken is a snapshot a connector took: its id, the blob of its

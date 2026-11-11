@@ -586,6 +586,46 @@ stay in the record: every rename is one of the session's events, so
 - The answer is `id`, the stored rename's `seq`, `title` and `old_title`, and `closed` when the
   session was closed.
 
+### `POST /api/v0/sessions/<id>/commands` — run a shell command in the session's copy
+
+The `!` of a chat. The person queues a shell command in the session's copy, on the runner that
+holds it, with no model call. The answer comes at once, **202**: the command's id and `queued`.
+
+```sh
+curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"command":"ls -la"}' $B/api/v0/sessions/abc/commands
+# {"session":"abc","command":"cmd_6f1c…","state":"queued"}
+```
+
+- **The record says the rest.** Each is an event of the session, with no turn, that carries the id
+  as `command.id`: `command.queued` now, `command.started` when its runner starts it, then
+  `command.ran` (its `exit_code`, `timed_out`, `stdout`, `stderr`, `output_bytes`, `truncated` and
+  `duration_ms`) or `command.failed` (`error` says why it did not run, or that its runner stopped
+  answering). Follow them on the stream, or read them with
+  `GET /api/v0/sessions/<id>/events?kind=command.queued,command.started,command.ran,command.failed`.
+- **One lane.** A command is a job in the session's lane, as a turn is. It waits behind what runs
+  in the session, a review of it included, runs alone in the copy, and a turn sent after it waits for
+  it. One command or turn of a session runs at a time on its runner.
+- **Where it runs.** By `/bin/sh -c`, in the session's copy (or its folder, for a session that
+  runs in the folder as it is), in the session's own home when its runner gives it one, and closed
+  off from the network when `[network] contain` is on, as the session's turns are. It gets no
+  AgentBus token and no model credential: a runner that holds no secrets has no sign-in to give it.
+- **It is the person's command.** The agents' `allow` and `forbid` lists do not apply. It changes
+  the copy only. Its changes go out with the session's next turn's changes; apply them as usual.
+- **Limits.** `timeout_seconds`, 1 to 600, 120 when absent: past it the command and everything it
+  started are ended, and `timed_out` is true. A command ends with everything it started: what it
+  leaves running in the background is ended when it exits. Each of `stdout` and `stderr` keeps its
+  first 64 KiB, with any NUL byte replaced; `output_bytes` counts all of it and `truncated` says
+  some was cut. The command line is 1 byte to 8 KiB. A command that fails or runs out of time is a
+  `command.ran`: read `exit_code`.
+- **The next turn sees it.** The session's next turn gets every command that ran since its previous
+  turn, oldest first, with its exit code and output, before the person's words, once. It is the same
+  for every harness: the text is the turn's `context` on its `turn.started`, and a `context.added`
+  piece of kind `commands`. At most 32 KiB, the newest commands kept, each stream cut at 8 KiB.
+- **409** for a session with no copy on a runner yet (its first turn has not ended) and for a
+  closed session. **404** for a session the record does not know.
+- Only the main token runs a command. A turn token gets **403**; the turns token cannot either.
+
 ### `GET /api/v0/events?store=<store>&after=<seq>&session=<id>`
 
 The one record-wide read: every session's events, for a cockpit, an export or a program. Main token
@@ -605,10 +645,12 @@ data: {"seq":1042,"id":"evt_…","kind":"tool.requested", …}
   that session or says `all_sessions`**, so a cockpit watching one session still learns its costs are incomplete.
 - A comment line (`: ping`) every 15 seconds keeps idle connections open.
 
-### `GET /api/v0/sessions/<id>/events?store=<store>&after=<seq>&turn=<turn>&limit=<n>`
+### `GET /api/v0/sessions/<id>/events?store=<store>&after=<seq>&turn=<turn>&kind=<kinds>&limit=<n>`
 
 One session's stored events, oldest first. **This is the one way to read stored events by page.**
-With `turn`, only that turn's events, and no `events.dropped` (a drop names sessions, never turns). `limit` defaults to 1000, at most 10000. A page also
+With `turn`, only that turn's events, and no `events.dropped` (a drop names sessions, never turns).
+With `kind` and no `turn`, only the session's events of those kinds, comma separated (up to 16),
+such as the four `command.*` kinds for the person's shell commands, and no `events.dropped`. `limit` defaults to 1000, at most 10000. A page also
 stops before its event JSON passes 8 MiB, but always holds at least one event, so a single larger
 event still pages forward; `next_after` is then the last seq in the page.
 
@@ -1786,6 +1828,7 @@ curl -s -X PUT -H "Authorization: Bearer $(cat ~/.local/share/agentbus/token)" -
 a turn's job and a review's job each run one turn, and the turn id is named when the job is made.
 Two more kinds run on a folder's connector and start no turn: an apply
 (`POST /api/v0/turns/<id>/apply`) and a snapshot of a folder for a runner on another machine. A
+command (`POST /api/v0/sessions/<id>/commands`) runs on the session's runner and starts no turn. A
 runner takes a job from the queue and runs it as an **attempt**; the turn keeps its id whichever
 attempt runs it. The runner protocol ([RUNNER_PROTOCOL.md](RUNNER_PROTOCOL.md)) is where jobs and
 attempts are seen.
@@ -1793,8 +1836,9 @@ attempts are seen.
 - **A turn's states:** `queued` (asked for, not yet started by a runner), `running`, then
   `finished`, `failed` or `stopped`. A turn that failed before it started says why in `error`: the
   runner's refusal, such as a folder it does not own.
-- **A session's turns run one at a time**, in the order they were asked for. A next turn waits for
-  the one before it. Reviews never wait: each runs in a session of its own.
+- **A session's turns run one at a time**, in the order they were asked for, and its commands
+  are in the same lane. A next turn waits for the one before it, and a command also waits for a
+  review that reads the session's copy. Reviews never wait: each runs in a session of its own.
 - **A session's next turn keeps the session's agent and model.** A turn of a session that names
   no agent and no model runs on the agent and the model of the session's latest turn, as the record
   holds them when the turn starts (`agent`, `agent_id` and `model` on its `turn.started`), so a fix
@@ -2050,6 +2094,10 @@ the model did; AgentBus only reads them off the wire.
 | `session.opened`, `session.closed` | the engine, when a turn's agent process starts and exits; the store, at start, for a process the previous service left running |
 | `context.added` | the engine, once per turn, just before its agent starts: what AgentBus gave the turn besides the person's words |
 | `session.renamed` | the API, on `PATCH /api/v0/sessions/<id>` |
+| `command.queued` | the API, on `POST /api/v0/sessions/<id>/commands` |
+| `command.started` | control, when the session's runner starts the command's job |
+| `command.ran` | the runner that holds the session's copy, when the command ended; control keeps the same event from the job's finish |
+| `command.failed` | control, when the command's job ended without running it, or its runner was lost |
 | `tools.listed` | the API, when the tool server (`POST /api/v0/mcp`) first answers `tools/list` for a turn's token |
 | `session.registered` | older versions only; nothing writes it now |
 | `tool.refused` | the gateway, when it refused a tool call by a `forbid` rule |

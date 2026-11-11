@@ -71,6 +71,17 @@ const (
 	// refused it. Host is what it asked for; Error says why.
 	NetworkRefused Kind = "network.refused"
 
+	// The person's shell command in a session's copy, with no model call
+	// (POST /api/v0/sessions/{id}/commands), as control records it: queued
+	// in the session's lane, started by the session's runner, then ran (how
+	// it ended and its output, capped) or failed (it did not run, or its
+	// runner was lost). Command.ID ties them. No turn: a command sits between
+	// turns, and the session's next turn is told of each one that ran.
+	CommandQueued  Kind = "command.queued"
+	CommandStarted Kind = "command.started"
+	CommandRan     Kind = "command.ran"
+	CommandFailed  Kind = "command.failed"
+
 	// Control's own operations, in no session: a subscription connected or
 	// failed to (Harness, and Error says why), a runner enrolled or stopped
 	// answering (Runner), and a settings file changed (File). Never a value.
@@ -107,8 +118,12 @@ var Kinds = []KindInfo{
 	{ReplayFailed, "A model request of a replayed turn (a turn.started with replay_from) could not be given the earlier turn's history: error says why, such as the harness's request layout not being one the gateway knows. The gateway refused that request with 400 and did not send it to the vendor, so the turn fails rather than continue without its history. Show it as an error.", []string{"error"}},
 	{ToolRefused, "The gateway refused a tool call before the agent could run it, because its command matched a forbid entry of permissions.toml: tool_id, tool_name, tool_input, rule (the entry), and text (what the model is told in place of the output). The call's tool.requested is still stored, and its tool.completed carries that text. Show it as a warning.", []string{"tool_id", "rule"}},
 	{ToolsListed, "Control served the turn's tool list: its agent's tool server (POST /api/v0/mcp, [agent_api] tools in permissions.toml) answered tools/list for the turn's token. Stored once per turn, at the first tools/list, however often the agent asks. server is the tool server's name, as tool names carry it (claude calls a tool mcp__agentbus__<name>); tools are the names it served, which the turn's token may call; tools_hidden are the harness's own tools the turn does not get, each with why. A turn with no tools.listed got no tool server, or its agent never asked for the list. Names only: never an input, a value or a token.", []string{"server"}},
-	{ContextAdded, "What AgentBus gave the turn besides the person's words, the same for every harness: added, each piece with its kind, bytes and text. Kinds: agents_md (the folder's AGENTS.md, when the harness does not read it by itself), instructions (instructions.md, filled in), asked_by (who asked an asked agent for the work) and mcp_instructions (the tool server's own instructions, when the turn has it). Stored once per turn, after its turn.started, just before its agent starts. Absent when nothing was added. Each text is whole: each source is bounded already (AGENTS.md at 32 KiB, instructions.md at 64 KiB).", []string{"added"}},
+	{ContextAdded, "What AgentBus gave the turn besides the person's words, the same for every harness: added, each piece with its kind, bytes and text. Kinds: agents_md (the folder's AGENTS.md, when the harness does not read it by itself), instructions (instructions.md, filled in), asked_by (who asked an asked agent for the work), mcp_instructions (the tool server's own instructions, when the turn has it) and commands (the shell commands the person ran in the session since its previous turn, with their output, each once). Stored once per turn, after its turn.started, just before its agent starts. Absent when nothing was added. Each text is as the agent got it: AGENTS.md is bounded at 32 KiB and instructions.md at 64 KiB; commands keeps the newest commands within 32 KiB, each stream cut at 8 KiB.", []string{"added"}},
 	{NetworkRefused, "A turn's agent runs closed off from the network ([network] of permissions.toml), and asked its runner's proxy for a host the policy does not allow: host (host:port as asked) and error (why). The connection was refused. Each refusal is its own event. Show it as a warning.", []string{"host"}},
+	{CommandQueued, "The person asked for a shell command in the session's copy (POST /api/v0/sessions/{id}/commands): command holds its id and line. It waits in the session's lane, behind what runs there. No turn.", []string{"session", "command"}},
+	{CommandStarted, "The session's runner started the queued command: command holds its id and line. No turn.", []string{"session", "command"}},
+	{CommandFailed, "The command did not run, or its runner stopped answering while it ran: command holds its id and line, error says why. No turn. Show it as an error.", []string{"session", "command", "error"}},
+	{CommandRan, "The person ran a shell command in the session's copy, on the runner that holds it, with no model call (POST /api/v0/sessions/{id}/commands): command holds its id, the line, exit_code, timed_out, stdout and stderr (each at most 64 KiB, the start kept), output_bytes (all the command wrote) and duration_ms. No turn. The session's next turn gets it in its prompt once (context.added, kind commands). Show it as a shell entry in the conversation.", []string{"session", "command"}},
 	{SubscriptionConnected, "Control kept a token from the person's own login for a subscription (POST /api/v0/subscriptions/{id}/connect): agent is the harness. No session. The token is never in the record.", []string{"agent"}},
 	{SubscriptionFailed, "A subscription's connect ended without a token: agent is the harness, error says why, such as a wrong code or the login waiting too long. No session. Show it as an error.", []string{"agent", "error"}},
 	{RunnerEnrolled, "A runner or a connector enrolled with control: runner is its id . No session.", []string{"runner"}},
@@ -219,6 +234,9 @@ type Event struct {
 	Added []Added `json:"added,omitempty" doc:"On context.added: each piece AgentBus gave the turn besides the person's words, in the order the agent got them."`
 	// Host is what a closed-off agent asked to reach.
 	Host string `json:"host,omitempty" doc:"On network.refused: the host and port the agent asked for, such as example.com:443."`
+	// Command, only on command.ran: the person's shell command and how it
+	// ended.
+	Command *Command `json:"command,omitempty" doc:"On command.ran: the person's shell command, how it ended and its output."`
 	// Runner, only on runner.enrolled and runner.gone: the runner's id.
 	Runner string `json:"runner,omitempty" doc:"On runner.enrolled and runner.gone: the runner's id."`
 	// File, only on settings.changed: which settings file was written.
@@ -276,10 +294,11 @@ type Event struct {
 	// Continuity, only on a next turn's turn.started: how it reaches the
 	// session's earlier turns, "replay", "resume" or "transcript".
 	Continuity string `json:"continuity,omitempty" doc:"On the turn.started of a session's next turn started by POST /api/v0/turns: replay (own replay, see replay_from), resume (the vendor's resume_id) or transcript (the turn's harness differs from the previous turn's, so it got the earlier turns as plain text, see context). Absent on a first turn."`
-	// Context, only on the turn.started of a turn whose continuity is
-	// transcript: the earlier turns as plain text. The agent's prompt was
-	// Context followed by Text; Text stays the person's own words.
-	Context string `json:"context,omitempty" doc:"On a turn.started whose continuity is transcript: the session's earlier turns as plain text, each person's message and the agent's final reply, oldest first. The agent got context followed by text as its prompt; text is the person's own words."`
+	// Context, only on the turn.started of a next turn: the earlier turns as
+	// plain text when its continuity is transcript, then the person's shell
+	// commands since the previous turn. The agent's prompt was Context
+	// followed by Text; Text stays the person's own words.
+	Context string `json:"context,omitempty" doc:"On a turn.started whose continuity is transcript: the session's earlier turns as plain text, each person's message and the agent's final reply, oldest first. On a next turn after the person ran shell commands (command.ran): those commands and their output, after any transcript, the same text as its context.added of kind commands. The agent got context followed by text as its prompt; text is the person's own words."`
 	// RecoveredFrom and RecoveredReason, only on a next turn's turn.started:
 	// the turn before it did not finish (it was interrupted, its last model
 	// call failed, or it never reached the model), and this turn continues
@@ -307,6 +326,21 @@ type Event struct {
 	Unexpected *Unexpected `json:"unexpected,omitempty" doc:"On schema.unexpected: the unknown shape."`
 }
 
+// Command is one shell command the person ran in a session's copy
+// (command.ran).
+type Command struct {
+	ID   string `json:"id" doc:"The command's id, as POST /api/v0/sessions/{id}/commands answered it: cmd_ and 16 hex digits."`
+	Line string `json:"line" doc:"The command line as sent, run by /bin/sh -c."`
+	// The rest only on command.ran.
+	ExitCode    int    `json:"exit_code,omitempty" doc:"On command.ran: its exit code, or 128 plus the signal that ended it. Absent means 0."`
+	TimedOut    bool   `json:"timed_out,omitempty" doc:"On command.ran: it ran past its time limit and was ended."`
+	Stdout      string `json:"stdout,omitempty" doc:"On command.ran: what it wrote to stdout, at most 64 KiB, the start kept."`
+	Stderr      string `json:"stderr,omitempty" doc:"On command.ran: what it wrote to stderr, at most 64 KiB, the start kept."`
+	OutputBytes int64  `json:"output_bytes,omitempty" doc:"On command.ran: all the bytes it wrote to stdout and stderr, kept or not."`
+	Truncated   bool   `json:"truncated,omitempty" doc:"On command.ran: some output was cut, as stdout or stderr went past 64 KiB."`
+	DurationMS  int64  `json:"duration_ms,omitempty" doc:"On command.ran: how long it ran."`
+}
+
 // HiddenTool is one of a harness's own tools a turn does not get.
 type HiddenTool struct {
 	Name string `json:"name" doc:"The tool's name, as the harness names it, such as Task."`
@@ -316,7 +350,7 @@ type HiddenTool struct {
 // Added is one piece of what AgentBus gave a turn besides the person's
 // words (context.added).
 type Added struct {
-	Kind  string `json:"kind" doc:"agents_md, instructions, asked_by or mcp_instructions."`
+	Kind  string `json:"kind" doc:"agents_md, instructions, asked_by, mcp_instructions or commands."`
 	Bytes int    `json:"bytes" doc:"The size of text, in bytes."`
 	Text  string `json:"text" doc:"The text as the agent got it."`
 }
@@ -327,6 +361,9 @@ const (
 	AddedInstructions    = "instructions"
 	AddedAskedBy         = "asked_by"
 	AddedMCPInstructions = "mcp_instructions"
+	// AddedCommands: the shell commands the person ran in the session since
+	// its previous turn (command.ran), with their output.
+	AddedCommands = "commands"
 )
 
 // Origin says who started a turn when the person did not.

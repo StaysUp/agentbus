@@ -15,7 +15,8 @@ the client API on purpose: **it is our binaries' own protocol and not a public p
 change in any release until third parties write runners. This is protocol version 2: the routes
 moved under `/api/v0/runner/` in 0.4, and a runner of an older build is refused at register.
 
-**Words.** A **job** is the queue's word for work: a turn, a review, an apply or a snapshot. A
+**Words.** A **job** is the queue's word for work: a turn, a review, an apply, a snapshot or a
+command. A
 runner takes a job and runs it as an **attempt**. A turn or review job names its turn id when it is
 made (`turn` on the job). The runner starts the turn with that id, whichever attempt runs it, so
 the turn a client asked for keeps its id. The client API never shows jobs or attempts.
@@ -67,6 +68,13 @@ of its content, never from a connector to a runner:
   its base) and the files it names in the store; the job's `result.changeset` names it.
 - An apply job goes to the folder's connector, which reads both changesets and the files from the
   store, checks the folder and writes it.
+- A command job (the person's `!`, `POST /api/v0/sessions/<id>/commands`) goes to the session's
+  runner, in the session's lane with its turns: `spec.command_id`, `spec.command` and
+  `spec.timeout_ms`. It waits for what runs in the session, a review of it included. The runner
+  runs it in the session's copy with no turn and no token. Control stores `command.started` at its
+  start. Its finish carries the `command.ran` event as `result.ran`, and control keeps it once the
+  finish is accepted; one of another session or command, with a turn, or of another kind refuses
+  the finish with **400**. A command job that ends without one gets `command.failed` from control.
 - A connector that takes work asks for it about once a second. One not seen for a minute is gone:
   a turn that needs a snapshot of its folder is refused (`the folder's connector is not connected:
   start agentbus connector on the folder's machine, then send the turn again`), and so is an apply

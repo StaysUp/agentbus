@@ -619,6 +619,9 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	case job.Kind == queue.KindApply || job.Kind == queue.KindSnapshot || job.Kind == queue.KindFolder:
 		at.finish(ctx, r.folderWork(ctx, at))
 		return
+	case r.cfg.Role != queue.RoleConnector && job.Kind == queue.KindCommand:
+		at.finish(ctx, r.command(ctx, at))
+		return
 	case r.cfg.Role == queue.RoleConnector:
 		at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup,
 			Result: mustJSON(queue.Result{Refused: "a connector takes only snapshot, apply and folder jobs", Status: http.StatusBadRequest})})

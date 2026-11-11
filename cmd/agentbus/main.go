@@ -712,6 +712,12 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 				} else if n > 0 {
 					svcLog.Printf("record.lost_turns_closed n=%d", n)
 				}
+				// A command whose job ended with no finish to say so.
+				if n, err := jobs.CloseCommands(s.queue, s.store); err != nil {
+					svcLog.Printf("record.close_commands_failed")
+				} else if n > 0 {
+					svcLog.Printf("record.commands_closed n=%d", n)
+				}
 				// A runner that stopped answering, or came back.
 				if tick++; tick%10 == 0 {
 					gone, back, err := presence.Check(s.queue, time.Now().UTC())

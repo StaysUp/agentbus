@@ -484,6 +484,10 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request, rn queue.Runner) 
 		s.queueError(w, err)
 		return
 	}
+	if err := s.commandStarted(rn, a.ID, a.Number); err != nil {
+		s.internal(w)
+		return
+	}
 	writeJSON(w, http.StatusOK, AttemptStarted{Attempt: a, Cancel: c, Token: s.mint(rn.ID, a.ID, a.Number)})
 }
 
@@ -570,10 +574,23 @@ func (s *Server) finish(w http.ResponseWriter, r *http.Request, rn queue.Runner)
 		fail(w, http.StatusBadRequest, "the body must be one JSON object with number, status and optionally reason, verdict, result and last_seq")
 		return
 	}
+	ran, ok := s.commandRan(w, rn, r.PathValue("id"), b)
+	if !ok {
+		return
+	}
 	j, err := s.cfg.Queue.End(rn.ID, r.PathValue("id"), b.Number, b.finish())
 	if err != nil {
 		s.queueError(w, err)
 		return
+	}
+	// A command's end is kept only once the finish is accepted: the same
+	// finish sent again keeps it once, so a write that fails here is retried
+	// by the runner (and by CloseCommands).
+	if j.Kind == queue.KindCommand && s.cfg.Record != nil {
+		if err := CommandEnded(s.cfg.Record, j, ran); err != nil {
+			s.internal(w)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, j)
 }

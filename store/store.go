@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -321,6 +322,9 @@ type Filter struct {
 	// events of the turn: the same turn id can be in two sessions.
 	Turn        string
 	TurnSession string
+	// Kinds, with Session and Only and no Turn, keeps only that session's
+	// events of these kinds, and no events.dropped.
+	Kinds []string
 }
 
 // PageBytes bounds the event JSON one page holds in memory: 1,000 events of
@@ -347,6 +351,14 @@ func (s *Store) Page(after int64, f Filter, limit, maxBytes int) (recs []Record,
 	} else if f.Turn != "" {
 		rows, err = s.r.Query(`SELECT seq, kind, data FROM events WHERE turn = ? AND seq > ? ORDER BY seq LIMIT ?`,
 			f.Turn, after, limit+1)
+	} else if f.Only && len(f.Kinds) > 0 {
+		args := []any{f.Session}
+		for _, k := range f.Kinds {
+			args = append(args, k)
+		}
+		args = append(args, after, limit+1)
+		rows, err = s.r.Query(`SELECT seq, kind, data FROM events WHERE session = ? AND kind IN (?`+strings.Repeat(",?", len(f.Kinds)-1)+
+			`) AND seq > ? ORDER BY seq LIMIT ?`, args...)
 	} else if f.Only {
 		rows, err = s.r.Query(`SELECT seq, kind, data FROM events
 			WHERE seq > ? AND (

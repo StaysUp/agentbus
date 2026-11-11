@@ -72,7 +72,7 @@ func stackEnv(t *testing.T, s stack) *env {
 		t.Fatal(err)
 	}
 	js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollTok, Heartbeat: 50 * time.Millisecond,
-		MaxWait: 500 * time.Millisecond, Folders: fr, Blobs: bs})
+		MaxWait: 500 * time.Millisecond, Folders: fr, Blobs: bs, Record: st})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -640,8 +640,21 @@ func (a *API) sessionEvents(w http.ResponseWriter, r *http.Request, session stri
 		a.eventPage(w, r, store.Filter{Turn: turn, TurnSession: session})
 		return
 	}
-	a.eventPage(w, r, store.Filter{Session: session, Only: true})
+	f := store.Filter{Session: session, Only: true}
+	if q := r.URL.Query(); q.Has("kind") {
+		f.Kinds = strings.Split(q.Get("kind"), ",")
+		for _, k := range f.Kinds {
+			if !kindShape.MatchString(k) || len(f.Kinds) > 16 {
+				writeError(w, http.StatusBadRequest, "kind must be up to 16 event kinds, comma separated, such as command.queued,command.ran")
+				return
+			}
+		}
+	}
+	a.eventPage(w, r, f)
 }
+
+// kindShape is an event kind as a filter names it.
+var kindShape = regexp.MustCompile(`^[a-z0-9_]+(\.[a-z0-9_]+){1,3}$`)
 
 // eventPage answers one page of the events f picks, after the cursor.
 func (a *API) eventPage(w http.ResponseWriter, r *http.Request, f store.Filter) {

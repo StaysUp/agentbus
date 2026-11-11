@@ -344,10 +344,12 @@ var routes = slices.Concat([]route{
 	{method: "GET", path: "/api/v0/sessions/{id}/events", op: "sessionEvents",
 		tag:     "Sessions",
 		summary: "Read a session's events",
-		doc: "One session's stored events, oldest first, a page at a time. With turn, only that turn's events.\n\n" +
-			"Without turn, the page also holds each events.dropped that names the session.",
+		doc: "One session's stored events, oldest first, a page at a time. With turn, only that turn's events. " +
+			"With kind and no turn, only the session's events of those kinds, such as a session's commands.\n\n" +
+			"Without turn or kind, the page also holds each events.dropped that names the session.",
 		query: []param{qStore, qAfter,
 			{name: "turn", doc: "Only this turn's events."},
+			{name: "kind", doc: "Only events of these kinds, comma separated, such as command.queued,command.started,command.ran,command.failed. Ignored with turn."},
 			{name: "limit", doc: "Events per page. 1000 when absent.", integer: true, min: 1, max: maxLimit}},
 		replies: []reply{ok(200, Page{}, "A page."), badRequest, mismatch, storeFailed},
 		turn:    treeSessionPath,
@@ -367,6 +369,30 @@ var routes = slices.Concat([]route{
 			doc: "Search an AgentBus session's stored history for a piece of text, newest first: your own session when session is absent. " +
 				"It finds what earlier turns said and did, including turns you no longer hold in context."}},
 		serve: (*API).search},
+
+	{method: "POST", path: "/api/v0/sessions/{id}/commands", op: "runCommand",
+		tag:     "Sessions",
+		summary: "Run a shell command",
+		doc: "Queue the person's shell command in the session's copy, on the runner that holds it, with no model call: the `!` of a chat. " +
+			"It answers at once with the command's id and state queued. The record says the rest, as events of the session that carry the id as command.id: " +
+			"command.queued now, command.started when its runner starts it, then command.ran (exit code and output) or command.failed (why it did not run).\n\n" +
+			"It is a job in the session's lane, as a turn is: it waits behind what runs in the session, a review of it included, runs alone in the copy, " +
+			"and a turn sent after it waits for it.\n\n" +
+			"The command runs by `/bin/sh -c` in the session's copy, in the session's own home when its runner gives it one, " +
+			"and closed off from the network when `[network] contain` is on, as the session's turns are. " +
+			"It gets no AgentBus token and no model credential. The agents' allow and forbid lists do not apply: it is the person's own command. " +
+			"It changes the copy only; apply the session's changes as usual to keep them.\n\n" +
+			"Limits: the time limit (timeout_seconds, 120 when absent, at most 600), after which the command and everything it started are ended; " +
+			"what it leaves running is ended when it exits; and 64 KiB kept of each of stdout and stderr (the start; output_bytes counts it all).\n\n" +
+			"The session's next turn gets the commands that ran since its previous turn, with their output, once, before the person's words " +
+			"(context.added, kind commands), the same for every harness.\n\n" +
+			"A session with no copy on a runner yet, or a closed one, is refused with 409. Only the main token runs a command.",
+		body: CommandRequest{},
+		replies: []reply{ok(202, CommandQueued{}, "Queued: its events follow in the record."),
+			badRequest, fail(403, "A turn token's request is refused: only the person runs a command."), noSession,
+			fail(409, "The session has no copy on a runner yet, or it is closed: error says which."),
+			fail(429, "Too many jobs are waiting."), storeFailed},
+		serve: (*API).runCommand},
 
 	{method: "GET", path: "/api/v0/agents", op: "listAgents",
 		tag:     "Agents",
