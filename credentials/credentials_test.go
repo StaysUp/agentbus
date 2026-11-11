@@ -52,6 +52,9 @@ echo done`)}}
 	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 		v, _ = m.View("claude")
 		if len(v.Output) == 1 {
+			if v.Output[0] != "https://example.test/auth?x=1" || !v.Paste {
+				t.Fatalf("%+v", v)
+			}
 			break
 		}
 		if time.Now().After(deadline) {
@@ -62,8 +65,8 @@ echo done`)}}
 		t.Fatal(err)
 	}
 	v = waitState(t, m, "claude")
-	if v.State != Connected || len(v.Output) != 1 || v.Output[0] != "https://example.test/auth?x=1" {
-		t.Fatalf("%+v", v)
+	if v.State != Connected || len(v.Output) != 0 || v.Code != "" || v.Paste {
+		t.Fatalf("an ended connect still shows its link: %+v", v)
 	}
 	got, err := m.Store.Credential(Need{Access: AccessSubscription, Harness: "claude"})
 	if err != nil || got.Token != fakeToken || got.Headers != nil {

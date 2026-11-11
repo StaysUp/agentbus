@@ -58,7 +58,7 @@ echo "Token: `+fakeToken+`"`)}}
 		t.Fatal(err)
 	}
 	v := waitState(t, m, "claude")
-	if v.State != Connected || len(v.Output) != 1 {
+	if v.State != Connected || len(v.Output) != 0 {
 		t.Fatalf("%+v", v)
 	}
 	want := []string{"subscription.login_started", "subscription.link_shown", "subscription.input_received", "subscription.connected"}
@@ -94,7 +94,8 @@ read again`, "did not accept the code"},
 			if err := m.Input("claude", "wrong"); err != nil {
 				t.Fatal(err)
 			}
-			if v := waitState(t, m, "claude"); v.State != Failed || !strings.Contains(v.Error, c.want) {
+			// A failed connect keeps why, and no link.
+			if v := waitState(t, m, "claude"); v.State != Failed || !strings.Contains(v.Error, c.want) || len(v.Output) != 0 || v.Paste {
 				t.Fatalf("%+v", v)
 			}
 		})

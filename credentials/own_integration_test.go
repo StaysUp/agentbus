@@ -116,12 +116,15 @@ func TestOwnLoginKeepsItsHome(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, func() bool { v, _ := m.View("agy"); return len(v.Output) == 1 })
+	if v, _ := m.View("agy"); v.Output[0] != "https://accounts.google.test/o/oauth2/auth?client_id=x&state=y" || !v.Paste {
+		t.Fatalf("running: %+v", v)
+	}
 	if err := m.Input("agy", "good-code"); err != nil {
 		t.Fatal(err)
 	}
 	v := waitState(t, m, "agy")
-	if v.State != Connected || len(v.Output) != 1 || v.Output[0] != "https://accounts.google.test/o/oauth2/auth?client_id=x&state=y" || v.Code != "" {
-		t.Fatalf("%+v", v)
+	if v.State != Connected || len(v.Output) != 0 || v.Code != "" || v.Paste {
+		t.Fatalf("an ended connect still shows its link: %+v", v)
 	}
 	seen, _ := os.ReadFile(marker)
 	f := strings.Fields(string(seen))

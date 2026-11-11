@@ -81,13 +81,15 @@ const (
 	Failed    = "failed"
 )
 
-// View is what may be shown of a connect: its state and the links the
-// login printed.
+// View is what may be shown of a connect: its state and, while it runs,
+// the links the login printed. Once it ended, its links and one-time code
+// are gone: only the state and why it failed are left.
 type View struct {
 	Harness string   `json:"harness" doc:"The harness being connected."`
 	State   string   `json:"state" doc:"running, connected or failed."`
-	Output  []string `json:"output" doc:"The links the login printed, where to sign in; nothing else it prints is shown. Send the code the browser shows with POST .../connect/input."`
-	Code    string   `json:"code,omitempty" doc:"A one-time code to enter at the link (codex's device login). Then nothing is sent back: the login ends by itself once the browser accepts it."`
+	Output  []string `json:"output" doc:"While it runs: the links the login printed, where to sign in; nothing else it prints is shown. Empty once it ended."`
+	Code    string   `json:"code,omitempty" doc:"While it runs: a one-time code to enter at the link (codex's device login). Then nothing is sent back: the login ends by itself once the browser accepts it. Gone once it ended."`
+	Paste   bool     `json:"paste" doc:"While it runs: the login waits for the code the browser shows, sent with POST .../connect/input (claude and agy). False for a device login, and once it ended."`
 	Error   string   `json:"error,omitempty" doc:"Why it failed."`
 }
 
@@ -122,12 +124,13 @@ type connecting struct {
 func (c *connecting) view() View {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return View{Harness: c.harness, State: c.state, Output: append([]string{}, c.links...), Code: c.code, Error: c.why}
+	return View{Harness: c.harness, State: c.state, Output: append([]string{}, c.links...), Code: c.code,
+		Paste: c.state == Running && c.login.Code == nil, Error: c.why}
 }
 
 // take reads the login's output until it ends: each ended line's links are
-// kept for showing (a link that names the token's prefix never is), and
-// the text, for the token. It calls shown with each new link.
+// kept for showing while it runs (a link that names the token's prefix
+// never is), and the text, for the token. It calls shown with each new link.
 func (c *connecting) take(r io.Reader, shown func(string)) {
 	var line []byte
 	buf := make([]byte, 4096)
@@ -140,12 +143,15 @@ func (c *connecting) take(r io.Reader, shown func(string)) {
 			c.refused = true
 		}
 		var added []string
-		if t := bytes.TrimSpace(plain); c.login.Code != nil && c.code == "" && c.login.Code.Match(t) {
+		// A connect that ended shows nothing more, even when its login
+		// still prints.
+		ended := c.state == Connected || c.state == Failed
+		if t := bytes.TrimSpace(plain); !ended && c.login.Code != nil && c.code == "" && c.login.Code.Match(t) {
 			c.code = string(t)
 			added = append(added, c.code)
 		}
 		for _, l := range link.FindAll(plain, -1) {
-			if (c.login.Prefix == "" || !bytes.Contains(l, []byte(c.login.Prefix))) && len(c.links) < maxLines {
+			if !ended && (c.login.Prefix == "" || !bytes.Contains(l, []byte(c.login.Prefix))) && len(c.links) < maxLines {
 				c.links = append(c.links, string(l))
 				added = append(added, string(l))
 			}
@@ -328,8 +334,11 @@ func (m *Manager) Connect(harness string) (View, error) {
 		if m.Ended != nil {
 			m.Ended(harness, state, why)
 		}
+		// Ended, its links and one-time code are used up: the state is
+		// what is left to show.
 		c.mu.Lock()
 		c.state, c.why = state, why
+		c.links, c.code = nil, ""
 		c.mu.Unlock()
 	}()
 	return c.view(), nil

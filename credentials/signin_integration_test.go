@@ -41,14 +41,21 @@ func TestDeviceLoginKeepsItsSignin(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "home")
 	m := &Manager{Store: &Subscriptions{Dir: dir, OAuth: map[string]OAuth{"codex": {URL: "http://127.0.0.1:1", AccountHeader: "ChatGPT-Account-ID"}}},
 		Logins: map[string]Login{"codex": deviceLogin(t, `echo "$FAKE_CODEX_HOME" > `+marker+`
-sleep 0.3
+sleep 1
 printf '%s' '`+authJSON(access)+`' > "$FAKE_CODEX_HOME/auth.json"
 echo "Successfully logged in"`)}}
 	if _, err := m.Connect("codex"); err != nil {
 		t.Fatal(err)
 	}
+	// While it runs: the link and the code, and nothing to paste.
+	waitFor(t, func() bool { v, _ := m.View("codex"); return v.Code != "" || v.State != Running })
+	if v, _ := m.View("codex"); v.State != Running || len(v.Output) != 1 || v.Output[0] != "https://auth.example.test/codex/device" ||
+		v.Code != "ABCD-EFGH2" || v.Paste {
+		t.Fatalf("running: %+v", v)
+	}
+	// Ended: the code is used up and no longer shown.
 	v := waitState(t, m, "codex")
-	if v.State != Connected || len(v.Output) != 1 || v.Output[0] != "https://auth.example.test/codex/device" || v.Code != "ABCD-EFGH2" {
+	if v.State != Connected || len(v.Output) != 0 || v.Code != "" {
 		t.Fatalf("%+v", v)
 	}
 	home, _ := os.ReadFile(marker)

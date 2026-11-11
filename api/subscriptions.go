@@ -33,7 +33,7 @@ type SubscriptionState struct {
 	Renews      bool              `json:"renews" doc:"Control renews the token itself before it expires, with what the login gave it (codex's ChatGPT sign-in), or runs the harness to renew its own (agy's Google sign-in)."`
 	Expired     bool              `json:"expired" doc:"The sign-in cannot be used: its time is up, or the vendor refused to renew it. Connect again."`
 	Error       string            `json:"error,omitempty" doc:"Why it cannot be used, when it cannot."`
-	Connect     *credentials.View `json:"connect,omitempty" doc:"The latest connect, while control runs."`
+	Connect     *credentials.View `json:"connect,omitempty" doc:"The latest connect, while control runs. Its links and one-time code are shown only while it runs."`
 }
 
 // ConnectInput is the body of POST /api/v0/subscriptions/{id}/connect/input.
@@ -68,7 +68,7 @@ var subscriptionRoutes = []route{
 		idDoc:   "A harness, such as claude. Another shape gets 404.",
 		tag:     "Settings",
 		summary: "Follow a connect",
-		doc:     "The harness's latest login: running, connected or failed, and the links and one-time code it printed; nothing else it prints is shown.",
+		doc:     "The harness's latest login: running, connected or failed. While it runs, the links and one-time code it printed; nothing else it prints is shown. Once it ended, only its state and why it failed.",
 		replies: []reply{ok(200, credentials.View{}, "The login."), fail(404, "No login was started for it since control started.")},
 		serve:   (*API).getConnect},
 	{method: "POST", path: "/api/v0/subscriptions/{id}/connect/input", op: "connectInput",
