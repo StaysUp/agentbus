@@ -286,6 +286,33 @@ func TestRunnerSettings(t *testing.T) {
 	}
 }
 
+// A runner gets the settings version with the settings, from one read, so a
+// turn on it records the version it ran under.
+func TestRunnerSettingsVersion(t *testing.T) {
+	q, err := queue.Open(filepath.Join(t.TempDir(), "jobs.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := settings.OpenDB(filepath.Join(t.TempDir(), settings.DBFile), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SetInstructions("mine", settings.Any); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(Config{Queue: q, Token: mainTok, EnrollToken: enrollTok, Settings: db})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(s)
+	t.Cleanup(func() { srv.Close(); q.Close(); db.Close() })
+	a := enroll(t, srv, 1)
+	var got settings.RunnerSettings
+	if code := send(t, srv, a.Token, "GET", "/api/v0/runner/settings", nil, &got); code != 200 || got.SettingsVersion != 1 || got.Instructions != "mine" {
+		t.Fatalf("%d %+v", code, got)
+	}
+}
+
 // testConnector is the connector id of testFolders: the runners the tests
 // enroll report it, so they take the jobs that name its folders.
 const testConnector = "con_0123456789abcdef"

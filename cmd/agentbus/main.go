@@ -211,6 +211,7 @@ type service struct {
 	queue    *queue.Queue
 	remote   *settings.Remote  // a runner's settings: the server's
 	settings settings.Store    // the settings the built-in runner reads
+	sdb      *settings.DB      // control's settings database (up, server)
 	folders  *folders.Registry // the folders this machine owns (up, runner)
 	blobs    *blobs.Store      // the control plane's blob store (up, server)
 	blobSwp  *jobs.Sweeper     // cleans it
@@ -257,21 +258,35 @@ func start(c config) (*service, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The settings: the policy and the instructions every turn gets. up and
-	// server keep them as files in the data folder, written with every
-	// default when missing. A runner reads the server's, through the runner
-	// protocol, so every runner follows one policy.
+	// The settings: the policy, the instructions every turn gets and the
+	// saved agents. up and server keep them in settings.db in the data
+	// folder, reached only through the API. The first start of this build
+	// copies the data folder beside it, then imports the settings files of
+	// 0.4 and before once (settings.Upgrade). A runner reads the server's,
+	// through the runner protocol, so every runner follows one policy.
 	var cfgStore settings.Store
 	var remote *settings.Remote
+	var sdb *settings.DB
+	var upgraded settings.Report
+	sdbHanded := false // once the service holds it, its stop closes it
+	defer func() {
+		if sdb != nil && !sdbHanded {
+			sdb.Close()
+		}
+	}()
 	if c.mode == modeRunner {
 		remote = &settings.Remote{Server: strings.TrimSuffix(c.server, "/"), Local: c.home}
 		cfgStore = remote
 	} else {
-		files := settings.NewFiles(c.home)
-		if err := files.Init(); err != nil {
+		sdb, upgraded, err = settings.Upgrade{Dir: c.home, Lock: filepath.Join(c.home, "events.db") + ".lock",
+			Skip: []string{copiesDir, oldCopiesDir, "blobs"}, Agents: agents.ImportRows}.Run()
+		if err != nil {
 			return nil, err
 		}
-		cfgStore = files
+		if upgraded.Copy != "" {
+			c.logf("the data folder was copied to %s before the settings moved into %s", upgraded.Copy, settings.DBFile)
+		}
+		cfgStore = sdb
 	}
 	// The data folder's own files, which no turn may edit: a turn that could
 	// would raise its own limits, or read a token.
@@ -347,7 +362,7 @@ func start(c config) (*service, error) {
 		}
 	}
 	if c.hasQueue() {
-		if saved, err = agents.Open(c.home, nil); err != nil {
+		if saved, err = agents.Open(sdb, nil); err != nil {
 			st.Close()
 			return nil, err
 		}
@@ -421,6 +436,14 @@ func start(c config) (*service, error) {
 	}
 	if blobSweep != nil {
 		blobSweep.Logf = svcLog.Printf
+	}
+	if sdb != nil {
+		if upgraded.Done {
+			svcLog.Printf("settings.imported copy=%q files=%q", upgraded.Copy, strings.Join(upgraded.Imported, ","))
+		}
+		// Each settings change waits in settings.db until the record has
+		// its event; those from before this start go now.
+		sdb.SetSink(api.RecordSettings(st), svcLog.Printf)
 	}
 	if runnerJobs != nil {
 		runnerJobs.Logf = svcLog.Printf
@@ -607,7 +630,8 @@ func start(c config) (*service, error) {
 	}
 	host, _, _ := net.SplitHostPort(c.listen)
 	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: gws, api: a, eng: eng, store: st, blobs: bs, blobSwp: blobSweep,
-		queue: q, remote: remote, settings: cfgStore, folders: fr, log: svcLog, logins: logins, done: make(chan error, 1)}
+		queue: q, remote: remote, settings: cfgStore, sdb: sdb, folders: fr, log: svcLog, logins: logins, done: make(chan error, 1)}
+	sdbHanded = true
 	if q != nil {
 		s.subs = subs
 	}
@@ -977,7 +1001,7 @@ func runConnect(args []string, home string, stdin io.Reader, stdout, stderr io.W
 		how = "and control renews it before it expires"
 	}
 	fmt.Fprintf(stdout, "\nConnected: %s's sign-in is kept in %s, readable by you only, %s.\n"+
-		"Control adds it to your runners' calls once permissions.toml says subscriptions_on_runners = \"own\".\n",
+		"Control adds it to your runners' calls once the permissions say subscriptions_on_runners = \"own\" (PUT /api/v0/settings/permissions).\n",
 		args[0], subs.Dir, how)
 	return 0
 }
@@ -1157,6 +1181,9 @@ func (s *service) shutdown() {
 	if s.queue != nil {
 		_ = s.queue.Close()
 	}
+	if s.sdb != nil {
+		_ = s.sdb.Close()
+	}
 	_ = s.store.Close()
 	s.log.Printf("service.stop")
 	_ = s.log.Close()
@@ -1287,7 +1314,7 @@ func networkNote() string {
 	if err := netjail.Check(); err != nil {
 		return err.Error() + "; a turn under [network] contain = \"on\" is refused until that is fixed here"
 	}
-	return "network control is ready: with [network] contain = \"on\" in the server's permissions.toml, each agent reaches only this runner's gateway, the server, and the hosts in [network] allow"
+	return "network control is ready: with network.contain = \"on\" in the server's permissions, each agent reaches only this runner's gateway, the server, and the hosts in [network] allow"
 }
 
 func agentAddr(listened net.Addr) string {

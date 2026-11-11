@@ -9,6 +9,7 @@ package main
 // it runs. Every credential here is fake.
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	"github.com/staysup/agentbus/folders"
 	"github.com/staysup/agentbus/netjail"
 	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -142,9 +144,7 @@ func TestRunnerAgentClosedOff(t *testing.T) {
 		t.Skipf("this machine cannot close an agent off: %v", err)
 	}
 	ns := startNoSecrets(t)
-	if err := os.WriteFile(filepath.Join(ns.serverHome, "permissions.toml"), []byte("[network]\ncontain = \"on\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	putPolicy(t, ns.server, ns.tok, "[network]\ncontain = \"on\"\n")
 	t.Setenv("AGENTBUS_FAKE_NET", "http://blocked.example/")
 	code, ag := sendAPI(t, ns.server, ns.tok, "POST", "/api/v0/agents", map[string]any{"name": "DeepSeek", "harness": "claude",
 		"access": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "key_env": "AB_TEST_OR_KEY"})
@@ -308,9 +308,7 @@ func TestRunnerUsesConnectedSubscription(t *testing.T) {
 		t.Fatalf("with subscriptions off the vendor saw %v", got)
 	}
 	// On, but nothing connected: refused too.
-	if err := os.WriteFile(filepath.Join(ns.serverHome, "permissions.toml"), []byte("subscriptions_on_runners = \"own\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	putPolicy(t, ns.server, ns.tok, "subscriptions_on_runners = \"own\"\n")
 	run()
 	if got := ns.anth.seen(); len(got) != 0 {
 		t.Fatalf("with nothing connected the vendor saw %v", got)
@@ -367,9 +365,7 @@ func TestRunnerUsesConnectedCodexSubscription(t *testing.T) {
 	ns.chat.mu.Lock()
 	ns.chat.stream = sample
 	ns.chat.mu.Unlock()
-	if err := os.WriteFile(filepath.Join(ns.serverHome, "permissions.toml"), []byte("subscriptions_on_runners = \"own\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	putPolicy(t, ns.server, ns.tok, "subscriptions_on_runners = \"own\"\n")
 	t.Setenv("AGENTBUS_FAKE_CALL", "")
 	t.Setenv("AGENTBUS_FAKE_CODEX_BODY", `{"model":"gpt-5.5","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
 	t.Setenv("AGENTBUS_FAKE_THREAD", "fake-thread-1")
@@ -481,9 +477,7 @@ func TestRunnerUsesConnectedAgySubscription(t *testing.T) {
 	ns.cc.stream = []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"pong"}]},"finishReason":"STOP"}],` +
 		`"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1,"totalTokenCount":4},"modelVersion":"gemini-3.8-flash","responseId":"r1"}}` + "\r\n\r\n")
 	ns.cc.mu.Unlock()
-	if err := os.WriteFile(filepath.Join(ns.serverHome, "permissions.toml"), []byte("subscriptions_on_runners = \"own\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	putPolicy(t, ns.server, ns.tok, "subscriptions_on_runners = \"own\"\n")
 	t.Setenv("AGENTBUS_FAKE_CALL", "")
 	t.Setenv("AGENTBUS_FAKE_AGY_BODY", `{"model":"gemini-3.8-flash","project":"p","requestId":"q","request":{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`)
 	t.Setenv("AGENTBUS_FAKE_STDOUT", `{"conversation_id":"fake-conv-1","status":"SUCCESS","response":"pong"}`+"\n")
@@ -756,5 +750,27 @@ func TestRunnerHomePerSession(t *testing.T) {
 	waitFor(t, "session A's home removed", func() bool { _, err := os.Stat(homeA); return os.IsNotExist(err) })
 	if _, err := os.Stat(homeOf(repB)); err != nil {
 		t.Fatalf("session B's home: %v", err)
+	}
+}
+
+// putPolicy replaces the server's policy, given as TOML, through the API:
+// control reads no settings file once it has started.
+func putPolicy(t *testing.T, svc *service, tok, policy string) {
+	t.Helper()
+	p, err := settings.ParsePolicy([]byte(policy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(p)
+	req, _ := http.NewRequest("PUT", "http://"+svc.addr+"/api/v0/settings/permissions", bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("If-Match", "*")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("PUT the policy: %d", resp.StatusCode)
 	}
 }

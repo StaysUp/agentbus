@@ -120,9 +120,11 @@ server's: what it lacks it fetches again, so every blob in it older than an hour
 the policy and the instructions from the server (`GET /api/v0/runner/settings`, with its own
 token), never from its own data folder. So a `forbid` rule set on the server holds on every runner
 from the next turn. Folders in `read_folders` must exist on the runner, with `~` the runner's home.
+The reply also carries `settings_version`, the settings version it was read at (0 from a server
+before 0.5), which the turn records on its `turn.started`. The runner reads it all in one call.
 
 **When the server's settings cannot be had, the turn does not start.** That is a server that
-cannot be reached, a server whose files are broken, or a server too old to serve the route. The job
+cannot be reached, a server whose stored settings cannot be used, or a server too old to serve the route. The job
 fails with reason `setup`, and its result says why, such as `the server's settings cannot be used,
 so the turn did not start: the server could not be reached`. A runner never falls back to a policy
 it read before: a `forbid` rule just added on the server must hold, and an old copy would miss it.

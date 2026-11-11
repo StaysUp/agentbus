@@ -1,13 +1,15 @@
-// Package settings is where the person's settings live: the policy
-// (permissions.toml), the instructions every turn gets (instructions.md), and
-// the list of the data folder's own files, which no turn may edit. The rest of
-// the code reads and writes them through Store only, so they can move from
-// files to a database without it changing.
+// Package settings is where the person's settings live: the policy, the
+// instructions every turn gets, and the list of the data folder's own files,
+// which no turn may edit. The rest of the code reads and writes them through
+// Store only.
 //
-// Two stores today. Files is the data folder's files, read fresh on every
-// call, so a hand edit applies to the next turn without a restart. Remote is
-// a runner's: the server's settings, read through the runner protocol with
-// the runner's token, so every runner follows the one policy.
+// DB is control's store: settings.db in the data folder, reached only
+// through the API, with the defaults in code under a version (defaults.go).
+// Remote is a runner's: the server's settings, read through the runner
+// protocol with the runner's token, so every runner follows the one policy.
+// Files is the settings files of 0.4 and before (permissions.toml,
+// instructions.md): the upgrade reads them once into the database
+// (upgrade.go), and nothing reads them after that.
 //
 // The package imports nothing of the module, so every package may use it.
 package settings
@@ -37,6 +39,41 @@ type Store interface {
 	// Protected are files no turn may edit with its edit tools: the data
 	// folder's settings, saved agents, tokens and stores.
 	Protected() []string
+}
+
+// Snapshot is the settings a turn starts under, read at one moment: the
+// policy, the instructions, and the settings version (Revision), which the
+// turn records on its turn.started.
+type Snapshot struct {
+	Policy              Policy
+	PolicyVersion       Version
+	Instructions        string
+	InstructionsVersion Version
+	// Revision is the settings version: it moves up by one with every
+	// change of the settings. 0 for a store that keeps none, such as files.
+	Revision int64
+}
+
+// snapshotter is a store that reads every setting at one moment.
+type snapshotter interface {
+	Snapshot() (Snapshot, error)
+}
+
+// Read is s's settings at one moment: its own Snapshot when it has one,
+// else its policy and instructions read one after the other, at version 0.
+func Read(s Store) (Snapshot, error) {
+	if sn, ok := s.(snapshotter); ok {
+		return sn.Snapshot()
+	}
+	var out Snapshot
+	var err error
+	if out.Policy, out.PolicyVersion, err = s.Policy(); err != nil {
+		return Snapshot{}, err
+	}
+	if out.Instructions, out.InstructionsVersion, err = s.Instructions(); err != nil {
+		return Snapshot{}, err
+	}
+	return out, nil
 }
 
 // Version names one state of a setting, for an ETag. It changes whenever the
@@ -85,7 +122,7 @@ const (
 // dataFiles are the data folder's own files, which no turn may edit: a turn
 // that could would raise its own limits, or read a token.
 var dataFiles = []string{PolicyFile, InstructionsFile, AgentsFile, "token", "turns_token",
-	"enroll_token", "events.db", "jobs.db", "runner.json", "folders.json", filepath.Join("bin", APIClient)}
+	"enroll_token", "events.db", "jobs.db", DBFile, "runner.json", "folders.json", filepath.Join("bin", APIClient)}
 
 // protected is dataFiles under dir.
 func protected(dir string) []string {

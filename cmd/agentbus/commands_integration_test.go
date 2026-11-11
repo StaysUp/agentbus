@@ -314,9 +314,7 @@ func TestCommandClosedOff(t *testing.T) {
 	}
 	ns := startNoSecrets(t)
 	t.Setenv("AGENTBUS_FAKE_STDOUT", `{"type":"result","subtype":"success","result":"done","session_id":"fake-resume-1"}`+"\n")
-	if err := os.WriteFile(filepath.Join(ns.serverHome, "permissions.toml"), []byte("[network]\ncontain = \"on\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	putPolicy(t, ns.server, ns.tok, "[network]\ncontain = \"on\"\n")
 	code, ag := sendAPI(t, ns.server, ns.tok, "POST", "/api/v0/agents", map[string]any{"name": "DeepSeek", "harness": "claude",
 		"access": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "key_env": "AB_TEST_OR_KEY"})
 	if code != http.StatusCreated {

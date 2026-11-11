@@ -1,12 +1,14 @@
 package agents
 
 import (
+	"encoding/json"
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/staysup/agentbus/settings"
 )
 
 // The harnesses the tests save agents on.
@@ -17,11 +19,28 @@ const (
 
 func fixed() time.Time { return time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC) }
 
-func TestOpenSeedsDefaultsOnce(t *testing.T) {
-	dir := t.TempDir()
-	s, err := Open(dir, fixed)
+// openAt opens the agents of the settings database in dir.
+func openAt(t *testing.T, dir string) (*Store, *settings.DB) {
+	t.Helper()
+	db, err := settings.OpenDB(filepath.Join(dir, settings.DBFile), fixed)
 	if err != nil {
 		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	s, err := Open(db, fixed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, db
+}
+
+// The defaults are in code: a new database holds no agent, and lists them.
+// A removed default stays removed; the database holds that one row.
+func TestOpenListsDefaults(t *testing.T) {
+	dir := t.TempDir()
+	s, db := openAt(t, dir)
+	if rows, err := db.Agents(); err != nil || len(rows) != 0 {
+		t.Fatalf("a new database holds %v %v", rows, err)
 	}
 	l := s.List()
 	if len(l) != 3 || l[0].ID != Claude || l[0].Harness != Claude || l[0].Access != Subscription ||
@@ -31,19 +50,19 @@ func TestOpenSeedsDefaultsOnce(t *testing.T) {
 	if err := s.Remove(Claude); err != nil {
 		t.Fatal(err)
 	}
-	// A removed default is not saved again on the next open.
-	s, err = Open(dir, fixed)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// A removed default is not listed again on the next open.
+	s, db = openAt(t, dir)
 	if l := s.List(); len(l) != 2 || l[0].ID != Codex {
 		t.Fatalf("after reopen %+v", l)
+	}
+	if rows, _ := db.Agents(); len(rows) != 1 || rows[0].ID != Claude || !rows[0].Removed {
+		t.Fatalf("rows %+v", rows)
 	}
 }
 
 func TestCreateUpdateRemove(t *testing.T) {
 	dir := t.TempDir()
-	s, _ := Open(dir, fixed)
+	s, db := openAt(t, dir)
 	a, err := s.Create(Fields{Name: "  DeepSeek ", Harness: Claude, Access: OpenRouter, Model: "deepseek/deepseek-v4.1-flash"})
 	if err != nil {
 		t.Fatal(err)
@@ -62,11 +81,8 @@ func TestCreateUpdateRemove(t *testing.T) {
 	if _, err := s.Update("a_none", Fields{Name: "x", Harness: Claude, Access: Subscription}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("update of none: %v", err)
 	}
-	// Kept on disk.
-	s2, err := Open(dir, fixed)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// Kept in the database.
+	s2, _ := openAt(t, dir)
 	if g, err := s2.Get(a.ID); err != nil || g.KeyEnv != "MY_OR_KEY" {
 		t.Fatalf("reopened %+v %v", g, err)
 	}
@@ -75,6 +91,21 @@ func TestCreateUpdateRemove(t *testing.T) {
 	}
 	if err := s2.Remove(a.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("second remove: %v", err)
+	}
+	// Each change is a settings change naming the agent, and the fields an
+	// update changed, never a value.
+	cs, _, err := db.Changes()
+	if err != nil || len(cs) != 3 {
+		t.Fatalf("changes %+v %v", cs, err)
+	}
+	if cs[0].Setting != settings.SettingAgents || cs[0].Keys[0] != a.ID || cs[0].Version != 1 {
+		t.Errorf("create: %+v", cs[0])
+	}
+	if strings.Join(cs[1].Keys, ",") != a.ID+".harness,"+a.ID+".key_env" || cs[1].Version != 2 {
+		t.Errorf("update: %+v", cs[1])
+	}
+	if b, _ := json.Marshal(cs); strings.Contains(string(b), "MY_OR_KEY") || strings.Contains(string(b), "deepseek") {
+		t.Errorf("a change holds a value: %s", b)
 	}
 }
 
@@ -108,7 +139,7 @@ func TestCheckRefuses(t *testing.T) {
 }
 
 func TestResolveFallsBackToHarness(t *testing.T) {
-	s, _ := Open(t.TempDir(), fixed)
+	s, _ := openAt(t, t.TempDir())
 	s.Remove(Codex)
 	a, err := s.Resolve(Codex)
 	if err != nil || a.Harness != Codex || a.Access != Subscription || a.ID != "" {
@@ -122,15 +153,44 @@ func TestResolveFallsBackToHarness(t *testing.T) {
 	}
 }
 
-func TestOpenRefusesABrokenFile(t *testing.T) {
-	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, FileName), []byte("{"), 0o600)
-	if _, err := Open(dir, fixed); err == nil {
-		t.Fatal("a broken file was read")
+// An agents.json of 0.4 is read as rows: a default as it was is left out,
+// a changed default and an added agent are kept whole, a default the file
+// lacks is removed. A file that cannot be used is refused.
+func TestImportRows(t *testing.T) {
+	added := Agent{ID: "a_1", Name: "DeepSeek", Harness: Claude, Access: OpenRouter, Model: "m", KeyEnv: DefaultKeyEnv, Created: fixed(), Updated: fixed()}
+	changed := Agent{ID: Codex, Name: "Codex · fast", Harness: Codex, Access: Subscription, Model: "gpt-5", Created: fixed(), Updated: fixed()}
+	asIs := Agent{ID: Claude, Name: "Claude Code", Harness: Claude, Access: Subscription, Created: fixed(), Updated: fixed()}
+	b, _ := json.Marshal(file{Agents: []Agent{asIs, changed, added}})
+	rows, err := ImportRows(b)
+	if err != nil {
+		t.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(dir, FileName), []byte(`{"agents":[{"id":"../x"}]}`), 0o600)
-	if _, err := Open(dir, fixed); err == nil {
-		t.Fatal("a bad id was read")
+	if len(rows) != 3 || rows[0].ID != Codex || rows[1].ID != "a_1" || rows[2].ID != "agy" || !rows[2].Removed {
+		t.Fatalf("rows %+v", rows)
+	}
+	// Stored and opened, they list as the file did.
+	db, err := settings.OpenDB(filepath.Join(t.TempDir(), settings.DBFile), fixed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, r := range rows {
+		if err := db.SetAgent(r, []string{r.ID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, err := Open(db, fixed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l := s.List()
+	if len(l) != 3 || l[0].ID != Claude || l[1] != changed || l[2] != added {
+		t.Fatalf("listed %+v", l)
+	}
+	for _, bad := range []string{"{", `{"agents":[{"id":"../x"}]}`, `{"agents":[{"id":"a_1"},{"id":"a_1"}]}`} {
+		if _, err := ImportRows([]byte(bad)); err == nil {
+			t.Errorf("%s was read", bad)
+		}
 	}
 }
 

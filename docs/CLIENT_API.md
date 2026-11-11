@@ -158,7 +158,7 @@ The main token never reaches a child. An `AGENTBUS_URL` or `AGENTBUS_TOKEN` in t
 environment is replaced.
 
 **A turn token works inside its request tree**, by default. `[agent_api]` in
-[permissions.toml](#permissionstoml) can narrow it to the turn's own session, and turn each kind of
+[permissions.toml](#the-permissions) can narrow it to the turn's own session, and turn each kind of
 call below off. The tree is the person's session (its root) and
 every session that work asked for from it started, at any depth. With the token an agent reads the
 tree, and asks other agents: it starts turns on any saved agent, continues the sessions it started,
@@ -193,7 +193,7 @@ remove agents, see or make a token (no reply holds one), close a session, write 
 read the snapshot `GET /api/v0/sessions` or the stream `GET /api/v0/events`, read
 `GET /api/v0/version`, and read or write any session outside its tree. The description and the docs need no token at all.
 
-**The caps on asked work** are `[limits]` in [permissions.toml](#permissionstoml), read for every
+**The caps on asked work** are `[limits]` in [permissions.toml](#the-permissions), read for every
 request, so a change applies to the next one. They keep a chain of agents from running away. Past
 one, the request gets **403** saying which and naming its key:
 
@@ -273,16 +273,36 @@ each session's copy, in a file of its own so the record knows nothing about the 
 copy or git worktree, named after the session, and in `sessions/.isolation/` its checkpoints;
 copies made before 0.4 stay in `worktrees/`, named `job_<id>`, and are still found, used and
 removed there), `homes/` (a
-runner's, each session's own home, below), `permissions.toml` (below), `instructions.md` (below), `agents.json`
-(the saved agents), `bin/agentbus-api` (below), `logs/` (below), and `events.db.lock`,
+runner's, each session's own home, below), `settings.db` (the settings: the policy, the
+instructions and the saved agents, [Settings](#settings)), `subscriptions/` (connected sign-ins),
+`bin/agentbus-api` (below), `logs/` (below), and `events.db.lock`,
 which one service holds while it runs, so a second `agentbus up` on the same folder refuses to
 start. No version in the name.
 
-### permissions.toml
+**The upgrade to 0.5 moves the settings into `settings.db`.** On its first start, a 0.5 control
+(`agentbus up` or `agentbus server`), holding `events.db.lock`:
+
+1. copies the data folder beside it, named with the date and `before-settings-db`, such as
+   `~/.local/share/agentbus-2026-11-12-before-settings-db` (mode 0700). The copy leaves out
+   `sessions/`, `worktrees/` and `blobs/`, which the upgrade does not change and which can be as
+   large as your folders. A new data folder is not copied. The copy is made as `<name>.partial`
+   and renamed when whole;
+2. imports `permissions.toml`, `instructions.md` and `agents.json`, those that are there, into
+   `settings.db` in one transaction, with a `settings.changed` event for each (`file` names it).
+
+A start that stops anywhere starts over on the next start, and the import is all in the
+database or none of it. A file the import cannot use stops the start with the file and the
+problem: fix the file, or move it out of the data folder for the defaults. **After the import the
+files are never read again.** They stay where they are; change the settings through the API.
+`token`, `turns_token`, `enroll_token` and `subscriptions/` stay files.
+
+### The permissions
 
 What a turn may do without a person to ask, and what its token may ask for. A turn has no one to
-click "allow", so without this file a claude turn is refused anything its settings would ask about,
-such as running `go test`.
+click "allow", so without them a claude turn is refused anything its settings would ask about,
+such as running `go test`. They are kept in `settings.db` and changed with
+`PUT /api/v0/settings/permissions` ([Settings](#settings)), as JSON with the same keys. Before
+0.5 they were the file `permissions.toml`, in this shape, which the upgrade imports once:
 
 ```toml
 read_folders = ["~/.agents", "~/Sites/agentbus-notes"]
@@ -315,20 +335,16 @@ contain = "on"
 allow = ["github.com", "registry.npmjs.org"]
 ```
 
-- `agentbus up` makes the file when it is missing, mode 0600, with empty lists, every other value
-  written out at its default, and a comment on each. It never writes an existing file.
-- **The API reads and writes it too**: `GET` and `PUT /api/v0/settings/permissions`
-  ([Settings](#settings)). Edit the file by hand or through the API, whichever you like.
-- **A runner on another machine reads the server's policy**, never its own file
+- **The defaults are in the code, under a version**, and `settings.db` keeps only the keys you
+  changed. A key you never changed reads as its default. A new build that changes a default adds a
+  version and never moves your control to it by itself ([Settings](#settings)).
+- **A runner on another machine reads the server's policy**, never its own files
   ([The runner protocol](#the-runner-protocol)).
 - **Every turn reads it when it starts, and the API reads it for every request a turn token
-  sends.** An edit applies to the next turn and the next request. No restart.
-- A key left out reads as its default, so an older file with the three lists only keeps working.
-  A missing file is every default.
-- **A broken file stops the turn.** The answer is 400, it names `permissions.toml` and the problem,
-  with the line when there is one, and nothing is stored. A turn never runs without the policy.
-  A file that cannot be read, or a link to a file that is gone, stops the turn the same way. An
-  unknown key or a value out of range is broken too.
+  sends.** A change applies to the next turn and the next request. No restart. Each turn records
+  the settings version it started under (`settings_version` on `turn.started`).
+- **Stored permissions that cannot be used stop the turn.** The answer is 400 with the problem, and
+  nothing is stored. A turn never runs without the policy.
 - `read_folders`: absolute paths, or starting with `~/`. Each must be an existing folder on the
   machine that runs the turn, where `~` is that machine's home. No comma, parenthesis or glob
   character (`*?[]{}`).
@@ -344,7 +360,7 @@ allow = ["github.com", "registry.npmjs.org"]
 - `edit`: where a turn may create and change files without asking. `"session"` (the default) is
   the turn's own session folder: its isolated copy, or the folder itself when the session is not
   isolated. `"none"` is nowhere. A read-only turn never edits, and `forbid` still wins.
-- **No turn edits the data folder's own files**: `permissions.toml`, `instructions.md`,
+- **No turn edits the data folder's own files**: `settings.db`, `permissions.toml`, `instructions.md`,
   `agents.json`, `subscriptions/`, `token`, `turns_token`, `enroll_token`, `events.db`, `jobs.db`, `runner.json` and
   `bin/agentbus-api`. claude gets a deny rule on each, which wins over `edit` and over the person's
   own settings. codex has no way to keep one file of its folder out of its sandbox, so a codex
@@ -771,12 +787,11 @@ answer names a job: the queue's jobs are internal.
   - claude: `claude -p --output-format json --append-system-prompt <hint> [--model M] -- <prompt>`
   - codex: `codex -c openai_base_url=… exec --skip-git-repo-check --json --sandbox <mode> -c developer_instructions=<hint> [-c sandbox_workspace_write.network_access=true] [--model M] -- <prompt>`
 - **The instructions tell the agent its history is there, and that it can ask other agents.** They
-  are the text of `instructions.md` in the data folder, read when each turn starts, with
-  `{session}` replaced by the session id. `agentbus up` writes the file when it is missing, with the
-  default text below; it never writes an existing file. A missing file gives the default, an empty
-  file gives no instructions, and a file over 64 KiB, not UTF-8 or holding a NUL byte stops the
-  turn with 400, as a broken `permissions.toml` does. `GET` and `PUT /api/v0/settings/instructions`
-  read and write it ([Settings](#settings)); a runner on another machine uses the server's. Keep the
+  are the instructions in the settings, read when each turn starts, with
+  `{session}` replaced by the session id: the default text below until you change it, and empty
+  text gives no instructions. `GET` and `PUT /api/v0/settings/instructions` read and write them
+  ([Settings](#settings)); a runner on another machine uses the server's. Before 0.5 they were the
+  file `instructions.md`, which the upgrade imports once. Keep the
   text the same within a session: own replay and the prompt cache rely on it. `{tools}` becomes how
   the turn calls AgentBus: one line naming the `agentbus` MCP tools for a turn that has them (below,
   "The tool server"), else the `agentbus-api` lines. The default says plainly that the agent works
@@ -1442,10 +1457,12 @@ own session and turn.
 ### Agents
 
 **An agent is a saved setup**: a harness, how it reaches its model (its access), the model and a
-name. A turn names one by id. An agent says nothing about where it runs. The agents are kept in
-`agents.json` in the data folder, written whole by an atomic rename. A new data folder starts with
-three, `claude` (Claude Code), `codex` (Codex) and `agy` (Antigravity), each on its own
-subscription with the harness's default model.
+name. A turn names one by id. An agent says nothing about where it runs. The agents are settings,
+kept in `settings.db`. Every control has the default agents, one per harness: `claude` (Claude
+Code), `codex` (Codex) and `agy` (Antigravity), each on its own subscription with the harness's
+default model. They are in the code: `settings.db` keeps only the agents you added, changed or
+removed. Before 0.5 the agents were the file `agents.json`, which the upgrade imports once; a
+default agent the file did not have stays removed.
 
 ```json
 {"id":"a_3f9c0d1e2b4a5c6d","name":"DeepSeek","harness":"claude","access":"openrouter",
@@ -1476,6 +1493,9 @@ Routes, all with the main token only:
   recorded its harness, access and `key_env` (`agent_id`, `access`, `key_env` on `turn.started` and
   `session.opened`), and a next turn uses those, not the saved agent. An edit is not seen by a
   session already started either.
+- Each `POST`, `PUT` and `DELETE` is a settings change: it moves the settings version up and is
+  saved together with its `settings.changed` event (`setting` `agents`; `keys` the agent's id, or
+  for a `PUT` `<id>.<field>` for each field that changed, such as `a_3f9c….model`; never a value).
 
 ### `GET /api/v0/harnesses` — what an agent can run on
 
@@ -1788,32 +1808,59 @@ Refusing and holding a tool call are planned for a later version. A review is a 
 
 ## Settings
 
-The policy ([permissions.toml](#permissionstoml)) and the instructions every turn gets
-(`instructions.md`, under [POST /api/v0/turns](#post-apiv0turns--start-a-turn)), read and written through the API. Behind the routes is a
-settings store: today the two files in the data folder, so a hand edit and an API write are the
-same thing. Only the main token may call them. A turn token and the turns token get **403**.
+The policy ([The permissions](#the-permissions)), the instructions every turn gets (under
+[POST /api/v0/turns](#post-apiv0turns--start-a-turn)) and the saved agents ([Agents](#agents)),
+read and written through the API only. Control keeps them in `settings.db` in its data folder,
+beside `events.db` and `jobs.db`; nothing else reads or writes them. Only the main token may call
+these routes. A turn token and the turns token get **403**.
 
 | Route | What it does |
 |---|---|
+| `GET /api/v0/settings` | The settings' state: `version`, `defaults_version`, `latest_defaults_version`, `created`, and `imported` and `imported_files` from the upgrade. `ETag` is `version`. |
+| `PUT /api/v0/settings/defaults` | `{"version": N}`: run under version `N` of the defaults. |
 | `GET /api/v0/settings/permissions` | The policy as JSON, every value filled. Folders are as written, `~` and all. |
 | `PUT /api/v0/settings/permissions` | Replace the policy whole. A key left out takes its default. |
-| `GET /api/v0/settings/instructions` | `{"text": "..."}`, before `{session}` is filled in. Without the file, the default text. |
+| `GET /api/v0/settings/instructions` | `{"text": "..."}`, before `{session}` is filled in. The default text until you change it. |
 | `PUT /api/v0/settings/instructions` | Replace the text. At most 64 KiB of UTF-8, no NUL. |
 
+- **Only your changes are stored.** The defaults are in the code. `settings.db` keeps the policy
+  keys whose value differs from the defaults, the instructions when they differ from the default
+  text, and the agents you added, changed or removed. Putting a key back to its default stores
+  nothing for it.
+- **The defaults have a version, so an upgrade never widens access by itself.** A build that
+  changes a default adds a new version and keeps the old ones. Your control stays on the version it
+  has (`defaults_version`) until you move it with `PUT /api/v0/settings/defaults`, sending the
+  `ETag` of `GET /api/v0/settings` in `If-Match`. Your own changes stay; every key you never
+  changed takes the new version's value. A new data folder starts on the latest version. A
+  version this build does not have is **400**. The default agents are not versioned: they grant
+  nothing a turn naming their harness does not already get.
+- **The settings version.** `version` moves up by one with every change of the policy, the
+  instructions, the agents or the defaults version. Each turn records the version it started under:
+  `settings_version` on its `turn.started` (and a runner gets it with the settings, below).
+- **A change and its event are saved together.** Each change is one transaction of `settings.db`
+  that also stores its `settings.changed` event. The event then goes to the record. If the record
+  cannot take it, `settings.db` keeps it and control tries again every few seconds, and after a
+  restart, until it does; a retry never stores it twice. So no change is kept without its event.
+  The event says `setting` (`permissions`, `instructions`, `agents` or `defaults`), `keys` (what
+  changed: policy keys such as `limits.max_depth`, `text`, agent ids or `<id>.<field>`, `version`
+  and each key that moved) and `settings_version`. **Never a value**, so never a secret.
+- **A `PUT` that changes nothing** makes no event and no new version.
 - **Versions.** Every reply sends `ETag`, the setting's version. A `PUT` must send it back in
   `If-Match`, or `*` to replace whatever is there. Without `If-Match`: **428**. When the setting
-  changed since your read, by the API or by hand: **412**, and nothing is written. GET it again and
-  apply your change to what is there now.
+  changed since your read: **412**, and nothing is written. GET it again and apply your change to
+  what is there now.
 - **Errors name the field**: `edit must be "session" or "none"`, `[limits] max_depth must be 0 or
   more`, `forbid has the wrong type: …`, `unknown key "allowed"`. Those are **400**.
-- **A file that cannot be used** answers a `GET` with **503**, the problem, and the `ETag` of what is
-  there, so a `PUT` with that `If-Match` can replace it.
-- **A `PUT` of the policy rewrites the file** in the starter's layout, with its comments and your
-  values. Comments of your own in the file are not kept. A folder is checked for shape here, and
-  for being there when a turn runs.
+- **Stored settings that cannot be used** answer a `GET` with **503**, the problem, and the `ETag`
+  of what is there, so a `PUT` with that `If-Match` can replace them.
+- A folder is checked for shape here, and for being there when a turn runs.
 - The next turn runs under what you wrote, and a turn token's next request too. No restart.
-- On a runner (`agentbus runner`), the settings are the server's: a `GET` reads them, a `PUT` gets
-  **409**. Change them on the server.
+- On a runner (`agentbus runner`), the settings are the server's: a `GET` of the policy or the
+  instructions reads them, a `PUT` gets **409**, and `GET /api/v0/settings` gets **404**. Change
+  them on the server.
+- **The upgrade from 0.4** copies the data folder, then imports `permissions.toml`,
+  `instructions.md` and `agents.json` once ([The data folder](#the-data-folder)). After that the
+  files are never read: a hand edit of them does nothing.
 
 ```sh
 curl -s -D - -H "Authorization: Bearer $(cat ~/.local/share/agentbus/token)" \
@@ -1822,6 +1869,7 @@ curl -s -D - -H "Authorization: Bearer $(cat ~/.local/share/agentbus/token)" \
 # {"read_folders":[],"allow":[],"forbid":[],"edit":"session","subagents":true,"limits":{…},"agent_api":{…}}
 curl -s -X PUT -H "Authorization: Bearer $(cat ~/.local/share/agentbus/token)" -H 'If-Match: "3f1c…"' \
   -d '{"forbid":["git push"]}' http://127.0.0.1:8787/api/v0/settings/permissions
+# the record gets {"kind":"settings.changed","setting":"permissions","keys":["forbid"],"settings_version":4,…}
 ```
 
 ## The queue
@@ -2107,6 +2155,7 @@ the model did; AgentBus only reads them off the wire.
 | `network.refused` | the runner, when a closed-off agent asked for a host `[network] allow` does not list |
 | `replay.failed` | the gateway, when it refused a request it could not give its history |
 | `events.dropped` | the gateway, when its output fell behind and events were lost |
+| `settings.changed` | control's settings database, for each change of the settings through the API and for each file of the one-time import; kept there until the record has it ([Settings](#settings)) |
 
 Two kinds do not follow the subject by writer: `turn.completed` is observed, though most of
 `turn.*` and `session.*` is AgentBus's own, and `tool.refused` is AgentBus's own, though the other
@@ -2136,6 +2185,7 @@ The client API does not read them. A turn's own events, such as `turn.started`, 
 | `stopped` on `session.closed` | the person stopped the turn with `POST /api/v0/turns/<id>/stop` while its agent ran. The next turn continues after it and is told so. Omitted when false |
 | `unsettled` on `session.closed` | the gateway could not confirm that every model call of the turn was stored (it gave up after 30 seconds, or a queue was full), or the service closed the turn at start because the previous service stopped without its usual shutdown. Own replay does not continue from such a turn. Omitted when false |
 | `continuity` on `turn.started` | on a session's next turn: `replay` (own replay, with `replay_from`), `resume` (the vendor's `resume_id`) or `transcript` (another harness: the earlier turns as text, in `context`). Absent on a first turn |
+| `settings_version` on `turn.started` | on a run's turn: the settings version the turn started under ([Settings](#settings)). Absent before 0.5 |
 | `context` on `turn.started` | with `continuity: "transcript"`: the earlier turns as plain text. The agent's prompt was `context` then `text`; `text` stays the person's words |
 | `replay_from` on `turn.started` | the session's earlier turn whose history the gateway replays in front of every model request of this turn (own replay, claude and codex). Absent on a first turn and on a turn continued by the vendor's resume |
 | `recovered_from` on `turn.started` | on a replayed turn: the session's previous turn, which did not finish (interrupted, its last model call failed, or it never reached the model). This turn continues after it, and the model is told what happened. Absent when the previous turn finished. A cockpit can show "continued after an interrupted turn" |
@@ -2284,6 +2334,19 @@ Invalid API key · Please run /login
 `v0` may change without notice. **The prefix stays `/api/v0` through 0.4**: v0 allows breaking
 changes, and the 0.4 cleanup is one. `/api/v1` comes when third parties depend on the API; from
 then on, a change that breaks a client gets a new version path, and the old one stays for a while.
+
+**What 0.5 changes after 0.4, so far.**
+
+- **The settings are a database inside control**: `settings.db`, reached only through the API
+  ([Settings](#settings)). The first start copies the data folder beside it and imports
+  `permissions.toml`, `instructions.md` and `agents.json` once; the files are not read after that,
+  and `agentbus up` no longer writes a starter `permissions.toml` or `instructions.md`.
+- **New routes**: `GET /api/v0/settings` and `PUT /api/v0/settings/defaults`. The defaults have a
+  version, and an upgrade never moves a control to a new one by itself.
+- **`settings.changed` changed shape**: `setting`, `keys` and `settings_version` in place of
+  `file`, which now names the file only on an import. Agent changes are settings changes too. The
+  event is saved with the change, never after it.
+- **`settings_version` on `turn.started`**, and on the runner's `GET /api/v0/runner/settings`.
 
 **What 0.4 changes after 0.3.** The API is now three nouns, agent, session and turn, and every
 action is on a turn. The old routes are removed with no alias: 0.3 had no outside users.

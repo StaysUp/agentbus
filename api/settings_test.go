@@ -5,29 +5,35 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 )
 
 const settingsTurnsToken = "turns-THIS-MUST-NEVER-APPEAR-0123456789"
 
-// settingsEnv is an API whose settings are the files of a data folder.
-func settingsEnv(t *testing.T) (*env, string) {
+// settingsEnv is an API whose settings are a settings database, its changes
+// recorded in the store as control records them.
+func settingsEnv(t *testing.T) (*env, *settings.DB) {
 	t.Helper()
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "events.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	db, err := settings.OpenDB(filepath.Join(dir, settings.DBFile), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetSink(RecordSettings(st), t.Logf)
 	srv := httptest.NewUnstartedServer(nil)
 	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
 	a, err := New(Config{Store: st, Token: token, TurnsToken: settingsTurnsToken, Port: port, BaseURL: "http://127.0.0.1:" + port,
-		Settings: settings.NewFiles(dir)})
+		Settings: db})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -35,9 +41,10 @@ func settingsEnv(t *testing.T) (*env, string) {
 	srv.Start()
 	t.Cleanup(func() {
 		srv.Close()
+		db.Close()
 		st.Close()
 	})
-	return &env{srv: srv, api: a, store: st, port: port}, dir
+	return &env{srv: srv, api: a, store: st, port: port}, db
 }
 
 // send is one settings call with the main token, and If-Match when match is
@@ -58,18 +65,37 @@ func send(t *testing.T, e *env, method, path, match, body string) (*http.Respons
 	return resp, out
 }
 
-// A person reads the policy, changes it with the version they read, and the
-// file holds the change in the starter's layout. A write with an old version
-// is refused, so a hand edit in between is never undone, and the hand edit
-// shows on the next read.
-func TestSettingsPolicyReadWrite(t *testing.T) {
-	e, dir := settingsEnv(t)
-	path := filepath.Join(dir, settings.PolicyFile)
+// settingsEvents are the settings.changed events in the record.
+func settingsEvents(t *testing.T, st *store.Store) []event.Event {
+	t.Helper()
+	recs, err := st.After(0, store.Filter{}, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out []event.Event
+	for _, r := range recs {
+		var ev event.Event
+		if err := json.Unmarshal(r.Data, &ev); err != nil {
+			t.Fatal(err)
+		}
+		if ev.Kind == event.SettingsChanged {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
 
-	// No file: every default, and a version for "no file".
+// A person reads the policy, changes it with the version they read, and the
+// next read has the change. A write with an old version is refused, so a
+// change by someone else in between is never undone. Each change is in the
+// record by the keys it changed, never their values.
+func TestSettingsPolicyReadWrite(t *testing.T) {
+	e, _ := settingsEnv(t)
+
+	// Nothing changed yet: every default.
 	resp, out := send(t, e, "GET", "/api/v0/settings/permissions", "", "")
 	if resp.StatusCode != 200 || !strings.Contains(out, `"edit":"session"`) || !strings.Contains(out, `"read_folders":[]`) {
-		t.Fatalf("GET with no file: %d %s", resp.StatusCode, out)
+		t.Fatalf("GET with nothing changed: %d %s", resp.StatusCode, out)
 	}
 	v0 := resp.Header.Get("ETag")
 	if v0 == "" || resp.Header.Get("Access-Control-Expose-Headers") != "ETag" {
@@ -107,8 +133,8 @@ func TestSettingsPolicyReadWrite(t *testing.T) {
 			t.Errorf("PUT %s: %d %s, want 400 with %q", tc.body, resp.StatusCode, out, tc.want)
 		}
 	}
-	if _, err := os.Stat(path); !os.IsNotExist(err) {
-		t.Fatal("a refused PUT wrote the file")
+	if evs := settingsEvents(t, e.store); len(evs) != 0 {
+		t.Fatalf("a refused PUT made %d events", len(evs))
 	}
 
 	// A good write: the reply is the policy as stored, with a new version.
@@ -121,61 +147,48 @@ func TestSettingsPolicyReadWrite(t *testing.T) {
 	if v1 == "" || v1 == v0 {
 		t.Fatalf("ETag after a write %q, before %q", v1, v0)
 	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(string(b), `forbid = ["git push"]`) || !strings.Contains(string(b), "max_depth = 1 ") ||
-		!strings.Contains(string(b), "# What AgentBus turns may do without asking.") {
-		t.Errorf("the file:\n%s", b)
-	}
 	if resp, _ := send(t, e, "GET", "/api/v0/settings/permissions", "", ""); resp.Header.Get("ETag") != v1 {
 		t.Errorf("GET after PUT: ETag %q, want %q", resp.Header.Get("ETag"), v1)
+	}
+	// The change is in the record when the reply comes: keys, not values.
+	evs := settingsEvents(t, e.store)
+	if len(evs) != 1 || evs[0].Setting != "permissions" || strings.Join(evs[0].Keys, ",") != "forbid,limits.max_depth,read_folders" ||
+		evs[0].SettingsVersion != 1 || evs[0].Session != "" {
+		t.Fatalf("events %+v", evs)
+	}
+	recs, _ := e.store.After(0, store.Filter{}, 100)
+	for _, r := range recs {
+		if strings.Contains(string(r.Data), "git push") || strings.Contains(string(r.Data), "~/notes") {
+			t.Fatalf("a value is in the record: %s", r.Data)
+		}
 	}
 
 	// The old version is refused: 412.
 	if resp, out := send(t, e, "PUT", "/api/v0/settings/permissions", v0, `{}`); resp.StatusCode != 412 {
 		t.Fatalf("PUT with a stale version: %d %s", resp.StatusCode, out)
 	}
-	// A hand edit changes the version, so the version read before it is
-	// refused, and the edit is what the next GET reads.
-	if err := os.WriteFile(path, []byte("forbid = [\"rm\"]\n"), 0o600); err != nil {
-		t.Fatal(err)
+	// The same policy again changes nothing: no event, no new version.
+	if resp, _ := send(t, e, "PUT", "/api/v0/settings/permissions", v1, `{"read_folders":["~/notes"],"forbid":["git push"],"limits":{"max_depth":1}}`); resp.StatusCode != 200 || resp.Header.Get("ETag") != v1 {
+		t.Fatalf("the same PUT: %d %s", resp.StatusCode, resp.Header.Get("ETag"))
 	}
-	if resp, out := send(t, e, "PUT", "/api/v0/settings/permissions", v1, `{}`); resp.StatusCode != 412 {
-		t.Fatalf("PUT over a hand edit: %d %s", resp.StatusCode, out)
-	}
-	resp, out = send(t, e, "GET", "/api/v0/settings/permissions", "", "")
-	if resp.StatusCode != 200 || !strings.Contains(out, `"forbid":["rm"]`) || resp.Header.Get("ETag") == v1 {
-		t.Fatalf("GET after a hand edit: %d %s %s", resp.StatusCode, resp.Header.Get("ETag"), out)
+	if evs := settingsEvents(t, e.store); len(evs) != 1 {
+		t.Fatalf("%d events after a PUT that changed nothing", len(evs))
 	}
 	// * replaces whatever is there.
 	if resp, out := send(t, e, "PUT", "/api/v0/settings/permissions", "*", `{"allow":["go test"]}`); resp.StatusCode != 200 || !strings.Contains(out, `"allow":["go test"]`) {
 		t.Fatalf("PUT with *: %d %s", resp.StatusCode, out)
 	}
-
-	// A broken file: 503 with what is wrong, and its version, so a PUT can
-	// replace it.
-	if err := os.WriteFile(path, []byte("allow = go test\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	resp, out = send(t, e, "GET", "/api/v0/settings/permissions", "", "")
-	if resp.StatusCode != 503 || !strings.Contains(out, "line 1") || resp.Header.Get("ETag") == "" {
-		t.Fatalf("GET of a broken file: %d %s", resp.StatusCode, out)
-	}
-	if resp, out := send(t, e, "PUT", "/api/v0/settings/permissions", resp.Header.Get("ETag"), `{}`); resp.StatusCode != 200 {
-		t.Fatalf("PUT over a broken file: %d %s", resp.StatusCode, out)
-	}
 }
 
-// The instructions: a missing file reads as the default text; a write takes
-// the version; text a turn cannot carry is refused.
+// The instructions: the default text until changed; a write takes the
+// version; text a turn cannot carry is refused; the record names the change,
+// never the text.
 func TestSettingsInstructionsReadWrite(t *testing.T) {
-	e, dir := settingsEnv(t)
+	e, _ := settingsEnv(t)
 	resp, out := send(t, e, "GET", "/api/v0/settings/instructions", "", "")
 	var got InstructionsBody
 	if resp.StatusCode != 200 || json.Unmarshal([]byte(out), &got) != nil || got.Text != settings.DefaultInstructions {
-		t.Fatalf("GET with no file: %d %s", resp.StatusCode, out)
+		t.Fatalf("GET with nothing changed: %d %s", resp.StatusCode, out)
 	}
 	v0 := resp.Header.Get("ETag")
 	if resp, out := send(t, e, "PUT", "/api/v0/settings/instructions", v0, `{"text":"a\u0000b"}`); resp.StatusCode != 400 || !strings.Contains(out, "NUL") {
@@ -188,29 +201,60 @@ func TestSettingsInstructionsReadWrite(t *testing.T) {
 	if resp.StatusCode != 200 || !strings.Contains(out, "Be brief") {
 		t.Fatalf("PUT: %d %s", resp.StatusCode, out)
 	}
-	if b, _ := os.ReadFile(filepath.Join(dir, settings.InstructionsFile)); string(b) != "Be brief. Session {session}.\n" {
-		t.Errorf("the file: %q", b)
+	if resp, out := send(t, e, "GET", "/api/v0/settings/instructions", "", ""); !strings.Contains(out, "Be brief") || resp.Header.Get("ETag") == v0 {
+		t.Errorf("GET after PUT: %s", out)
 	}
 	if resp, _ := send(t, e, "PUT", "/api/v0/settings/instructions", v0, `{"text":"x"}`); resp.StatusCode != 412 {
 		t.Errorf("PUT with a stale version: %d", resp.StatusCode)
 	}
-	// The write that took is in the record, by file name only.
 	recs, _ := e.store.After(0, store.Filter{}, 10)
 	if len(recs) != 1 || !strings.Contains(string(recs[0].Data), `"kind":"settings.changed"`) ||
-		!strings.Contains(string(recs[0].Data), `"file":"instructions.md"`) || strings.Contains(string(recs[0].Data), "Be brief") {
+		!strings.Contains(string(recs[0].Data), `"setting":"instructions"`) || strings.Contains(string(recs[0].Data), "Be brief") {
 		t.Fatalf("%d events: %v", len(recs), recs)
+	}
+}
+
+// GET /api/v0/settings is the settings' state; its ETag is the settings
+// version, which a change of the defaults version names in If-Match.
+func TestSettingsStateAndDefaults(t *testing.T) {
+	e, _ := settingsEnv(t)
+	resp, out := send(t, e, "GET", "/api/v0/settings", "", "")
+	var in SettingsInfo
+	if resp.StatusCode != 200 || json.Unmarshal([]byte(out), &in) != nil || in.Version != 0 || in.Defaults != settings.LatestDefaults() ||
+		in.LatestDefaults != settings.LatestDefaults() || in.ImportedFiles == nil || resp.Header.Get("ETag") != `"0"` {
+		t.Fatalf("GET: %d %s %s", resp.StatusCode, resp.Header.Get("ETag"), out)
+	}
+	if resp, _ := send(t, e, "PUT", "/api/v0/settings/instructions", "*", `{"text":"x"}`); resp.StatusCode != 200 {
+		t.Fatal(resp.StatusCode)
+	}
+	if resp, _ := send(t, e, "GET", "/api/v0/settings", "", ""); resp.Header.Get("ETag") != `"1"` {
+		t.Fatalf("ETag after a change %q", resp.Header.Get("ETag"))
+	}
+	if resp, _ := send(t, e, "PUT", "/api/v0/settings/defaults", `"0"`, `{"version":1}`); resp.StatusCode != 412 {
+		t.Errorf("a stale version: %d", resp.StatusCode)
+	}
+	if resp, out := send(t, e, "PUT", "/api/v0/settings/defaults", `"1"`, `{"version":99}`); resp.StatusCode != 400 || !strings.Contains(out, "version must be") {
+		t.Errorf("no such version: %d %s", resp.StatusCode, out)
+	}
+	if resp, _ := send(t, e, "PUT", "/api/v0/settings/defaults", "", `{"version":1}`); resp.StatusCode != 428 {
+		t.Errorf("no If-Match: %d", resp.StatusCode)
+	}
+	// The version it runs under already: nothing changes.
+	if resp, out := send(t, e, "PUT", "/api/v0/settings/defaults", `"1"`, `{"version":1}`); resp.StatusCode != 200 || resp.Header.Get("ETag") != `"1"` {
+		t.Errorf("the same version: %d %s", resp.StatusCode, out)
 	}
 }
 
 // The turns token, which may only start, stop, review and read turns, never reads or
 // writes settings. (A turn's own token: TestAskPolicyFromPermissions.)
 func TestSettingsTurnsTokenRefused(t *testing.T) {
-	e, dir := settingsEnv(t)
+	e, db := settingsEnv(t)
 	for _, r := range [][2]string{
+		{"GET", "/api/v0/settings"}, {"PUT", "/api/v0/settings/defaults"},
 		{"GET", "/api/v0/settings/permissions"}, {"PUT", "/api/v0/settings/permissions"},
 		{"GET", "/api/v0/settings/instructions"}, {"PUT", "/api/v0/settings/instructions"},
 	} {
-		req := e.req(t, r[0], r[1], strings.NewReader(`{"text":"x","forbid":[]}`))
+		req := e.req(t, r[0], r[1], strings.NewReader(`{"text":"x","forbid":[],"version":1}`))
 		req.Header.Set("Authorization", "Bearer "+settingsTurnsToken)
 		req.Header.Set("If-Match", "*")
 		resp, out := do(t, req)
@@ -218,9 +262,7 @@ func TestSettingsTurnsTokenRefused(t *testing.T) {
 			t.Errorf("%s %s with the turns token: %d %s", r[0], r[1], resp.StatusCode, out)
 		}
 	}
-	for _, f := range []string{settings.PolicyFile, settings.InstructionsFile} {
-		if _, err := os.Stat(filepath.Join(dir, f)); !os.IsNotExist(err) {
-			t.Errorf("%s was written", f)
-		}
+	if in, _ := db.Info(); in.Version != 0 {
+		t.Errorf("the settings changed: version %d", in.Version)
 	}
 }

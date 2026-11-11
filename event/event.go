@@ -128,7 +128,7 @@ var Kinds = []KindInfo{
 	{SubscriptionFailed, "A subscription's connect ended without a token: agent is the harness, error says why, such as a wrong code or the login waiting too long. No session. Show it as an error.", []string{"agent", "error"}},
 	{RunnerEnrolled, "A runner or a connector enrolled with control: runner is its id . No session.", []string{"runner"}},
 	{RunnerGone, "A runner or a connector stopped asking control for work for a minute: runner is its id. It may come back; a turn it was running whose lease runs out ends as runner_lost. No session. Show it as a warning.", []string{"runner"}},
-	{SettingsChanged, "A settings file was written through the API: file is permissions.toml or instructions.md. Never its content. No session.", []string{"file"}},
+	{SettingsChanged, "The settings changed, through the API or by the one-time import of the settings files: setting is permissions, instructions, agents or defaults; keys names what changed (a policy key such as limits.max_depth, text for the instructions, an agent id or id.field such as a_1234.model, version and each key that moved for defaults); settings_version is the settings version the change made. On an import, file is the file the setting came from. Names only: never a value, so never a secret. The change and this event are stored together: the settings database keeps the event until the record has it. No session.", []string{"setting", "settings_version"}},
 	{SessionRenamed, "The session was given a name with PATCH /api/v0/sessions/{id}: title is the new name, old_title the one it had before (absent when it had none). The latest names the session in GET /api/v0/sessions; earlier names stay in the record.", []string{"session", "title"}},
 }
 
@@ -239,8 +239,15 @@ type Event struct {
 	Command *Command `json:"command,omitempty" doc:"On command.ran: the person's shell command, how it ended and its output."`
 	// Runner, only on runner.enrolled and runner.gone: the runner's id.
 	Runner string `json:"runner,omitempty" doc:"On runner.enrolled and runner.gone: the runner's id."`
-	// File, only on settings.changed: which settings file was written.
-	File string `json:"file,omitempty" doc:"On settings.changed: the file written, permissions.toml or instructions.md."`
+	// Setting, Keys and File, only on settings.changed: which setting
+	// changed, the names of what changed, and on an import the file it came
+	// from. Never a value.
+	Setting string   `json:"setting,omitempty" doc:"On settings.changed: permissions, instructions, agents or defaults."`
+	Keys    []string `json:"keys,omitempty" doc:"On settings.changed: the names of what changed, never a value: policy keys such as limits.max_depth, text, agent ids or id.field. Absent when the import found nothing changed from the defaults."`
+	File    string   `json:"file,omitempty" doc:"On settings.changed of the one-time import: the file the setting came from, permissions.toml, instructions.md or agents.json. Before 0.5: the file written."`
+	// SettingsVersion, on settings.changed and a run's turn.started: the
+	// settings version.
+	SettingsVersion int64 `json:"settings_version,omitempty" doc:"On settings.changed: the settings version the change made. On a run's turn.started: the settings version the turn started under. It moves up by one with every change; absent before 0.5."`
 	// Title and OldTitle, only on session.renamed: the new name and the one
 	// it replaced.
 	Title    string `json:"title,omitempty" doc:"On session.renamed: the session's new name."`

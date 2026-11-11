@@ -291,9 +291,11 @@ func (s *Server) runnerBeat(w http.ResponseWriter, r *http.Request, rn queue.Run
 func (s *Server) runnerSettings(w http.ResponseWriter, r *http.Request, rn queue.Runner) {
 	snap := settings.RunnerSettings{Permissions: settings.DefaultPolicy(), Instructions: settings.DefaultInstructions}
 	if st := s.cfg.Settings; st != nil {
-		var err error
-		if snap.Permissions, snap.PermissionsVersion, err = st.Policy(); err == nil {
-			snap.Instructions, snap.InstructionsVersion, err = st.Instructions()
+		// One read, so the version names the policy and instructions sent.
+		got, err := settings.Read(st)
+		if err == nil {
+			snap = settings.RunnerSettings{Permissions: got.Policy, PermissionsVersion: got.PolicyVersion,
+				Instructions: got.Instructions, InstructionsVersion: got.InstructionsVersion, SettingsVersion: got.Revision}
 		}
 		var se *settings.Error
 		if errors.As(err, &se) {
