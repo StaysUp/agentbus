@@ -83,7 +83,8 @@ const (
 	turnReadOnly        = "this turn is read-only, so its token only reads; it cannot start, continue, review or stop work, rename sessions or apply changes"
 	turnContinueRefused = "a turn token continues only sessions its request tree started, never its own or the person's; " +
 		"results come back to your session as later turns"
-	turnFolderRefused  = "a turn token starts sessions only in its own session's folder, or a folder inside it"
+	turnFolderRefused = "a turn token starts sessions only in its own session's folder, or a folder inside it; " +
+		"leave folder out to start in your own session's folder"
 	turnIsolateRefused = "a session a turn token starts always gets its own isolated copy of its folder; leave isolate out"
 	turnAskedRefused   = "a turn token stops only turns its request tree asked for"
 )
@@ -309,7 +310,7 @@ func turnRefusal(turn int, g run.Grant, api settings.AgentAPI) string {
 	case turn == applyTurnTok && !*api.Apply:
 		return turnSwitchedOff("apply a turn's changes", "apply")
 	case turn == toolList && !*api.Tools:
-		return turnSwitchedOff("use the agentbus_* tools", "tools")
+		return turnSwitchedOff("use the agentbus MCP tools", "tools")
 	}
 	return ""
 }

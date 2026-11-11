@@ -402,7 +402,7 @@ def run(args):
 
 # ---- show, table -----------------------------------------------------------
 
-TOOL = "mcp__agentbus__agentbus_"  # the agentbus_* tools, as both harnesses name them
+TOOL = "mcp__agentbus__"  # the agentbus server's tools, as both harnesses name them
 
 
 def tool_text(x):
@@ -414,7 +414,7 @@ def tool_text(x):
 def api_calls(res):
     """Each AgentBus API call the test turn made, with whether it failed. A
     call is an agentbus-api (or curl to the service) command, a shell line
-    with several counting each, or an agentbus_* tool call: claude's own
+    with several counting each, or an agentbus MCP tool call: claude's own
     mcp__agentbus__ tool, or one named in codex's exec code. A tool call
     failed when its answer is a refusal (it starts with its HTTP status)."""
     outs = {e.get("tool_id"): e.get("tool_output") or "" for e in res["events"]["events"] if e["kind"] == "tool.completed"}
@@ -446,7 +446,7 @@ def first_tool(res):
         if re.search(r"agentbus-api |agentbus api |curl ", cmd):
             return "agentbus-api"
         if x["name"].startswith(TOOL) or (x["name"] in ("ToolSearch", "exec") and "agentbus" in tool_text(x)):
-            return "agentbus_* tool"
+            return "agentbus tool"
         if x["name"] in ("Agent", "Task", "ListAgents", "SendMessage", "spawn_agent", "send_input"):
             return "built-in " + x["name"]
         return x["name"] + (": " + cmd[:40] if cmd else "")

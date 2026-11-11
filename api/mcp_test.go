@@ -110,9 +110,9 @@ func TestMCPInitialize(t *testing.T) {
 func TestMCPToolListFollowsTheToken(t *testing.T) {
 	e := mcpEnv(t)
 	all := toolNames(t, e, token)
-	for _, want := range []string{"agentbus_list_agents", "agentbus_ask_agent", "agentbus_continue_session", "agentbus_list_turns",
-		"agentbus_get_turn", "agentbus_stop_turn", "agentbus_turn_diff", "agentbus_apply_turn", "agentbus_review_turn",
-		"agentbus_search_history", "agentbus_rename_session"} {
+	for _, want := range []string{"list_agents", "ask_agent", "continue_session", "list_turns",
+		"get_turn", "stop_turn", "turn_diff", "apply_turn", "review_turn",
+		"search_history", "rename_session"} {
 		if !slices.Contains(all, want) {
 			t.Errorf("main token: %s missing from %v", want, all)
 		}
@@ -121,7 +121,7 @@ func TestMCPToolListFollowsTheToken(t *testing.T) {
 		t.Errorf("write turn: %v, want %v", w, all)
 	}
 	ro := toolNames(t, e, mcpReadTok)
-	want := []string{"agentbus_list_turns", "agentbus_get_turn", "agentbus_turn_diff", "agentbus_search_history", "agentbus_list_agents"}
+	want := []string{"list_turns", "get_turn", "turn_diff", "search_history", "list_agents"}
 	if !slices.Equal(ro, want) {
 		t.Errorf("read-only turn: %v, want %v", ro, want)
 	}
@@ -151,14 +151,14 @@ func TestMCPToolListFollowsAgentAPI(t *testing.T) {
 		api  settings.AgentAPI
 		gone []string
 	}{
-		{off(func(a *settings.AgentAPI) { a.Apply = &no }), []string{"agentbus_apply_turn"}},
-		{off(func(a *settings.AgentAPI) { a.Start = &no }), []string{"agentbus_ask_agent"}},
-		{off(func(a *settings.AgentAPI) { a.Continue = &no }), []string{"agentbus_continue_session"}},
-		{off(func(a *settings.AgentAPI) { a.Scope = settings.ScopeSession }), []string{"agentbus_continue_session"}},
-		{off(func(a *settings.AgentAPI) { a.Review = &no }), []string{"agentbus_review_turn"}},
-		{off(func(a *settings.AgentAPI) { a.Cancel = &no }), []string{"agentbus_stop_turn"}},
-		{off(func(a *settings.AgentAPI) { a.ListAgents = &no }), []string{"agentbus_list_agents"}},
-		{off(func(a *settings.AgentAPI) { a.Read = &no }), []string{"agentbus_list_turns", "agentbus_get_turn", "agentbus_turn_diff", "agentbus_search_history"}},
+		{off(func(a *settings.AgentAPI) { a.Apply = &no }), []string{"apply_turn"}},
+		{off(func(a *settings.AgentAPI) { a.Start = &no }), []string{"ask_agent"}},
+		{off(func(a *settings.AgentAPI) { a.Continue = &no }), []string{"continue_session"}},
+		{off(func(a *settings.AgentAPI) { a.Scope = settings.ScopeSession }), []string{"continue_session"}},
+		{off(func(a *settings.AgentAPI) { a.Review = &no }), []string{"review_turn"}},
+		{off(func(a *settings.AgentAPI) { a.Cancel = &no }), []string{"stop_turn"}},
+		{off(func(a *settings.AgentAPI) { a.ListAgents = &no }), []string{"list_agents"}},
+		{off(func(a *settings.AgentAPI) { a.Read = &no }), []string{"list_turns", "get_turn", "turn_diff", "search_history"}},
 	} {
 		got := names(tc.api)
 		for _, n := range tc.gone {
@@ -181,9 +181,9 @@ func TestMCPToolListFollowsAgentAPI(t *testing.T) {
 func TestMCPCallOutsideTheGrantIsRefused(t *testing.T) {
 	e := mcpEnv(t)
 	for _, call := range []string{
-		`{"name":"agentbus_apply_turn","arguments":{"turn":"t_1"}}`,
-		`{"name":"agentbus_ask_agent","arguments":{"agent":"claude","prompt":"x"}}`,
-		`{"name":"agentbus_stop_turn","arguments":{"turn":"t_1"}}`,
+		`{"name":"apply_turn","arguments":{"turn":"t_1"}}`,
+		`{"name":"ask_agent","arguments":{"agent":"claude","prompt":"x"}}`,
+		`{"name":"stop_turn","arguments":{"turn":"t_1"}}`,
 	} {
 		code, v := rpc(t, e, mcpReadTok, `{"jsonrpc":"2.0","id":4,"method":"tools/call","params":`+call+`}`)
 		text, _ := dig(v, "result", "content").([]any)[0].(map[string]any)["text"].(string)
@@ -192,7 +192,7 @@ func TestMCPCallOutsideTheGrantIsRefused(t *testing.T) {
 		}
 	}
 	// Another session's history, outside the token's tree.
-	code, v := rpc(t, e, mcpWriteTok, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"agentbus_search_history","arguments":{"session":"other","q":"x"}}}`)
+	code, v := rpc(t, e, mcpWriteTok, `{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_history","arguments":{"session":"other","q":"x"}}}`)
 	text, _ := dig(v, "result", "content").([]any)[0].(map[string]any)["text"].(string)
 	if code != 200 || dig(v, "result", "isError") != true || !strings.HasPrefix(text, "HTTP 403") {
 		t.Errorf("other session: %d %v", code, v)
@@ -212,15 +212,17 @@ func TestMCPCallSendsTheRoute(t *testing.T) {
 		}
 		return dig(v, "result", "isError") == true, c[0].(map[string]any)["text"].(string)
 	}
-	if isErr, text := call(mcpWriteTok, `{"name":"agentbus_search_history","arguments":{"q":"needle"}}`); isErr || !strings.Contains(text, `"hits"`) {
+	if isErr, text := call(mcpWriteTok, `{"name":"search_history","arguments":{"q":"needle"}}`); isErr || !strings.Contains(text, `"hits"`) {
 		t.Errorf("own session search: %v %s", isErr, text)
 	}
 	for params, want := range map[string]string{
-		`{"name":"agentbus_get_turn","arguments":{}}`:                                              "turn is required",
-		`{"name":"agentbus_get_turn","arguments":{"turn":"t_1","x":1}}`:                            "no input of that name",
-		`{"name":"agentbus_get_turn","arguments":{"turn":"../x"}}`:                                 "turn must be an id",
-		`{"name":"agentbus_continue_session","arguments":{"prompt":"hi"}}`:                         "session is required",
-		`{"name":"agentbus_ask_agent","arguments":{"agent":"claude","session":"s1","prompt":"x"}}`: "no input of that name",
+		`{"name":"get_turn","arguments":{}}`:                                              "turn is required",
+		`{"name":"get_turn","arguments":{"turn":"t_1","x":1}}`:                            "no input of that name",
+		`{"name":"get_turn","arguments":{"turn":"../x"}}`:                                 "turn must be an id",
+		`{"name":"continue_session","arguments":{"prompt":"hi"}}`:                         "session is required",
+		`{"name":"ask_agent","arguments":{"agent":"claude","session":"s1","prompt":"x"}}`: "no input of that name",
+		// No folder: the asking session's folder, always.
+		`{"name":"ask_agent","arguments":{"agent":"claude","folder":"/x","prompt":"x"}}`: "no input of that name",
 	} {
 		if isErr, text := call(mcpWriteTok, params); !isErr || !strings.Contains(text, want) {
 			t.Errorf("%s: %v %q, want %q", params, isErr, text, want)
@@ -230,7 +232,7 @@ func TestMCPCallSendsTheRoute(t *testing.T) {
 		t.Errorf("unknown tool: %v", v)
 	}
 	// The main token reaches the same route.
-	if isErr, text := call(token, `{"name":"agentbus_list_agents","arguments":{}}`); isErr {
+	if isErr, text := call(token, `{"name":"list_agents","arguments":{}}`); isErr {
 		t.Errorf("main token list agents: %s", text)
 	}
 }
@@ -249,10 +251,10 @@ func TestMCPToolSchemas(t *testing.T) {
 		}
 	}
 	req := func(name string) []string { return schemaRequired(e.api.toolSchemas[name]) }
-	if r := req("agentbus_review_turn"); !slices.Contains(r, "turn") || !slices.Contains(r, "agent") {
+	if r := req("review_turn"); !slices.Contains(r, "turn") || !slices.Contains(r, "agent") {
 		t.Errorf("review requires %v", r)
 	}
-	if r := req("agentbus_search_history"); slices.Contains(r, "session") || !slices.Contains(r, "q") {
+	if r := req("search_history"); slices.Contains(r, "session") || !slices.Contains(r, "q") {
 		t.Errorf("search requires %v", r)
 	}
 }
@@ -262,7 +264,7 @@ func TestOpenAPINamesTools(t *testing.T) {
 	doc := loadSpec(t)
 	op := doc.Paths.Value("/api/v0/turns/{id}/apply").Post
 	b, _ := json.Marshal(op.Extensions["x-agentbus-tools"])
-	if !strings.Contains(string(b), `"agentbus_apply_turn"`) || !strings.Contains(string(b), effectApply) {
+	if !strings.Contains(string(b), `"apply_turn"`) || !strings.Contains(string(b), effectApply) {
 		t.Errorf("apply's tools: %s", b)
 	}
 
@@ -281,7 +283,7 @@ func TestToolQueryValue(t *testing.T) {
 // the rename never happens. A notification never runs either.
 func TestMCPRefusesABadID(t *testing.T) {
 	e := mcpEnv(t)
-	call := `"method":"tools/call","params":{"name":"agentbus_rename_session","arguments":{"title":"renamed"}}}`
+	call := `"method":"tools/call","params":{"name":"rename_session","arguments":{"title":"renamed"}}}`
 	for _, id := range []string{`{}`, `[]`, `true`, `null`, `1.5`} {
 		code, v := rpc(t, e, mcpWriteTok, `{"jsonrpc":"2.0","id":`+id+`,`+call)
 		if code != 200 || dig(v, "error", "code") != float64(rpcInvalid) || dig(v, "result") != nil {
@@ -331,7 +333,7 @@ func TestMCPAnnotations(t *testing.T) {
 	for _, x := range dig(v, "result", "tools").([]any) {
 		m := x.(map[string]any)
 		a := m["annotations"].(map[string]any)
-		read := strings.Contains("agentbus_list_agents agentbus_list_turns agentbus_get_turn agentbus_turn_diff agentbus_search_history", m["name"].(string))
+		read := strings.Contains("list_agents list_turns get_turn turn_diff search_history", m["name"].(string))
 		if a["destructiveHint"] != false || a["readOnlyHint"] != read {
 			t.Errorf("%s: %v", m["name"], a)
 		}

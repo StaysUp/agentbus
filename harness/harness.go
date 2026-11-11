@@ -189,7 +189,7 @@ type Turn struct {
 	// files are never edited.
 	NoSubagents bool
 	// Tools, when not empty, is the address of the turn's tool server:
-	// control's POST /api/v0/mcp, which serves the API as agentbus_* tools
+	// control's POST /api/v0/mcp, which serves the API as agentbus MCP tools
 	// ([agent_api] tools). The harness sends the turn's own token from
 	// AGENTBUS_TOKEN, read by the harness itself, so no token is in an
 	// argument or a file. Wired by run flags only, never a settings file.
@@ -200,7 +200,7 @@ type Turn struct {
 }
 
 // ToolServer is the name a harness gives the tool server, so its tools read
-// mcp__agentbus__agentbus_list_agents in claude, and the like elsewhere.
+// mcp__agentbus__list_agents in claude, and the like elsewhere.
 const ToolServer = "agentbus"
 
 // Harness is one program that runs an agent's loop.

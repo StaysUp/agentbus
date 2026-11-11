@@ -1075,9 +1075,9 @@ func askedLine(asked *event.Origin, api settings.AgentAPI, client, tools bool) s
 	if tools {
 		return "Another agent asked for this work, from session " + asked.Session + ", turn " + asked.Turn +
 			" (also in AGENTBUS_ASKED_BY_SESSION and AGENTBUS_ASKED_BY_TURN). Your folder may not hold its changes. " +
-			"To read what that turn changed, with each file's diff, call agentbus_turn_diff with turn " + asked.Turn + " and session " + asked.Session +
+			"To read what that turn changed, with each file's diff, call turn_diff with turn " + asked.Turn + " and session " + asked.Session +
 			". Its files are null while that turn still runs; read it again once its state is no longer running. " +
-			"That session's earlier turns: agentbus_list_turns with session " + asked.Session + "."
+			"That session's earlier turns: list_turns with session " + asked.Session + "."
 	}
 	get := `agentbus-api GET "%s"`
 	if !client {
@@ -1094,7 +1094,7 @@ func askedLine(asked *event.Origin, api settings.AgentAPI, client, tools bool) s
 }
 
 // ToolPath is control's tool server, under a turn's API address: the API as
-// agentbus_* tools over MCP (api/mcp.go), for [agent_api] tools.
+// agentbus MCP tools over MCP (api/mcp.go), for [agent_api] tools.
 const ToolPath = "/api/v0/mcp"
 
 // APIClient is the name of the API client on a turn's PATH (Config.APIDir).

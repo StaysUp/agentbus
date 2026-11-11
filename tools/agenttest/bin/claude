@@ -7,7 +7,7 @@
 # AT_REAL_CLAUDE is the real program, set by agenttest.py up.
 # AT_SHOW_OWN_AGENTS (up -show-own-agents) takes Claude Code's own agent tools
 # (Task, Agent, ListAgents, SendMessage) out of --disallowedTools, so a turn
-# with the agentbus_* tools still has them: the arm that tells the tools'
+# with the agentbus MCP tools still has them: the arm that tells the tools'
 # effect from the hiding's.
 if [ "$1" = "-p" ]; then
   if [ -n "$AT_SHOW_OWN_AGENTS" ]; then

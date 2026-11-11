@@ -28,7 +28,7 @@ var mcpVersions = []string{"2025-11-25", "2025-06-18", "2025-03-26"}
 // its model.
 const mcpInstructions = "AgentBus tools: ask other saved agents (any vendor) for work and reviews, " +
 	"read, stop and apply turns, and search this session's history. Your folder is your session's own copy; " +
-	"agentbus_apply_turn puts a turn's changes in the person's folder. Work you ask for comes back to your session as a later turn."
+	"apply_turn puts a turn's changes in the person's folder. Work you ask for comes back to your session as a later turn."
 
 // JSON-RPC error codes.
 const (
@@ -199,7 +199,7 @@ func (a *API) toolList(r *http.Request) []mcpTool {
 // false for every tool: whether a turn may apply is the token's and
 // [agent_api]'s to say, and an apply refuses a file the person changed. codex
 // asks for approval before a tool marked destructive, and a turn has nobody
-// to ask: it refused agentbus_apply_turn with "MCP tool call requires
+// to ask: it refused apply_turn with "MCP tool call requires
 // approval, but approval policy is never" (codex-cli 0.164.0, 2026-11-11, the
 // fresh-agent test).
 func annotations(effect string) map[string]any {

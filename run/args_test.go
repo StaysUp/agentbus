@@ -53,7 +53,7 @@ func TestIDScanner(t *testing.T) {
 // through the agent's own instruction flag and never inside the prompt: own
 // replay and the vendor's prompt cache need the text the same on every turn.
 // The default is the text turns had before the file existed.
-// With the agentbus_* tools, {tools} is one line that names them, and no
+// With the agentbus MCP tools, {tools} is one line that names them, and no
 // agentbus-api command.
 func TestInstructionsWithTools(t *testing.T) {
 	got, err := (&Engine{}).instructions("abc")

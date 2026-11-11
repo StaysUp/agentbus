@@ -528,7 +528,7 @@ func TestRunTurnCarriesAgentAndFolder(t *testing.T) {
 func argsOf(t *testing.T, args []string, session string) string {
 	t.Helper()
 	out := append([]string(nil), args...)
-	// The hint names the session; with the agentbus_* tools it names no
+	// The hint names the session; with the agentbus MCP tools it names no
 	// route, so the session's own words are what is checked.
 	search := "in session " + session + "."
 	for i, a := range out {

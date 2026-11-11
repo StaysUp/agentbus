@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -39,8 +40,10 @@ const (
 
 // tool is one tool a route is.
 type tool struct {
-	// name is stable: agentbus_<verb>_<noun>. A model and a recorded tool
-	// call name it, so a rename breaks both.
+	// name is stable: <verb>_<noun>. A model and a recorded tool call name
+	// it, so a rename breaks both. No agentbus_ prefix: claude names the
+	// tool mcp__agentbus__<name> and codex keeps it under the agentbus
+	// server, so the server's name is in front already.
 	name string
 	// doc is the description a model reads: what it does and its scope
 	// first, then what it does not do.
@@ -78,6 +81,9 @@ func allTools() []toolRoute {
 	return out
 }
 
+// toolName is a tool's name: <verb>_<noun>, lower case.
+var toolName = regexp.MustCompile(`^[a-z]+(_[a-z]+)+$`)
+
 // checkTools refuses a tool table that cannot be served: a name used twice, or
 // a tool on a route a turn token cannot call, the public or the runner's.
 func checkTools() error {
@@ -85,8 +91,8 @@ func checkTools() error {
 	for _, tr := range allTools() {
 		t, rt := tr.t, tr.rt
 		switch {
-		case !strings.HasPrefix(t.name, "agentbus_"):
-			return fmt.Errorf("api: tool %s must start with agentbus_", t.name)
+		case !toolName.MatchString(t.name):
+			return fmt.Errorf("api: tool %s must be <verb>_<noun>, in lower case", t.name)
 		case seen[t.name]:
 			return fmt.Errorf("api: tool %s is named twice", t.name)
 		case rt.public || rt.self || rt.turn == mainOnly:

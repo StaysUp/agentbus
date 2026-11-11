@@ -119,7 +119,7 @@ review = true        # ask for a review of a turn in its scope
 cancel = true        # stop turns its tree asked for
 rename = true        # rename sessions in its scope
 apply = true         # apply a turn's changes to the person's folder, for a turn in its scope
-tools = false        # true: give each claude and codex turn the agentbus_* tools (MCP), which
+tools = false        # true: give each claude and codex turn the agentbus MCP tools (MCP), which
                      # call this API as its token may, and hide claude's own Task, Agent,
                      # ListAgents and SendMessage. false: agents call it with agentbus-api
 
@@ -223,7 +223,7 @@ type AgentAPI struct {
 	Cancel     *bool  `toml:"cancel" json:"cancel,omitempty" doc:"Stop turns its tree asked for. Absent in a PUT: true."`
 	Rename     *bool  `toml:"rename" json:"rename,omitempty" doc:"Rename sessions in its scope. Absent in a PUT: true."`
 	Apply      *bool  `toml:"apply" json:"apply,omitempty" doc:"Apply a turn's changes to the person's folder, for a turn of a session in its scope. Absent in a PUT: true."`
-	Tools      *bool  `toml:"tools" json:"tools,omitempty" doc:"Give each turn the agentbus_* tools over MCP (POST /api/v0/mcp), which call this API as its token may. claude's own Task, Agent, ListAgents and SendMessage tools are hidden then. false: agents call the API with agentbus-api only. Absent in a PUT: false."`
+	Tools      *bool  `toml:"tools" json:"tools,omitempty" doc:"Give each turn the agentbus MCP tools over MCP (POST /api/v0/mcp), which call this API as its token may. claude's own Task, Agent, ListAgents and SendMessage tools are hidden then. false: agents call the API with agentbus-api only. Absent in a PUT: false."`
 }
 
 // Network says what a turn's agent may reach ([network]). Read by the

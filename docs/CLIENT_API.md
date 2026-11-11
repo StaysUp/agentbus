@@ -716,7 +716,7 @@ answer names a job: the queue's jobs are internal.
   turn with 400, as a broken `permissions.toml` does. `GET` and `PUT /api/v0/settings/instructions`
   read and write it ([Settings](#settings)); a runner on another machine uses the server's. Keep the
   text the same within a session: own replay and the prompt cache rely on it. `{tools}` becomes how
-  the turn calls AgentBus: one line naming the `agentbus_*` tools for a turn that has them (below,
+  the turn calls AgentBus: one line naming the `agentbus` MCP tools for a turn that has them (below,
   "The tool server"), else the `agentbus-api` lines. The default says plainly that the agent works
   in a copy:
 
@@ -729,7 +729,7 @@ answer names a job: the queue's jobs are internal.
   With the tools, `{tools}` is:
 
   ```
-  Use the agentbus_* tools for AgentBus: list and ask other agents, review, read, apply and stop turns, search this session. AgentBus agents are saved setups across vendors, not your harness's own agents or subagents.
+  Use the tools of the agentbus MCP server for AgentBus: list and ask other agents, review, read, apply and stop turns, search this session. AgentBus agents are saved setups across vendors, not your harness's own agents or subagents.
   Work you ask for comes back to you as a later turn: do not wait for it.
   ```
 
@@ -748,10 +748,10 @@ answer names a job: the queue's jobs are internal.
 
   **The tool server.** With `tools = true` in `[agent_api]` (off by default), a claude or codex turn
   gets the API as tools of its own, over MCP: `POST /api/v0/mcp` on the turn's API address,
-  stateless Streamable HTTP, with the turn's own token as the bearer. The tools are
-  `agentbus_list_agents`, `agentbus_ask_agent`, `agentbus_continue_session`, `agentbus_list_turns`,
-  `agentbus_get_turn`, `agentbus_turn_diff`, `agentbus_apply_turn`, `agentbus_review_turn`,
-  `agentbus_stop_turn`, `agentbus_search_history` and `agentbus_rename_session`. They are declared
+  stateless Streamable HTTP, with the turn's own token as the bearer. The tools are `list_agents`,
+  `ask_agent`, `continue_session`, `list_turns`, `get_turn`, `turn_diff`, `apply_turn`,
+  `review_turn`, `stop_turn`, `search_history` and `rename_session`, under the server name
+  `agentbus` (claude calls them `mcp__agentbus__<name>`). They are declared
   in the route table beside the routes they call, and each operation of the OpenAPI description
   names its tools in `x-agentbus-tools`; a tool's input is built from its route's description. The
   list a turn sees holds only what its token may call (a read-only turn sees reads only), and is

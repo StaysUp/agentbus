@@ -200,7 +200,7 @@ func (claude) Args(t Turn) []string {
 	// person's settings could still write in a read-only turn.
 	// --strict-mcp-config loads only the --mcp-config servers: the tool
 	// server, or none at all. A turn with the tool server gets no MCP
-	// server of the person's either, so the agentbus_* tools are the only
+	// server of the person's either, so the agentbus MCP tools are the only
 	// MCP tools it sees.
 	if t.Tools != "" {
 		a = append(a, "--mcp-config", claudeMCPConfig(t.Tools))

@@ -22,10 +22,9 @@ copy. They reach the **person's folder** only when a turn is **applied**:
 
 ## Calling the API from a turn
 
-A claude or codex turn may have the API as tools of its own (when `[agent_api] tools = true`): `agentbus_list_agents`,
-`agentbus_ask_agent`, `agentbus_review_turn`, `agentbus_apply_turn`, `agentbus_stop_turn`,
-`agentbus_list_turns`, `agentbus_get_turn`, `agentbus_turn_diff`, `agentbus_search_history` and the
-rest (MCP, at `POST /api/v0/mcp`). Each does what its route below does, with your turn's token.
+A claude or codex turn may have the API as tools of its own (when `[agent_api] tools = true`), from
+the MCP server `agentbus` at `POST /api/v0/mcp`: `list_agents`, `ask_agent`, `review_turn`,
+`apply_turn`, `stop_turn`, `list_turns`, `get_turn`, `turn_diff`, `search_history` and the rest. Each does what its route below does, with your turn's token.
 
 Your environment has `AGENTBUS_URL` and `AGENTBUS_TOKEN` (your turn's own token; never print it).
 Without the tools, use `agentbus-api METHOD PATH [JSON]`: it is on your PATH and sends the token for you.

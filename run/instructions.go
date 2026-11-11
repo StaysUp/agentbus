@@ -25,7 +25,7 @@ func (e *Engine) instructions(session string) (string, error) {
 }
 
 // withTools fills {tools} in text, a turn's instructions of session: how
-// the turn calls AgentBus, by the agentbus_* tools when tools, else by
+// the turn calls AgentBus, by the agentbus MCP tools when tools, else by
 // agentbus-api, with the session named in it.
 func withTools(text, session string, tools bool) string {
 	how := settings.APIText

@@ -4,8 +4,8 @@ package settings
 // agent's own: Claude Code's --append-system-prompt and codex's
 // developer_instructions, never inside the prompt. The file store keeps them
 // in instructions.md. {session} in them becomes the turn's session id, and
-// {tools} how the turn calls AgentBus: ToolsText when it has the agentbus_*
-// tools, else APIText (package run). Keep the text the same across a
+// {tools} how the turn calls AgentBus: ToolsText when it has the agentbus
+// MCP tools, else APIText (package run). Keep the text the same across a
 // session's turns: own replay and the vendor's prompt cache rely on it.
 
 import (
@@ -25,8 +25,8 @@ Your folder is usually your session's own copy of the person's folder. Your edit
 {tools}
 `
 
-// ToolsText is what {tools} becomes for a turn with the agentbus_* tools.
-const ToolsText = `Use the agentbus_* tools for AgentBus: list and ask other agents, review, read, apply and stop turns, search this session. AgentBus agents are saved setups across vendors, not your harness's own agents or subagents.
+// ToolsText is what {tools} becomes for a turn with the agentbus MCP tools.
+const ToolsText = `Use the tools of the agentbus MCP server for AgentBus: list and ask other agents, review, read, apply and stop turns, search this session. AgentBus agents are saved setups across vendors, not your harness's own agents or subagents.
 Work you ask for comes back to you as a later turn: do not wait for it.`
 
 // APIText is what {tools} becomes for a turn without them.
