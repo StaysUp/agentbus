@@ -218,6 +218,11 @@ func TestHTTPError(t *testing.T) {
 	if evs[0].Status != 529 || evs[0].Error != "Overloaded" {
 		t.Errorf("got %+v", evs[0])
 	}
+	// AgentBus's relay refuses with its own shape: the text is kept.
+	evs, err = Adapter{}.ResponseEvents(403, "application/json", []byte(`{"error":"no subscription is connected on control"}`))
+	if err != nil || evs[0].Status != 403 || evs[0].Error != "no subscription is connected on control" {
+		t.Errorf("relay refusal: %+v %v", evs, err)
+	}
 }
 
 func TestWatches(t *testing.T) {

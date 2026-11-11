@@ -500,3 +500,62 @@ func TestTurnEventsSessionFilter(t *testing.T) {
 		t.Errorf("session s3: %v, want none", got)
 	}
 }
+
+// A failed run whose child gave no reason takes the refusal of its last
+// model call as its error; a refusal of an earlier call, a 200's error, or
+// a finished run does not.
+func TestFailedTurnTakesItsLastCallsRefusal(t *testing.T) {
+	s := newStore(t)
+	one, zero := 1, 0
+	call := func(session, turn, exchange string) event.Event {
+		e := inTurn(event.ModelRequested, session, turn)
+		e.Exchange = exchange
+		return e
+	}
+	answer := func(session, turn, exchange string, status int, msg string) event.Event {
+		e := inTurn(event.ModelResponded, session, turn)
+		e.Exchange, e.Status, e.Error = exchange, status, msg
+		return e
+	}
+	refusal := "no codex subscription is connected on control; connect it once"
+	for _, e := range []event.Event{
+		// a: failed, its one call refused.
+		runOpened("s", "t_a", "h1"), started("s", "t_a", "hi"),
+		call("s", "t_a", "x1"), answer("s", "t_a", "x1", 403, refusal),
+		runClosed("s", "t_a", "h1", &one),
+		// b: failed, an earlier call refused and the last one answered.
+		runOpened("s", "t_b", "h2"), started("s", "t_b", "hi"),
+		call("s", "t_b", "x2"), answer("s", "t_b", "x2", 429, "slow down"),
+		call("s", "t_b", "x3"), answer("s", "t_b", "x3", 200, ""),
+		runClosed("s", "t_b", "h2", &one),
+		// c: finished, its last reply a 200 the adapter could not read.
+		runOpened("s", "t_c", "h3"), started("s", "t_c", "hi"),
+		call("s", "t_c", "x4"), answer("s", "t_c", "x4", 200, "openai reply: not JSON"),
+		runClosed("s", "t_c", "h3", &zero),
+		// d: failed, refused, and its child gave its own reason.
+		runOpened("s", "t_d", "h4"), started("s", "t_d", "hi"),
+		call("s", "t_d", "x5"), answer("s", "t_d", "x5", 403, refusal),
+	} {
+		mustAppend(t, s, e)
+	}
+	closed := runClosed("s", "t_d", "h4", &one)
+	closed.Error = "the agent could not start"
+	mustAppend(t, s, closed)
+	l, err := s.Turns(TurnQuery{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := byID(l)
+	if a := m["t_a"]; a.State != TurnFailed || a.Error != refusal {
+		t.Errorf("refused turn %+v", a)
+	}
+	if b := m["t_b"]; b.State != TurnFailed || b.Error != "" {
+		t.Errorf("earlier refusal %+v", b)
+	}
+	if c := m["t_c"]; c.State != TurnFinished || c.Error != "" {
+		t.Errorf("finished turn %+v", c)
+	}
+	if d := m["t_d"]; d.State != TurnFailed || d.Error != "the agent could not start" {
+		t.Errorf("child's own reason %+v", d)
+	}
+}

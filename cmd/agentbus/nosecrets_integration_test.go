@@ -376,12 +376,19 @@ func TestRunnerUsesConnectedCodexSubscription(t *testing.T) {
 		j := queueTurn(t, ns.server, ns.tok, map[string]any{"agent": "codex", "folder_ref": ns.ref, "connector": ns.connector, "prompt": "hello"})
 		return j
 	}
-	// Not connected: refused, and the vendor sees nothing.
+	// Not connected: refused, and the vendor sees nothing. codex then
+	// exits 1, and the turn's error is the relay's refusal.
 	os.WriteFile(ns.release, nil, 0o600)
-	waitJob(t, ns.server, ns.tok, run().ID)
+	t.Setenv("AGENTBUS_FAKE_EXIT", "1")
+	refused := waitJob(t, ns.server, ns.tok, run().ID)
 	if got := ns.chat.seen(); len(got) != 0 {
 		t.Fatalf("with nothing connected the vendor saw %v", got)
 	}
+	waitFor(t, "the refused turn's error", func() bool {
+		code, raw := getAPI(t, ns.server, ns.tok, "/api/v0/turns/"+refused.Turn)
+		return code == 200 && strings.Contains(raw, `"state":"failed"`) && strings.Contains(raw, `"error":"no codex subscription is connected`)
+	})
+	t.Setenv("AGENTBUS_FAKE_EXIT", "")
 	os.Remove(ns.release)
 	os.Remove(ns.report)
 	subs := subscriptionStore(ns.serverHome)

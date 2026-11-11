@@ -233,6 +233,11 @@ func TestErrorStatuses(t *testing.T) {
 	if evs[0].Status != 429 || evs[0].Error != "The usage limit has been reached" {
 		t.Errorf("got %+v", evs[0])
 	}
+	// AgentBus's relay refuses with its own shape: the text is kept.
+	evs = reply(t, 403, "application/json", []byte(`{"error":"no codex subscription is connected on control"}`))
+	if evs[0].Status != 403 || evs[0].Error != "no codex subscription is connected on control" {
+		t.Errorf("relay refusal: %+v", evs[0])
+	}
 
 	failed := "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"model\":\"m\",\"status\":\"in_progress\"}}\n\n" +
 		"event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"model\":\"m\",\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"Something went wrong\"},\"output\":[],\"usage\":null}}\n\n"

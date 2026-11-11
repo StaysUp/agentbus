@@ -57,7 +57,7 @@ type Turn struct {
 	ExitCode   *int       `json:"exit_code,omitempty" doc:"A run's turn: its child's exit code, once it exited. Absent for a child the service closed on restart."`
 	Stopped    bool       `json:"stopped,omitempty" doc:"A run's turn: someone stopped it with POST /api/v0/turns/{id}/stop. Its state is then stopped."`
 	Unsettled  bool       `json:"unsettled,omitempty" doc:"A run's turn: its session.closed says the gateway could not confirm that every model call was stored, as for a turn the service closed on restart. Own replay does not continue from it."`
-	Error      string     `json:"error,omitempty" doc:"A run's turn: why its child could not start, from its session.closed. Its state is then failed."`
+	Error      string     `json:"error,omitempty" doc:"A run's turn: why its child could not start, from its session.closed. Its state is then failed. A failed turn whose child gave no reason takes the error of its last model call's reply, when the vendor or control's relay refused that call with a status other than 200."`
 	// Origin, from the turn's turn.started: who started it when the person
 	// did not.
 	Origin *event.Origin `json:"origin,omitempty" doc:"From the turn's turn.started: who started this turn when the person did not. kind result marks a delivered result: AgentBus started the turn, and its prompt is the result of work this session asked for. kind asked marks a turn another agent's turn asked for. Absent for a turn the person started."`
@@ -172,6 +172,7 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 			u.calls, COALESCE(json_extract(q.data, '$.model'), ''),
 			substr(CAST(COALESCE(json_extract(r.data, '$.text'), '') AS BLOB), 1, ?),
 			length(CAST(COALESCE(json_extract(r.data, '$.text'), '') AS BLOB)),
+			COALESCE(json_extract(r.data, '$.status'), 0), COALESCE(json_extract(r.data, '$.error'), ''),
 			(SELECT COUNT(*) FROM events n WHERE n.session = s.session AND n.kind = 'turn.started' AND n.turn <> '' AND n.seq <= s.seq)
 		FROM u JOIN events s ON s.seq = u.seq
 			LEFT JOIN events q ON q.seq = u.last_call
@@ -182,6 +183,9 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 	}
 	type key struct{ session, turn string }
 	at := map[key]int{}
+	// refused: the error of a turn's last call when the vendor, or the relay
+	// on its way, refused it with a status other than 200.
+	refused := map[key]string{}
 	size := 0
 	stop := func() {
 		last := list.Turns[len(list.Turns)-1].StartedSeq
@@ -196,8 +200,10 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 		var tm, promptLen, replyLen int64
 		var head, replyHead []byte
 		var origin string
+		var replyStatus int64
+		var replyErr string
 		if err := rows.Scan(&t.StartedSeq, &t.Session, &t.ID, &tm, &t.Harness, &t.AgentID, &t.Folder, &t.IdempotencyKey, &origin,
-			&head, &promptLen, &t.ModelCalls, &t.Model, &replyHead, &replyLen, &t.Number); err != nil {
+			&head, &promptLen, &t.ModelCalls, &t.Model, &replyHead, &replyLen, &replyStatus, &replyErr, &t.Number); err != nil {
 			rows.Close()
 			return list, fmt.Errorf("store: read turns: %w", err)
 		}
@@ -211,6 +217,9 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 		t.Reply, t.ReplyTruncated = preview(replyHead, replyLen)
 		t.Started = time.Unix(0, tm).UTC()
 		t.State = TurnRunning
+		if replyStatus != 0 && replyStatus != 200 {
+			refused[key{t.Session, t.ID}] = replyErr
+		}
 		b, err := json.Marshal(t)
 		if err != nil {
 			rows.Close()
@@ -318,6 +327,12 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 				t.State = TurnFinished
 			default:
 				t.State = TurnFailed
+				// The child gave no reason: the refusal of its last call is
+				// it, as a turn whose call the relay refused (no codex
+				// sign-in connected) otherwise showed nothing.
+				if t.Error == "" {
+					t.Error = refused[key{session, turn}]
+				}
 			}
 		case opened == 0 && completedAt.Valid:
 			ended := time.Unix(0, completedAt.Int64).UTC()

@@ -501,9 +501,15 @@ func (Adapter) ResponseEvents(status int, contentType string, body []byte) ([]ev
 				Message string `json:"message"`
 			} `json:"error"`
 		}
+		// AgentBus's own relay refuses as {"error": "<text>"}.
+		var own struct {
+			Error string `json:"error"`
+		}
 		msg := strings.TrimSpace(string(body))
 		if json.Unmarshal(body, &e) == nil && e.Error.Message != "" {
 			msg = e.Error.Message
+		} else if json.Unmarshal(body, &own) == nil && own.Error != "" {
+			msg = own.Error
 		}
 		return []event.Event{{Kind: event.ModelResponded, Status: status, Error: shortError(msg)}}, nil
 	}
