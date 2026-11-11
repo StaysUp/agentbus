@@ -1572,10 +1572,13 @@ machine (`agentbus up`) uses each harness's own sign-in and needs none of this. 
 
 - `GET /api/v0/subscriptions`: the above. `on` is `subscriptions_on_runners = "own"`.
 - `POST /api/v0/subscriptions/<harness>/connect`: **202**. Starts the login on control (for
-  claude, `claude setup-token`; for codex, `codex login --device-auth`). The answer is
-  `{harness, state, output, code, error}`: `state` is `running`, `connected` or `failed`, `output`
+  claude, `claude setup-token`; for codex, `codex login --device-auth`; for agy,
+  `agy acp --login`). The answer is
+  `{harness, state, output, code, paste, error}`: `state` is `running`, `connected` or `failed`, `output`
   holds only the links the login printed, and `code` the one-time code codex's login prints, to
   enter at its link (nothing is sent back: the login ends by itself once the browser accepts it).
+  `paste` is true while the login waits for the code the browser shows (claude and agy), sent with
+  `connect/input`. Once the login has ended, `output` is empty, `code` is gone and `paste` is false.
   A login already running is answered as it is. The login runs in a terminal of its own, as when a
   person runs it by hand. A login still running after 10 minutes is stopped, and the connect fails
   with "the login waited too long". **500** with the reason when the login cannot be started, such
@@ -1583,7 +1586,7 @@ machine (`agentbus up`) uses each harness's own sign-in and needs none of this. 
 - `GET /api/v0/subscriptions/<harness>/connect`: the same view, to follow the login. A wrong code
   ends it as `failed`, with `error` saying so.
 - `POST /api/v0/subscriptions/<harness>/connect/input` with `{"line":"<code>"}`: **204**. Sends the
-  code the browser showed to the running login (claude's). It is never kept. **409** when no login
+  code the browser showed to the running login (claude's or agy's). It is never kept. **409** when no login
   runs.
 - `DELETE /api/v0/subscriptions/<harness>`: **204**. Forgets the token; runners' calls on it are
   refused until it is connected again.
@@ -2326,6 +2329,32 @@ action is on a turn. The old routes are removed with no alias: 0.3 had no outsid
 - **`/docs/llms.txt` is short**, for an agent to read in one go. The long reference is
   `/docs/reference.md`. The default `instructions.md` says plainly that the agent works in a copy,
   and how to apply, review, stop and search.
+- **The person's `!` command.** New `POST /api/v0/sessions/<id>/commands` runs a shell command in
+  the session's copy, with no model call. It answers **202** at once; the record has
+  `command.queued`, `command.started`, then `command.ran` or `command.failed`. The next turn gets
+  what ran, as a `context.added` piece of kind `commands` ([Run a shell
+  command](#post-apiv0sessionsidcommands--run-a-shell-command-in-the-sessions-copy)).
+- **The API as tools, over MCP.** New `POST /api/v0/mcp`: with `[agent_api] tools = true` (off by
+  default), a claude or codex turn gets `list_agents`, `ask_agent`, `review_turn`, `apply_turn` and
+  the rest as tools. Each operation of the OpenAPI description names its tools in
+  `x-agentbus-tools`. The new `tools.listed` event records what each turn was served.
+- **Sessions.** Each listed session has `closed`, and a closed session is never `resumable`.
+- **Reviews.** An ended review's `findings` is always a list, `[]` when the reviewer named nothing.
+- **A failed turn says why.** When the agent gave no reason, its error is the refusal of its last
+  model call, such as the relay's "subscriptions on runners are off".
+- **codex and agy on runners that hold no secrets.** The relay gains `/relay/chatgpt/…` (codex's
+  ChatGPT sign-in) and `/relay/cloudcode/…` (agy's Google sign-in). `POST
+  /api/v0/subscriptions/<harness>/connect` takes `codex` (`codex login --device-auth`) and `agy`
+  (`agy acp --login`), and so does `agentbus connect`. Control renews codex's sign-in itself, and
+  runs agy to renew its own ([Subscriptions](#subscriptions--your-own-sign-in-for-your-own-runners)).
+- **A connect's view.** It gains `code` (codex's one-time code) and `paste` (the login waits for the
+  code the browser shows). Once a connect has ended, it keeps no link and no code.
+- **agy (Antigravity, Gemini) is a harness.** `GET /api/v0/harnesses` lists it, and a saved agent
+  may use it.
+- **Each conversation gets a home of its own** on a runner that holds no secrets, and every turn
+  gets the folder's `AGENTS.md` when its harness does not read it by itself.
+- **`GET /api/v0/folders` never lists a session's copy.** `agentbus-api` takes every method the
+  route table uses, `PATCH` included.
 
 **0.2 was never published.** A 0.1 client moving to 0.3 reads both lists below: what 0.2 changed,
 then what 0.3 changed after it.
@@ -2400,7 +2429,7 @@ then what 0.3 changed after it.
   machine: takes their snapshots, applies changes into them) and the **runner** (runs agents in
   copies). A connector is a runner with `capabilities.role` `connector` that takes only the new job
   kinds `snapshot` and `apply`, of its own folders. `agentbus up` runs all three in one process;
-  `agentbus connector -server URL [-folder DIR]...` runs a connector alone ([Modes](#the-runner-protocol)).
+  `agentbus connector -server URL -folder DIR...` runs a connector alone ([Modes](#the-runner-protocol)).
 - **Apply goes up to a turn, all or nothing.** `POST /api/v0/turns/<id>/apply` applies every turn of
   the session not yet applied, up to and including this one, on the folder's connector. It checks
   every file first and writes nothing on a conflict, then stages every file before putting any in
@@ -2436,17 +2465,15 @@ then what 0.3 changed after it.
 - **Runners hold no secrets.** `POST /api/v0/attempts/<id>/start` answers the attempt's `token`
   (`abr_…`), minted by the server and working while that attempt is current. The runner's agent
   uses it as `AGENTBUS_TOKEN` and as its model credential. The server's relay,
-  `/relay/anthropic/…`, `/relay/chatgpt/…`, `/relay/cloudcode/…` and `/relay/openrouter/…`, swaps it for the real credential on the way out
+  `/relay/anthropic/…` and `/relay/openrouter/…`, swaps it for the real credential on the way out
   ([Where it listens](#where-it-listens)). `agentbus runner -gateway server` is the default; `-gateway local` keeps the runner's own
   sign-in and keys.
 - **Subscriptions for the person's own runners**: `GET /api/v0/subscriptions`,
   `POST /api/v0/subscriptions/<harness>/connect` (the harness's own login, run on the server; for
-  claude, `claude setup-token`; for codex, `codex login --device-auth`; for agy, `agy acp --login`), `GET` of it (the login's
-  state, links and one-time code),
+  claude, `claude setup-token`), `GET` of it (the login's state and links),
   `POST /api/v0/subscriptions/<harness>/connect/input` (what the person types) and
-  `DELETE /api/v0/subscriptions/<harness>`, the main token only. `agentbus connect claude` and
-  `agentbus connect codex` do the same in a terminal, and `agentbus connect agy`. Control renews codex's ChatGPT
-  sign-in itself; agy renews its own, which control runs on control. The policy key `subscriptions_on_runners` (`off` or `own`, default `off`).
+  `DELETE /api/v0/subscriptions/<harness>`, the main token only. `agentbus connect claude` does the
+  same in a terminal. The policy key `subscriptions_on_runners` (`off` or `own`, default `off`).
 - **An agent on a runner asks other agents** through the server's API with its turn token; the
   answer comes back as its session's next turn.
 - **`-host`** on `up` and `server`: another name a loopback service answers to, such as

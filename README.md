@@ -218,6 +218,72 @@ curl -s -X POST "http://127.0.0.1:8787/api/v0/turns/<turn>/stop" -H "Authorizati
 
 The next turn of the session continues after it, and the agent is told that you stopped it.
 
+## Host it yourself in 10 minutes
+
+Control on a Linux box, a runner on your laptop, and the cockpit in your browser. Your code stays
+on the laptop. Control keeps the record and your sign-ins. The runner holds no secrets.
+
+**1. Control, on the Linux box.** [Install](#install) AgentBus there, then:
+
+```sh
+agentbus server
+```
+
+It listens on `127.0.0.1:8787`. Its data folder, `~/.local/share/agentbus` by default, holds two
+files you need: `token` for the cockpit and `enroll_token` for runners.
+
+**2. Reach it from the laptop.** There is no HTTPS, so use an SSH tunnel, and leave it open:
+
+```sh
+ssh -N -L 8787:127.0.0.1:8787 you@box
+```
+
+On a private network you trust, you can start control with `agentbus server -listen 0.0.0.0`
+instead, and use `http://box:8787` below in place of `http://127.0.0.1:8787`.
+
+**3. Your sign-in, kept on control.** With Claude Code installed on the box:
+
+```sh
+agentbus connect claude
+```
+
+Then set `subscriptions_on_runners = "own"` in the box's `~/.local/share/agentbus/permissions.toml`.
+It is read at the start of every turn, so no restart is needed. `agentbus connect codex` works the
+same way. The cockpit can do this step too: open an agent's form, press **Connect**, then **Turn on
+for my runners**.
+
+**4. A runner, on the laptop.** Copy the enroll token over, readable by you only, and start a
+runner with your code folder:
+
+```sh
+scp you@box:.local/share/agentbus/enroll_token ~/agentbus-enroll && chmod 600 ~/agentbus-enroll
+agentbus runner -server http://127.0.0.1:8787 -enroll-token-file ~/agentbus-enroll -folder "$HOME/code/myproject"
+```
+
+`-folder` also starts a connector beside the runner. It owns your folders on the laptop: it takes
+their snapshots and applies changes back. A folder you type in the cockpit is added to it when a
+session starts there. `claude` (or `codex`) must be installed on the laptop, but it need not be
+signed in. To skip step 3 and use the laptop's own sign-in, add `-gateway local`.
+
+**5. The cockpit, on the laptop.**
+
+```sh
+git clone https://github.com/staysup/agentbus-cockpit.git
+cd agentbus-cockpit && npm ci && npm run dev
+```
+
+Open `http://localhost:5173`. The address is `http://127.0.0.1:8787` (the tunnel). For the token,
+print control's and paste it:
+
+```sh
+ssh you@box cat .local/share/agentbus/token
+```
+
+Start a session in `/Users/you/code/myproject`. The cockpit's runners list shows the laptop. The
+turn runs on the laptop, in a copy of your folder, and shows in the cockpit live. Apply writes its
+changes into your folder. More on the three roles: [Three roles, one or more
+machines](#three-roles-one-or-more-machines).
+
 ## Talking to agents
 
 A session is one conversation. You write; an agent answers. Everything else is asked for in the
@@ -387,6 +453,9 @@ with the reason. Details: `docs/CLIENT_API.md`, "Network control".
 - **OpenRouter turns show a cost of $0.** The price table has no OpenRouter prices yet.
 - **A session stays on one runner.** Its copy lives there, so its later turns go to the same
   runner. Moving a session between runners comes later.
+- **A `!` command works only after a session's first turn.** Before that turn ends, the session
+  has no copy to run it in, and the command is refused. The agent does not answer a command by
+  itself: it sees the output with your next message. Both are fixed in 0.4.1.
 - **Copies on shared or network disks are slow.** A copy is a clone (APFS) or a reflink (xfs,
   btrfs) only when the folder and the data folder are on the same disk that can make one.
   Elsewhere, such as a network disk, every file is copied byte by byte.
@@ -422,11 +491,11 @@ with the reason. Details: `docs/CLIENT_API.md`, "Network control".
   Code Assist only. Google has not said this is allowed. The risk sits on your Google account, and
   it is off unless you set `subscriptions_on_runners = "own"`. A runner's agy also sends the turn's
   placeholder to Google's account lookup, which refuses it; that token works only with control.
-- **codex's ChatGPT sign-in on a runner is not yet checked against a live login.** Everything up
-  to the login is: codex's device login on control, and codex sending, through a provider of its
-  own, the same request it sends chatgpt.com, with no secret on the runner (codex-cli 0.164.0 and
-  0.167.0, 2026-11-10). That request leaves out one field codex sends on its own sign-in
-  (`access_programs`), and the first live turn is what shows whether chatgpt.com minds.
+- **agy on a runner is not yet checked with a real turn.** Its sign-in on control, the relay and
+  the renewal were tested with stand-ins and live up to Google's answer, not with a real reply.
+  claude and codex on a runner were checked with real turns on 2026-11-11.
+- **The API as tools (MCP) is off by default.** `[agent_api] tools = true` turns it on for claude
+  and codex turns. agy turns get no tools; they use `agentbus-api`.
 
 ## Docs
 
