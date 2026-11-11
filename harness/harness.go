@@ -78,6 +78,11 @@ type Info struct {
 	// flags (Turn.Tools). False: its turns call the API with agentbus-api
 	// only, and the instructions say so.
 	ToolServer bool
+	// ToolsHidden are the harness's own tools a turn with the tool server
+	// does not get, because AgentBus tools replace them (ToolsHiddenWhy).
+	// The harness's Args denies them; control names them in the turn's
+	// tools.listed.
+	ToolsHidden []string
 	// Login is its own login for the person's subscription, so they can
 	// connect it once on control for the runners they own. Nil: its
 	// subscription cannot be used on a runner yet.
@@ -226,6 +231,10 @@ type Turn struct {
 	// it is never read as a flag.
 	Prompt string
 }
+
+// ToolsHiddenWhy is why a turn with the tool server does not get the tools
+// of Info.ToolsHidden.
+const ToolsHiddenWhy = "replaced by AgentBus tools"
 
 // ToolServer is the name a harness gives the tool server, so its tools read
 // mcp__agentbus__list_agents in claude, and the like elsewhere.

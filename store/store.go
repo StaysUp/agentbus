@@ -213,6 +213,28 @@ func (s *Store) AppendOnce(e event.Event) (stored bool, err error) {
 	return stored, err
 }
 
+// AppendFirst is Append of an event a turn holds once, such as tools.listed:
+// when the store already holds an event of e's kind for e's session and turn,
+// nothing is stored and stored is false. The check and the write are one step
+// under the store's lock, so two at once store one. e must name a turn.
+func (s *Store) AppendFirst(e event.Event) (stored bool, err error) {
+	if e.Turn == "" {
+		return false, errors.New("store: an event a turn holds once needs its turn")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var n int
+	if err := s.w.QueryRow(`SELECT COUNT(*) FROM events WHERE session = ? AND turn = ? AND kind = ?`,
+		e.Session, e.Turn, string(e.Kind)).Scan(&n); err != nil {
+		return false, fmt.Errorf("store: read %s: %w", e.Kind, err)
+	}
+	if n > 0 {
+		return false, nil
+	}
+	_, stored, err = s.appendLocked(e)
+	return stored, err
+}
+
 // appendLocked is Append with s.mu held.
 func (s *Store) appendLocked(e event.Event) (out event.Event, stored bool, err error) {
 	if s.closed {

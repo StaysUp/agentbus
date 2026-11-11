@@ -773,6 +773,8 @@ answer names a job: the queue's jobs are internal.
   Claude Code's own agent tools, and the instructions name `agentbus-api`; `POST /api/v0/mcp` then
   refuses a turn token with 403. The fresh-agent test on 2026-11-11 found no gain from the tools
   over `agentbus-api`, so they stay off until that changes.
+  The record keeps what the tool server served each turn: a `tools.listed` event, stored at the
+  turn's first `tools/list`, with the names served and the harness's own tools hidden for the turn.
 
   `agentbus-api METHOD PATH [BODY]` is the API client. It is a link to the running program, kept
   at `<data folder>/bin/agentbus-api` and made at every start, and that folder goes first on each
@@ -1994,6 +1996,7 @@ the model did; AgentBus only reads them off the wire.
 | `turn.started` | the API, for a turn started with `POST /api/v0/turns`, before its agent starts. The store keeps one per turn, so the gateway's copy of the same turn is not stored again |
 | `session.opened`, `session.closed` | the engine, when a turn's agent process starts and exits; the store, at start, for a process the previous service left running |
 | `session.renamed` | the API, on `PATCH /api/v0/sessions/<id>` |
+| `tools.listed` | the API, when the tool server (`POST /api/v0/mcp`) first answers `tools/list` for a turn's token |
 | `session.registered` | older versions only; nothing writes it now |
 | `tool.refused` | the gateway, when it refused a tool call by a `forbid` rule |
 | `network.refused` | the runner, when a closed-off agent asked for a host `[network] allow` does not list |
@@ -2036,6 +2039,7 @@ The client API does not read them. A turn's own events, such as `turn.started`, 
 | kind `tool.refused` | the gateway refused a tool call of a run's turn, because its command matched a `forbid` entry of `permissions.toml`. `tool_id`, `tool_name`, `tool_input` as the model wrote them; `rule` is the entry; `text` is what the model is told in place of the output. The agent did not run the call. Show it as a warning |
 | kind `network.refused` | a closed-off agent asked its runner's proxy for a host the policy does not allow ([Network control](#network-control)): `host` is the `host:port` it asked for, `error` says why. The connection was refused. One event per refusal. Show it as a warning |
 | kind `replay.failed` | a model request of a replayed turn could not be given the earlier turn's history; `error` says why. The gateway answered the agent 400 and sent nothing to the vendor, so the turn fails rather than run without its past. Show it as an error |
+| kind `tools.listed` | control served the turn's tool list: the tool server answered `tools/list` for the turn's token. Stored once per turn, at the first list, however often the agent asks again. `server` is the tool server's name as tool names carry it (`agentbus`: claude calls a tool `mcp__agentbus__<name>`, and codex calls it from its `exec` tool as `tools.mcp__agentbus__<name>(...)`, codex-cli 0.164.0, 2026-11-11); `tools` are the names served, which the turn's token may call (a read-only turn's reads only); `tools_hidden` are the harness's own tools the turn does not get, each a `name` and a `why` (claude: `Task`, `Agent`, `ListAgents`, `SendMessage`, "replaced by AgentBus tools"; codex: none). A turn with no `tools.listed` got no tool server, or its agent never asked for the list. Names only: never an input, a value or a token. The list is what the turn could call, not what its model saw in one request: Claude Code defers MCP tools, so their schemas reach a call only after a `ToolSearch` loads them (read `tools_offered` on `model.requested`) |
 | kind `session.renamed` | the session was given a name with `PATCH /api/v0/sessions/<id>`: `title` is the new name, `old_title` the one before it (absent when it had none). It has no `turn`. The latest names the session in `GET /api/v0/sessions` |
 | kinds `x.<program>.<name>` | a program's own event (`POST /api/v0/events`); `vendor` is `"program"` |
 | `data` | only on a program's own event: the JSON object it sent |

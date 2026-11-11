@@ -693,7 +693,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	if t.token != "" {
 		apiURL = t.apiURL
 	} else {
-		if tok, err = e.turnTokens.mint(Grant{Session: t.session, Turn: t.id, Root: root, Depth: t.depth, ReadOnly: t.readOnly}); err != nil {
+		if tok, err = e.turnTokens.mint(Grant{Session: t.session, Turn: t.id, Root: root, Depth: t.depth, ReadOnly: t.readOnly, Harness: t.harness}); err != nil {
 			return nil, storeFailed
 		}
 		childTok = tok

@@ -54,6 +54,12 @@ const (
 	// name and OldTitle the one it replaced. The latest names the session.
 	SessionRenamed Kind = "session.renamed"
 
+	// ToolsListed: control served a turn's tool list (the tool server's
+	// tools/list, [agent_api] tools), once per turn. Server names the tool
+	// server, Tools the tools it served, and ToolsHidden the harness's own
+	// tools the turn does not get, with why. Names only, never a value.
+	ToolsListed Kind = "tools.listed"
+
 	// NetworkRefused: a closed-off agent asked to reach a host the policy
 	// does not allow ([network] of permissions.toml), and the runner's proxy
 	// refused it. Host is what it asked for; Error says why.
@@ -94,6 +100,7 @@ var Kinds = []KindInfo{
 	{SchemaUnexpected, "The vendor sent a shape the adapter does not know: unexpected, as names only. Show it as a quiet warning.", []string{"unexpected"}},
 	{ReplayFailed, "A model request of a replayed turn (a turn.started with replay_from) could not be given the earlier turn's history: error says why, such as the harness's request layout not being one the gateway knows. The gateway refused that request with 400 and did not send it to the vendor, so the turn fails rather than continue without its history. Show it as an error.", []string{"error"}},
 	{ToolRefused, "The gateway refused a tool call before the agent could run it, because its command matched a forbid entry of permissions.toml: tool_id, tool_name, tool_input, rule (the entry), and text (what the model is told in place of the output). The call's tool.requested is still stored, and its tool.completed carries that text. Show it as a warning.", []string{"tool_id", "rule"}},
+	{ToolsListed, "Control served the turn's tool list: its agent's tool server (POST /api/v0/mcp, [agent_api] tools in permissions.toml) answered tools/list for the turn's token. Stored once per turn, at the first tools/list, however often the agent asks. server is the tool server's name, as tool names carry it (claude calls a tool mcp__agentbus__<name>); tools are the names it served, which the turn's token may call; tools_hidden are the harness's own tools the turn does not get, each with why. A turn with no tools.listed got no tool server, or its agent never asked for the list. Names only: never an input, a value or a token.", []string{"server"}},
 	{NetworkRefused, "A turn's agent runs closed off from the network ([network] of permissions.toml), and asked its runner's proxy for a host the policy does not allow: host (host:port as asked) and error (why). The connection was refused. Each refusal is its own event. Show it as a warning.", []string{"host"}},
 	{SubscriptionConnected, "Control kept a token from the person's own login for a subscription (POST /api/v0/subscriptions/{id}/connect): agent is the harness. No session. The token is never in the record.", []string{"agent"}},
 	{SubscriptionFailed, "A subscription's connect ended without a token: agent is the harness, error says why, such as a wrong code or the login waiting too long. No session. Show it as an error.", []string{"agent", "error"}},
@@ -195,6 +202,12 @@ type Event struct {
 	ToolOutput string          `json:"tool_output,omitempty"`
 	// Rule, only on tool.refused: the forbid entry that matched.
 	Rule string `json:"rule,omitempty" doc:"On tool.refused: the forbid entry of permissions.toml that matched, such as git push."`
+	// Server, Tools and ToolsHidden, only on tools.listed: the tool
+	// server's name, the tools it served the turn, and the harness's own
+	// tools hidden from the turn.
+	Server      string       `json:"server,omitempty" doc:"On tools.listed: the tool server's name, as the harness puts it in tool names: agentbus."`
+	Tools       []string     `json:"tools,omitempty" doc:"On tools.listed: the names of the tools the server served the turn, in its order. Absent when it served none."`
+	ToolsHidden []HiddenTool `json:"tools_hidden,omitempty" doc:"On tools.listed: the harness's own tools the turn does not get, each with why. Absent when none are hidden."`
 	// Host is what a closed-off agent asked to reach.
 	Host string `json:"host,omitempty" doc:"On network.refused: the host and port the agent asked for, such as example.com:443."`
 	// Runner, only on runner.enrolled and runner.gone: the runner's id.
@@ -283,6 +296,12 @@ type Event struct {
 	Data json.RawMessage `json:"data,omitempty" doc:"On a program's own event: the JSON object it sent."`
 
 	Unexpected *Unexpected `json:"unexpected,omitempty" doc:"On schema.unexpected: the unknown shape."`
+}
+
+// HiddenTool is one of a harness's own tools a turn does not get.
+type HiddenTool struct {
+	Name string `json:"name" doc:"The tool's name, as the harness names it, such as Task."`
+	Why  string `json:"why" doc:"Why the turn does not get it, such as replaced by AgentBus tools."`
 }
 
 // Origin says who started a turn when the person did not.

@@ -167,6 +167,10 @@ type Grant struct {
 	Root          string
 	Depth         int
 	ReadOnly      bool
+	// Harness is the turn's harness, such as claude, when the token's
+	// maker knew it; empty for a session's next turn that names no agent,
+	// which runs on the session's latest.
+	Harness string
 }
 
 // turnTokens are the live turns' own tokens. A turn's token reads only its

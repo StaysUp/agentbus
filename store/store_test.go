@@ -134,6 +134,43 @@ func TestTurnStartedStoredOncePerTurn(t *testing.T) {
 	}
 }
 
+// AppendFirst stores a turn's first event of a kind only: the same kind of
+// the same turn again is not stored, another turn's or another session's is.
+func TestAppendFirstOncePerTurn(t *testing.T) {
+	s := newStore(t)
+	first := func(session, turn string) bool {
+		e := ev(event.ToolsListed, session)
+		e.Turn, e.Server = turn, "agentbus"
+		ok, err := s.AppendFirst(e)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return ok
+	}
+	if !first("a", "t1") {
+		t.Fatal("first tools.listed not stored")
+	}
+	if first("a", "t1") {
+		t.Fatal("a second tools.listed of the turn was stored")
+	}
+	if !first("b", "t1") || !first("a", "t2") {
+		t.Fatal("another session's or turn's must be stored")
+	}
+	// Another kind of the same turn is not limited by it.
+	e := ev(event.ModelRequested, "a")
+	e.Turn = "t1"
+	if ok, err := s.AppendFirst(e); err != nil || !ok {
+		t.Fatalf("another kind: %v %v", ok, err)
+	}
+	if _, err := s.AppendFirst(ev(event.ToolsListed, "a")); err == nil {
+		t.Fatal("an event with no turn was taken")
+	}
+	rs, _ := s.After(0, Filter{}, 100)
+	if got := seqs(rs); fmt.Sprint(got) != "[1 2 3 4]" {
+		t.Fatalf("seqs %v", got)
+	}
+}
+
 func dropped(sessions []string, all bool) event.Event {
 	e := ev(event.EventsDropped, "")
 	e.Dropped, e.Sessions, e.AllSessions = 1, sessions, all

@@ -18,6 +18,9 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+
+	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/harness"
 )
 
 // mcpVersions are the protocol versions this server speaks, newest first. A
@@ -141,7 +144,9 @@ func (a *API) mcp(w http.ResponseWriter, r *http.Request) {
 	case "ping":
 		reply(req.ID, map[string]any{}, nil)
 	case "tools/list":
-		reply(req.ID, map[string]any{"tools": a.toolList(r)}, nil)
+		list := a.toolList(r)
+		a.toolsListed(r, list)
+		reply(req.ID, map[string]any{"tools": list}, nil)
 	case "tools/call":
 		var p struct {
 			Name      string         `json:"name"`
@@ -193,6 +198,41 @@ func (a *API) toolList(r *http.Request) []mcpTool {
 			InputSchema: a.toolSchemas[tr.t.name], Annotations: annotations(tr.t.effect)})
 	}
 	return out
+}
+
+// toolsListed stores the turn's tools.listed at its first tools/list: the
+// tools list served it, and the harness's own tools hidden from it
+// (harness.Info.ToolsHidden). Only a turn token lists for a turn. Names only.
+// A list the store cannot keep is still served: the record misses one event,
+// and the service log says so.
+func (a *API) toolsListed(r *http.Request, list []mcpTool) {
+	g := grantOf(r)
+	if g == nil || g.Turn == "" {
+		return
+	}
+	names := make([]string, 0, len(list))
+	for _, t := range list {
+		names = append(names, t.Name)
+	}
+	// A session's next turn that names no agent runs on the session's
+	// latest, which its grant leaves empty.
+	name := g.Harness
+	if name == "" {
+		if c, err := a.cfg.Store.Continuation(g.Session); err == nil {
+			name = c.Harness
+		}
+	}
+	var hidden []event.HiddenTool
+	if h, ok := harness.Get(name); ok {
+		for _, n := range h.Info().ToolsHidden {
+			hidden = append(hidden, event.HiddenTool{Name: n, Why: harness.ToolsHiddenWhy})
+		}
+	}
+	e := event.Event{ID: newEventID(), Kind: event.ToolsListed, Time: a.cfg.Now().UTC(), Session: g.Session, Turn: g.Turn,
+		Server: harness.ToolServer, Tools: names, ToolsHidden: hidden}
+	if _, err := a.cfg.Store.AppendFirst(e); err != nil && a.cfg.Logf != nil {
+		a.cfg.Logf("store.error what=%s", e.Kind)
+	}
 }
 
 // annotations are MCP's hints for what a tool changes. destructiveHint is

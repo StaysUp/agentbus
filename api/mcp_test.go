@@ -28,6 +28,16 @@ func mcpEnv(t *testing.T) *env { return mcpEnvTools(t, true) }
 // mcpEnvTools is mcpEnv with [agent_api] tools as given.
 func mcpEnvTools(t *testing.T, tools bool) *env {
 	t.Helper()
+	return mcpEnvGrants(t, tools, map[string]run.Grant{
+		mcpWriteTok: {Session: "s1", Turn: "t_1", Root: "s1"},
+		mcpReadTok:  {Session: "s1", Turn: "t_1", Root: "s1", ReadOnly: true},
+	})
+}
+
+// mcpEnvGrants is an API whose runner tokens are grants' keys, each with its
+// grant, and [agent_api] tools as given.
+func mcpEnvGrants(t *testing.T, tools bool, grants map[string]run.Grant) *env {
+	t.Helper()
 	dir := t.TempDir()
 	p := settings.DefaultPolicy()
 	p.AgentAPI.Tools = &tools
@@ -43,13 +53,8 @@ func mcpEnvTools(t *testing.T, tools bool) *env {
 	a, err := New(Config{Store: st, Token: token, Port: port, BaseURL: "http://127.0.0.1:" + port,
 		Settings: settings.NewFiles(dir),
 		RunnerTokens: func(tok string) (run.Grant, bool) {
-			switch tok {
-			case mcpWriteTok:
-				return run.Grant{Session: "s1", Turn: "t_1", Root: "s1"}, true
-			case mcpReadTok:
-				return run.Grant{Session: "s1", Turn: "t_1", Root: "s1", ReadOnly: true}, true
-			}
-			return run.Grant{}, false
+			g, ok := grants[tok]
+			return g, ok
 		}})
 	if err != nil {
 		t.Fatal(err)

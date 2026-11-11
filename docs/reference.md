@@ -580,7 +580,7 @@ fields depend on the kind. Ignore kinds and fields you do not know: v0 may add b
 
 The kind says who wrote the event; there is no separate source field. `model.*`, `tool.requested`,
 `tool.completed`, `schema.unexpected` and `turn.completed` are observed by the gateway from the
-agent's model traffic. `session.*`, `tool.refused`, `network.refused`, `replay.failed`, `events.dropped` and the API's
+agent's model traffic. `session.*`, `tool.refused`, `tools.listed`, `network.refused`, `replay.failed`, `events.dropped` and the API's
 own `turn.started` are written by AgentBus about its own actions. `x.<program>.<name>` is written
 by a program and can never be a built-in kind. A runner's own reports about an attempt
 (`workspace.*`, `attempt.started`, `turn.created` and the like) stay in the queue, not here.
@@ -601,6 +601,7 @@ by a program and can never be a built-in kind. A runner's own reports about an a
 | `replay.failed` | a replayed turn's request could not be given the earlier turn's history; the gateway refused it and the turn fails | `error` |
 | `tool.refused` | the gateway refused a tool call because its command matched a `forbid` entry; the agent did not run it | `tool_id`, `tool_name`, `tool_input`, `rule`, `text` (what the model is told) |
 | `session.renamed` | the session was renamed with `PATCH /api/v0/sessions/{id}`; the latest names it | `title`, `old_title` (absent when it had none) |
+| `tools.listed` | control served the turn's tool list (`[agent_api] tools`): its first `tools/list` on `POST /api/v0/mcp`, once per turn | `turn`, `server` (`agentbus`), `tools` (the names served), `tools_hidden` (the harness's own tools the turn does not get, each `name` and `why`) |
 | `x.<program>.<name>` | a program's own event | `text`, `data`, `turn`; `vendor` is `program` |
 
 - `usage` is absent when the vendor sent none. Absent is not zero.

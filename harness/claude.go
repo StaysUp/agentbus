@@ -27,6 +27,14 @@ func (claude) Info() Info {
 		// .claude.json under CLAUDE_CONFIG_DIR when it is set.
 		ConfigEnv: "CLAUDE_CONFIG_DIR", ConfigDir: ".claude",
 		ToolServer: true,
+		// With the tool server, Claude Code's own agents are hidden, so
+		// AgentBus agents are the only agents the turn sees (his call,
+		// 2026-11-10). Claude Code 2.1.321 (2026-11-11, read from the tool
+		// list a haiku -p turn prints): Task starts a subagent (Agent in
+		// newer versions), ListAgents lists other Claude sessions on the
+		// machine and SendMessage writes to them. A turn asked "list other
+		// agents" used ListAgents and answered there were none (2026-11-10).
+		ToolsHidden: slices.Clone(claudeHidden),
 		// claude setup-token prints a long-lived OAuth token "for CI
 		// pipelines, scripts, or other environments", valid one year, which
 		// Claude Code reads from CLAUDE_CODE_OAUTH_TOKEN
@@ -235,15 +243,10 @@ func (claude) Args(t Turn) []string {
 	if t.NoSubagents {
 		denied = append(denied, "Task", "Agent", "Workflow")
 	}
-	// With the tool server, Claude Code's own agents are hidden, so
-	// AgentBus agents are the only agents the turn sees (his call,
-	// 2026-11-10). Claude Code 2.1.321 (2026-11-11, read from the tool list
-	// a haiku -p turn prints): Task starts a subagent (Agent in newer
-	// versions), ListAgents lists other Claude sessions on the machine and
-	// SendMessage writes to them. A turn asked "list other agents" used
-	// ListAgents and answered there were none (2026-11-10).
+	// With the tool server, the tools AgentBus tools replace are denied
+	// (Info.ToolsHidden).
 	if t.Tools != "" {
-		for _, n := range []string{"Task", "Agent", "ListAgents", "SendMessage"} {
+		for _, n := range claudeHidden {
 			if !slices.Contains(denied, n) {
 				denied = append(denied, n)
 			}
@@ -257,6 +260,9 @@ func (claude) Args(t Turn) []string {
 	}
 	return append(a, "--", t.Prompt)
 }
+
+// claudeHidden is claude's Info.ToolsHidden.
+var claudeHidden = []string{"Task", "Agent", "ListAgents", "SendMessage"}
 
 // claudeMCPConfig is the --mcp-config value of a turn with the tool server at
 // url: inline JSON, so nothing is written. Claude Code expands

@@ -147,3 +147,34 @@ func TestCodexOwnTools(t *testing.T) {
 		t.Errorf("claude: %q", why)
 	}
 }
+
+// Every harness denies, with the tool server, the tools its Info says it
+// hides (control names them in the turn's tools.listed), and keeps them
+// without it.
+func TestToolsHiddenAreDenied(t *testing.T) {
+	for _, h := range All() {
+		info := h.Info()
+		if len(info.ToolsHidden) == 0 {
+			continue
+		}
+		if !info.ToolServer {
+			t.Errorf("%s hides tools but takes no tool server", info.Name)
+		}
+		with := strings.Join(h.Args(Turn{Tools: toolsURL, Prompt: "hi"}), " ")
+		without := strings.Join(h.Args(Turn{Prompt: "hi"}), " ")
+		for _, n := range info.ToolsHidden {
+			if !strings.Contains(with, n) {
+				t.Errorf("%s: %s hidden but not denied: %s", info.Name, n, with)
+			}
+			if strings.Contains(without, n) {
+				t.Errorf("%s: %s denied without the tool server: %s", info.Name, n, without)
+			}
+		}
+	}
+	if got := (claude{}).Info().ToolsHidden; !slices.Equal(got, []string{"Task", "Agent", "ListAgents", "SendMessage"}) {
+		t.Errorf("claude hides %v", got)
+	}
+	if got := (codex{}).Info().ToolsHidden; len(got) != 0 {
+		t.Errorf("codex hides %v", got)
+	}
+}
