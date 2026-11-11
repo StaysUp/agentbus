@@ -80,6 +80,10 @@ const (
 	// KindSnapshot takes a snapshot of a folder, on its connector, for a
 	// runner that builds a copy from it (connector.go). It starts no turn.
 	KindSnapshot = "snapshot"
+	// KindFolder checks a folder a person typed, on the connector named, and
+	// registers it there: its result is the folder's reference (folder.go).
+	// It starts no turn.
+	KindFolder = "folder"
 )
 
 // Failure reasons.
@@ -271,6 +275,12 @@ type Spec struct {
 	// of it was applied before.
 	ApplyFrom string `json:"apply_from,omitempty"`
 	ApplyTo   string `json:"apply_to,omitempty"`
+	// Typed and TypedConnector: a new session's folder as the request typed
+	// it, and the connector it named. They are never stored; they only keep
+	// the request's hash what was asked, so a retry with the same key gets
+	// its turn without its folder being checked again.
+	Typed          string `json:"-"`
+	TypedConnector string `json:"-"`
 }
 
 // asked is spec as the request named it, for the idempotency hash: the
@@ -283,6 +293,9 @@ func (spec Spec) asked() Spec {
 		a.Harness = a.AgentID
 	}
 	a.AgentID, a.Access, a.KeyEnv, a.AgentModel = "", "", "", ""
+	if a.Typed != "" {
+		a.Folder, a.FolderRef, a.Connector = a.Typed, "", a.TypedConnector
+	}
 	if a.ModelFromAgent {
 		a.Model = ""
 	}
@@ -459,6 +472,10 @@ type Queue struct {
 	// applyMu makes Apply's read of a session's applies and its new job
 	// one step. One process keeps a queue (the record's lock says so).
 	applyMu sync.Mutex
+	// typed holds the path of each folder job that waits, by job id: in
+	// memory only, never in the file (folder.go).
+	typedMu sync.Mutex
+	typed   map[string]string
 }
 
 // Open opens or creates the queue at path. now is the clock; nil is time.Now.
@@ -1070,7 +1087,7 @@ func (q *Queue) Take(runnerID string, lease time.Duration) (job Job, att Attempt
 		var id string
 		err = tx.QueryRow(`SELECT j.id FROM jobs j, runners r WHERE r.id = ? AND j.team = ? AND j.state = 'queued'
 			AND (`+roleTake+`)
-			AND (j.kind IN ('snapshot','apply') OR j.session IS NULL OR NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team)
+			AND (j.kind IN ('snapshot','apply','folder') OR j.session IS NULL OR NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team)
 				OR EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team AND s.runner = r.id AND s.closed IS NULL))
 			AND (j.kind != 'turn' OR j.session IS NULL OR NOT EXISTS (SELECT 1 FROM jobs o WHERE o.team = j.team
 				AND o.state IN ('taken','running') AND ((o.session = j.session AND o.kind = 'turn') OR (`+reviewIn+`))))
@@ -1107,6 +1124,9 @@ func (q *Queue) Take(runnerID string, lease time.Duration) (job Job, att Attempt
 		ok = true
 		return nil
 	})
+	if ok && job.Kind == KindFolder {
+		job.Spec.Folder = q.typedPath(job.ID)
+	}
 	return job, att, ok, cleanup, err
 }
 
@@ -1171,8 +1191,9 @@ func reasonIf(ok bool, r string) string {
 	return ""
 }
 
-// sweepTx settles every attempt whose lease ran out, and ends the queued
-// turns of every ended session (sessionEnded).
+// sweepTx settles every attempt whose lease ran out, ends the queued
+// turns of every ended session (sessionEnded), and ends every folder job
+// that waited too long (endFoldersTx).
 func sweepTx(tx *sql.Tx, now time.Time) error {
 	rows, err := tx.Query(`SELECT `+attemptCols+` FROM attempts WHERE state IN ('taken','running') AND lease_until <= ?`, nanos(now))
 	if err != nil {
@@ -1202,6 +1223,9 @@ func sweepTx(tx *sql.Tx, now time.Time) error {
 		if err := endSnapshotsTx(tx, now, a.ID); err != nil {
 			return err
 		}
+	}
+	if err := endFoldersTx(tx, now); err != nil {
+		return err
 	}
 	// Whatever ended a session's first turn, its queued turns end here,
 	// before any runner can take one.

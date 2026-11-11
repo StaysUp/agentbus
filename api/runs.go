@@ -46,9 +46,9 @@ const badRun = "the body must be one JSON object with prompt, agent and folder (
 type TurnRequest struct {
 	Session   string `json:"session,omitempty" doc:"A session the snapshot calls resumable: this turn is its next one. Absent: a new session."`
 	Agent     string `json:"agent,omitempty" doc:"A saved agent's id, from GET /api/v0/agents: its harness, access and model run the turn. claude and codex also name that harness on its own subscription when no saved agent has that id. Required without session. With session it is optional: absent, the turn runs on the agent of the session's latest turn; sent, this turn runs on that agent, in the session's folder, and later turns that name none keep it. On the same harness as the latest turn the conversation continues by own replay; on another harness the turn gets the earlier turns as plain text (continuity transcript)."`
-	Folder    string `json:"folder,omitempty" doc:"An absolute path to an existing directory on this machine, for agentbus up: its built-in connector keeps the path and the queue keeps only the folder's reference. Without session, folder or folder_ref is required. With session it is the session's own; if sent it must match. agentbus server has no folders of its own and refuses it: send folder_ref."`
+	Folder    string `json:"folder,omitempty" doc:"An absolute path to a directory that the connector's user can read. A connector checks it and registers it: agentbus up's own; on agentbus server the one named in connector, or the only one connected. The queue keeps only the folder's reference, and GET /api/v0/folders lists the folder from then on. Without session, folder or folder_ref is required. With session it is the session's own; if sent it must match."`
 	FolderRef string `json:"folder_ref,omitempty" doc:"A folder's reference, fld_ and 16 hex digits, from GET /api/v0/folders: the turn runs in that folder, on the runner that owns it. For a new session, instead of folder."`
-	Connector string `json:"connector,omitempty" doc:"With folder_ref: the connector that owns the folder, from GET /api/v0/folders. Absent: this service's own connector."`
+	Connector string `json:"connector,omitempty" doc:"With folder_ref: the connector that owns the folder, from GET /api/v0/folders. With folder: the connector that checks and registers it. Absent: this service's own connector, or else the only one connected; with several connected, it is required for folder."`
 	Isolate   *bool  `json:"isolate,omitempty" doc:"True unless false, for a new session. True: the session runs in its own copy of folder, exactly as folder is now, uncommitted edits included, made as the isolation setting says (auto, overlay, copy, git or none). False: always folder as it is. Not sent with session."`
 	Prompt    string `json:"prompt" doc:"From 1 byte to 256 KiB, no NUL byte. Always passed after --."`
 	Model     string `json:"model,omitempty" doc:"Passed only as the value of --model. Absent with agent: the saved agent's model, for a new session or a turn that switches agent; a next turn that names the session's own latest agent keeps the session's model. A session's next turn with no agent and no model keeps the model of the session's latest turn, from its turn.started."`
@@ -198,6 +198,37 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		}
 		spec.Folder, spec.FolderRef, spec.Connector = body.Folder, body.FolderRef, body.Connector
 		spec.Isolate = body.Isolate == nil || *body.Isolate
+		if body.Folder != "" && body.FolderRef == "" {
+			// A typed folder: its connector checks and registers it, and the
+			// session goes on by its reference. A retry of a key already used
+			// is not checked again: the queue answers with the key's turn, or
+			// 409 when the request differs.
+			spec.Typed, spec.TypedConnector = body.Folder, body.Connector
+			known := false
+			if body.IdempotencyKey != "" {
+				if known, err = a.cfg.Queue.HasKey(queue.DefaultTeam, body.IdempotencyKey); err != nil {
+					a.internal(w)
+					return
+				}
+			}
+			ref, conn := "", ""
+			if !known {
+				var status int
+				var msg string
+				ref, conn, status, msg = a.typedFolder(r.Context(), body.Folder, body.Connector)
+				switch {
+				case status == 0 && msg != "":
+					return // the caller went away
+				case status == http.StatusInternalServerError:
+					a.internal(w)
+					return
+				case msg != "":
+					writeError(w, status, msg)
+					return
+				}
+			}
+			spec.Folder, spec.FolderRef, spec.Connector = "", ref, conn
+		}
 		if msg := queue.ResolveFolders(&spec, a.cfg.Folders); msg != "" {
 			writeError(w, http.StatusBadRequest, msg)
 			return

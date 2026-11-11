@@ -206,10 +206,11 @@ func TestServerAndRunner(t *testing.T) {
 	folder := t.TempDir()
 	t.Setenv("AGENTBUS_FAKE_MARK", filepath.Join(folder, "made.txt"))
 
-	// The server has no folders of its own: a path is refused. The runner
-	// owns the folder (-folder), and the server knows it by its reference.
-	if code, _ := startTurn(t, server, tok, map[string]any{"agent": "claude", "folder": folder, "prompt": "hello"}); code != 400 {
-		t.Fatalf("POST /api/v0/turns with a path on the server: %d, want 400", code)
+	// The server has no folders of its own, and no connector is connected
+	// yet to check a path: it is refused. The runner owns the folder
+	// (-folder), and the server knows it by its reference.
+	if code, _ := startTurn(t, server, tok, map[string]any{"agent": "claude", "folder": folder, "prompt": "hello"}); code != 503 {
+		t.Fatalf("POST /api/v0/turns with a path on the server and no connector: %d, want 503", code)
 	}
 	fr, err := folders.Open(filepath.Join(runnerHome, "folders.json"))
 	if err != nil {

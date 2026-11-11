@@ -726,6 +726,19 @@ func (j Jobs) SnapshotJob(ctx context.Context, ref string) (queue.SnapshotTaken,
 	return queue.SnapshotTaken{ID: t.ID, Times: t.Times, Files: t.Files, Git: t.Git}, nil
 }
 
+// FolderJob is Folders.Add, for a folder job: a folder a person typed,
+// checked and registered. Its errors are one sentence each, naming no path.
+// A job stopped while the folder was checked registers nothing.
+func (j Jobs) FolderJob(ctx context.Context, path string) (string, error) {
+	if err := folders.Check(path); err != nil {
+		return "", err
+	}
+	if err := ctx.Err(); err != nil {
+		return "", errors.New("the folder job was stopped")
+	}
+	return j.Folders.Register(path)
+}
+
 // ApplyJob is Apply, for an apply job: the files written, or the conflicts
 // that refused it; partial when not all files could be put in place.
 func (j Jobs) ApplyJob(ctx context.Context, ref, from, to string) (files []string, conflicts []queue.ApplyConflict, partial bool, err error) {

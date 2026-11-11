@@ -47,7 +47,12 @@ gets 409 with `stale: true`, and the runner stops that turn.
 **Three roles.** A runner runs agents in copies, each named after its session
 (`sessions/<session>` in its data folder; copies made before 0.4 stay in `worktrees/job_<id>`). A **connector** owns the folders of its machine:
 it enrolls like a runner, with `capabilities.role` `connector` and its `folders`, and takes only
-`snapshot` and `apply` jobs of those folders. Control (the server) never reads or writes a folder;
+`snapshot`, `apply` and `folder` jobs of those folders. A `folder` job names a path a person typed
+(`spec.folder`): the connector checks that it is a directory it can read, registers it, and
+answers its reference in `result.folder_ref`, or a one-sentence `refused`. It reports its folders
+again at once. The server never stores the path: it hands it out with the job from memory, so a
+job taken after the server restarted has none and is refused. One no connector took within 15
+seconds ends. Control (the server) never reads or writes a folder;
 it knows one by its reference. File data always goes through the server's blob store, by the hash
 of its content, never from a connector to a runner:
 
@@ -82,7 +87,7 @@ The modes:
 agentbus up                                   # control, a connector and a runner, one process
 agentbus server                               # control alone
 agentbus runner -server URL [-folder DIR]...  # a runner; with -folder, a connector beside it
-agentbus connector -server URL -folder DIR... # a connector alone: no agents, record or gateway
+agentbus connector -server URL [-folder DIR]... # a connector alone: no agents, record or gateway
 ```
 
 In `agentbus up` the three share the server's blob store on disk: nothing is sent over HTTP and

@@ -26,7 +26,7 @@ control's blob store, never straight from a connector to a runner.
 `agentbus up` runs all three in one process, and copies a folder by clone or overlay. `agentbus
 server` is control alone. `agentbus runner -server <url>` takes jobs from a server and runs them
 on its machine, with its own record and gateway; its own API starts no turns; with `-folder DIR`
-a connector runs beside it. `agentbus connector -server <url> -folder DIR...` is a connector alone.
+a connector runs beside it. `agentbus connector -server <url> [-folder DIR]...` is a connector alone; a folder a session names by path is added when the session starts.
 This file describes the API of `up` and `server`.
 
 A runner holds no secrets. The server mints each runner turn's token, which works while that

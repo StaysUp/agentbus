@@ -36,6 +36,10 @@ type FolderSide interface {
 	// not empty, refused it: nothing was written. partial: not every file
 	// could be put in place, and files are those that were.
 	ApplyJob(ctx context.Context, ref, from, to string) (files []string, conflicts []queue.ApplyConflict, partial bool, err error)
+	// FolderJob checks the folder at path, a folder a person typed, and
+	// registers it: it answers the folder's reference, or why it cannot
+	// be used, in one sentence.
+	FolderJob(ctx context.Context, path string) (ref string, err error)
 }
 
 // errPartial is a partial apply's refusal.
@@ -55,7 +59,7 @@ func applyFinish(status, reason string, res queue.Result) queue.Finish {
 	return queue.Finish{Status: status, Reason: reason, Result: mustJSON(res)}
 }
 
-// folderWork does a snapshot or an apply job, on a connector. It stops
+// folderWork does a snapshot, an apply or a folder job, on a connector. It stops
 // reading the folder and the store once the job is cancelled, the attempt
 // is no longer current, or the runner stops: an apply stopped so writes
 // nothing, as no file is put in place before every one is staged.
@@ -73,6 +77,23 @@ func (r *Runner) folderWork(ctx context.Context, at *attempt) queue.Finish {
 	if r.cfg.Role != queue.RoleConnector || r.cfg.FolderSide == nil || r.cfg.Folders == nil ||
 		sp.Connector != r.cfg.Folders.Connector() {
 		return refuse("this runner is not the connector of the job's folder", nil)
+	}
+	if at.job.Kind == queue.KindFolder {
+		if sp.Folder == "" {
+			// Control keeps a typed path in memory only: it restarted since.
+			return refuse("the folder's path is no longer known; send the turn again", nil)
+		}
+		ref, err := r.cfg.FolderSide.FolderJob(ctx, sp.Folder)
+		if err != nil {
+			return queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup,
+				Result: mustJSON(queue.Result{Refused: err.Error(), Status: http.StatusBadRequest})}
+		}
+		// Reported now, so GET /api/v0/folders lists it at once.
+		select {
+		case r.reportNow <- struct{}{}:
+		default:
+		}
+		return queue.Finish{Status: queue.Finished, Result: mustJSON(queue.Result{FolderRef: ref})}
 	}
 	if _, ok := r.cfg.Folders.Path(sp.FolderRef); !ok {
 		return refuse(folderUnknown, nil)

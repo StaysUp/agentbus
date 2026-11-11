@@ -288,7 +288,7 @@ One program has three roles:
 |---|---|---|
 | `agentbus up` | Control, a connector and a runner, in one process | One person on one machine. The default. |
 | `agentbus server` | Control alone | The machine that holds the record. |
-| `agentbus connector -server <url> -folder DIR...` | A connector alone | The machine that holds the code. |
+| `agentbus connector -server <url>` | A connector alone | The machine that holds the code. |
 | `agentbus runner -server <url>` | A runner; with `-folder DIR`, a connector beside it | Any machine that should run agents. |
 
 On one machine, `agentbus up` is all you need. Its copy is a clone or an overlay of your folder,
@@ -301,7 +301,7 @@ they work behind a router.
 ```sh
 # On the machine with the code: control, then a connector for your folders.
 agentbus server -listen 0.0.0.0
-agentbus connector -server http://127.0.0.1:8787 -folder ~/code/app
+agentbus connector -server http://127.0.0.1:8787
 
 # On each runner machine, with the server's enroll_token file copied over (mode 0600):
 agentbus runner -server http://devbox:8787 -enroll-token-file ./enroll_token
@@ -311,9 +311,11 @@ A runner on the same machine as its server needs its own data folder (`AGENTBUS_
 runner in a Lima VM and a server on the Mac's loopback, start the server with
 `-host host.lima.internal`. `go run ./tools/remote` runs the whole path that way.
 
-`agentbus server` has no folders of its own. A session names its folder by reference:
-`GET /api/v0/folders` lists them, and a turn sends `folder_ref`, `connector` and
-`"isolate": true` in place of `folder`. A cockpit does this for you.
+A session starts in any folder you type. `agentbus server` has no folders of its own, so it asks
+the connector: the connector checks that the folder exists and that it can read it, and keeps it.
+No restart and no `-folder` flag is needed. With several connectors, the turn names one in
+`connector`. `GET /api/v0/folders` lists every folder used so far, and a turn can name one by
+`folder_ref` and `connector` instead.
 
 File contents go through control's store, by the SHA-256 of each file, so each side sends only
 what the other lacks. A runner builds a session's copy from a snapshot the connector took. At the

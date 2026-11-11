@@ -70,7 +70,7 @@ func (c config) modeName() string {
 const usage = `usage: agentbus up     [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false] [-max-runs 4]
        agentbus server [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false]
        agentbus runner -server URL [-enroll-token-file F] [-gateway server|local] [-capacity 4] [-name NAME] [-folder DIR]... [-labels a,b] [-listen 127.0.0.1:0] [-replay=false]
-       agentbus connector -server URL -folder DIR... [-enroll-token-file F] [-name NAME]
+       agentbus connector -server URL [-folder DIR]... [-enroll-token-file F] [-name NAME]
        agentbus connect HARNESS           (on control, once: keep your own subscription's token for your runners)
        agentbus api METHOD PATH [BODY]   (inside a turn: calls this service with the turn's token)
        agentbus version`
@@ -218,7 +218,7 @@ func parseConnector(args []string, home string, stderr io.Writer) (config, bool)
 	fl := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	fl.SetOutput(stderr)
 	var folderList folderFlags
-	fl.Var(&folderList, "folder", "a folder on this machine that sessions may copy and apply to, by its absolute path; repeat it for each one (required)")
+	fl.Var(&folderList, "folder", "a folder on this machine that sessions may copy and apply to, by its absolute path; repeat it for each one. A folder a session names by path is added when the session starts, so none is required")
 	server := fl.String("server", "", "the server's URL, such as http://192.168.1.10:8787 (required)")
 	enrollFile := fl.String("enroll-token-file", "", "the server's enroll_token, copied here with mode 0600; default <data folder>/enroll_token")
 	runnerName := fl.String("name", "", "the connector's name; default the host name")
@@ -232,10 +232,6 @@ func parseConnector(args []string, home string, stderr io.Writer) (config, bool)
 	u, err := url.Parse(*server)
 	if *server == "" || err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		fmt.Fprintf(stderr, "%s: -server must be the server's URL, such as http://192.168.1.10:8787\n", name)
-		return c, false
-	}
-	if len(folderList) == 0 {
-		fmt.Fprintf(stderr, "%s: name at least one -folder\n", name)
 		return c, false
 	}
 	for _, f := range folderList {

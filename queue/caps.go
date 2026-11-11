@@ -132,9 +132,9 @@ const remoteIsolated = `(j.kind = 'turn' AND json_extract(j.spec, '$.isolate') A
 const connectorTake = `COALESCE(json_extract(j.spec, '$.connector'), '') = '' OR ` + remoteIsolated + `
 	OR json_extract(j.spec, '$.connector') = json_extract(r.caps, '$.connector')`
 
-// roleTake: snapshot and apply jobs go only to the connector of their
+// roleTake: snapshot, apply and folder jobs go only to the connector of their
 // folder, and every other job only to a runner.
-const roleTake = `CASE WHEN j.kind IN ('snapshot','apply')
+const roleTake = `CASE WHEN j.kind IN ('snapshot','apply','folder')
 	THEN COALESCE(json_extract(r.caps, '$.role'), '') = 'connector' AND json_extract(j.spec, '$.connector') = json_extract(r.caps, '$.connector')
 	ELSE COALESCE(json_extract(r.caps, '$.role'), '') != 'connector' END`
 
@@ -270,6 +270,9 @@ var SnapshotShape = regexp.MustCompile(`^[0-9a-f]{64}$`)
 type FolderIssuer interface {
 	Connector() string
 	Register(path string) (ref string, err error)
+	// Add is Register for a folder a person typed: it must be an existing
+	// directory they can read, and its error says why not in one sentence.
+	Add(path string) (ref string, err error)
 	Path(ref string) (string, bool)
 	// Within says the folder at path is the folder ref or inside it, and
 	// WithinRef the same of the folder child: on the connector, where the

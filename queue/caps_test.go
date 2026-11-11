@@ -168,7 +168,8 @@ func TestFoldersListed(t *testing.T) {
 
 type fakeIssuer map[string]string
 
-func (f fakeIssuer) Connector() string { return conA }
+func (f fakeIssuer) Connector() string            { return conA }
+func (f fakeIssuer) Add(p string) (string, error) { return f.Register(p) }
 func (f fakeIssuer) Register(p string) (string, error) {
 	ref := "fld_" + strings.Repeat("0", 15) + string(rune('0'+len(f)))
 	for k, v := range f {

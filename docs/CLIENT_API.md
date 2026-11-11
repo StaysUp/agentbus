@@ -648,11 +648,26 @@ process that does it.
   reaches the folder. The session's `folder` in its events is the copy's folder.
   `"isolate": false`, or the setting `"none"`, uses the folder as it is.
   `isolate` with `session` is refused: a session keeps its copy.
-- **A folder is kept by its reference.** In `agentbus up` the built-in connector keeps the path of
-  `folder` in `folders.json` in the data folder, and the queue keeps only `folder_ref` and
-  `connector`. Send those two in place of `folder` to name a folder another machine owns, from
-  `GET /api/v0/folders`; `agentbus server` takes only those. The turn runs on the runner that owns
-  the folder.
+- **A folder is kept by its reference.** A connector keeps the path of `folder` in `folders.json`
+  in its data folder, and the queue keeps only `folder_ref` and `connector`. Send those two in
+  place of `folder` to name a folder from `GET /api/v0/folders`. The turn runs on the runner that
+  owns the folder, or, isolated, on any runner from the folder's snapshot.
+- **Any folder can be typed.** `folder` need not be one the connector was started with. Its
+  connector checks it and registers it, and the session goes on by its reference;
+  `GET /api/v0/folders` lists it from then on. Which connector: in `agentbus up`, its own. On
+  `agentbus server`, the one named in `connector`, or else the only one connected. No restart and
+  no `-folder` flag is needed. The refusals, one sentence each:
+  - 400 `the folder does not exist on the connector's machine`
+  - 400 `the folder is a file, not a directory`
+  - 400 `the folder cannot be read by the user the connector runs as`
+  - 400 `<n> connectors are connected; name the folder's connector, from GET /api/v0/folders`
+  - 503 `no connector is connected, so the folder cannot be reached; start agentbus connector on the folder's machine`
+  - 503 `connector <id> is not connected; start it, or name another`
+  - 503 `the connector did not check the folder within 15 seconds; check that it runs, and send the turn again`
+
+  On a server the path is never written to disk: control holds it in memory only while the
+  connector checks it. A retry with the same `idempotency_key` is not checked again: it answers
+  the turn the key started, even if the folder has moved since.
 
 The reply is **202** `{"session":"abc","turn":"t_5d0c19a2e7b3f481","state":"running","base_url":"http://127.0.0.1:8787/s/abc/t/t_5d0c19a2e7b3f481"}`,
 sent as soon as the agent has started. `session` is the session, `turn` the new turn. The agent's
@@ -1490,10 +1505,11 @@ The main token only. Newest seen first.
 ```
 
 A folder is known here by its reference, `fld_` and 16 hex digits, issued by the connector on the
-machine that has it (in `agentbus up`, this service's own; on another machine, `agentbus connector
--folder <path>` or `agentbus runner -folder <path>`). The path stays on that machine; `name` is its last part only. Start a turn in it
-with `folder_ref` and `connector`. In `agentbus up` every folder a turn was started in is listed,
-newest first, within a minute of its first turn. A session's copy is never listed, though a turn
+machine that has it (in `agentbus up`, this service's own; on another machine, `agentbus connector`
+or `agentbus runner -folder <path>`). The path stays on that machine; `name` is its last part only. Start a turn in it
+with `folder_ref` and `connector`. Every folder a turn was started in by path is listed, newest
+first: at once from `agentbus connector`, within a minute in `agentbus up`. So are the folders a
+connector was started with (`-folder`). A session's copy is never listed, though a turn
 may run in one: a folder in the data folder's `sessions/` or `worktrees/`, or a 0.2 copy
 (`worktrees/job_…`) wherever its data folder was.
 
@@ -2221,6 +2237,11 @@ then on, a change that breaks a client gets a new version path, and the old one 
 **What 0.4 changes after 0.3.** The API is now three nouns, agent, session and turn, and every
 action is on a turn. The old routes are removed with no alias: 0.3 had no outside users.
 
+- **A session starts in any folder typed.** `agentbus server` no longer refuses `folder`: a
+  connector checks the path and registers it ([Start a turn](#post-apiv0turns--start-a-turn)).
+  The refusals of a missing folder, a file and an unreadable folder are one sentence each, in
+  `agentbus up` too. `agentbus connector` needs no `-folder`. A connector takes a third job kind,
+  `folder`.
 - **A turn exists from the moment it is asked for.** `POST /api/v0/turns` answers
   `{session, turn, state, base_url, existing, ahead}`; `state` is `running` or `queued`, and `turn`
   is always there. `id` (the session), `job` and `queued` are gone. `GET /api/v0/turns/<id>` and
@@ -2331,7 +2352,7 @@ then what 0.3 changed after it.
   machine: takes their snapshots, applies changes into them) and the **runner** (runs agents in
   copies). A connector is a runner with `capabilities.role` `connector` that takes only the new job
   kinds `snapshot` and `apply`, of its own folders. `agentbus up` runs all three in one process;
-  `agentbus connector -server URL -folder DIR...` runs a connector alone ([Modes](#the-runner-protocol)).
+  `agentbus connector -server URL [-folder DIR]...` runs a connector alone ([Modes](#the-runner-protocol)).
 - **Apply goes up to a turn, all or nothing.** `POST /api/v0/turns/<id>/apply` applies every turn of
   the session not yet applied, up to and including this one, on the folder's connector. It checks
   every file first and writes nothing on a conflict, then stages every file before putting any in

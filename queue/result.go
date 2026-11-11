@@ -41,6 +41,9 @@ type Result struct {
 	Changeset string `json:"changeset,omitempty"`
 	// Snapshot, for a snapshot job: the snapshot it took.
 	Snapshot *SnapshotTaken `json:"snapshot,omitempty"`
+	// FolderRef, for a folder job: the reference the connector registered
+	// the typed folder under.
+	FolderRef string `json:"folder_ref,omitempty"`
 }
 
 // SnapshotTaken is a snapshot a connector took: its id, the blob of its

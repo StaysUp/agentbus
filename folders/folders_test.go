@@ -106,3 +106,44 @@ func TestListLeavesOutCopies(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A typed folder must be an existing directory this user can read; each
+// refusal is its own sentence, and Add registers only a folder that passes.
+func TestAddChecks(t *testing.T) {
+	r, err := Open(filepath.Join(t.TempDir(), "folders.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	file := filepath.Join(dir, "f")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	locked := filepath.Join(dir, "locked")
+	if err := os.Mkdir(locked, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(locked, 0o700) })
+	cases := []struct {
+		path string
+		want error
+	}{
+		{"relative", ErrNotAbsolute},
+		{filepath.Join(dir, "nope"), ErrNoFolder},
+		{file, ErrNotDir},
+		{locked, ErrUnreadable},
+		{dir, nil},
+	}
+	for _, c := range cases {
+		if c.want == ErrUnreadable && os.Geteuid() == 0 {
+			continue // root reads every folder
+		}
+		ref, err := r.Add(c.path)
+		if err != c.want {
+			t.Errorf("Add(%s): %v, want %v", c.path, err, c.want)
+		}
+		if _, ok := r.Path(Ref(c.path)); ok != (c.want == nil) || (c.want == nil && ref != Ref(dir)) {
+			t.Errorf("Add(%s) registered %v, ref %q", c.path, ok, ref)
+		}
+	}
+}

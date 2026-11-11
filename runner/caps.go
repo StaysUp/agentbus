@@ -60,6 +60,7 @@ func (r *Runner) report(ctx context.Context, wg *sync.WaitGroup) {
 		case <-ctx.Done():
 			return
 		case <-time.After(harness.ProbeEvery):
+		case <-r.reportNow:
 		}
 	}
 }

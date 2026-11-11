@@ -115,6 +115,9 @@ type Runner struct {
 	cleanMu   sync.Mutex      // one workspace removal at a time
 	cleaned   map[string]bool // sessions this process already cleaned, under cleanMu
 	down      retry           // the take loops' wait while control does not answer
+	// reportNow asks report to send the capabilities at once: a connector
+	// registered a folder.
+	reportNow chan struct{}
 }
 
 // state is what StateFile keeps.
@@ -148,7 +151,7 @@ func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 	if cfg.Labels == nil {
 		cfg.Labels = []string{"agentbus"}
 	}
-	r := &Runner{cfg: cfg,
+	r := &Runner{cfg: cfg, reportNow: make(chan struct{}, 1),
 		// Shorter than a lease, so one slow call cannot outlast it.
 		short: &http.Client{Timeout: 10 * time.Second, Transport: cfg.HTTP.Transport}}
 	// A saved identity is used again when the control plane still knows it.
@@ -613,12 +616,12 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 		return
 	}
 	switch {
-	case job.Kind == queue.KindApply || job.Kind == queue.KindSnapshot:
+	case job.Kind == queue.KindApply || job.Kind == queue.KindSnapshot || job.Kind == queue.KindFolder:
 		at.finish(ctx, r.folderWork(ctx, at))
 		return
 	case r.cfg.Role == queue.RoleConnector:
 		at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup,
-			Result: mustJSON(queue.Result{Refused: "a connector takes only snapshot and apply jobs", Status: http.StatusBadRequest})})
+			Result: mustJSON(queue.Result{Refused: "a connector takes only snapshot, apply and folder jobs", Status: http.StatusBadRequest})})
 		return
 	}
 	refused := r.prepare(ctx, at)

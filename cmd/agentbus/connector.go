@@ -175,7 +175,7 @@ func runConnector(c config, own func(string, ...any)) int {
 		own("%v", err)
 		return 1
 	}
-	own("connector taking snapshot and apply jobs from %s for %d folder(s); data folder %s", c.server, len(c.folders), c.home)
+	own("connector taking snapshot, apply and folder jobs from %s for %d folder(s), and any folder a session names; data folder %s", c.server, len(fr.List(queue.MaxFolders)), c.home)
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	<-sig

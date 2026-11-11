@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -33,6 +34,49 @@ const MaxPath = 4096
 
 // ErrNotAbsolute: a folder is named by an absolute path.
 var ErrNotAbsolute = errors.New("folders: the folder must be an absolute path, at most 4096 bytes")
+
+// Why a typed folder cannot be used, one sentence each. None names the path:
+// the refusal is stored on the control plane.
+var (
+	ErrNoFolder   = errors.New("the folder does not exist on the connector's machine")
+	ErrNotDir     = errors.New("the folder is a file, not a directory")
+	ErrUnreadable = errors.New("the folder cannot be read by the user the connector runs as")
+)
+
+// Check says why the folder at path cannot be used, or nil: it must be an
+// absolute path to an existing directory this user can read.
+func Check(path string) error {
+	if len(path) > MaxPath || !filepath.IsAbs(path) {
+		return ErrNotAbsolute
+	}
+	fi, err := os.Stat(path)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return ErrNoFolder
+	case err != nil:
+		return ErrUnreadable
+	case !fi.IsDir():
+		return ErrNotDir
+	}
+	d, err := os.Open(path)
+	if err != nil {
+		return ErrUnreadable
+	}
+	defer d.Close()
+	if _, err := d.Readdirnames(1); err != nil && !errors.Is(err, io.EOF) {
+		return ErrUnreadable
+	}
+	return nil
+}
+
+// Add checks the folder at path (Check), then registers it (Register): a
+// folder a person typed, used from now on by its reference.
+func (r *Registry) Add(path string) (string, error) {
+	if err := Check(path); err != nil {
+		return "", err
+	}
+	return r.Register(path)
+}
 
 // Registry is the folders of one connector. It is safe for concurrent use.
 type Registry struct {

@@ -404,6 +404,11 @@ func TestAskInOwnCopy(t *testing.T) {
 	if code, out := as(t, e, tok, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"x","folder":"`+t.TempDir()+`"}`); code != 403 {
 		t.Errorf("a folder outside: %d %s", code, out)
 	}
+	// A folder inside, checked here, never goes to another connector.
+	if code, out := as(t, e, tok, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"x","folder":"`+filepath.Join(folder, "sub")+
+		`","connector":"con_0123456789abcdef"}`); code != 403 {
+		t.Errorf("a folder inside, on another connector: %d %s", code, out)
+	}
 	for _, p := range []string{"root", "in-copy", "in-copy-sub", "in-folder-sub"} {
 		release(dir, p)
 	}

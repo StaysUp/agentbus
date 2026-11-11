@@ -472,5 +472,13 @@ func (a *API) askChecks(w http.ResponseWriter, g run.Grant, perm settings.Policy
 			}
 		}
 	}
+	// A path was checked on this service's own connector, so it goes there
+	// and nowhere else: never to another connector's machine.
+	if body.Folder != "" {
+		if body.Connector != "" && body.Connector != connector {
+			return refuse(turnFolderRefused)
+		}
+		body.Connector = connector
+	}
 	return askedLinks(g), true
 }
