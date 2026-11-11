@@ -620,18 +620,19 @@ func (s *service) sample(peak *int64) func() {
 }
 
 // disk is the space allocated under the data folder, in bytes, without the
-// session copies themselves (worktrees/<id>): a clone or an overlay shares
-// the folder's blocks, so counting its files would count the folder again.
-// Shared blocks elsewhere (an overlay's reflinked lower layer) are counted in
-// full; free is the disk's own figure.
+// session copies themselves (sessions/<id>, and worktrees/<id> from builds
+// before 0.4): a clone or an overlay shares the folder's blocks, so counting
+// its files would count the folder again. Shared blocks elsewhere (an
+// overlay's reflinked lower layer) are counted in full; free is the disk's
+// own figure.
 func (s *service) disk() int64 {
-	work := filepath.Join(s.home, "worktrees")
+	copies := map[string]bool{filepath.Join(s.home, "sessions"): true, filepath.Join(s.home, "worktrees"): true}
 	var total int64
 	filepath.WalkDir(s.home, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		if d.IsDir() && filepath.Dir(p) == work && d.Name() != ".isolation" {
+		if d.IsDir() && copies[filepath.Dir(p)] && d.Name() != ".isolation" {
 			return filepath.SkipDir
 		}
 		if fi, err := d.Info(); err == nil {
