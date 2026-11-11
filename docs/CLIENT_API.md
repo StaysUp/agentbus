@@ -1453,7 +1453,9 @@ A folder is known here by its reference, `fld_` and 16 hex digits, issued by the
 machine that has it (in `agentbus up`, this service's own; on another machine, `agentbus connector
 -folder <path>` or `agentbus runner -folder <path>`). The path stays on that machine; `name` is its last part only. Start a turn in it
 with `folder_ref` and `connector`. In `agentbus up` every folder a turn was started in is listed,
-newest first, within a minute of its first turn.
+newest first, within a minute of its first turn. A session's copy is never listed, though a turn
+may run in one: a folder in the data folder's `sessions/` or `worktrees/`, or a 0.2 copy
+(`worktrees/job_…`) wherever its data folder was.
 
 ### Subscriptions — your own sign-in, for your own runners
 

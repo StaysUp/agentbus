@@ -146,6 +146,7 @@ func runConnector(c config, own func(string, ...any)) int {
 		own("%v", err)
 		return 1
 	}
+	fr.CopiesIn(filepath.Join(c.home, copiesDir), filepath.Join(c.home, oldCopiesDir))
 	for _, f := range c.folders {
 		if _, err := fr.Register(f); err != nil {
 			own("-folder %s: %v", f, err)

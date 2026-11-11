@@ -423,7 +423,8 @@ var routes = slices.Concat([]route{
 		summary: "List folders",
 		doc: "The folders the runners own, each by its reference: a turn names one as folder_ref, with its connector. " +
 			"A folder's path stays on the machine that owns it; the answer has only the last part of it. " +
-			"In agentbus up every folder a turn was started in is listed, newest first, within a minute of its first turn. No body is read.",
+			"In agentbus up every folder a turn was started in is listed, newest first, within a minute of its first turn. " +
+			"A session's copy is never listed, though a turn may run in one. No body is read.",
 		replies: []reply{ok(200, FolderList{}, "The folders."), badRequest},
 		serve:   plain((*API).listFolders)},
 

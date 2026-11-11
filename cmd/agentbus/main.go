@@ -330,6 +330,7 @@ func start(c config) (*service, error) {
 			st.Close()
 			return nil, err
 		}
+		fr.CopiesIn(filepath.Join(c.home, copiesDir), filepath.Join(c.home, oldCopiesDir))
 		if c.mode == modeUp {
 			issuer = fr
 		}

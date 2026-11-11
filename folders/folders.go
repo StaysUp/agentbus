@@ -41,6 +41,7 @@ type Registry struct {
 	mu        sync.Mutex
 	connector string
 	folders   map[string]entry
+	copies    []string // the folders that hold session copies (CopiesIn)
 }
 
 type entry struct {
@@ -161,13 +162,61 @@ func within(folder, dir string) bool {
 	return f == d || strings.HasPrefix(f, d+string(os.PathSeparator))
 }
 
+// CopiesIn names the folders that hold this machine's session copies: the
+// data folder's sessions/ and worktrees/. List leaves out each folder inside
+// them. A turn may still name one, such as the asked work of a session on a
+// worktree, which runs in that session's copy, so it stays registered and a
+// job that names it by reference still finds it. It is never one of the
+// person's folders to pick.
+func (r *Registry) CopiesIn(dirs ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.copies = r.copies[:0]
+	for _, d := range dirs {
+		r.copies = append(r.copies, filepath.Clean(d))
+	}
+}
+
+// isCopy says path is inside one of dirs, or is a copy made by 0.2 in any
+// data folder: worktrees/job_ and 16 hex digits, or a folder inside it.
+// 0.3.0's migration registered those (a 0.2 asked turn named the asking
+// job's copy), some in a data folder since moved, so its path is not known.
+func isCopy(path string, dirs []string) bool {
+	for _, d := range dirs {
+		if strings.HasPrefix(path, d+string(os.PathSeparator)) {
+			return true
+		}
+	}
+	parts := strings.Split(path, string(os.PathSeparator))
+	for i := 0; i+1 < len(parts); i++ {
+		if parts[i] == "worktrees" && oldJobID(parts[i+1]) {
+			return true
+		}
+	}
+	return false
+}
+
+// oldJobID says s is shaped as a job id: job_ and 16 lowercase hex digits.
+func oldJobID(s string) bool {
+	if len(s) != 20 || s[:4] != "job_" {
+		return false
+	}
+	for _, c := range s[4:] {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
 // Folder is one folder as the control plane may know it.
 type Folder struct {
 	Ref  string
 	Name string // the last part of its path
 }
 
-// List is the folders, newest registered first, at most max.
+// List is the folders, newest registered first, at most max. Session
+// copies are left out (CopiesIn).
 func (r *Registry) List(max int) []Folder {
 	r.mu.Lock()
 	type kv struct {
@@ -176,7 +225,9 @@ func (r *Registry) List(max int) []Folder {
 	}
 	all := make([]kv, 0, len(r.folders))
 	for k, v := range r.folders {
-		all = append(all, kv{k, v})
+		if !isCopy(v.Path, r.copies) {
+			all = append(all, kv{k, v})
+		}
 	}
 	r.mu.Unlock()
 	sort.Slice(all, func(i, j int) bool {
