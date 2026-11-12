@@ -35,6 +35,9 @@ archives:
       - LICENSE
       - README.md
       - THIRD_PARTY.md
+      # The AppArmor profile Ubuntu 24.04 needs for the session wall and
+      # [network] contain; install.sh writes the same rules.
+      - packaging/apparmor/agentbus
 
 checksum:
   name_template: checksums.txt

@@ -1,13 +1,22 @@
-# AppArmor profile for agentbus. Ubuntu 24.04 and later let a program make
-# an unprivileged user namespace only when a profile allows it. agentbus up
-# and agentbus runner, when not root, run in their own user and mount
-# namespace so a session's copy can be an overlay mount. This profile allows
-# that one thing, the way Ubuntu's own profiles allow it for podman.
+# AppArmor profile for agentbus. Ubuntu 23.10 and later
+# (kernel.apparmor_restrict_unprivileged_userns=1) let an unconfined program
+# make a user namespace only with no capabilities in it. agentbus needs
+# them: for the session wall (bubblewrap), for [network] contain (loopback
+# in the agent's network namespace) and for overlay copies without root.
+# This profile allows user namespaces and nothing else changes, the way
+# Ubuntu's own profiles do it for chrome and flatpak. The programs agentbus
+# starts, bubblewrap and the agents among them, keep this profile, so
+# bubblewrap needs none of its own.
 #
-# install.sh installs it for the binary it installed, as root, only on
-# systems that restrict user namespaces:
-#   curl -fsSL https://raw.githubusercontent.com/staysup/agentbus/main/install.sh | sudo sh -s apparmor /path/to/agentbus
-# The path below is the binary's; a moved or renamed binary needs it again.
+# Its path must be one only root can change: whoever can put another
+# program there gets user namespaces for it. install.sh refuses any other.
+# It installs it as root, when asked:
+#   curl -fsSL https://raw.githubusercontent.com/staysup/agentbus/main/install.sh | sudo AGENTBUS_INSTALL_DIR=/usr/local/bin sh
+# or for a binary already in such a folder:
+#   curl -fsSL https://raw.githubusercontent.com/staysup/agentbus/main/install.sh | sudo sh -s apparmor /usr/local/bin/agentbus
+# By hand, with this file: copy it to /etc/apparmor.d/agentbus, set the
+# path below to the binary's, and run sudo apparmor_parser -r /etc/apparmor.d/agentbus.
+# A moved or renamed binary needs it again.
 
 abi <abi/4.0>,
 include <tunables/global>

@@ -175,7 +175,7 @@ func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 		short: &http.Client{Timeout: 10 * time.Second, Transport: cfg.HTTP.Transport}}
 	if cfg.Sandbox != nil {
 		can, why := cfg.Sandbox()
-		r.sandbox = &queue.SandboxReport{Can: can, Why: why}
+		r.sandbox = queue.NewSandboxReport(can, why)
 	}
 	// A saved identity is used again when the control plane still knows it.
 	if st, ok := loadState(cfg.StateFile); ok {
