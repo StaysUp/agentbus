@@ -257,6 +257,18 @@ func TestCommandsKeyRetired(t *testing.T) {
 	if err != nil || *p.Subagents {
 		t.Fatalf("JSON with commands: %+v %v", p, err)
 	}
+	for _, src := range []string{"subscriptions_on_runners = \"own\"\n", "subscriptions_on_runners = \"off\"\n"} {
+		p, err := ParsePolicy([]byte(src))
+		if err != nil {
+			t.Fatalf("%q: %v", src, err)
+		}
+		if strings.Contains(string(FormatPolicy(p)), "subscriptions_on_runners") {
+			t.Errorf("%q: the policy written back holds subscriptions_on_runners", src)
+		}
+	}
+	if _, err := DecodePolicy([]byte(`{"subscriptions_on_runners":"own"}`)); err != nil {
+		t.Errorf("JSON with subscriptions_on_runners: %v", err)
+	}
 	if _, err := ParsePolicy([]byte("command = true\n")); err == nil || !strings.Contains(err.Error(), `unknown key "command"`) {
 		t.Errorf("an unknown key: %v", err)
 	}

@@ -653,6 +653,75 @@ func TestUpgradeRemovesRetiredKey(t *testing.T) {
 	}
 }
 
+// A settings.db that 0.5 wrote, with its two steps done and
+// subscriptions_on_runners stored (the cockpit's "Turn on for my runners"),
+// loses the key on the first start of 0.5.1: one change whose
+// settings.changed event names it, the rest kept. A second start does
+// nothing.
+func TestUpgradeRemovesSubscriptionsOnRunners(t *testing.T) {
+	dir := home(t)
+	storedDB(t, dir, `{"subscriptions_on_runners":"own","forbid":["rm"]}`)
+	d, err := openDB(filepath.Join(dir, DBFile), fixedNow, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.db.Exec(`INSERT INTO meta(key, value) VALUES ('upgrades', '2') ON CONFLICT(key) DO UPDATE SET value = excluded.value`); err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+	d, rep, err := upgrade(dir).Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(rep.Removed, ",") != "subscriptions_on_runners" || len(rep.Kept) != 0 {
+		t.Fatalf("removed %v kept %v", rep.Removed, rep.Kept)
+	}
+	var got []Change
+	d.SetSink(func(c Change) error { got = append(got, c); return nil }, nil)
+	if s := stored(t, d, SettingPermissions); s != `{"forbid":["rm"]}` {
+		t.Fatalf("stored %s", s)
+	}
+	if len(got) != 1 || got[0].Setting != SettingPermissions || strings.Join(got[0].Keys, ",") != "subscriptions_on_runners" || got[0].File != "" {
+		t.Fatalf("events %+v", got)
+	}
+	if p, _, err := d.Policy(); err != nil || p.Forbid[0] != "rm" {
+		t.Fatalf("policy %+v %v", p, err)
+	}
+	d.Close()
+
+	d, rep, err = upgrade(dir).Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if len(rep.Removed) != 0 || len(rep.Kept) != 0 {
+		t.Fatalf("second start: removed %v kept %v", rep.Removed, rep.Kept)
+	}
+	if cs, _, _ := d.Changes(); len(cs) != 1 {
+		t.Fatalf("second start: %d changes", len(cs))
+	}
+}
+
+// A 0.4 permissions.toml that sets subscriptions_on_runners imports without
+// error, and the stored policy never holds it.
+func TestUpgradeImportsFileWithSubscriptionsOnRunners(t *testing.T) {
+	for _, v := range []string{`"own"`, `"off"`} {
+		dir := home(t)
+		write(t, filepath.Join(dir, PolicyFile), "subscriptions_on_runners = "+v+"\nforbid = [\"rm\"]\n")
+		d, rep, err := upgrade(dir).Run()
+		if err != nil {
+			t.Fatalf("%s: %v", v, err)
+		}
+		if strings.Join(rep.Imported, ",") != PolicyFile || len(rep.Removed) != 0 {
+			t.Fatalf("%s: imported %v removed %v", v, rep.Imported, rep.Removed)
+		}
+		if s := stored(t, d, SettingPermissions); strings.Contains(s, "subscriptions") || !strings.Contains(s, `"forbid":["rm"]`) {
+			t.Fatalf("%s: stored %s", v, s)
+		}
+		d.Close()
+	}
+}
+
 // A stored policy without a retired key is not written, and makes no change.
 func TestUpgradeNoRetiredKey(t *testing.T) {
 	dir := home(t)

@@ -3,8 +3,8 @@ package credentials
 // The person's own subscriptions, for runners they own: each harness's
 // sign-in, connected once with the vendor's own login (Manager) and kept in
 // control's data folder, one file per harness, readable by its owner only.
-// Never the Mac Keychain, never a runner. Only used when the policy says
-// subscriptions_on_runners = "own".
+// Never the Mac Keychain, never a runner. Used for turns on every approved
+// runner: a machine joins only when the person approves its code.
 //
 // Three kinds of sign-in. A long-lived token works until it expires (claude
 // setup-token: a year). An OAuth sign-in (codex's ChatGPT sign-in) is an

@@ -75,7 +75,7 @@ func TestUpgradeSteps(t *testing.T) {
 	if last != nil && string(now[last.Key]) == string(last.Old) {
 		t.Errorf("the last step %s keeps the default it changes", last.Key)
 	}
-	if strings.Join(retiredKeys, ",") != "commands" {
+	if strings.Join(retiredKeys, ",") != "commands,subscriptions_on_runners" {
 		t.Errorf("retired keys %v", retiredKeys)
 	}
 	if p := policyBefore(0); !*p.AgentAPI.Apply {

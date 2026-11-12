@@ -52,8 +52,7 @@ A second runner starts in the VM, `-labels real`, with the VM's own `claude` and
 each asking for one word:
 
 1. An OpenRouter agent (`key_env` as `-key-env`). The server reads the key from its environment.
-2. A claude subscription agent, with `subscriptions_on_runners = "own"` set on the scratch server.
-   It uses the subscription connected there (`-connect`), or is refused when none is.
+2. A claude subscription agent. It uses the subscription connected there (`-connect`), or is refused when none is.
 3. A codex subscription agent, the same way (`-connect-codex`). Left out when the VM has no codex.
 
 Each turn's agent gets its turn token as its credential. Its model calls go through the runner's

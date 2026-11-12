@@ -21,15 +21,14 @@ func defaultPolicy() Policy {
 	num := func(n int) *int { return &n }
 	cost := 0.0
 	return Policy{
-		ReadFolders:            []string{},
-		Allow:                  []string{},
-		Forbid:                 []string{},
-		Edit:                   EditSession,
-		Isolation:              IsolationAuto,
-		ShareReadOnly:          []string{},
-		Subagents:              on(),
-		SubscriptionsOnRunners: SubscriptionsOff,
-		Limits:                 Limits{MaxDepth: num(2), MaxJobsPerTurn: num(10), MaxJobsPerTree: num(30), MaxCostUSDPerTree: &cost},
+		ReadFolders:   []string{},
+		Allow:         []string{},
+		Forbid:        []string{},
+		Edit:          EditSession,
+		Isolation:     IsolationAuto,
+		ShareReadOnly: []string{},
+		Subagents:     on(),
+		Limits:        Limits{MaxDepth: num(2), MaxJobsPerTurn: num(10), MaxJobsPerTree: num(30), MaxCostUSDPerTree: &cost},
 		AgentAPI: AgentAPI{Scope: ScopeTree, Read: on(), ListAgents: on(), Start: on(), Continue: on(),
 			Review: on(), Cancel: on(), Rename: on(), Apply: off(), Tools: off()},
 		Network: Network{Contain: ContainOff, Allow: []string{}},
@@ -59,6 +58,10 @@ var upgradeSteps = []upgradeStep{
 	// 0.5: commands, the switch of the person's own "!" commands, is
 	// retired: a "!" is a message to the session's agent.
 	{Key: "commands", Retired: true},
+	// 0.5.1: subscriptions_on_runners is retired: a machine joins only when
+	// the person approves its code, so every runner is theirs, and a
+	// subscription connected on control is used on all of them.
+	{Key: "subscriptions_on_runners", Retired: true},
 }
 
 // retiredKeys are the policy keys an older build had and this one does not:
