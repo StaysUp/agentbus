@@ -432,7 +432,7 @@ type TakeRequest struct {
 	Protocol int `json:"protocol"`
 	// Folders asks for a folder job of the runner's own machine (an apply,
 	// a typed folder's check), in one of its queue.FolderCapacity folder
-	// places; without it, a turn, a review or a command, in one of its
+	// places; without it, a turn or a review, in one of its
 	// capacity's places.
 	Folders bool `json:"folders,omitempty"`
 }
@@ -525,10 +525,6 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request, rn queue.Runner) 
 		s.queueError(w, err)
 		return
 	}
-	if err := s.commandStarted(rn, a.ID, a.Number); err != nil {
-		s.internal(w)
-		return
-	}
 	writeJSON(w, http.StatusOK, AttemptStarted{Attempt: a, Cancel: c, Token: s.mint(rn.ID, a.ID, a.Number)})
 }
 
@@ -613,10 +609,6 @@ func (s *Server) finish(w http.ResponseWriter, r *http.Request, rn queue.Runner)
 	var b FinishCall
 	if !decode(r, &b) {
 		fail(w, http.StatusBadRequest, "the body must be one JSON object with number, status and optionally reason, verdict, result and last_seq")
-		return
-	}
-	_, ok := s.commandRan(w, rn, r.PathValue("id"), b) // checked here; the finisher reads it from the saved finish
-	if !ok {
 		return
 	}
 	f := b.finish()

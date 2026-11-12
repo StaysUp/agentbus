@@ -131,7 +131,7 @@ const machineTake = `COALESCE(json_extract(j.spec, '$.connector'), '') = ''
 const folderKinds = `('snapshot','apply','folder')`
 
 // FolderCapacity is how many folder jobs (folderKinds) one runner runs at
-// once, besides its capacity of turns and commands. Applies of one folder
+// once, besides its capacity of turns and reviews. Applies of one folder
 // take turns (package connector).
 const FolderCapacity = 4
 

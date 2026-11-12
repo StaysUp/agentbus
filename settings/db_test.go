@@ -283,3 +283,20 @@ func TestDBBrokenPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// A stored policy that holds commands, the switch retired in 0.5, reads with
+// the rest of its changes, and the stored row is not rewritten by reading.
+func TestDBRetiredCommandsKey(t *testing.T) {
+	d := openTestDB(t, t.TempDir())
+	row := `{"commands":false,"subagents":false}`
+	if _, err := d.db.Exec(`INSERT INTO settings(name, value, updated) VALUES ('permissions', ?, '')`, row); err != nil {
+		t.Fatal(err)
+	}
+	p, _, err := d.Policy()
+	if err != nil || *p.Subagents {
+		t.Fatalf("policy: %+v %v", p, err)
+	}
+	if got := stored(t, d, SettingPermissions); got != row {
+		t.Errorf("stored %s, want %s", got, row)
+	}
+}

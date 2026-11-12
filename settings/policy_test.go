@@ -123,8 +123,7 @@ func TestReadPolicy(t *testing.T) {
 		{"cost negative", "[limits]\nmax_cost_usd_per_tree = -0.5\n", "max_cost_usd_per_tree must be 0"},
 		{"unknown limit", "[limits]\nmax_rounds = 2\n", `unknown key "limits.max_rounds"`},
 		{"scope unknown", "[agent_api]\nscope = \"all\"\n", `scope must be "tree" or "session"`},
-		{"subagents not a bool", "subagents = \"no\"\n", "subagents and commands are true or false"},
-		{"commands not a bool", "commands = \"no\"\n", "subagents and commands are true or false"},
+		{"subagents not a bool", "subagents = \"no\"\n", "subagents is true or false"},
 		{"switch not a bool", "[agent_api]\nstart = \"no\"\n", "wrong type"},
 		{"unknown switch", "[agent_api]\nwrite_permissions = true\n", `unknown key "agent_api.write_permissions"`},
 	} {
@@ -237,5 +236,31 @@ func TestSandboxPolicy(t *testing.T) {
 		if _, err := ParsePolicy([]byte("[sandbox]\n" + bad + "\n")); err == nil || !strings.Contains(err.Error(), "[sandbox]") {
 			t.Errorf("%s: %v, want a refusal naming [sandbox]", bad, err)
 		}
+	}
+}
+
+// commands, the switch of the person's "!" commands, is retired in 0.5: a
+// permissions.toml or a PUT body from before that still holds it reads as
+// if it did not, whatever its value, and the policy written back has no
+// such key. Another unknown key is still refused.
+func TestCommandsKeyRetired(t *testing.T) {
+	for _, src := range []string{"commands = true\n", "commands = false\nsubagents = false\n", "commands = \"no\"\n"} {
+		p, err := ParsePolicy([]byte(src))
+		if err != nil {
+			t.Fatalf("%q: %v", src, err)
+		}
+		if strings.Contains(string(FormatPolicy(p)), "\ncommands =") {
+			t.Errorf("%q: the policy written back holds commands", src)
+		}
+	}
+	p, err := DecodePolicy([]byte(`{"commands":false,"subagents":false}`))
+	if err != nil || *p.Subagents {
+		t.Fatalf("JSON with commands: %+v %v", p, err)
+	}
+	if _, err := ParsePolicy([]byte("command = true\n")); err == nil || !strings.Contains(err.Error(), `unknown key "command"`) {
+		t.Errorf("an unknown key: %v", err)
+	}
+	if _, err := DecodePolicy([]byte(`{"command":true}`)); err == nil {
+		t.Error("JSON accepted an unknown key")
 	}
 }

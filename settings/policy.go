@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -88,11 +89,6 @@ share_read_only = []
 # files are never changed.
 subagents = true
 
-# commands: whether the person's own ! commands run in a session's copy
-# (POST /api/v0/sessions/{id}/commands). false refuses them. Agents never run
-# one: only the main token can.
-commands = true
-
 # subscriptions_on_runners: whether control adds your own subscription's
 # sign-in to the model calls of agents on your runners, which hold none.
 #   "off"  never: a subscription agent runs only where its harness is signed
@@ -144,7 +140,7 @@ contain = "off"
 allow = []           # e.g. ["github.com", "registry.npmjs.org"]
 
 # A wall around each session, built by the runner around the agent's whole
-# process and around each ! command. A proof of concept: off by default.
+# process. A proof of concept: off by default.
 # mode: "off" (the default) or "on". On, a session reads and writes only its
 # own folder and its own home; it reads the system folders and the agent's
 # own program; nothing else of your home and no other session. Its network
@@ -220,13 +216,12 @@ type Policy struct {
 	Isolation     string   `toml:"isolation" json:"isolation,omitempty" doc:"Where a new session's turns run: auto (copy on macOS; overlay on Linux where the runner can mount one, else copy), overlay, copy (a copy of its folder as it is now), git (a git worktree with the folder's uncommitted edits, in a repo) or none (the folder itself). Absent in a PUT: auto."`
 	ShareReadOnly []string `toml:"share_read_only" json:"share_read_only" doc:"Folders at the top of a session's folder, such as node_modules, that a copy links to one shared read-only copy of instead of copying. A turn cannot write there. Absent in a PUT: none."`
 	Subagents     *bool    `toml:"subagents" json:"subagents,omitempty" doc:"Whether a turn may start the agent's own subagents. Absent in a PUT: true."`
-	Commands      *bool    `toml:"commands" json:"commands,omitempty" doc:"Whether the person's own ! commands run in a session's copy (POST /api/v0/sessions/{id}/commands). false refuses them with 403. Absent in a PUT: true."`
 	// SubscriptionsOnRunners is read by control's gateway only (jobs/relay.go).
 	SubscriptionsOnRunners string   `toml:"subscriptions_on_runners" json:"subscriptions_on_runners,omitempty" doc:"Whether control adds the person's own subscription sign-in to model calls of agents on their runners: off or own (runners on their own machines; connect the subscription once on control). Absent in a PUT: off."`
 	Limits                 Limits   `toml:"limits" json:"limits" doc:"The limits on work agents ask for."`
 	AgentAPI               AgentAPI `toml:"agent_api" json:"agent_api" doc:"What a turn's own token may call."`
 	Network                Network  `toml:"network" json:"network" doc:"What a turn's agent may reach on the network (Linux runners, and any runner with [sandbox] on)."`
-	Sandbox                Sandbox  `toml:"sandbox" json:"sandbox" doc:"A wall around each session's agent and ! commands (a proof of concept)."`
+	Sandbox                Sandbox  `toml:"sandbox" json:"sandbox" doc:"A wall around each session's agent (a proof of concept)."`
 
 	// where and fix say, in a turn's refusal, where the policy came from and
 	// what to do: set by the store that read it (Error).
@@ -267,7 +262,7 @@ type Network struct {
 // Sandbox says whether each session runs inside a wall ([sandbox]). Read by
 // the runner that starts the agent (package sandbox).
 type Sandbox struct {
-	Mode string   `toml:"mode" json:"mode,omitempty" doc:"off (the default) or on. On, a session's agent and its ! commands read and write only the session's folder and home, read the system folders and the agent's program, and reach the network only through the runner's proxy. A runner that cannot build it refuses the turn. Absent in a PUT: off."`
+	Mode string   `toml:"mode" json:"mode,omitempty" doc:"off (the default) or on. On, a session's agent reads and writes only the session's folder and home, read the system folders and the agent's program, and reach the network only through the runner's proxy. A runner that cannot build it refuses the turn. Absent in a PUT: off."`
 	Read []string `toml:"read" json:"read" doc:"Files or folders under the home folder, each starting with ~/, copied into the session's home at the same place at the start of each turn, such as ~/.aws/config. Absent in a PUT: none."`
 }
 
@@ -294,10 +289,6 @@ func (p *Policy) fill() {
 	if p.Subagents == nil {
 		on := true
 		p.Subagents = &on
-	}
-	if p.Commands == nil {
-		on := true
-		p.Commands = &on
 	}
 	if p.SubscriptionsOnRunners == "" {
 		p.SubscriptionsOnRunners = SubscriptionsOff
@@ -442,10 +433,11 @@ func parsePolicy(b []byte) (Policy, error) {
 		// Not a parse error: a value of the wrong type, such as a string
 		// where a list belongs.
 		return Policy{}, errors.New("a value has the wrong type: read_folders, allow, forbid and share_read_only are lists of strings, such as [\"go test\"]; " +
-			"edit, isolation, subscriptions_on_runners, scope, contain and mode are strings; [network] allow and [sandbox] read are lists of strings; subagents and commands are true or false; the [limits] are numbers; the [agent_api] switches are true or false")
+			"edit, isolation, subscriptions_on_runners, scope, contain and mode are strings; [network] allow and [sandbox] read are lists of strings; subagents is true or false; the [limits] are numbers; the [agent_api] switches are true or false")
 	}
-	if extra := md.Undecoded(); len(extra) > 0 {
-		return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, commands, subscriptions_on_runners, [limits], [agent_api], [network] and [sandbox] (see the README)", strconv.Quote(extra[0].String()))
+	extra := slices.DeleteFunc(md.Undecoded(), func(k toml.Key) bool { return len(k) == 1 && slices.Contains(retiredKeys, k[0]) })
+	if len(extra) > 0 {
+		return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, subscriptions_on_runners, [limits], [agent_api], [network] and [sandbox] (see the README)", strconv.Quote(extra[0].String()))
 	}
 	if err := p.Check(); err != nil {
 		return Policy{}, err
@@ -482,6 +474,35 @@ func (p Policy) over(base Policy) (Policy, error) {
 	return applyOverlay(base, set)
 }
 
+// retiredKeys are policy keys an older build had and this one does not. A
+// file or a body that still holds one is read with it left out, so a
+// permissions.toml written before, or an older client, keeps working.
+// commands: the switch of the person's own "!" commands, retired in 0.5,
+// where a "!" is a message to the session's agent.
+var retiredKeys = []string{"commands"}
+
+// withoutRetired is the JSON object b with its retiredKeys left out, or b
+// itself when it holds none or is not an object (the decoder then says
+// what is wrong).
+func withoutRetired(b []byte) []byte {
+	var top map[string]json.RawMessage
+	if json.Unmarshal(b, &top) != nil {
+		return b
+	}
+	n := len(top)
+	for _, k := range retiredKeys {
+		delete(top, k)
+	}
+	if len(top) == n {
+		return b
+	}
+	out, err := json.Marshal(top)
+	if err != nil {
+		return b
+	}
+	return out
+}
+
 // DecodePolicy reads a policy sent as JSON, as PUT
 // /api/v0/settings/permissions takes it. A key left out holds its default.
 // The error names the key.
@@ -491,6 +512,7 @@ func DecodePolicy(b []byte) (Policy, error) {
 	if t := bytes.TrimLeft(b, " \t\r\n"); len(t) == 0 || t[0] != '{' {
 		return Policy{}, errors.New("the body must be one JSON object: the policy")
 	}
+	b = withoutRetired(b)
 	d := json.NewDecoder(bytes.NewReader(b))
 	d.DisallowUnknownFields()
 	if err := d.Decode(&p); err != nil {
@@ -499,11 +521,11 @@ func DecodePolicy(b []byte) (Policy, error) {
 		switch {
 		case errors.As(err, &te) && te.Field != "":
 			return Policy{}, fmt.Errorf("%s has the wrong type: read_folders, allow, forbid and share_read_only are lists of strings; "+
-				"edit, isolation, subscriptions_on_runners, scope, contain and mode are strings; network.allow and sandbox.read are lists of strings; subagents, commands and the agent_api switches are true or false; the limits are numbers", te.Field)
+				"edit, isolation, subscriptions_on_runners, scope, contain and mode are strings; network.allow and sandbox.read are lists of strings; subagents and the agent_api switches are true or false; the limits are numbers", te.Field)
 		case errors.As(err, &se):
 			return Policy{}, errors.New("the body is not valid JSON")
 		case strings.HasPrefix(err.Error(), "json: unknown field "):
-			return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, commands, subscriptions_on_runners, limits, agent_api, network and sandbox",
+			return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, subscriptions_on_runners, limits, agent_api, network and sandbox",
 				strings.TrimPrefix(err.Error(), "json: unknown field "))
 		}
 		return Policy{}, errors.New("the body must be one JSON object: the policy")
@@ -529,7 +551,7 @@ func FormatPolicy(p Policy) []byte {
 	p.fill()
 	values := map[string]any{
 		"read_folders": p.ReadFolders, "allow": p.Allow, "forbid": p.Forbid, "edit": p.Edit, "isolation": p.Isolation,
-		"share_read_only": p.ShareReadOnly, "subagents": *p.Subagents, "commands": *p.Commands, "subscriptions_on_runners": p.SubscriptionsOnRunners,
+		"share_read_only": p.ShareReadOnly, "subagents": *p.Subagents, "subscriptions_on_runners": p.SubscriptionsOnRunners,
 		"limits.max_depth": *p.Limits.MaxDepth, "limits.max_jobs_per_turn": *p.Limits.MaxJobsPerTurn,
 		"limits.max_jobs_per_tree": *p.Limits.MaxJobsPerTree, "limits.max_cost_usd_per_tree": *p.Limits.MaxCostUSDPerTree,
 		"agent_api.scope": p.AgentAPI.Scope, "agent_api.read": *p.AgentAPI.Read, "agent_api.list_agents": *p.AgentAPI.ListAgents,

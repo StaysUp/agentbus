@@ -303,7 +303,7 @@ func (r *Runner) loadIn(load func(workdir string) (*isolation.Space, error)) (*i
 }
 
 // loop takes and runs one job at a time until ctx ends: folder jobs of this
-// machine with folders, else turns, reviews and commands.
+// machine with folders, else turns and reviews.
 func (r *Runner) loop(ctx context.Context, folders bool) {
 	for ctx.Err() == nil {
 		var t jobs.TakenWork
@@ -634,8 +634,11 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	case job.Kind == queue.KindApply || job.Kind == queue.KindSnapshot || job.Kind == queue.KindFolder:
 		at.finish(ctx, r.folderWork(ctx, at))
 		return
-	case job.Kind == queue.KindCommand:
-		at.finish(ctx, r.command(ctx, at))
+	case job.Kind != queue.KindTurn && job.Kind != queue.KindReview:
+		// A kind this runner does not run, such as a command job (the
+		// person's "!" in 0.4, retired) a control made before.
+		at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup,
+			Result: mustJSON(queue.Result{Refused: fmt.Sprintf("this runner does not run jobs of kind %q", job.Kind), Status: http.StatusBadRequest})})
 		return
 	}
 	refused := r.prepare(ctx, at)

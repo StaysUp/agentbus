@@ -408,9 +408,6 @@ with the reason. Details: `docs/CLIENT_API.md`, "Network control".
 - **OpenRouter turns show a cost of $0.** The price table has no OpenRouter prices yet.
 - **A session stays on one runner.** Its copy lives there, so its later turns go to the same
   runner. Moving a session between runners comes later.
-- **A `!` command works only after a session's first turn.** Before that turn ends, the session
-  has no copy to run it in, and the command is refused. The agent does not answer a command by
-  itself: it sees the output with your next message. Both are fixed in 0.4.1.
 - **Copies on shared or network disks are slow.** A copy is a clone (APFS) or a reflink (xfs,
   btrfs) only when the folder and the data folder are on the same disk that can make one.
   Elsewhere, such as a network disk, every file is copied byte by byte.
@@ -499,7 +496,6 @@ allow = ["go test", "make test"]       # claude gets --allowedTools Bash(go test
 forbid = ["git push", "git checkout"]  # the gateway refuses these, for claude and codex
 edit = "session"                       # where a turn may edit files: "session" or "none"
 subagents = true                       # false: no turn starts the agent's own subagents
-commands = true                        # false: your own ! commands are refused
 
 [limits]                     # work agents ask other agents for
 max_depth = 2                # levels of asking below your turn

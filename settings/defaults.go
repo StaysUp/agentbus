@@ -27,7 +27,6 @@ func defaultPolicy() Policy {
 		Isolation:              IsolationAuto,
 		ShareReadOnly:          []string{},
 		Subagents:              on(),
-		Commands:               on(),
 		SubscriptionsOnRunners: SubscriptionsOff,
 		Limits:                 Limits{MaxDepth: num(2), MaxJobsPerTurn: num(10), MaxJobsPerTree: num(30), MaxCostUSDPerTree: &cost},
 		AgentAPI: AgentAPI{Scope: ScopeTree, Read: on(), ListAgents: on(), Start: on(), Continue: on(),

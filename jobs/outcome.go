@@ -4,7 +4,7 @@ package jobs
 // needed to run work, events.db holds each outcome once. When a runner
 // sends a job's finish, control saves it (queue.Accept); its one finisher
 // then puts what the job did into the record, as an event (turn.changed,
-// turn.applied, command.ran), and then ends the job
+// turn.applied), and then ends the job
 // keeping only that event's id (queue.Result's *Event pointers): the
 // record first, the finish second, so "finished" means "its outcome is in
 // the record" (keepOutcomes). Readers read the outcome from the record by
@@ -49,12 +49,11 @@ var errOutcome = errors.New("jobs: the job's outcome could not be written")
 // a write done twice stores each once: a stop or a failed write before End
 // leaves an event and an unfinished job, and the finisher's next pass
 // writes the same event (no change) and then ends the job. This is the one
-// place a job's outcomes are written; every kind goes through it. ran is a
-// command job's command.ran.
+// place a job's outcomes are written; every kind goes through it.
 //
 // j is the job before End, still running. j.Ended is not set yet, so the
 // events take control's time now, a moment before End's.
-func keepOutcomes(rec Recorder, j queue.Job, f queue.Finish, ran *event.Event) (json.RawMessage, error) {
+func keepOutcomes(rec Recorder, j queue.Job, f queue.Finish) (json.RawMessage, error) {
 	now := time.Now().UTC()
 	j.State, j.Reason, j.Result, j.Ended = f.Status, f.Reason, f.Result, &now
 	res, err := queue.ReadResult(j.Result)
@@ -88,13 +87,6 @@ func keepOutcomes(rec Recorder, j queue.Job, f queue.Finish, ran *event.Event) (
 			return nil, err
 		}
 		res.Apply, res.Refused, res.AppliedEvent, moved = nil, "", e.ID, true
-	case queue.KindCommand:
-		if err := CommandEnded(rec, j, ran); err != nil {
-			return nil, err
-		}
-		if len(res.Ran) > 0 && ran != nil {
-			res.Ran, res.RanEvent, moved = nil, ran.ID, true
-		}
 	}
 	if !moved {
 		return nil, nil

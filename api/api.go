@@ -645,7 +645,7 @@ func (a *API) sessionEvents(w http.ResponseWriter, r *http.Request, session stri
 		f.Kinds = strings.Split(q.Get("kind"), ",")
 		for _, k := range f.Kinds {
 			if !kindShape.MatchString(k) || len(f.Kinds) > 16 {
-				writeError(w, http.StatusBadRequest, "kind must be up to 16 event kinds, comma separated, such as command.queued,command.ran")
+				writeError(w, http.StatusBadRequest, "kind must be up to 16 event kinds, comma separated, such as turn.started,turn.completed")
 				return
 			}
 		}

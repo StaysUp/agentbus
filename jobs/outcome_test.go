@@ -401,22 +401,18 @@ func TestOutcomeBeforeFinish(t *testing.T) {
 	}
 }
 
-// A command's finish saved before control stopped, and the runner sending
-// it again just as control starts: the start's finisher and the finish
-// route meet on the same saved finish. Only the finisher ends it, from the
-// saved finish, so the command's command.ran is kept once and no
-// command.failed is ever written for a command that ran. 50 rounds.
+// A turn's finish saved before control stopped, and the runner sending it
+// again just as control starts: the start's finisher and the finish route
+// meet on the same saved finish. Only the finisher ends it, from the saved
+// finish, so the turn's turn.changed is kept once. 50 rounds.
 func TestRestartAndFinishRouteRace(t *testing.T) {
 	e, _, _ := newFailingEnv(t)
 	for i := range 50 {
-		session := fmt.Sprintf("s_%d", i)
-		if _, _, err := e.q.Create(queue.DefaultTeam, queue.KindCommand, "", queue.Spec{Session: session, Command: "ls"}, queue.Links{}); err != nil {
+		if _, _, err := e.q.Create(queue.DefaultTeam, queue.KindTurn, "", queue.Spec{Harness: "claude", Prompt: "x"}, queue.Links{}); err != nil {
 			t.Fatal(err)
 		}
-		j, base := e.take(t, queue.KindCommand)
-		ran, _ := json.Marshal(event.Event{ID: "evt_ran_" + j.ID, Kind: event.CommandRan, Time: time.Now().UTC(), Session: session,
-			Command: &event.Command{Line: "ls", Stdout: "a\n"}})
-		res, _ := json.Marshal(queue.Result{Ran: ran})
+		j, base := e.take(t, queue.KindTurn)
+		res, _ := json.Marshal(queue.Result{Changes: turnChanges(fmt.Sprintf("cp_%d", i))})
 		call := FinishCall{Number: 1, Status: queue.Finished, Result: res}
 		// Saved before the stop: what the route did then.
 		held, err := e.q.Get(queue.DefaultTeam, j.ID)
@@ -435,10 +431,10 @@ func TestRestartAndFinishRouteRace(t *testing.T) {
 		if code != 200 || j.State != queue.Finished {
 			t.Fatalf("round %d: finish %d, job %s %s", i, code, j.State, j.Reason)
 		}
-		if k := e.kinds(t, session); k[event.CommandRan] != 1 || k[event.CommandFailed] != 0 {
+		if k := e.kinds(t, j.Session); k[event.TurnChanged] != 1 {
 			t.Fatalf("round %d: the record holds %v", i, k)
 		}
-		if kept, _ := queue.ReadResult(j.Result); kept.RanEvent != "evt_ran_"+j.ID || len(kept.Ran) != 0 {
+		if kept, _ := queue.ReadResult(j.Result); kept.ChangesEvent != changedID(j) || kept.Changes != nil {
 			t.Fatalf("round %d: the job keeps %s", i, j.Result)
 		}
 	}

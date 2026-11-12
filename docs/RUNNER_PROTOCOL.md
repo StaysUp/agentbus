@@ -19,7 +19,7 @@ machine, with `agentbus connector` retired (4). Register and every take carry `p
 either, so a runner already running when control is upgraded stops at its next take.
 
 **Words.** A **job** is the queue's word for work: a turn, a review, an apply, a snapshot or a
-command. A
+folder check. A
 runner takes a job and runs it as an **attempt**. A turn or review job names its turn id when it is
 made (`turn` on the job). The runner starts the turn with that id, whichever attempt runs it, so
 the turn a client asked for keeps its id. The client API never shows jobs or attempts.
@@ -82,13 +82,13 @@ in `folders.json` in its data folder; the name is kept from before 0.5) and the 
 as `capabilities.folders`, by reference. **A job that names a machine (`spec.connector`) goes to
 that machine's runner and no other**, so a session runs on the machine that holds its folder for
 its whole life: its copy is made there from the folder, by clone or overlay (`sessions/<session>`
-in the runner's data folder; copies made before 0.4 stay in `worktrees/job_<id>`), its turns and
-commands run there, and its changes are applied there. A next job of a session goes to the
+in the runner's data folder; copies made before 0.4 stay in `worktrees/job_<id>`), its turns run
+there, and its changes are applied there. A next job of a session goes to the
 session's runner. One exception keeps a session made before 0.5 going: a session whose first turn
 another machine's runner built from a snapshot stays with that runner; its applies still go to the
 folder's machine.
 
-A runner takes its jobs in two kinds of places. Turns, reviews and commands take its `capacity`.
+A runner takes its jobs in two kinds of places. Turns and reviews take its `capacity`.
 **Folder jobs** (`apply`, `folder`, and a `snapshot` stored before 0.5) take one of 4 folder places
 of their own, asked for with `take`'s `folders: true`, so an apply never waits behind running
 turns. A `folder` job names a path a person typed for that machine (`spec.folder`): the runner
@@ -104,13 +104,9 @@ its reference. File data goes through the server's blob store, by the hash of it
 - An apply job goes to the runner of the folder's machine, which reads both changesets and the
   files from the store (on that machine they are already in its own store), checks the folder and
   writes it.
-- A command job (the person's `!`, `POST /api/v0/sessions/<id>/commands`) goes to the session's
-  runner, in the session's lane with its turns: `spec.command_id`, `spec.command` and
-  `spec.timeout_ms`. It waits for what runs in the session, a review of it included. The runner
-  runs it in the session's copy with no turn and no token. Control stores `command.started` at its
-  start. Its finish carries the `command.ran` event as `result.ran`, and control keeps it once,
-  before it ends the job; one of another session or command, with a turn, or of another kind refuses
-  the finish with **400**. A command job that ends without one gets `command.failed` from control.
+- A job of a kind the runner does not run ends as a setup failure with a one-sentence `refused`.
+  The `command` job of 0.4 (the person's `!`) is retired: a `!` is now a message to the session's
+  agent, which runs it with its own shell tool. One that an older control made is refused so.
 - **Outcomes go to control's record, the job keeps a pointer** (from 0.5). On a finish, control
   saves it in its queue, as the job's result. Control's one finisher then stores what the job did
   as an event and ends the job, with that event's id in place of the outcome. A job is never
@@ -120,9 +116,8 @@ its reference. File data goes through the server's blob store, by the hash of it
   **503** when that takes longer than 5 seconds, and **500** when the record could not be written.
   The finish is saved either way: send the same finish again, which changes nothing. If control
   stops in between, it ends the job when it starts again. The outcome event for each kind: a
-  turn's `result.changes` becomes `turn.changed` (`result.changes_event`, and `result.checkpoint` keeps the end checkpoint the next turn starts from), an apply's
-  `result.apply` and `result.refused` become `turn.applied` (`result.applied_event`), and a
-  command's `result.ran` is kept once as `command.ran` (`result.ran_event`). A finish sent again
+  turn's `result.changes` becomes `turn.changed` (`result.changes_event`, and `result.checkpoint` keeps the end checkpoint the next turn starts from), and an apply's
+  `result.apply` and `result.refused` become `turn.applied` (`result.applied_event`). A finish sent again
   is answered the same and stores nothing twice. A runner may not send `turn.changed` or
   `turn.applied` in a turn's record (**400**): they are control's own. A job from before 0.5 keeps
   its outcome in its result, and readers read it there.

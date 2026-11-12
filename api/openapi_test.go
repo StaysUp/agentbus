@@ -218,9 +218,9 @@ func served(t *testing.T, e *env, method, path string) bool {
 
 // One endpoint starts every turn: POST /api/v0/turns, with session for a
 // session's next turn. /sessions is read-only but for PATCH /sessions/{id},
-// which renames or closes, and POST /sessions/{id}/commands, which runs the
-// person's shell command; neither starts a turn. Every other action is on a
-// turn.
+// which renames or closes and starts no turn; POST /sessions/{id}/commands,
+// the person's "!" of 0.4, is gone (a "!" is a message to the agent now).
+// Every other action is on a turn.
 // /runs, /jobs, /attempts, /workspaces and /calls are gone with no alias.
 func TestOneEndpointStartsEveryTurn(t *testing.T) {
 	doc := loadSpec(t)
@@ -228,16 +228,15 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 	for p, item := range doc.Paths.Map() {
 		for m := range item.Operations() {
 			ops = append(ops, m+" "+p)
-			if strings.HasPrefix(p, "/api/v0/sessions") && m != http.MethodGet && m+" "+p != "PATCH /api/v0/sessions/{id}" &&
-				m+" "+p != "POST /api/v0/sessions/{id}/commands" {
-				t.Errorf("%s %s: /sessions takes only GET, PATCH to rename or close, and POST to run a command", m, p)
+			if strings.HasPrefix(p, "/api/v0/sessions") && m != http.MethodGet && m+" "+p != "PATCH /api/v0/sessions/{id}" {
+				t.Errorf("%s %s: /sessions takes only GET, and PATCH to rename or close", m, p)
 			}
 		}
 	}
-	// 38 with POST /api/v0/mcp, which starts a turn only as the
+	// 37 with POST /api/v0/mcp, which starts a turn only as the
 	// POST /api/v0/turns it sends a tool call through.
-	if len(ops) != 38 {
-		t.Errorf("%d endpoints, want 38: %v", len(ops), ops)
+	if len(ops) != 37 {
+		t.Errorf("%d endpoints, want 37: %v", len(ops), ops)
 	}
 	for _, want := range []string{"POST /api/v0/turns", "GET /api/v0/turns", "GET /api/v0/turns/{id}", "POST /api/v0/turns/{id}/stop",
 		"GET /api/v0/turns/{id}/diff", "POST /api/v0/turns/{id}/apply", "POST /api/v0/turns/{id}/review",

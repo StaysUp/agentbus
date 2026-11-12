@@ -88,12 +88,9 @@ const (
 	// named, and registers it there: its result is the folder's reference
 	// (folder.go). It starts no turn.
 	KindFolder = "folder"
-	// KindCommand runs the person's shell command in a session's copy, on
-	// the session's runner (run.Engine.RunCommand). It starts no turn. It is
-	// a job in the session's lane, as a turn is (Take): it waits behind what
-	// runs in the session, a review of it included, runs alone in the copy,
-	// and what comes next waits for it.
-	KindCommand = "command"
+	// A "command" job (the person's "!" in 0.4) is retired: a "!" is now a
+	// message to the session's agent. One stored before is read as it is,
+	// and a runner refuses to run it.
 )
 
 // Failure reasons.
@@ -291,12 +288,6 @@ type Spec struct {
 	// its turn without its folder being checked again.
 	Typed          string `json:"-"`
 	TypedConnector string `json:"-"`
-	// CommandID, Command and TimeoutMS, for a command job: its id (as the
-	// API answered it, and its events name it), the command line, and its
-	// time limit in milliseconds (zero: run.CommandTimeout).
-	CommandID string `json:"command_id,omitempty"`
-	Command   string `json:"command,omitempty"`
-	TimeoutMS int64  `json:"timeout_ms,omitempty"`
 }
 
 // asked is spec as the request named it, for the idempotency hash: the
@@ -776,40 +767,36 @@ const reviewIn = `o.kind = 'review' AND EXISTS (SELECT 1 FROM attempts a JOIN at
 	WHERE a.job = o.id AND e.kind = 'turn.created' AND json_extract(e.data, '$.session') = j.session)`
 
 // laneTake is Take's one rule of a session's lane, for a job j and another
-// job o: j waits for o. A session's turns and commands are one lane, first
-// in, first out: each waits for one that runs, and for an older one still
-// queued. A command also waits for a review that reads the session's copy
-// (a review's session column is the reviewed session) while it runs, and
-// that review for a running command. A turn job sent to a review's own
-// session waits behind the review (reviewIn). Snapshot, apply and folder
-// jobs use no copy and never wait.
+// job o: j waits for o. A session's turns are one lane, first in, first out:
+// each waits for one that runs, and for an older one still queued. A turn job
+// sent to a review's own session waits behind the review (reviewIn).
+// Snapshot, apply and folder jobs use no copy and never wait.
 const laneTake = `(o.state IN ('taken','running') AND (
-		(j.kind IN ('turn','command') AND o.session = j.session AND o.kind IN ('turn','command'))
-		OR (o.session = j.session AND ((j.kind = 'command' AND o.kind = 'review') OR (j.kind = 'review' AND o.kind = 'command')))
+		(j.kind = 'turn' AND o.session = j.session AND o.kind = 'turn')
 		OR (j.kind = 'turn' AND (` + reviewIn + `))))
-	OR (o.state = 'queued' AND j.kind IN ('turn','command') AND o.session = j.session AND o.kind IN ('turn','command')
+	OR (o.state = 'queued' AND j.kind = 'turn' AND o.session = j.session AND o.kind = 'turn'
 		AND (o.created < j.created OR (o.created = j.created AND o.id < j.id)))`
 
-// SessionHasWork says the session has a job that has not ended: a turn or
-// command job of it, or a review whose turn runs in it.
+// SessionHasWork says the session has a job that has not ended: a turn job
+// of it, or a review whose turn runs in it.
 func (q *Queue) SessionHasWork(team, session string) (bool, error) {
 	var n int
 	err := q.db.QueryRow(`SELECT COUNT(*) FROM jobs o, (SELECT ? AS session) j WHERE o.team = ? AND o.ended IS NULL
-		AND ((o.kind IN ('turn','command') AND o.session = j.session) OR (`+reviewIn+`))`, session, team).Scan(&n)
+		AND ((o.kind = 'turn' AND o.session = j.session) OR (`+reviewIn+`))`, session, team).Scan(&n)
 	if err != nil {
 		return false, fmt.Errorf("queue: read session work: %w", err)
 	}
 	return n > 0, nil
 }
 
-// TurnsAhead are the jobs the turn or command job waits behind, oldest
-// first: its session's turn and command jobs that have not ended and were
+// TurnsAhead are the jobs the turn job waits behind, oldest
+// first: its session's turn jobs that have not ended and were
 // made before it, and a review whose turn runs in its session. None for a
 // job of no session.
 func (q *Queue) TurnsAhead(team, id string) ([]Job, error) {
 	rows, err := q.db.Query(`SELECT o.id FROM jobs o JOIN jobs j ON j.id = ? AND j.team = ?
 		WHERE o.team = j.team AND o.ended IS NULL AND o.id != j.id AND j.session IS NOT NULL
-		AND ((o.kind IN ('turn','command') AND o.session = j.session AND (o.created < j.created OR (o.created = j.created AND o.id < j.id)))
+		AND ((o.kind = 'turn' AND o.session = j.session AND (o.created < j.created OR (o.created = j.created AND o.id < j.id)))
 			OR (`+reviewIn+`))
 		ORDER BY o.created, o.id`, id, team)
 	if err != nil {
@@ -1141,7 +1128,7 @@ func workspaceOf(db querier, j Job) (*Workspace, error) {
 // runner whose workspace it must remove (cleanup), once no job of it is left
 // running. Else the oldest queued job of the runner's team it may run, if it
 // has a free slot, as a new attempt with a lease: a job of a session the queue
-// knows goes only to that session's runner, and a session's turn and command
+// knows goes only to that session's runner, and a session's turn
 // jobs run one at a time, so a next turn waits for the one before it. Reviews
 // never wait:
 // each runs in a session of its own. The capacity check and the claim
@@ -1150,7 +1137,7 @@ func workspaceOf(db querier, j Job) (*Workspace, error) {
 //
 // folders asks for a folder job (folderKinds: an apply, a typed folder's
 // check) of the runner's own machine, in one of its FolderCapacity folder
-// places; without it the take is for a turn, a review or a command, in one
+// places; without it the take is for a turn or a review, in one
 // of its capacity's places. So an apply never waits behind running turns.
 func (q *Queue) Take(runnerID string, lease time.Duration, folders bool) (job Job, att Attempt, ok bool, cleanup *Workspace, err error) {
 	err = q.tx(func(tx *sql.Tx) error {
@@ -1894,19 +1881,6 @@ func (q *Queue) Workspace(team, session string) (w Workspace, ok bool, err error
 		return Workspace{}, false, fmt.Errorf("queue: read session: %w", err)
 	}
 	return w, true, nil
-}
-
-// JobOfCommand reads the command job of team with this command id.
-func (q *Queue) JobOfCommand(team, id string) (Job, error) {
-	var jid string
-	err := q.db.QueryRow(`SELECT id FROM jobs WHERE team = ? AND kind = 'command' AND json_extract(spec, '$.command_id') = ?`, team, id).Scan(&jid)
-	if errors.Is(err, sql.ErrNoRows) {
-		return Job{}, ErrNotFound
-	}
-	if err != nil {
-		return Job{}, fmt.Errorf("queue: read job: %w", err)
-	}
-	return q.Get(team, jid)
 }
 
 // JobByTurn reads the job of team that runs the turn with this id.

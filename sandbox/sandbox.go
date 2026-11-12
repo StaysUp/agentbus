@@ -1,5 +1,5 @@
 // Package sandbox builds a wall around one session's agent: the whole
-// harness process and everything it starts, or one ! command. Inside it a
+// harness process and everything it starts. Inside it a
 // session reads and writes its own folder (its copy) and its own home, reads
 // the system folders and the paths it is given (the agent's own program),
 // and reaches the network only through the runner's proxy. Nothing else of

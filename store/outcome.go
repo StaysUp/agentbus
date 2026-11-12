@@ -1,7 +1,7 @@
 package store
 
 // Control's own outcomes of a job, kept in the record (turn.changed,
-// turn.applied, command.ran) and named from the job by their event id.
+// turn.applied) and named from the job by their event id.
 
 import (
 	"database/sql"

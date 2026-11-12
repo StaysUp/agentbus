@@ -15,7 +15,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/queue"
 )
 
@@ -75,12 +74,7 @@ func (f *finisher) pass() {
 	failed := map[string]bool{}
 	if err == nil {
 		for _, a := range list {
-			var ran *event.Event
-			if a.Job.Kind == queue.KindCommand {
-				res, _ := queue.ReadResult(a.Finish.Result)
-				ran = ranOf(res)
-			}
-			if _, err := endAccepted(f.rec, f.q, a, ran); err != nil {
+			if _, err := endAccepted(f.rec, f.q, a); err != nil {
 				failed[a.Attempt] = true // tried again next pass
 			}
 		}
@@ -138,10 +132,9 @@ func (f *finisher) await(ctx context.Context, team, id, attempt string, wait tim
 
 // endAccepted ends the job of saved finish a: its outcome into the record
 // first (keepOutcomes), from the saved finish alone, then the job's end
-// (queue.End), the commit point. ran is a command job's command.ran. Only
-// the finisher calls it.
-func endAccepted(rec Recorder, q *queue.Queue, a queue.AcceptedFinish, ran *event.Event) (queue.Job, error) {
-	kept, err := keepOutcomes(rec, a.Job, a.Finish, ran)
+// (queue.End), the commit point. Only the finisher calls it.
+func endAccepted(rec Recorder, q *queue.Queue, a queue.AcceptedFinish) (queue.Job, error) {
+	kept, err := keepOutcomes(rec, a.Job, a.Finish)
 	if err != nil {
 		return queue.Job{}, errOutcome
 	}

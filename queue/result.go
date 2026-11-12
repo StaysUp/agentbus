@@ -44,21 +44,18 @@ type Result struct {
 	// FolderRef, for a folder job: the reference the connector registered
 	// the typed folder under.
 	FolderRef string `json:"folder_ref,omitempty"`
-	// Ran, for a command job: its command.ran event, as the runner's record
-	// stored it. Control stores it in its own record and keeps only RanEvent.
-	Ran json.RawMessage `json:"ran,omitempty"`
 
 	// Pointers to the outcomes control keeps in its record, from 0.5 (the
 	// record holds every outcome once; the job only names it): the turn's
-	// turn.changed in place of Changes, an apply's turn.applied in place of
-	// Apply and Refused, a command's command.ran in place of Ran. A job
-	// from before 0.5 has none and keeps its outcome here.
+	// turn.changed in place of Changes, and an apply's turn.applied in
+	// place of Apply and Refused. A job from before 0.5 has none and keeps
+	// its outcome here. (A retired command job's ran and ran_event are no
+	// longer read.)
 	ChangesEvent string `json:"changes_event,omitempty"`
 	// Checkpoint: the checkpoint the turn ended with (Changes.To), kept
 	// beside ChangesEvent: the session's next turn starts from it.
 	Checkpoint   string `json:"checkpoint,omitempty"`
 	AppliedEvent string `json:"applied_event,omitempty"`
-	RanEvent     string `json:"ran_event,omitempty"`
 }
 
 // SnapshotTaken is a snapshot a connector took: its id, the blob of its

@@ -293,6 +293,29 @@ func TestRefusedTurnIsSetupFailure(t *testing.T) {
 	}
 }
 
+// A job of a kind the runner does not run, such as a "command" job an older
+// control made (the person's "!" of 0.4, retired), fails as setup with
+// words that name its kind, and runs no turn in its session.
+func TestUnknownKindIsRefused(t *testing.T) {
+	w := newWorld(t, 1)
+	first := w.create(t, queue.Spec{Harness: "claude", Prompt: "hi"})
+	waitFor(t, "the first turn", func() bool { return w.job(t, first.ID).Ended != nil })
+	runs := len(w.runs())
+	j, _, err := w.q.Create(queue.DefaultTeam, "command", "", queue.Spec{Session: first.Session}, queue.Links{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "refused", func() bool { return w.job(t, j.ID).Ended != nil })
+	got := w.job(t, j.ID)
+	res := result(t, got)
+	if got.State != queue.Failed || got.Reason != queue.ReasonSetup || !strings.Contains(res.Refused, `kind "command"`) {
+		t.Fatalf("%+v %s", got, got.Result)
+	}
+	if n := len(w.runs()); n != runs {
+		t.Errorf("%d agent runs, want %d: the command job ran as a turn", n, runs)
+	}
+}
+
 // A turn whose agent exits with a failure fails the job with reason agent.
 func TestAgentFailureFailsTheJob(t *testing.T) {
 	w := newWorld(t, 1)
