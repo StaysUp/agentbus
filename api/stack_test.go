@@ -93,30 +93,23 @@ func stackEnv(t *testing.T, s stack) *env {
 	srv.Config.Handler = a
 	srv.Start()
 	ctx, cancel := context.WithCancel(context.Background())
-	// As in agentbus up: a connector beside the runner, sharing the blob
+	// As in agentbus up: one runner holds the folders, sharing the blob
 	// store on disk.
 	conn := &connector.Connector{Folders: fr, Store: bs, State: filepath.Join(dir, "connector")}
-	cn, err := runner.Enroll(ctx, runner.Config{Queue: base, EnrollToken: enrollTok, Name: "connector", Capacity: 2,
-		Role: queue.RoleConnector, FolderSide: connector.Jobs{Connector: conn}, Folders: fr, Logf: t.Logf})
-	if err != nil {
-		t.Fatal(err)
-	}
 	rn, err := runner.Enroll(ctx, runner.Config{Queue: base, EnrollToken: enrollTok, Name: "test", Capacity: s.maxRuns,
 		Engine: eng, Store: st, Workdir: filepath.Join(dir, "sessions"), Settings: cfgStore, Logf: t.Logf, Folders: fr,
-		Lender: conn, Blobs: bs, BlobSink: bs})
+		FolderSide: connector.Jobs{Connector: conn}, Lender: conn, Blobs: bs, BlobSink: bs})
 	if err != nil {
 		t.Fatal(err)
 	}
-	done := make(chan struct{}, 2)
+	done := make(chan struct{}, 1)
 	go func() { rn.Run(ctx); done <- struct{}{} }()
-	go func() { cn.Run(ctx); done <- struct{}{} }()
 	// Control's finisher stops after the runner, as in the service: the
 	// runner finishes its jobs as it stops.
 	finStop, finDone := make(chan struct{}), make(chan struct{})
 	go func() { js.RunFinisher(finStop); close(finDone) }()
 	t.Cleanup(func() {
 		cancel()
-		<-done
 		<-done
 		close(finStop)
 		<-finDone

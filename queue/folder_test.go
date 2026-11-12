@@ -8,26 +8,30 @@ import (
 	"time"
 )
 
-// A folder job goes only to the connector it names. Take hands it the path;
-// the stored job never holds it.
+// A folder job goes only to the runner of the machine it names, in a folder
+// place. Take hands it the path; the stored job never holds it.
 func TestFolderJob(t *testing.T) {
 	q, clk := open(t)
 	plain := capsRunner(t, q, nil, nil)
-	connB := capsRunner(t, q, nil, &Capabilities{Role: RoleConnector, Connector: conB})
-	connA := capsRunner(t, q, nil, &Capabilities{Role: RoleConnector, Connector: conA})
-	if got, err := q.Connectors(DefaultTeam); err != nil || strings.Join(got, ",") != conA+","+conB {
-		t.Fatalf("connectors %v %v", got, err)
+	connB := capsRunner(t, q, nil, &Capabilities{Connector: conB})
+	connA := capsRunner(t, q, nil, &Capabilities{Connector: conA})
+	capsRunner(t, q, nil, &Capabilities{Role: RoleConnector, Connector: "con_cccccccccccccccc"})
+	if got, err := q.Machines(DefaultTeam); err != nil || strings.Join(got, ",") != conA+","+conB {
+		t.Fatalf("machines %v %v", got, err)
 	}
 	j, err := q.RegisterFolder(DefaultTeam, conA, "/home/me/code")
 	if err != nil || j.Kind != KindFolder || j.Spec.Folder != "" || j.Spec.Connector != conA || j.Turn != "" || j.Session != "" {
 		t.Fatalf("folder job %+v %v", j, err)
 	}
 	for _, r := range []Runner{plain, connB} {
-		if got := takes(t, q, r); got != "" {
+		if got := takesFolder(t, q, r); got != "" {
 			t.Fatalf("%s took the folder job", got)
 		}
 	}
-	taken, _, ok, _, err := q.Take(connA.ID, lease)
+	if got := takes(t, q, connA); got != "" {
+		t.Fatalf("a turn place took the folder job %s", got)
+	}
+	taken, _, ok, _, err := q.Take(connA.ID, lease, true)
 	if err != nil || !ok || taken.ID != j.ID || taken.Spec.Folder != "/home/me/code" {
 		t.Fatalf("the named connector took %+v %v %v", taken.Spec, ok, err)
 	}
@@ -57,11 +61,11 @@ func TestFolderJob(t *testing.T) {
 
 	// A connector not seen within RunnerFresh is not listed.
 	clk.add(RunnerFresh + time.Second)
-	if _, _, _, _, err := q.Take(connB.ID, lease); err != nil {
+	if _, _, _, _, err := q.Take(connB.ID, lease, true); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ := q.Connectors(DefaultTeam); strings.Join(got, ",") != conB {
-		t.Fatalf("connectors after a minute: %v", got)
+	if got, _ := q.Machines(DefaultTeam); strings.Join(got, ",") != conB {
+		t.Fatalf("machines after a minute: %v", got)
 	}
 }
 
@@ -75,10 +79,10 @@ func TestFolderPathNeverStored(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
-	conn := capsRunner(t, q, nil, &Capabilities{Role: RoleConnector, Connector: conA})
+	conn := capsRunner(t, q, nil, &Capabilities{Connector: conA})
 	const path = "/home/me/very-private-folder-name"
 	lost, _ := q.RegisterFolder(DefaultTeam, conA, path)
-	if j, _, ok, _, _ := q.Take(conn.ID, lease); !ok || j.Spec.Folder != path {
+	if j, _, ok, _, _ := q.Take(conn.ID, lease, true); !ok || j.Spec.Folder != path {
 		t.Fatalf("take: %+v %v", j.Spec, ok)
 	}
 	waiting, _ := q.RegisterFolder(DefaultTeam, conB, path+"-2")
@@ -103,7 +107,7 @@ func TestFolderPathNeverStored(t *testing.T) {
 			t.Errorf("job %s did not end: %+v", id, got)
 		}
 	}
-	if _, _, ok, _, _ := q.Take(conn.ID, lease); ok {
+	if _, _, ok, _, _ := q.Take(conn.ID, lease, true); ok {
 		t.Fatal("an ended folder job was taken again")
 	}
 }

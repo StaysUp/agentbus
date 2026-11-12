@@ -12,10 +12,10 @@ import (
 // copy with its changes recorded.
 var ErrNotApplicable = errors.New("queue: the turn's changes cannot be applied")
 
-// ErrNoConnector: the folder's connector has not asked for work within
-// RunnerFresh, so a new snapshot or apply of its folder would wait for
-// nothing. No job is made.
-var ErrNoConnector = errors.New("queue: the folder's connector is not connected")
+// ErrMachineOffline: no runner on the folder's machine has asked for work
+// within RunnerFresh, so a new snapshot or apply of its folder would wait
+// for nothing. No job is made.
+var ErrMachineOffline = errors.New("queue: the folder's machine is offline")
 
 // ErrApplyBusy: an apply of the session up to an earlier turn has not ended.
 var ErrApplyBusy = errors.New("queue: an apply of this session has not ended")
@@ -132,9 +132,9 @@ func (q *Queue) AppliedBy(team, turn string) (job Job, ok bool, err error) {
 
 // Apply makes the job that makes the person's folder as the session was at
 // the end of turn: every turn of the session not yet applied, up to and
-// including turn, in one step, on the folder's connector. It starts no turn.
+// including turn, in one step, on the runner of the folder's machine. It starts no turn.
 // It goes from the changeset of the last turn applied (none: the session's
-// base) to turn's, so the connector checks each file against where the
+// base) to turn's, so the folder's runner checks each file against where the
 // folder should be now. A turn already applied, by its own apply or by one
 // of a later turn, gets that job and created false: applying twice writes
 // nothing more. So does a turn whose apply is running. An apply of an
@@ -206,10 +206,10 @@ func (q *Queue) ApplyAs(team, turn string, by *By) (job Job, created bool, err e
 	// The key counts the applies of turn that ended without applying, so
 	// requests at once make one job, and one after a refusal makes a new
 	// one. It holds a "/", which no key a caller sends may hold (ResultKey).
-	if ok, err := q.ConnectorSeen(team, first.Connector); err != nil {
+	if ok, err := q.MachineSeen(team, first.Connector); err != nil {
 		return Job{}, false, err
 	} else if !ok {
-		return Job{}, false, ErrNoConnector
+		return Job{}, false, ErrMachineOffline
 	}
 	key := ApplyKey(turn, refused)
 	spec := Spec{Session: j.Session, FolderRef: first.FolderRef, Connector: first.Connector, ApplyFrom: from, ApplyTo: r.Changeset}
@@ -247,11 +247,12 @@ func ApplyKey(turn string, n int) string { return fmt.Sprintf("apply/%s/%d", tur
 func SnapshotKey(attempt string) string { return "snapshot/" + attempt }
 
 // Snapshot makes, or finds, the snapshot job the runner's attempt asks for:
-// a snapshot of the folder its job names, on the folder's connector, for
+// a snapshot of the folder its job names, on the folder's machine, for
 // the runner to build the session's copy from. Only the runner holding the
 // attempt, while it is current, may ask, and only for a first turn in an
-// isolated copy of a folder. While no connector has taken it, a connector
-// not seen within RunnerFresh is ErrNoConnector: the runner stops waiting.
+// isolated copy of a folder. While no runner has taken it, a folder's
+// machine not seen within RunnerFresh is ErrMachineOffline: the runner stops
+// waiting. Since 0.5 no runner of this build asks for one.
 func (q *Queue) Snapshot(runnerID, attemptID string, number int) (Job, error) {
 	var a Attempt
 	var j Job
@@ -272,10 +273,10 @@ func (q *Queue) Snapshot(runnerID, attemptID string, number int) (Job, error) {
 	if err != nil || job.State != Queued {
 		return job, err
 	}
-	if ok, err := q.ConnectorSeen(j.Team, sp.Connector); err != nil {
+	if ok, err := q.MachineSeen(j.Team, sp.Connector); err != nil {
 		return Job{}, err
 	} else if !ok {
-		return job, ErrNoConnector
+		return job, ErrMachineOffline
 	}
 	return job, nil
 }

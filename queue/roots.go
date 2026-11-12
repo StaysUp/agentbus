@@ -47,8 +47,8 @@ func (q *Queue) BlobRoots() (BlobRoots, error) {
 // every job of each session it holds an attempt of that has not ended or
 // ended within recent, the snapshot jobs of those sessions' attempts
 // included; of each job it holds so with no session; and each such
-// session's own snapshot. A connector's apply and snapshot jobs are its
-// jobs too.
+// session's own snapshot. Its apply and snapshot jobs, of its machine's
+// folders, are its jobs too.
 func (q *Queue) RunnerBlobRoots(runnerID string, recent time.Duration) (BlobRoots, error) {
 	var out BlobRoots
 	since := nanos(q.now().Add(-recent))

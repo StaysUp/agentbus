@@ -32,7 +32,18 @@ func makeJob(t *testing.T, q *Queue, sp Spec) Job {
 
 func takes(t *testing.T, q *Queue, r Runner) string {
 	t.Helper()
-	j, _, ok, _, err := q.Take(r.ID, lease)
+	return takesKind(t, q, r, false)
+}
+
+// takesFolder is takes of a folder job.
+func takesFolder(t *testing.T, q *Queue, r Runner) string {
+	t.Helper()
+	return takesKind(t, q, r, true)
+}
+
+func takesKind(t *testing.T, q *Queue, r Runner, folders bool) string {
+	t.Helper()
+	j, _, ok, _, err := q.Take(r.ID, lease, folders)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +60,7 @@ const (
 )
 
 // A job that names a folder goes only to the runner of that folder's
-// connector; a runner of none, or of another, never takes it.
+// machine; a runner of none, or of another, never takes it.
 func TestTakeRoutesByConnector(t *testing.T) {
 	q, _ := open(t)
 	none := capsRunner(t, q, nil, nil)
@@ -306,7 +317,7 @@ func TestFillTurnFromStartedAttempt(t *testing.T) {
 }
 
 // The harness rule counts only runners that could take the job: a runner of
-// another connector that has the harness does not hold back the folder's
+// another machine that has the harness does not hold back the folder's
 // own runner, whose engine then says how to install it.
 func TestHarnessRuleCountsOnlyEligibleRunners(t *testing.T) {
 	q, _ := open(t)
@@ -326,7 +337,7 @@ func TestHarnessRuleCountsOnlyEligibleRunners(t *testing.T) {
 	}
 }
 
-// Equal paths on two connectors are two folders.
+// Equal paths on two machines are two folders.
 func TestFoldersOfTwoConnectors(t *testing.T) {
 	q, _ := open(t)
 	capsRunner(t, q, nil, &Capabilities{Connector: conA, Folders: []FolderInfo{{Ref: refX, Name: "p"}}})

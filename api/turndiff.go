@@ -310,7 +310,7 @@ const (
 	applySessionClosed = "this turn's session was closed, so its copy and checkpoints are gone"
 	applyNoJob         = "no turn of this service has this id"
 	applyBusy          = "an apply of an earlier turn of this session has not ended; ask again once it has"
-	applyNoConnector   = "the folder's connector is not connected, so nothing was written: start agentbus connector on the folder's machine, then ask again"
+	applyOffline       = "the folder's machine is offline, so nothing was written: start agentbus runner there, then ask again"
 )
 
 // POST /api/v0/turns/<id>/apply: put the turn's changes into the person's
@@ -334,8 +334,8 @@ func (a *API) applyTurn(w http.ResponseWriter, r *http.Request, id string) {
 	case errors.Is(err, queue.ErrApplyBusy):
 		writeError(w, http.StatusConflict, applyBusy)
 		return
-	case errors.Is(err, queue.ErrNoConnector):
-		writeError(w, http.StatusServiceUnavailable, applyNoConnector)
+	case errors.Is(err, queue.ErrMachineOffline):
+		writeError(w, http.StatusServiceUnavailable, applyOffline)
 		return
 	case errors.Is(err, queue.ErrFull):
 		writeError(w, http.StatusTooManyRequests, "too many turns and applies are waiting; retry later")

@@ -1,13 +1,14 @@
 package runner
 
-// The folder side's jobs on a connector, and a runner's copy built from a
-// snapshot and its changes going out. A connector is a runner with
-// Config.Role queue.RoleConnector: it takes only snapshot and apply jobs, and
-// does them through Config.FolderSide (package connector). A runner never
-// touches a folder of another machine: it asks for a snapshot through the
-// control plane, builds the copy from the snapshot's blobs, and after each
-// turn puts the copy's changeset and the files it names in the control
-// plane's store, from where an apply reads them.
+// The folder jobs of a runner's own machine, and a turn's changes going out.
+// A runner holds its machine's folders (Config.Folders) and does their jobs
+// through Config.FolderSide (package connector): it checks and registers a
+// folder a person typed, and applies a session's changes into its folder.
+// A runner never touches a folder of another machine, and a session's work
+// comes only to the runner of its folder's machine (queue.Take). After each
+// turn the runner puts the copy's changeset and the files it names in the
+// control plane's store, from where an apply reads them, so the turn's
+// changes are in the record's reach whichever runner applies them.
 
 import (
 	"bytes"
@@ -16,7 +17,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"time"
 
 	"github.com/staysup/agentbus/blobs"
 	"github.com/staysup/agentbus/isolation"
@@ -25,7 +25,7 @@ import (
 	"github.com/staysup/agentbus/workspace"
 )
 
-// FolderSide is what a connector does to its folders (connector.Jobs).
+// FolderSide is what a runner does to its machine's folders (connector.Jobs).
 // Its errors are in fixed wording for the person: they name no path.
 type FolderSide interface {
 	// SnapshotJob takes a snapshot of the folder ref; its trees and files
@@ -59,7 +59,7 @@ func applyFinish(status, reason string, res queue.Result) queue.Finish {
 	return queue.Finish{Status: status, Reason: reason, Result: mustJSON(res)}
 }
 
-// folderWork does a snapshot, an apply or a folder job, on a connector. It stops
+// folderWork does a snapshot, an apply or a folder job of this machine. It stops
 // reading the folder and the store once the job is cancelled, the attempt
 // is no longer current, or the runner stops: an apply stopped so writes
 // nothing, as no file is put in place before every one is staged.
@@ -74,9 +74,8 @@ func (r *Runner) folderWork(ctx context.Context, at *attempt) queue.Finish {
 		}
 		return applyFinish(queue.Failed, queue.ReasonSetup, res)
 	}
-	if r.cfg.Role != queue.RoleConnector || r.cfg.FolderSide == nil || r.cfg.Folders == nil ||
-		sp.Connector != r.cfg.Folders.Connector() {
-		return refuse("this runner is not the connector of the job's folder", nil)
+	if r.cfg.FolderSide == nil || sp.Connector != r.cfg.Folders.Connector() {
+		return refuse("this runner is not on the machine of the job's folder", nil)
 	}
 	if at.job.Kind == queue.KindFolder {
 		if sp.Folder == "" {
@@ -88,11 +87,9 @@ func (r *Runner) folderWork(ctx context.Context, at *attempt) queue.Finish {
 			return queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup,
 				Result: mustJSON(queue.Result{Refused: err.Error(), Status: http.StatusBadRequest})}
 		}
-		// Reported now, so GET /api/v0/folders lists it at once.
-		select {
-		case r.reportNow <- struct{}{}:
-		default:
-		}
+		// Reported before the job ends, so GET /api/v0/folders lists it
+		// by the time the turn that typed it is answered.
+		r.beat(ctx)
 		return queue.Finish{Status: queue.Finished, Result: mustJSON(queue.Result{FolderRef: ref})}
 	}
 	if _, ok := r.cfg.Folders.Path(sp.FolderRef); !ok {
@@ -142,64 +139,6 @@ func joinPaths(cs []queue.ApplyConflict) string {
 		b.WriteString(c.Path)
 	}
 	return b.String()
-}
-
-// snapshotWait bounds how long a runner waits for a folder's snapshot.
-const snapshotWait = 30 * time.Minute
-
-// fromSnapshot builds the session's copy from a snapshot of the folder its
-// job names: the runner asks the control plane for one, which the folder's
-// connector takes, and builds the copy from its blobs.
-func (r *Runner) fromSnapshot(ctx context.Context, at *attempt) *queue.Result {
-	if r.cfg.Blobs == nil {
-		return &queue.Result{Refused: "this runner keeps no blob store, so it cannot copy a folder of another machine"}
-	}
-	deadline := time.Now().Add(snapshotWait)
-	var st jobs.SnapshotState
-	for {
-		var e jobs.JobError
-		status, err := callErr(ctx, r.short, at.path("snapshot"), r.token, jobs.AttemptCall{Number: at.a.Number}, &st, &e)
-		switch {
-		case ctx.Err() != nil:
-			return &queue.Result{Refused: "the runner stopped while the folder's snapshot was taken"}
-		case err == nil && status == http.StatusOK && st.Snapshot != nil:
-		case err == nil && status == http.StatusOK && st.Error != "":
-			// The folder's side could not give the snapshot: not this
-			// service's fault, and the turn may be sent again.
-			return &queue.Result{Refused: st.Error, Status: http.StatusServiceUnavailable}
-		case err == nil && status != http.StatusOK && status < 500:
-			return &queue.Result{Refused: "the folder's snapshot could not be asked for: " + e.Error}
-		case time.Now().After(deadline):
-			return &queue.Result{Refused: "the folder's snapshot was not taken in time"}
-		default:
-			select {
-			case <-at.stale:
-				return &queue.Result{Refused: "the attempt is no longer current"}
-			case <-at.cancel:
-				return &queue.Result{Refused: "the turn was stopped while the folder's snapshot was taken"}
-			case <-ctx.Done():
-				return &queue.Result{Refused: "the runner stopped while the folder's snapshot was taken"}
-			case <-time.After(100 * time.Millisecond):
-			}
-			continue
-		}
-		break
-	}
-	at.event("workspace.snapshot", map[string]any{"snapshot": st.Snapshot.ID, "files": st.Snapshot.Files, "job": st.Job})
-	p, err := r.policy()
-	if err != nil {
-		return &queue.Result{Refused: "the permissions cannot be read, so the turn did not start; fix them and send the turn again"}
-	}
-	b, ok := isolation.For(p.Isolation, "")
-	if !ok {
-		b, _ = isolation.Get(isolation.Copy)
-	}
-	snap := &isolation.Snapshot{ID: st.Snapshot.ID, Blobs: r.cfg.Blobs, Times: st.Snapshot.Times, Git: st.Snapshot.Git}
-	// The copy's blobs stop coming once the turn is stopped, the attempt is
-	// no longer current, or the runner stops.
-	bctx, stop := attemptContext(ctx, at)
-	defer stop()
-	return r.isolate(at, b, isolation.Request{Snapshot: snap, Ref: at.ref, Ctx: bctx})
 }
 
 // publish puts what the session's copy holds at the checkpoint name that

@@ -75,7 +75,7 @@ func TestRunnerProtocolOnTheOneAPI(t *testing.T) {
 		}
 	}
 	// Register takes the enrollment token, and not the main or turns token.
-	enroll := `{"name":"r","capacity":1,"protocol":3,"capabilities":{"connector":"con_0123456789abcdef"}}`
+	enroll := `{"name":"r","capacity":1,"protocol":4,"capabilities":{"connector":"con_0123456789abcdef"}}`
 	for _, tok := range []string{token, turnsTok} {
 		r := e.req(t, "POST", "/api/v0/runner/register", strings.NewReader(enroll))
 		r.Header.Set("Authorization", "Bearer "+tok)
@@ -94,10 +94,10 @@ func TestRunnerProtocolOnTheOneAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The main token never takes work.
-	if resp, _ := do(t, e.req(t, "POST", "/api/v0/runner/take", strings.NewReader(`{"wait_ms":0,"protocol":3}`))); resp.StatusCode != http.StatusUnauthorized {
+	if resp, _ := do(t, e.req(t, "POST", "/api/v0/runner/take", strings.NewReader(`{"wait_ms":0,"protocol":4}`))); resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("take with the main token: %d, want 401", resp.StatusCode)
 	}
-	r = e.req(t, "POST", "/api/v0/runner/take", strings.NewReader(`{"wait_ms":0,"protocol":3}`))
+	r = e.req(t, "POST", "/api/v0/runner/take", strings.NewReader(`{"wait_ms":0,"protocol":4}`))
 	r.Header.Set("Authorization", "Bearer "+en.Token)
 	resp, raw = do(t, r)
 	var taken jobs.TakenWork

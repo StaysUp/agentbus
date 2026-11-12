@@ -189,7 +189,7 @@ func TestCommandRunnerLost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, att, ok, _, err := e.q.Take(far.ID, time.Minute)
+	_, att, ok, _, err := e.q.Take(far.ID, time.Minute, false)
 	if err != nil || !ok || att.Job != first.ID {
 		t.Fatalf("take: %v %v", ok, err)
 	}
@@ -204,7 +204,7 @@ func TestCommandRunnerLost(t *testing.T) {
 	if json.Unmarshal([]byte(body), &q); resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("command: %d %s", resp.StatusCode, body)
 	}
-	_, ca, ok, _, _ := e.q.Take(far.ID, 200*time.Millisecond)
+	_, ca, ok, _, _ := e.q.Take(far.ID, 200*time.Millisecond, false)
 	if !ok {
 		t.Fatal("far did not take the command")
 	}

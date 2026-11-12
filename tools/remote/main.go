@@ -15,6 +15,11 @@
 //	go run ./tools/remote
 //
 // See tools/remote/README.md.
+//
+// Since 0.5 it no longer runs: it measures the path that release retired.
+// agentbus connector only says what to run instead, and a session runs on
+// the machine that holds its folder, so the VM's runner takes no job of the
+// Mac's folder. It stays as the record of what that path cost.
 package main
 
 import (

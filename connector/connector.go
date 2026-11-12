@@ -1,16 +1,15 @@
 // Package connector is the folder side: the one part of AgentBus that reads
-// and writes the person's folder. It owns the folders of one machine
-// (package folders), takes a snapshot of one for a runner to build a copy
-// from, puts a session's changes into one when the person applies them, and,
-// on the local fast path only, lends a runner in the same process the base
-// content of a file its copy no longer has.
+// and writes the person's folder. It holds the folders of one machine
+// (package folders), checks and registers a folder a person typed, puts a
+// session's changes into one when the person applies them, and lends the
+// runner the base content of a file its copy no longer has.
 //
-// A connector is a runner that takes only snapshot and apply jobs (package
-// runner, Config.Folder). File data goes through the control plane's blob
-// store, never straight to a runner: a snapshot's files and trees go there,
-// and an apply reads the files a turn wrote from there. In agentbus up the
-// store is the control plane's own on the same disk, and nothing is sent
-// over HTTP.
+// Since 0.5 it is no program of its own: the runner of the machine does its
+// jobs (package runner, Config.FolderSide), so one program runs on each
+// machine. The package keeps its name. An apply reads the files a turn
+// wrote from the control plane's blob store, where the runner put them; in
+// agentbus up the store is the control plane's own on the same disk, and
+// nothing is sent over HTTP.
 //
 // Control packages never import it (cmd/agentbus/layers_test.go).
 package connector
@@ -77,7 +76,7 @@ type Taken struct {
 
 // Errors, in fixed wording for the person: none names a path.
 var (
-	ErrUnknown   = errors.New("this connector does not own the folder")
+	ErrUnknown   = errors.New("this machine does not hold the folder")
 	ErrNotFolder = errors.New("the folder is not an existing directory")
 	ErrTooMany   = errors.New("the folder has more files than a snapshot holds")
 	ErrChanged   = errors.New("the folder changed while its snapshot was taken; send the turn again")
@@ -713,7 +712,7 @@ func hashIn(rt *os.Root, name string) (hash string, mode fs.FileMode, exists boo
 	return "", 0, false, errors.New("not a file")
 }
 
-// Jobs is the connector as a connector's runner calls it (runner.FolderSide):
+// Jobs is the connector as the machine's runner calls it (runner.FolderSide):
 // the answers in the queue's words.
 type Jobs struct{ *Connector }
 

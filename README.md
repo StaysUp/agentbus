@@ -274,52 +274,73 @@ curl -s http://127.0.0.1:8787/api/v0/turns/<turn>/diff -H "Authorization: Bearer
 curl -s -X POST http://127.0.0.1:8787/api/v0/turns/<turn>/apply -H "Authorization: Bearer $TOKEN"
 ```
 
-## Three roles, one or more machines
+## One program per machine
 
-One program has three roles:
+Control and the machines that do the work:
 
 - **Control** keeps the API, the job queue, the record, the settings, the saved agents, the
   gateway, and a store of file contents. It never reads or writes your folder.
-- **A connector** owns the folders of its machine. It takes their snapshots and applies changes
-  into them.
-- **A runner** runs agents, each session in its own copy.
+- **A runner** is the one program of each machine that does work. It holds that machine's
+  folders, makes each session's copy from its folder, runs the session's agents, and applies the
+  changes back into the folder when you ask.
 
 | Command | What runs | For |
 |---|---|---|
-| `agentbus up` | Control, a connector and a runner, in one process | One person on one machine. The default. |
+| `agentbus up` | Control and this machine's runner, in one process | One person on one machine. The default. |
 | `agentbus server` | Control alone | The machine that holds the record. |
-| `agentbus connector -server <url>` | A connector alone | The machine that holds the code. |
-| `agentbus runner -server <url>` | A runner; with `-folder DIR`, a connector beside it | Any machine that should run agents. |
+| `agentbus runner -server <url>` | This machine's runner | Every other machine that holds code and runs agents. |
 
 On one machine, `agentbus up` is all you need. Its copy is a clone or an overlay of your folder,
 and nothing goes over HTTP. Its runner uses each harness's own sign-in, as you do.
 
-**More machines.** Keep control and the connector on the machine with your code. Run runners
-anywhere, such as in a Linux VM. Runners and connectors pull their work and are never called, so
-they work behind a router.
+**More machines.** Run `agentbus runner` on each machine that holds code. A session runs on the
+machine that holds its folder, for its whole life: you pick the machine, then type (or pick) a
+folder on it. Runners pull their work and are never called, so they work behind a router.
 
 ```sh
-# On the machine with the code: control, then a connector for your folders.
+# Control, on the machine that keeps the record:
 agentbus server -listen 0.0.0.0
-agentbus connector -server http://127.0.0.1:8787
 
-# On each runner machine, with the server's enroll_token file copied over (mode 0600):
+# On each machine with code, with the server's enroll_token file copied over (mode 0600):
 agentbus runner -server http://devbox:8787 -enroll-token-file ./enroll_token
 ```
 
 A runner on the same machine as its server needs its own data folder (`AGENTBUS_HOME`). For a
 runner in a Lima VM and a server on the Mac's loopback, start the server with
-`-host host.lima.internal`. `go run ./tools/remote` runs the whole path that way.
+`-host host.lima.internal`.
 
-A session starts in any folder you type. `agentbus server` has no folders of its own, so it asks
-the connector: the connector checks that the folder exists and that it can read it, and keeps it.
-No restart and no `-folder` flag is needed. With several connectors, the turn names one in
-`connector`. `GET /api/v0/folders` lists every folder used so far, and a turn can name one by
-`folder_ref` and `connector` instead.
+A session starts in any folder you type for the machine you picked. Typing it is the grant for
+that session. `agentbus server` has no folders of its own, so it asks that machine's runner: the
+runner checks that the folder exists and that it can read it, and keeps it. No restart and no
+`-folder` flag is needed. A turn names the machine in `connector`, its id from
+`GET /api/v0/runners`. `GET /api/v0/folders` lists every folder used so far on each machine, and a
+turn can name one by `folder_ref` and `connector` instead.
 
-File contents go through control's store, by the SHA-256 of each file, so each side sends only
-what the other lacks. A runner builds a session's copy from a snapshot the connector took. At the
-end of each turn it puts what changed in the store. An apply is a job of the folder's connector.
+At the end of each turn the runner puts what changed in control's store, by the SHA-256 of each
+file, so it sends only what control lacks. An apply is a job of the same runner, on the folder's
+machine, and does not wait behind the turns running there.
+
+### Upgrading to 0.5
+
+`agentbus connector` is retired. It changes nothing: it prints the `agentbus runner` line to run
+instead, with the flags you gave it, and exits 2. To move a machine over:
+
+1. Stop the connector.
+2. Start `agentbus runner` there with the same flags (`-server`, `-folder`, `-enroll-token-file`,
+   `-name`) and the same data folder. The data folder's `folders.json` keeps the machine's id and
+   its folders' references, so the sessions and applies that name them reach the new runner.
+3. If the connector shared control's data folder (both ran as one user next to each other, as in
+   a container), give the runner its own: make a new folder, copy `folders.json` into it (copy, do
+   not move), and start the runner with `AGENTBUS_HOME` set to it. Two programs on one data
+   folder would share `events.db`.
+4. The runner also runs the agents of every session in that machine's folders, so install the
+   agents' programs there (`claude`, `codex`, `agy`). Until a runner runs there, those sessions'
+   turns wait in the queue and their applies are refused with 503.
+
+A session made before 0.5 whose copy another machine built from a snapshot keeps running on that
+machine until it closes; its applies go to the folder's machine. The old connector's row stays in
+control's queue and shows in `GET /api/v0/runners` only while no runner reports its machine.
+Control and every runner must run the same release (runner protocol 4).
 
 **Runners hold no secrets.** Control gives each runner turn a token of its own. The agent uses it
 as its model credential. Control's gateway swaps it for the real one on the way out:
@@ -446,10 +467,11 @@ The contract in words is [docs/CLIENT_API.md](docs/CLIENT_API.md).
 
 Everything stays on your machine, in the data folder: `events.db` (a SQLite file, the record),
 `jobs.db` (the job queue), `token`, `turns_token`, `enroll_token`, `runner.json`,
-`connector.json`, `folders.json`, `settings.db` (your settings and saved agents), `blobs/`,
+`folders.json`, `settings.db` (your settings and saved agents), `blobs/`,
 `sessions/`, `homes/` (a runner's) and `logs/`. `turns_token` is a second token for a program that only starts, stops
-and reads turns. `enroll_token` adds a runner or a connector; the built-in ones read it, and keep
-their identities in `runner.json` and `connector.json`. `blobs/` is control's store of file
+and reads turns. `enroll_token` adds a runner; the built-in one reads it, and keeps
+its identity in `runner.json`. A data folder from before 0.5 may also hold `connector.json`, the
+retired connector's identity, which nothing reads now. `blobs/` is control's store of file
 contents. `sessions/` holds the copies and git worktrees sessions run in, each named after its
 session. A data folder from before 0.4 may also hold `worktrees/`, with its older copies, which
 are still used and removed there. `subscriptions/`
@@ -584,7 +606,7 @@ runner on another machine uses its server's.
 | `jobs/` | The runner protocol, under `/api/v0/runner/` |
 | `runner/` | Takes jobs through the runner protocol and runs each one with `run/` |
 | `isolation/` | The runner's side: a session's own copy, from a clone or a snapshot; checkpoint, diff, changeset, close |
-| `connector/` | The folder side: a folder's snapshot, and applying a session's changes into it |
+| `connector/` | The folder side, in each machine's runner: checking a typed folder, and applying a session's changes into it |
 | `folders/` | The folders of one machine, known to control by reference only |
 | `blobs/` | The content-addressed store every file travels through, and its HTTP client |
 | `workspace/` | What a job changed, and git worktrees |

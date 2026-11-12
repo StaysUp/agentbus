@@ -25,24 +25,24 @@ type Capabilities struct {
 	// Harnesses: each harness's program on the runner's machine. Nil until
 	// the runner's first probe has ended.
 	Harnesses []harness.Report `json:"harnesses,omitempty"`
-	// Connector: the connector id of the folders this runner owns, when it
-	// owns any. Folders are those folders, at most MaxFolders.
+	// Connector: the id of the runner's machine (con_ and 16 hex digits),
+	// the id of the folders it holds. A job that names it goes to this
+	// runner only. Folders are those folders, at most MaxFolders. The field
+	// keeps its name from when a separate connector held the folders.
 	Connector string       `json:"connector,omitempty"`
 	Folders   []FolderInfo `json:"folders,omitempty"`
-	// Role: RoleConnector for a connector, which takes only snapshot and
-	// apply jobs of its own folders; empty for a runner, which takes every
-	// other job. A runner that reports Connector shares the connector's
-	// machine and disk: it can use a folder as it is, and copy it by the
-	// local fast path.
+	// Role was RoleConnector for a connector of a build before 0.5. A
+	// runner stored with it is listed as such; none may report it now.
 	Role string `json:"role,omitempty"`
 }
 
-// RoleConnector is a connector's Capabilities.Role.
+// RoleConnector is the Capabilities.Role of a connector of a build before
+// 0.5, when a machine's folders had a program of their own.
 const RoleConnector = "connector"
 
-// FolderInfo is one folder a connector owns, as control may know it: its
-// reference and the last part of its path. The path itself stays with the
-// connector.
+// FolderInfo is one folder a runner holds, as control may know it: its
+// reference and the last part of its path. The path itself stays on the
+// runner's machine.
 type FolderInfo struct {
 	Ref  string `json:"ref"`
 	Name string `json:"name"`
@@ -51,7 +51,7 @@ type FolderInfo struct {
 // MaxFolders bounds the folders one runner reports.
 const MaxFolders = 1000
 
-// Shapes of the ids a connector issues.
+// Shapes of the ids a runner issues for its machine and its folders.
 var (
 	ConnectorShape = regexp.MustCompile(`^con_[0-9a-f]{16}$`)
 	FolderRefShape = regexp.MustCompile(`^fld_[0-9a-f]{16}$`)
@@ -67,11 +67,8 @@ func (c Capabilities) Check() string {
 	if c.Connector != "" && !ConnectorShape.MatchString(c.Connector) {
 		return "capabilities.connector must be con_ and 16 hex digits"
 	}
-	if c.Role != "" && c.Role != RoleConnector {
-		return "capabilities.role must be connector, or absent"
-	}
-	if c.Role == RoleConnector && c.Connector == "" {
-		return "a connector needs capabilities.connector"
+	if c.Role != "" {
+		return "agentbus connector was retired in 0.5: run agentbus runner on the folder's machine, with the same data folder"
 	}
 	if len(c.Folders) > MaxFolders || len(c.Harnesses) > 64 || len(c.Isolation) > 16 || len(c.OS) > 32 || len(c.Arch) > 32 {
 		return "capabilities lists too much"
@@ -103,8 +100,8 @@ const RunnerFresh = time.Minute
 
 // harnessTake is Take's harness rule for a job j and runner r: a session's
 // first job on a harness goes to a runner that reports it found. When no
-// runner that could take the job (seen within RunnerFresh, with its
-// connector and every label it asks for) does, or this runner has not
+// runner that could take the job (seen within RunnerFresh, on the job's
+// machine, with every label it asks for) does, or this runner has not
 // reported yet, any runner may take it, and its engine refuses it with how
 // to install the program, as on one machine. A job of a known session goes
 // to the session's runner whatever it reports.
@@ -115,28 +112,28 @@ const harnessTake = `(j.session IS NOT NULL AND EXISTS (SELECT 1 FROM sessions s
 		WHERE json_extract(h.value, '$.name') = json_extract(j.spec, '$.agent') AND json_extract(h.value, '$.found'))
 	OR NOT EXISTS (SELECT 1 FROM runners o, json_each(o.caps, '$.harnesses') h WHERE o.team = j.team AND o.seen >= ?
 		AND json_extract(h.value, '$.name') = json_extract(j.spec, '$.agent') AND json_extract(h.value, '$.found')
-		AND COALESCE(json_extract(o.caps, '$.role'), '') != 'connector'
-		AND (COALESCE(json_extract(j.spec, '$.connector'), '') = '' OR ` + remoteIsolated + `
-			OR json_extract(j.spec, '$.connector') = json_extract(o.caps, '$.connector'))
+		AND (COALESCE(json_extract(j.spec, '$.connector'), '') = '' OR json_extract(j.spec, '$.connector') = json_extract(o.caps, '$.connector'))
 		AND NOT EXISTS (SELECT 1 FROM json_each(j.spec, '$.labels') l WHERE l.value NOT IN (SELECT value FROM json_each(o.labels))))`
 
-// remoteIsolated: a job j that any runner can run, wherever its folder is: a
-// first turn in an isolated copy of a folder, built from its snapshot.
-const remoteIsolated = `(j.kind = 'turn' AND json_extract(j.spec, '$.isolate') AND COALESCE(json_extract(j.spec, '$.folder_ref'), '') != ''
-	AND COALESCE(json_extract(j.spec, '$.repo_ref'), '') = '')`
+// machineTake: a job that names a machine (spec.connector) goes to the
+// runner on that machine and no other. A session runs on the machine that
+// holds its folder. One exception keeps a session made before 0.5 going: a
+// next job of a session another machine's runner already holds (its first
+// turn was built there from a snapshot) stays with that runner. Folder jobs
+// never take it: an apply is always the folder's own machine's.
+const machineTake = `COALESCE(json_extract(j.spec, '$.connector'), '') = ''
+	OR json_extract(j.spec, '$.connector') = json_extract(r.caps, '$.connector')
+	OR (j.kind NOT IN ` + folderKinds + ` AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team AND s.runner = r.id))`
 
-// connectorTake: a job that names a folder's connector goes to a runner on
-// the connector's machine (one that reports that connector), unless it is a
-// first turn in an isolated copy of a folder, which any runner can build
-// from the folder's snapshot.
-const connectorTake = `COALESCE(json_extract(j.spec, '$.connector'), '') = '' OR ` + remoteIsolated + `
-	OR json_extract(j.spec, '$.connector') = json_extract(r.caps, '$.connector')`
+// folderKinds are the jobs a runner does to its machine's folders, not in a
+// session's copy: they take a runner's folder places (Take), not its turn
+// places, so an apply never waits behind running turns.
+const folderKinds = `('snapshot','apply','folder')`
 
-// roleTake: snapshot, apply and folder jobs go only to the connector of their
-// folder, and every other job only to a runner.
-const roleTake = `CASE WHEN j.kind IN ('snapshot','apply','folder')
-	THEN COALESCE(json_extract(r.caps, '$.role'), '') = 'connector' AND json_extract(j.spec, '$.connector') = json_extract(r.caps, '$.connector')
-	ELSE COALESCE(json_extract(r.caps, '$.role'), '') != 'connector' END`
+// FolderCapacity is how many folder jobs (folderKinds) one runner runs at
+// once, besides its capacity of turns and commands. Applies of one folder
+// take turns (package connector).
+const FolderCapacity = 4
 
 // SpaceShape is a copy's id on its runner (isolation): a job id.
 var SpaceShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
@@ -146,9 +143,9 @@ const labelsTake = `NOT EXISTS (SELECT 1 FROM json_each(j.spec, '$.labels') l
 	WHERE l.value NOT IN (SELECT value FROM json_each(r.labels)))`
 
 // Folders is every folder the team's runners report, by runner, newest
-// report first. A folder (its connector and reference) reported by two
+// report first. A folder (its machine and reference) reported by two
 // runners is listed once, from the one seen last. Equal paths on two
-// connectors have one reference, and are two folders.
+// machines have one reference, and are two folders.
 func (q *Queue) Folders(team string) ([]RunnerFolder, error) {
 	rows, err := q.db.Query(`SELECT id, caps FROM runners WHERE team = ? AND caps IS NOT NULL ORDER BY seen DESC, id`, team)
 	if err != nil {
@@ -182,19 +179,20 @@ func (q *Queue) Folders(team string) ([]RunnerFolder, error) {
 // RunnerFolder is one folder in Folders.
 type RunnerFolder struct {
 	Ref       string `json:"ref" doc:"The folder's reference: name it as folder_ref."`
-	Name      string `json:"name" doc:"The last part of the folder's path, for a screen. The path stays on the connector's machine."`
-	Connector string `json:"connector" doc:"The connector that owns the folder."`
-	Runner    string `json:"runner" doc:"The runner that reported it."`
+	Name      string `json:"name" doc:"The last part of the folder's path, for a screen. The path stays on the folder's machine."`
+	Connector string `json:"connector" doc:"The machine that holds the folder (con_ and 16 hex digits): a session in it names it as connector, and runs there."`
+	Runner    string `json:"runner" doc:"The runner that reported it: the one on that machine."`
 }
 
-// ConnectorSeen says whether the connector of this id asked for work within
-// RunnerFresh. A connected one asks about once a second, so one not seen
-// that long is gone: its folder's snapshots and applies wait for nothing.
-func (q *Queue) ConnectorSeen(team, connector string) (bool, error) {
+// MachineSeen says whether a runner on the machine of this id (one that
+// reports it as its connector) asked for work within RunnerFresh. A
+// connected one asks about once a second, so one not seen that long is
+// gone: its folders' applies and checks wait for nothing.
+func (q *Queue) MachineSeen(team, machine string) (bool, error) {
 	var n int
 	err := q.db.QueryRow(`SELECT COUNT(*) FROM runners WHERE team = ? AND seen >= ?
-		AND json_extract(caps, '$.role') = ? AND json_extract(caps, '$.connector') = ?`,
-		team, nanos(q.now().Add(-RunnerFresh)), RoleConnector, connector).Scan(&n)
+		AND COALESCE(json_extract(caps, '$.role'), '') = '' AND json_extract(caps, '$.connector') = ?`,
+		team, nanos(q.now().Add(-RunnerFresh)), machine).Scan(&n)
 	if err != nil {
 		return false, fmt.Errorf("queue: read runners: %w", err)
 	}
@@ -262,8 +260,8 @@ func addColumns(db *sql.DB) error {
 // tree (package isolation).
 var SnapshotShape = regexp.MustCompile(`^[0-9a-f]{64}$`)
 
-// FolderIssuer is a connector on this machine, as the control plane of
-// agentbus up reaches it: package folders. It turns a path a request names
+// FolderIssuer is this machine's folders, as the control plane of agentbus
+// up reaches them: package folders. It turns a path a request names
 // into the reference the queue keeps, and says whether one folder is inside
 // another, so a check that needs the path (a turn token's folder) runs where
 // the folder is. agentbus server has none, and takes references only.
@@ -275,11 +273,11 @@ type FolderIssuer interface {
 	Add(path string) (ref string, err error)
 	Path(ref string) (string, bool)
 	// Within says the folder at path is the folder ref or inside it, and
-	// WithinRef the same of the folder child: on the connector, where the
-	// folders are, once every symbolic link is resolved.
+	// WithinRef the same of the folder child: on the folders' machine, once
+	// every symbolic link is resolved.
 	Within(path, ref string) bool
 	WithinRef(child, ref string) bool
-	// WithinDir says the same of two paths on the connector's machine.
+	// WithinDir says the same of two paths on the folders' machine.
 	WithinDir(path, dir string) bool
 }
 
@@ -297,7 +295,7 @@ func ResolveFolders(spec *Spec, f FolderIssuer) string {
 				spec.Connector = f.Connector()
 			}
 			if !ConnectorShape.MatchString(spec.Connector) {
-				return "a folder_ref needs connector, from GET /api/v0/folders"
+				return "a folder_ref needs connector, its machine, from GET /api/v0/folders"
 			}
 		}
 		return ""
@@ -325,7 +323,7 @@ func ResolveFolders(spec *Spec, f FolderIssuer) string {
 // MigrateFolders rewrites every job whose spec still names a path, as a queue
 // made before folder references holds them, to the references f issues: the
 // paths go. It answers how many jobs it rewrote. agentbus up runs it at
-// start; a server has no connector, and its runners register such a path
+// start; a server has no folders, and its runners register such a path
 // when they take the job.
 //
 // The job's request hash is left as it was: a retry, after the upgrade, of
@@ -358,7 +356,7 @@ func (q *Queue) MigrateFolders(f FolderIssuer) (int, error) {
 				continue
 			}
 			if ResolveFolders(&sp, f) != "" {
-				// A path the connector cannot keep stays, and its runner
+				// A path the folders cannot keep stays, and its runner
 				// refuses it as it would have.
 				continue
 			}

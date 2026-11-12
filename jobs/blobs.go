@@ -1,9 +1,8 @@
 package jobs
 
 // The control plane's blob store, on the runner protocol: every file of a
-// snapshot or of a turn's changes goes through it (package blobs), so a
-// connector and a runner never reach each other. Each route takes a runner's
-// token, a connector's too. A blob's body is streamed to disk and checked
+// snapshot or of a turn's changes goes through it (package blobs). Each
+// route takes a runner's token. A blob's body is streamed to disk and checked
 // against its hash as it arrives: the protocol's MaxBody does not bound it.
 
 import (
@@ -201,9 +200,9 @@ func (d *deadlineWriter) Write(p []byte) (int, error) {
 	return d.w.Write(p)
 }
 
-// noConnector refuses a turn that needs a snapshot of a folder whose
-// connector is gone.
-const noConnector = "the folder's connector is not connected: start agentbus connector on the folder's machine, then send the turn again"
+// machineOffline refuses a turn that needs a snapshot of a folder whose
+// machine's runner is gone.
+const machineOffline = "the folder's machine is offline: start agentbus runner there, then send the turn again"
 
 // SnapshotState is the answer to an attempt's snapshot request: the
 // snapshot job, and once it has finished, the snapshot.
@@ -223,8 +222,8 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request, rn queue.Runne
 	}
 	j, err := s.cfg.Queue.Snapshot(rn.ID, r.PathValue("id"), b.Number)
 	switch {
-	case errors.Is(err, queue.ErrNoConnector):
-		writeJSON(w, http.StatusOK, SnapshotState{Job: j.ID, State: j.State, Error: noConnector})
+	case errors.Is(err, queue.ErrMachineOffline):
+		writeJSON(w, http.StatusOK, SnapshotState{Job: j.ID, State: j.State, Error: machineOffline})
 		return
 	case errors.Is(err, queue.ErrNotApplicable):
 		fail(w, http.StatusBadRequest, "only a session's first turn in an isolated copy of a folder takes a snapshot")
@@ -240,7 +239,7 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request, rn queue.Runne
 	} else if j.Ended != nil {
 		st.Error = res.Refused
 		if st.Error == "" && j.Reason == queue.ReasonRunnerLost {
-			st.Error = "the folder's connector stopped while it took the snapshot; send the turn again"
+			st.Error = "the folder's runner stopped while it took the snapshot; send the turn again"
 		} else if st.Error == "" {
 			st.Error = "the snapshot job ended " + j.State
 		}

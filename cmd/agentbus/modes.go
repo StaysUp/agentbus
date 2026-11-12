@@ -1,21 +1,23 @@
 package main
 
-// One program, four ways to run it:
+// One program, three ways to run it:
 //
-//	agentbus up         the API, the job queue, the record, the gateway, a
-//	                    connector and a runner, in one process: one person
-//	                    on one machine
-//	agentbus server     the API, the job queue, the record, the gateway and
-//	                    the blob store, with no runner: runners and
-//	                    connectors on other machines pull from it
-//	agentbus runner     a runner, with its own gateway and record, that takes
-//	                    jobs from a server; with -folder, a connector beside it
-//	agentbus connector  a connector alone: the folders of this machine, their
-//	                    snapshots and their applies, for a server
+//	agentbus up      the API, the job queue, the record, the gateway and a
+//	                 runner, in one process: one person on one machine
+//	agentbus server  the API, the job queue, the record, the gateway and the
+//	                 blob store, with no runner: the runners of other
+//	                 machines pull from it
+//	agentbus runner  the one program of a machine that is not control: it
+//	                 holds the machine's folders, makes each session's copy
+//	                 from its folder, runs its turns, and applies changes
+//	                 back into the folder
 //
-// Every runner and connector, the built-in ones of up too, talks to its
-// queue through the runner protocol over HTTP. File data goes through the
-// server's blob store; in up the three share it on disk.
+// agentbus connector, a machine's folders as a program of their own, was
+// retired in 0.5: it now says what to run instead (connectorRetired).
+//
+// Every runner, the built-in one of up too, talks to its queue through the
+// runner protocol over HTTP. File data goes through the server's blob store;
+// in up the two share it on disk.
 
 import (
 	"errors"
@@ -34,9 +36,10 @@ import (
 
 // The modes. up is the zero value of config.mode.
 const (
-	modeUp        = ""
-	modeServer    = "server"
-	modeRunner    = "runner"
+	modeUp     = ""
+	modeServer = "server"
+	modeRunner = "runner"
+	// modeConnector is no mode since 0.5: parse refuses it.
 	modeConnector = "connector"
 )
 
@@ -70,7 +73,6 @@ func (c config) modeName() string {
 const usage = `usage: agentbus up     [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false] [-max-runs 4]
        agentbus server [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false]
        agentbus runner -server URL [-enroll-token-file F] [-gateway server|local] [-capacity 4] [-name NAME] [-folder DIR]... [-labels a,b] [-listen 127.0.0.1:0] [-replay=false]
-       agentbus connector -server URL [-folder DIR]... [-enroll-token-file F] [-name NAME]
        agentbus connect HARNESS           (on control, once: keep your own subscription's token for your runners)
        agentbus api METHOD PATH [BODY]   (inside a turn: calls this service with the turn's token)
        agentbus version`
@@ -85,7 +87,8 @@ func parse(args []string, home string, stderr io.Writer) (config, bool) {
 	case modeServer, modeRunner:
 		c.mode = args[0]
 	case modeConnector:
-		return parseConnector(args, home, stderr)
+		fmt.Fprintln(stderr, connectorRetired(args[1:]))
+		return c, false
 	default:
 		fmt.Fprintln(stderr, usage)
 		return c, false
@@ -116,7 +119,7 @@ func parse(args []string, home string, stderr io.Writer) (config, bool) {
 	var server, enrollFile, runnerName, gatewayMode, labels *string
 	var folderList folderFlags
 	if c.mode == modeRunner {
-		fl.Var(&folderList, "folder", "a folder on this machine that turns may run in, by its absolute path; repeat it for each one. The server knows it only by its reference (GET /api/v0/folders)")
+		fl.Var(&folderList, "folder", "a folder on this machine that sessions may run in, by its absolute path; repeat it for each one. The server knows it only by its reference (GET /api/v0/folders). A folder a person types for this machine is added when its session starts, so none is required")
 		labels = fl.String("labels", "", "words a job can ask for in spec.labels, comma-separated, such as gpu,docker; default agentbus")
 		server = fl.String("server", "", "the server's URL, such as http://192.168.1.10:8787 (required)")
 		enrollFile = fl.String("enroll-token-file", "", "the server's enroll_token, copied here with mode 0600; default <data folder>/enroll_token")
@@ -211,39 +214,22 @@ type folderFlags []string
 func (f *folderFlags) String() string     { return strings.Join(*f, ",") }
 func (f *folderFlags) Set(v string) error { *f = append(*f, v); return nil }
 
-// parseConnector reads agentbus connector's command line.
-func parseConnector(args []string, home string, stderr io.Writer) (config, bool) {
-	c := config{mode: modeConnector}
-	name := "agentbus connector"
-	fl := flag.NewFlagSet(args[0], flag.ContinueOnError)
-	fl.SetOutput(stderr)
-	var folderList folderFlags
-	fl.Var(&folderList, "folder", "a folder on this machine that sessions may copy and apply to, by its absolute path; repeat it for each one. A folder a session names by path is added when the session starts, so none is required")
-	server := fl.String("server", "", "the server's URL, such as http://192.168.1.10:8787 (required)")
-	enrollFile := fl.String("enroll-token-file", "", "the server's enroll_token, copied here with mode 0600; default <data folder>/enroll_token")
-	runnerName := fl.String("name", "", "the connector's name; default the host name")
-	if err := fl.Parse(args[1:]); err != nil {
-		return c, false
-	}
-	if fl.NArg() > 0 {
-		fmt.Fprintf(stderr, "%s: unexpected argument %q\n", name, fl.Arg(0))
-		return c, false
-	}
-	u, err := url.Parse(*server)
-	if *server == "" || err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		fmt.Fprintf(stderr, "%s: -server must be the server's URL, such as http://192.168.1.10:8787\n", name)
-		return c, false
-	}
-	for _, f := range folderList {
-		if !filepath.IsAbs(f) || len(f) > 4096 {
-			fmt.Fprintf(stderr, "%s: -folder must be an absolute path\n", name)
-			return c, false
+// connectorRetired is what agentbus connector says since 0.5: what to run
+// instead, with the flags it was given. agentbus runner takes each of them.
+// Nothing is changed or removed: a runner started on the same data folder
+// keeps this machine's id and its folders' references, so the sessions and
+// applies that name them reach it.
+func connectorRetired(args []string) string {
+	line := "agentbus runner"
+	for _, a := range args {
+		if a == "" || strings.ContainsAny(a, " \t\n'\"\\$`!*?[]{}()<>|&;#~") {
+			a = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
 		}
+		line += " " + a
 	}
-	c.server, c.runnerName, c.folders = *server, *runnerName, folderList
-	c.enrollFile = *enrollFile
-	if c.enrollFile == "" {
-		c.enrollFile = home + string(os.PathSeparator) + "enroll_token"
-	}
-	return c, true
+	return "agentbus connector was retired in 0.5: one program, agentbus runner, runs on each machine, holds its folders, runs their sessions and applies their changes.\n" +
+		"Run instead, with the same data folder (it keeps this machine's id and its folders' references):\n\n    " + line + "\n\n" +
+		"If this data folder is also control's (agentbus server's), give the runner one of its own: set AGENTBUS_HOME to a new folder and copy folders.json into it first. " +
+		"The runner also runs the agents of every session in this machine's folders, so the agents' programs must be installed here. " +
+		"Nothing was changed. See Upgrading to 0.5 in README.md."
 }

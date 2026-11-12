@@ -25,6 +25,7 @@ import (
 	"github.com/staysup/agentbus/blobs"
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/folders"
+	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/isolation"
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
@@ -61,19 +62,18 @@ type Config struct {
 	// Empty enrolls a new runner on every start.
 	StateFile string
 
-	// Role is queue.RoleConnector for a connector, which takes only snapshot
-	// and apply jobs and does them through FolderSide; empty for a runner.
-	Role       string
+	// Folders are this machine's folders, and FolderSide what reads and
+	// writes them (package connector): the runner reports them, a job that
+	// names their machine comes to this runner only, and it does that
+	// job's folder work itself, the copy (by clone or overlay, reading base
+	// content through Lender) and the apply. Both or neither; nil: a runner
+	// with no folders, which takes only jobs that name no machine.
 	FolderSide FolderSide
-	// Folders are the folders of the connector on this runner's machine:
-	// a connector reports them; a runner that has them uses the local fast
-	// path for them (a copy by clone or overlay, and a folder used as it
-	// is), reading their base content through Lender. Nil: none here.
-	Folders *folders.Registry
-	Lender  isolation.Lender
-	// Blobs reads blobs for a copy built from a snapshot: the runner's own
-	// store with the control plane's behind it, or in agentbus up the
-	// control plane's own. BlobSink is the control plane's store, where a
+	Folders    *folders.Registry
+	Lender     isolation.Lender
+	// Blobs reads blobs for a copy's base content: the runner's own store
+	// with the control plane's behind it, or in agentbus up the control
+	// plane's own. BlobSink is the control plane's store, where a
 	// turn's changeset and the files it names go. Nil: a runner without
 	// them can only use the local fast path, and records no changeset.
 	Blobs    isolation.BlobSource
@@ -115,9 +115,12 @@ type Runner struct {
 	cleanMu   sync.Mutex      // one workspace removal at a time
 	cleaned   map[string]bool // sessions this process already cleaned, under cleanMu
 	down      retry           // the take loops' wait while control does not answer
-	// reportNow asks report to send the capabilities at once: a connector
-	// registered a folder.
-	reportNow chan struct{}
+	// probed is the last probe's harnesses, under probeMu: every report
+	// sends it (caps.go).
+	probeMu sync.Mutex
+	probed  []harness.Report
+	// beatMu keeps one report in flight at a time (beat).
+	beatMu sync.Mutex
 }
 
 // state is what StateFile keeps.
@@ -137,10 +140,10 @@ func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 		cfg.StopWait = time.Minute
 	}
 	switch {
-	case cfg.Role == queue.RoleConnector && (cfg.FolderSide == nil || cfg.Folders == nil):
-		return nil, errors.New("runner: a connector needs its folders")
-	case cfg.Role != queue.RoleConnector && (cfg.Engine == nil || cfg.Store == nil):
+	case cfg.Engine == nil || cfg.Store == nil:
 		return nil, errors.New("runner: an engine and its store are required")
+	case (cfg.FolderSide == nil) != (cfg.Folders == nil):
+		return nil, errors.New("runner: a runner's folders need their folder side, and the reverse")
 	}
 	if cfg.HTTP == nil {
 		cfg.HTTP = &http.Client{Timeout: jobs.MaxWait + 15*time.Second}
@@ -151,7 +154,7 @@ func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 	if cfg.Labels == nil {
 		cfg.Labels = []string{"agentbus"}
 	}
-	r := &Runner{cfg: cfg, reportNow: make(chan struct{}, 1),
+	r := &Runner{cfg: cfg,
 		// Shorter than a lease, so one slow call cannot outlast it.
 		short: &http.Client{Timeout: 10 * time.Second, Transport: cfg.HTTP.Transport}}
 	// A saved identity is used again when the control plane still knows it.
@@ -228,9 +231,10 @@ func (r *Runner) ID() string { return r.id }
 // (settings.Remote). It is never logged.
 func (r *Runner) Token() string { return r.token }
 
-// Run takes and runs jobs, Capacity at once, until ctx ends. A job still
-// running then has its turn stopped and is finished as failed with reason
-// runner_stopped.
+// Run takes and runs jobs, Capacity at once, until ctx ends, and with its
+// folders as many as queue.FolderCapacity folder jobs besides, so an apply
+// never waits behind running turns. A job still running then has its turn
+// stopped and is finished as failed with reason runner_stopped.
 func (r *Runner) Run(ctx context.Context) {
 	// What a runner here left mounted, if it did not stop cleanly, is
 	// unmounted first; each session mounts its copy again when it next
@@ -244,8 +248,17 @@ func (r *Runner) Run(ctx context.Context) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r.loop(ctx)
+			r.loop(ctx, false)
 		}()
+	}
+	if r.cfg.FolderSide != nil {
+		for range queue.FolderCapacity {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				r.loop(ctx, true)
+			}()
+		}
 	}
 	wg.Wait()
 }
@@ -289,11 +302,13 @@ func (r *Runner) loadIn(load func(workdir string) (*isolation.Space, error)) (*i
 	return nil, err
 }
 
-func (r *Runner) loop(ctx context.Context) {
+// loop takes and runs one job at a time until ctx ends: folder jobs of this
+// machine with folders, else turns, reviews and commands.
+func (r *Runner) loop(ctx context.Context, folders bool) {
 	for ctx.Err() == nil {
 		var t jobs.TakenWork
 		status, err := call(ctx, r.cfg.HTTP, r.cfg.Queue+"/api/v0/runner/take", r.token,
-			jobs.TakeRequest{WaitMS: jobs.MaxWait.Milliseconds(), Protocol: jobs.ProtocolVersion}, &t)
+			jobs.TakeRequest{WaitMS: jobs.MaxWait.Milliseconds(), Protocol: jobs.ProtocolVersion, Folders: folders}, &t)
 		switch {
 		case ctx.Err() != nil:
 			return
@@ -619,12 +634,8 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	case job.Kind == queue.KindApply || job.Kind == queue.KindSnapshot || job.Kind == queue.KindFolder:
 		at.finish(ctx, r.folderWork(ctx, at))
 		return
-	case r.cfg.Role != queue.RoleConnector && job.Kind == queue.KindCommand:
+	case job.Kind == queue.KindCommand:
 		at.finish(ctx, r.command(ctx, at))
-		return
-	case r.cfg.Role == queue.RoleConnector:
-		at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup,
-			Result: mustJSON(queue.Result{Refused: "a connector takes only snapshot, apply and folder jobs", Status: http.StatusBadRequest})})
 		return
 	}
 	refused := r.prepare(ctx, at)
@@ -739,15 +750,8 @@ func (r *Runner) prepare(ctx context.Context, at *attempt) *queue.Result {
 		at.ref = sp.RepoRef
 		b, _ := isolation.Get(isolation.Git)
 		return r.isolate(at, b, isolation.Request{Repo: repo, Base: sp.Base, Ref: sp.RepoRef})
-	case (sp.Folder != "" || sp.FolderRef != "") && !r.local(sp):
-		// The folder is on another machine: the copy is built from its
-		// snapshot, which its connector takes.
-		if !sp.Isolate {
-			return &queue.Result{Refused: folderNotHere, Status: http.StatusBadRequest}
-		}
-		at.ref = sp.FolderRef
-		return r.fromSnapshot(ctx, at)
 	case sp.Folder != "" || sp.FolderRef != "":
+		// A session runs on the machine that holds its folder: this one.
 		folder, ok := r.folderPath(sp.Folder, sp.FolderRef, sp.Connector)
 		if !ok {
 			return &queue.Result{Refused: folderUnknown, Status: http.StatusBadRequest}
@@ -794,25 +798,6 @@ func (r *Runner) prepare(ctx context.Context, at *attempt) *queue.Result {
 	}
 	return r.watchFolder(at)
 }
-
-// local says the folder sp names is on this runner's machine: its
-// connector is this runner's, or sp names the path itself, as a job stored
-// before references did.
-func (r *Runner) local(sp queue.Spec) bool {
-	if sp.FolderRef == "" {
-		return true
-	}
-	if r.cfg.Folders == nil || sp.Connector != r.cfg.Folders.Connector() {
-		return false
-	}
-	_, ok := r.cfg.Folders.Path(sp.FolderRef)
-	return ok
-}
-
-// folderNotHere refuses a folder used as it is on a runner that is not on
-// the folder's machine.
-const folderNotHere = "the folder is on another machine, so this runner can only work in a copy of it; " +
-	"start the session with isolate true"
 
 // workspaceDir is where a session's workspace is on this runner: its
 // space's folder, a folder used as it is, or the path a session made

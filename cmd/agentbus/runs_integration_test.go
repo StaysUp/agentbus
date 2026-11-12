@@ -363,7 +363,7 @@ func TestRunRefusals(t *testing.T) {
 		{"unknown agent", ok(map[string]any{"agent": "opencode"}), badAgent},
 		{"no agent", ok(map[string]any{"agent": nil}), noAgent},
 		{"relative folder", ok(map[string]any{"folder": "x/y"}), badFolder},
-		{"missing folder", ok(map[string]any{"folder": filepath.Join(folder, "nope")}), "the folder does not exist on the connector's machine"},
+		{"missing folder", ok(map[string]any{"folder": filepath.Join(folder, "nope")}), "the folder does not exist on the chosen machine"},
 		{"folder is a file", ok(map[string]any{"folder": file}), "the folder is a file, not a directory"},
 		{"no folder", ok(map[string]any{"folder": nil}), badFolder},
 		{"empty prompt", ok(map[string]any{"prompt": ""}), badPrompt},

@@ -1,6 +1,6 @@
 package api
 
-// GET /api/v0/runners: the runners and connectors control knows, for a
+// GET /api/v0/runners: the runners control knows, one per machine, for a
 // person. The runner protocol, under /api/v0/runner/, is the machines' side;
 // this is the read of it a screen shows. It holds no token: a runner's token
 // is stored only as its hash, and that stays in the queue.
@@ -12,18 +12,20 @@ import (
 	"github.com/staysup/agentbus/queue"
 )
 
-// RunnerInfo is one runner or connector in GET /api/v0/runners.
+// RunnerInfo is one runner in GET /api/v0/runners.
 type RunnerInfo struct {
-	ID       string    `json:"id" doc:"The runner's id, as GET /api/v0/harnesses names it."`
-	Name     string    `json:"name" doc:"The name it enrolled with, such as its machine's."`
-	Role     string    `json:"role" doc:"runner, which runs turns, or connector, which owns folders and takes only their snapshot and apply jobs."`
-	Online   bool      `json:"online" doc:"It asked control for work in the last minute."`
-	LastSeen time.Time `json:"last_seen" doc:"When it last asked control for work."`
-	Enrolled time.Time `json:"enrolled" doc:"When it enrolled."`
-	Capacity int       `json:"capacity" doc:"How many jobs it runs at once."`
-	Labels   []string  `json:"labels" doc:"The labels it enrolled with. Empty when none."`
-	OS       string    `json:"os,omitempty" doc:"Its operating system, as Go names it, such as linux or darwin. Absent before its first report."`
-	Arch     string    `json:"arch,omitempty" doc:"Its processor, as Go names it, such as amd64 or arm64. Absent before its first report."`
+	ID   string `json:"id" doc:"The runner's id, as GET /api/v0/harnesses names it."`
+	Name string `json:"name" doc:"The name it enrolled with, such as its machine's."`
+	Role string `json:"role" doc:"runner: the one program of its machine, which holds its folders and runs its sessions. connector: a connector of a build before 0.5, which takes no work from this build."`
+	// Connector is the runner's machine, which a new session names.
+	Connector string    `json:"connector,omitempty" doc:"The id of the runner's machine (con_ and 16 hex digits): a new session on this machine names it as connector, with a folder typed for that machine. Absent before its first report."`
+	Online    bool      `json:"online" doc:"It asked control for work in the last minute."`
+	LastSeen  time.Time `json:"last_seen" doc:"When it last asked control for work."`
+	Enrolled  time.Time `json:"enrolled" doc:"When it enrolled."`
+	Capacity  int       `json:"capacity" doc:"How many jobs it runs at once."`
+	Labels    []string  `json:"labels" doc:"The labels it enrolled with. Empty when none."`
+	OS        string    `json:"os,omitempty" doc:"Its operating system, as Go names it, such as linux or darwin. Absent before its first report."`
+	Arch      string    `json:"arch,omitempty" doc:"Its processor, as Go names it, such as amd64 or arm64. Absent before its first report."`
 	// Harnesses: the runner's last probe of each harness.
 	Harnesses []RunnerProbe `json:"harnesses" doc:"Its last probe of each harness, in the order it reported them. Empty for a connector, and before its first probe ends."`
 }
@@ -38,7 +40,7 @@ type RunnerProbe struct {
 
 // RunnerList is the answer to GET /api/v0/runners.
 type RunnerList struct {
-	Runners []RunnerInfo `json:"runners" doc:"Newest seen first. A runner that stopped stays listed, offline."`
+	Runners []RunnerInfo `json:"runners" doc:"Newest seen first, one per machine. A runner that stopped stays listed, offline. A connector of a build before 0.5 is listed only while no runner reports its machine."`
 }
 
 func (a *API) listRunners(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +55,19 @@ func (a *API) listRunners(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		now := a.cfg.Now()
+		// The machines a runner reports. A connector of a build before 0.5
+		// on one of them is the same machine, now its runner's: it stays in
+		// the queue, and is not listed twice.
+		held := map[string]bool{}
 		for _, rn := range all {
+			if rn.Caps != nil && rn.Caps.Role == "" && rn.Caps.Connector != "" {
+				held[rn.Caps.Connector] = true
+			}
+		}
+		for _, rn := range all {
+			if rn.Caps != nil && rn.Caps.Role == queue.RoleConnector && held[rn.Caps.Connector] {
+				continue
+			}
 			list = append(list, runnerInfo(rn, now))
 		}
 	}
@@ -75,7 +89,7 @@ func runnerInfo(rn queue.Runner, now time.Time) RunnerInfo {
 	if c.Role == queue.RoleConnector {
 		v.Role = queue.RoleConnector
 	}
-	v.OS, v.Arch = c.OS, c.Arch
+	v.OS, v.Arch, v.Connector = c.OS, c.Arch, c.Connector
 	for _, rep := range c.Harnesses {
 		v.Harnesses = append(v.Harnesses, RunnerProbe{Name: rep.Name, Found: rep.Found, Version: rep.Version, SignedIn: rep.SignedIn})
 	}

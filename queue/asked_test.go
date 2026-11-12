@@ -155,7 +155,7 @@ func TestDeliver(t *testing.T) {
 		}
 	}
 	// It waits for the parent's turn, then runs.
-	if _, _, ok, _, err := q.Take(r.ID, lease); err != nil || ok {
+	if _, _, ok, _, err := q.Take(r.ID, lease, false); err != nil || ok {
 		t.Fatalf("took the delivery while the parent runs: %v %v", ok, err)
 	}
 	if _, err := q.End(r.ID, pa.ID, pa.Number, Finish{Status: Finished, Session: parent.Session,

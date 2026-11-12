@@ -16,14 +16,15 @@ import (
 
 const module = "github.com/staysup/agentbus"
 
-// The package rule of one program: three roles in one codebase. Control
+// The package rule of one program: control and each machine's runner in one
+// codebase. Control
 // (api, jobs, queue, agents, store, the gateway, replay, settings) keeps the
 // record, the queue, the settings and the saved agents, and never touches a
 // person's folder: it knows a folder by its reference only. The folder side
 // (folders, connector) reads and writes the person's folders. The runner
 // side (runner, run, isolation) works in copies, and never imports the
-// folder side: on one machine it reaches the connector through interfaces
-// the command wires (plans/IDENTITIES.md and plans/ARCHITECTURE.md in the
+// folder side: each machine's runner reaches it through interfaces the
+// command wires (plans/IDENTITIES.md and plans/ARCHITECTURE.md in the
 // notes).
 //
 // Within that: harness, what differs per harness, and
@@ -33,7 +34,7 @@ const module = "github.com/staysup/agentbus"
 // or saved agents; agents, the saved agents, may use run and nothing of the
 // queue side; isolation, the session's copies, may use workspace and
 // nothing of the turn or queue side; the queue may use run and workspace,
-// never the reverse. folders, the connector's folders by path, uses nothing
+// never the reverse. folders, a machine's folders by path, uses nothing
 // of the module, and the control side (api, jobs, queue, agents, store, the
 // gateway, replay, settings) never uses it: control knows a folder by its
 // reference only (plans/IDENTITIES.md in the notes).

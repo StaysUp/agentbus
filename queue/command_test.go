@@ -26,14 +26,14 @@ func TestCommandWaitsItsTurn(t *testing.T) {
 	if err != nil || cmd.Turn != "" || cmd.Session != s {
 		t.Fatalf("command job: %+v %v", cmd, err)
 	}
-	if _, _, ok, _, _ := q.Take(b.ID, lease); ok {
+	if _, _, ok, _, _ := q.Take(b.ID, lease, false); ok {
 		t.Fatal("another runner took the session's job")
 	}
 	j, att2 := take(t, q, a)
 	if j.ID != turn.ID {
 		t.Fatalf("took %s first, want the turn", j.Kind)
 	}
-	if _, _, ok, _, _ := q.Take(a.ID, lease); ok {
+	if _, _, ok, _, _ := q.Take(a.ID, lease, false); ok {
 		t.Fatal("the command ran beside the session's turn")
 	}
 	if _, err := q.End(a.ID, att2.ID, 1, Finish{Status: Finished}); err != nil {
@@ -45,7 +45,7 @@ func TestCommandWaitsItsTurn(t *testing.T) {
 	}
 	// A turn sent while the command runs waits for it.
 	q.Create(DefaultTeam, KindTurn, "", Spec{Session: s, Prompt: "three"}, Links{})
-	if _, _, ok, _, _ := q.Take(a.ID, lease); ok {
+	if _, _, ok, _, _ := q.Take(a.ID, lease, false); ok {
 		t.Fatal("a turn ran beside the session's command")
 	}
 	if busy, _ := q.SessionHasWork(DefaultTeam, s); !busy {
@@ -96,13 +96,13 @@ func TestCommandLaneWithReviews(t *testing.T) {
 	if j.ID != rev.ID {
 		t.Fatalf("took %s first, want the review", j.Kind)
 	}
-	if _, _, ok, _, _ := q.Take(a.ID, lease); ok {
+	if _, _, ok, _, _ := q.Take(a.ID, lease, false); ok {
 		t.Fatal("the command ran beside a review of its session")
 	}
 	// A turn of the session is not held up by the review.
 	clock.add(time.Millisecond)
 	q.Create(DefaultTeam, KindTurn, "", Spec{Session: s, Prompt: "two"}, Links{})
-	if _, _, ok, _, _ := q.Take(a.ID, lease); ok {
+	if _, _, ok, _, _ := q.Take(a.ID, lease, false); ok {
 		t.Fatal("the turn jumped the command queued before it")
 	}
 	q.Start(a.ID, ratt.ID, 1, lease)
@@ -117,7 +117,7 @@ func TestCommandLaneWithReviews(t *testing.T) {
 	if _, _, err := q.Review(DefaultTeam, first.ID, "claude", "", "", false); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, ok, _, _ := q.Take(a.ID, lease); ok {
+	if _, _, ok, _, _ := q.Take(a.ID, lease, false); ok {
 		t.Fatal("a job ran beside the session's command")
 	}
 	if got, err := q.JobOfCommand(DefaultTeam, "cmd_1"); err != nil || got.ID != cmd.ID {

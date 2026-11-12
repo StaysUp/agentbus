@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -14,10 +15,11 @@ import (
 	"github.com/staysup/agentbus/queue"
 )
 
-// A session starts in a folder the person types, on a server with a
-// connector started with no -folder: the connector checks the path and
+// A session starts in a folder the person types, on a server with a runner
+// started with no -folder: the runner of that machine checks the path and
 // registers it, GET /api/v0/folders lists it from then on, and the session
-// runs as one named by reference does. The server keeps no path.
+// runs on that machine as one named by reference does. The server keeps no
+// path.
 func TestTypedFolderOnServer(t *testing.T) {
 	bin, bins := built(t), standInDir(t)
 	serverHome, addr := t.TempDir(), freeAddr(t)
@@ -31,21 +33,20 @@ func TestTypedFolderOnServer(t *testing.T) {
 		return code, e.Error
 	}
 
-	// No connector yet: nothing can check the folder.
-	if code, msg := post(folder); code != http.StatusServiceUnavailable || !strings.HasPrefix(msg, "no connector is connected") {
-		t.Fatalf("with no connector: %d %q", code, msg)
+	// No machine yet: nothing can check the folder.
+	if code, msg := post(folder); code != http.StatusServiceUnavailable || !strings.HasPrefix(msg, "no machine is online") {
+		t.Fatalf("with no machine: %d %q", code, msg)
 	}
 
 	connHome := t.TempDir()
-	startProc(t, bin, connHome, bins, "connector", "-server", c.base, "-enroll-token-file", enroll, "-name", "conn")
-	startProc(t, bin, t.TempDir(), bins, "runner", "-server", c.base, "-enroll-token-file", enroll, "-name", "run", "-replay=false")
+	startProc(t, bin, connHome, bins, "runner", "-server", c.base, "-enroll-token-file", enroll, "-name", "run", "-replay=false")
 
 	// Each refusal says what is wrong in one sentence. The first waits for
-	// the connector to be connected.
+	// the runner to be online.
 	missing := filepath.Join(folder, "nope")
 	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(50 * time.Millisecond) {
 		code, msg := post(missing)
-		if code == http.StatusBadRequest && msg == "the folder does not exist on the connector's machine" {
+		if code == http.StatusBadRequest && msg == "the folder does not exist on the chosen machine" {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -55,27 +56,30 @@ func TestTypedFolderOnServer(t *testing.T) {
 	if code, msg := post(filepath.Join(folder, "a.txt")); code != http.StatusBadRequest || msg != "the folder is a file, not a directory" {
 		t.Fatalf("a file: %d %q", code, msg)
 	}
-	if os.Geteuid() != 0 {
+	// On Linux the runner runs in a user namespace of its own, where the
+	// folder's owner reads a folder of mode 000 as agentbus up does; only
+	// outside one is such a folder refused.
+	if os.Geteuid() != 0 && runtime.GOOS != "linux" {
 		locked := t.TempDir()
 		os.Chmod(locked, 0o000)
 		t.Cleanup(func() { os.Chmod(locked, 0o700) })
-		if code, msg := post(locked); code != http.StatusBadRequest || msg != "the folder cannot be read by the user the connector runs as" {
+		if code, msg := post(locked); code != http.StatusBadRequest || msg != "the folder cannot be read by the user the machine's runner runs as" {
 			t.Fatalf("an unreadable folder: %d %q", code, msg)
 		}
 	}
 	if code, msg := post(folder + "x"); code != http.StatusBadRequest || !strings.Contains(msg, "does not exist") {
 		t.Fatalf("another missing folder: %d %q", code, msg)
 	}
-	// A connector named that is not connected.
+	// A machine named that is not online.
 	if code, _ := c.call("POST", "/api/v0/turns", map[string]any{"agent": "claude", "folder": folder, "prompt": "hi",
 		"connector": "con_0123456789abcdef"}, nil); code != http.StatusServiceUnavailable {
-		t.Fatalf("an unknown connector: %d", code)
+		t.Fatalf("an unknown machine: %d", code)
 	}
 
 	// The whole flow, by the typed path: copies, diffs and applies.
 	filesFlow(t, c, folder, map[string]any{"folder": folder, "isolate": true})
 
-	// Listed from now on, with the connector that owns it; the missing and
+	// Listed from now on, with the machine that holds it; the missing and
 	// refused paths were never registered.
 	var fs struct {
 		Folders []struct{ Ref, Name, Connector string }
@@ -85,7 +89,7 @@ func TestTypedFolderOnServer(t *testing.T) {
 		t.Fatalf("folders after a typed path: %+v", fs.Folders)
 	}
 	if s := fileText(t, filepath.Join(connHome, "folders.json")); !strings.Contains(s, folder) || strings.Contains(s, missing) {
-		t.Fatalf("the connector's folders.json: %s", s)
+		t.Fatalf("the runner's folders.json: %s", s)
 	}
 
 	// A retry with the same idempotency key gets the same turn, without the
@@ -111,22 +115,22 @@ func TestTypedFolderOnServer(t *testing.T) {
 		t.Fatalf("the key with another folder: %d %s", code, out)
 	}
 
-	// With a second connector, a typed folder must name one. The missing
+	// With a second machine, a typed folder must name one. The missing
 	// path asks without starting a turn while the second one enrolls.
-	startProc(t, bin, t.TempDir(), bins, "connector", "-server", c.base, "-enroll-token-file", enroll, "-name", "conn2")
+	startProc(t, bin, t.TempDir(), bins, "runner", "-server", c.base, "-enroll-token-file", enroll, "-name", "run2", "-replay=false")
 	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(50 * time.Millisecond) {
 		code, msg := post(missing)
-		if code == http.StatusBadRequest && msg == "2 connectors are connected; name the folder's connector, from GET /api/v0/folders" {
+		if code == http.StatusBadRequest && msg == "2 machines are online; name the folder's machine as connector, from GET /api/v0/runners" {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("with two connectors: %d %q", code, msg)
+			t.Fatalf("with two machines: %d %q", code, msg)
 		}
 	}
 	named := c.turn(map[string]any{"agent": "claude", "folder": folder, "prompt": "named", "isolate": true,
 		"connector": fs.Folders[0].Connector})
 	if named.Turn == "" {
-		t.Fatal("a turn naming its connector did not start")
+		t.Fatal("a turn naming its machine did not start")
 	}
 
 	// The server's queue keeps no path: every job names the folder by its

@@ -1,5 +1,5 @@
-// Package jobs is the runner protocol, under /api/v0/runner/: how runners and
-// connectors take jobs from control and report them. The client API (package
+// Package jobs is the runner protocol, under /api/v0/runner/: how runners,
+// one on each machine, take jobs from control and report them. The client API (package
 // api) makes and reads the jobs; this package never answers a client.
 //
 // Two tokens:
@@ -56,8 +56,11 @@ const (
 // relay records every model call it carries, so a runner that holds no
 // secret sends none of them (relay.go). Every register and every take names
 // it, and a runner of another version is refused, so a runner and a server
-// of different builds never both record a call, or both leave it out.
-const ProtocolVersion = 3
+// of different builds never both record a call, or both leave it out. 4: one
+// runner per machine holds that machine's folders, takes their folder jobs
+// with take's folders, and is the only runner of a job that names its
+// machine; agentbus connector is retired.
+const ProtocolVersion = 4
 
 // Config is what the server needs.
 type Config struct {
@@ -72,7 +75,7 @@ type Config struct {
 	// Settings are the policy and the instructions a runner reads for each
 	// turn (GET /api/v0/runner/settings). Nil sends the defaults.
 	Settings settings.Store
-	// Folders is this machine's connector, in agentbus up: a job's folder
+	// Folders are this machine's folders, in agentbus up: a job's folder
 	// path becomes its reference there (queue.ResolveFolders). Nil, as in
 	// agentbus server, takes references only.
 	Folders queue.FolderIssuer
@@ -409,12 +412,8 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
 		s.internal(w)
 		return
 	}
-	role := "runner"
-	if b.Capabilities != nil && b.Capabilities.Role == queue.RoleConnector {
-		role = queue.RoleConnector
-	}
 	if s.Logf != nil {
-		s.Logf("runner.enrolled id=%s name=%q role=%s", rn.ID, rn.Name, role)
+		s.Logf("runner.enrolled id=%s name=%q", rn.ID, rn.Name)
 	}
 	if s.cfg.Record != nil {
 		if _, err := s.cfg.Record.AppendOnce(event.Event{ID: queue.NewID("evt_"), Kind: event.RunnerEnrolled, Time: rn.Created, Runner: rn.ID}); err != nil && s.Logf != nil {
@@ -431,6 +430,11 @@ type TakeRequest struct {
 	WaitMS int64 `json:"wait_ms"`
 	// Protocol is the runner protocol the runner speaks: ProtocolVersion.
 	Protocol int `json:"protocol"`
+	// Folders asks for a folder job of the runner's own machine (an apply,
+	// a typed folder's check), in one of its queue.FolderCapacity folder
+	// places; without it, a turn, a review or a command, in one of its
+	// capacity's places.
+	Folders bool `json:"folders,omitempty"`
 }
 
 // protocolWhy refuses a runner of another protocol version.
@@ -469,7 +473,7 @@ func (s *Server) take(w http.ResponseWriter, r *http.Request, rn queue.Runner) {
 		if r.Context().Err() != nil {
 			return
 		}
-		j, a, ok, cleanup, err := s.cfg.Queue.Take(rn.ID, s.cfg.Lease)
+		j, a, ok, cleanup, err := s.cfg.Queue.Take(rn.ID, s.cfg.Lease, b.Folders)
 		if err != nil {
 			s.internal(w)
 			return

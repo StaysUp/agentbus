@@ -141,18 +141,11 @@ func newWorld(t *testing.T, capacity int) *world {
 	}
 	plane := httptest.NewServer(s)
 	ctx, cancel := context.WithCancel(context.Background())
+	// One runner holds the folders and does their jobs, as on every machine.
 	conn := &connector.Connector{Folders: fr, Store: bs, State: filepath.Join(dir, "connector")}
-	cn, err := Enroll(ctx, Config{Queue: plane.URL, EnrollToken: enrollTok, Name: "connector", Capacity: 2,
-		Role: queue.RoleConnector, FolderSide: connector.Jobs{Connector: conn}, Folders: fr, Logf: t.Logf})
-	if err != nil {
-		t.Fatal(err)
-	}
-	cnDone := make(chan struct{})
-	go func() { cn.Run(ctx); close(cnDone) }()
-	t.Cleanup(func() { <-cnDone })
 	r, err := Enroll(ctx, Config{Queue: plane.URL, EnrollToken: enrollTok, Name: "test", Capacity: capacity,
 		Engine: eng, Store: st, StopWait: 5 * time.Second, Logf: t.Logf, Workdir: filepath.Join(dir, "worktrees"), Folders: fr,
-		Lender: conn, Blobs: bs, BlobSink: bs})
+		FolderSide: connector.Jobs{Connector: conn}, Lender: conn, Blobs: bs, BlobSink: bs})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -527,5 +520,55 @@ func TestCopyWrittenBetweenTurnsIsInTheNextDiff(t *testing.T) {
 	if n.State != queue.Finished || res.Changes.Count != 2 || m["second.txt"].Change != "added" || m["stray.txt"].Change != "added" ||
 		res.Changes.From != f.Turn {
 		t.Fatalf("second: %s, changes %+v", n.State, res.Changes)
+	}
+}
+
+// Folders typed at once are each listed once their jobs end: the runner's
+// reports go one at a time, each read as it is sent, so an older list never
+// reaches control after a newer one.
+func TestFoldersTypedAtOnceAllListed(t *testing.T) {
+	w := newWorld(t, 1)
+	var paths []string
+	for i := range queue.FolderCapacity {
+		p := filepath.Join(t.TempDir(), fmt.Sprintf("typed-%d", i))
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		paths = append(paths, p)
+	}
+	for round := range 5 {
+		var ids []string
+		for _, p := range paths {
+			j, err := w.q.RegisterFolder(queue.DefaultTeam, w.r.cfg.Folders.Connector(), fmt.Sprintf("%s-%d", p, round))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.MkdirAll(fmt.Sprintf("%s-%d", p, round), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			ids = append(ids, j.ID)
+		}
+		for _, id := range ids {
+			for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+				j, err := w.q.Get(queue.DefaultTeam, id)
+				if err == nil && j.Ended != nil {
+					if j.State != queue.Finished {
+						t.Fatalf("folder job %s ended %s: %s", id, j.State, j.Result)
+					}
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatalf("folder job %s did not end", id)
+				}
+			}
+			w.q.ForgetFolder(queue.DefaultTeam, id)
+		}
+		list, err := w.q.Folders(queue.DefaultTeam)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if want := (round + 1) * len(paths); len(list) != want {
+			t.Fatalf("round %d: %d folders listed once every job ended, want %d", round, len(list), want)
+		}
 	}
 }

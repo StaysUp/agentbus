@@ -420,8 +420,9 @@ func (a *API) askChecks(w http.ResponseWriter, g run.Grant, perm settings.Policy
 		return refuse(turnIsolateRefused)
 	}
 	// The folder is compared by reference: the control plane holds no
-	// path. Whether a path is inside a folder is the connector's to say,
-	// where the folder is (queue.FolderIssuer).
+	// path. Whether a path is inside a folder is for the folder's machine
+	// to say (queue.FolderIssuer). The new session names the same machine,
+	// so it runs where this one does.
 	ref, connector, repo, err := a.cfg.Queue.SessionFolder(queue.DefaultTeam, g.Session)
 	if err != nil {
 		a.internal(w)
@@ -472,8 +473,8 @@ func (a *API) askChecks(w http.ResponseWriter, g run.Grant, perm settings.Policy
 			}
 		}
 	}
-	// A path was checked on this service's own connector, so it goes there
-	// and nowhere else: never to another connector's machine.
+	// A path was checked on this service's own machine, so it goes there
+	// and nowhere else: never to another machine.
 	if body.Folder != "" {
 		if body.Connector != "" && body.Connector != connector {
 			return refuse(turnFolderRefused)

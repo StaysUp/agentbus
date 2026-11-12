@@ -1,5 +1,10 @@
 # remote: one complete remote path, across two machines
 
+**Retired in 0.5.** This measures a path 0.5 removed: a runner on one machine building a copy of
+another machine's folder from a snapshot. Since 0.5 a session runs on the machine that holds its
+folder, and `agentbus connector` only says what to run instead, so this tool no longer runs. It
+stays as the record of what that path cost.
+
 `tools/remote` runs AgentBus's remote path end to end and times each step. Control (`agentbus
 server`) and a connector run on this Mac; a runner runs in a Lima VM. A stand-in agent edits files,
 so no model, key or sign-in is involved. It is not part of the release binary.

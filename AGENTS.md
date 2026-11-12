@@ -66,17 +66,22 @@ may hold other projects' Go code. Go's own tools skip folders that start with `_
 - **The client API describes itself.** Routes and types in `api/routes.go` generate the OpenAPI
   description. Change the route table, not a hand-written spec. `docs/CLIENT_API.md` is the
   contract in words; keep it in step.
-- **One program, one flow.** `agentbus up`, `server`, `runner` and `connector` are modes of one
-  binary. Every turn is a job, and every runner and connector, the built-in ones too, takes jobs
-  through the runner protocol over HTTP. A runner starts a turn through `run/`, never through the
-  API.
-- **Three roles, and control never touches a folder.** Control (`api/`, `jobs/`, `queue/`,
-  `agents/`, `store/`, `gateway/`, `replay/`, `settings/`) knows a person's folder by its reference
-  only. The folder side (`folders/`, `connector/`) is the only code that reads or writes the
-  person's folder: snapshots out, applies in. The runner side (`runner/`, `run/`, `isolation/`)
-  works in copies and never imports the folder side; on one machine the command wires them
-  through interfaces (`isolation.Lender`, `runner.FolderSide`). File data goes through control's
-  blob store (`blobs/`), never from a connector to a runner. Two tests hold it: no control package
+- **One program, one flow.** `agentbus up`, `server` and `runner` are modes of one binary
+  (`connector` was retired in 0.5 and only says what to run instead). Every turn is a job, and
+  every runner, the built-in one too, takes jobs through the runner protocol over HTTP. A runner
+  starts a turn through `run/`, never through the API.
+- **One program per machine.** A machine's runner holds its folders and does their jobs itself:
+  the copy, the turns, the apply. A job that names a machine (`spec.connector`, the machine's id)
+  goes to that machine's runner only (`queue/caps.go`, `machineTake`), so a session runs on the
+  machine that holds its folder for its whole life. Folder jobs take places of their own
+  (`queue.FolderCapacity`), never a turn's.
+- **Control never touches a folder.** Control (`api/`, `jobs/`, `queue/`, `agents/`, `store/`,
+  `gateway/`, `replay/`, `settings/`) knows a person's folder by its reference only. The folder
+  side (`folders/`, `connector/`) is the only code that reads or writes the person's folder:
+  checks of typed folders, base content lent to a copy, applies in. The runner side (`runner/`,
+  `run/`, `isolation/`) works in copies and never imports the folder side; the command wires the
+  two into each machine's runner through interfaces (`isolation.Lender`, `runner.FolderSide`).
+  A turn's changes go through control's blob store (`blobs/`), where an apply reads them. Two tests hold it: no control package
   imports the folder or runner side, and no control package calls a function that touches files
   or starts a program (`os.Stat`, `os.OpenRoot`, `filepath.EvalSymlinks`, `exec.Command` and the
   like), but the few its own data folder needs, listed in `controlAllowed`. That list only
@@ -92,7 +97,7 @@ may hold other projects' Go code. Go's own tools skip folders that start with `_
   `queue/` may use `run/` and `workspace/`, never the reverse.
 - **Isolation goes through `isolation.Backend`.** A session's copy is opened, checkpointed,
   diffed and closed by its backend, never by git calls or file copies elsewhere. Its changes go
-  out as a changeset (`isolation.ChangesetOf`); applying them is the connector's. A new
+  out as a changeset (`isolation.ChangesetOf`); applying them is the folder side's (`connector/`). A new
   backend (a VM) is one more entry in its registry; nothing above it changes.
 - **Settings go through `settings.Store`.** The policy, the instructions and the data folder's
   protected files are read and written through the store, never by a path. `settings.Files` is

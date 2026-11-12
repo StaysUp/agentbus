@@ -76,14 +76,17 @@ const (
 	KindTurn   = "turn"
 	KindReview = "review"
 	// KindApply puts a session's changes, up to one turn, into the person's
-	// folder, on the folder's connector (apply.go). It starts no turn.
+	// folder, on the runner of the folder's machine (apply.go). It starts no
+	// turn.
 	KindApply = "apply"
-	// KindSnapshot takes a snapshot of a folder, on its connector, for a
-	// runner that builds a copy from it (connector.go). It starts no turn.
+	// KindSnapshot takes a snapshot of a folder, on the runner of its
+	// machine, for a runner that builds a copy from it. Since 0.5 a session
+	// runs on its folder's machine, so the runner of this build asks for
+	// none; one stored before still runs. It starts no turn.
 	KindSnapshot = "snapshot"
-	// KindFolder checks a folder a person typed, on the connector named, and
-	// registers it there: its result is the folder's reference (folder.go).
-	// It starts no turn.
+	// KindFolder checks a folder a person typed, on the runner of the machine
+	// named, and registers it there: its result is the folder's reference
+	// (folder.go). It starts no turn.
 	KindFolder = "folder"
 	// KindCommand runs the person's shell command in a session's copy, on
 	// the session's runner (run.Engine.RunCommand). It starts no turn. It is
@@ -1144,7 +1147,12 @@ func workspaceOf(db querier, j Job) (*Workspace, error) {
 // each runs in a session of its own. The capacity check and the claim
 // are one transaction. ok is false when there is no job; cleanup may still be
 // set.
-func (q *Queue) Take(runnerID string, lease time.Duration) (job Job, att Attempt, ok bool, cleanup *Workspace, err error) {
+//
+// folders asks for a folder job (folderKinds: an apply, a typed folder's
+// check) of the runner's own machine, in one of its FolderCapacity folder
+// places; without it the take is for a turn, a review or a command, in one
+// of its capacity's places. So an apply never waits behind running turns.
+func (q *Queue) Take(runnerID string, lease time.Duration, folders bool) (job Job, att Attempt, ok bool, cleanup *Workspace, err error) {
 	err = q.tx(func(tx *sql.Tx) error {
 		now := q.now()
 		if err := sweepTx(tx, now); err != nil {
@@ -1172,23 +1180,30 @@ func (q *Queue) Take(runnerID string, lease time.Duration) (job Job, att Attempt
 		if !errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("queue: read sessions: %w", err)
 		}
+		// Folder jobs and the rest count against their own places.
+		kinds, places := `j.kind NOT IN `+folderKinds, capacity
+		if folders {
+			kinds, places = `j.kind IN `+folderKinds, FolderCapacity
+		}
 		var busy int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM attempts WHERE runner = ? AND state IN ('taken','running')`, runnerID).Scan(&busy); err != nil {
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM attempts a JOIN jobs j ON j.id = a.job WHERE a.runner = ? AND a.state IN ('taken','running') AND `+kinds,
+			runnerID).Scan(&busy); err != nil {
 			return fmt.Errorf("queue: count attempts: %w", err)
 		}
-		if busy >= capacity {
+		if busy >= places {
 			return nil
 		}
-		// A job goes only to a runner that can run it (caps.go): the
-		// session's runner, the folder's connector, every label it asks
-		// for, and its harness.
+		// A job goes only to a runner that can run it (caps.go): the job's
+		// machine, the session's runner, every label it asks for, and its
+		// harness. A runner stored as a connector of a build before 0.5
+		// takes nothing.
 		var id string
 		err = tx.QueryRow(`SELECT j.id FROM jobs j, runners r WHERE r.id = ? AND j.team = ? AND j.state = 'queued'
-			AND (`+roleTake+`)
-			AND (j.kind IN ('snapshot','apply','folder') OR j.session IS NULL OR NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team)
+			AND `+kinds+` AND COALESCE(json_extract(r.caps, '$.role'), '') = ''
+			AND (j.kind IN `+folderKinds+` OR j.session IS NULL OR NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team)
 				OR EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team AND s.runner = r.id AND s.closed IS NULL))
 			AND (j.session IS NULL OR NOT EXISTS (SELECT 1 FROM jobs o WHERE o.team = j.team AND o.id != j.id AND (`+laneTake+`)))
-			AND (`+connectorTake+`) AND (`+labelsTake+`) AND (`+harnessTake+`)
+			AND (`+machineTake+`) AND (`+labelsTake+`) AND (`+harnessTake+`)
 			ORDER BY j.created, j.id LIMIT 1`, runnerID, team, nanos(now.Add(-RunnerFresh))).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil

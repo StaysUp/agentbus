@@ -52,7 +52,8 @@ func newOutcomeEnv(t *testing.T) *outcomeEnv {
 func (e *outcomeEnv) take(t *testing.T, kind string) (queue.Job, string) {
 	t.Helper()
 	var taken TakenWork
-	if code := send(t, e.srv, e.tok, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, &taken); code != 200 || taken.Job.Kind != kind {
+	folders := kind == queue.KindApply || kind == queue.KindFolder || kind == queue.KindSnapshot
+	if code := send(t, e.srv, e.tok, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion, Folders: folders}, &taken); code != 200 || taken.Job.Kind != kind {
 		t.Fatalf("take: %d %+v", code, taken.Job)
 	}
 	base := "/api/v0/runner/attempts/" + taken.Attempt.ID
@@ -197,13 +198,13 @@ func mustJSON(v any) json.RawMessage {
 	return b
 }
 
-// enrollConnector enrolls the connector of testConnector, which takes apply
+// enrollConnector enrolls the runner of the machine testConnector, which takes apply
 // jobs, and answers its token.
 func enrollConnector(t *testing.T, srv *httptest.Server) string {
 	t.Helper()
 	var e Enrolled
 	if code := send(t, srv, enrollTok, "POST", "/api/v0/runner/register", EnrollRequest{Name: "c", Capacity: 2, Protocol: ProtocolVersion,
-		Capabilities: &queue.Capabilities{Connector: testConnector, Role: queue.RoleConnector}}, &e); code != 201 {
+		Capabilities: &queue.Capabilities{Connector: testConnector}}, &e); code != 201 {
 		t.Fatalf("enroll: %d", code)
 	}
 	return e.Token

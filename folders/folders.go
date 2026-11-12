@@ -1,13 +1,14 @@
-// Package folders is the connector's side of a folder's identity: the folders
-// this machine owns, each known to the control plane only by its reference.
+// Package folders is the machine's side of a folder's identity: the folders
+// this machine's runner holds, each known to the control plane only by its reference.
 // A reference is fld_ and 16 hex digits of the SHA-256 of the cleaned path,
 // so the same folder always gets the same reference. The path never leaves
 // this machine: the file folders.json in the data folder maps each
 // reference back to it.
 //
-// The connector itself has an id (con_ and 16 hex digits), made once and
-// kept in the same file. A job that names a folder goes only to the runner
-// that reports this connector (queue.Take).
+// The machine itself has an id (con_ and 16 hex digits, still named
+// connector), made once and kept in the same file. A job that names it goes
+// only to the runner that reports it (queue.Take), so a session runs on its
+// folder's machine. A runner that keeps its data folder keeps the id.
 //
 // It imports nothing of the module. Control packages never import it
 // (cmd/agentbus/layers_test.go): in agentbus up the API reaches it through
@@ -38,9 +39,9 @@ var ErrNotAbsolute = errors.New("folders: the folder must be an absolute path, a
 // Why a typed folder cannot be used, one sentence each. None names the path:
 // the refusal is stored on the control plane.
 var (
-	ErrNoFolder   = errors.New("the folder does not exist on the connector's machine")
+	ErrNoFolder   = errors.New("the folder does not exist on the chosen machine")
 	ErrNotDir     = errors.New("the folder is a file, not a directory")
-	ErrUnreadable = errors.New("the folder cannot be read by the user the connector runs as")
+	ErrUnreadable = errors.New("the folder cannot be read by the user the machine's runner runs as")
 )
 
 // Check says why the folder at path cannot be used, or nil: it must be an
@@ -78,7 +79,7 @@ func (r *Registry) Add(path string) (string, error) {
 	return r.Register(path)
 }
 
-// Registry is the folders of one connector. It is safe for concurrent use.
+// Registry is the folders of one machine. It is safe for concurrent use.
 type Registry struct {
 	path string
 
@@ -99,7 +100,7 @@ type file struct {
 	Folders   map[string]entry `json:"folders"`
 }
 
-// Open reads the registry at path, or makes one with a new connector id.
+// Open reads the registry at path, or makes one with a new machine id.
 func Open(path string) (*Registry, error) {
 	r := &Registry{path: path, folders: map[string]entry{}}
 	b, err := os.ReadFile(path)
@@ -128,7 +129,7 @@ func Open(path string) (*Registry, error) {
 	return r, nil
 }
 
-// Connector is this connector's id.
+// Connector is this machine's id.
 func (r *Registry) Connector() string { return r.connector }
 
 // Ref is the reference of the folder at path. It does not register it.
@@ -166,7 +167,7 @@ func (r *Registry) Register(path string) (string, error) {
 	return ref, nil
 }
 
-// Path is the folder a reference names, when this connector owns it.
+// Path is the folder a reference names, when this machine holds it.
 func (r *Registry) Path(ref string) (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -176,7 +177,7 @@ func (r *Registry) Path(ref string) (string, bool) {
 
 // Within says the folder at path is the folder ref or inside it, once
 // every symbolic link of both is resolved: a link inside the folder that
-// leads out of it is not inside. False when ref is not this connector's.
+// leads out of it is not inside. False when ref is not this machine's.
 func (r *Registry) Within(path, ref string) bool {
 	dir, ok := r.Path(ref)
 	if !ok || !filepath.IsAbs(path) {

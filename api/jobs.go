@@ -26,10 +26,10 @@ var (
 	staleReply    = ok(http.StatusConflict, jobs.JobError{}, "The attempt is no longer current (stale is true): stop its work. Or, for events, a gap: send from next.")
 	noAttempt     = fail(http.StatusNotFound, "No such attempt for this runner token, or this service keeps no job queue.")
 	noBlobs       = fail(http.StatusNotFound, "This service keeps no blob store, or no blob of that hash.")
-	noRunnerToken = fail(http.StatusUnauthorized, "A runner's or a connector's token is required.")
+	noRunnerToken = fail(http.StatusUnauthorized, "A runner's token is required.")
 )
 
-// runnerRoutes are the runner protocol: how runners and connectors talk to
+// runnerRoutes are the runner protocol: how runners, one per machine, talk to
 // control. Package jobs serves them, with their own tokens. They are
 // described on their own (/api/v0/runner/openapi.json), never with the
 // client API: the protocol is our binaries' own and may change freely.
@@ -43,7 +43,7 @@ var runnerRoutes = []route{
 	{method: "POST", path: "/api/v0/runner/register", op: "registerRunner",
 		tag:     "Runners",
 		summary: "Register a runner",
-		doc:     "Add a runner or a connector, with the enrollment token. The reply holds its own token, this once.",
+		doc:     "Add a runner, the one program of its machine, with the enrollment token. The reply holds its own token, this once.",
 		body:    jobs.EnrollRequest{},
 		replies: []reply{ok(201, jobs.Enrolled{}, "The runner and its token."), badRequest, storeFailed},
 		self:    true, serve: jobsRoute},
@@ -51,7 +51,8 @@ var runnerRoutes = []route{
 		tag:     "Runners",
 		summary: "Take work",
 		doc: "Long poll, up to 30 seconds, for a job (with its new attempt and lease) or a cleanup (a closed session's workspace to remove). " +
-			"A job of a session goes to the runner that holds its workspace.",
+			"A job of a session goes to the runner that holds its workspace, and a job that names a machine (spec.connector) to that machine's runner only. " +
+			"With folders true it is a folder job of the runner's own machine (an apply, a typed folder's check), in one of its 4 folder places; without it a turn, a review or a command.",
 		body:    jobs.TakeRequest{Protocol: jobs.ProtocolVersion},
 		replies: []reply{ok(200, jobs.TakenWork{}, "A job, or a cleanup."), {status: 204, doc: "Nothing to do.", empty: true}, badRequest, noAttempt, storeFailed},
 		self:    true, serve: jobsRoute},
@@ -106,8 +107,8 @@ var runnerRoutes = []route{
 		idDoc:   "The attempt id, from take. Another shape gets 404.",
 		tag:     "Attempts",
 		summary: "Ask for a folder's snapshot",
-		doc: "For a session's first turn in an isolated copy of a folder on another machine: the snapshot job, made the first time and the same job after, " +
-			"on the folder's connector. Send it again until snapshot is set, then build the copy from its blobs (GET /api/v0/runner/blobs/{id}).",
+		doc: "For a session's first turn in an isolated copy of a folder: the snapshot job, made the first time and the same job after, " +
+			"on the folder's machine. Since protocol 4 a session runs on its folder's machine, and the runner of this build never asks for one. Send it again until snapshot is set, then build the copy from its blobs (GET /api/v0/runner/blobs/{id}).",
 		body:    jobs.AttemptCall{},
 		replies: []reply{ok(200, jobs.SnapshotState{}, "The snapshot job, and the snapshot once taken."), badRequest, noAttempt, staleReply, storeFailed},
 		self:    true, serve: jobsRoute},
@@ -135,7 +136,7 @@ var runnerRoutes = []route{
 		tag:     "Blobs",
 		summary: "Ask which blobs are missing",
 		doc: "The control plane's blob store holds every file of a snapshot and of a turn's changes, by the hex SHA-256 of its content. " +
-			"Of the hashes sent, at most 10000, the reply lists those it does not hold, so only those are sent. A runner's or a connector's token.",
+			"Of the hashes sent, at most 10000, the reply lists those it does not hold, so only those are sent. A runner's token.",
 		body:    blobs.MissingRequest{},
 		replies: []reply{ok(200, blobs.MissingReply{}, "The hashes not held."), badRequest, noBlobs, noRunnerToken},
 		self:    true, serve: jobsRoute},
@@ -144,7 +145,7 @@ var runnerRoutes = []route{
 		summary: "Send many blobs",
 		doc: "A pack: frames, each a line of the blob's hash, a space and its size in bytes, then that many bytes; as application/octet-stream, " +
 			"at most 1000 blobs and 8 MiB of them (a bigger blob goes alone by PUT). Each is kept only when its SHA-256 is its hash; the blobs " +
-			"before a bad one stay kept. A runner's or a connector's token.",
+			"before a bad one stay kept. A runner's token.",
 		replies: []reply{ok(200, blobs.PackReply{}, "Every blob kept."), fail(400, "The pack is not well formed, or a blob does not have its hash."),
 			noBlobs, noRunnerToken, fail(413, "The pack is bigger than a pack may be."), fail(500, "The pack could not be kept.")},
 		self: true, serve: jobsRoute},
@@ -152,7 +153,7 @@ var runnerRoutes = []route{
 		tag:     "Blobs",
 		summary: "Read many blobs",
 		doc: "The blobs of the hashes sent, 1 to 1000, as one pack in the order asked (the frames of POST /api/v0/runner/packs), streamed. " +
-			"A runner's or a connector's token, and only blobs of its own jobs: those of each session it holds an attempt of that has not ended or ended in the last 10 minutes.",
+			"A runner's token, and only blobs of its own jobs: those of each session it holds an attempt of that has not ended or ended in the last 10 minutes.",
 		body: blobs.FetchRequest{},
 		replies: []reply{{status: 200, doc: "The pack.", empty: true}, badRequest,
 			{status: 404, doc: "A blob asked for is not held: the reply lists the missing ones.", body: blobs.MissingReply{}}, noRunnerToken,
@@ -163,7 +164,7 @@ var runnerRoutes = []route{
 		tag:     "Blobs",
 		summary: "Send a blob",
 		doc: "The body is the blob's content, as application/octet-stream, streamed: the 2 MiB limit of the runner protocol does not apply, up to 4 GiB. " +
-			"It is kept only when its SHA-256 is the hash in the path. A blob already held is kept as it was. A runner's or a connector's token.",
+			"It is kept only when its SHA-256 is the hash in the path. A blob already held is kept as it was. A runner's token.",
 		replies: []reply{{status: 204, doc: "Kept.", empty: true}, fail(400, "The content does not have the hash in the path."), noBlobs,
 			noRunnerToken, fail(413, "The blob is bigger than 4 GiB."), fail(500, "The blob could not be kept.")},
 		self: true, serve: jobsRoute},
@@ -171,7 +172,7 @@ var runnerRoutes = []route{
 		idDoc:   "The blob's hash: 64 lowercase hex digits.",
 		tag:     "Blobs",
 		summary: "Read a blob",
-		doc:     "The blob's content, as application/octet-stream, streamed. A runner's or a connector's token, and only a blob of its own jobs (as getBlobPack).",
+		doc:     "The blob's content, as application/octet-stream, streamed. A runner's token, and only a blob of its own jobs (as getBlobPack).",
 		replies: []reply{{status: 200, doc: "The content.", empty: true}, fail(404, "No blob of that hash, or this service keeps no blob store."), noRunnerToken,
 			fail(403, "The blob is not of this runner's jobs."), fail(500, "The runner's jobs could not be read.")},
 		self: true, serve: jobsRoute},

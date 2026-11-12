@@ -286,7 +286,7 @@ func TestCloseLost(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, a, ok, _, err := q.Take(rn.ID, 30*time.Second)
+		_, a, ok, _, err := q.Take(rn.ID, 30*time.Second, false)
 		if err != nil || !ok {
 			t.Fatalf("take: %v %v", ok, err)
 		}

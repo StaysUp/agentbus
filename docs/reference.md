@@ -18,15 +18,17 @@ for: `queued`, then `running`, then `finished`, `failed` or `stopped`.
 
 ## Modes
 
-Three roles in one program. Control keeps the API, the job queue, the record, the gateway and a
-blob store of file contents. A connector owns the person's folders on its machine: it takes their
-snapshots and applies changes into them. A runner runs agents in copies. File data goes through
-control's blob store, never straight from a connector to a runner.
+One program per machine. Control keeps the API, the job queue, the record, the gateway and a blob
+store of file contents. A runner is the one program of each other machine: it holds that
+machine's folders, makes each session's copy from its folder, runs the agents, and applies changes
+back into the folder. A session runs on the machine that holds its folder: a turn names the
+machine as `connector`, and only that machine's runner takes its work.
 
-`agentbus up` runs all three in one process, and copies a folder by clone or overlay. `agentbus
-server` is control alone. `agentbus runner -server <url>` takes jobs from a server and runs them
-on its machine, with its own record and gateway; its own API starts no turns; with `-folder DIR`
-a connector runs beside it. `agentbus connector -server <url> [-folder DIR]...` is a connector alone; a folder a session names by path is added when the session starts.
+`agentbus up` runs control and the machine's runner in one process, and copies a folder by clone or
+overlay. `agentbus server` is control alone. `agentbus runner -server <url> [-folder DIR]...`
+takes jobs from a server and runs them on its machine, with its own record and gateway; its own
+API starts no turns; a folder a session names by path is added when the session starts.
+`agentbus connector` was retired in 0.5: it prints the `agentbus runner` line to run instead.
 This file describes the API of `up` and `server`.
 
 A runner holds no secrets. The server mints each runner turn's token, which works while that
@@ -407,12 +409,12 @@ curl -s -H "Authorization: Bearer $TOKEN" $B/api/v0/turns/t_9f2c01ab4d5e6f70/dif
 
 Make the person's folder (the one its session's copy was made from) as the session was at the end
 of this turn: every turn of the session not yet applied, up to and including this one, in one step,
-on the folder's connector. No body. 200 with `state: "applied"` and `files` written. All or nothing:
+on the runner of the folder's machine. No body. 200 with `state: "applied"` and `files` written. All or nothing:
 if any file there is neither as the last applied turn left it nor already as this turn leaves it,
 nothing is written: 409 with `state: "refused"`, `error`, and `conflicts` (`path` and `why` for
 each). Every new file is staged before any is put in place. A turn already applied, by its own apply
 or a later turn's, is a no-op: 200 with `already: true`. A refused apply may be asked for again.
-409 while an apply of an earlier turn of the session runs. 202 when the connector has not finished
+409 while an apply of an earlier turn of the session runs. 202 when the folder's runner has not finished
 within 30 seconds; the turn's diff shows how it ended. 400 for a turn that cannot be applied (still
 running, stopped before it started, not in an isolated copy, or its session closed). A turn works in its session's copy, so
 its changes reach the person's folder only by an apply. A turn token may apply a turn in its
@@ -524,8 +526,8 @@ curl -s -H "Authorization: Bearer $TOKEN" $B/api/v0/harnesses
 
 ### GET /api/v0/folders
 
-The folders the runners own, each by its reference (`fld_` and 16 hex digits) with its `connector`
-and the last part of its path. The path itself stays on its machine. Start a turn in one with
+The folders the runners hold, each by its reference (`fld_` and 16 hex digits) with its machine
+as `connector` and the last part of its path. The path itself stays on its machine. Start a turn in one with
 `folder_ref` and `connector` in place of `folder`; `agentbus server` takes only that.
 
 ```sh
@@ -543,7 +545,7 @@ curl -s -H "Authorization: Bearer $TOKEN" $B/api/v0/version
 
 ### The runner protocol
 
-Runners and connectors talk to control through the runner protocol, under `/api/v0/runner/`, with
+Runners talk to control through the runner protocol, under `/api/v0/runner/`, with
 their own tokens. It is described on its own: `/api/v0/runner/openapi.json`, and the page
 `/docs/runner`. It is our binaries' own and not a public promise. A client never calls it. Inside
 it, a job is the queue's word for work (a turn, a review, an apply or a snapshot), and an attempt

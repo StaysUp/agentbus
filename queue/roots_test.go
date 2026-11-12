@@ -12,12 +12,14 @@ import (
 func TestBlobRoots(t *testing.T) {
 	q, _ := open(t)
 	const con, ref = "con_0123456789abcdef", "fld_0123456789abcdef"
-	conn, err := q.RegisterRunner(DefaultTeam, "c", nil, 2, HashToken(NewID("tok_")), &Capabilities{Role: RoleConnector, Connector: con,
+	conn, err := q.RegisterRunner(DefaultTeam, "c", nil, 2, HashToken(NewID("tok_")), &Capabilities{Connector: con,
 		Folders: []FolderInfo{{Ref: ref, Name: "p"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	r := runner(t, q, 2)
+	// The runner of the folder's machine runs the turn and takes the
+	// snapshot, as a session made before 0.5 asked for one.
+	r := conn
 	// One session per folder turn, each with a snapshot and a changeset.
 	session := func(cs, tree string) string {
 		t.Helper()
@@ -32,7 +34,7 @@ func TestBlobRoots(t *testing.T) {
 		if _, err := q.Snapshot(r.ID, a.ID, 1); err != nil {
 			t.Fatal(err)
 		}
-		_, sa := take(t, q, conn)
+		_, sa := takeFolder(t, q, conn)
 		if _, _, err := q.Start(conn.ID, sa.ID, 1, lease); err != nil {
 			t.Fatal(err)
 		}

@@ -140,7 +140,7 @@ func TestReviewJobs(t *testing.T) {
 	if _, _, err := q.Review(DefaultTeam, author.ID, "claude", "sonnet", "", false); !errors.Is(err, ErrNotReviewable) {
 		t.Fatalf("a queued job: %v", err)
 	}
-	_, att, _, _, _ := q.Take(a.ID, lease)
+	_, att, _, _, _ := q.Take(a.ID, lease, false)
 	if _, _, err := q.Start(a.ID, att.ID, 1, lease); err != nil {
 		t.Fatal(err)
 	}
@@ -162,12 +162,12 @@ func TestReviewJobs(t *testing.T) {
 	third, _, _ := q.Review(DefaultTeam, author.ID, "claude", "haiku", "", false)
 
 	// Only the workspace's runner takes them, all at once.
-	if _, _, ok, _, _ := q.Take(b.ID, lease); ok {
+	if _, _, ok, _, _ := q.Take(b.ID, lease, false); ok {
 		t.Fatal("another runner took a review")
 	}
 	held := map[string]Attempt{}
 	for range 3 {
-		j, at, ok, _, err := q.Take(a.ID, lease)
+		j, at, ok, _, err := q.Take(a.ID, lease, false)
 		if err != nil || !ok || j.Kind != KindReview || j.Workspace == nil || j.Workspace.Folder != "/w/job_a" {
 			t.Fatalf("take: %+v %v %v", j, ok, err)
 		}
@@ -255,7 +255,7 @@ func TestReviewReadsChangesFromRecord(t *testing.T) {
 	q, _ := open(t)
 	a := runner(t, q, 4)
 	author, _, _ := q.Create(DefaultTeam, KindTurn, "", Spec{Harness: "claude", Repo: "/r", Base: "main", Prompt: "Bump the version."}, Links{})
-	_, att, _, _, _ := q.Take(a.ID, lease)
+	_, att, _, _, _ := q.Take(a.ID, lease, false)
 	if _, _, err := q.Start(a.ID, att.ID, 1, lease); err != nil {
 		t.Fatal(err)
 	}

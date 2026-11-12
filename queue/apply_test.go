@@ -44,6 +44,16 @@ func TestApplyResultFit(t *testing.T) {
 // first turn also records its copy.
 func run(t *testing.T, q *Queue, r Runner, res Result) Job {
 	t.Helper()
+	return runKind(t, q, r, res, false)
+}
+
+// runKind is run of a turn (folders false) or of a folder job.
+func runKind(t *testing.T, q *Queue, r Runner, res Result, folders bool) Job {
+	t.Helper()
+	take := take
+	if folders {
+		take = takeFolder
+	}
 	j, a := take(t, q, r)
 	if _, _, err := q.Start(r.ID, a.ID, a.Number, lease); err != nil {
 		t.Fatal(err)
@@ -66,8 +76,8 @@ func hexOf(c byte) string { return strings.Repeat(string(c), 64) }
 // turn before it: asking for an earlier one answers the apply that did it.
 func TestApplyUpToATurn(t *testing.T) {
 	q, _ := open(t)
-	rn := capsRunner(t, q, nil, nil)
-	conn := capsRunner(t, q, nil, &Capabilities{Role: RoleConnector, Connector: conA})
+	rn := capsRunner(t, q, nil, &Capabilities{Connector: conA})
+	conn := rn
 	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Connector: conA, Isolate: true})
 	t1 := run(t, q, rn, Result{Changeset: hexOf('1')})
 	if t1.ID != first.ID {
@@ -83,9 +93,9 @@ func TestApplyUpToATurn(t *testing.T) {
 	if err != nil || !created || a2.Spec.ApplyFrom != "" || a2.Spec.ApplyTo != hexOf('2') || a2.Spec.Connector != conA || a2.Spec.FolderRef != refX {
 		t.Fatalf("apply up to turn 2: %+v %v %v", a2.Spec, created, err)
 	}
-	// Only the connector takes it; the runner of the session never does.
+	// Only a folder place takes it; a turn place never does.
 	if got := takes(t, q, rn); got != "" {
-		t.Fatalf("the runner took %s", got)
+		t.Fatalf("a turn place took %s", got)
 	}
 	// While it runs, an apply of turn 1 is that apply; of turn 3, busy.
 	if j, created, err := q.Apply(DefaultTeam, turns[0].Turn); err != nil || created || j.ID != a2.ID {
@@ -94,7 +104,7 @@ func TestApplyUpToATurn(t *testing.T) {
 	if _, _, err := q.Apply(DefaultTeam, turns[2].Turn); err != ErrApplyBusy {
 		t.Fatalf("turn 3 while turn 2's apply runs: %v", err)
 	}
-	run(t, q, conn, Result{Apply: &ApplyResult{Files: []string{"a.txt"}}})
+	runKind(t, q, conn, Result{Apply: &ApplyResult{Files: []string{"a.txt"}}}, true)
 	if j, ok, err := q.AppliedBy(DefaultTeam, turns[0].Turn); err != nil || !ok || j.ID != a2.ID {
 		t.Fatalf("turn 1 applied by %s %v %v", j.ID, ok, err)
 	}
@@ -110,45 +120,124 @@ func TestApplyUpToATurn(t *testing.T) {
 	}
 }
 
-// Snapshot and apply jobs go only to the connector of their folder; a
-// connector takes nothing else, and an isolated first turn goes to any
-// runner, which builds its copy from a snapshot.
-func TestTakeRoutesByRole(t *testing.T) {
+// A session runs on the machine that holds its folder: its first turn, an
+// isolated copy included, goes only to that machine's runner, never to
+// another's or to a runner of no machine. Folder jobs (a snapshot, an apply)
+// go only to that runner's folder places, and turns only to its turn places.
+// A connector of a build before 0.5 takes nothing, and none can report
+// itself one now.
+func TestTakeRoutesByMachine(t *testing.T) {
 	q, _ := open(t)
 	plain := capsRunner(t, q, nil, nil)
-	connB := capsRunner(t, q, nil, &Capabilities{Role: RoleConnector, Connector: conB})
-	connA := capsRunner(t, q, nil, &Capabilities{Role: RoleConnector, Connector: conA})
+	onB := capsRunner(t, q, nil, &Capabilities{Connector: conB})
+	legacy := capsRunner(t, q, nil, &Capabilities{Role: RoleConnector, Connector: conA})
+	onA := capsRunner(t, q, nil, &Capabilities{Connector: conA})
 	turn := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Connector: conA, Isolate: true})
-	for _, r := range []Runner{connA, connB} {
+	for _, r := range []Runner{plain, onB, legacy} {
 		if got := takes(t, q, r); got != "" {
-			t.Fatalf("a connector took the turn %s", got)
+			t.Fatalf("a runner off the folder's machine took the turn %s", got)
 		}
 	}
-	if got := takes(t, q, plain); got != turn.ID {
-		t.Fatalf("the runner took %q, want the isolated turn %s", got, turn.ID)
+	if got := takesFolder(t, q, onA); got != "" {
+		t.Fatalf("a folder place took the turn %s", got)
 	}
-	snap, err := q.Snapshot(plain.ID, mustAttempt(t, q, turn.ID), 1)
+	if got := takes(t, q, onA); got != turn.ID {
+		t.Fatalf("the folder's machine took %q, want %s", got, turn.ID)
+	}
+	snap, err := q.Snapshot(onA.ID, mustAttempt(t, q, turn.ID), 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := q.Snapshot(plain.ID, mustAttempt(t, q, turn.ID), 1)
-	if err != nil || again.ID != snap.ID || snap.Kind != KindSnapshot {
-		t.Fatalf("asked twice: %s and %s (%v)", snap.ID, again.ID, err)
-	}
-	for _, r := range []Runner{plain, connB} {
-		if got := takes(t, q, r); got != "" {
+	for _, r := range []Runner{plain, onB, legacy} {
+		if got := takesFolder(t, q, r); got != "" {
 			t.Fatalf("%s took the snapshot", got)
 		}
 	}
-	if got := takes(t, q, connA); got != snap.ID {
-		t.Fatalf("the folder's connector took %q, want %s", got, snap.ID)
+	if got := takes(t, q, onA); got != "" {
+		t.Fatalf("a turn place took the snapshot %s", got)
 	}
-	if _, err := q.Snapshot(connA.ID, mustAttempt(t, q, turn.ID), 1); err == nil {
-		t.Fatal("another runner asked for the turn's snapshot")
+	if got := takesFolder(t, q, onA); got != snap.ID {
+		t.Fatalf("the folder's machine took %q, want %s", got, snap.ID)
 	}
-	if (Capabilities{Role: "x"}).Check() == "" || (Capabilities{Role: RoleConnector}).Check() == "" ||
-		(Capabilities{Role: RoleConnector, Connector: conA}).Check() != "" {
-		t.Fatal("a connector's capabilities are not checked")
+	// A next turn of the session stays on the session's runner.
+	makeJob(t, q, Spec{Session: turn.Session})
+	if got := takes(t, q, onB); got != "" {
+		t.Fatalf("another machine took the next turn %s", got)
+	}
+	if (Capabilities{Role: "x"}).Check() == "" || (Capabilities{Role: RoleConnector, Connector: conA}).Check() == "" ||
+		(Capabilities{Connector: conA}).Check() != "" {
+		t.Fatal("a role is not refused")
+	}
+}
+
+// A session made before 0.5 whose first turn another machine's runner built
+// from a snapshot keeps going there: its next turn goes to the session's
+// runner, though its folder is elsewhere. Its apply goes to the folder's
+// machine only.
+func TestSessionFromBeforeKeepsItsRunner(t *testing.T) {
+	q, _ := open(t)
+	far := capsRunner(t, q, nil, &Capabilities{Connector: conB})
+	home := capsRunner(t, q, nil, &Capabilities{Connector: conA})
+	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Connector: conA, Isolate: true})
+	// As 0.4 took it: bound to the far runner.
+	j, a, ok, _, err := q.Take(home.ID, lease, false)
+	if err != nil || !ok || j.ID != first.ID {
+		t.Fatalf("take: %v %v", ok, err)
+	}
+	if _, err := q.db.Exec(`UPDATE attempts SET runner = ? WHERE id = ?`, far.ID, a.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := q.Start(far.ID, a.ID, 1, lease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.End(far.ID, a.ID, 1, Finish{Status: Finished, Session: j.Session, Result: []byte(`{"changeset":"` + hexOf('1') + `"}`),
+		Workspace: &Workspace{Kind: WorkspaceCopy, Space: j.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	next := makeJob(t, q, Spec{Session: first.Session})
+	if got := takes(t, q, home); got != "" {
+		t.Fatalf("the folder's machine took the next turn of a session another runner holds: %s", got)
+	}
+	if got := takes(t, q, far); got != next.ID {
+		t.Fatalf("the session's runner took %q, want %s", got, next.ID)
+	}
+	ap, created, err := q.Apply(DefaultTeam, j.Turn)
+	if err != nil || !created {
+		t.Fatalf("apply: %v %v", created, err)
+	}
+	if got := takesFolder(t, q, far); got != "" {
+		t.Fatalf("the session's far runner took the apply %s", got)
+	}
+	if got := takesFolder(t, q, home); got != ap.ID {
+		t.Fatalf("the folder's machine took %q, want the apply %s", got, ap.ID)
+	}
+}
+
+// Folder jobs have places of their own: an apply is taken while every turn
+// place is busy, and at most FolderCapacity folder jobs run at once.
+func TestFolderPlacesBesideTurns(t *testing.T) {
+	q, _ := open(t)
+	r, err := q.RegisterRunner(DefaultTeam, "r", nil, 1, HashToken(NewID("tok_")), &Capabilities{Connector: conA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Connector: conA})
+	makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Connector: conA})
+	if takes(t, q, r) == "" || takes(t, q, r) != "" {
+		t.Fatal("a runner of capacity 1 did not take exactly one turn")
+	}
+	for i := range FolderCapacity + 1 {
+		if _, err := q.RegisterFolder(DefaultTeam, conA, "/p/"+string(rune('a'+i))); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := range FolderCapacity {
+		if takesFolder(t, q, r) == "" {
+			t.Fatalf("folder job %d was not taken while the turn runs", i+1)
+		}
+	}
+	if got := takesFolder(t, q, r); got != "" {
+		t.Fatalf("a folder job past FolderCapacity was taken: %s", got)
 	}
 }
 
@@ -165,8 +254,7 @@ func mustAttempt(t *testing.T, q *Queue, job string) string {
 // that apply or refused as busy; never two from the same starting point.
 func TestApplyAtOnce(t *testing.T) {
 	q, _ := open(t)
-	rn := capsRunner(t, q, nil, nil)
-	capsRunner(t, q, nil, &Capabilities{Role: RoleConnector, Connector: conA})
+	rn := capsRunner(t, q, nil, &Capabilities{Connector: conA})
 	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Connector: conA, Isolate: true})
 	turns := []Job{run(t, q, rn, Result{Changeset: hexOf('1')})}
 	for _, c := range []byte{'2', '3'} {
@@ -199,30 +287,29 @@ func TestApplyAtOnce(t *testing.T) {
 	}
 }
 
-// An isolated first turn goes to a runner with its harness, wherever the
-// folder is: a runner on the folder's machine without it does not take it.
-func TestTakeIsolatedByHarness(t *testing.T) {
+// An isolated first turn stays on its folder's machine whatever harness
+// another runner has: the folder's runner takes it, and its engine says how
+// to install the program.
+func TestTakeIsolatedStaysOnItsMachine(t *testing.T) {
 	q, _ := open(t)
 	found := func(name string) []harness.Report { return []harness.Report{{Name: name, Found: true}} }
 	here := capsRunner(t, q, nil, &Capabilities{Connector: conA, Harnesses: found("claude")})
-	away := capsRunner(t, q, nil, &Capabilities{Harnesses: found("codex")})
+	away := capsRunner(t, q, nil, &Capabilities{Connector: conB, Harnesses: found("codex")})
 	j := makeJob(t, q, Spec{Harness: "codex", FolderRef: refX, Connector: conA, Isolate: true})
-	if got := takes(t, q, here); got != "" {
-		t.Fatalf("the runner without codex took %s", got)
+	if got := takes(t, q, away); got != "" {
+		t.Fatalf("the runner of another machine took %s", got)
 	}
-	if got := takes(t, q, away); got != j.ID {
-		t.Fatalf("the runner with codex took %q", got)
+	if got := takes(t, q, here); got != j.ID {
+		t.Fatalf("the folder's runner took %q", got)
 	}
 }
 
-// A snapshot or an apply of a folder whose connector has not been seen for
-// RunnerFresh is refused: nothing would take it. An apply makes no job; a
-// snapshot already queued stays, and goes once the connector is back.
-func TestFolderJobsNeedTheirConnector(t *testing.T) {
+// An apply of a folder whose machine's runner has not been seen for
+// RunnerFresh is refused: nothing would take it. It makes no job. A
+// connector of a build before 0.5 on that machine does not count.
+func TestApplyNeedsItsMachine(t *testing.T) {
 	q, c := open(t)
-	conn := capsRunner(t, q, nil, &Capabilities{Role: RoleConnector, Connector: conA})
-	c.add(RunnerFresh + time.Second)
-	rn := capsRunner(t, q, nil, nil)
+	rn := capsRunner(t, q, nil, &Capabilities{Connector: conA})
 	turn := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Connector: conA, Isolate: true})
 	j, a := take(t, q, rn)
 	if j.ID != turn.ID {
@@ -231,32 +318,23 @@ func TestFolderJobsNeedTheirConnector(t *testing.T) {
 	if _, _, err := q.Start(rn.ID, a.ID, a.Number, lease); err != nil {
 		t.Fatal(err)
 	}
-	snap, err := q.Snapshot(rn.ID, a.ID, a.Number)
-	if !errors.Is(err, ErrNoConnector) || snap.State != Queued {
-		t.Fatalf("snapshot without its connector: %s %v", snap.State, err)
-	}
-	if takes(t, q, conn) != snap.ID {
-		t.Fatal("the connector, back, did not take the snapshot")
-	}
-	if again, err := q.Snapshot(rn.ID, a.ID, a.Number); err != nil || again.ID != snap.ID {
-		t.Fatalf("snapshot once taken: %s %v", again.ID, err)
-	}
 	if _, err := q.End(rn.ID, a.ID, a.Number, Finish{Status: Finished, Session: j.Session,
 		Workspace: &Workspace{Kind: WorkspaceCopy, Space: j.ID}, Result: []byte(`{"changeset":"` + hexOf('1') + `"}`)}); err != nil {
 		t.Fatal(err)
 	}
 	c.add(RunnerFresh + time.Second)
-	if _, _, err := q.Apply(DefaultTeam, j.Turn); !errors.Is(err, ErrNoConnector) {
-		t.Fatalf("apply without its connector: %v", err)
+	capsRunner(t, q, nil, &Capabilities{Role: RoleConnector, Connector: conA})
+	if _, _, err := q.Apply(DefaultTeam, j.Turn); !errors.Is(err, ErrMachineOffline) {
+		t.Fatalf("apply with its machine offline: %v", err)
 	}
 	if applies, _ := q.sessionApplies(DefaultTeam, j.Session); len(applies) != 0 {
 		t.Fatalf("%d applies made", len(applies))
 	}
-	if _, err := q.RunnerBeat(conn.ID, 1, nil, nil); err != nil {
+	if _, err := q.RunnerBeat(rn.ID, 1, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	if _, created, err := q.Apply(DefaultTeam, j.Turn); err != nil || !created {
-		t.Fatalf("apply with its connector back: %v %v", created, err)
+		t.Fatalf("apply with its machine back: %v %v", created, err)
 	}
 }
 
@@ -264,8 +342,8 @@ func TestFolderJobsNeedTheirConnector(t *testing.T) {
 // cancelled; taken, it is asked to stop.
 func TestSnapshotEndsWithItsAttempt(t *testing.T) {
 	q, _ := open(t)
-	rn := capsRunner(t, q, nil, nil)
-	conn := capsRunner(t, q, nil, &Capabilities{Role: RoleConnector, Connector: conA})
+	rn := capsRunner(t, q, nil, &Capabilities{Connector: conA})
+	conn := rn
 	for _, taken := range []bool{false, true} {
 		turn := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Connector: conA, Isolate: true})
 		j, a := take(t, q, rn)
@@ -279,8 +357,8 @@ func TestSnapshotEndsWithItsAttempt(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if taken && takes(t, q, conn) != snap.ID {
-			t.Fatal("the connector did not take the snapshot")
+		if taken && takesFolder(t, q, conn) != snap.ID {
+			t.Fatal("the folder's runner did not take the snapshot")
 		}
 		if _, err := q.End(rn.ID, a.ID, a.Number, Finish{Status: Cancelled}); err != nil {
 			t.Fatal(err)
@@ -366,7 +444,7 @@ func TestSessionEndsWithItsFirstTurn(t *testing.T) {
 				t.Fatalf("behind the first turn: %v", err)
 			}
 			c.end(t, q, clk, rn, first)
-			if j, _, ok, _, err := q.Take(rn.ID, lease); err != nil || ok {
+			if j, _, ok, _, err := q.Take(rn.ID, lease, false); err != nil || ok {
 				t.Fatalf("a runner took a turn: %v %v: %s (first %s, next %s)", ok, err, j.ID, first.ID, next.ID)
 			}
 			got := state(t, q, next.ID)

@@ -93,7 +93,7 @@ type Config struct {
 	// request from there.
 	Hosts []string
 
-	// Folders is this machine's connector, in agentbus up: a folder a
+	// Folders are this machine's folders, in agentbus up: a folder a
 	// request names by path is kept as its reference (queue.ResolveFolders).
 	// Nil, as in agentbus server, takes references only.
 	Folders queue.FolderIssuer

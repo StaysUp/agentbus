@@ -60,7 +60,7 @@ const turnsTokenDoc = "The turns token (the file `turns_token` in the data folde
 
 // runnerTokenDoc is what an operation of the runner protocol adds to its
 // description: it checks its own token.
-const runnerTokenDoc = "Runner protocol: called by a runner or a connector, never by the cockpit. Takes the enrollment token (register) or the runner's own token (every other call), not the main token."
+const runnerTokenDoc = "Runner protocol: called by a runner, never by the cockpit. Takes the enrollment token (register) or the runner's own token (every other call), not the main token."
 
 // turnTokenDoc is what each turn-token rule adds to an operation's
 // description.
@@ -405,7 +405,7 @@ func describe(runner bool) (*openapi3.T, error) {
 	// Each tag's routes, counted, so a route cannot name a tag that is not
 	// listed and a listed tag cannot be empty.
 	if runner {
-		doc.Info.Title, doc.Info.Summary, doc.Info.Description = "agentbus runner protocol", "What runners and connectors call on control.", runnerIntro
+		doc.Info.Title, doc.Info.Summary, doc.Info.Description = "agentbus runner protocol", "What runners call on control.", runnerIntro
 	}
 	tagged := map[string]int{}
 	for _, t := range tags {
@@ -560,7 +560,7 @@ func describe(runner bool) (*openapi3.T, error) {
 }
 
 // runnerIntro opens the runner protocol's description.
-const runnerIntro = "How a runner and a connector talk to control: register, take jobs, report their attempts, and move files as blobs. " +
+const runnerIntro = "How a runner, the one program of each machine, talks to control: register, take jobs, report their attempts, and move files as blobs. " +
 	"A job is the queue's word for work: a turn, a review, an apply or a snapshot. A runner takes a job as an attempt, and every call after take names the attempt and its number. " +
 	"This protocol is our own code's, between our own binaries. It is not a public promise and may change in any release. " +
 	"The client API, for people, programs and agents, is at `/api/v0/openapi.json`."

@@ -3,8 +3,8 @@
 package main
 
 // The built binary in its roles, over HTTP only, as a person and their
-// machines use it: agentbus up on one machine, and agentbus server, runner
-// and connector as three processes. A stand-in claude edits the files, so no
+// machines use it: agentbus up on one machine, and agentbus server with a
+// runner on each of two machines. A stand-in claude edits the files, so no
 // model is called.
 //
 // TestOneMachineFilesPinned pins what one machine does with a session's
@@ -15,7 +15,9 @@ package main
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -400,54 +402,66 @@ func TestOneMachineFilesPinned(t *testing.T) {
 	restoreFlow(t, c, other, map[string]any{"folder": other})
 }
 
-// The three roles as three processes on one machine: the server holds the
-// queue, the record and the blob store; the connector owns the folder; the
-// runner owns no folder and runs the agent. Every file goes through the
-// server's blob store: the runner builds its copy from the folder's
-// snapshot, and the connector applies the changes it reads from there.
-func TestThreeProcesses(t *testing.T) {
+// Two machines and their control as three processes: the server holds the
+// queue, the record and the blob store; runner A holds the folder; runner
+// B, with a data folder of its own, is another machine. A session in A's
+// folder runs on A for its whole life: its copy is made there from the
+// folder, its turns run there, and its changes are applied there. B takes
+// none of its work, and no snapshot is taken.
+func TestSessionRunsOnItsFolderMachine(t *testing.T) {
 	bin, bins := built(t), standInDir(t)
 	serverHome, addr := t.TempDir(), freeAddr(t)
 	sp := startProc(t, bin, serverHome, bins, "server", "-listen", addr, "-replay=false")
 	c := waitService(t, sp, addr, serverHome)
 	enroll := filepath.Join(serverHome, "enroll_token")
 	folder := personFolder(t)
-	connHome, runHome := t.TempDir(), t.TempDir()
-	startProc(t, bin, connHome, bins, "connector", "-server", c.base, "-folder", folder, "-enroll-token-file", enroll, "-name", "conn")
-	startProc(t, bin, runHome, bins, "runner", "-server", c.base, "-enroll-token-file", enroll, "-name", "run", "-replay=false")
-	// The folder, by its reference, once the connector reports it.
-	var ref, connector string
-	waitFor(t, "the connector's folder", func() bool {
+	homeA, homeB := t.TempDir(), t.TempDir()
+	// B first, so it is asking for work before A's session is queued.
+	startProc(t, bin, homeB, bins, "runner", "-server", c.base, "-enroll-token-file", enroll, "-name", "b", "-replay=false")
+	startProc(t, bin, homeA, bins, "runner", "-server", c.base, "-folder", folder, "-enroll-token-file", enroll, "-name", "a", "-replay=false")
+	// The folder, by its reference, once A reports it; and each machine.
+	var ref, machineA string
+	waitFor(t, "machine A's folder", func() bool {
 		var fs struct {
 			Folders []struct{ Ref, Name, Connector string }
 		}
 		c.call("GET", "/api/v0/folders", nil, &fs)
 		for _, f := range fs.Folders {
 			if f.Name == filepath.Base(folder) {
-				ref, connector = f.Ref, f.Connector
+				ref, machineA = f.Ref, f.Connector
 			}
 		}
 		return ref != ""
 	})
-	filesFlow(t, c, folder, map[string]any{"folder_ref": ref, "connector": connector, "isolate": true})
+	var rl struct {
+		Runners []struct{ Name, Connector, Role string }
+	}
+	waitFor(t, "both machines", func() bool {
+		c.call("GET", "/api/v0/runners", nil, &rl)
+		return len(rl.Runners) == 2 && rl.Runners[0].Connector != "" && rl.Runners[1].Connector != ""
+	})
+	for _, r := range rl.Runners {
+		if r.Role != "runner" || (r.Name == "a") != (r.Connector == machineA) {
+			t.Fatalf("runners: %+v, want one row per machine, a on %s", rl.Runners, machineA)
+		}
+	}
+	filesFlow(t, c, folder, map[string]any{"folder_ref": ref, "connector": machineA, "isolate": true})
 	// The same folder again, now as filesFlow left it.
 	if err := os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	restoreFlow(t, c, folder, map[string]any{"folder_ref": ref, "connector": connector, "isolate": true})
-	// The runner's copy came from the snapshot, not from the folder: its
-	// data folder holds the blobs it fetched, and the connector's the ones
-	// it sent.
-	for home, dir := range map[string]string{runHome: cacheDir, connHome: cacheDir, serverHome: "blobs"} {
-		if n := countFiles(t, filepath.Join(home, dir)); n == 0 {
-			t.Errorf("no blob in %s", filepath.Join(home, dir))
+	restoreFlow(t, c, folder, map[string]any{"folder_ref": ref, "connector": machineA, "isolate": true})
+	// The copies were made on A, from the folder; B made none and holds no
+	// session's home.
+	if n := countFiles(t, filepath.Join(homeA, copiesDir)); n == 0 {
+		t.Errorf("no copy on machine A")
+	}
+	for _, dir := range []string{copiesDir, homesDir, cacheDir} {
+		if n := countFiles(t, filepath.Join(homeB, dir)); n != 0 {
+			t.Errorf("machine B holds %d files in %s", n, dir)
 		}
 	}
-	if s := fileText(t, filepath.Join(runHome, "folders.json")); strings.Contains(s, folder) {
-		t.Errorf("the runner knows the folder's path: %s", s)
-	}
-	// The server's record holds the runner's turns, as the cockpit reads
-	// them, and no path of the runner's.
+	// The server's record holds A's turns, as the cockpit reads them.
 	var ss struct {
 		Store    string
 		Sessions []struct{ ID string }
@@ -457,9 +471,47 @@ func TestThreeProcesses(t *testing.T) {
 	}
 	for _, se := range ss.Sessions {
 		code, out := c.call("GET", "/api/v0/sessions/"+se.ID+"/events?after=0&limit=1000&store="+ss.Store, nil, nil)
-		if code != 200 || strings.Contains(out, runHome) || !strings.Contains(out, "turn.started") || !strings.Contains(out, "session.closed") {
+		if code != 200 || strings.Contains(out, homeB) || !strings.Contains(out, "turn.started") || !strings.Contains(out, "session.closed") {
 			t.Fatalf("the server's record of %s: %d %s", se.ID, code, out)
 		}
+	}
+	// Every attempt of every job ran on A, and no snapshot was taken.
+	_ = sp.cmd.Process.Signal(syscall.SIGTERM)
+	<-sp.done
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(serverHome, "jobs.db")+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var jobsN, onA, offA, snaps int
+	if err := db.QueryRow(`SELECT (SELECT COUNT(*) FROM jobs),
+		(SELECT COUNT(*) FROM attempts a JOIN runners r ON r.id = a.runner WHERE r.name = 'a'),
+		(SELECT COUNT(*) FROM attempts a JOIN runners r ON r.id = a.runner WHERE r.name != 'a'),
+		(SELECT COUNT(*) FROM jobs WHERE kind = 'snapshot')`).Scan(&jobsN, &onA, &offA, &snaps); err != nil {
+		t.Fatal(err)
+	}
+	if jobsN == 0 || onA == 0 || offA != 0 || snaps != 0 {
+		t.Fatalf("%d jobs, %d attempts on A, %d elsewhere, %d snapshots", jobsN, onA, offA, snaps)
+	}
+}
+
+// agentbus connector is retired: it says what to run instead, with its own
+// flags, changes nothing and exits 2.
+func TestConnectorRetired(t *testing.T) {
+	bin := built(t)
+	home := t.TempDir()
+	cmd := exec.Command(bin, "connector", "-server", "http://127.0.0.1:1", "-folder", "/my folder", "-name", "box")
+	cmd.Env = append(os.Environ(), "AGENTBUS_HOME="+home)
+	out, err := cmd.CombinedOutput()
+	var ee *exec.ExitError
+	if !errors.As(err, &ee) || ee.ExitCode() != 2 {
+		t.Fatalf("exit: %v\n%s", err, out)
+	}
+	if want := "agentbus runner -server http://127.0.0.1:1 -folder '/my folder' -name box"; !strings.Contains(string(out), want) {
+		t.Fatalf("output %s, want %q", out, want)
+	}
+	if n := countFiles(t, home); n != 0 {
+		t.Fatalf("it wrote %d files", n)
 	}
 }
 

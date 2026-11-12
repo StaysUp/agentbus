@@ -130,9 +130,9 @@ var tags = []struct {
 	{name: "Settings", doc: "The policy and the instructions every turn gets, and the subscriptions control holds for runners. The main token only."},
 	{name: "Events", doc: "The record as a live stream, for a cockpit, an export or a program, and a program's own events. The main token only."},
 	{name: "Service", doc: "Which build this is, and this description."},
-	{name: "Runners", doc: "Register a runner or a connector, and take work.", runner: true},
+	{name: "Runners", doc: "Register a runner, and take work.", runner: true},
 	{name: "Attempts", doc: "Report an attempt: its start, lease, events, record, model calls and end.", runner: true},
-	{name: "Blobs", doc: "Files by their SHA-256: a snapshot's, and a turn's changes. A runner's or a connector's token.", runner: true},
+	{name: "Blobs", doc: "Files by their SHA-256: a snapshot's, and a turn's changes. A runner's token.", runner: true},
 }
 
 const (
@@ -150,6 +150,8 @@ var routes = slices.Concat([]route{
 			"With session, prompt is required and the turn continues that session in its own agent and folder; " +
 			"an agent or folder sent that differs from the session's is refused with 400. " +
 			"The turn's turn.started, with the prompt, is stored before the reply.\n\n" +
+			"A session runs on one machine, the one that holds its folder, for its whole life: pick the machine (connector, from GET /api/v0/runners), " +
+			"then type a folder on it (folder) or name one it holds (folder_ref, from GET /api/v0/folders). Only that machine's runner takes the session's work.\n\n" +
 			"The reply waits up to 30 seconds for a runner to start the turn. A turn no runner starts by then answers 202 with state queued: " +
 			"it runs when a runner is free, and GET /api/v0/turns/{id} follows it.\n\n" +
 			"A session whose turn runs, or has turns waiting, is never refused: the new turn queues behind them and runs next, in order. " +
@@ -256,13 +258,14 @@ var routes = slices.Concat([]route{
 			"with 409, state refused, and each file in conflicts with why. Nothing is written then, so the agent can read why and make another turn. " +
 			"Applying the same turn again is a no-op: 200 with already true and the files the first apply wrote. " +
 			"An apply that was refused may be asked for again. " +
+			"It runs on the runner of the folder's machine, in a place of its own, so it does not wait behind running turns. " +
 			"The reply waits up to 30 seconds; past that it is 202 with state queued or running, and GET /api/v0/turns/{id}/diff shows how it ended.",
 		replies: []reply{ok(200, ApplyState{}, "Applied: files lists what was written. already true: applied before, and nothing more was written."),
 			ok(202, ApplyState{}, "The apply has not finished yet."),
 			badRequest,
 			fail(404, "This service keeps no queue, or no turn of this service has this id."),
 			ok(409, ApplyState{}, "Refused or failed: error says why, and conflicts names each file in your folder that changed. Nothing was written on a conflict."),
-			tooMany, fail(503, "The folder's connector has not been seen for a minute. Nothing was written and no apply was made."), storeFailed},
+			tooMany, fail(503, "The runner of the folder's machine has not been seen for a minute. Nothing was written and no apply was made."), storeFailed},
 		turn: applyTurnTok,
 		tools: []tool{{name: "apply_turn", effect: effectApply, id: "turn",
 			doc: "Apply an AgentBus turn's file changes to the person's folder. Your edits stay in your session's own copy until a turn is applied. " +
@@ -455,15 +458,15 @@ var routes = slices.Concat([]route{
 	{method: "GET", path: "/api/v0/runners", op: "listRunners",
 		tag:     "Agents",
 		summary: "List runners",
-		doc: "The runners and connectors control knows, for a person: each one's name, id, role, labels, whether it is online, " +
+		doc: "The runners control knows, one per machine, for a person: each one's name, id, machine (connector), role, labels, whether it is online, " +
 			"when it was last seen, and its last probe of each harness with its version. Online means it asked for work in the last minute. " +
-			"A runner that stopped stays listed, offline. No token is in the answer. Takes the main token only. No body is read.",
+			"A runner that stopped stays listed, offline. A connector of a build before 0.5 is listed only while no runner reports its machine. No token is in the answer. Takes the main token only. No body is read.",
 		replies: []reply{ok(200, RunnerList{}, "The runners."), badRequest, storeFailed},
 		serve:   plain((*API).listRunners)},
 	{method: "GET", path: "/api/v0/folders", op: "listFolders",
 		tag:     "Agents",
 		summary: "List folders",
-		doc: "The folders the runners own, each by its reference: a turn names one as folder_ref, with its connector. " +
+		doc: "The folders the runners hold, each by its reference: a turn names one as folder_ref, with its machine as connector, and runs on that machine. " +
 			"A folder's path stays on the machine that owns it; the answer has only the last part of it. " +
 			"In agentbus up every folder a turn was started in is listed, newest first, within a minute of its first turn. " +
 			"A session's copy is never listed, though a turn may run in one. No body is read.",
