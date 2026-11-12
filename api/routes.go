@@ -386,10 +386,12 @@ var routes = slices.Concat([]route{
 			"what it leaves running is ended when it exits; and 64 KiB kept of each of stdout and stderr (the start; output_bytes counts it all).\n\n" +
 			"The session's next turn gets the commands that ran since its previous turn, with their output, once, before the person's words " +
 			"(context.added, kind commands), the same for every harness.\n\n" +
-			"A session with no copy on a runner yet, or a closed one, is refused with 409. Only the main token runs a command.",
+			"A session with no copy on a runner yet, or a closed one, is refused with 409. Only the main token runs a command, " +
+			"and only while the policy's commands switch is true (the default).",
 		body: CommandRequest{},
 		replies: []reply{ok(202, CommandQueued{}, "Queued: its events follow in the record."),
-			badRequest, fail(403, "A turn token's request is refused: only the person runs a command."), noSession,
+			badRequest, fail(403, "A turn token's request is refused: only the person runs a command. Or commands are off in the policy (commands = false)."), noSession,
+			fail(503, "The stored permissions cannot be used."),
 			fail(409, "The session has no copy on a runner yet, or it is closed: error says which."),
 			fail(429, "Too many jobs are waiting."), storeFailed},
 		serve: (*API).runCommand},

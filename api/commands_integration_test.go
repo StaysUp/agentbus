@@ -142,6 +142,37 @@ while [ ! -e "$0/release" ]; do sleep 0.05; done`
 	}
 }
 
+// commands = false in the policy refuses the person's commands with 403,
+// before anything is queued or recorded; true runs them again.
+func TestCommandsSwitch(t *testing.T) {
+	perm := filepath.Join(t.TempDir(), "permissions.toml")
+	os.WriteFile(perm, []byte("commands = false\n"), 0o600)
+	e := stackEnv(t, stack{permissions: perm, wire: func(agent, baseURL string, _ run.Access) (run.Launch, error) {
+		return run.Launch{Path: "/bin/sh", Args: []string{"-c", `echo '{"type":"result","session_id":"r1"}'`}}, nil
+	}})
+	resp, body := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"hi"}`)))
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("turn: %d %s", resp.StatusCode, body)
+	}
+	var st Started
+	json.Unmarshal([]byte(body), &st)
+	waitEnded(t, e, st.Turn)
+	command := func() (int, string) {
+		resp, body := do(t, e.req(t, "POST", "/api/v0/sessions/"+st.Session+"/commands", strings.NewReader(`{"command":"echo hi"}`)))
+		return resp.StatusCode, body
+	}
+	if code, body := command(); code != http.StatusForbidden || !strings.Contains(body, commandsOff) {
+		t.Fatalf("commands off: %d %s", code, body)
+	}
+	if recs, _ := e.store.After(0, store.Filter{Session: st.Session, Only: true, Kinds: []string{string(event.CommandQueued)}}, 10); len(recs) != 0 {
+		t.Fatalf("a refused command was recorded: %d", len(recs))
+	}
+	os.WriteFile(perm, []byte("commands = true\n"), 0o600)
+	if code, body := command(); code != http.StatusAccepted {
+		t.Fatalf("commands on: %d %s", code, body)
+	}
+}
+
 // A command whose runner stops answering while it runs ends as
 // command.failed once its lease runs out: control's sweep, then
 // CloseCommands, as the service's own loop runs them.

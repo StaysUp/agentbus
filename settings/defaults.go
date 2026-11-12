@@ -34,7 +34,9 @@ func DefaultsFor(v int) (Defaults, bool) {
 }
 
 // defaultsV1 are the defaults of 0.4, written out in full, so a change of
-// fill() cannot change them.
+// fill() cannot change them. [sandbox] and commands were added on
+// 2026-11-12, before any release carried version 1, at the values fill()
+// already gave them: no control's policy changed.
 func defaultsV1() Defaults {
 	on := func() *bool { b := true; return &b }
 	off := func() *bool { b := false; return &b }
@@ -49,11 +51,13 @@ func defaultsV1() Defaults {
 			Isolation:              IsolationAuto,
 			ShareReadOnly:          []string{},
 			Subagents:              on(),
+			Commands:               on(),
 			SubscriptionsOnRunners: SubscriptionsOff,
 			Limits:                 Limits{MaxDepth: num(2), MaxJobsPerTurn: num(10), MaxJobsPerTree: num(30), MaxCostUSDPerTree: &cost},
 			AgentAPI: AgentAPI{Scope: ScopeTree, Read: on(), ListAgents: on(), Start: on(), Continue: on(),
 				Review: on(), Cancel: on(), Rename: on(), Apply: on(), Tools: off()},
 			Network: Network{Contain: ContainOff, Allow: []string{}},
+			Sandbox: Sandbox{Mode: SandboxOff, Read: []string{}},
 		},
 		Instructions: DefaultInstructions,
 	}

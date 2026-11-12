@@ -51,6 +51,22 @@ func TestDefaultsLatestIsDefaultPolicy(t *testing.T) {
 	}
 }
 
+// Every version of the defaults writes out every key: a key it leaves out
+// would take fill()'s value, so a later change of fill() would change a
+// released version.
+func TestDefaultsWrittenInFull(t *testing.T) {
+	for v := 1; v <= LatestDefaults(); v++ {
+		d, _ := DefaultsFor(v)
+		filled := d.Policy
+		filled.fill()
+		as, _ := json.Marshal(d.Policy)
+		fs, _ := json.Marshal(filled)
+		if string(as) != string(fs) {
+			t.Errorf("version %d leaves out a key:\n written %s\n filled  %s", v, as, fs)
+		}
+	}
+}
+
 // A new database reads as the defaults and holds nothing. A change keeps
 // only the keys that differ from the defaults, names them in its change, and
 // moves the settings version up by one. A stale version is refused; a write

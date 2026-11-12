@@ -477,6 +477,7 @@ allow = ["go test", "make test"]       # claude gets --allowedTools Bash(go test
 forbid = ["git push", "git checkout"]  # the gateway refuses these, for claude and codex
 edit = "session"                       # where a turn may edit files: "session" or "none"
 subagents = true                       # false: no turn starts the agent's own subagents
+commands = true                        # false: your own ! commands are refused
 
 [limits]                     # work agents ask other agents for
 max_depth = 2                # levels of asking below your turn

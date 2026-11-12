@@ -6,7 +6,8 @@ package api
 // turn is. The route never waits: it stores command.queued and answers with
 // the command's id; the record says the rest (jobs/command.go). Only the main
 // token runs one: it is the person's command, not an agent's, so the agents'
-// allow and forbid lists do not apply.
+// allow and forbid lists do not apply. The policy's commands switch turns
+// them all off.
 
 import (
 	"encoding/json"
@@ -35,8 +36,10 @@ type CommandQueued struct {
 
 // The refusals of a command, in plain words.
 const (
-	commandNoCopy = "this session has no copy on a runner yet; wait for its first turn to end"
-	commandClosed = "this session is closed; it runs no more commands"
+	commandNoCopy   = "this session has no copy on a runner yet; wait for its first turn to end"
+	commandClosed   = "this session is closed; it runs no more commands"
+	commandsOff     = "commands are off in the settings (commands = false); turn them on in the permissions to run one"
+	commandNoPolicy = "the permissions cannot be used, so no command runs; fix them"
 )
 
 // POST /api/v0/sessions/{id}/commands
@@ -44,6 +47,17 @@ func (a *API) runCommand(w http.ResponseWriter, r *http.Request, id string) {
 	if a.cfg.Queue == nil {
 		writeError(w, http.StatusNotFound, noTurns)
 		return
+	}
+	if a.cfg.Settings != nil {
+		p, _, err := a.cfg.Settings.Policy()
+		if err != nil {
+			writeError(w, http.StatusServiceUnavailable, commandNoPolicy)
+			return
+		}
+		if !*p.Commands {
+			writeError(w, http.StatusForbidden, commandsOff)
+			return
+		}
 	}
 	var body CommandRequest
 	if !decodeObject(r, &body) {

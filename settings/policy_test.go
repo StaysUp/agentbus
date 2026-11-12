@@ -123,7 +123,8 @@ func TestReadPolicy(t *testing.T) {
 		{"cost negative", "[limits]\nmax_cost_usd_per_tree = -0.5\n", "max_cost_usd_per_tree must be 0"},
 		{"unknown limit", "[limits]\nmax_rounds = 2\n", `unknown key "limits.max_rounds"`},
 		{"scope unknown", "[agent_api]\nscope = \"all\"\n", `scope must be "tree" or "session"`},
-		{"subagents not a bool", "subagents = \"no\"\n", "subagents is true or false"},
+		{"subagents not a bool", "subagents = \"no\"\n", "subagents and commands are true or false"},
+		{"commands not a bool", "commands = \"no\"\n", "subagents and commands are true or false"},
 		{"switch not a bool", "[agent_api]\nstart = \"no\"\n", "wrong type"},
 		{"unknown switch", "[agent_api]\nwrite_permissions = true\n", `unknown key "agent_api.write_permissions"`},
 	} {

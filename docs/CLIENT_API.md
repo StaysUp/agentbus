@@ -325,6 +325,7 @@ allow = ["go test", "make test", "git commit"]
 forbid = ["git push", "git checkout"]
 edit = "session"
 subagents = true
+commands = true
 subscriptions_on_runners = "off"
 
 [limits]
@@ -348,6 +349,10 @@ tools = false
 [network]
 contain = "on"
 allow = ["github.com", "registry.npmjs.org"]
+
+[sandbox]
+mode = "off"
+read = ["~/.aws/config"]
 ```
 
 - **The defaults are in the code, under a version**, and `settings.db` keeps only the keys you
@@ -386,6 +391,9 @@ allow = ["github.com", "registry.npmjs.org"]
 - `subagents`: `true` (the default) or `false`. `false` turns off the agent's own subagents for
   every turn, on the command line only (the table below). The person's `~/.claude/settings.json`
   and `~/.codex/config.toml` are never edited.
+- `commands`: `true` (the default) or `false`. `false` refuses the person's own `!` commands
+  (`POST /api/v0/sessions/<id>/commands`) with **403**, before anything is queued. Agents never run
+  one either way.
 - `subscriptions_on_runners`: `"off"` (the default) or `"own"`. Read by the server only. `"own"`
   lets the server add the person's own subscription, connected once on it, to the model calls of
   agents on their runners, which hold no sign-in. Only for runners on the person's own machines.
@@ -645,6 +653,8 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/
   off from the network when `[network] contain` is on, or in its sandbox when `[sandbox]` is on,
   as the session's turns are. It gets no
   AgentBus token and no model credential: a runner that holds no secrets has no sign-in to give it.
+- **Only while `commands` is true** in the policy (the default). `commands = false` refuses every
+  command with **403**, and nothing is queued or recorded.
 - **It is the person's command.** The agents' `allow` and `forbid` lists do not apply. It changes
   the copy only. Its changes go out with the session's next turn's changes; apply them as usual.
 - **Limits.** `timeout_seconds`, 1 to 600, 120 when absent: past it the command and everything it
@@ -1853,12 +1863,21 @@ these routes. A turn token and the turns token get **403**.
 | `GET /api/v0/settings/instructions` | `{"text": "..."}`, before `{session}` is filled in. The default text until you change it. |
 | `PUT /api/v0/settings/instructions` | Replace the text. At most 64 KiB of UTF-8, no NUL. |
 
+- **The grants.** One global set, the same for every machine: the policy's `[sandbox] read` (files
+  under `~` a session gets in its own home), `[sandbox] mode`, the network (`[network]`: off is
+  `contain = "on"` with an empty `allow`, so an agent reaches only its gateway and the server; a
+  list is `contain = "on"` with hosts in `allow`; on is `contain = "off"`), and two actions:
+  `agent_api.apply` (may a turn's token apply changes) and `commands` (may the person's `!`
+  commands run). Folders are not settings: the folder you start a session in is the grant for that
+  session. The cockpit's Settings page reads and writes these keys through
+  `PUT /api/v0/settings/permissions`, as any client can.
 - **Only your changes are stored.** The defaults are in the code. `settings.db` keeps the policy
   keys whose value differs from the defaults, the instructions when they differ from the default
   text, and the agents you added, changed or removed. Putting a key back to its default stores
   nothing for it.
 - **The defaults have a version, so an upgrade never widens access by itself.** A build that
-  changes a default adds a new version and keeps the old ones. Your control stays on the version it
+  changes a default adds a new version and keeps the old ones. Each version writes every key out,
+so a change in the code's own fill-in values never changes one. Your control stays on the version it
   has (`defaults_version`) until you move it with `PUT /api/v0/settings/defaults`, sending the
   `ETag` of `GET /api/v0/settings` in `If-Match`. Your own changes stay; every key you never
   changed takes the new version's value. A new data folder starts on the latest version. A
