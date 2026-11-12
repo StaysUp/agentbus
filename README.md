@@ -110,8 +110,7 @@ curl -fsSL https://raw.githubusercontent.com/staysup/agentbus/main/install.sh | 
 "$HOME/.local/agentbus/bin/agentbus" version
 ```
 
-Until a release with `agentbus login` is out, build it from a clone of this repository instead:
-`go build -o "$HOME/.local/agentbus/bin/agentbus" ./cmd/agentbus`. Run it by its full path, as below. The service it sets up runs that same file.
+Run it by its full path, as below. The service it sets up runs that same file.
 
 **2. Sign the machine in.** Give it a data folder of its own, and name control's address:
 
@@ -163,6 +162,8 @@ to use the machine's own sign-ins.
 
 ### Upgrading to 0.5
 
+- **Upgrade control and every runner together.** The runner protocol is now 4: control refuses a
+  0.4 runner, and a 0.5 runner cannot join 0.4 control.
 - **`agentbus connector` is retired.** It changes nothing and prints the `agentbus runner` line to
   run instead. Stop the connector and run that line with the same data folder: its `folders.json`
   keeps the machine's id and folders. If the connector shared control's data folder, give the
@@ -172,6 +173,9 @@ to use the machine's own sign-ins.
   `agentbus login` needs none.
 - **Settings move into control.** The first start of 0.5 copies the data folder beside it, then
   imports `permissions.toml`, `instructions.md` and `agents.json` once and never reads them again.
+- **A default that changed keeps your old value.** In 0.5 an agent's own token no longer applies a
+  turn (`[agent_api] apply`). A 0.4 data folder gets `apply = true` written into its settings, so
+  nothing changes for you. Turn it off on the Settings page to take the new default.
 
 ## Settings
 
