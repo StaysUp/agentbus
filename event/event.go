@@ -90,6 +90,14 @@ const (
 	RunnerEnrolled        Kind = "runner.enrolled"
 	RunnerGone            Kind = "runner.gone"
 	SettingsChanged       Kind = "settings.changed"
+
+	// TurnChanged: control's record of what a turn changed in its copy, or
+	// in the folder it ran in, stored when control accepts the turn job's
+	// finish. Changes holds every changed file and the diffs. TurnApplied:
+	// an apply of a session's turns to the person's folder ended. Applied
+	// says which turns, who asked, how it ended and the files.
+	TurnChanged Kind = "turn.changed"
+	TurnApplied Kind = "turn.applied"
 )
 
 // KindInfo says what one framework kind means and which fields it always
@@ -113,7 +121,7 @@ var Kinds = []KindInfo{
 	{EventsDropped, "Events were lost because the output did not keep up: dropped, and sessions or all_sessions.", []string{"dropped"}},
 	{SessionRegistered, "Older stores only: a launcher or a run registered the session, with agent and folder. Nothing writes it now.", []string{"session"}},
 	{SessionOpened, "A run's child is starting: hold names it; agent and folder say what and where; turn is the turn it runs. Stored just before the child starts.", []string{"session", "hold"}},
-	{SessionClosed, "A run's child exited: hold, exit_code, resume_id, turn, stopped when the person stopped the turn, and unsettled when the gateway could not confirm all of the turn's calls were stored. Also stored at start, with unsettled, for a child the previous service left running.", []string{"session"}},
+	{SessionClosed, "A run's child exited: hold, exit_code, resume_id, turn, stopped when the person stopped the turn, error_tail (the last lines the agent wrote to stderr, when it exited with an error), and unsettled when the gateway could not confirm all of the turn's calls were stored. Also stored at start, with unsettled, for a child the previous service left running.", []string{"session"}},
 	{SchemaUnexpected, "The vendor sent a shape the adapter does not know: unexpected, as names only. Show it as a quiet warning.", []string{"unexpected"}},
 	{ReplayFailed, "A model request of a replayed turn (a turn.started with replay_from) could not be given the earlier turn's history: error says why, such as the harness's request layout not being one the gateway knows. The gateway refused that request with 400 and did not send it to the vendor, so the turn fails rather than continue without its history. Show it as an error.", []string{"error"}},
 	{ToolRefused, "The gateway refused a tool call before the agent could run it, because its command matched a forbid entry of permissions.toml: tool_id, tool_name, tool_input, rule (the entry), and text (what the model is told in place of the output). The call's tool.requested is still stored, and its tool.completed carries that text. Show it as a warning.", []string{"tool_id", "rule"}},
@@ -128,7 +136,9 @@ var Kinds = []KindInfo{
 	{SubscriptionFailed, "A subscription's connect ended without a token: agent is the harness, error says why, such as a wrong code or the login waiting too long. No session. Show it as an error.", []string{"agent", "error"}},
 	{RunnerEnrolled, "A runner or a connector enrolled with control: runner is its id . No session.", []string{"runner"}},
 	{RunnerGone, "A runner or a connector stopped asking control for work for a minute: runner is its id. It may come back; a turn it was running whose lease runs out ends as runner_lost. No session. Show it as a warning.", []string{"runner"}},
-	{SettingsChanged, "A settings file was written through the API: file is permissions.toml or instructions.md. Never its content. No session.", []string{"file"}},
+	{SettingsChanged, "The settings changed, through the API or by the one-time import of the settings files: setting is permissions, instructions, agents or defaults; keys names what changed (a policy key such as limits.max_depth, text for the instructions, an agent id or id.field such as a_1234.model, version and each key that moved for defaults); settings_version is the settings version the change made. On an import, file is the file the setting came from. Names only: never a value, so never a secret. The change and this event are stored together: the settings database keeps the event until the record has it. No session.", []string{"setting", "settings_version"}},
+	{TurnChanged, "What the turn changed in its session's copy, or in the folder it ran in, from its start to its end. Stored by control once it accepts the turn's end, at most once per turn: changes holds every changed file (path, change, size, sha256 at the end, sha256_before at the start) and, for small text files, each one's unified diff (at most 1 MiB for the whole turn; diffs_cut says some were left out) and content. A binary file has its path, size and hashes only. GET /api/v0/turns/{id}/diff reads it. Absent for a turn that ran in no folder, and for turns from before 0.5, whose changes are in their job.", []string{"session", "turn", "changes"}},
+	{TurnApplied, "An apply of the session's turns to the person's folder ended (POST /api/v0/turns/{id}/apply): turn is the turn asked for, and applied holds every turn whose changes it carried, who asked (by: the person or an agent, never a token), the result (applied, refused or failed), the files written or removed, and on a refusal the files that refused it, each with why. Stored once per apply. Show a refusal as a warning.", []string{"session", "turn", "applied"}},
 	{SessionRenamed, "The session was given a name with PATCH /api/v0/sessions/{id}: title is the new name, old_title the one it had before (absent when it had none). The latest names the session in GET /api/v0/sessions; earlier names stay in the record.", []string{"session", "title"}},
 }
 
@@ -239,8 +249,15 @@ type Event struct {
 	Command *Command `json:"command,omitempty" doc:"On command.ran: the person's shell command, how it ended and its output."`
 	// Runner, only on runner.enrolled and runner.gone: the runner's id.
 	Runner string `json:"runner,omitempty" doc:"On runner.enrolled and runner.gone: the runner's id."`
-	// File, only on settings.changed: which settings file was written.
-	File string `json:"file,omitempty" doc:"On settings.changed: the file written, permissions.toml or instructions.md."`
+	// Setting, Keys and File, only on settings.changed: which setting
+	// changed, the names of what changed, and on an import the file it came
+	// from. Never a value.
+	Setting string   `json:"setting,omitempty" doc:"On settings.changed: permissions, instructions, agents or defaults."`
+	Keys    []string `json:"keys,omitempty" doc:"On settings.changed: the names of what changed, never a value: policy keys such as limits.max_depth, text, agent ids or id.field. Absent when the import found nothing changed from the defaults."`
+	File    string   `json:"file,omitempty" doc:"On settings.changed of the one-time import: the file the setting came from, permissions.toml, instructions.md or agents.json. Before 0.5: the file written."`
+	// SettingsVersion, on settings.changed and a run's turn.started: the
+	// settings version.
+	SettingsVersion int64 `json:"settings_version,omitempty" doc:"On settings.changed: the settings version the change made. On a run's turn.started: the settings version the turn started under. It moves up by one with every change; absent before 0.5."`
 	// Title and OldTitle, only on session.renamed: the new name and the one
 	// it replaced.
 	Title    string `json:"title,omitempty" doc:"On session.renamed: the session's new name."`
@@ -278,6 +295,16 @@ type Event struct {
 	// session id, read from the child's stdout (claude's session_id, codex's
 	// thread_id). It is what the session's next turn continues.
 	ResumeID string `json:"resume_id,omitempty" doc:"On a run's session.closed: the vendor's own session id, which the next turn continues."`
+
+	// ErrorTail, only on a run's session.closed of a child that exited with
+	// an error and was not stopped: the last lines it wrote to stderr,
+	// bounded, with anything shaped like a secret hidden.
+	ErrorTail string `json:"error_tail,omitempty" doc:"On a run's session.closed of an agent that exited with an error: the last lines it wrote to stderr, at most 20 lines and 2 KiB, with anything shaped like a token or key replaced by [hidden]. Absent when it exited 0, was stopped, or wrote nothing there."`
+
+	// Changes, only on turn.changed: what the turn changed.
+	Changes *TurnChanges `json:"changes,omitempty" doc:"On turn.changed: every file the turn added, modified or deleted, with diffs."`
+	// Applied, only on turn.applied: what the apply did.
+	Applied *Applied `json:"applied,omitempty" doc:"On turn.applied: the turns applied, who asked, the result and the files."`
 
 	// ReplayFrom, only on turn.started: the earlier turn of the session whose
 	// history the gateway puts in front of every model request of this turn,
@@ -340,6 +367,70 @@ type Command struct {
 	Truncated   bool   `json:"truncated,omitempty" doc:"On command.ran: some output was cut, as stdout or stderr went past 64 KiB."`
 	DurationMS  int64  `json:"duration_ms,omitempty" doc:"On command.ran: how long it ran."`
 }
+
+// TurnChanges is what one turn changed (turn.changed).
+type TurnChanges struct {
+	Isolated bool   `json:"isolated" doc:"The turn ran in an isolated copy, between two checkpoints: POST /api/v0/turns/{id}/apply can put its changes in the person's folder."`
+	From     string `json:"from,omitempty" doc:"The checkpoint the turn started from. In an isolated copy only."`
+	To       string `json:"to,omitempty" doc:"The checkpoint the turn ended with. The same as from: the turn changed nothing."`
+	Count    int    `json:"count" doc:"Every file the turn added, modified or deleted."`
+	// Truncated: Files holds fewer than Count.
+	Truncated bool `json:"truncated,omitempty" doc:"files holds fewer files than count: past 1000 files, or to fit the record."`
+	// Partial: taken while the turn may still have run.
+	Partial bool `json:"partial,omitempty" doc:"Taken while the turn may still have run, so it may miss later changes."`
+	// DiffsCut: some files' diffs were left out, as all diffs together
+	// passed 1 MiB.
+	DiffsCut       bool          `json:"diffs_cut,omitempty" doc:"Some text files have no diff here: all the turn's diffs together passed 1 MiB, and the later ones were left out (each marked diff_left_out)."`
+	ContentLeftOut bool          `json:"content_left_out,omitempty" doc:"Some small text files have no content here, to keep the event small."`
+	Error          string        `json:"error,omitempty" doc:"The workspace could not be read at the end of the turn."`
+	Files          []ChangedFile `json:"files" doc:"Each changed file, sorted by path."`
+}
+
+// ChangedFile is one file a turn changed.
+type ChangedFile struct {
+	Path   string `json:"path"`
+	Change string `json:"change" doc:"added, modified or deleted."`
+	Size   int64  `json:"size" doc:"The file at the end; for a deleted file, at the start."`
+	SHA256 string `json:"sha256" doc:"The file's SHA-256 at the end; for a deleted file, at the start."`
+	// SHA256Before is the file at the start; empty for an added file.
+	SHA256Before string  `json:"sha256_before,omitempty" doc:"The file's SHA-256 at the turn's start. Absent for an added file."`
+	Diff         *string `json:"diff,omitempty" doc:"The file's unified diff, from the turn's start to its end, for small text files whose earlier content is kept."`
+	DiffLeftOut  bool    `json:"diff_left_out,omitempty" doc:"The content changed and no diff is here: a binary file, a link, a file over 256 KiB, past the 1 MiB of all diffs, or its earlier content is no longer kept."`
+	Content      *string `json:"content,omitempty" doc:"The whole file at the end, when it is small UTF-8 text."`
+}
+
+// Applied is what one apply did (turn.applied).
+type Applied struct {
+	Turns     []string      `json:"turns" doc:"Every turn whose changes the apply carried to the folder, oldest first: the turns after the session's last apply, up to the one asked for."`
+	By        *By           `json:"by,omitempty" doc:"Who asked for the apply. Absent for an apply made before 0.5."`
+	Result    string        `json:"result" doc:"applied, refused (a file in the folder changed, or the turn cannot be applied: error says why), or failed (the apply did not finish)."`
+	Files     []string      `json:"files,omitempty" doc:"The files the apply wrote or removed in the person's folder, sorted."`
+	Count     int           `json:"count,omitempty" doc:"How many files the apply wrote or removed. files may list fewer, with truncated."`
+	Truncated bool          `json:"truncated,omitempty" doc:"files or conflicts was cut to keep the event small."`
+	Pruned    bool          `json:"pruned,omitempty" doc:"The checkpoints before the turn's end were removed."`
+	Conflicts []RefusedFile `json:"conflicts,omitempty" doc:"On a refusal: each file in the folder that is neither as it was at the turn's start nor as the turn left it, with why. Nothing was written."`
+	Error     string        `json:"error,omitempty" doc:"Why it was refused or failed."`
+}
+
+// RefusedFile is one file that refused an apply.
+type RefusedFile struct {
+	Path string `json:"path"`
+	Why  string `json:"why"`
+}
+
+// By says who asked for something, by the kind of token it came with. Never
+// the token itself.
+type By struct {
+	Kind    string `json:"kind" doc:"person (the main token) or agent (a turn's own token)."`
+	Session string `json:"session,omitempty" doc:"agent: the session of the turn whose token asked."`
+	Turn    string `json:"turn,omitempty" doc:"agent: the turn whose token asked."`
+}
+
+// The kinds of a By.
+const (
+	ByPerson = "person"
+	ByAgent  = "agent"
+)
 
 // HiddenTool is one of a harness's own tools a turn does not get.
 type HiddenTool struct {

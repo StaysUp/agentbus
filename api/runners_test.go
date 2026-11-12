@@ -26,9 +26,9 @@ func TestListRunners(t *testing.T) {
 		}
 		return en
 	}
-	run := register(`{"name":"mac","capacity":4,"labels":["gpu"],"protocol":2,"capabilities":{"os":"darwin","arch":"arm64",` +
+	run := register(`{"name":"mac","capacity":4,"labels":["gpu"],"protocol":3,"capabilities":{"os":"darwin","arch":"arm64",` +
 		`"harnesses":[{"name":"claude","found":true,"version":"2.1.319","signed_in":true},{"name":"codex","found":false}]}}`)
-	conn := register(`{"name":"mac","capacity":1,"protocol":2,"capabilities":{"role":"connector","connector":"con_0123456789abcdef"}}`)
+	conn := register(`{"name":"mac","capacity":1,"protocol":3,"capabilities":{"role":"connector","connector":"con_0123456789abcdef"}}`)
 
 	resp, raw := do(t, e.req(t, "GET", "/api/v0/runners", nil))
 	if resp.StatusCode != http.StatusOK {

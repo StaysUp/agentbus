@@ -6,6 +6,13 @@ package runner
 // agent's request tree is known to control when the agent asks another. The
 // same is sent once more when the turn ends; what control holds already is
 // not stored twice.
+//
+// A runner that holds no secret (Config.NoSecrets) sends none of its model
+// calls: each went through control's relay, which recorded it from its own
+// copy (jobs/relay.go). It sends what only it sees: the turn's own events,
+// and of a call's events only those its gateway made itself (relayOnly). A
+// call that never reached control reached no vendor: it stays in the
+// runner's own record and log.
 
 import (
 	"context"
@@ -33,6 +40,12 @@ func callSize(sc jobs.SentCall) int {
 // callBudget bounds one calls batch's callSize, under the protocol's body
 // limit with room for what the estimate leaves out (JSON escapes).
 const callBudget = jobs.MaxBody - 128<<10
+
+// relayOnly are the kinds of a call's events (those with an exchange) that
+// the runner's gateway makes and control's relay cannot: own replay's refusal
+// and the guard's. Every other event of a relayed call control records
+// itself.
+var relayOnly = map[event.Kind]bool{event.ReplayFailed: true, event.ToolRefused: true}
 
 // LiveEvery is how often a running turn's new record goes to control, at
 // most.
@@ -102,6 +115,11 @@ func (at *attempt) forward(ctx context.Context, session string, final bool) {
 		size, last, taken := 0, s.after, 0
 		var exch []string
 		for _, rec := range recs {
+			if at.r.cfg.NoSecrets && !relayOnly[rec.Kind] && hasExchange(rec.Data) {
+				// The relay recorded it.
+				last, taken = rec.Seq, taken+1
+				continue
+			}
 			if len(rec.Data) > MaxRecordBatch {
 				// Bigger than a batch may be (a tool's whole output): left
 				// out, so the rest of the turn still goes.
@@ -139,12 +157,23 @@ func (at *attempt) forward(ctx context.Context, session string, final bool) {
 			break
 		}
 	}
+	if at.r.cfg.NoSecrets {
+		return
+	}
 	// A call refused for pieces control lacked goes again with them.
 	for range 2 {
 		if !at.forwardCalls(ctx, session, tries) {
 			return
 		}
 	}
+}
+
+// hasExchange says whether an event's data names a model call's exchange.
+func hasExchange(data []byte) bool {
+	var e struct {
+		Exchange string `json:"exchange"`
+	}
+	return json.Unmarshal(data, &e) == nil && e.Exchange != ""
 }
 
 // forwardCalls sends the turn's calls control lacks, each with the bytes of

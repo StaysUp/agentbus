@@ -446,7 +446,7 @@ The contract in words is [docs/CLIENT_API.md](docs/CLIENT_API.md).
 
 Everything stays on your machine, in the data folder: `events.db` (a SQLite file, the record),
 `jobs.db` (the job queue), `token`, `turns_token`, `enroll_token`, `runner.json`,
-`connector.json`, `folders.json`, `permissions.toml`, `instructions.md`, `agents.json`, `blobs/`,
+`connector.json`, `folders.json`, `settings.db` (your settings and saved agents), `blobs/`,
 `sessions/`, `homes/` (a runner's) and `logs/`. `turns_token` is a second token for a program that only starts, stops
 and reads turns. `enroll_token` adds a runner or a connector; the built-in ones read it, and keep
 their identities in `runner.json` and `connector.json`. `blobs/` is control's store of file
@@ -465,8 +465,11 @@ To clear it, stop `agentbus up` and delete the data folder. A new one is made on
 ## Permissions
 
 A turn runs with no person to click "allow". So a claude turn is refused anything that needs a
-"may I?", such as `go test` or reading a folder outside its own. `permissions.toml` in the data
-folder says what turns may do:
+"may I?", such as `go test` or reading a folder outside its own. The permissions say what turns
+may do. Control keeps them in `settings.db` in the data folder; change them with
+`PUT /api/v0/settings/permissions` (the keys are the same as below, as JSON). Up to 0.4 they were
+the file `permissions.toml`, in this shape; the first start of 0.5 copies the data folder beside
+it, imports the file once, and never reads it again:
 
 ```toml
 read_folders = ["~/.agents"]           # claude may Read, Grep and Glob there
@@ -550,12 +553,12 @@ reads it, so it is not given it again. Claude Code reads `AGENTS.md` only when t
 `CLAUDE.md`; beside a `CLAUDE.md` of its own it is given `AGENTS.md`, unless that `CLAUDE.md` is a
 symlink to it or imports it with a line `@AGENTS.md`. An asked agent also gets who asked it, after
 them. They are the
-text of `instructions.md` in the data folder. `agentbus up` writes it with the default: how to
-search the session's earlier turns and ask other agents with `agentbus-api`. Edit it to change what
-every agent is told; `{session}` becomes the session id. An empty file gives no instructions, and a
-missing one the default. Each turn reads it when it starts. Keep it the same within a session, so
-the prompt cache holds. `GET` and `PUT /api/v0/settings/instructions` read and write it through the
-API, and a runner on another machine uses its server's.
+instructions in the settings: by default, how to search the session's earlier turns and ask
+other agents with `agentbus-api`. Change them to change what every agent is told; `{session}`
+becomes the session id. Empty text gives no instructions. Up to 0.4 they were the file
+`instructions.md`, which 0.5 imports once. Each turn reads it when it starts. Keep it the same within a session, so
+the prompt cache holds. `GET` and `PUT /api/v0/settings/instructions` read and write them, and a
+runner on another machine uses its server's.
 
 ## How it works
 

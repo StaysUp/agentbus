@@ -9,6 +9,7 @@ package main
 // it runs. Every credential here is fake.
 
 import (
+	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	"github.com/staysup/agentbus/folders"
 	"github.com/staysup/agentbus/netjail"
 	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -142,9 +144,7 @@ func TestRunnerAgentClosedOff(t *testing.T) {
 		t.Skipf("this machine cannot close an agent off: %v", err)
 	}
 	ns := startNoSecrets(t)
-	if err := os.WriteFile(filepath.Join(ns.serverHome, "permissions.toml"), []byte("[network]\ncontain = \"on\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	putPolicy(t, ns.server, ns.tok, "[network]\ncontain = \"on\"\n")
 	t.Setenv("AGENTBUS_FAKE_NET", "http://blocked.example/")
 	code, ag := sendAPI(t, ns.server, ns.tok, "POST", "/api/v0/agents", map[string]any{"name": "DeepSeek", "harness": "claude",
 		"access": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "key_env": "AB_TEST_OR_KEY"})
@@ -256,6 +256,35 @@ func TestRunnerHoldsNoKey(t *testing.T) {
 	if jj := waitJob(t, ns.server, ns.tok, j.ID); jj.State != queue.Finished {
 		t.Fatalf("job %s %s %s", jj.State, jj.Reason, jj.Result)
 	}
+	// The call is in the server's record once, from the relay's own copy:
+	// the runner sent none of its call's events. Both name the call by the
+	// runner's exchange.
+	runnerIDs := map[string]bool{}
+	recs, _ := ns.runner.store.After(0, store.Filter{Turn: turn}, 1000)
+	for _, r := range recs {
+		var e event.Event
+		if json.Unmarshal(r.Data, &e) == nil && e.Exchange == exchange {
+			runnerIDs[e.ID] = true
+		}
+	}
+	if len(runnerIDs) == 0 {
+		t.Fatalf("the runner's record has no call %s", exchange)
+	}
+	counts := map[string]int{}
+	recs, _ = ns.server.store.After(0, store.Filter{Turn: turn}, 1000)
+	for _, r := range recs {
+		var e event.Event
+		if json.Unmarshal(r.Data, &e) != nil || e.Exchange == "" {
+			continue
+		}
+		if runnerIDs[e.ID] {
+			t.Fatalf("the runner sent its copy of a call's event: %s", r.Data)
+		}
+		counts[string(e.Kind)]++
+	}
+	if counts["model.requested"] != 1 || counts["model.responded"] != 1 {
+		t.Fatalf("the server's record of the call: %v", counts)
+	}
 	// Once the attempt ended, its token adds no credential and calls no API.
 	req, _ := http.NewRequest("POST", "http://"+ns.server.addr+"/relay/openrouter/v1/messages", strings.NewReader(`{}`))
 	req.Header.Set("Authorization", "Bearer "+placeholder)
@@ -308,9 +337,7 @@ func TestRunnerUsesConnectedSubscription(t *testing.T) {
 		t.Fatalf("with subscriptions off the vendor saw %v", got)
 	}
 	// On, but nothing connected: refused too.
-	if err := os.WriteFile(filepath.Join(ns.serverHome, "permissions.toml"), []byte("subscriptions_on_runners = \"own\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	putPolicy(t, ns.server, ns.tok, "subscriptions_on_runners = \"own\"\n")
 	run()
 	if got := ns.anth.seen(); len(got) != 0 {
 		t.Fatalf("with nothing connected the vendor saw %v", got)
@@ -367,9 +394,7 @@ func TestRunnerUsesConnectedCodexSubscription(t *testing.T) {
 	ns.chat.mu.Lock()
 	ns.chat.stream = sample
 	ns.chat.mu.Unlock()
-	if err := os.WriteFile(filepath.Join(ns.serverHome, "permissions.toml"), []byte("subscriptions_on_runners = \"own\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	putPolicy(t, ns.server, ns.tok, "subscriptions_on_runners = \"own\"\n")
 	t.Setenv("AGENTBUS_FAKE_CALL", "")
 	t.Setenv("AGENTBUS_FAKE_CODEX_BODY", `{"model":"gpt-5.5","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
 	t.Setenv("AGENTBUS_FAKE_THREAD", "fake-thread-1")
@@ -422,26 +447,10 @@ func TestRunnerUsesConnectedCodexSubscription(t *testing.T) {
 	if strings.Contains(string(b), "fake-chatgpt") || strings.Contains(string(b), "fake-account-1") {
 		t.Fatal("the agent's environment or arguments hold the sign-in")
 	}
-	// The running turn's token on the Anthropic path: refused, nothing sent.
-	req, _ := http.NewRequest("POST", "http://"+ns.server.addr+"/relay/anthropic/v1/messages", strings.NewReader(`{}`))
-	req.Header.Set("Authorization", "Bearer "+placeholder)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden || len(ns.anth.seen()) != 0 {
-		t.Fatalf("a codex turn's token on the Anthropic path: %d, %v", resp.StatusCode, ns.anth.seen())
-	}
-	os.WriteFile(ns.release, nil, 0o600)
-	jj := waitJob(t, ns.server, ns.tok, j.ID)
-	if jj.State != queue.Finished {
-		t.Fatalf("job %s %s %s", jj.State, jj.Reason, jj.Result)
-	}
 	// The streamed reply is in the server's record: its text, its usage,
 	// and the turn's reply.
 	waitFor(t, "the codex reply in the server's record", func() bool {
-		recs, _ := ns.server.store.After(0, store.Filter{Turn: jj.Turn}, 1000)
+		recs, _ := ns.server.store.After(0, store.Filter{Turn: j.Turn}, 1000)
 		for _, r := range recs {
 			var e event.Event
 			if r.Kind == "model.responded" && json.Unmarshal(r.Data, &e) == nil {
@@ -454,9 +463,37 @@ func TestRunnerUsesConnectedCodexSubscription(t *testing.T) {
 		return false
 	})
 	waitFor(t, "the turn's reply", func() bool {
-		code, raw := getAPI(t, ns.server, ns.tok, "/api/v0/turns/"+jj.Turn)
+		code, raw := getAPI(t, ns.server, ns.tok, "/api/v0/turns/"+j.Turn)
 		return code == 200 && strings.Contains(raw, `"reply":"pong"`)
 	})
+	// The running turn's token on the Anthropic path: refused, nothing sent.
+	req, _ := http.NewRequest("POST", "http://"+ns.server.addr+"/relay/anthropic/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+placeholder)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || len(ns.anth.seen()) != 0 {
+		t.Fatalf("a codex turn's token on the Anthropic path: %d, %v", resp.StatusCode, ns.anth.seen())
+	}
+	// The refusal is in the server's record, as a call of the turn: the
+	// relay records every call a running turn's token makes.
+	waitFor(t, "the refused call in the server's record", func() bool {
+		recs, _ := ns.server.store.After(0, store.Filter{Turn: j.Turn}, 1000)
+		for _, r := range recs {
+			var e event.Event
+			if r.Kind == "model.responded" && json.Unmarshal(r.Data, &e) == nil && e.Vendor == "anthropic" {
+				return e.Status == http.StatusForbidden && strings.Contains(e.Error, "control adds its subscription to no call on this path")
+			}
+		}
+		return false
+	})
+	os.WriteFile(ns.release, nil, 0o600)
+	jj := waitJob(t, ns.server, ns.tok, j.ID)
+	if jj.State != queue.Finished {
+		t.Fatalf("job %s %s %s", jj.State, jj.Reason, jj.Result)
+	}
 	var list struct {
 		Subscriptions []struct {
 			Harness           string
@@ -481,9 +518,7 @@ func TestRunnerUsesConnectedAgySubscription(t *testing.T) {
 	ns.cc.stream = []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"pong"}]},"finishReason":"STOP"}],` +
 		`"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1,"totalTokenCount":4},"modelVersion":"gemini-3.8-flash","responseId":"r1"}}` + "\r\n\r\n")
 	ns.cc.mu.Unlock()
-	if err := os.WriteFile(filepath.Join(ns.serverHome, "permissions.toml"), []byte("subscriptions_on_runners = \"own\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	putPolicy(t, ns.server, ns.tok, "subscriptions_on_runners = \"own\"\n")
 	t.Setenv("AGENTBUS_FAKE_CALL", "")
 	t.Setenv("AGENTBUS_FAKE_AGY_BODY", `{"model":"gemini-3.8-flash","project":"p","requestId":"q","request":{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`)
 	t.Setenv("AGENTBUS_FAKE_STDOUT", `{"conversation_id":"fake-conv-1","status":"SUCCESS","response":"pong"}`+"\n")
@@ -756,5 +791,27 @@ func TestRunnerHomePerSession(t *testing.T) {
 	waitFor(t, "session A's home removed", func() bool { _, err := os.Stat(homeA); return os.IsNotExist(err) })
 	if _, err := os.Stat(homeOf(repB)); err != nil {
 		t.Fatalf("session B's home: %v", err)
+	}
+}
+
+// putPolicy replaces the server's policy, given as TOML, through the API:
+// control reads no settings file once it has started.
+func putPolicy(t *testing.T, svc *service, tok, policy string) {
+	t.Helper()
+	p, err := settings.ParsePolicy([]byte(policy))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(p)
+	req, _ := http.NewRequest("PUT", "http://"+svc.addr+"/api/v0/settings/permissions", bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("If-Match", "*")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("PUT the policy: %d", resp.StatusCode)
 	}
 }

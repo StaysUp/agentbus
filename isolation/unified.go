@@ -18,8 +18,9 @@ import (
 const (
 	// MaxFileDiff bounds one side of a file that gets a diff.
 	MaxFileDiff = 256 << 10
-	// MaxFileDiffs bounds every file's diff together.
-	MaxFileDiffs = 512 << 10
+	// MaxFileDiffs bounds every file's diff together: the 1 MiB of diffs a
+	// turn's turn.changed holds.
+	MaxFileDiffs = 1 << 20
 	// maxCells bounds the table the line matcher fills. Past it, the changed
 	// middle of a file is shown as all removed, then all added.
 	maxCells = 1 << 21
@@ -70,7 +71,7 @@ func addFileDiffs(s *Space, end func(rel string, f workspace.File, max int) ([]b
 		}
 		d := unified(ch.Path, old, cur, ch.Change)
 		if len(d) > budget {
-			ch.DiffLeftOut = true
+			ch.DiffLeftOut, c.DiffsCut = true, true
 			continue
 		}
 		budget -= len(d)

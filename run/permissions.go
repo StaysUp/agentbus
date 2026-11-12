@@ -27,6 +27,25 @@ func (e *Engine) policy() (settings.Policy, error) {
 	return p.Resolve(home)
 }
 
+// settingsNow is what a turn starts under, read at one moment: the policy,
+// its folders resolved as policy resolves them, the instructions before
+// {session} is filled in, and the settings version. No store gives every
+// default, at version 0.
+func (e *Engine) settingsNow() (settings.Snapshot, error) {
+	if e.cfg.Settings == nil {
+		return settings.Snapshot{Policy: settings.DefaultPolicy(), Instructions: settings.DefaultInstructions}, nil
+	}
+	s, err := settings.Read(e.cfg.Settings)
+	if err != nil {
+		return settings.Snapshot{}, err
+	}
+	home, _ := os.UserHomeDir()
+	if s.Policy, err = s.Policy.Resolve(home); err != nil {
+		return settings.Snapshot{}, err
+	}
+	return s, nil
+}
+
 // Writes is what one turn may change (harness.Writes).
 type Writes = harness.Writes
 

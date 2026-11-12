@@ -122,7 +122,6 @@ var touchCalls = map[string][]string{
 // may touch files: each reads or writes the control plane's own data
 // folder, never a person's.
 var controlAllowed = []string{
-	"agents/agents.go Open os.ReadFile",
 	// The vendor's own login, which prints a subscription's token, and the
 	// folder control keeps those tokens in.
 	"credentials/connect.go Manager.Connect exec.Command",
@@ -154,9 +153,24 @@ var controlAllowed = []string{
 	"credentials/own.go Subscriptions.keepHome os.RemoveAll",
 	"credentials/own.go Subscriptions.removeOwnHome os.RemoveAll",
 	"credentials/own.go Subscriptions.runOwn exec.CommandContext",
-	"agents/agents.go Store.save os.CreateTemp",
-	"agents/agents.go Store.save os.Remove",
-	"agents/agents.go Store.save os.Rename",
+	// The upgrade to settings.db: it copies the data folder beside itself
+	// and reads its settings files once.
+	"settings/upgrade.go DB.importFiles os.ReadFile",
+	"settings/upgrade.go realPath filepath.EvalSymlinks",
+	"settings/upgrade.go Upgrade.Run os.Stat",
+	"settings/upgrade.go copyFile os.Open",
+	"settings/upgrade.go copyFile os.OpenFile",
+	"settings/upgrade.go copyFolder filepath.WalkDir",
+	"settings/upgrade.go copyFolder os.Chmod",
+	"settings/upgrade.go copyFolder os.Mkdir",
+	"settings/upgrade.go copyFolder os.Readlink",
+	"settings/upgrade.go copyFolder os.RemoveAll",
+	"settings/upgrade.go copyFolder os.Rename",
+	"settings/upgrade.go copyFolder os.Stat",
+	"settings/upgrade.go copyFolder os.Symlink",
+	"settings/upgrade.go exists os.Lstat",
+	"settings/upgrade.go lockDir os.OpenFile",
+	"settings/upgrade.go newFolder os.Lstat",
 	"settings/files.go Files.write filepath.EvalSymlinks",
 	"settings/files.go Files.write os.CreateTemp",
 	"settings/files.go Files.write os.Remove",

@@ -118,12 +118,17 @@ func TestTokenScopes(t *testing.T) {
 		want              int
 	}{
 		{mainTok, "GET", "/api/v0/runner/settings", nil, 401},
-		{enrollTok, "POST", "/api/v0/runner/take", TakeRequest{}, 401},
-		{mainTok, "POST", "/api/v0/runner/take", TakeRequest{}, 401},
+		{enrollTok, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, 401},
+		{mainTok, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, 401},
 		{mainTok, "POST", "/api/v0/runner/register", EnrollRequest{Name: "x", Capacity: 1, Protocol: ProtocolVersion}, 401},
 		{a.Token, "POST", "/api/v0/runner/register", EnrollRequest{Name: "x", Capacity: 1, Protocol: ProtocolVersion}, 401},
-		{"abr_wrong", "POST", "/api/v0/runner/take", TakeRequest{}, 401},
+		{"abr_wrong", "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, 401},
 		{enrollTok, "POST", "/api/v0/runner/register", EnrollRequest{Name: "x", Capacity: 1, Protocol: 99}, 400},
+		// A runner of the previous protocol, still running when control
+		// moved on: refused at its next take, so it never sends its copy of
+		// calls the relay records.
+		{a.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: 2}, 400},
+		{enrollTok, "POST", "/api/v0/runner/register", EnrollRequest{Name: "x", Capacity: 1, Protocol: 2}, 400},
 		{enrollTok, "POST", "/api/v0/runner/register", EnrollRequest{Name: "x", Capacity: 65, Protocol: ProtocolVersion}, 400},
 	} {
 		if got := send(t, srv, c.tok, c.method, c.path, c.body, nil); got != c.want {
@@ -131,7 +136,7 @@ func TestTokenScopes(t *testing.T) {
 		}
 	}
 	var taken TakenWork
-	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{}, &taken); code != 200 || taken.Job.ID != j.ID {
+	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, &taken); code != 200 || taken.Job.ID != j.ID {
 		t.Fatalf("take: %d %+v", code, taken)
 	}
 	att := "/api/v0/runner/attempts/" + taken.Attempt.ID
@@ -177,7 +182,7 @@ func TestTakeLongPoll(t *testing.T) {
 	a := enroll(t, srv, 1)
 	path := "/api/v0/runner/take"
 	start := time.Now()
-	if got := send(t, srv, a.Token, "POST", path, TakeRequest{WaitMS: 100}, nil); got != 204 || time.Since(start) < 90*time.Millisecond {
+	if got := send(t, srv, a.Token, "POST", path, TakeRequest{WaitMS: 100, Protocol: ProtocolVersion}, nil); got != 204 || time.Since(start) < 90*time.Millisecond {
 		t.Fatalf("empty take: %d after %s", got, time.Since(start))
 	}
 	// The job is made from another goroutine that never touches t, and the
@@ -189,7 +194,7 @@ func TestTakeLongPoll(t *testing.T) {
 		made <- err
 	}()
 	var taken TakenWork
-	got := send(t, srv, a.Token, "POST", path, TakeRequest{WaitMS: 5000}, &taken)
+	got := send(t, srv, a.Token, "POST", path, TakeRequest{WaitMS: 5000, Protocol: ProtocolVersion}, &taken)
 	if err := <-made; err != nil {
 		t.Fatal(err)
 	}
@@ -283,6 +288,33 @@ func TestRunnerSettings(t *testing.T) {
 	}
 	if code := send(t, srv, a.Token, "GET", path, nil, nil); code != 503 {
 		t.Fatalf("a broken file: %d", code)
+	}
+}
+
+// A runner gets the settings version with the settings, from one read, so a
+// turn on it records the version it ran under.
+func TestRunnerSettingsVersion(t *testing.T) {
+	q, err := queue.Open(filepath.Join(t.TempDir(), "jobs.db"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := settings.OpenDB(filepath.Join(t.TempDir(), settings.DBFile), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SetInstructions("mine", settings.Any); err != nil {
+		t.Fatal(err)
+	}
+	s, err := New(Config{Queue: q, Token: mainTok, EnrollToken: enrollTok, Settings: db})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(s)
+	t.Cleanup(func() { srv.Close(); q.Close(); db.Close() })
+	a := enroll(t, srv, 1)
+	var got settings.RunnerSettings
+	if code := send(t, srv, a.Token, "GET", "/api/v0/runner/settings", nil, &got); code != 200 || got.SettingsVersion != 1 || got.Instructions != "mine" {
+		t.Fatalf("%d %+v", code, got)
 	}
 }
 

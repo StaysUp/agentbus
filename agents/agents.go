@@ -1,9 +1,9 @@
 // Package agents keeps the saved agents: a harness, how it reaches its model,
 // the model and a name. An agent says nothing about where it runs. They are
-// kept in one JSON file in the data folder, agents.json, written whole by an
-// atomic rename. The first open of a data folder without the file saves two
-// agents, Claude Code and Codex, on their own subscriptions, so a turn named
-// by harness keeps working.
+// kept in control's settings database (settings.DB): the default agents, one
+// per harness on its own subscription, are in code, and the database holds
+// only the agents the person added, changed or removed. agents.json, where
+// 0.4 and before kept them, is read once by the upgrade (ImportRows).
 //
 // An OpenRouter agent names the environment variable that holds its key,
 // never the key. The runner reads the variable when a turn starts.
@@ -15,8 +15,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -126,10 +124,19 @@ func Check(f *Fields) string {
 	return ""
 }
 
-// Store keeps the agents of one data folder. Its methods are safe to call at
-// once from many goroutines of one process.
+// Backend keeps the agents the person added, changed or removed: the
+// settings database (settings.DB). The default agents are not kept there
+// unless the person changed or removed one.
+type Backend interface {
+	Agents() ([]settings.AgentRow, error)
+	SetAgent(r settings.AgentRow, keys []string) error
+	Created() time.Time
+}
+
+// Store keeps the saved agents. Its methods are safe to call at once from
+// many goroutines of one process.
 type Store struct {
-	path string
+	b    Backend
 	now  func() time.Time
 	mu   sync.Mutex
 	list []Agent
@@ -139,9 +146,10 @@ type file struct {
 	Agents []Agent `json:"agents"`
 }
 
-// Defaults are the agents a new data folder starts with: one per harness, on
-// its own subscription. Their ids are the harness names, so a turn that names
-// claude or codex finds them.
+// Defaults are the agents every control has unless the person changed or
+// removed them: one per harness, on its own subscription. Their ids are the
+// harness names, so a turn that names claude or codex finds them. A default
+// agent grants nothing a turn naming its harness does not already get.
 func Defaults(now time.Time) []Agent {
 	var out []Agent
 	for _, h := range harness.All() {
@@ -173,35 +181,111 @@ func planned(name string) bool {
 	return false
 }
 
-// Open reads dir's agents file, or saves the defaults when there is none. now
-// nil means time.Now.
-func Open(dir string, now func() time.Time) (*Store, error) {
+// Open reads the agents from b: the defaults the person kept, as changed,
+// then the agents the person added. now nil means time.Now.
+func Open(b Backend, now func() time.Time) (*Store, error) {
 	if now == nil {
 		now = time.Now
 	}
-	s := &Store{path: filepath.Join(dir, FileName), now: now}
-	data, err := os.ReadFile(s.path)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		s.list = Defaults(now().UTC())
-		if err := s.save(s.list); err != nil {
+	rows, err := b.Agents()
+	if err != nil {
+		return nil, err
+	}
+	s := &Store{b: b, now: now}
+	if s.list, err = merge(rows, b.Created().UTC()); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// merge is the defaults with rows on top: a row of a default's id replaces
+// it in place, or removes it; the other rows follow in their order.
+func merge(rows []settings.AgentRow, created time.Time) ([]Agent, error) {
+	byID := map[string]settings.AgentRow{}
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+	decode := func(r settings.AgentRow) (Agent, error) {
+		var a Agent
+		if err := json.Unmarshal(r.Data, &a); err != nil || a.ID != r.ID || !idShape.MatchString(a.ID) {
+			return Agent{}, fmt.Errorf("agents: the stored agent %s cannot be read", strconv.Quote(r.ID))
+		}
+		return a, nil
+	}
+	var out []Agent
+	isDefault := map[string]bool{}
+	for _, d := range Defaults(created) {
+		isDefault[d.ID] = true
+		r, ok := byID[d.ID]
+		switch {
+		case !ok:
+			out = append(out, d)
+		case r.Removed:
+		default:
+			a, err := decode(r)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, a)
+		}
+	}
+	for _, r := range rows {
+		if isDefault[r.ID] || r.Removed {
+			continue
+		}
+		a, err := decode(r)
+		if err != nil {
 			return nil, err
 		}
-		return s, nil
-	case err != nil:
-		return nil, fmt.Errorf("agents: %s could not be read: %w", s.path, err)
+		out = append(out, a)
 	}
+	return out, nil
+}
+
+// ImportRows reads an agents.json of 0.4 and before as the rows the
+// settings database keeps: an agent that is a default as it was is left
+// out, a default missing from the file is a removed row, and every other
+// agent is kept whole.
+func ImportRows(data []byte) ([]settings.AgentRow, error) {
 	var f file
 	if err := json.Unmarshal(data, &f); err != nil {
-		return nil, fmt.Errorf("agents: %s is not valid: %w", s.path, err)
+		return nil, fmt.Errorf("agents: %s is not valid: %w", FileName, err)
 	}
+	seen := map[string]bool{}
+	var out []settings.AgentRow
 	for _, a := range f.Agents {
 		if !idShape.MatchString(a.ID) {
-			return nil, fmt.Errorf("agents: %s has an agent with the id %s, which is not a valid id", s.path, strconv.Quote(a.ID))
+			return nil, fmt.Errorf("agents: %s has an agent with the id %s, which is not a valid id", FileName, strconv.Quote(a.ID))
+		}
+		if seen[a.ID] {
+			return nil, fmt.Errorf("agents: %s has the id %s twice", FileName, strconv.Quote(a.ID))
+		}
+		seen[a.ID] = true
+		if isDefault(a) {
+			continue
+		}
+		b, err := json.Marshal(a)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, settings.AgentRow{ID: a.ID, Data: b})
+	}
+	for _, d := range Defaults(time.Time{}) {
+		if !seen[d.ID] {
+			out = append(out, settings.AgentRow{ID: d.ID, Removed: true})
 		}
 	}
-	s.list = f.Agents
-	return s, nil
+	return out, nil
+}
+
+// isDefault says a is a default agent with its default fields.
+func isDefault(a Agent) bool {
+	for _, d := range Defaults(time.Time{}) {
+		if d.ID == a.ID {
+			return a.Name == d.Name && a.Harness == d.Harness && a.Access == d.Access && a.Model == d.Model && a.KeyEnv == d.KeyEnv
+		}
+	}
+	return false
 }
 
 // List is every agent, in the order they were made.
@@ -239,11 +323,10 @@ func (s *Store) Create(f Fields) (Agent, error) {
 	now := s.now().UTC()
 	a := Agent{ID: "a_" + randomHex(8), Created: now, Updated: now}
 	a.set(f)
-	list := append(append([]Agent(nil), s.list...), a)
-	if err := s.save(list); err != nil {
+	if err := s.put(a, []string{a.ID}); err != nil {
 		return Agent{}, err
 	}
-	s.list = list
+	s.list = append(append([]Agent(nil), s.list...), a)
 	return a, nil
 }
 
@@ -265,7 +348,7 @@ func (s *Store) Update(id string, f Fields) (Agent, error) {
 	list := append([]Agent(nil), s.list...)
 	list[i].set(f)
 	list[i].Updated = s.now().UTC()
-	if err := s.save(list); err != nil {
+	if err := s.put(list[i], changedFields(s.list[i], list[i])); err != nil {
 		return Agent{}, err
 	}
 	s.list = list
@@ -281,11 +364,10 @@ func (s *Store) Remove(id string) error {
 	if i < 0 {
 		return ErrNotFound
 	}
-	list := append(append([]Agent(nil), s.list[:i]...), s.list[i+1:]...)
-	if err := s.save(list); err != nil {
-		return err
+	if err := s.b.SetAgent(settings.AgentRow{ID: id, Removed: true}, []string{id}); err != nil {
+		return fmt.Errorf("agents: the agent could not be removed: %w", err)
 	}
-	s.list = list
+	s.list = append(append([]Agent(nil), s.list[:i]...), s.list[i+1:]...)
 	return nil
 }
 
@@ -350,32 +432,35 @@ func (s *Store) nameTaken(name, except string) string {
 	return ""
 }
 
-// save writes list to the file through a temporary file and a rename, so a
-// reader never sees half of it.
-func (s *Store) save(list []Agent) error {
-	if list == nil {
-		list = []Agent{}
-	}
-	data, err := json.MarshalIndent(file{list}, "", "  ")
+// put stores a, naming keys as what changed.
+func (s *Store) put(a Agent, keys []string) error {
+	b, err := json.Marshal(a)
 	if err != nil {
 		return err
 	}
-	tmp, err := os.CreateTemp(filepath.Dir(s.path), ".agents-*.json")
-	if err != nil {
-		return fmt.Errorf("agents: the file could not be written: %w", err)
-	}
-	_, werr := tmp.Write(append(data, '\n'))
-	serr := tmp.Sync()
-	cerr := tmp.Close()
-	if err := errors.Join(werr, serr, cerr); err != nil {
-		os.Remove(tmp.Name())
-		return fmt.Errorf("agents: the file could not be written: %w", err)
-	}
-	if err := os.Rename(tmp.Name(), s.path); err != nil {
-		os.Remove(tmp.Name())
-		return fmt.Errorf("agents: the file could not be written: %w", err)
+	if err := s.b.SetAgent(settings.AgentRow{ID: a.ID, Data: b}, keys); err != nil {
+		return fmt.Errorf("agents: the agent could not be saved: %w", err)
 	}
 	return nil
+}
+
+// changedFields names what an update changed, as id.field, such as
+// a_1234.model. Never a value.
+func changedFields(old, now Agent) []string {
+	var out []string
+	for _, f := range []struct {
+		name string
+		a, b string
+	}{{"name", old.Name, now.Name}, {"harness", old.Harness, now.Harness}, {"access", old.Access, now.Access},
+		{"model", old.Model, now.Model}, {"key_env", old.KeyEnv, now.KeyEnv}} {
+		if f.a != f.b {
+			out = append(out, now.ID+"."+f.name)
+		}
+	}
+	if out == nil {
+		out = []string{now.ID}
+	}
+	return out
 }
 
 func randomHex(n int) string {

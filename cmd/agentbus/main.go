@@ -40,6 +40,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/staysup/agentbus/adapter"
 	"github.com/staysup/agentbus/adapter/anthropic"
 	"github.com/staysup/agentbus/adapter/gemini"
 	"github.com/staysup/agentbus/adapter/openai"
@@ -211,6 +212,7 @@ type service struct {
 	queue    *queue.Queue
 	remote   *settings.Remote  // a runner's settings: the server's
 	settings settings.Store    // the settings the built-in runner reads
+	sdb      *settings.DB      // control's settings database (up, server)
 	folders  *folders.Registry // the folders this machine owns (up, runner)
 	blobs    *blobs.Store      // the control plane's blob store (up, server)
 	blobSwp  *jobs.Sweeper     // cleans it
@@ -257,21 +259,35 @@ func start(c config) (*service, error) {
 	if err != nil {
 		return nil, err
 	}
-	// The settings: the policy and the instructions every turn gets. up and
-	// server keep them as files in the data folder, written with every
-	// default when missing. A runner reads the server's, through the runner
-	// protocol, so every runner follows one policy.
+	// The settings: the policy, the instructions every turn gets and the
+	// saved agents. up and server keep them in settings.db in the data
+	// folder, reached only through the API. The first start of this build
+	// copies the data folder beside it, then imports the settings files of
+	// 0.4 and before once (settings.Upgrade). A runner reads the server's,
+	// through the runner protocol, so every runner follows one policy.
 	var cfgStore settings.Store
 	var remote *settings.Remote
+	var sdb *settings.DB
+	var upgraded settings.Report
+	sdbHanded := false // once the service holds it, its stop closes it
+	defer func() {
+		if sdb != nil && !sdbHanded {
+			sdb.Close()
+		}
+	}()
 	if c.mode == modeRunner {
 		remote = &settings.Remote{Server: strings.TrimSuffix(c.server, "/"), Local: c.home}
 		cfgStore = remote
 	} else {
-		files := settings.NewFiles(c.home)
-		if err := files.Init(); err != nil {
+		sdb, upgraded, err = settings.Upgrade{Dir: c.home, Lock: filepath.Join(c.home, "events.db") + ".lock",
+			Skip: []string{copiesDir, oldCopiesDir, "blobs"}, Agents: agents.ImportRows}.Run()
+		if err != nil {
 			return nil, err
 		}
-		cfgStore = files
+		if upgraded.Copy != "" {
+			c.logf("the data folder was copied to %s before the settings moved into %s", upgraded.Copy, settings.DBFile)
+		}
+		cfgStore = sdb
 	}
 	// The data folder's own files, which no turn may edit: a turn that could
 	// would raise its own limits, or read a token.
@@ -330,6 +346,11 @@ func start(c config) (*service, error) {
 	var issuer queue.FolderIssuer // nil, not a nil *folders.Registry, in server
 	var bs *blobs.Store           // the control plane's blob store (up, server)
 	var blobSweep *jobs.Sweeper   // and what cleans it
+	// Every model.responded is priced, and every turn.started of a run's
+	// session gets the run's agent and folder, before it is stored.
+	sink := cost.Sink{Table: cost.Default(), Next: engine.TurnSink(st, st)}
+	// The relay's gateways, which record the runners' calls it carries.
+	var relayGws []*gateway.Gateway
 	if c.hasEngine() {
 		if fr, err = folders.Open(filepath.Join(c.home, "folders.json")); err != nil {
 			st.Close()
@@ -347,7 +368,7 @@ func start(c config) (*service, error) {
 		}
 	}
 	if c.hasQueue() {
-		if saved, err = agents.Open(c.home, nil); err != nil {
+		if saved, err = agents.Open(sdb, nil); err != nil {
 			st.Close()
 			return nil, err
 		}
@@ -380,13 +401,27 @@ func start(c config) (*service, error) {
 		if orUp == nil {
 			orUp, _ = url.Parse(openrouter)
 		}
+		// Each records the calls it carries in this record, as a runner's
+		// own gateway does (jobs/relay.go).
+		recorded := func(u *url.URL, as ...adapter.Adapter) []*gateway.Gateway {
+			var gs []*gateway.Gateway
+			for _, a := range as {
+				g := gateway.New(u, a, sink)
+				gs = append(gs, g)
+				relayGws = append(relayGws, g)
+			}
+			return gs
+		}
 		relay := map[string]jobs.Upstream{
-			relayAnthropic: {URL: c.upstream, Access: credentials.AccessSubscription, Harness: "claude"},
-			relayChatGPT:   {URL: c.chatgpt, Access: credentials.AccessSubscription, Harness: "codex"},
+			relayAnthropic: {URL: c.upstream, Access: credentials.AccessSubscription, Harness: "claude", Gateways: recorded(c.upstream, anthropic.Adapter{})},
+			relayChatGPT:   {URL: c.chatgpt, Access: credentials.AccessSubscription, Harness: "codex", Gateways: recorded(c.chatgpt, openai.Adapter{})},
 			// agy's Code Assist methods only: the Google sign-in reaches
 			// nothing else of that host.
-			relayCloudCode:  {URL: c.cloudCodeOr(), Access: credentials.AccessSubscription, Harness: "agy", Under: "v1internal:"},
-			relayOpenRouter: {URL: orUp, Access: credentials.AccessOpenRouter},
+			relayCloudCode: {URL: c.cloudCodeOr(), Access: credentials.AccessSubscription, Harness: "agy", Under: "v1internal:",
+				Gateways: recorded(c.cloudCodeOr(), gemini.Adapter{})},
+			// OpenRouter takes both API formats: the Responses one's calls
+			// go to the openai adapter, any other to the anthropic one.
+			relayOpenRouter: {URL: orUp, Access: credentials.AccessOpenRouter, Gateways: recorded(orUp, openai.Adapter{}, anthropic.Adapter{})},
 		}
 		creds := credentials.Plug{credentials.AccessOpenRouter: credentials.Env{Getenv: c.getenvOr()}, credentials.AccessSubscription: subs}
 		js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollToken, Heartbeat: c.heartbeat, Agents: saved, Settings: cfgStore,
@@ -421,6 +456,14 @@ func start(c config) (*service, error) {
 	}
 	if blobSweep != nil {
 		blobSweep.Logf = svcLog.Printf
+	}
+	if sdb != nil {
+		if upgraded.Done {
+			svcLog.Printf("settings.imported copy=%q files=%q", upgraded.Copy, strings.Join(upgraded.Imported, ","))
+		}
+		// Each settings change waits in settings.db until the record has
+		// its event; those from before this start go now.
+		sdb.SetSink(api.RecordSettings(st), svcLog.Printf)
 	}
 	if runnerJobs != nil {
 		runnerJobs.Logf = svcLog.Printf
@@ -544,16 +587,14 @@ func start(c config) (*service, error) {
 		closeQ()
 		return nil, err
 	}
-	// Every model.responded is priced, and every turn.started of a run's
-	// session gets the run's agent and folder, before it is stored.
-	sink := cost.Sink{Table: cost.Default(), Next: engine.TurnSink(st, st)}
 	anthURL, chatURL, orURL, ccURL := c.upstream, c.chatgpt, c.openrouter, c.cloudCodeOr()
 	if orURL == nil {
 		orURL, _ = url.Parse(openrouter)
 	}
 	// A runner that holds no secret sends each call on to the server's
-	// relay, which adds the credential (jobs/relay.go). It records the call
-	// here as before.
+	// relay, which adds the credential and records the call in control's
+	// record (jobs/relay.go). It records the call here too, for its own
+	// record, and names each call's exchange to the relay.
 	if c.noSecrets() {
 		srv := strings.TrimSuffix(c.server, "/") + jobs.RelayPrefix
 		anthURL, orURL = mustParse(srv+relayAnthropic), mustParse(srv+relayOpenRouter)
@@ -591,9 +632,16 @@ func start(c config) (*service, error) {
 	// Every model request's body is kept as pieces, for a call's context
 	// view, and every reply an adapter can rebuild, for own replay.
 	keep := keeper{st: st, logf: svcLog.Printf}
+	for _, g := range relayGws {
+		g.KeepBodies(keep)
+		g.SetLog(svcLog.Printf)
+	}
 	for _, g := range gws {
 		g.KeepBodies(keep)
 		g.SetLog(svcLog.Printf)
+		if c.noSecrets() {
+			g.SendExchange()
+		}
 		// forbid in permissions.toml, applied to each run turn's replies.
 		if eng != nil {
 			g.SetGuard(eng)
@@ -606,8 +654,9 @@ func start(c config) (*service, error) {
 		orOAI.SetRewriter(codexReplay)
 	}
 	host, _, _ := net.SplitHostPort(c.listen)
-	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: gws, api: a, eng: eng, store: st, blobs: bs, blobSwp: blobSweep,
-		queue: q, remote: remote, settings: cfgStore, folders: fr, log: svcLog, logins: logins, done: make(chan error, 1)}
+	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: append(gws, relayGws...), api: a, eng: eng, store: st, blobs: bs, blobSwp: blobSweep,
+		queue: q, remote: remote, settings: cfgStore, sdb: sdb, folders: fr, log: svcLog, logins: logins, done: make(chan error, 1)}
+	sdbHanded = true
 	if q != nil {
 		s.subs = subs
 	}
@@ -977,7 +1026,7 @@ func runConnect(args []string, home string, stdin io.Reader, stdout, stderr io.W
 		how = "and control renews it before it expires"
 	}
 	fmt.Fprintf(stdout, "\nConnected: %s's sign-in is kept in %s, readable by you only, %s.\n"+
-		"Control adds it to your runners' calls once permissions.toml says subscriptions_on_runners = \"own\".\n",
+		"Control adds it to your runners' calls once the permissions say subscriptions_on_runners = \"own\" (PUT /api/v0/settings/permissions).\n",
 		args[0], subs.Dir, how)
 	return 0
 }
@@ -1157,6 +1206,9 @@ func (s *service) shutdown() {
 	if s.queue != nil {
 		_ = s.queue.Close()
 	}
+	if s.sdb != nil {
+		_ = s.sdb.Close()
+	}
 	_ = s.store.Close()
 	s.log.Printf("service.stop")
 	_ = s.log.Close()
@@ -1287,7 +1339,7 @@ func networkNote() string {
 	if err := netjail.Check(); err != nil {
 		return err.Error() + "; a turn under [network] contain = \"on\" is refused until that is fixed here"
 	}
-	return "network control is ready: with [network] contain = \"on\" in the server's permissions.toml, each agent reaches only this runner's gateway, the server, and the hosts in [network] allow"
+	return "network control is ready: with network.contain = \"on\" in the server's permissions, each agent reaches only this runner's gateway, the server, and the hosts in [network] allow"
 }
 
 func agentAddr(listened net.Addr) string {

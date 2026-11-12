@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/folders"
+	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/store"
 )
@@ -159,15 +160,22 @@ func TestUpRunsAJobOnItsOwnRunner(t *testing.T) {
 	}
 	var res struct {
 		Session string `json:"session"`
-		Changes struct {
-			Count int `json:"count"`
-		} `json:"changes"`
 	}
-	if err := json.Unmarshal(j.Result, &res); err != nil || res.Session == "" || res.Changes.Count != 1 {
+	if err := json.Unmarshal(j.Result, &res); err != nil || res.Session == "" {
 		t.Fatalf("result %s", j.Result)
 	}
-	if evs := runEvents(t, svc.store, res.Session); len(evs) < 3 || evs[len(evs)-1].Kind != "session.closed" {
-		t.Fatalf("record of the job's session: %+v", evs)
+	// What the turn changed is in the record (turn.changed); the job names it.
+	if c, err := jobs.Changes(svc.store, j); err != nil || c == nil || c.Count != 1 {
+		t.Fatalf("changes %+v %v, result %s", c, err, j.Result)
+	}
+	var kinds []string
+	for _, e := range runEvents(t, svc.store, res.Session) {
+		if e.Kind != "turn.changed" {
+			kinds = append(kinds, e.Kind)
+		}
+	}
+	if len(kinds) < 3 || kinds[len(kinds)-1] != "session.closed" {
+		t.Fatalf("record of the job's session: %v", kinds)
 	}
 	// The data folder holds the queue beside the record, and the runner's
 	// identity.
@@ -246,13 +254,24 @@ func TestServerAndRunner(t *testing.T) {
 	var res struct {
 		Session string `json:"session"`
 		State   string `json:"state"`
-		Changes struct {
-			Count int `json:"count"`
-		} `json:"changes"`
 	}
 	if err := json.Unmarshal(j.Result, &res); err != nil || j.State != queue.Finished || res.State != "finished" ||
-		res.Session != j.Session || res.Changes.Count != 1 || len(j.Attempts) != 1 || !j.Attempts[0].TurnStarted {
+		res.Session != j.Session || len(j.Attempts) != 1 || !j.Attempts[0].TurnStarted {
 		t.Fatalf("job %s %s: %s", j.State, j.Reason, j.Result)
+	}
+	// What the turn changed goes to the server's record (turn.changed) just
+	// after the job ends; then the job keeps only its id.
+	for deadline := time.Now().Add(10 * time.Second); !strings.Contains(string(j.Result), `"changes_event"`); {
+		if time.Now().After(deadline) {
+			t.Fatalf("the job's changes never moved to the record: %s", j.Result)
+		}
+		time.Sleep(50 * time.Millisecond)
+		if j, err = server.queue.Get(queue.DefaultTeam, j.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if c, err := jobs.Changes(server.store, j); err != nil || c == nil || c.Count != 1 || strings.Contains(string(j.Result), `"changes":`) {
+		t.Fatalf("changes %+v %v, result %s", c, err, j.Result)
 	}
 	turn := j.Turn
 	if list, _ := r.store.Turns(store.TurnQuery{Turn: turn, Limit: 1}); len(list.Turns) != 1 || list.Turns[0].Session != j.Session {

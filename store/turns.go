@@ -57,7 +57,8 @@ type Turn struct {
 	ExitCode   *int       `json:"exit_code,omitempty" doc:"A run's turn: its child's exit code, once it exited. Absent for a child the service closed on restart."`
 	Stopped    bool       `json:"stopped,omitempty" doc:"A run's turn: someone stopped it with POST /api/v0/turns/{id}/stop. Its state is then stopped."`
 	Unsettled  bool       `json:"unsettled,omitempty" doc:"A run's turn: its session.closed says the gateway could not confirm that every model call was stored, as for a turn the service closed on restart. Own replay does not continue from it."`
-	Error      string     `json:"error,omitempty" doc:"A run's turn: why its child could not start, from its session.closed. Its state is then failed. A failed turn whose child gave no reason takes the error of its last model call's reply, when the vendor or control's relay refused that call with a status other than 200."`
+	Error      string     `json:"error,omitempty" doc:"A run's turn: why its child could not start, from its session.closed. Its state is then failed. A failed turn whose child gave no reason takes the error of its last model call's reply, when the vendor or control's relay refused that call with a status other than 200, else the last line of error_tail."`
+	ErrorTail  string     `json:"error_tail,omitempty" doc:"A run's turn whose agent exited with an error: the last lines it wrote to stderr, from its session.closed (at most 20 lines and 2 KiB, anything shaped like a secret hidden)."`
 	// Origin, from the turn's turn.started: who started it when the person
 	// did not.
 	Origin *event.Origin `json:"origin,omitempty" doc:"From the turn's turn.started: who started this turn when the person did not. kind result marks a delivered result: AgentBus started the turn, and its prompt is the result of work this session asked for. kind asked marks a turn another agent's turn asked for. Absent for a turn the person started."`
@@ -291,6 +292,7 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 			MAX(CASE WHEN kind = 'session.closed' THEN time END),
 			MAX(CASE WHEN kind = 'session.closed' THEN json_extract(data, '$.exit_code') END),
 			MAX(CASE WHEN kind = 'session.closed' THEN COALESCE(json_extract(data, '$.error'), '') END),
+			MAX(CASE WHEN kind = 'session.closed' THEN COALESCE(json_extract(data, '$.error_tail'), '') END),
 			COALESCE(MAX(CASE WHEN kind = 'session.closed' THEN json_extract(data, '$.stopped') END), 0),
 			COALESCE(MAX(CASE WHEN kind = 'session.closed' THEN json_extract(data, '$.unsettled') END), 0),
 			MAX(CASE WHEN kind = 'turn.completed' THEN time END),
@@ -311,11 +313,11 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 		var u event.Usage
 		var cost float64
 		var closedAt, exitCode, completedAt sql.NullInt64
-		var closeErr, outcome sql.NullString
+		var closeErr, errTail, outcome sql.NullString
 		if err := rows.Scan(&session, &turn, &withUsage, &usageMissing,
 			&u.InputTokens, &u.OutputTokens, &u.CacheReadTokens, &u.CacheWriteTokens,
 			&u.CacheWrite5mTokens, &u.CacheWrite1hTokens, &outputIncomplete, &cost, &costMissing,
-			&opened, &closed, &closedAt, &exitCode, &closeErr, &stopped, &unsettled, &completedAt, &outcome); err != nil {
+			&opened, &closed, &closedAt, &exitCode, &closeErr, &errTail, &stopped, &unsettled, &completedAt, &outcome); err != nil {
 			return list, fmt.Errorf("store: read turns: %w", err)
 		}
 		i, ok := at[key{session, turn}]
@@ -341,6 +343,7 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 			t.Stopped = stopped
 			t.Unsettled = unsettled
 			t.Error = closeErr.String
+			t.ErrorTail = errTail.String
 			switch {
 			case stopped:
 				t.State = TurnStopped
@@ -353,6 +356,10 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 				// sign-in connected) otherwise showed nothing.
 				if t.Error == "" {
 					t.Error = refused[key{session, turn}]
+				}
+				// Else what the agent wrote last before it exited.
+				if t.Error == "" && t.ErrorTail != "" {
+					t.Error = t.ErrorTail[strings.LastIndexByte(t.ErrorTail, '\n')+1:]
 				}
 			}
 		case opened == 0 && completedAt.Valid:

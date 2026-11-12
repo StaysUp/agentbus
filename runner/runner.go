@@ -293,7 +293,7 @@ func (r *Runner) loop(ctx context.Context) {
 	for ctx.Err() == nil {
 		var t jobs.TakenWork
 		status, err := call(ctx, r.cfg.HTTP, r.cfg.Queue+"/api/v0/runner/take", r.token,
-			jobs.TakeRequest{WaitMS: jobs.MaxWait.Milliseconds()}, &t)
+			jobs.TakeRequest{WaitMS: jobs.MaxWait.Milliseconds(), Protocol: jobs.ProtocolVersion}, &t)
 		switch {
 		case ctx.Err() != nil:
 			return

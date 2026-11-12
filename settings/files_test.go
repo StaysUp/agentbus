@@ -198,7 +198,7 @@ func TestFilesInit(t *testing.T) {
 			t.Errorf("%s: an existing file was written: %q", file, b)
 		}
 	}
-	want := []string{PolicyFile, InstructionsFile, AgentsFile, "token", "turns_token", "enroll_token", "events.db", "jobs.db", "runner.json", "folders.json", "bin/" + APIClient}
+	want := []string{PolicyFile, InstructionsFile, AgentsFile, "token", "turns_token", "enroll_token", "events.db", "jobs.db", DBFile, "runner.json", "folders.json", "bin/" + APIClient}
 	for i := range want {
 		want[i] = filepath.Join(dir, want[i])
 	}
@@ -229,7 +229,7 @@ func TestRemote(t *testing.T) {
 		p := DefaultPolicy()
 		p.Forbid = []string{"git push"}
 		p.ReadFolders = []string{"~"}
-		json.NewEncoder(w).Encode(RunnerSettings{Permissions: p, PermissionsVersion: "v1", Instructions: "Hi {session}", InstructionsVersion: "v2"})
+		json.NewEncoder(w).Encode(RunnerSettings{Permissions: p, PermissionsVersion: "v1", Instructions: "Hi {session}", InstructionsVersion: "v2", SettingsVersion: 7})
 	}))
 	defer srv.Close()
 	r := &Remote{Server: srv.URL, Local: "/data"}
@@ -252,6 +252,10 @@ func TestRemote(t *testing.T) {
 	}
 	if text, v, err := r.Instructions(); err != nil || text != "Hi {session}" || v != "v2" {
 		t.Fatalf("Instructions: %q %q %v", text, v, err)
+	}
+	// One read gives all of it, with the settings version a turn records.
+	if sn, err := Read(r); err != nil || sn.Revision != 7 || sn.PolicyVersion != "v1" || sn.Instructions != "Hi {session}" || sn.Policy.Forbid[0] != "git push" {
+		t.Fatalf("Snapshot: %+v %v", sn, err)
 	}
 	if _, _, err := r.SetPolicy(p, Any); !errors.Is(err, ErrReadOnly) {
 		t.Fatalf("SetPolicy: %v", err)
