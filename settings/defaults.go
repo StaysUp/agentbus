@@ -29,7 +29,7 @@ func defaultPolicy() Policy {
 		ShareReadOnly: []string{},
 		Subagents:     on(),
 		Limits:        Limits{MaxDepth: num(2), MaxJobsPerTurn: num(10), MaxJobsPerTree: num(30), MaxCostUSDPerTree: &cost},
-		AgentAPI: AgentAPI{Scope: ScopeTree, Read: on(), ListAgents: on(), Start: on(), Continue: on(),
+		AgentAPI: AgentAPI{Scope: ScopeTree, Read: on(), ListAgents: on(), Start: on(),
 			Review: on(), Cancel: on(), Rename: on(), Apply: off(), Tools: off()},
 		Network: Network{Contain: ContainOff, Allow: []string{}},
 		Sandbox: Sandbox{Mode: SandboxOff, Read: []string{}},
@@ -62,10 +62,15 @@ var upgradeSteps = []upgradeStep{
 	// the person approves its code, so every runner is theirs, and a
 	// subscription connected on control is used on all of them.
 	{Key: "subscriptions_on_runners", Retired: true},
+	// 0.5.1: agent_api.continue is retired with the continue_session tool
+	// (his call, 2026-11-12): a turn's token never continues a session;
+	// ask_agent starts a new one, and its result comes back on its own.
+	{Key: "agent_api.continue", Retired: true},
 }
 
 // retiredKeys are the policy keys an older build had and this one does not:
-// the keys of the retired steps. Each is a key at the top of the policy. A
+// the keys of the retired steps: a key at the top of the policy, or one in a
+// table by its dotted name, such as agent_api.continue. A
 // file or a body that still holds one is read with it left out, so a
 // permissions.toml written before, or an older client, keeps working; any
 // other unknown key is still refused.

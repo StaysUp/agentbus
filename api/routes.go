@@ -147,8 +147,8 @@ var routes = slices.Concat([]route{
 		summary: "Start a turn",
 		doc: "Start a turn: in a new session, or with session the next turn of that one. The reply names the turn at once; every event of the turn carries its id.\n\n" +
 			"Without session, agent, folder and prompt are required and the turn opens a new session. " +
-			"With session, prompt is required and the turn continues that session in its own agent and folder; " +
-			"an agent or folder sent that differs from the session's is refused with 400. " +
+			"With session, agent and prompt are required and the turn continues that session, in its folder, on the agent named; " +
+			"a folder sent that differs from the session's is refused with 400. Only the main token continues a session: a turn token is refused with 403. " +
 			"The turn's turn.started, with the prompt, is stored before the reply.\n\n" +
 			"A session runs on one machine, the one that holds its folder, for its whole life: pick the machine (connector, from GET /api/v0/runners), " +
 			"then type a folder on it (folder) or name one it holds (folder_ref, from GET /api/v0/folders). Only that machine's runner takes the session's work.\n\n" +
@@ -170,13 +170,8 @@ var routes = slices.Concat([]route{
 				doc: "Ask a saved AgentBus agent (from list_agents, any vendor) to do work. " +
 					"It starts a new session on that agent, in its own copy of your folder. " +
 					"The reply names the new turn and session at once. Its result comes back to your session as a later turn: do not wait or poll for it. " +
-					"This is not your harness's own subagent: it is recorded, and can be another vendor."},
-			{name: "continue_session", effect: effectStarts, need: "continue",
-				fields:   []string{"session", "prompt", "agent", "model", "idempotency_key"},
-				required: []string{"session", "prompt", "agent"},
-				doc: "Send the next message to a session you started with ask_agent. " +
-					"Name the agent it runs on (from list_agents), as with ask_agent: a session keeps no agent of its own. " +
-					"Never your own session or the person's. The result comes back to your session as a later turn."}},
+					"This is not your harness's own subagent: it is recorded, and can be another vendor. " +
+					"Each ask is a new session: to follow up, ask again with what the result said."}},
 		replies: []reply{ok(202, Started{}, "The turn: running, or queued behind the session's earlier turns or for a runner."), turnRefused,
 			fail(403, "A turn token's request is refused: error says why, such as a cap on asked work."),
 			fail(404, "This service keeps no queue, or the session sent has no events."),

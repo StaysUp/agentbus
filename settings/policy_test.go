@@ -24,7 +24,7 @@ func samePolicy(p, q Policy) bool {
 	a, b := p.AgentAPI, q.AgentAPI
 	return p.Edit == q.Edit && *p.Subagents == *q.Subagents && *l.MaxDepth == *m.MaxDepth && *l.MaxJobsPerTurn == *m.MaxJobsPerTurn &&
 		*l.MaxJobsPerTree == *m.MaxJobsPerTree && *l.MaxCostUSDPerTree == *m.MaxCostUSDPerTree && a.Scope == b.Scope &&
-		*a.Read == *b.Read && *a.ListAgents == *b.ListAgents && *a.Start == *b.Start && *a.Continue == *b.Continue &&
+		*a.Read == *b.Read && *a.ListAgents == *b.ListAgents && *a.Start == *b.Start &&
 		*a.Review == *b.Review && *a.Cancel == *b.Cancel && *a.Rename == *b.Rename
 }
 
@@ -67,7 +67,7 @@ func TestReadPolicy(t *testing.T) {
 	}
 	writePerm(t, path, "edit = \"none\"\n[limits]\nmax_depth = 0\nmax_cost_usd_per_tree = 0.25\n[agent_api]\nscope = \"session\"\nstart = false\nrename = false\n")
 	if p, err := load(path, home); err != nil || p.Edit != EditNone || *p.Limits.MaxDepth != 0 || *p.Limits.MaxJobsPerTurn != 10 ||
-		*p.Limits.MaxCostUSDPerTree != 0.25 || p.AgentAPI.Scope != ScopeSession || *p.AgentAPI.Start || !*p.AgentAPI.Continue || *p.AgentAPI.Rename {
+		*p.Limits.MaxCostUSDPerTree != 0.25 || p.AgentAPI.Scope != ScopeSession || *p.AgentAPI.Start || *p.AgentAPI.Rename {
 		t.Fatalf("set values: %+v %v", p, err)
 	}
 	writePerm(t, path, "subagents = false\n")

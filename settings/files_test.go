@@ -28,7 +28,7 @@ func TestFormatPolicyRoundTrip(t *testing.T) {
 	p := Policy{ReadFolders: []string{"~/notes", "/tmp/a b"}, Allow: []string{"go test", `say "hi"`}, Forbid: []string{"git push"},
 		Edit: EditNone, Subagents: &no,
 		Limits:   Limits{MaxDepth: &two, MaxJobsPerTurn: &two, MaxJobsPerTree: &two, MaxCostUSDPerTree: &half},
-		AgentAPI: AgentAPI{Scope: ScopeSession, Read: &no, ListAgents: &no, Start: &no, Continue: &no, Review: &no, Cancel: &no, Rename: &no}}
+		AgentAPI: AgentAPI{Scope: ScopeSession, Read: &no, ListAgents: &no, Start: &no, Review: &no, Cancel: &no, Rename: &no}}
 	b := FormatPolicy(p)
 	q, err := ParsePolicy(b)
 	if err != nil {

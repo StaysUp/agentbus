@@ -44,7 +44,7 @@ const specIntro = "agentbus runs on your machine, between your coding agents and
 	"- A turn exists from the moment it is asked for: `queued`, then `running`, then `finished`, `failed` or `stopped`.\n" +
 	"- Runners talk to this service through the runner protocol, under `/api/v0/runner/`. It is described on its own, at `/api/v0/runner/openapi.json`, and is not a public promise.\n" +
 	"- A turn started by `POST /api/v0/turns` gets its own token in `$AGENTBUS_TOKEN`, and this service's address in `$AGENTBUS_URL`. " +
-	"With it the agent reads its session and asks other agents: it starts turns, continues the sessions it started, asks for reviews and reads their results, on the operations that say so. " +
+	"With it the agent reads its session and asks other agents: it starts turns, each in a new session, asks for reviews and reads their results, on the operations that say so; it never continues a session. " +
 	"Each result comes back to the asking session as a later turn. It never changes policy or saved agents, never sees a token, " +
 	"and stops working when the turn's child exits. A read-only turn's token only reads. " +
 	"An asked turn finds who asked it in `$AGENTBUS_ASKED_BY_SESSION` and `$AGENTBUS_ASKED_BY_TURN`. " +

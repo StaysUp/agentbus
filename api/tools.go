@@ -59,7 +59,7 @@ type tool struct {
 	// required are the inputs the tool must be sent, beyond id.
 	required []string
 	// need is the [agent_api] switch the tool needs beyond its route's own
-	// check: "start" or "continue", for the two tools of POST /api/v0/turns.
+	// check: "start", for the tool of POST /api/v0/turns.
 	need string
 }
 
@@ -135,8 +135,6 @@ func listed(tr toolRoute, g *run.Grant, turnsOnly bool, api settings.AgentAPI) b
 	switch tr.t.need {
 	case "start":
 		return *api.Start
-	case "continue":
-		return *api.Continue && api.Scope != settings.ScopeSession
 	}
 	return true
 }

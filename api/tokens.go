@@ -3,8 +3,8 @@ package api
 // Turn tokens. POST /api/v0/turns gives each turn's child its own token in
 // AGENTBUS_TOKEN, with the service's address in AGENTBUS_URL. With it the
 // agent reads its session's history and asks other agents: it starts turns
-// on any saved agent, continues the sessions it started, asks for reviews,
-// and reads their results. Each result comes back to its session as a later
+// on any saved agent, each in a new session, asks for reviews, and reads
+// their results. It never continues a session (his call, 2026-11-12). Each result comes back to its session as a later
 // turn (queue.Deliver).
 //
 // What a turn token must never do: read or change the settings (the policy
@@ -81,8 +81,8 @@ const (
 	turnSessionRefused  = "a turn token reads only its own session and the sessions its request tree started"
 	turnCallRefused     = "a turn token reads only the calls of its own session and the sessions its request tree started"
 	turnReadOnly        = "this turn is read-only, so its token only reads; it cannot start, continue, review or stop work, rename sessions or apply changes"
-	turnContinueRefused = "a turn token continues only sessions its request tree started, never its own or the person's; " +
-		"results come back to your session as later turns"
+	turnContinueRefused = "a turn token does not continue sessions: ask_agent starts a new one, and its result comes back to your session " +
+		"as a later turn; to follow up, ask again with what the result said"
 	turnFolderRefused = "a turn token starts sessions only in its own session's folder, or a folder inside it; " +
 		"leave folder out to start in your own session's folder"
 	turnIsolateRefused = "a session a turn token starts always gets its own isolated copy of its folder; leave isolate out"
@@ -390,10 +390,12 @@ func (a *API) askChecks(w http.ResponseWriter, g run.Grant, perm settings.Policy
 		return queue.Links{}, false
 	}
 	api := perm.AgentAPI
-	if continues && !*api.Continue {
-		return refuse(turnSwitchedOff("continue sessions", "continue"))
+	// A turn's token never continues a session (his call, 2026-11-12):
+	// ask_agent starts a new one, and its result comes back on its own.
+	if continues {
+		return refuse(turnContinueRefused)
 	}
-	if !continues && !*api.Start {
+	if !*api.Start {
 		return refuse(turnSwitchedOff("start sessions", "start"))
 	}
 	if msg, err := a.overBudget(g, perm, body.IdempotencyKey); err != nil {
@@ -401,20 +403,6 @@ func (a *API) askChecks(w http.ResponseWriter, g run.Grant, perm settings.Policy
 		return queue.Links{}, false
 	} else if msg != "" {
 		return refuse(msg)
-	}
-	if continues {
-		if body.Session == g.Session || body.Session == g.Root || api.Scope == settings.ScopeSession {
-			return refuse(turnContinueRefused)
-		}
-		root, err := a.cfg.Queue.SessionRoot(queue.DefaultTeam, body.Session)
-		if err != nil {
-			a.internal(w)
-			return queue.Links{}, false
-		}
-		if root == "" || root != g.Root {
-			return refuse(turnContinueRefused)
-		}
-		return askedLinks(g), true
 	}
 	if body.Isolate != nil && !*body.Isolate {
 		return refuse(turnIsolateRefused)

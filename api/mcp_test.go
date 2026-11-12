@@ -120,7 +120,10 @@ func TestMCPInitialize(t *testing.T) {
 func TestMCPToolListFollowsTheToken(t *testing.T) {
 	e := mcpEnv(t)
 	all := toolNames(t, e, token)
-	for _, want := range []string{"list_agents", "ask_agent", "continue_session", "list_turns",
+	if slices.Contains(all, "continue_session") {
+		t.Error("continue_session is listed: a turn token never continues a session")
+	}
+	for _, want := range []string{"list_agents", "ask_agent", "list_turns",
 		"get_turn", "stop_turn", "turn_diff", "apply_turn", "review_turn",
 		"search_history", "rename_session"} {
 		if !slices.Contains(all, want) {
@@ -167,8 +170,6 @@ func TestMCPToolListFollowsAgentAPI(t *testing.T) {
 	}{
 		{off(func(a *settings.AgentAPI) { a.Apply = &no }), []string{"apply_turn"}},
 		{off(func(a *settings.AgentAPI) { a.Start = &no }), []string{"ask_agent"}},
-		{off(func(a *settings.AgentAPI) { a.Continue = &no }), []string{"continue_session"}},
-		{off(func(a *settings.AgentAPI) { a.Scope = settings.ScopeSession }), []string{"continue_session"}},
 		{off(func(a *settings.AgentAPI) { a.Review = &no }), []string{"review_turn"}},
 		{off(func(a *settings.AgentAPI) { a.Cancel = &no }), []string{"stop_turn"}},
 		{off(func(a *settings.AgentAPI) { a.ListAgents = &no }), []string{"list_agents"}},
@@ -233,7 +234,6 @@ func TestMCPCallSendsTheRoute(t *testing.T) {
 		`{"name":"get_turn","arguments":{}}`:                                              "turn is required",
 		`{"name":"get_turn","arguments":{"turn":"t_1","x":1}}`:                            "no input of that name",
 		`{"name":"get_turn","arguments":{"turn":"../x"}}`:                                 "turn must be an id",
-		`{"name":"continue_session","arguments":{"prompt":"hi"}}`:                         "session is required",
 		`{"name":"ask_agent","arguments":{"agent":"claude","session":"s1","prompt":"x"}}`: "no input of that name",
 		// No folder: the asking session's folder, always.
 		`{"name":"ask_agent","arguments":{"agent":"claude","folder":"/x","prompt":"x"}}`: "no input of that name",

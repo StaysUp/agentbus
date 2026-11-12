@@ -56,16 +56,18 @@ func TestDefaultsWrittenInFull(t *testing.T) {
 }
 
 // Each upgrade step names a policy key and an old value that differs from
-// today's default, or a retired key the policy no longer has, at its top;
-// before the steps, a turn token applies, as in 0.4.
+// today's default, or a retired key the policy no longer has, at its top or
+// one table down; before the steps, a turn token applies, as in 0.4. A file
+// or a body that still holds a retired key, agent_api.continue too, is read
+// with it left out.
 func TestUpgradeSteps(t *testing.T) {
 	now := flatten(defaultPolicy())
 	var last *upgradeStep
 	for i, st := range upgradeSteps {
 		_, ok := now[st.Key]
 		switch {
-		case st.Retired && (ok || strings.Contains(st.Key, ".")):
-			t.Errorf("retired step %s: the policy has the key, or it is not at the top", st.Key)
+		case st.Retired && (ok || strings.Count(st.Key, ".") > 1):
+			t.Errorf("retired step %s: the policy has the key, or it is deeper than one table", st.Key)
 		case !st.Retired && !ok:
 			t.Errorf("step %s: no such key", st.Key)
 		case !st.Retired:
@@ -75,8 +77,17 @@ func TestUpgradeSteps(t *testing.T) {
 	if last != nil && string(now[last.Key]) == string(last.Old) {
 		t.Errorf("the last step %s keeps the default it changes", last.Key)
 	}
-	if strings.Join(retiredKeys, ",") != "commands,subscriptions_on_runners" {
+	if strings.Join(retiredKeys, ",") != "commands,subscriptions_on_runners,agent_api.continue" {
 		t.Errorf("retired keys %v", retiredKeys)
+	}
+	if p, err := ParsePolicy([]byte("[agent_api]\ncontinue = false\nstart = false\n")); err != nil || *p.AgentAPI.Start {
+		t.Errorf("a file with agent_api.continue: %+v %v", p.AgentAPI, err)
+	}
+	if p, err := DecodePolicy([]byte(`{"agent_api":{"continue":false,"start":false}}`)); err != nil || *p.AgentAPI.Start {
+		t.Errorf("a body with agent_api.continue: %+v %v", p.AgentAPI, err)
+	}
+	if _, err := DecodePolicy([]byte(`{"agent_api":{"bogus":true}}`)); err == nil {
+		t.Error("an unknown key in a table was taken")
 	}
 	if p := policyBefore(0); !*p.AgentAPI.Apply {
 		t.Error("before the steps, apply is off")

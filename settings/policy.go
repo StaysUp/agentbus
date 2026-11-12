@@ -102,12 +102,11 @@ max_cost_usd_per_tree = 0.0  # USD one request tree may cost before asking stops
 # No setting here lets it change this file, the instructions, saved agents or
 # tokens: those take the main token, always.
 [agent_api]
-scope = "tree"       # whose sessions it reads, continues and reviews:
+scope = "tree"       # whose sessions it reads and reviews:
                      # "tree" (its request tree) or "session" (its own only)
 read = true          # read sessions, turns and calls in its scope
 list_agents = true   # list saved agents and harnesses
 start = true         # start a new session on a saved agent
-continue = true      # continue a session its tree started (never its own or the person's)
 review = true        # ask for a review of a turn in its scope
 cancel = true        # stop turns its tree asked for
 rename = true        # rename sessions in its scope
@@ -228,7 +227,6 @@ type AgentAPI struct {
 	Read       *bool  `toml:"read" json:"read,omitempty" doc:"Read sessions, turns and calls in its scope. Absent in a PUT: true."`
 	ListAgents *bool  `toml:"list_agents" json:"list_agents,omitempty" doc:"List saved agents and harnesses. Absent in a PUT: true."`
 	Start      *bool  `toml:"start" json:"start,omitempty" doc:"Start a new session on a saved agent. Absent in a PUT: true."`
-	Continue   *bool  `toml:"continue" json:"continue,omitempty" doc:"Continue a session its tree started. Absent in a PUT: true."`
 	Review     *bool  `toml:"review" json:"review,omitempty" doc:"Ask for a review of a turn in its scope. Absent in a PUT: true."`
 	Cancel     *bool  `toml:"cancel" json:"cancel,omitempty" doc:"Stop turns its tree asked for. Absent in a PUT: true."`
 	Rename     *bool  `toml:"rename" json:"rename,omitempty" doc:"Rename sessions in its scope. Absent in a PUT: true."`
@@ -296,7 +294,7 @@ func (p *Policy) fill() {
 		p.Sandbox.Mode = SandboxOff
 	}
 	for _, b := range []**bool{&p.AgentAPI.Read, &p.AgentAPI.ListAgents, &p.AgentAPI.Start,
-		&p.AgentAPI.Continue, &p.AgentAPI.Review, &p.AgentAPI.Cancel, &p.AgentAPI.Rename} {
+		&p.AgentAPI.Review, &p.AgentAPI.Cancel, &p.AgentAPI.Rename} {
 		if *b == nil {
 			on := true
 			*b = &on
@@ -411,7 +409,7 @@ func parsePolicy(b []byte) (Policy, error) {
 		return Policy{}, errors.New("a value has the wrong type: read_folders, allow, forbid and share_read_only are lists of strings, such as [\"go test\"]; " +
 			"edit, isolation, scope, contain and mode are strings; [network] allow and [sandbox] read are lists of strings; subagents is true or false; the [limits] are numbers; the [agent_api] switches are true or false")
 	}
-	extra := slices.DeleteFunc(md.Undecoded(), func(k toml.Key) bool { return len(k) == 1 && slices.Contains(retiredKeys, k[0]) })
+	extra := slices.DeleteFunc(md.Undecoded(), func(k toml.Key) bool { return slices.Contains(retiredKeys, strings.Join(k, ".")) })
 	if len(extra) > 0 {
 		return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, [limits], [agent_api], [network] and [sandbox] (see the README)", strconv.Quote(extra[0].String()))
 	}
@@ -458,11 +456,27 @@ func withoutRetired(b []byte) []byte {
 	if json.Unmarshal(b, &top) != nil {
 		return b
 	}
-	n := len(top)
+	changed := false
 	for _, k := range retiredKeys {
-		delete(top, k)
+		// A key in a table, such as agent_api.continue, is left out of it.
+		if t, sub, ok := strings.Cut(k, "."); ok {
+			var inner map[string]json.RawMessage
+			if raw, found := top[t]; found && json.Unmarshal(raw, &inner) == nil {
+				if _, found := inner[sub]; found {
+					delete(inner, sub)
+					if out, err := json.Marshal(inner); err == nil {
+						top[t], changed = out, true
+					}
+				}
+			}
+			continue
+		}
+		if _, found := top[k]; found {
+			delete(top, k)
+			changed = true
+		}
 	}
-	if len(top) == n {
+	if !changed {
 		return b
 	}
 	out, err := json.Marshal(top)
@@ -524,7 +538,7 @@ func FormatPolicy(p Policy) []byte {
 		"limits.max_depth": *p.Limits.MaxDepth, "limits.max_jobs_per_turn": *p.Limits.MaxJobsPerTurn,
 		"limits.max_jobs_per_tree": *p.Limits.MaxJobsPerTree, "limits.max_cost_usd_per_tree": *p.Limits.MaxCostUSDPerTree,
 		"agent_api.scope": p.AgentAPI.Scope, "agent_api.read": *p.AgentAPI.Read, "agent_api.list_agents": *p.AgentAPI.ListAgents,
-		"agent_api.start": *p.AgentAPI.Start, "agent_api.continue": *p.AgentAPI.Continue, "agent_api.review": *p.AgentAPI.Review,
+		"agent_api.start": *p.AgentAPI.Start, "agent_api.review": *p.AgentAPI.Review,
 		"agent_api.cancel": *p.AgentAPI.Cancel, "agent_api.rename": *p.AgentAPI.Rename,
 		"agent_api.apply": *p.AgentAPI.Apply, "agent_api.tools": *p.AgentAPI.Tools,
 		"network.contain": p.Network.Contain, "network.allow": p.Network.Allow,
