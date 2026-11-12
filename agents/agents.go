@@ -141,7 +141,14 @@ type Store struct {
 	now  func() time.Time
 	mu   sync.Mutex
 	list []Agent
+	// removed are the ids of agents the person removed, so a turn that
+	// names one is told so (ErrRemoved).
+	removed map[string]bool
 }
+
+// ErrRemoved is an agent the person removed: a turn that names it is
+// refused, and names another.
+var ErrRemoved = errors.New("agents: the agent was removed")
 
 type file struct {
 	Agents []Agent `json:"agents"`
@@ -208,9 +215,14 @@ func Open(b Backend, now func() time.Time) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	s := &Store{b: b, now: now}
+	s := &Store{b: b, now: now, removed: map[string]bool{}}
 	if s.list, err = merge(rows, b.Created().UTC()); err != nil {
 		return nil, err
+	}
+	for _, r := range rows {
+		if r.Removed {
+			s.removed[r.ID] = true
+		}
 	}
 	return s, nil
 }
@@ -385,6 +397,7 @@ func (s *Store) Remove(id string) error {
 		return fmt.Errorf("agents: the agent could not be removed: %w", err)
 	}
 	s.list = append(append([]Agent(nil), s.list[:i]...), s.list[i+1:]...)
+	s.removed[id] = true
 	return nil
 }
 
@@ -399,6 +412,12 @@ func (s *Store) Resolve(id string) (Agent, error) {
 	}
 	if known(id) {
 		return Agent{Harness: id, Access: Subscription}, nil
+	}
+	s.mu.Lock()
+	gone := s.removed[id]
+	s.mu.Unlock()
+	if gone {
+		return Agent{}, ErrRemoved
 	}
 	return Agent{}, err
 }

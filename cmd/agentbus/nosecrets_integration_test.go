@@ -307,10 +307,9 @@ func TestRunnerHoldsNoKey(t *testing.T) {
 		t.Fatalf("a forged token: %v %v", err, resp)
 	}
 	resp.Body.Close()
-	// A next turn that names no agent runs on the session's agent, and gets
-	// that saved agent's key.
+	// A next turn names its agent, and gets that saved agent's key.
 	t.Setenv("AGENTBUS_FAKE_WAIT", "")
-	code, out, raw := postRun(t, ns.server, ns.tok, map[string]any{"session": j.Session, "prompt": "again"})
+	code, out, raw := postRun(t, ns.server, ns.tok, map[string]any{"session": j.Session, "agent": j.Spec.AgentID, "prompt": "again"})
 	if code != 202 {
 		t.Fatalf("next turn: %d %s", code, raw)
 	}
@@ -716,6 +715,7 @@ func TestRunnerHomePerSession(t *testing.T) {
 	t.Setenv("HOME", realHome)
 	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(realHome, ".claude"))
 	ns := startNoSecrets(t)
+	connectFake(t, ns.serverHome, "claude")
 	t.Setenv("AGENTBUS_FAKE_HOME", "1")
 	// A resume id, so a session can take a next turn: the runner continues
 	// by the vendor's resume, which reads the transcript in the home.
@@ -756,7 +756,7 @@ func TestRunnerHomePerSession(t *testing.T) {
 	if env := envOf(t, ns.report); env["CLAUDE_CONFIG_DIR"] != filepath.Join(homeA, ".claude") {
 		t.Fatalf("claude's config folder: %q", env["CLAUDE_CONFIG_DIR"])
 	}
-	_, repA2 := turn(map[string]any{"session": a.Session, "prompt": "second of A"})
+	_, repA2 := turn(map[string]any{"session": a.Session, "agent": "claude", "prompt": "second of A"})
 	if homeOf(repA2) != homeA || strings.Join(repA2.Seen, ",") != "first of A" {
 		t.Fatalf("A's next turn: home %q, seen %q", homeOf(repA2), repA2.Seen)
 	}

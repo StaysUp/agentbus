@@ -150,7 +150,7 @@ func TestOpenAPIResponsesMatch(t *testing.T) {
 	check(t, doc, e, "GET", "/api/v0/sessions", "", false, 401)
 	check(t, doc, e, "GET", "/api/v0/sessions/s1/events?store=st_other&after=0", "", true, 409)
 	check(t, doc, e, "GET", "/api/v0/sessions/s1/events?store=x", "", true, 400)
-	check(t, doc, e, "POST", "/api/v0/turns", `{"session":"nobody","prompt":"next"}`, true, 404)
+	check(t, doc, e, "POST", "/api/v0/turns", `{"agent":"claude","session":"nobody","prompt":"next"}`, true, 404)
 	check(t, doc, e, "POST", "/api/v0/turns", `{"agent":"other","folder":"/","prompt":"hi"}`, true, 400)
 
 	// The stream: every message is framed as the spec says, and its data

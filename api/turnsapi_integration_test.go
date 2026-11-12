@@ -143,7 +143,7 @@ func TestIdempotencyKey(t *testing.T) {
 		"another prompt": `{"agent":"claude","folder":"` + dir + `","prompt":"other","idempotency_key":"job-7:a1"}`,
 		"another model":  `{"agent":"claude","folder":"` + dir + `","prompt":"hello","model":"haiku","idempotency_key":"job-7:a1"}`,
 		"read_only":      `{"agent":"claude","folder":"` + dir + `","prompt":"hello","read_only":true,"idempotency_key":"job-7:a1"}`,
-		"with a session": `{"session":"` + first.Session + `","prompt":"hello","idempotency_key":"job-7:a1"}`,
+		"with a session": `{"agent":"claude","session":"` + first.Session + `","prompt":"hello","idempotency_key":"job-7:a1"}`,
 	} {
 		if resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(b))); resp.StatusCode != 409 {
 			t.Errorf("%s: %d %s, want 409", name, resp.StatusCode, out)

@@ -283,14 +283,11 @@ type Request struct {
 	ReadOnly       bool
 	IdempotencyKey string // stored on turn.started, as the caller's key
 	// AgentID, Access and KeyEnv: the saved agent and how it reaches its
-	// model (Access). A new session needs Harness; for a next turn they are
-	// optional. Set with Session, Harness and these run this turn
-	// on another agent, in the session's folder; left out, the turn runs on
-	// the agent of the session's latest turn, read from the record.
+	// model (Access). Every turn needs Harness, a next one too (NoAgent):
+	// with Session, the turn runs on that agent in the session's folder.
 	AgentID, Access, KeyEnv string
-	// AgentModel is the saved agent's model, for a next turn that names an
-	// agent and no Model: used when the turn switches agent. A turn that
-	// names the session's own latest agent keeps the session's model.
+	// AgentModel is the named agent's model, for a next turn that names no
+	// Model: the turn runs with it.
 	AgentModel string
 	// Origin, when set, is stored on turn.started: who started the turn
 	// when the person did not.
@@ -445,29 +442,23 @@ func (e *Engine) next(req Request) (*Turn, error) {
 	if !KnownHarness(c.Harness) {
 		return fail(refuse(http.StatusConflict, "this session cannot be continued from here"))
 	}
-	// The turn runs on the agent it names, or on the agent of the session's
-	// latest turn. The folder is always the session's.
-	// The model too: a turn that names neither keeps the model the latest
-	// turn ran with, read from the same event as its agent, so the two never
-	// disagree, whichever turns started.
-	agent, agentID, access, keyEnv, model := c.Harness, c.AgentID, c.Access, c.KeyEnv, req.Model
-	// Naming the session's own latest agent is the same as naming none: the
-	// session keeps its model. Only a switch takes the named agent's model.
-	if model == "" {
-		if req.Harness == "" || (req.AgentID != "" && req.AgentID == c.AgentID) {
-			model = c.Model
-		} else {
-			model = req.AgentModel
-		}
+	// The turn runs on the agent it names, as control read it once when the
+	// turn was asked for: the same answer control's relay adds the
+	// credential for. A session keeps no agent of its own, only its folder;
+	// the record keeps which agent and model each past turn ran with, as
+	// history. With no model of its own, the turn takes the agent's.
+	if req.Harness == "" {
+		return fail(refuse(http.StatusBadRequest, NoAgent))
 	}
-	if req.Harness != "" {
-		if !KnownHarness(req.Harness) {
-			return fail(refuse(http.StatusBadRequest, unknownHarness()))
-		}
-		if req.Access != "" && req.Access != "subscription" && req.Access != "openrouter" {
-			return fail(refuse(http.StatusBadRequest, "access must be subscription or openrouter"))
-		}
-		agent, agentID, access, keyEnv = req.Harness, req.AgentID, req.Access, req.KeyEnv
+	if !KnownHarness(req.Harness) {
+		return fail(refuse(http.StatusBadRequest, unknownHarness()))
+	}
+	if req.Access != "" && req.Access != "subscription" && req.Access != "openrouter" {
+		return fail(refuse(http.StatusBadRequest, "access must be subscription or openrouter"))
+	}
+	agent, agentID, access, keyEnv, model := req.Harness, req.AgentID, req.Access, req.KeyEnv, req.Model
+	if model == "" {
+		model = req.AgentModel
 	}
 	// How the turn reaches the session's earlier turns depends on the agent
 	// (Continuity): by own replay, the child starts fresh and the gateway

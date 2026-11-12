@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/event"
+	engine "github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -52,14 +53,33 @@ func getAPI(t *testing.T, svc *service, tok, path string) (int, string) {
 }
 
 // postMessage starts a session's next turn: POST /api/v0/turns with session.
+// Every turn names its agent: without one in body, it sends the agent of
+// the session's latest turn, as the cockpit's box starts with.
 func postMessage(t *testing.T, svc *service, tok, session string, body map[string]any) (int, map[string]any, string) {
 	t.Helper()
 	with := map[string]any{"session": session}
+	if _, named := body["agent"]; !named {
+		with["agent"] = lastAgent(t, svc, session)
+	}
 	for k, v := range body {
 		with[k] = v
 	}
 	b, _ := json.Marshal(with)
 	return postAPI(t, svc, tok, "/api/v0/turns", b)
+}
+
+// lastAgent is the agent of session's latest turn, as the record holds it:
+// its saved agent, or its harness.
+func lastAgent(t *testing.T, svc *service, session string) string {
+	t.Helper()
+	c, err := svc.store.Continuation(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.AgentID != "" {
+		return c.AgentID
+	}
+	return c.Harness
 }
 
 // snapSession is one session of GET /api/v0/sessions, read over HTTP.
@@ -310,7 +330,7 @@ func TestRunWithSessionRefusals(t *testing.T) {
 	tok := readToken(t, home)
 
 	// Unknown session.
-	if code, _, raw := postMessage(t, svc, tok, "nosuchsession", map[string]any{"prompt": "hi"}); code != http.StatusNotFound {
+	if code, _, raw := postMessage(t, svc, tok, "nosuchsession", map[string]any{"agent": "claude", "prompt": "hi"}); code != http.StatusNotFound {
 		t.Errorf("unknown session: %d %s, want 404", code, raw)
 	}
 	// A session seen only through the gateway (pointed at it by hand) has no
@@ -321,7 +341,7 @@ func TestRunWithSessionRefusals(t *testing.T) {
 		t.Fatal(err)
 	}
 	before := svc.store.Last()
-	if code, out, raw := postMessage(t, svc, tok, byHand, map[string]any{"prompt": "hi"}); code != http.StatusConflict ||
+	if code, out, raw := postMessage(t, svc, tok, byHand, map[string]any{"agent": "claude", "prompt": "hi"}); code != http.StatusConflict ||
 		out["error"] != "this session cannot be continued from here" {
 		t.Errorf("hand-pointed session: %d %s, want 409 cannot be continued", code, raw)
 	}
@@ -399,6 +419,7 @@ func TestRunWithSessionRefusals(t *testing.T) {
 		{"over 256 KiB", `{"prompt":"` + strings.Repeat("a", 256<<10+1) + `"}`, badPrompt},
 		{"model as flag", `{"prompt":"a","model":"--x"}`, "model must match ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"},
 		{"unknown field", `{"prompt":"a","bogus":1}`, badBody},
+		{"no agent", `{"prompt":"a"}`, engine.NoAgent},
 		{"an agent not saved", `{"prompt":"a","agent":"nobody"}`,
 			`agent "nobody" is not a saved agent; GET /api/v0/agents lists them`},
 		{"another folder", `{"prompt":"a","folder":"/"}`,
@@ -407,7 +428,11 @@ func TestRunWithSessionRefusals(t *testing.T) {
 			"folder is not this session's folder " + strconv.Quote(folder) + "; leave folder out to use the session's"},
 	} {
 		before := svc.store.Last()
-		code, out, raw := postAPI(t, svc, tok, "/api/v0/turns", []byte(`{"session":"`+id+`",`+strings.TrimPrefix(tc.body, "{")))
+		body := tc.body
+		if !strings.Contains(body, `"agent"`) && tc.name != "no agent" {
+			body = `{"agent":"claude",` + strings.TrimPrefix(body, "{")
+		}
+		code, out, raw := postAPI(t, svc, tok, "/api/v0/turns", []byte(`{"session":"`+id+`",`+strings.TrimPrefix(body, "{")))
 		if code != http.StatusBadRequest || out["error"] != tc.want {
 			t.Errorf("%s: %d %.200s, want 400 %q", tc.name, code, raw, tc.want)
 		}

@@ -166,7 +166,7 @@ func TestTurnDiffAndApply(t *testing.T) {
 	}
 
 	// The next turn changes a.txt, and so does the person.
-	second := startTurn(t, e, `{"session":"`+first.Session+`","prompt":"edit2"}`)
+	second := startTurn(t, e, `{"agent":"claude","session":"`+first.Session+`","prompt":"edit2"}`)
 	waitEnded(t, e, second.Turn)
 	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("mine\n"), 0o644)
 	code, st = applyAs(t, e, token, second.Turn)
@@ -181,7 +181,7 @@ func TestTurnDiffAndApply(t *testing.T) {
 	// Resolved, and applied by a turn of the session with its own token.
 	// With apply off in [agent_api], the token is refused first.
 	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\nTWO\n"), 0o644)
-	third := startTurn(t, e, `{"session":"`+first.Session+`","prompt":"hold"}`)
+	third := startTurn(t, e, `{"agent":"claude","session":"`+first.Session+`","prompt":"hold"}`)
 	tok := tokenOf(t, dir, "hold")
 	os.WriteFile(perm, []byte("[agent_api]\napply = false\n"), 0o600)
 	if code, out := as(t, e, tok, "POST", "/api/v0/turns/"+second.Turn+"/apply", ""); code != 403 || !strings.Contains(out, "apply is false") {
@@ -273,7 +273,7 @@ func TestTurnChangesAreTheCheckpointDiff(t *testing.T) {
 			}
 			first := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"edit1"}`)
 			waitEnded(t, e, first.Turn)
-			second := startTurn(t, e, `{"session":"`+first.Session+`","prompt":"edit2"}`)
+			second := startTurn(t, e, `{"agent":"claude","session":"`+first.Session+`","prompt":"edit2"}`)
 			waitEnded(t, e, second.Turn)
 			for _, c := range []struct {
 				st    Started

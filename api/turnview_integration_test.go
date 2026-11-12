@@ -169,7 +169,7 @@ func TestCloseSession(t *testing.T) {
 		snap.Sessions[0].Closed == nil || snap.Sessions[0].Resumable {
 		t.Fatalf("GET /sessions: %d %+v", code, snap.Sessions)
 	}
-	if code, out := as(t, e, token, "POST", "/api/v0/turns", `{"session":"`+s.Session+`","prompt":"more"}`); code != 409 {
+	if code, out := as(t, e, token, "POST", "/api/v0/turns", `{"agent":"claude","session":"`+s.Session+`","prompt":"more"}`); code != 409 {
 		t.Errorf("a turn of a closed session: %d %s", code, out)
 	}
 	if code, out := as(t, e, token, "PATCH", "/api/v0/sessions/nobody", `{"closed":true}`); code != 404 {

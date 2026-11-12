@@ -35,6 +35,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -209,6 +210,7 @@ type service struct {
 	srv      *http.Server
 	gws      []*gateway.Gateway
 	api      *api.API
+	saved    *agents.Store // the saved agents, with the queue; nil in a runner
 	eng      *engine.Engine
 	store    *store.Store
 	queue    *queue.Queue
@@ -673,7 +675,7 @@ func start(c config) (*service, error) {
 	}
 	host, _, _ := net.SplitHostPort(c.listen)
 	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: append(gws, relayGws...), api: a, eng: eng, store: st, blobs: bs, blobSwp: blobSweep, jobsSrv: runnerJobs,
-		queue: q, remote: remote, settings: cfgStore, sdb: sdb, folders: fr, log: svcLog, logins: logins, done: make(chan error, 1)}
+		queue: q, saved: saved, remote: remote, settings: cfgStore, sdb: sdb, folders: fr, log: svcLog, logins: logins, done: make(chan error, 1)}
 	sdbHanded = true
 	if q != nil {
 		s.subs = subs
@@ -814,7 +816,7 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 				}
 				// Asked work that ended: its result becomes the asking
 				// session's next turn (queue.Deliver).
-				if n, err := s.queue.Deliver(queue.DefaultTeam, name); err != nil {
+				if n, err := s.queue.Deliver(queue.DefaultTeam, name, s.deliveredAgent); err != nil {
 					svcLog.Printf("queue.deliver_failed")
 				} else if n > 0 {
 					svcLog.Printf("queue.results_delivered n=%d", n)
@@ -896,6 +898,28 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 		close(s.runnerDone)
 	}()
 	return nil
+}
+
+// deliveredAgent is the agent a delivered result's turn runs on: the asking
+// turn's saved agent as it is now (or its harness, for a turn that named one
+// by harness), so every turn names its agent and reads it once. A removed one
+// says so.
+func (s *service) deliveredAgent(asking queue.Spec) (queue.Spec, string) {
+	id := asking.AgentID
+	if id == "" {
+		id = asking.Harness
+	}
+	if s.saved == nil {
+		return asking, ""
+	}
+	ag, err := s.saved.Resolve(id)
+	switch {
+	case errors.Is(err, agents.ErrRemoved):
+		return queue.Spec{}, "the asking turn's agent " + strconv.Quote(id) + " was removed, so its result was not delivered"
+	case err != nil:
+		return queue.Spec{}, "the asking turn's agent " + strconv.Quote(id) + " is not a saved agent, so its result was not delivered"
+	}
+	return queue.Spec{Harness: ag.Harness, AgentID: ag.ID, Access: ag.Access, KeyEnv: ag.KeyEnv, AgentModel: ag.Model}, ""
 }
 
 // unrecorded is the sink of up's relay gateways for its own runner's calls

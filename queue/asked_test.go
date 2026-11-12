@@ -103,7 +103,7 @@ func TestDeliver(t *testing.T) {
 	if _, _, err := q.Start(r.ID, pa.ID, pa.Number, lease); err != nil {
 		t.Fatal(err)
 	}
-	child, err := askTurn(q, asked(parent.Session, pa.ID, parent.Session, 1), "")
+	child, err := askTurn(q, asked(parent.Session, parent.Turn, parent.Session, 1), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestDeliver(t *testing.T) {
 	if _, _, err := q.Start(r.ID, ca.ID, ca.Number, lease); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := q.Deliver(DefaultTeam, nil); err != nil || n != 0 {
+	if n, err := q.Deliver(DefaultTeam, nil, nil); err != nil || n != 0 {
 		t.Fatalf("before the child ends: %d %v", n, err)
 	}
 	res := `{"session":"` + child.Session + `","state":"finished","reply":"short","reply_text":"the whole answer","folder":"/w/1",` +
@@ -123,7 +123,7 @@ func TestDeliver(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if _, err := q.Deliver(DefaultTeam, nil); err != nil {
+		if _, err := q.Deliver(DefaultTeam, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -143,7 +143,7 @@ func TestDeliver(t *testing.T) {
 	if d == nil {
 		t.Fatal("no delivery")
 	}
-	if d.State != Queued || d.Spec.Session != parent.Session || d.Spec.Harness != "" || d.Links.ResultOf.Job != child.ID ||
+	if d.State != Queued || d.Spec.Session != parent.Session || d.Spec.Harness != "claude" || d.Links.ResultOf.Job != child.ID ||
 		d.Links.ResultOf.Session != child.Session || d.Links.ResultOf.Turn != child.Turn || d.Links.ResultOf.Agent != "claude" ||
 		d.Links.Chain == nil || d.Links.Chain.Depth != 1 || d.Links.Asker != nil {
 		t.Fatalf("delivery: %+v %+v", d, d.Links)
@@ -166,7 +166,7 @@ func TestDeliver(t *testing.T) {
 		t.Fatalf("took %s, want the delivery", got.ID)
 	}
 	// The person's own job ended too, and is never delivered.
-	if n, err := q.Deliver(DefaultTeam, nil); err != nil || n != 0 {
+	if n, err := q.Deliver(DefaultTeam, nil, nil); err != nil || n != 0 {
 		t.Fatalf("after: %d %v", n, err)
 	}
 	_ = pj
@@ -195,11 +195,69 @@ func TestResultPrompt(t *testing.T) {
 	}
 }
 
+// A delivered result's turn names the asking turn's agent, as control
+// reads it at delivery (agent): never the asking session's latest agent.
+// One whose agent cannot run (removed) is not delivered, and the deliveries
+// table says why, once.
+func TestDeliverNamesTheAskingTurnsAgent(t *testing.T) {
+	for _, removed := range []bool{false, true} {
+		q, _ := open(t)
+		parent := job(t, q, "")
+		child, err := askTurn(q, asked(parent.Session, parent.Turn, parent.Session, 1), "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := q.Cancel(DefaultTeam, child.ID); err != nil {
+			t.Fatal(err)
+		}
+		var saw Spec
+		agent := func(asking Spec) (Spec, string) {
+			saw = asking
+			if removed {
+				return Spec{}, "the asking turn's agent was removed"
+			}
+			return Spec{Harness: "codex", AgentID: "a_1", Access: "subscription", AgentModel: "m"}, ""
+		}
+		for range 2 {
+			if _, err := q.Deliver(DefaultTeam, nil, agent); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if saw.Harness != "claude" {
+			t.Fatalf("asked for the agent of %+v, want the asking turn's", saw)
+		}
+		ds, err := q.List(DefaultTeam, Filter{Session: parent.Session}, 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var d *Job
+		for i := range ds {
+			if ds[i].Links.ResultOf != nil {
+				d = &ds[i]
+			}
+		}
+		if removed {
+			if d != nil {
+				t.Fatalf("delivered with its agent removed: %+v", d)
+			}
+			var why string
+			if err := q.db.QueryRow(`SELECT error FROM deliveries WHERE job = ?`, child.ID).Scan(&why); err != nil || why == "" {
+				t.Fatalf("delivery record: %q %v", why, err)
+			}
+			continue
+		}
+		if d == nil || d.Spec.Harness != "codex" || d.Spec.AgentID != "a_1" || d.Spec.AgentModel != "m" {
+			t.Fatalf("delivery: %+v", d)
+		}
+	}
+}
+
 // A caller's key can never take a delivery's: a job made first with a
 // look-alike key does not stop the result from being delivered.
 func TestDeliverKeyIsOurs(t *testing.T) {
 	q, _ := open(t)
-	child, err := askTurn(q, asked("p", "t_1", "p", 1), "")
+	parent := job(t, q, "")
+	child, err := askTurn(q, asked(parent.Session, parent.Turn, parent.Session, 1), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,14 +265,14 @@ func TestDeliverKeyIsOurs(t *testing.T) {
 		t.Fatalf("%s is a key a caller may send", ResultKey(child.ID))
 	}
 	for _, k := range []string{"result_" + child.ID, "result:" + child.ID} {
-		if _, _, err := q.Create(DefaultTeam, KindTurn, k, Spec{Session: "p", Prompt: "squat"}, Links{}); err != nil {
+		if _, _, err := q.Create(DefaultTeam, KindTurn, k, Spec{Session: parent.Session, Harness: "claude", Prompt: "squat"}, Links{}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if _, err := q.Cancel(DefaultTeam, child.ID); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := q.Deliver(DefaultTeam, nil); err != nil || n != 1 {
+	if n, err := q.Deliver(DefaultTeam, nil, nil); err != nil || n != 1 {
 		t.Fatalf("deliver: %d %v", n, err)
 	}
 }
@@ -313,7 +371,7 @@ func TestDeliverToALostSession(t *testing.T) {
 	if _, _, err := q.Start(r.ID, pa.ID, pa.Number, lease); err != nil {
 		t.Fatal(err)
 	}
-	child, err := askTurn(q, asked(parent.Session, pa.ID, parent.Session, 1), "")
+	child, err := askTurn(q, asked(parent.Session, parent.Turn, parent.Session, 1), "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,7 +390,7 @@ func TestDeliverToALostSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if n, err := q.Deliver(DefaultTeam, nil); err != nil || n != 0 {
+		if n, err := q.Deliver(DefaultTeam, nil, nil); err != nil || n != 0 {
 			t.Fatalf("deliver: %d %v", n, err)
 		}
 	}

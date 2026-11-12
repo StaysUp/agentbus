@@ -101,7 +101,7 @@ func gitRepo(t *testing.T) string {
 func deliverUntil(t *testing.T, e *env, session string, want int) []store.Turn {
 	t.Helper()
 	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
-		if _, err := e.q.Deliver(queue.DefaultTeam, nil); err != nil {
+		if _, err := e.q.Deliver(queue.DefaultTeam, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		list, err := e.store.Turns(store.TurnQuery{Session: session, Limit: 100})
@@ -176,8 +176,8 @@ func TestAskFanOutAndDeliver(t *testing.T) {
 		{ctok, "GET", "/api/v0/sessions/" + p.Session + "/events", "", 200},
 		{ctok, "GET", "/api/v0/sessions/" + c2.Session + "/events", "", 200},
 		// The asked turn never writes to its asker's session, nor its own.
-		{ctok, "POST", "/api/v0/turns", `{"session":"` + p.Session + `","prompt":"x"}`, 403},
-		{ctok, "POST", "/api/v0/turns", `{"session":"` + c1.Session + `","prompt":"x"}`, 403},
+		{ctok, "POST", "/api/v0/turns", `{"agent":"claude","session":"` + p.Session + `","prompt":"x"}`, 403},
+		{ctok, "POST", "/api/v0/turns", `{"agent":"claude","session":"` + c1.Session + `","prompt":"x"}`, 403},
 		// It may not stop the person's work.
 		{ctok, "POST", "/api/v0/turns/" + p.Turn + "/stop", "", 403},
 		{ptok, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"x","isolate":false}`, 403},
@@ -219,7 +219,7 @@ func TestAskFanOutAndDeliver(t *testing.T) {
 	if err != nil || j1.Ended == nil {
 		t.Fatalf("child job: %v %+v", err, j1)
 	}
-	p2 := startTurn(t, e, `{"session":"`+p.Session+`","prompt":"again"}`)
+	p2 := startTurn(t, e, `{"agent":"claude","session":"`+p.Session+`","prompt":"again"}`)
 	atok := tokenOf(t, dir, "again")
 	code, out := as(t, e, atok, "POST", "/api/v0/turns/"+c1.Turn+"/review", `{"agent":"codex"}`)
 	if code != 202 {

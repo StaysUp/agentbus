@@ -163,7 +163,7 @@ func TestTurnRefusalsComeFromTheJob(t *testing.T) {
 	if resp.StatusCode != 400 || !strings.Contains(out, "is not on the service's PATH") {
 		t.Fatalf("missing agent: %d %s", resp.StatusCode, out)
 	}
-	resp, out = do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"session":"nosuch","prompt":"x"}`)))
+	resp, out = do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"agent":"claude","session":"nosuch","prompt":"x"}`)))
 	if resp.StatusCode != 404 || !strings.Contains(out, "no such session") {
 		t.Fatalf("unknown session: %d %s", resp.StatusCode, out)
 	}
@@ -172,7 +172,7 @@ func TestTurnRefusalsComeFromTheJob(t *testing.T) {
 		t.Fatalf("jobs %+v", jobs)
 	}
 	for _, b := range []string{`{"agent":"x","folder":"/","prompt":"x"}`, `{"agent":"claude","folder":"rel","prompt":"x"}`,
-		`{"agent":"claude","folder":"/","prompt":""}`, `{"session":"a b","prompt":"x"}`, `{"session":null,"prompt":"x"}`} {
+		`{"agent":"claude","folder":"/","prompt":""}`, `{"agent":"claude","session":"a b","prompt":"x"}`, `{"session":null,"prompt":"x"}`} {
 		if resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(b))); resp.StatusCode != 400 {
 			t.Errorf("%s: %d %s, want 400", b, resp.StatusCode, out)
 		}

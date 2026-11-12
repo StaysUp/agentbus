@@ -7,12 +7,11 @@ package jobs
 // control's environment, or the person's own subscription connected on
 // control (package credentials). The vendor's reply goes back as it came.
 //
-// Which credential, by one rule: that of the agent the token's job names; a
-// job that names none continues on the agent its session's latest turn ran
-// on, as control's record holds it (what the runner's engine reads too).
-// Either way a saved agent's access and key variable come from control's
-// saved agents, never from a runner: a runner can at most pick among the
-// person's own agents, and never names a variable.
+// Which credential, by one rule: that of the agent the token's job names,
+// as control read it from its saved agents when the turn was asked for. The
+// runner's engine starts the turn with the same agent, so the two never
+// disagree. A saved agent's access and key variable come from control's
+// saved agents, never from a runner or the record a runner writes.
 //
 // The relay records every call it carries, in control's record, with the
 // session and turn of the job the token names: the request, then the reply
@@ -35,7 +34,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/staysup/agentbus/agents"
 	"github.com/staysup/agentbus/credentials"
 	"github.com/staysup/agentbus/gateway"
 	"github.com/staysup/agentbus/queue"
@@ -212,44 +210,13 @@ func (s *Server) credential(j queue.Job, up Upstream) (credentials.Cred, int, st
 	return cred, 0, ""
 }
 
-// savedAgent is control's saved agent id, or an error when control keeps
-// none or the agent is gone.
-func (s *Server) savedAgent(id string) (agents.Agent, error) {
-	if s.cfg.Agents == nil {
-		return agents.Agent{}, errors.New("jobs: no saved agents")
-	}
-	return s.cfg.Agents.Get(id)
-}
-
-// agentOf is the agent whose credential j's calls get (the rule above), or
-// why there is none.
+// agentOf is the agent whose credential j's calls get: the agent j names,
+// as control read it when the turn was asked for (api, queue.Deliver), the
+// one the runner's engine starts the turn with too. Every turn names its
+// agent; one stored before that rule names none and gets no credential.
 func (s *Server) agentOf(j queue.Job) (queue.Spec, string) {
-	sp := j.Spec
-	if sp.Harness == "" {
-		if s.cfg.Record == nil {
-			return sp, "control keeps no record, so it cannot tell this session's agent"
-		}
-		c, err := s.cfg.Record.Continuation(assignedSession(j))
-		if err != nil || !c.Known || c.Harness == "" {
-			return sp, "control's record does not hold this session's agent yet"
-		}
-		sp = queue.Spec{Harness: c.Harness, AgentID: c.AgentID}
-		if sp.AgentID != "" {
-			ag, err := s.savedAgent(sp.AgentID)
-			switch {
-			case err == nil:
-				sp.Harness, sp.Access, sp.KeyEnv = ag.Harness, ag.Access, ag.KeyEnv
-			case c.Access == "" || c.Access == credentials.AccessSubscription:
-				// The agent was removed since: the session goes on, on its
-				// harness's subscription, as the record holds it. A
-				// subscription goes only to its own vendor (credential).
-				sp.Access = credentials.AccessSubscription
-			default:
-				// A key's variable comes from control's saved agents only,
-				// never from the record, which a runner writes.
-				return sp, "this session's agent was removed, and only a saved agent names the variable of its key; save the agent again, or start a new conversation"
-			}
-		}
+	if j.Spec.Harness == "" {
+		return j.Spec, "this turn names no agent, so control adds no credential to its calls; send it again naming its agent"
 	}
-	return sp, ""
+	return j.Spec, ""
 }

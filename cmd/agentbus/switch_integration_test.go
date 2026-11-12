@@ -130,21 +130,20 @@ func TestSwitchAgentPerMessage(t *testing.T) {
 		t.Errorf("turn 4 started %v", ts)
 	}
 
-	// The model goes with the agent: a turn that names neither keeps the
-	// latest turn's model, and a switch to an agent with no model runs on the
-	// harness's default.
+	// The model goes with the agent: a model sent is that turn's only, and a
+	// turn that sends none runs with its named agent's model as it is now
+	// (his rule, 2026-11-12), here none, so the harness's default.
 	r, _ = next(5, map[string]any{"agent": "claude", "model": "haiku", "prompt": "fifth"})
 	if !strings.Contains(strings.Join(r.Args, " "), "--model haiku") {
 		t.Errorf("turn 5 args %q", r.Args)
 	}
 	r, ts = next(6, map[string]any{"prompt": "sixth"})
-	if !strings.Contains(strings.Join(r.Args, " "), "--model haiku") || ts["model"] != "haiku" {
-		t.Errorf("turn 6 args %q, started %v", r.Args, ts)
+	if strings.Contains(strings.Join(r.Args, " "), "--model") || ts["model"] != nil {
+		t.Errorf("turn 6 args %q, started %v, want the agent's own default", r.Args, ts)
 	}
-	// Naming the session's own agent changes nothing: it keeps the model.
 	r, _ = next(7, map[string]any{"agent": "claude", "prompt": "seventh"})
-	if !strings.Contains(strings.Join(r.Args, " "), "--model haiku") {
-		t.Errorf("turn 7 args %q, want the session's model kept", r.Args)
+	if strings.Contains(strings.Join(r.Args, " "), "--model") {
+		t.Errorf("turn 7 args %q, want the agent's own default", r.Args)
 	}
 	// A switch to an agent with no model runs on the harness's default.
 	r, _ = next(8, map[string]any{"agent": "codex", "prompt": "eighth"})

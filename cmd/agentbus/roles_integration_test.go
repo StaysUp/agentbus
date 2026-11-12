@@ -276,7 +276,7 @@ func fileText(t *testing.T, p string) string {
 func filesFlow(t *testing.T, c *client, folder string, body map[string]any) {
 	t.Helper()
 	t1 := c.turn(merge(body, map[string]any{"agent": "claude", "prompt": "p1"}))
-	t2 := c.turn(map[string]any{"session": t1.Session, "prompt": "p2"})
+	t2 := c.turn(map[string]any{"session": t1.Session, "agent": "claude", "prompt": "p2"})
 	// The person's folder is untouched until an apply.
 	if got := fileText(t, filepath.Join(folder, "a.txt")); got != "one\n" {
 		t.Fatalf("a.txt before any apply: %q", got)
@@ -337,7 +337,7 @@ func restoreFlow(t *testing.T, c *client, folder string, body map[string]any) {
 	if code, a := c.apply(t1.Turn); code != 200 || a.State != "applied" {
 		t.Fatalf("apply of the first turn: %d %+v", code, a)
 	}
-	t2 := c.turn(map[string]any{"session": t1.Session, "prompt": "restore"})
+	t2 := c.turn(map[string]any{"session": t1.Session, "agent": "claude", "prompt": "restore"})
 	if code, a := c.apply(t2.Turn); code != 200 || a.State != "applied" {
 		t.Fatalf("apply of the turn that puts a.txt back: %d %+v", code, a)
 	}

@@ -146,36 +146,78 @@ func TestUpRecordsEveryRunnersCallsOnce(t *testing.T) {
 	}
 }
 
-// A session whose saved agent was removed goes on, on its harness's
-// subscription as the record holds it: up's relay adds the sign-in to its
-// next turn's calls as before the removal.
-func TestUpSessionGoesOnAfterItsAgentIsRemoved(t *testing.T) {
+// Every turn names its agent, read as it is when the turn is asked for,
+// and the tool and its credential both come from that one answer (his rule,
+// 2026-11-12):
+//   - a next turn that names a removed agent is refused, and says so, for a
+//     subscription agent and an OpenRouter one alike (rounds 2 and 3);
+//   - a next turn that names an agent edited since runs on it as it is now,
+//     its tool and its credential agreeing (round 3: an edit from claude to
+//     codex left the old claude session's call refused, 403).
+func TestUpEveryTurnNamesItsAgent(t *testing.T) {
 	vendor := newFakeVendor(t)
+	chat := newFakeVendor(t)
 	home := t.TempDir()
-	svc := runServiceWith(t, home, nil, 0, vendor.URL, true)
+	// A fake OpenRouter key in control's environment; no turn here calls
+	// OpenRouter.
+	getenv := func(k string) string {
+		if k == "OPENROUTER_API_KEY" {
+			return "fake-openrouter-key-for-tests"
+		}
+		return os.Getenv(k)
+	}
+	svc := runServiceVendors(t, home, getenv, 0, vendor.URL, chat.URL, true)
 	tok := readToken(t, home)
 	t.Setenv("AGENTBUS_FAKE_OUT", filepath.Join(t.TempDir(), "report"))
-	t.Setenv("AGENTBUS_FAKE_CALL", "1")
-	code, ag := sendAPI(t, svc, tok, "POST", "/api/v0/agents", map[string]any{"name": "Mine", "harness": "claude", "access": "subscription"})
-	if code != http.StatusCreated {
-		t.Fatalf("agent: %d %v", code, ag)
+	save := func(fields map[string]any) string {
+		code, ag := sendAPI(t, svc, tok, "POST", "/api/v0/agents", fields)
+		if code != http.StatusCreated {
+			t.Fatalf("agent: %d %v", code, ag)
+		}
+		return ag["id"].(string)
 	}
-	session, _ := startRun(t, svc, tok, ag["id"].(string), `{"type":"result","subtype":"success","result":"one","session_id":"fake-resume-1"}`+"\n")
-	if code, _ := sendAPI(t, svc, tok, "DELETE", "/api/v0/agents/"+ag["id"].(string), nil); code != http.StatusNoContent {
-		t.Fatalf("remove: %d", code)
+	claudeResult := `{"type":"result","subtype":"success","result":"one","session_id":"fake-resume-1"}` + "\n"
+
+	for _, fields := range []map[string]any{
+		{"name": "Mine", "harness": "claude", "access": "subscription"},
+		{"name": "Routed", "harness": "claude", "access": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "key_env": "OPENROUTER_API_KEY"},
+	} {
+		id := save(fields)
+		session, _ := startRun(t, svc, tok, id, claudeResult)
+		if code, _ := sendAPI(t, svc, tok, "DELETE", "/api/v0/agents/"+id, nil); code != http.StatusNoContent {
+			t.Fatalf("remove: %d", code)
+		}
+		code, _, raw := postMessage(t, svc, tok, session, map[string]any{"agent": id, "prompt": "two"})
+		if code != http.StatusBadRequest || !strings.Contains(raw, `agent \"`+id+`\" was removed; pick another`) {
+			t.Fatalf("%s, removed: %d %s", fields["access"], code, raw)
+		}
+		// A next turn that names no agent at all is refused too.
+		code, _, raw = postAPI(t, svc, tok, "/api/v0/turns", []byte(`{"session":"`+session+`","prompt":"three"}`))
+		if code != http.StatusBadRequest || !strings.Contains(raw, "agent is required") {
+			t.Fatalf("%s, no agent: %d %s", fields["access"], code, raw)
+		}
 	}
-	code, _, raw := postMessage(t, svc, tok, session, map[string]any{"prompt": "two"})
+
+	// Edited from claude to codex: the session's next turn runs codex, and
+	// control adds codex's sign-in to its call.
+	id := save(map[string]any{"name": "Edited", "harness": "claude", "access": "subscription"})
+	session, _ := startRun(t, svc, tok, id, claudeResult)
+	if code, ag := sendAPI(t, svc, tok, "PUT", "/api/v0/agents/"+id, map[string]any{"name": "Edited", "harness": "codex", "access": "subscription"}); code != http.StatusOK {
+		t.Fatalf("edit: %d %v", code, ag)
+	}
+	t.Setenv("AGENTBUS_FAKE_CODEX_BODY", `{"model":"x","input":[]}`)
+	code, out, raw := postMessage(t, svc, tok, session, map[string]any{"agent": id, "prompt": "two"})
 	if code != http.StatusAccepted {
-		t.Fatalf("next turn: %d %s", code, raw)
+		t.Fatalf("edited, next turn: %d %s", code, raw)
 	}
 	closed := waitClosedN(t, svc, session, 2)
 	if c := closed[len(closed)-1]; c.ExitCode == nil || *c.ExitCode != 0 {
-		t.Fatalf("the next turn closed %+v", c)
+		t.Fatalf("the edited agent's turn closed %+v", c)
 	}
-	want := "/v1/messages Bearer " + fakeSubscription
-	if got := vendor.seen(); len(got) != 2 || got[0] != want || got[1] != want {
-		t.Fatalf("the vendor saw %v", got)
+	if got := chat.seen(); len(got) != 1 || got[0] != "/backend-api/codex/responses Bearer "+fakeSubscription {
+		t.Fatalf("chatgpt saw %v", got)
 	}
+	_ = out
 }
 
 // A model the vendor refuses fails the turn with the vendor's own words,

@@ -332,11 +332,22 @@ func runLaunchCase(t *testing.T, self string, c launchCase) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "=== %s\n", c.name)
 	n := 0
+	var prev engine.Request
 	for _, req := range c.turns {
 		if req.Session == "" {
 			req.Folder = folder
 		}
 		fmt.Fprintf(&b, "--- turn %s harness=%q access=%q model=%q read_only=%t\n", req.Turn, req.Harness, req.Access, req.Model, req.ReadOnly)
+		// Every turn names its agent: a next turn that names none here runs
+		// on the agent the turn before named, with its model, as control
+		// fills it in from the saved agent the cockpit sends.
+		if req.Session != "" && req.Harness == "" {
+			req.Harness, req.AgentID, req.Access, req.KeyEnv = prev.Harness, prev.AgentID, prev.Access, prev.KeyEnv
+			if req.AgentModel == "" {
+				req.AgentModel = prev.Model
+			}
+		}
+		prev = req
 		logs, replayAsked = nil, nil
 		tn, err := eng.Start(req)
 		if err != nil {

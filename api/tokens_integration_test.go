@@ -188,8 +188,8 @@ func TestTurnToken(t *testing.T) {
 		{"GET", "/docs/llms.txt", "", 200},
 		// The writes it may not make, and every read beyond its request
 		// tree. Asking other agents is tested in asked_integration_test.go.
-		{"POST", "/api/v0/turns", `{"session":"` + own + `","prompt":"again"}`, 403},
-		{"POST", "/api/v0/turns", `{"session":"` + other + `","prompt":"again"}`, 403},
+		{"POST", "/api/v0/turns", `{"agent":"claude","session":"` + own + `","prompt":"again"}`, 403},
+		{"POST", "/api/v0/turns", `{"agent":"claude","session":"` + other + `","prompt":"again"}`, 403},
 		{"POST", "/api/v0/turns", `{"agent":"claude","folder":"` + t.TempDir() + `","prompt":"new"}`, 403},
 		{"POST", "/api/v0/events", `{"kind":"x.a.b","session":"` + own + `","text":"hi"}`, 403},
 		// Not even its own turn: it stops only work its tree asked for.

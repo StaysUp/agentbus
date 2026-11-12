@@ -173,8 +173,9 @@ var routes = slices.Concat([]route{
 					"This is not your harness's own subagent: it is recorded, and can be another vendor."},
 			{name: "continue_session", effect: effectStarts, need: "continue",
 				fields:   []string{"session", "prompt", "agent", "model", "idempotency_key"},
-				required: []string{"session", "prompt"},
+				required: []string{"session", "prompt", "agent"},
 				doc: "Send the next message to a session you started with ask_agent. " +
+					"Name the agent it runs on (from list_agents), as with ask_agent: a session keeps no agent of its own. " +
 					"Never your own session or the person's. The result comes back to your session as a later turn."}},
 		replies: []reply{ok(202, Started{}, "The turn: running, or queued behind the session's earlier turns or for a runner."), turnRefused,
 			fail(403, "A turn token's request is refused: error says why, such as a cap on asked work."),

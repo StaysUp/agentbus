@@ -178,9 +178,11 @@ func (q *Queue) ReviewLinked(team, id string, as Spec, key string, includeReply 
 // ended, with the result as its prompt, and says how many it started. Each
 // job's result is delivered once: the delivery's idempotency key is the job's
 // id, and the deliveries table records it, or why it could not be. The turn
-// runs on the asking session's own agent, after the turn running there now.
-// name gives a saved agent's name for the prompt; nil names it by id.
-func (q *Queue) Deliver(team string, name func(id string) string) (int, error) {
+// runs on the agent of the asking turn, as agent reads it now, after the
+// turn running there now: every turn names its agent, and control names
+// this one. name gives a saved agent's name for the prompt; nil names it by
+// id. agent nil runs it on the asking turn's agent as that turn was asked.
+func (q *Queue) Deliver(team string, name func(id string) string, agent AgentOf) (int, error) {
 	rows, err := q.db.Query(`SELECT id FROM jobs j WHERE team = ? AND ended IS NOT NULL
 		AND json_extract(links, '$.asker.session') IS NOT NULL
 		AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.job = j.id) ORDER BY ended, id LIMIT 20`, team)
@@ -211,13 +213,35 @@ func (q *Queue) Deliver(team string, name func(id string) string) (int, error) {
 			return n, err
 		}
 		spec := Spec{Session: j.Links.Asker.Session, Prompt: ResultPrompt(j, c, name)}
+		why := ""
+		asking, err := q.JobByTurn(team, j.Links.Asker.Turn)
+		switch {
+		case errors.Is(err, ErrNotFound):
+			why = "the asking turn is not in the queue, so its agent is not known"
+		case err != nil:
+			return n, err
+		case agent != nil:
+			var as Spec
+			if as, why = agent(asking.Spec); why == "" {
+				spec.Harness, spec.AgentID, spec.Access, spec.KeyEnv, spec.AgentModel = as.Harness, as.AgentID, as.Access, as.KeyEnv, as.AgentModel
+			}
+		default:
+			a := asking.Spec
+			spec.Harness, spec.AgentID, spec.Access, spec.KeyEnv, spec.AgentModel = a.Harness, a.AgentID, a.Access, a.KeyEnv, a.AgentModel
+		}
+		if why != "" {
+			if _, err := q.db.Exec(`INSERT INTO deliveries(job, delivery, error, created) VALUES(?,?,?,?) ON CONFLICT DO NOTHING`,
+				j.ID, "", why, nanos(q.now())); err != nil {
+				return n, fmt.Errorf("queue: write delivery: %w", err)
+			}
+			continue
+		}
 		res := &ResultOf{Job: j.ID, Kind: j.Kind, Session: resultSession(j), Turn: j.Turn, Agent: agentName(j.Spec)}
 		links := Links{ResultOf: res}
 		if j.Links.Chain != nil {
 			links.Chain = &Chain{Root: j.Links.Chain.Root, Depth: j.Links.Chain.Depth}
 		}
 		d, _, err := q.create(team, KindTurn, ResultKey(j.ID), spec, links, Limits{}, spec.Session)
-		why := ""
 		var removed *RunnerRemovedError
 		switch {
 		case errors.As(err, &removed):
@@ -242,6 +266,11 @@ func (q *Queue) Deliver(team string, name func(id string) string) (int, error) {
 	}
 	return n, nil
 }
+
+// AgentOf is the agent a delivered result's turn runs on, read now from the
+// asking turn's spec (its saved agent, or its harness), or why it cannot
+// run, such as "agent X was removed, pick another".
+type AgentOf func(asking Spec) (Spec, string)
 
 // ResultKey is the idempotency key of the turn job that delivers job id's
 // result. It holds a "/", which no key a caller sends may hold, so no request

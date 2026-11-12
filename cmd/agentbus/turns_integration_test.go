@@ -93,7 +93,7 @@ func TestRunTurnIDOnEveryEvent(t *testing.T) {
 
 	// The session's next turn gets a new id of its own.
 	t.Setenv("AGENTBUS_FAKE_CALL", "1")
-	b, _ = json.Marshal(map[string]any{"session": session, "prompt": "second words"})
+	b, _ = json.Marshal(map[string]any{"session": session, "agent": "claude", "prompt": "second words"})
 	code, out, raw = postAPI(t, svc, tok, turnsPath, b)
 	if code != http.StatusAccepted || out["session"] != session {
 		t.Fatalf("next %d %s", code, raw)

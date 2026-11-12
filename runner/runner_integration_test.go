@@ -284,7 +284,7 @@ func TestCancelStopsTheTurn(t *testing.T) {
 // its status. Here: a session no event names.
 func TestRefusedTurnIsSetupFailure(t *testing.T) {
 	w := newWorld(t, 1)
-	j := w.create(t, queue.Spec{Session: "nosuch", Prompt: "hi"})
+	j := w.create(t, queue.Spec{Session: "nosuch", Harness: "claude", Prompt: "hi"})
 	waitFor(t, "failed", func() bool { return w.job(t, j.ID).Ended != nil })
 	got := w.job(t, j.ID)
 	res := result(t, got)
@@ -360,7 +360,7 @@ func TestWorktreeSession(t *testing.T) {
 	first := w.create(t, queue.Spec{Harness: "claude", Repo: repo, Base: "main", Prompt: "write app.txt v2\nwrite test.log ran\nhold"})
 	waitFor(t, "a turn", func() bool { return len(w.runs()) == 1 })
 	// The next job of the session is queued now, and waits for the first.
-	next := w.create(t, queue.Spec{Session: first.Session, Prompt: "write second.txt two"})
+	next := w.create(t, queue.Spec{Session: first.Session, Harness: "claude", Prompt: "write second.txt two"})
 	time.Sleep(300 * time.Millisecond)
 	if got := w.job(t, next.ID); got.State != queue.Queued || len(w.runs()) != 1 {
 		t.Fatalf("the next job did not wait: %s, %d turns", got.State, len(w.runs()))
@@ -532,7 +532,7 @@ func TestCopyWrittenBetweenTurnsIsInTheNextDiff(t *testing.T) {
 		t.Fatalf("first: %s %s", f.State, f.Reason)
 	}
 	write(t, filepath.Join(w.r.cfg.Workdir, first.Session, "stray.txt"), "left behind\n")
-	next := w.create(t, queue.Spec{Session: first.Session, Prompt: "write second.txt two"})
+	next := w.create(t, queue.Spec{Session: first.Session, Harness: "claude", Prompt: "write second.txt two"})
 	waitFor(t, "finished", func() bool { return w.job(t, next.ID).Ended != nil })
 	var res struct {
 		Changes workspace.Changes `json:"changes"`

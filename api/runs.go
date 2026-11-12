@@ -45,13 +45,13 @@ const badRun = "the body must be one JSON object with prompt, agent and folder (
 // optional in the API's description.
 type TurnRequest struct {
 	Session   string `json:"session,omitempty" doc:"A session the snapshot calls resumable: this turn is its next one. Absent: a new session."`
-	Agent     string `json:"agent,omitempty" doc:"A saved agent's id, from GET /api/v0/agents: its harness, access and model run the turn. claude, codex and agy also name that harness on its own subscription when no saved agent has that id, as when the person removed that agent or the data folder started without it. Required without session. With session it is optional: absent, the turn runs on the agent of the session's latest turn; sent, this turn runs on that agent, in the session's folder, and later turns that name none keep it. On the same harness as the latest turn the conversation continues by own replay; on another harness the turn gets the earlier turns as plain text (continuity transcript)."`
+	Agent     string `json:"agent,omitempty" doc:"A saved agent's id, from GET /api/v0/agents: its harness, access and model run the turn. claude, codex and agy also name that harness on its own subscription when no saved agent has that id, as when the person removed that agent or the data folder started without it. Required on every turn, a session's next one too (400 without it): a session keeps no agent of its own. The agent is read as it is when the turn is asked for, and its model is the turn's unless model is sent. A removed agent is refused: pick another. With session the turn runs in the session's folder. On the same harness as the latest turn the conversation continues by own replay; on another harness the turn gets the earlier turns as plain text (continuity transcript)."`
 	Folder    string `json:"folder,omitempty" doc:"An absolute path to a directory on the machine named in connector, that the user its runner runs as can read. Typing it is the grant for this session: that machine's runner checks it and registers it (agentbus up's own; on agentbus server the machine named in connector, or the only one online), and the session runs on that machine for its whole life. The queue keeps only the folder's reference, and GET /api/v0/folders lists the folder from then on. Without session, folder or folder_ref is required. With session it is the session's own; if sent it must match."`
 	FolderRef string `json:"folder_ref,omitempty" doc:"A folder's reference, fld_ and 16 hex digits, from GET /api/v0/folders: the turn runs in that folder, on the runner of the machine that holds it. For a new session, instead of folder."`
 	Connector string `json:"connector,omitempty" doc:"The machine the session runs on (con_ and 16 hex digits): a runner's connector in GET /api/v0/runners, or a folder's in GET /api/v0/folders. Only the runner on that machine takes the session's work. With folder_ref: the machine that holds the folder. With folder: the machine whose runner checks and registers it. Absent: this service's own machine (agentbus up), or else the only one online; with several online, it is required for folder. The name is kept from before 0.5, when a connector held a machine's folders."`
 	Isolate   *bool  `json:"isolate,omitempty" doc:"True unless false, for a new session. True: the session runs in its own copy of folder, exactly as folder is now, uncommitted edits included, made as the isolation setting says (auto, overlay, copy, git or none). False: always folder as it is. Not sent with session."`
 	Prompt    string `json:"prompt" doc:"From 1 byte to 256 KiB, no NUL byte. Always passed after --."`
-	Model     string `json:"model,omitempty" doc:"Passed only as the value of --model. Absent with agent: the saved agent's model, for a new session or a turn that switches agent; a next turn that names the session's own latest agent keeps the session's model. A session's next turn with no agent and no model keeps the model of the session's latest turn, from its turn.started."`
+	Model     string `json:"model,omitempty" doc:"Passed only as the value of --model, for this turn only. Absent: the named agent's model, as it is when the turn is asked for; an agent with none runs on its harness's own default."`
 	ReadOnly  *bool  `json:"read_only,omitempty" doc:"False unless true. True: claude gets Read, Grep and Glob only; codex runs with --sandbox read-only. False: claude keeps its own tools and permission settings, plus the edit rule of the settings (by default it edits its session's folder without asking); with edit = \"session\" codex runs with --sandbox workspace-write and network access on, so it can edit the folder and reach the network, and with edit = \"none\" read-only. Read-only codex has no network."`
 	// IdempotencyKey makes a retry safe: a client whose request timed out
 	// sends it again with the same key and gets the same turn.
@@ -138,18 +138,20 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "folder_ref and connector are for a new session; a session keeps its own folder")
 			return
 		}
-		if body.Agent != "" {
-			ag, ok := a.turnAgent(w, body.Agent, body.IdempotencyKey)
-			if !ok {
-				return
-			}
-			spec.Harness, spec.AgentID, spec.Access, spec.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
-			// The agent's model is used only if the turn switches agent,
-			// which the runner knows when the turn starts: the session's
-			// latest turn may change while this one waits in the queue.
-			if spec.Model == "" {
-				spec.AgentModel = ag.Model
-			}
+		// Every turn names its agent, a next one too (his rule,
+		// 2026-11-12): it is read here, once, as it is now, and the turn's
+		// tool and its credential both come from this one answer.
+		if body.Agent == "" {
+			writeError(w, http.StatusBadRequest, run.NoAgent)
+			return
+		}
+		ag, ok := a.turnAgent(w, body.Agent, body.IdempotencyKey)
+		if !ok {
+			return
+		}
+		spec.Harness, spec.AgentID, spec.Access, spec.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
+		if spec.Model == "" {
+			spec.AgentModel = ag.Model
 		}
 		if c.Known && body.Folder != "" && filepath.Clean(body.Folder) != filepath.Clean(c.Folder) {
 			writeError(w, http.StatusBadRequest, "folder is not this session's folder "+strconv.Quote(c.Folder)+
@@ -300,6 +302,9 @@ func (a *API) resolveAgent(id string) (agents.Agent, error) {
 		return agents.Agent{}, errors.New("agent must be a saved agent's id; GET /api/v0/agents lists them")
 	}
 	ag, err := a.cfg.Agents.Resolve(id)
+	if errors.Is(err, agents.ErrRemoved) {
+		return agents.Agent{}, errors.New("agent " + strconv.Quote(id) + " was removed; pick another (GET /api/v0/agents lists them)")
+	}
 	if err != nil {
 		return agents.Agent{}, errors.New("agent " + strconv.Quote(id) + " is not a saved agent; GET /api/v0/agents lists them")
 	}

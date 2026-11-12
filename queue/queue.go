@@ -271,10 +271,9 @@ type Spec struct {
 	// ModelFromAgent: Model came from the saved agent, not the request. It
 	// is never stored; it only keeps the request's hash what was asked.
 	ModelFromAgent bool `json:"-"`
-	// AgentModel: a session's next turn that names a saved agent and no
-	// model gets that agent's model here, filled by the control plane, for
-	// the runner to use only if the turn switches agent: a turn that names
-	// the session's own latest agent keeps the session's model.
+	// AgentModel: a session's next turn that names no model gets its named
+	// agent's model here, filled by the control plane when it read the
+	// agent, and runs with it.
 	AgentModel string `json:"agent_model,omitempty"`
 	// ApplyFrom and ApplyTo, for an apply job: the changesets
 	// (workspace.Changeset) it goes from and to, by their blobs in the

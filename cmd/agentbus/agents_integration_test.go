@@ -344,7 +344,7 @@ func TestCopiedSessionKeptAcrossTurnsAndRemovedOnClose(t *testing.T) {
 	}
 	// The second turn writes a file in the copy, through the fake agent.
 	t.Setenv("AGENTBUS_FAKE_MARK", filepath.Join(want, "made.txt"))
-	code, next := startTurn(t, svc, tok, map[string]any{"session": j.Session, "prompt": "two"})
+	code, next := startTurn(t, svc, tok, map[string]any{"session": j.Session, "agent": j.Spec.Harness, "prompt": "two"})
 	if code != http.StatusAccepted {
 		t.Fatalf("next turn: %d", code)
 	}
@@ -456,7 +456,7 @@ func TestIsolatedSubfolderKeptAcrossTurnsAndReview(t *testing.T) {
 		t.Fatalf("the record's folder_ref %q, want %q (%v)", c.FolderRef, j.Spec.FolderRef, err)
 	}
 	os.Remove(report)
-	code, next := startTurn(t, svc, tok, map[string]any{"session": j.Session, "prompt": "two"})
+	code, next := startTurn(t, svc, tok, map[string]any{"session": j.Session, "agent": j.Spec.Harness, "prompt": "two"})
 	if code != http.StatusAccepted {
 		t.Fatalf("next turn: %d", code)
 	}

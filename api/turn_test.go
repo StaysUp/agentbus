@@ -36,7 +36,7 @@ func resumableEnv(t *testing.T, wire run.Wire) *env {
 
 func postNext(t *testing.T, e *env) (int, string) {
 	t.Helper()
-	resp, body := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"session":"s1","prompt":"next"}`)))
+	resp, body := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"agent":"claude","session":"s1","prompt":"next"}`)))
 	return resp.StatusCode, body
 }
 
