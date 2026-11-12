@@ -286,8 +286,7 @@ func receive(fd, n int) ([]net.Listener, string) {
 // hint is what to do when Linux refuses a user namespace its capabilities.
 func hint(err error) string {
 	if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
-		return "; on Ubuntu 24.04 and later AppArmor allows it only to a binary with a profile: " +
-			"run once: curl -fsSL https://raw.githubusercontent.com/staysup/agentbus/main/install.sh | sudo sh -s apparmor <path to agentbus>"
+		return AppArmorAdvice()
 	}
 	if errors.Is(err, unix.ENOSPC) || errors.Is(err, unix.EUSERS) {
 		return "; the limit on user namespaces is reached (user.max_user_namespaces)"

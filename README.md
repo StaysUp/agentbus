@@ -124,6 +124,12 @@ next turn. Runners read control's settings before each turn. The keys and their 
 
 - OpenRouter turns show a cost of $0: the price table has no OpenRouter prices yet.
 - A session stays on the machine that holds its folder.
+- On Ubuntu 24.04 and later, AppArmor allows user namespaces only to a program with a profile, so
+  the sandbox and `contain` need one. The install script offers it when it installs into a folder
+  only root can change: `curl -fsSL https://raw.githubusercontent.com/staysup/agentbus/main/install.sh | sudo AGENTBUS_INSTALL_DIR=/usr/local/bin sh`.
+  The profile is `packaging/apparmor/agentbus`, also in each release archive. The runner says what is
+  missing. The fallback is the system setting `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0`,
+  which turns the rule off for every program, so the profile is the better choice.
 - Network control is Linux only. On macOS, `contain = "on"` refuses every turn unless the sandbox
   is on.
 - On ext4 a copy is a full copy. A clone (APFS) or a reflink (xfs, btrfs) is used where the disk

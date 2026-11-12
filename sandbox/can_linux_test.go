@@ -22,9 +22,14 @@ func TestUserNSHint(t *testing.T) {
 				return []byte(v), nil
 			}
 			return nil, os.ErrNotExist
-		})
+		}, func() string { return "; AppArmor allows it only with a profile" })
 		if (c.want == "") != (got == "") || !strings.Contains(got, c.want) {
 			t.Errorf("%v: %q, want %q in it", c.files, got, c.want)
 		}
+	}
+	// A program with its own profile is not told AppArmor refuses it.
+	one := func(string) ([]byte, error) { return []byte("1"), nil }
+	if word, got := userNSHint(one, func() string { return "" }); word != "" || got != "" {
+		t.Errorf("with a profile: %q %q, want none", word, got)
 	}
 }

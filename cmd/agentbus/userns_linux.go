@@ -34,6 +34,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/staysup/agentbus/isolation"
+	"github.com/staysup/agentbus/netjail"
 )
 
 // usernsEnv: "off" keeps the service outside a namespace; the child is
@@ -52,16 +53,9 @@ const (
 var mountCaps = []uintptr{unix.CAP_SYS_ADMIN, unix.CAP_DAC_OVERRIDE, unix.CAP_DAC_READ_SEARCH,
 	unix.CAP_FOWNER, unix.CAP_CHOWN, unix.CAP_MKNOD, unix.CAP_FSETID}
 
-// apparmorHint is what to do when AppArmor refuses the namespace: the
-// profile names this binary's path.
-func apparmorHint() string {
-	bin := self()
-	if bin == "" {
-		bin = "/path/to/agentbus"
-	}
-	return "; on Ubuntu 24.04 and later AppArmor allows it only to a binary with a profile: " +
-		"run once: curl -fsSL https://raw.githubusercontent.com/staysup/agentbus/main/install.sh | sudo sh -s apparmor " + bin
-}
+// apparmorHint is what to do when AppArmor refuses the namespace: what is
+// missing and the one command that adds it; "" when AppArmor is not why.
+func apparmorHint() string { return netjail.AppArmorAdvice() }
 
 // userns runs the service in its own namespace where it should: for up and
 // runner, on Linux, not root, unless AGENTBUS_USERNS=off. done is true when

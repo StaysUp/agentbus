@@ -35,3 +35,59 @@ jobs:
       # integration tag, every test with -race, and the build.
       - name: make gate
         run: make gate
+
+  # Ubuntu 24.04 refuses user namespaces with capabilities to a program
+  # without an AppArmor profile, so the gate above skips the wall and
+  # contain tests there. This job installs the profile with install.sh, for
+  # test binaries put where only root can change them (install.sh refuses
+  # any other path), and runs those tests with AGENTBUS_TEST_WALL=required,
+  # so a skip fails.
+  apparmor:
+    name: Wall and contain under AppArmor (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: bubblewrap
+        run: sudo apt-get update && sudo apt-get install -y bubblewrap
+
+      - name: The restriction is on
+        run: test "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns)" = 1
+
+      - name: Test binaries only root can change
+        run: |
+          go test -c -tags integration -o "$RUNNER_TEMP/sandbox.test" ./sandbox
+          go test -c -o "$RUNNER_TEMP/netjail.test" ./netjail
+          sudo install -d -o root -g root -m 755 /opt/agentbus-ci
+          sudo install -o root -g root -m 755 "$RUNNER_TEMP/sandbox.test" "$RUNNER_TEMP/netjail.test" /opt/agentbus-ci/
+
+      - name: Without the profile, the advice names it
+        run: |
+          out=$(cd netjail && /opt/agentbus-ci/netjail.test -test.run 'TestStartRefusesWithWhy' -test.v 2>&1 || true)
+          printf '%s\n' "$out"
+          printf '%s\n' "$out" | grep -F 'sudo sh -s apparmor /opt/agentbus-ci/netjail.test'
+
+      - name: install.sh refuses a path others can change
+        run: |
+          if sudo sh install.sh apparmor "$RUNNER_TEMP/netjail.test"; then exit 1; fi
+
+      - name: netjail with the profile
+        env:
+          AGENTBUS_TEST_WALL: required
+        run: |
+          sudo sh install.sh apparmor /opt/agentbus-ci/netjail.test
+          cd netjail && /opt/agentbus-ci/netjail.test -test.v -test.count=1
+
+      - name: sandbox with the profile
+        env:
+          AGENTBUS_TEST_WALL: required
+        run: |
+          sudo sh install.sh apparmor /opt/agentbus-ci/sandbox.test
+          cd sandbox && /opt/agentbus-ci/sandbox.test -test.v -test.count=1

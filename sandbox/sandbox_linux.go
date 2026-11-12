@@ -59,7 +59,7 @@ func (b *Box) build(spec netjail.Spec) error {
 	// The check makes its own network namespace: it runs outside netjail.
 	check := exec.Command(bwrap, append(append(append([]string{}, b.plat.args...), "--unshare-net"), "--", "/usr/bin/true")...)
 	if !runCheck(check) {
-		return &Error{Why: "bubblewrap could not start a program in it: a path it shows the session is missing, or its user namespace was refused (on Ubuntu 24.04 and later AppArmor refuses one to a program without a profile)"}
+		return &Error{Why: "bubblewrap could not start a program in it: a path it shows the session is missing, or its user namespace was refused"}
 	}
 	b.jail = netjail.New(spec)
 	return nil
@@ -222,10 +222,12 @@ func systemHint() (string, string) {
 	if _, err := os.Stat(bwrap); err != nil {
 		return "", ""
 	}
-	return userNSHint(os.ReadFile)
+	return userNSHint(os.ReadFile, netjail.AppArmorAdvice)
 }
 
-func userNSHint(read func(string) ([]byte, error)) (word, text string) {
+// userNSHint reads the switches with read; appArmor is netjail's advice
+// for AppArmor's rule, "" when that rule is not what refuses this program.
+func userNSHint(read func(string) ([]byte, error), appArmor func() string) (word, text string) {
 	val := func(p string) string {
 		b, err := read(p)
 		if err != nil {
@@ -239,8 +241,9 @@ func userNSHint(read func(string) ([]byte, error)) (word, text string) {
 	case val("/proc/sys/user/max_user_namespaces") == "0":
 		return "max_user_namespaces", "; this machine allows no user namespaces (user.max_user_namespaces is 0)"
 	case val("/proc/sys/kernel/apparmor_restrict_unprivileged_userns") == "1":
-		return "AppArmor", "; AppArmor allows a user namespace only to a program with a profile " +
-			"(kernel.apparmor_restrict_unprivileged_userns is 1, as on Ubuntu 24.04 and later)"
+		if a := appArmor(); a != "" {
+			return "AppArmor", a
+		}
 	}
 	return "", ""
 }
