@@ -437,6 +437,9 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, session, runTurn
 	body, err := io.ReadAll(r.Body)
 	_ = r.Body.Close()
 	if err != nil {
+		if rl != nil {
+			g.cutRequest(rl, r)
+		}
 		http.Error(w, "gateway: the request could not be read", http.StatusBadRequest)
 		return
 	}

@@ -16,10 +16,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/staysup/agentbus/event"
 )
 
 // ExchangeHeader carries the runner's exchange id of a model call to
@@ -91,6 +94,23 @@ func (g *Gateway) ServeRelayed(w http.ResponseWriter, r *http.Request, rl Relaye
 	r.URL.Path, r.URL.RawPath = rl.Path, ""
 	r = r.WithContext(context.WithValue(r.Context(), relayedKey{}, &relayed{Relayed: rl, w: w}))
 	g.serve(w, r, rl.Session, rl.Turn)
+}
+
+// RequestCut is the error of a relayed call whose request did not arrive
+// whole: the runner's connection ended during it. No vendor got it.
+const RequestCut = "the request did not reach control whole, so no vendor got it"
+
+// cutRequest records a relayed call whose request did not arrive whole, so
+// control's record holds every call it took, this one too.
+func (g *Gateway) cutRequest(rl *relayed, r *http.Request) {
+	id := rl.Exchange
+	if id == "" {
+		id = fmt.Sprintf("x-%s-%d", g.run, g.seq.Add(1))
+	}
+	ex := &exchange{id: id, session: rl.Session, client: clientName(r.UserAgent()), turn: rl.Turn, start: g.now(), relayed: true}
+	g.track(ex, rl.Session, rl.Turn)
+	g.emit(ex, []event.Event{{Kind: event.ModelRequested, Error: RequestCut}, {Kind: event.ModelResponded, Error: RequestCut}})
+	g.flushed(ex.done)
 }
 
 // refuser answers a relayed call that carries a Refusal in the vendor's

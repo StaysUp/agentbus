@@ -55,7 +55,8 @@ with the refusal as its reply. A vendor it cannot reach or read answers **502** 
 is recorded as a failed `model.responded`, and the service log gets one
 `gateway.upstream_failed … via=relay session=… turn=… exchange=… class=… reason=…` line, never a
 header, a token or a body. A reply cut off before its end is recorded with
-`the reply was cut off` in its error. The runner's gateway names each call in the
+`the reply was cut off` in its error, and a request cut off before it arrived whole with
+`the request did not reach control whole, so no vendor got it`. The runner's gateway names each call in the
 `X-Agentbus-Exchange` header, and the relay records the call under that name, so a `tool.refused`
 the runner sends names the same call. The relay ignores a name of another session's call, of
 another turn's, or of its own, and names the call itself; the header never reaches a vendor. A

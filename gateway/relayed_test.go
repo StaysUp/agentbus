@@ -336,3 +336,40 @@ func TestRelayedCallHoldsTurnWhilePrepared(t *testing.T) {
 		t.Fatal("the call's reply was not recorded")
 	}
 }
+
+// cutBody gives some bytes, then fails, as a runner's upload cut off does.
+type cutBody struct{ sent bool }
+
+func (b *cutBody) Read(p []byte) (int, error) {
+	if b.sent {
+		return 0, io.ErrUnexpectedEOF
+	}
+	b.sent = true
+	return copy(p, `{"model":"m","messa`), nil
+}
+
+// A relayed call whose request did not arrive whole reached no vendor, and
+// is recorded as such: control's record holds every call it took.
+func TestRelayedCutRequestIsRecorded(t *testing.T) {
+	called := false
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { called = true }))
+	defer upstream.Close()
+	u, _ := url.Parse(upstream.URL)
+	mem := &event.Memory{}
+	g := New(u, anthropic.Adapter{}, mem)
+	defer g.Close()
+	r := httptest.NewRequest("POST", "/relay/anthropic/v1/messages", &cutBody{})
+	w := httptest.NewRecorder()
+	g.ServeRelayed(w, r, Relayed{Session: "s1", Turn: "t_1", Exchange: "x-0123abcd-9", Path: "/v1/messages"})
+	if w.Code != http.StatusBadRequest || called {
+		t.Fatalf("answer %d, vendor called %t", w.Code, called)
+	}
+	if !g.Settle("s1", "t_1", 2*time.Second) {
+		t.Fatal("the turn did not settle")
+	}
+	evs := mem.Events()
+	if len(evs) != 2 || evs[0].Kind != event.ModelRequested || evs[1].Kind != event.ModelResponded || evs[1].Error != RequestCut ||
+		evs[1].Exchange != "x-0123abcd-9" || evs[1].Turn != "t_1" || evs[1].Status != 0 {
+		t.Fatalf("events %+v", evs)
+	}
+}
