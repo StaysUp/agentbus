@@ -186,7 +186,12 @@ func TestStopRouteEndsTheTurnsTree(t *testing.T) {
 			id, agent, tool, other := startToolRun(t, svc, tok, true)
 			time.Sleep(600 * time.Millisecond) // the poll sees the tool through its parent
 			turn := turnOf(t, svc, tok, id).ID
-			// Two stops at once: both get 202, and the turn stops once.
+			// Two stops at once, and the turn stops once. The first to
+			// arrive gets 202. Nothing makes the second arrive before the
+			// turn ends: an agent that obeys SIGTERM ends within about one
+			// heartbeat of the first stop, and a stop after that gets 409.
+			// One that ignores SIGTERM runs on for the grace period, so
+			// there both get 202.
 			stoppedAt := time.Now()
 			codes := make(chan int, 2)
 			for i := 0; i < 2; i++ {
@@ -195,10 +200,18 @@ func TestStopRouteEndsTheTurnsTree(t *testing.T) {
 					codes <- code
 				}()
 			}
+			accepted := 0
 			for i := 0; i < 2; i++ {
-				if code := <-codes; code != http.StatusAccepted {
+				switch code := <-codes; {
+				case code == http.StatusAccepted:
+					accepted++
+				case code == http.StatusConflict && !tc.ignoreTerm:
+				default:
 					t.Errorf("stop: %d, want 202", code)
 				}
+			}
+			if accepted == 0 {
+				t.Error("no stop got 202")
 			}
 			c := waitClosed(t, svc.store, id)
 			// One deadline for the whole tree: the tool, which ignores
