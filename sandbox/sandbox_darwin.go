@@ -168,3 +168,6 @@ func loopbackPorts(addrs []string) (ports []int, ok bool) {
 	}
 	return ports, true
 }
+
+// systemHint: macOS has no system setting that refuses the wall.
+func systemHint() (string, string) { return "", "" }

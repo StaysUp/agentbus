@@ -21,3 +21,5 @@ func (b *Box) build(netjail.Spec) error {
 func (b *Box) Start(*exec.Cmd) error {
 	return &Error{Why: "this platform has no sandbox; it is built on macOS and Linux"}
 }
+
+func systemHint() (string, string) { return "", "" }

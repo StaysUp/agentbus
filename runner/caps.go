@@ -1,7 +1,7 @@
 package runner
 
 // What this runner reports of itself (queue.Capabilities): its machine, its
-// isolation backends, its harnesses as its own probe finds them, and its
+// isolation backends, whether it can build a session's wall, its harnesses as its own probe finds them, and its
 // machine's id with the folders it holds. Reported at enroll, and on a heartbeat
 // once its first probe ends and every harness.ProbeEvery after.
 
@@ -20,7 +20,8 @@ import (
 
 // caps is what the runner can report now. harnesses is nil before a probe.
 func (r *Runner) caps(harnesses []harness.Report) *queue.Capabilities {
-	c := &queue.Capabilities{OS: runtime.GOOS, Arch: runtime.GOARCH, Isolation: isolation.Available(), Harnesses: harnesses}
+	c := &queue.Capabilities{OS: runtime.GOOS, Arch: runtime.GOARCH, Isolation: isolation.Available(), Harnesses: harnesses,
+		Sandbox: r.sandbox}
 	if f := r.cfg.Folders; f != nil {
 		// This machine, and the folders the runner holds on it.
 		c.Connector = f.Connector()

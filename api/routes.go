@@ -433,10 +433,40 @@ var routes = slices.Concat([]route{
 		tag:     "Agents",
 		summary: "List runners",
 		doc: "The runners control knows, one per machine, for a person: each one's name, id, machine (connector), role, labels, whether it is online, " +
-			"when it was last seen, and its last probe of each harness with its version. Online means it asked for work in the last minute. " +
-			"A runner that stopped stays listed, offline. A connector of a build before 0.5 is listed only while no runner reports its machine. No token is in the answer. Takes the main token only. No body is read.",
+			"when it was last seen, its last probe of each harness with its version, and whether it can build a session's wall (sandbox). Online means it asked for work in the last minute. " +
+			"pending lists the machines that ran agentbus login and wait for the person's approval. " +
+			"A runner that stopped stays listed, offline, until removed. A connector of a build before 0.5 is listed only while no runner reports its machine. No token is in the answer. Takes the main token only. No body is read.",
 		replies: []reply{ok(200, RunnerList{}, "The runners."), badRequest, storeFailed},
 		serve:   plain((*API).listRunners)},
+	{method: "POST", path: "/api/v0/runners/pending/{id}/approve", op: "approveMachine",
+		idDoc:   "A waiting machine's id (lgn_ and 16 hex digits), from pending in GET /api/v0/runners. Another shape gets 404.",
+		tag:     "Agents",
+		summary: "Approve a machine",
+		doc: "Let a machine that ran agentbus login become a runner of this control. Type the code the machine shows: the list never holds it, " +
+			"so only the person in front of that machine can approve it. Until approved, a machine takes no job and its token works for nothing else. " +
+			"Within 2 seconds the machine gets its runner credential and starts. Takes the main token only.",
+		body: Approval{},
+		replies: []reply{ok(200, RunnerInfo{}, "Approved: the runner it now is."), badRequest, fail(404, "No machine waits by that id."),
+			fail(409, "It was approved or refused already, or waited longer than 15 minutes."), storeFailed},
+		serve: (*API).approveMachine},
+	{method: "POST", path: "/api/v0/runners/pending/{id}/refuse", op: "refuseMachine",
+		idDoc:   "A waiting machine's id (lgn_ and 16 hex digits), from pending in GET /api/v0/runners. Another shape gets 404.",
+		tag:     "Agents",
+		summary: "Refuse a machine",
+		doc:     "Refuse a machine that ran agentbus login: it never becomes a runner, and agentbus login on it says so. Takes the main token only. No body is read.",
+		replies: []reply{{status: 204, doc: "Refused.", empty: true}, badRequest, fail(404, "No machine waits by that id."),
+			fail(409, "It was approved or refused already, or waited longer than 15 minutes."), storeFailed},
+		serve: (*API).refuseMachine},
+	{method: "POST", path: "/api/v0/runners/{id}/remove", op: "removeRunner",
+		idDoc:   "A runner's id, from GET /api/v0/runners. Another shape gets 404.",
+		tag:     "Agents",
+		summary: "Remove a runner",
+		doc: "Remove a machine that is offline: its runner token works no more, so it never takes work again, and it leaves the list. " +
+			"Its sessions, jobs and their events stay in the record. A runner.removed event is stored. " +
+			"An online runner is refused: stop it on its machine first. To add the machine again, run agentbus login on it. Takes the main token only. No body is read.",
+		replies: []reply{{status: 204, doc: "Removed.", empty: true}, badRequest, fail(404, "No runner by that id."),
+			fail(409, "It is online."), storeFailed},
+		serve: (*API).removeRunner},
 	{method: "GET", path: "/api/v0/folders", op: "listFolders",
 		tag:     "Agents",
 		summary: "List folders",

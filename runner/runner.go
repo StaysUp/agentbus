@@ -37,7 +37,9 @@ import (
 
 // Config is what a runner needs.
 type Config struct {
-	Queue       string // the queue's service, such as http://127.0.0.1:8787
+	Queue string // the queue's service, such as http://127.0.0.1:8787
+	// EnrollToken adds the runner when StateFile holds no identity control
+	// accepts. Empty: a machine signed in by agentbus login, which has none.
 	EnrollToken string
 	Name        string
 	Labels      []string
@@ -78,6 +80,10 @@ type Config struct {
 	// them can only use the local fast path, and records no changeset.
 	Blobs    isolation.BlobSource
 	BlobSink blobs.Sink
+	// Sandbox says whether this machine can build a session's wall, and why
+	// not (sandbox.Can). It is asked once, when the runner enrolls, and
+	// reported with the runner's capabilities. Nil reports nothing.
+	Sandbox func() (bool, string)
 	// LookPath and Environ are how the runner probes its harnesses for its
 	// report (caps.go). Nil LookPath probes nothing.
 	LookPath func(string) (string, error)
@@ -121,6 +127,8 @@ type Runner struct {
 	probed  []harness.Report
 	// beatMu keeps one report in flight at a time (beat).
 	beatMu sync.Mutex
+	// sandbox is Config.Sandbox's answer, nil without one.
+	sandbox *queue.SandboxReport
 }
 
 // state is what StateFile keeps.
@@ -131,7 +139,15 @@ type state struct {
 	LeaseMS     int64  `json:"lease_ms"`
 }
 
-// Enroll adds the runner to the control plane.
+// ErrNotSignedIn: the runner has no enrollment token, and control does not
+// accept the identity agentbus login saved (refused, removed, or another
+// control), or there is none.
+var ErrNotSignedIn = errors.New("this machine is not signed in to this control, or control no longer accepts it: run agentbus login with control's address")
+
+// Enroll adds the runner to the control plane: with the identity saved in
+// StateFile (by an earlier enroll, or by agentbus login) when control still
+// accepts it, else with the enrollment token. Without one it answers
+// ErrNotSignedIn.
 func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 	if cfg.Capacity == 0 {
 		cfg.Capacity = run.DefaultMaxRuns
@@ -157,6 +173,10 @@ func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 	r := &Runner{cfg: cfg,
 		// Shorter than a lease, so one slow call cannot outlast it.
 		short: &http.Client{Timeout: 10 * time.Second, Transport: cfg.HTTP.Transport}}
+	if cfg.Sandbox != nil {
+		can, why := cfg.Sandbox()
+		r.sandbox = &queue.SandboxReport{Can: can, Why: why}
+	}
 	// A saved identity is used again when the control plane still knows it.
 	if st, ok := loadState(cfg.StateFile); ok {
 		var rn queue.Runner
@@ -173,6 +193,11 @@ func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 		if status != http.StatusUnauthorized && status != http.StatusNotFound {
 			return nil, fmt.Errorf("runner: the saved runner's heartbeat answered %d", status)
 		}
+	}
+	if cfg.EnrollToken == "" {
+		// Signed in by agentbus login, which saved the identity: there is
+		// no enrollment token to fall back on.
+		return nil, ErrNotSignedIn
 	}
 	var e jobs.Enrolled
 	status, err := call(ctx, cfg.HTTP, cfg.Queue+"/api/v0/runner/register", cfg.EnrollToken,
@@ -192,6 +217,19 @@ func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 		}
 	}
 	return r, nil
+}
+
+// SaveIdentity keeps a runner's identity in path, the runner's StateFile, as
+// Enroll reads it: what agentbus login does once the person approved the
+// machine.
+func SaveIdentity(path string, rn queue.Runner, token string, heartbeatMS, leaseMS int64) error {
+	return saveState(path, state{rn.ID, token, heartbeatMS, leaseMS})
+}
+
+// HasIdentity says path holds a runner's identity Enroll would try.
+func HasIdentity(path string) bool {
+	_, ok := loadState(path)
+	return ok
 }
 
 func loadState(path string) (state, bool) {

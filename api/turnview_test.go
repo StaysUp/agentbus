@@ -281,13 +281,15 @@ func TestRunnerProtocolDescribedApart(t *testing.T) {
 		for m, op := range item.Operations() {
 			n++
 			public := op.Security != nil && len(*op.Security) == 0
-			if public != (p == "/api/v0/runner/openapi.json") {
+			// The protocol's description, and a machine's first ask to sign
+			// in (agentbus login), which has no token yet.
+			if public != (p == "/api/v0/runner/openapi.json" || (p == "/api/v0/runner/login" && m == "POST")) {
 				t.Errorf("%s %s: public = %v", m, p, public)
 			}
 		}
 	}
-	if n != 18 {
-		t.Errorf("the runner protocol has %d operations, want 18", n)
+	if n != 20 {
+		t.Errorf("the runner protocol has %d operations, want 20", n)
 	}
 	e := newEnv(t)
 	for p, want := range map[string]string{

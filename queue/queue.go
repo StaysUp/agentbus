@@ -568,7 +568,7 @@ func Open(path string, now func() time.Time) (*Queue, error) {
 	// One connection: every transaction is serialised, so a claim and its
 	// capacity check can never interleave with another.
 	db.SetMaxOpenConns(1)
-	if _, err := db.Exec(schema); err != nil {
+	if _, err := db.Exec(schema + loginsSchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("queue: create tables: %w", err)
 	}
@@ -696,7 +696,8 @@ func (q *Queue) RegisterRunner(team, name string, labels []string, capacity int,
 
 // RunnerByToken finds the runner a token hash belongs to.
 func (q *Queue) RunnerByToken(tokenHash string) (Runner, error) {
-	return q.runner(`token_hash = ?`, tokenHash)
+	// A removed runner's token works no more (RemoveRunner).
+	return q.runner(`token_hash = ? AND removed IS NULL`, tokenHash)
 }
 
 // GetRunner reads one runner of team.
@@ -1147,7 +1148,8 @@ func (q *Queue) Take(runnerID string, lease time.Duration, folders bool) (job Jo
 		}
 		var team string
 		var capacity int
-		err := tx.QueryRow(`SELECT team, capacity FROM runners WHERE id = ?`, runnerID).Scan(&team, &capacity)
+		// A runner removed since its token was checked takes nothing.
+		err := tx.QueryRow(`SELECT team, capacity FROM runners WHERE id = ? AND removed IS NULL`, runnerID).Scan(&team, &capacity)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}

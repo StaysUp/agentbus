@@ -135,3 +135,34 @@ func (b *Box) Start(cmd *exec.Cmd) error {
 	cmd.Err = nil
 	return b.jail.Start(cmd)
 }
+
+// systemHint is the system setting that refuses the wall, when one does, as
+// a sentence to follow the reason: Linux's switches for user namespaces,
+// which bubblewrap needs. None when bubblewrap is not there: that is the
+// reason then.
+func systemHint() (string, string) {
+	if _, err := os.Stat(bwrap); err != nil {
+		return "", ""
+	}
+	return userNSHint(os.ReadFile)
+}
+
+func userNSHint(read func(string) ([]byte, error)) (word, text string) {
+	val := func(p string) string {
+		b, err := read(p)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(string(b))
+	}
+	switch {
+	case val("/proc/sys/kernel/unprivileged_userns_clone") == "0":
+		return "unprivileged_userns_clone", "; this machine turns unprivileged user namespaces off (kernel.unprivileged_userns_clone is 0)"
+	case val("/proc/sys/user/max_user_namespaces") == "0":
+		return "max_user_namespaces", "; this machine allows no user namespaces (user.max_user_namespaces is 0)"
+	case val("/proc/sys/kernel/apparmor_restrict_unprivileged_userns") == "1":
+		return "AppArmor", "; AppArmor allows a user namespace only to a program with a profile " +
+			"(kernel.apparmor_restrict_unprivileged_userns is 1, as on Ubuntu 24.04 and later)"
+	}
+	return "", ""
+}

@@ -82,12 +82,13 @@ const (
 	CommandFailed  Kind = "command.failed"
 
 	// Control's own operations, in no session: a subscription connected or
-	// failed to (Harness, and Error says why), a runner enrolled or stopped
-	// answering (Runner), and a settings file changed (File). Never a value.
+	// failed to (Harness, and Error says why), a runner enrolled, stopped
+	// answering or was removed (Runner), and a settings file changed (File). Never a value.
 	SubscriptionConnected Kind = "subscription.connected"
 	SubscriptionFailed    Kind = "subscription.failed"
 	RunnerEnrolled        Kind = "runner.enrolled"
 	RunnerGone            Kind = "runner.gone"
+	RunnerRemoved         Kind = "runner.removed"
 	SettingsChanged       Kind = "settings.changed"
 
 	// TurnChanged: control's record of what a turn changed in its copy, or
@@ -133,8 +134,9 @@ var Kinds = []KindInfo{
 	{CommandRan, "Retired in 0.5; only in older records. The person ran a shell command in the session's copy, with no model call (the ! of 0.4): command holds its id, the line, exit_code, timed_out, stdout and stderr (each at most 64 KiB, the start kept), output_bytes (all the command wrote) and duration_ms. No turn. Show it as a shell entry in the conversation.", []string{"session", "command"}},
 	{SubscriptionConnected, "Control kept a token from the person's own login for a subscription (POST /api/v0/subscriptions/{id}/connect): agent is the harness. No session. The token is never in the record.", []string{"agent"}},
 	{SubscriptionFailed, "A subscription's connect ended without a token: agent is the harness, error says why, such as a wrong code or the login waiting too long. No session. Show it as an error.", []string{"agent", "error"}},
-	{RunnerEnrolled, "A runner or a connector enrolled with control: runner is its id . No session.", []string{"runner"}},
+	{RunnerEnrolled, "A runner or a connector enrolled with control, by the enrollment token or by a sign-in (agentbus login) the person approved: runner is its id. No session.", []string{"runner"}},
 	{RunnerGone, "A runner or a connector stopped asking control for work for a minute: runner is its id. It may come back; a turn it was running whose lease runs out ends as runner_lost. No session. Show it as a warning.", []string{"runner"}},
+	{RunnerRemoved, "The person removed a runner that was offline (POST /api/v0/runners/{id}/remove): runner is its id. Its token works no more and it is no longer listed; its sessions, jobs and their events stay. No session.", []string{"runner"}},
 	{SettingsChanged, "The settings changed, through the API or by the one-time import of the settings files: setting is permissions, instructions or agents; keys names what changed (a policy key such as limits.max_depth, text for the instructions, an agent id or id.field such as a_1234.model); settings_version is the settings version the change made. On an import, file is the file the setting came from. A build that changed a default writes the old value into the person's policy on its first start: a change of permissions with no file, whose keys are those defaults. Names only: never a value, so never a secret. The change and this event are stored together: the settings database keeps the event until the record has it. No session.", []string{"setting", "settings_version"}},
 	{TurnChanged, "What the turn changed in its session's copy, or in the folder it ran in, from its start to its end. Stored by control once it accepts the turn's end, at most once per turn: changes holds every changed file (path, change, size, sha256 at the end, sha256_before at the start) and, for small text files, each one's unified diff (at most 1 MiB for the whole turn; diffs_cut says some were left out) and content. A binary file has its path, size and hashes only. GET /api/v0/turns/{id}/diff reads it. Absent for a turn that ran in no folder, and for turns from before 0.5, whose changes are in their job.", []string{"session", "turn", "changes"}},
 	{TurnApplied, "An apply of the session's turns to the person's folder ended (POST /api/v0/turns/{id}/apply): turn is the turn asked for, and applied holds every turn whose changes it carried, who asked (by: the person or an agent, never a token), the result (applied, refused or failed), the files written or removed, and on a refusal the files that refused it, each with why. Stored once per apply. Show a refusal as a warning.", []string{"session", "turn", "applied"}},

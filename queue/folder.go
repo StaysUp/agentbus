@@ -68,7 +68,7 @@ func endFoldersTx(tx *sql.Tx, now time.Time) error {
 // Machines is the id of every machine of the team whose runner was seen
 // within RunnerFresh, sorted.
 func (q *Queue) Machines(team string) ([]string, error) {
-	rows, err := q.db.Query(`SELECT DISTINCT json_extract(caps, '$.connector') FROM runners WHERE team = ? AND seen >= ?
+	rows, err := q.db.Query(`SELECT DISTINCT json_extract(caps, '$.connector') FROM runners WHERE team = ? AND seen >= ? AND removed IS NULL
 		AND COALESCE(json_extract(caps, '$.role'), '') = '' AND COALESCE(json_extract(caps, '$.connector'), '') != '' ORDER BY 1`,
 		team, nanos(q.now().Add(-RunnerFresh)))
 	if err != nil {

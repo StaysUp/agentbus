@@ -4,8 +4,14 @@
 //
 // Two tokens:
 //   - the enrollment token (Config.EnrollToken): POST /api/v0/runner/register only.
-//   - a runner token, made when a runner registers and returned once: every
-//     other call, for its own runner and the attempts it holds.
+//     The old way to add a machine; agentbus login is the new (login.go).
+//   - a runner token, made when a runner registers or signs in and returned
+//     once: every other call, for its own runner and the attempts it holds,
+//     and only once its runner exists (a sign-in the person approved) and is
+//     not removed.
+//
+// POST /api/v0/runner/login takes no token: anyone who reaches control may
+// ask to sign a machine in, and the person decides.
 //
 // The main token (Config.Token) is not taken here; it only keys the turn
 // tokens control signs for runners' turns (tokens.go).
@@ -145,6 +151,8 @@ func New(cfg Config) (*Server, error) {
 		s.fin = newFinisher(cfg.Queue, cfg.Record)
 	}
 	s.mux.HandleFunc("POST /api/v0/runner/register", s.enroll)
+	s.mux.HandleFunc("POST /api/v0/runner/login", s.loginStart)
+	s.mux.HandleFunc("GET /api/v0/runner/login", s.loginState)
 	s.mux.HandleFunc("POST /api/v0/runner/removed", s.runner(s.removed))
 	s.mux.HandleFunc("POST /api/v0/runner/heartbeat", s.runner(s.runnerBeat))
 	s.mux.HandleFunc("GET /api/v0/runner/settings", s.runner(s.runnerSettings))
@@ -387,31 +395,45 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, "the body must be one JSON object with name, capacity, protocol and optionally labels")
 		return
 	}
-	if b.Protocol != ProtocolVersion {
-		fail(w, http.StatusBadRequest, protocolWhy)
-		return
-	}
-	if b.Name == "" || len(b.Name) > 128 || b.Capacity < 1 || b.Capacity > MaxCapacity || len(b.Labels) > 64 {
-		fail(w, http.StatusBadRequest, "name must be 1 to 128 bytes, capacity 1 to 64, and at most 64 labels")
-		return
-	}
-	if msg := checkLabels(b.Labels); msg != "" {
+	if msg := s.checkEnroll(b); msg != "" {
 		fail(w, http.StatusBadRequest, msg)
 		return
 	}
-	if b.Capabilities != nil {
-		if msg := b.Capabilities.Check(); msg != "" {
-			fail(w, http.StatusBadRequest, msg)
-			return
-		}
-	}
-	// 256 random bits: four ids of 64 bits each.
-	rt := runnerTokenPrefix + queue.NewID("") + queue.NewID("") + queue.NewID("") + queue.NewID("")
+	rt := newRunnerToken()
 	rn, err := s.cfg.Queue.RegisterRunner(queue.DefaultTeam, b.Name, b.Labels, b.Capacity, queue.HashToken(rt), b.Capabilities)
 	if err != nil {
 		s.internal(w)
 		return
 	}
+	s.enrolled(rn)
+	writeJSON(w, http.StatusCreated, Enrolled{rn, rt, s.cfg.Heartbeat.Milliseconds(), s.cfg.Lease.Milliseconds()})
+}
+
+// checkEnroll says what is wrong with an enroll or a sign-in's body, or "".
+func (s *Server) checkEnroll(b EnrollRequest) string {
+	if b.Protocol != ProtocolVersion {
+		return protocolWhy
+	}
+	if b.Name == "" || len(b.Name) > 128 || b.Capacity < 1 || b.Capacity > MaxCapacity || len(b.Labels) > 64 {
+		return "name must be 1 to 128 bytes, capacity 1 to 64, and at most 64 labels"
+	}
+	if msg := checkLabels(b.Labels); msg != "" {
+		return msg
+	}
+	if b.Capabilities != nil {
+		return b.Capabilities.Check()
+	}
+	return ""
+}
+
+// newRunnerToken is a new runner token: 256 random bits, four ids of 64
+// bits each.
+func newRunnerToken() string {
+	return runnerTokenPrefix + queue.NewID("") + queue.NewID("") + queue.NewID("") + queue.NewID("")
+}
+
+// enrolled logs and records a runner added to control.
+func (s *Server) enrolled(rn queue.Runner) {
 	if s.Logf != nil {
 		s.Logf("runner.enrolled id=%s name=%q", rn.ID, rn.Name)
 	}
@@ -420,7 +442,6 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
 			s.Logf("store.error what=%s", event.RunnerEnrolled)
 		}
 	}
-	writeJSON(w, http.StatusCreated, Enrolled{rn, rt, s.cfg.Heartbeat.Milliseconds(), s.cfg.Lease.Milliseconds()})
 }
 
 // TakeRequest is the body of POST /api/v0/runner/take.

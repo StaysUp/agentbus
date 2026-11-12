@@ -402,3 +402,41 @@ func runCheck(cmd *exec.Cmd) bool {
 	cmd.Env = []string{"PATH=/usr/bin:/bin"}
 	return cmd.Run() == nil
 }
+
+// Can says whether this machine can build a session's wall, and when not,
+// why, in a plain sentence: it builds one around an empty folder, which
+// starts a program that does nothing in it, and takes it down. A runner
+// reports the answer when it starts (queue.SandboxReport), so a turn is not
+// refused by surprise.
+func Can() (bool, string) { return can(New, systemHint) }
+
+// hint is the system setting that refuses the wall, as a word the reason
+// names it by and a sentence to follow the reason; both empty when none.
+type hint func() (word, text string)
+
+func can(build func(Spec) (*Box, error), h hint) (bool, string) {
+	dir, err := os.MkdirTemp("", "agentbus-sandbox-check-")
+	if err != nil {
+		return false, "the check could not make a folder to build a wall around"
+	}
+	defer os.RemoveAll(dir)
+	copy, home := filepath.Join(dir, "copy"), filepath.Join(dir, "home")
+	if os.Mkdir(copy, 0o700) != nil || os.Mkdir(home, 0o700) != nil {
+		return false, "the check could not make a folder to build a wall around"
+	}
+	b, err := build(Spec{Copy: copy, Home: home})
+	if err != nil {
+		why := "the sandbox could not be built"
+		var se *Error
+		if errors.As(err, &se) {
+			why = se.Why
+		}
+		// A reason that names the setting already says it.
+		if word, text := h(); word != "" && !strings.Contains(why, word) {
+			why += text
+		}
+		return false, why
+	}
+	b.Close()
+	return true, ""
+}

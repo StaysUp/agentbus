@@ -31,10 +31,26 @@ type Capabilities struct {
 	// keeps its name from when a separate connector held the folders.
 	Connector string       `json:"connector,omitempty"`
 	Folders   []FolderInfo `json:"folders,omitempty"`
+	// Sandbox: whether the runner can build a session's wall (package
+	// sandbox), and why not. Nil from a runner of a build before it reported
+	// it.
+	Sandbox *SandboxReport `json:"sandbox,omitempty"`
 	// Role was RoleConnector for a connector of a build before 0.5. A
 	// runner stored with it is listed as such; none may report it now.
 	Role string `json:"role,omitempty"`
 }
+
+// SandboxReport is whether a runner can build a session's wall: the system's
+// sandbox program is there (sandbox-exec on macOS, bwrap on Linux) and starts
+// a program in a wall, which on Linux needs unprivileged user namespaces.
+type SandboxReport struct {
+	Can bool `json:"can"`
+	// Why says, in a plain sentence, why it cannot. Empty when it can.
+	Why string `json:"why,omitempty"`
+}
+
+// MaxSandboxWhy bounds SandboxReport.Why.
+const MaxSandboxWhy = 500
 
 // RoleConnector is the Capabilities.Role of a connector of a build before
 // 0.5, when a machine's folders had a program of their own.
@@ -86,6 +102,9 @@ func (c Capabilities) Check() string {
 			return "a harness's name and version are at most 64 bytes"
 		}
 	}
+	if c.Sandbox != nil && len(c.Sandbox.Why) > MaxSandboxWhy {
+		return "capabilities.sandbox.why is at most 500 bytes"
+	}
 	for _, b := range c.Isolation {
 		if len(b) > 32 {
 			return "an isolation backend's name is at most 32 bytes"
@@ -110,7 +129,7 @@ const harnessTake = `(j.session IS NOT NULL AND EXISTS (SELECT 1 FROM sessions s
 	OR json_extract(r.caps, '$.harnesses') IS NULL
 	OR EXISTS (SELECT 1 FROM json_each(r.caps, '$.harnesses') h
 		WHERE json_extract(h.value, '$.name') = json_extract(j.spec, '$.agent') AND json_extract(h.value, '$.found'))
-	OR NOT EXISTS (SELECT 1 FROM runners o, json_each(o.caps, '$.harnesses') h WHERE o.team = j.team AND o.seen >= ?
+	OR NOT EXISTS (SELECT 1 FROM runners o, json_each(o.caps, '$.harnesses') h WHERE o.team = j.team AND o.seen >= ? AND o.removed IS NULL
 		AND json_extract(h.value, '$.name') = json_extract(j.spec, '$.agent') AND json_extract(h.value, '$.found')
 		AND (COALESCE(json_extract(j.spec, '$.connector'), '') = '' OR json_extract(j.spec, '$.connector') = json_extract(o.caps, '$.connector'))
 		AND NOT EXISTS (SELECT 1 FROM json_each(j.spec, '$.labels') l WHERE l.value NOT IN (SELECT value FROM json_each(o.labels))))`
@@ -147,7 +166,7 @@ const labelsTake = `NOT EXISTS (SELECT 1 FROM json_each(j.spec, '$.labels') l
 // runners is listed once, from the one seen last. Equal paths on two
 // machines have one reference, and are two folders.
 func (q *Queue) Folders(team string) ([]RunnerFolder, error) {
-	rows, err := q.db.Query(`SELECT id, caps FROM runners WHERE team = ? AND caps IS NOT NULL ORDER BY seen DESC, id`, team)
+	rows, err := q.db.Query(`SELECT id, caps FROM runners WHERE team = ? AND caps IS NOT NULL AND removed IS NULL ORDER BY seen DESC, id`, team)
 	if err != nil {
 		return nil, fmt.Errorf("queue: read runners: %w", err)
 	}
@@ -190,7 +209,7 @@ type RunnerFolder struct {
 // gone: its folders' applies and checks wait for nothing.
 func (q *Queue) MachineSeen(team, machine string) (bool, error) {
 	var n int
-	err := q.db.QueryRow(`SELECT COUNT(*) FROM runners WHERE team = ? AND seen >= ?
+	err := q.db.QueryRow(`SELECT COUNT(*) FROM runners WHERE team = ? AND seen >= ? AND removed IS NULL
 		AND COALESCE(json_extract(caps, '$.role'), '') = '' AND json_extract(caps, '$.connector') = ?`,
 		team, nanos(q.now().Add(-RunnerFresh)), machine).Scan(&n)
 	if err != nil {
@@ -199,9 +218,9 @@ func (q *Queue) MachineSeen(team, machine string) (bool, error) {
 	return n > 0, nil
 }
 
-// Runners is every runner of the team, newest seen first.
+// Runners is every runner of the team not removed, newest seen first.
 func (q *Queue) Runners(team string) ([]Runner, error) {
-	rows, err := q.db.Query(`SELECT `+runnerCols+` FROM runners WHERE team = ? ORDER BY seen DESC, id`, team)
+	rows, err := q.db.Query(`SELECT `+runnerCols+` FROM runners WHERE team = ? AND removed IS NULL ORDER BY seen DESC, id`, team)
 	if err != nil {
 		return nil, fmt.Errorf("queue: read runners: %w", err)
 	}
@@ -218,13 +237,15 @@ func (q *Queue) Runners(team string) ([]Runner, error) {
 }
 
 // addColumns adds the columns a queue made by an earlier build lacks:
-// runners.caps, sessions.snapshot and jobs.turn. The first two start empty.
+// runners.caps, runners.removed, sessions.snapshot and jobs.turn. The first
+// three start empty.
 // jobs.turn is filled for the turn and review jobs made before it: the id of
 // the attempt that started the turn, which was the turn's id then, or a new
 // id for a job whose turn no runner has started.
 func addColumns(db *sql.DB) error {
 	for _, c := range []struct{ table, column, decl string }{
 		{"runners", "caps", "TEXT"},
+		{"runners", "removed", "INTEGER"},
 		{"sessions", "snapshot", "TEXT NOT NULL DEFAULT ''"},
 		{"jobs", "turn", "TEXT"},
 	} {

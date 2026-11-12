@@ -61,6 +61,7 @@ import (
 	"github.com/staysup/agentbus/replay"
 	engine "github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/runner"
+	"github.com/staysup/agentbus/sandbox"
 	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 )
@@ -120,6 +121,9 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	}
 	if args[0] == "connect" {
 		return runConnect(args[1:], home, os.Stdin, stdout, stderr)
+	}
+	if args[0] == "login" {
+		return runLogin(args[1:], home, getenv, stdout, stderr, systemLogin())
 	}
 	c, ok := parse(args, home, stderr)
 	if !ok {
@@ -194,6 +198,8 @@ type config struct {
 	// A runner's: the server's URL, its enroll_token file, the runner's
 	// name, and where its agents send model calls.
 	server, enrollFile, runnerName, gatewayMode string
+	// enrollFileSet: -enroll-token-file was given, so it must be there.
+	enrollFileSet bool
 	// A runner's folders it owns (-folder), and its labels (-labels).
 	folders, labels []string
 }
@@ -316,7 +322,7 @@ func start(c config) (*service, error) {
 			return nil, err
 		}
 	case c.mode == modeRunner:
-		if enrollToken, err = readTokenFile(c.enrollFile); err != nil {
+		if enrollToken, err = runnerEnrollToken(c); err != nil {
 			return nil, err
 		}
 	}
@@ -823,8 +829,8 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 	cfg := runner.Config{Queue: self, EnrollToken: enrollToken, Name: name, Capacity: capacity,
 		Engine: s.eng, Store: s.store, Logf: svcLog.Printf, Labels: c.labels,
 		LookPath: c.lookPath, Environ: c.environ,
-		Workdir: filepath.Join(c.home, copiesDir), OldWorkdir: filepath.Join(c.home, oldCopiesDir), StateFile: filepath.Join(c.home, "runner.json"), Settings: s.settings,
-		Forward: c.mode == modeRunner, NoSecrets: c.noSecrets()}
+		Workdir: filepath.Join(c.home, copiesDir), OldWorkdir: filepath.Join(c.home, oldCopiesDir), StateFile: filepath.Join(c.home, runnerState), Settings: s.settings,
+		Forward: c.mode == modeRunner, NoSecrets: c.noSecrets(), Sandbox: sandbox.Can}
 	// A runner of a server keeps its own store, which its folder side
 	// shares: one handle, so its sweep and the folder side's touches share
 	// one lock.

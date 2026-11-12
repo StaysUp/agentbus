@@ -301,9 +301,22 @@ folder on it. Runners pull their work and are never called, so they work behind 
 # Control, on the machine that keeps the record:
 agentbus server -listen 0.0.0.0
 
-# On each machine with code, with the server's enroll_token file copied over (mode 0600):
-agentbus runner -server http://devbox:8787 -enroll-token-file ./enroll_token
+# On each machine with code, once:
+agentbus login http://devbox:8787
 ```
+
+`agentbus login` shows a code. Open the cockpit's Runners page, find the machine under waiting
+machines, and type the code to approve it (or refuse it). Until then the machine gets no work.
+Once approved, it saves its runner credential in its data folder (`runner.json`) and sets up the
+runner as a service: a systemd user unit on Linux, a launchd agent on macOS. Where it cannot (no
+systemd user session, or a unit of that name already there), it prints the one command to run.
+It takes `agentbus runner`'s flags (`-name`, `-folder`, `-labels`, `-capacity`, `-gateway`), and
+`-no-service` to only print the command. The Runners page also shows whether each machine can
+build a session's sandbox, and why not; and it removes a machine that is offline, so its
+credential works no more (its sessions stay in the record).
+
+The old way still works: copy the server's `enroll_token` file to the machine (mode 0600) and run
+`agentbus runner -server http://devbox:8787 -enroll-token-file ./enroll_token`.
 
 A runner on the same machine as its server needs its own data folder (`AGENTBUS_HOME`). For a
 runner in a Lima VM and a server on the Mac's loopback, start the server with
@@ -466,8 +479,8 @@ Everything stays on your machine, in the data folder: `events.db` (a SQLite file
 `jobs.db` (the job queue), `token`, `turns_token`, `enroll_token`, `runner.json`,
 `folders.json`, `settings.db` (your settings and saved agents), `blobs/`,
 `sessions/`, `homes/` (a runner's) and `logs/`. `turns_token` is a second token for a program that only starts, stops
-and reads turns. `enroll_token` adds a runner; the built-in one reads it, and keeps
-its identity in `runner.json`. A data folder from before 0.5 may also hold `connector.json`, the
+and reads turns. `enroll_token` adds a runner the old way; the built-in one reads it. A runner keeps
+its identity in `runner.json`, from that or from `agentbus login`. A data folder from before 0.5 may also hold `connector.json`, the
 retired connector's identity, which nothing reads now. `blobs/` is control's store of file
 contents. `sessions/` holds the copies and git worktrees sessions run in, each named after its
 session. A data folder from before 0.4 may also hold `worktrees/`, with its older copies, which
