@@ -65,6 +65,26 @@ open_to_others() {
   done
 }
 
+# other_binaries names each other agentbus that runs without the profile
+# of $1 when it comes first on PATH: the one on this PATH, and the one in
+# the sudo user's ~/.local/bin, the default without sudo. It names a path it
+# found in quotes and never prints a command that acts on it: a path may
+# hold a space or anything else a shell reads.
+other_binaries() {
+  others=$(command -v agentbus 2>/dev/null || true)
+  if [ -n "${SUDO_USER:-}" ]; then
+    home=$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)
+    [ -z "$home" ] || others="$others
+$home/.local/bin/agentbus"
+  fi
+  printf '%s\n' "$others" | while IFS= read -r o; do
+    [ -n "$o" ] && [ -e "$o" ] || continue
+    [ "$(readlink -f "$o" 2>/dev/null)" = "$1" ] && continue
+    say "Another agentbus, at '$o', has no profile, so the wall stays off when it comes first on PATH."
+    say "Remove the agentbus at '$o', or run $1 directly."
+  done
+}
+
 # apparmor_profile prints the profile for the binary at $1: the profile in
 # packaging/apparmor/agentbus, with its path.
 apparmor_profile() {
@@ -210,23 +230,7 @@ if [ "$os" = linux ] && needs_apparmor; then
     say "To have them, install agentbus with its profile into /usr/local/bin, once:"
     say "  curl -fsSL https://raw.githubusercontent.com/$repo/main/install.sh | sudo AGENTBUS_INSTALL_DIR=/usr/local/bin sh"
   fi
-  # Another agentbus found first on PATH runs without the profile: the
-  # one on root's PATH, and the one in the sudo user's ~/.local/bin, the
-  # install script's default without sudo.
-  if [ -n "$profiled" ]; then
-    others=$(command -v agentbus 2>/dev/null || true)
-    if [ -n "${SUDO_USER:-}" ]; then
-      home=$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)
-      [ -z "$home" ] || others="$others
-$home/.local/bin/agentbus"
-    fi
-    printf '%s\n' "$others" | while IFS= read -r o; do
-      [ -n "$o" ] && [ -e "$o" ] || continue
-      [ "$(readlink -f "$o" 2>/dev/null)" = "$profiled" ] && continue
-      say "Another agentbus is at $o and has no profile. If it comes first on PATH, the wall stays off:"
-      say "  remove it (rm $o), or run $profiled directly."
-    done
-  fi
+  [ -z "$profiled" ] || other_binaries "$profiled"
 fi
 case ":$PATH:" in
   *":$dir:"*) ;;
