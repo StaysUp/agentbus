@@ -8,7 +8,9 @@ package settings
 //     followed), named with the date and "before-settings-db" (CopyName),
 //     unless the folder is new;
 //  3. imports permissions.toml, instructions.md and agents.json into the
-//     database, in one transaction that also marks the import done.
+//     database, in one transaction that also marks the import done;
+//  4. writes out the old value of each default this build changed, so
+//     nothing changes for the person (writeOldDefaults).
 //
 // The copy is made in a folder of its own name with .partial on the end and
 // renamed when whole, and the database is made only once the copy is whole.
@@ -19,6 +21,7 @@ package settings
 // files.
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +29,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -57,6 +61,7 @@ type Report struct {
 	Copy     string   // the copy it made; "" when it made none
 	Imported []string // the files it imported
 	Done     bool     // false when the import was done already
+	Kept     []string // the policy keys whose old default it wrote out
 }
 
 // CopyName is the copy of the data folder dir made at t: beside it, its name
@@ -96,12 +101,13 @@ func (u Upgrade) Run() (*DB, Report, error) {
 	if !hasDB && !errors.Is(statErr, fs.ErrNotExist) {
 		return nil, rep, fmt.Errorf("settings: %s could not be read: %w", path, statErr)
 	}
-	// A data folder from before settings.db keeps the defaults it ran under
-	// (Defaults04); a new one starts on the latest. The database is made
-	// with its version, so a start that stops after this keeps it.
-	dv := LatestDefaults()
+	// A data folder from before settings.db keeps the defaults it ran under:
+	// none of the upgrade steps are written yet. A new one has nothing to
+	// keep, so it starts with all of them done. The database is made with
+	// its count, so a start that stops after this keeps it.
+	done := len(upgradeSteps)
 	if !hasDB && !newFolder(u.Dir) {
-		dv = Defaults04
+		done = 0
 		// One rule for where the copy comes from and where it goes: the
 		// data folder's real path, however it was named (relative, or
 		// through links). The walk starts at the folder itself, and the copy
@@ -114,7 +120,7 @@ func (u Upgrade) Run() (*DB, Report, error) {
 			return nil, rep, err
 		}
 	}
-	db, err := openDB(path, now, dv)
+	db, err := openDB(path, now, done)
 	if err != nil {
 		return nil, rep, err
 	}
@@ -123,7 +129,106 @@ func (u Upgrade) Run() (*DB, Report, error) {
 		db.Close()
 		return nil, rep, err
 	}
+	if rep.Kept, err = db.writeOldDefaults(); err != nil {
+		db.Close()
+		return nil, rep, err
+	}
 	return db, rep, nil
+}
+
+// upgradesDone is how many of upgradeSteps the database has written. A
+// database made by a build that kept a defaults version instead (meta
+// defaults, 1 for 0.4's) has written all the steps before that version.
+func upgradesDone(q querier) (int, error) {
+	v, err := meta(q, "upgrades")
+	if err != nil {
+		return 0, err
+	}
+	if v == "" {
+		if v, err = meta(q, "defaults"); err != nil {
+			return 0, err
+		}
+		n, _ := strconv.Atoi(v)
+		return min(max(n-1, 0), len(upgradeSteps)), nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("the stored upgrade count %q is not a number", v)
+	}
+	return min(n, len(upgradeSteps)), nil
+}
+
+// setUpgradesDone stores that every upgrade step is written.
+func setUpgradesDone(tx *sql.Tx) error {
+	if _, err := tx.Exec(`INSERT INTO meta(key, value) VALUES ('upgrades', ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, strconv.Itoa(len(upgradeSteps))); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`DELETE FROM meta WHERE key = 'defaults'`)
+	return err
+}
+
+// writeOldDefaults writes out, once, the old value of each default changed
+// since the database last ran, into the person's policy, unless they set
+// that key themselves: so an upgrade never changes what a turn may do. The
+// write is one change, with its settings.changed event naming the keys, in
+// the transaction that marks the steps done. keys is what it wrote; none
+// when nothing was waiting.
+func (d *DB) writeOldDefaults() (keys []string, err error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	fail := func(err error) ([]string, error) {
+		return nil, fmt.Errorf("settings: the old defaults could not be kept: %w", err)
+	}
+	tx, err := d.db.Begin()
+	if err != nil {
+		return fail(err)
+	}
+	defer tx.Rollback()
+	n, err := upgradesDone(tx)
+	if err != nil {
+		return fail(err)
+	}
+	legacy, err := meta(tx, "defaults")
+	if err != nil {
+		return fail(err)
+	}
+	if n == len(upgradeSteps) && legacy == "" {
+		return nil, nil
+	}
+	s, err := readState(tx)
+	if err != nil {
+		return fail(err)
+	}
+	// An overlay that is not readable has no value to keep: turns refuse
+	// until the person writes the policy again, and that write is theirs.
+	if s.overlay != nil {
+		o := flat{}
+		for k, v := range s.overlay {
+			o[k] = v
+		}
+		for _, st := range upgradeSteps[n:] {
+			if _, set := o[st.Key]; !set {
+				o[st.Key] = st.Old
+				keys = append(keys, st.Key)
+			}
+		}
+		if len(keys) > 0 {
+			if err := putSetting(tx, SettingPermissions, o, d.now()); err != nil {
+				return fail(err)
+			}
+			if err := addChanges(tx, s.version, []Change{{Setting: SettingPermissions, Keys: keys}}, d.now()); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if err := setUpgradesDone(tx); err != nil {
+		return fail(err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fail(err)
+	}
+	return keys, nil
 }
 
 // lockDir takes the lock at path, refusing when another service holds it.
@@ -274,17 +379,24 @@ func (d *DB) importFiles(dir string, readAgents func([]byte) ([]AgentRow, error)
 	}
 	if exists(filepath.Join(dir, PolicyFile)) {
 		// A key the file leaves out held its default under 0.4: it takes the
-		// value of the defaults the database starts on (Defaults04 for a
-		// folder from before settings.db), not fill's.
-		p, err := old.policyOver(s.defaults.Policy)
+		// value it had then, kept as the person's own, so the policy after
+		// the import is the one the file gave. The steps are then done.
+		n, err := upgradesDone(tx)
+		if err != nil {
+			return nil, false, fmt.Errorf("settings: %w", err)
+		}
+		p, err := old.policyOver(policyBefore(n))
 		if err != nil {
 			return fail(PolicyFile, err)
 		}
-		if err := putSetting(tx, SettingPermissions, overlayOf(s.defaults.Policy, p), now); err != nil {
+		if err := putSetting(tx, SettingPermissions, overlayOf(defaultPolicy(), p), now); err != nil {
+			return nil, false, err
+		}
+		if err := setUpgradesDone(tx); err != nil {
 			return nil, false, err
 		}
 		files = append(files, PolicyFile)
-		cs = append(cs, Change{Setting: SettingPermissions, Keys: changedKeys(s.defaults.Policy, p), File: PolicyFile})
+		cs = append(cs, Change{Setting: SettingPermissions, Keys: changedKeys(defaultPolicy(), p), File: PolicyFile})
 	}
 	if exists(filepath.Join(dir, InstructionsFile)) {
 		text, _, err := old.Instructions()
@@ -295,12 +407,12 @@ func (d *DB) importFiles(dir string, readAgents func([]byte) ([]AgentRow, error)
 			}
 			return fail(InstructionsFile, err)
 		}
-		if err := putInstructions(tx, s.defaults, text, now); err != nil {
+		if err := putInstructions(tx, text, now); err != nil {
 			return nil, false, err
 		}
 		files = append(files, InstructionsFile)
 		keys := []string{}
-		if text != s.defaults.Instructions {
+		if text != DefaultInstructions {
 			keys = []string{"text"}
 		}
 		cs = append(cs, Change{Setting: SettingInstructions, Keys: keys, File: InstructionsFile})

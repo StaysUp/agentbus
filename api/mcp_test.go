@@ -122,7 +122,7 @@ func TestMCPToolListFollowsTheToken(t *testing.T) {
 			t.Errorf("main token: %s missing from %v", want, all)
 		}
 	}
-	// apply is off for a turn token by default (defaults version 2).
+	// apply is off for a turn token by default.
 	allButApply := slices.DeleteFunc(slices.Clone(all), func(n string) bool { return n == "apply_turn" })
 	if w := toolNames(t, e, mcpWriteTok); !slices.Equal(w, allButApply) {
 		t.Errorf("write turn: %v, want %v", w, allButApply)

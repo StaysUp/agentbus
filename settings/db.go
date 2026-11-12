@@ -2,7 +2,7 @@ package settings
 
 // DB is control's settings store: settings.db in the data folder, beside
 // events.db and jobs.db. It holds only what the person changed: the policy as
-// an overlay on the defaults of its version (defaults.go), the instructions
+// an overlay on the defaults (defaults.go), the instructions
 // when they differ from the default text, and the saved agents the person
 // added, changed or removed. The API is the only way in; nothing reads a
 // settings file once the import has run (upgrade.go).
@@ -37,7 +37,6 @@ const (
 	SettingPermissions  = "permissions"
 	SettingInstructions = "instructions"
 	SettingAgents       = "agents"
-	SettingDefaults     = "defaults"
 )
 
 // What a turn's refusal says of a stored setting that cannot be used.
@@ -54,7 +53,7 @@ const (
 type Change struct {
 	ID      string
 	Time    time.Time
-	Setting string   // permissions, instructions, agents or defaults
+	Setting string   // permissions, instructions or agents
 	Keys    []string // such as limits.max_depth, or an agent id
 	File    string   // on an import: the file the setting came from
 	Version int64    // the settings version after the change
@@ -71,8 +70,8 @@ type AgentRow struct {
 // Info is the settings database's state, for GET /api/v0/settings.
 type Info struct {
 	Version  int64     // moves up by one with every change
-	Defaults int       // the version of the defaults the settings run under
 	Created  time.Time // when the database was made
+	Changed  time.Time // when the last change was made; zero for none
 	Imported time.Time // when the old files were imported; zero for none
 	Files    []string  // the files imported
 }
@@ -103,17 +102,15 @@ CREATE INDEX IF NOT EXISTS changes_unpublished ON changes(seq) WHERE published I
 `
 
 // OpenDB opens or makes the settings database at path. A new one starts on
-// the latest defaults, at settings version 0. now nil is time.Now.
+// the defaults as they are, at settings version 0. now nil is time.Now.
 func OpenDB(path string, now func() time.Time) (*DB, error) {
-	return openDB(path, now, LatestDefaults())
+	return openDB(path, now, len(upgradeSteps))
 }
 
-// Defaults04 is the version of the defaults 0.4 ran under. A data folder from
-// before settings.db starts on it, so the upgrade changes nothing it did.
-const Defaults04 = 1
-
-// openDB is OpenDB, with a new database starting on defaults version dv.
-func openDB(path string, now func() time.Time, dv int) (*DB, error) {
+// openDB is OpenDB, with a new database counting done upgrade steps of
+// upgradeSteps as written: all of them for a new data folder, none for one
+// from 0.4, whose old defaults the upgrade then writes out.
+func openDB(path string, now func() time.Time, done int) (*DB, error) {
 	if now == nil {
 		now = time.Now
 	}
@@ -132,8 +129,14 @@ func openDB(path string, now func() time.Time, dv int) (*DB, error) {
 		return nil, fmt.Errorf("settings: the database %s could not be made: %w", path, err)
 	}
 	t := now().UTC().Format(time.RFC3339Nano)
-	if _, err := db.Exec(`INSERT OR IGNORE INTO meta(key, value) VALUES ('version', '0'), ('defaults', ?), ('created', ?)`,
-		strconv.Itoa(dv), t); err != nil {
+	// The count is set only when the database is new: one made before the
+	// count was kept is read by upgradesDone.
+	if _, err := db.Exec(`INSERT INTO meta(key, value) SELECT 'upgrades', ? WHERE NOT EXISTS (SELECT 1 FROM meta WHERE key = 'created')`,
+		strconv.Itoa(done)); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("settings: the database %s could not be made: %w", path, err)
+	}
+	if _, err := db.Exec(`INSERT OR IGNORE INTO meta(key, value) VALUES ('version', '0'), ('created', ?)`, t); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("settings: the database %s could not be made: %w", path, err)
 	}
@@ -163,7 +166,6 @@ func (d *DB) Close() error {
 // state is what one read of the database holds.
 type state struct {
 	version      int64
-	defaults     Defaults
 	overlay      flat
 	instructions *string // nil: the default text
 	created      time.Time
@@ -192,15 +194,6 @@ func readState(q querier) (state, error) {
 	}
 	if s.version, err = strconv.ParseInt(v, 10, 64); err != nil {
 		return s, fmt.Errorf("settings: the stored version %q is not a number", v)
-	}
-	dv, err := meta(q, "defaults")
-	if err != nil {
-		return s, err
-	}
-	n, _ := strconv.Atoi(dv)
-	var ok bool
-	if s.defaults, ok = DefaultsFor(n); !ok {
-		return s, fmt.Errorf("settings: the database runs under defaults version %q, which this build does not have; run a newer agentbus", dv)
 	}
 	c, err := meta(q, "created")
 	if err != nil {
@@ -241,7 +234,7 @@ func (s state) policyOf() (Policy, Version, error) {
 		v := Version("broken")
 		return Policy{}, v, &Error{Setting: SettingPermissions, Where: dbPolicyWhere, Why: "they are not readable", Fix: dbPolicyFix, Version: v}
 	}
-	p, err := applyOverlay(s.defaults.Policy, s.overlay)
+	p, err := applyOverlay(defaultPolicy(), s.overlay)
 	if err != nil {
 		b, _ := json.Marshal(s.overlay)
 		v := versionOf(b)
@@ -253,7 +246,7 @@ func (s state) policyOf() (Policy, Version, error) {
 
 // instructionsOf is the text s holds, and its version.
 func (s state) instructionsOf() (string, Version, error) {
-	text := s.defaults.Instructions
+	text := DefaultInstructions
 	if s.instructions != nil {
 		text = *s.instructions
 	}
@@ -274,8 +267,7 @@ func (d *DB) read() (state, error) {
 	return s, nil
 }
 
-// Policy is the policy: the defaults of the database's version with the
-// person's changes on top.
+// Policy is the policy: the defaults with the person's changes on top.
 func (d *DB) Policy() (Policy, Version, error) {
 	s, err := d.read()
 	if err != nil {
@@ -319,7 +311,13 @@ func (d *DB) Info() (Info, error) {
 	if err != nil {
 		return Info{}, err
 	}
-	in := Info{Version: s.version, Defaults: s.defaults.Version, Created: s.created}
+	in := Info{Version: s.version, Created: s.created}
+	var last string
+	if err := d.db.QueryRow(`SELECT time FROM changes ORDER BY seq DESC LIMIT 1`).Scan(&last); err == nil {
+		in.Changed, _ = time.Parse(time.RFC3339Nano, last)
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return Info{}, err
+	}
 	if t, _ := meta(d.db, "imported"); t != "" {
 		in.Imported, _ = time.Parse(time.RFC3339Nano, t)
 	}
@@ -341,7 +339,7 @@ func (d *DB) SetPolicy(p Policy, match Version) (Policy, Version, error) {
 	err := d.change(func(tx *sql.Tx, s state) ([]Change, error) {
 		cur, curV, err := s.policyOf()
 		if err != nil {
-			cur = s.defaults.Policy
+			cur = defaultPolicy()
 		}
 		if match != Any && match != curV {
 			return nil, ErrChanged
@@ -351,7 +349,7 @@ func (d *DB) SetPolicy(p Policy, match Version) (Policy, Version, error) {
 		if err == nil && curV == v {
 			return nil, nil // nothing changes
 		}
-		if err := putSetting(tx, SettingPermissions, overlayOf(s.defaults.Policy, p), d.now()); err != nil {
+		if err := putSetting(tx, SettingPermissions, overlayOf(defaultPolicy(), p), d.now()); err != nil {
 			return nil, err
 		}
 		return []Change{{Setting: SettingPermissions, Keys: changedKeys(cur, p)}}, nil
@@ -377,7 +375,7 @@ func (d *DB) SetInstructions(text string, match Version) (Version, error) {
 		if curV == v {
 			return nil, nil
 		}
-		if err := putInstructions(tx, s.defaults, text, d.now()); err != nil {
+		if err := putInstructions(tx, text, d.now()); err != nil {
 			return nil, err
 		}
 		return []Change{{Setting: SettingInstructions, Keys: []string{"text"}}}, nil
@@ -386,47 +384,6 @@ func (d *DB) SetInstructions(text string, match Version) (Version, error) {
 		return "", err
 	}
 	return v, nil
-}
-
-// SetDefaults moves the settings to version v of the defaults, when the
-// settings are still at match (the settings version, as GET
-// /api/v0/settings sends it). The person's own changes stay; every other key
-// takes the new version's value. The change names each key whose value
-// moved.
-func (d *DB) SetDefaults(v int, match string) (Info, error) {
-	nd, ok := DefaultsFor(v)
-	if !ok {
-		return Info{}, &Invalid{Why: fmt.Sprintf("version must be from 1 to %d", LatestDefaults())}
-	}
-	err := d.change(func(tx *sql.Tx, s state) ([]Change, error) {
-		if match != string(Any) && match != strconv.FormatInt(s.version, 10) {
-			return nil, ErrChanged
-		}
-		if s.defaults.Version == v {
-			return nil, nil
-		}
-		keys := []string{"version"}
-		if s.overlay != nil {
-			oldP, err1 := applyOverlay(s.defaults.Policy, s.overlay)
-			newP, err2 := applyOverlay(nd.Policy, s.overlay)
-			if err1 == nil && err2 == nil {
-				for _, k := range changedKeys(oldP, newP) {
-					keys = append(keys, "permissions."+k)
-				}
-			}
-		}
-		if s.instructions == nil && s.defaults.Instructions != nd.Instructions {
-			keys = append(keys, "instructions.text")
-		}
-		if _, err := tx.Exec(`UPDATE meta SET value = ? WHERE key = 'defaults'`, strconv.Itoa(v)); err != nil {
-			return nil, err
-		}
-		return []Change{{Setting: SettingDefaults, Keys: keys}}, nil
-	})
-	if err != nil {
-		return Info{}, err
-	}
-	return d.Info()
 }
 
 // Agents are the saved agents the person added, changed or removed, in the
@@ -488,10 +445,10 @@ func putSetting(tx *sql.Tx, name string, v any, now time.Time) error {
 	return err
 }
 
-// putInstructions keeps text only when it differs from the defaults' text.
-func putInstructions(tx *sql.Tx, def Defaults, text string, now time.Time) error {
+// putInstructions keeps text only when it differs from the default text.
+func putInstructions(tx *sql.Tx, text string, now time.Time) error {
 	body := map[string]*string{}
-	if text != def.Instructions {
+	if text != DefaultInstructions {
 		body["text"] = &text
 	}
 	return putSetting(tx, SettingInstructions, body, now)

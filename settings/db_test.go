@@ -33,37 +33,46 @@ func stored(t *testing.T, d *DB, name string) string {
 	return v
 }
 
-// The defaults of the latest version are DefaultPolicy: a change of fill()
-// that is not a new version of the defaults fails here.
-func TestDefaultsLatestIsDefaultPolicy(t *testing.T) {
-	d, ok := DefaultsFor(LatestDefaults())
-	if !ok {
-		t.Fatal("no latest defaults")
-	}
-	if !reflect.DeepEqual(flatten(d.Policy), flatten(DefaultPolicy())) || d.Instructions != DefaultInstructions {
-		t.Fatalf("the latest defaults differ from DefaultPolicy: change the defaults by adding a version (defaults.go)")
-	}
-	if _, ok := DefaultsFor(0); ok {
-		t.Error("version 0 exists")
-	}
-	if _, ok := DefaultsFor(LatestDefaults() + 1); ok {
-		t.Error("a version past the latest exists")
+// The defaults in code are DefaultPolicy: a change of fill() that is not
+// also a change of the defaults, with its upgrade step, fails here.
+func TestDefaultsAreDefaultPolicy(t *testing.T) {
+	if !reflect.DeepEqual(flatten(defaultPolicy()), flatten(DefaultPolicy())) {
+		t.Fatalf("the defaults differ from DefaultPolicy: change a default in defaults.go, with an upgrade step")
 	}
 }
 
-// Every version of the defaults writes out every key: a key it leaves out
-// would take fill()'s value, so a later change of fill() would change a
-// released version.
+// The defaults write out every key: a key they leave out would take fill()'s
+// value, so a later change of fill() would change a default with no upgrade
+// step to keep the old value.
 func TestDefaultsWrittenInFull(t *testing.T) {
-	for v := 1; v <= LatestDefaults(); v++ {
-		d, _ := DefaultsFor(v)
-		filled := d.Policy
-		filled.fill()
-		as, _ := json.Marshal(d.Policy)
-		fs, _ := json.Marshal(filled)
-		if string(as) != string(fs) {
-			t.Errorf("version %d leaves out a key:\n written %s\n filled  %s", v, as, fs)
+	d := defaultPolicy()
+	filled := d
+	filled.fill()
+	as, _ := json.Marshal(d)
+	fs, _ := json.Marshal(filled)
+	if string(as) != string(fs) {
+		t.Errorf("the defaults leave out a key:\n written %s\n filled  %s", as, fs)
+	}
+}
+
+// Each upgrade step names a policy key and an old value that differs from
+// today's default; before the steps, a turn token applies, as in 0.4.
+func TestUpgradeSteps(t *testing.T) {
+	now := flatten(defaultPolicy())
+	for _, st := range upgradeSteps {
+		if _, ok := now[st.Key]; !ok {
+			t.Errorf("step %s: no such key", st.Key)
 		}
+	}
+	last := upgradeSteps[len(upgradeSteps)-1]
+	if string(now[last.Key]) == string(last.Old) {
+		t.Errorf("the last step %s keeps the default it changes", last.Key)
+	}
+	if p := policyBefore(0); !*p.AgentAPI.Apply {
+		t.Error("before the steps, apply is off")
+	}
+	if p := policyBefore(len(upgradeSteps)); !reflect.DeepEqual(flatten(p), now) {
+		t.Error("after every step, the policy is not the defaults")
 	}
 }
 
@@ -119,7 +128,7 @@ func TestDBPolicyKeepsOnlyChanges(t *testing.T) {
 	if got := stored(t, d, SettingPermissions); got != "{}" {
 		t.Fatalf("after the defaults: %s", got)
 	}
-	if in, _ := d.Info(); in.Version != 2 || in.Defaults != LatestDefaults() {
+	if in, _ := d.Info(); in.Version != 2 || !in.Changed.Equal(fixedNow()) {
 		t.Fatalf("info %+v", in)
 	}
 }
@@ -252,62 +261,6 @@ func TestChangeAndEventSavedTogether(t *testing.T) {
 	}
 }
 
-// A new build's defaults never reach a control by themselves. A control made
-// on version 1 keeps reading version 1 when the build adds a wider version 2,
-// until it moves to it; then the person's own changes stay, and every other
-// key takes version 2's value.
-func TestDefaultsVersionPinned(t *testing.T) {
-	saved := defaultSets
-	defer func() { defaultSets = saved }()
-	defaultSets = []func() Defaults{defaultsV1}
-	dir := t.TempDir()
-	d := openTestDB(t, dir)
-	if _, _, err := d.SetPolicy(Policy{Forbid: []string{"rm"}}, Any); err != nil {
-		t.Fatal(err)
-	}
-	d.Close()
-
-	// The build adds version 2: deeper asking, and the agent tools on.
-	defaultSets = append(defaultSets, func() Defaults {
-		v := defaultsV1()
-		depth, on := 5, true
-		v.Policy.Limits.MaxDepth, v.Policy.AgentAPI.Tools = &depth, &on
-		return v
-	})
-	d = openTestDB(t, dir)
-	p, _, err := d.Policy()
-	if err != nil || *p.Limits.MaxDepth != 2 || *p.AgentAPI.Tools || p.Forbid[0] != "rm" {
-		t.Fatalf("after the upgrade: %+v %v", p, err)
-	}
-	in, _ := d.Info()
-	if in.Defaults != 1 {
-		t.Fatalf("defaults version %d", in.Defaults)
-	}
-	if _, err := d.SetDefaults(3, "*"); err == nil {
-		t.Fatal("a version that does not exist was taken")
-	}
-	if _, err := d.SetDefaults(2, "0"); !errors.Is(err, ErrChanged) {
-		t.Fatalf("stale: %v", err)
-	}
-	in, err = d.SetDefaults(2, "1")
-	if err != nil || in.Defaults != 2 || in.Version != 2 {
-		t.Fatalf("move: %+v %v", in, err)
-	}
-	p, _, _ = d.Policy()
-	if *p.Limits.MaxDepth != 5 || !*p.AgentAPI.Tools || p.Forbid[0] != "rm" {
-		t.Fatalf("on version 2: %+v", p)
-	}
-	cs, _, _ := d.Changes()
-	if last := cs[len(cs)-1]; last.Setting != SettingDefaults || strings.Join(last.Keys, ",") != "version,permissions.agent_api.tools,permissions.limits.max_depth" {
-		t.Fatalf("change %+v", last)
-	}
-	// A new database starts on the latest.
-	n := openTestDB(t, t.TempDir())
-	if in, _ := n.Info(); in.Defaults != 2 {
-		t.Fatalf("a new database is on %d", in.Defaults)
-	}
-}
-
 // A stored policy that a build cannot use is an *Error with a version, so a
 // PUT can replace it.
 func TestDBBrokenPolicy(t *testing.T) {
@@ -328,47 +281,5 @@ func TestDBBrokenPolicy(t *testing.T) {
 	}
 	if _, _, err := d.Policy(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-// Version 2 differs from version 1 in one key: a turn token's apply is off.
-// A database on version 1 that never set it applies; moving to 2 turns it
-// off and names the key; the person can turn it on again.
-func TestDefaultsV2ApplyOff(t *testing.T) {
-	v1, _ := DefaultsFor(1)
-	v2, ok := DefaultsFor(2)
-	if !ok || !*v1.Policy.AgentAPI.Apply || *v2.Policy.AgentAPI.Apply {
-		t.Fatalf("apply: v1 %v, v2 %v", *v1.Policy.AgentAPI.Apply, *v2.Policy.AgentAPI.Apply)
-	}
-	if k := changedKeys(v1.Policy, v2.Policy); strings.Join(k, ",") != "agent_api.apply" {
-		t.Fatalf("version 2 changes %v", k)
-	}
-	dir := t.TempDir()
-	d, err := openDB(filepath.Join(dir, DBFile), fixedNow, 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer d.Close()
-	if p, _, _ := d.Policy(); !*p.AgentAPI.Apply {
-		t.Fatal("version 1: apply is off")
-	}
-	if _, err := d.SetDefaults(2, "*"); err != nil {
-		t.Fatal(err)
-	}
-	p, v, _ := d.Policy()
-	if *p.AgentAPI.Apply {
-		t.Fatal("version 2: apply is on")
-	}
-	cs, _, _ := d.Changes()
-	if last := cs[len(cs)-1]; strings.Join(last.Keys, ",") != "version,permissions.agent_api.apply" {
-		t.Fatalf("the move names %v", last.Keys)
-	}
-	on := true
-	p.AgentAPI.Apply = &on
-	if _, _, err := d.SetPolicy(p, v); err != nil {
-		t.Fatal(err)
-	}
-	if p, _, _ := d.Policy(); !*p.AgentAPI.Apply || stored(t, d, SettingPermissions) != `{"agent_api.apply":true}` {
-		t.Fatalf("turned on: %v, stored %s", *p.AgentAPI.Apply, stored(t, d, SettingPermissions))
 	}
 }

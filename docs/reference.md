@@ -54,7 +54,7 @@ as on macOS, refuses the turn with the reason.
 - The permissions (`GET` and `PUT /api/v0/settings/permissions`, kept in `settings.db`; up to 0.4
   the file `permissions.toml`, imported once) have three lists: `read_folders`, `allow` and
   `forbid`, the `edit` rule, the `subagents` switch, `[limits]` and `[agent_api]`. A key never
-  changed reads as its default, from the defaults version the settings run under. Every turn reads it when it starts; the API reads it for each request a turn token
+  changed reads as its default. Every turn reads it when it starts; the API reads it for each request a turn token
   sends. claude gets one
   `--allowedTools` with `Read(//<folder>/**),Grep(//<folder>/**),Glob(//<folder>/**)` per folder
   (reading only) and `Bash(<cmd>:*)` per allowed command, and `--disallowedTools Bash(<cmd>:*),…`. A

@@ -1,7 +1,6 @@
 package api
 
-// The settings routes: the settings database's state and its defaults
-// version, the policy, and the instructions every turn gets, read and
+// The settings routes: the settings database's state, the policy, and the instructions every turn gets, read and
 // written through the settings store (settings.Store), so a cockpit or a
 // script can show and change them. The saved agents are settings too, at
 // /api/v0/agents (agents.go).
@@ -32,23 +31,16 @@ import (
 
 // SettingsInfo is the body of GET /api/v0/settings.
 type SettingsInfo struct {
-	Version        int64      `json:"version" doc:"The settings version: it moves up by one with every change of the policy, the instructions, the saved agents or the defaults version. Each turn records the version it started under (settings_version on turn.started). Also the ETag."`
-	Defaults       int        `json:"defaults_version" doc:"The version of the defaults the settings run under. A key the person never changed takes its value from it."`
-	LatestDefaults int        `json:"latest_defaults_version" doc:"The newest version of the defaults this build has. An upgrade never moves the settings to it by itself: PUT /api/v0/settings/defaults does."`
-	Created        time.Time  `json:"created" doc:"When the settings database was made."`
-	Imported       *time.Time `json:"imported,omitempty" doc:"When the settings files of 0.4 and before were imported into the database. Absent when the import has not run."`
-	ImportedFiles  []string   `json:"imported_files" doc:"The files the import read: permissions.toml, instructions.md and agents.json, those that were there. Empty for a new data folder."`
-}
-
-// DefaultsBody is the body of PUT /api/v0/settings/defaults.
-type DefaultsBody struct {
-	Version int `json:"version" doc:"The version of the defaults to run under, from 1 to latest_defaults_version."`
+	Version       int64      `json:"version" doc:"The settings version: it moves up by one with every change of the policy, the instructions or the saved agents. Each turn records the version it started under (settings_version on turn.started). Also the ETag."`
+	Created       time.Time  `json:"created" doc:"When the settings database was made."`
+	Changed       *time.Time `json:"changed,omitempty" doc:"When the settings last changed. Absent when they never did."`
+	Imported      *time.Time `json:"imported,omitempty" doc:"When the settings files of 0.4 and before were imported into the database. Absent when the import has not run."`
+	ImportedFiles []string   `json:"imported_files" doc:"The files the import read: permissions.toml, instructions.md and agents.json, those that were there. Empty for a new data folder."`
 }
 
 // settingsDB is a store that keeps a settings database: control's.
 type settingsDB interface {
 	Info() (settings.Info, error)
-	SetDefaults(v int, match string) (settings.Info, error)
 }
 
 // SettingsEvent is the settings.changed event of a change.
@@ -90,33 +82,21 @@ var settingsRoutes = []route{
 	{method: "GET", path: "/api/v0/settings", op: "getSettings",
 		tag:     "Settings",
 		summary: "Read the settings' state",
-		doc: "The settings database's state: the settings version, the version of the defaults the settings run under, the newest this build has, " +
+		doc: "The settings database's state: the settings version, when the settings last changed, " +
 			"and what the one-time import of the settings files read.\n\n" +
-			"Control keeps the settings in settings.db in its data folder, reached only through this API. The defaults are in the code, under a version; " +
+			"Control keeps the settings in settings.db in its data folder, reached only through this API. The defaults are in the code; " +
 			"the database holds only what the person changed. On its first start, a 0.5 control copies its data folder beside it " +
 			"(its name with the date and before-settings-db), then imports permissions.toml, instructions.md and agents.json once. " +
-			"It never reads those files again.\n\nETag is the settings version: send it back in If-Match to change the defaults version.",
+			"It never reads those files again. When a build changes a default, its first start writes the old value into the person's policy, " +
+			"unless they set that key, so nothing changes for them. To take the new default, change that key.\n\nETag is the settings version.",
 		replies:   []reply{ok(200, SettingsInfo{}, "The settings' state."), noSettings, fail(http.StatusInternalServerError, "The settings could not be read.")},
 		versioned: true,
 		serve:     plain((*API).getSettings)},
-	{method: "PUT", path: "/api/v0/settings/defaults", op: "putDefaults",
-		tag:     "Settings",
-		summary: "Change the defaults version",
-		doc: "Run the settings under another version of the defaults. The keys the person changed stay as they are; every other key takes the new version's value. " +
-			"A new build that changes a default adds a version and never moves a control to it by itself, so an upgrade never widens what a turn may do.\n\n" +
-			"Send If-Match with the ETag of GET /api/v0/settings, or * to change it whatever the settings version is now. " +
-			"The settings.changed event names version and each policy key whose value moved.",
-		body: DefaultsBody{},
-		replies: []reply{ok(200, SettingsInfo{}, "The settings' state after the change."),
-			fail(http.StatusBadRequest, "No such version of the defaults."), settingsReadOnly, settingsChanged, settingsNoMatch, noSettings,
-			fail(http.StatusInternalServerError, "The setting could not be written.")},
-		versioned: true,
-		serve:     plain((*API).putDefaults)},
 	{method: "GET", path: "/api/v0/settings/permissions", op: "getPermissions",
 		tag:     "Settings",
 		summary: "Read the policy",
 		doc: "The policy: what a turn may do without a person to ask, the limits on work agents ask for, and what a turn token may call. " +
-			"Every value is filled: a key the person never changed reads as its default, from the defaults version the settings run under. Folders are as written, ~ and all: " +
+			"Every value is filled: a key the person never changed reads as its default. Folders are as written, ~ and all: " +
 			"they name folders on the machine that runs the turn.\n\n" +
 			"ETag is the policy's version: send it back in If-Match to change it.",
 		replies:   []reply{ok(200, settings.Policy{}, "The policy."), settingsBroken, noSettings},
@@ -299,8 +279,11 @@ func (a *API) putInstructions(w http.ResponseWriter, r *http.Request) {
 
 // settingsInfo is the body of GET /api/v0/settings.
 func settingsInfo(in settings.Info) SettingsInfo {
-	out := SettingsInfo{Version: in.Version, Defaults: in.Defaults, LatestDefaults: settings.LatestDefaults(),
-		Created: in.Created.UTC(), ImportedFiles: append([]string{}, in.Files...)}
+	out := SettingsInfo{Version: in.Version, Created: in.Created.UTC(), ImportedFiles: append([]string{}, in.Files...)}
+	if !in.Changed.IsZero() {
+		t := in.Changed.UTC()
+		out.Changed = &t
+	}
 	if !in.Imported.IsZero() {
 		t := in.Imported.UTC()
 		out.Imported = &t
@@ -318,31 +301,6 @@ func (a *API) getSettings(w http.ResponseWriter, _ *http.Request) {
 	in, err := db.Info()
 	if err != nil {
 		a.internal(w)
-		return
-	}
-	setVersion(w, settings.Version(strconv.FormatInt(in.Version, 10)))
-	writeJSON(w, http.StatusOK, settingsInfo(in))
-}
-
-// PUT /api/v0/settings/defaults
-func (a *API) putDefaults(w http.ResponseWriter, r *http.Request) {
-	match, ok := a.matched(w, r)
-	if !ok {
-		return
-	}
-	db, ok := a.cfg.Settings.(settingsDB)
-	if !ok {
-		a.settingsWrite(w, settings.ErrReadOnly)
-		return
-	}
-	var body DefaultsBody
-	if !decodeObject(r, &body) {
-		writeError(w, http.StatusBadRequest, "the body must be one JSON object with version")
-		return
-	}
-	in, err := db.SetDefaults(body.Version, string(match))
-	if err != nil {
-		a.settingsWrite(w, err)
 		return
 	}
 	setVersion(w, settings.Version(strconv.FormatInt(in.Version, 10)))

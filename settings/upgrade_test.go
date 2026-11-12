@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"testing"
@@ -156,7 +157,7 @@ func TestUpgradeImportsFiles(t *testing.T) {
 		t.Fatalf("agents %+v", rows)
 	}
 	cs, pub, _ := d.Changes()
-	if len(cs) != 3 || cs[0].File != PolicyFile || strings.Join(cs[0].Keys, ",") != "forbid,limits.max_depth" ||
+	if len(cs) != 3 || cs[0].File != PolicyFile || strings.Join(cs[0].Keys, ",") != "agent_api.apply,forbid,limits.max_depth" ||
 		cs[1].File != InstructionsFile || cs[2].File != AgentsFile || cs[2].Keys[0] != "a_1" || cs[2].Version != 3 || pub[0] {
 		t.Fatalf("changes %+v %v", cs, pub)
 	}
@@ -369,21 +370,20 @@ func TestUpgradeFolderNamedThroughItself(t *testing.T) {
 	}
 }
 
-// A data folder from before settings.db starts on the defaults 0.4 ran
-// under, so a turn token still applies; a key its permissions.toml leaves
-// out takes that version's value. A new folder starts on the latest, where
-// it does not.
+// A data folder from before settings.db keeps the defaults 0.4 ran under,
+// so a turn token still applies: the old value is written out as the
+// person's own. A key its permissions.toml sets keeps the file's value. A new
+// folder starts on the defaults as they are, where it does not.
 func TestUpgradeKeepsDefaultsOf04(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		files map[string]string
-		dv    int
 		apply bool
 	}{
-		{"new", nil, LatestDefaults(), false},
-		{"record only", map[string]string{"events.db": "record"}, Defaults04, true},
-		{"file without apply", map[string]string{PolicyFile: "forbid = [\"rm\"]\n"}, Defaults04, true},
-		{"file with apply off", map[string]string{PolicyFile: "[agent_api]\napply = false\n"}, Defaults04, false},
+		{"new", nil, false},
+		{"record only", map[string]string{"events.db": "record"}, true},
+		{"file without apply", map[string]string{PolicyFile: "forbid = [\"rm\"]\n"}, true},
+		{"file with apply off", map[string]string{PolicyFile: "[agent_api]\napply = false\n"}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := home(t)
@@ -395,13 +395,130 @@ func TestUpgradeKeepsDefaultsOf04(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer d.Close()
-			in, _ := d.Info()
 			p, _, err := d.Policy()
-			if err != nil || in.Defaults != tc.dv || *p.AgentAPI.Apply != tc.apply {
-				t.Fatalf("defaults %d, apply %v, %v; want %d, %v", in.Defaults, *p.AgentAPI.Apply, err, tc.dv, tc.apply)
+			if err != nil || *p.AgentAPI.Apply != tc.apply {
+				t.Fatalf("apply %v, %v; want %v", *p.AgentAPI.Apply, err, tc.apply)
 			}
-			if strings.Contains(stored(t, d, SettingPermissions), "apply") != (tc.dv == Defaults04 && !tc.apply) {
+			if strings.Contains(stored(t, d, SettingPermissions), `"agent_api.apply":true`) != tc.apply {
 				t.Fatalf("stored %s", stored(t, d, SettingPermissions))
+			}
+			if n, _ := upgradesDone(d.db); n != len(upgradeSteps) {
+				t.Fatalf("%d steps done", n)
+			}
+		})
+	}
+}
+
+// legacyDB is a settings database as the build before this one left it: on
+// defaults version dv, imported, with overlay as the stored policy.
+func legacyDB(t *testing.T, dir string, dv int, overlay string) {
+	t.Helper()
+	d, err := openDB(filepath.Join(dir, DBFile), fixedNow, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`DELETE FROM meta WHERE key = 'upgrades'`,
+		`INSERT INTO meta(key, value) VALUES ('defaults', '` + strconv.Itoa(dv) + `'), ('imported', '2026-11-12T00:00:00Z'), ('imported_files', '[]')`,
+		`INSERT INTO settings(name, value, updated) VALUES ('permissions', '` + overlay + `', '')`,
+	} {
+		if _, err := d.db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d.Close()
+}
+
+// A settings.db on defaults version 1 (0.4's), where the person never set
+// apply: the first start writes apply = true once, as a change of its own
+// with its settings.changed event, and the version is gone from storage.
+// A second start does nothing. The person can then turn it off, and it
+// stays off.
+func TestUpgradeFromDefaultsVersion1(t *testing.T) {
+	dir := home(t)
+	legacyDB(t, dir, 1, `{"forbid":["rm"]}`)
+	d, rep, err := upgrade(dir).Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(rep.Kept, ",") != "agent_api.apply" {
+		t.Fatalf("kept %v", rep.Kept)
+	}
+	var got []Change
+	d.SetSink(func(c Change) error { got = append(got, c); return nil }, nil)
+	p, v, err := d.Policy()
+	if err != nil || !*p.AgentAPI.Apply || p.Forbid[0] != "rm" {
+		t.Fatalf("after the upgrade: apply %v forbid %v %v", *p.AgentAPI.Apply, p.Forbid, err)
+	}
+	if s := stored(t, d, SettingPermissions); s != `{"agent_api.apply":true,"forbid":["rm"]}` {
+		t.Fatalf("stored %s", s)
+	}
+	if len(got) != 1 || got[0].Setting != SettingPermissions || strings.Join(got[0].Keys, ",") != "agent_api.apply" || got[0].File != "" || got[0].Version != 1 {
+		t.Fatalf("events %+v", got)
+	}
+	if dv, _ := meta(d.db, "defaults"); dv != "" {
+		t.Fatalf("the defaults version is still stored: %q", dv)
+	}
+	d.Close()
+
+	d, rep, err = upgrade(dir).Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Kept) != 0 {
+		t.Fatalf("second start kept %v", rep.Kept)
+	}
+	if cs, _, _ := d.Changes(); len(cs) != 1 {
+		t.Fatalf("second start: %d changes", len(cs))
+	}
+	off := false
+	p.AgentAPI.Apply = &off
+	if _, _, err := d.SetPolicy(p, v); err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+
+	d, _, err = upgrade(dir).Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if p, _, _ := d.Policy(); *p.AgentAPI.Apply {
+		t.Fatal("turned off, then on again by a start")
+	}
+	if cs, _, _ := d.Changes(); len(cs) != 2 {
+		t.Fatalf("%d changes, want the upgrade and the person's", len(cs))
+	}
+}
+
+// A settings.db on version 1 where the person set apply off keeps it, and
+// one on version 2 (made new by the build before) is on today's defaults:
+// neither writes a change.
+func TestUpgradeFromDefaultsVersionNothingToKeep(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		dv      int
+		overlay string
+	}{
+		{"version 1, apply off", 1, `{"agent_api.apply":false}`},
+		{"version 2", 2, `{}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := home(t)
+			legacyDB(t, dir, tc.dv, tc.overlay)
+			d, rep, err := upgrade(dir).Run()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer d.Close()
+			if p, _, _ := d.Policy(); *p.AgentAPI.Apply || len(rep.Kept) != 0 {
+				t.Fatalf("apply %v kept %v", *p.AgentAPI.Apply, rep.Kept)
+			}
+			if cs, _, _ := d.Changes(); len(cs) != 0 {
+				t.Fatalf("%d changes", len(cs))
+			}
+			if dv, _ := meta(d.db, "defaults"); dv != "" {
+				t.Fatalf("the defaults version is still stored: %q", dv)
 			}
 		})
 	}

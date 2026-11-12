@@ -195,8 +195,8 @@ The writes are refused for a **read-only** turn (`read_only: true`): its token o
 
 Each row is also a switch of `[agent_api]`, read for every request: `read` (the reads of the first
 three rows), `list_agents`, `start` (a new session), `continue` (with `session`), `review`,
-`cancel` (stop), `rename` and `apply`. Each is on unless set `false`, except `apply`: from defaults
-version 2 it is off, so only the main token applies a turn until you turn `apply` on
+`cancel` (stop), `rename` and `apply`. Each is on unless set `false`, except `apply`: it is off by
+default, so only the main token applies a turn until you turn `apply` on
 ([Settings](#settings)). A call switched off gets **403** naming the switch. `scope = "session"` keeps the token to its own session: it reads only that session's turns
 and calls, reviews only its turns, stops only what its own turns asked for, renames only its
 own session, applies only its own session's turns, and continues no session. A `permissions.toml` that cannot be used refuses every turn token's request with **503**.
@@ -305,9 +305,12 @@ start. No version in the name.
    and renamed when whole;
 2. imports `permissions.toml`, `instructions.md` and `agents.json`, those that are there, into
    `settings.db` in one transaction, with a `settings.changed` event for each (`file` names it).
-   The database starts on **defaults version 1**, the defaults 0.4 ran under, and a key
-   `permissions.toml` leaves out takes its version 1 value, so the upgrade changes nothing a turn
-   may do. A new data folder starts on the latest version.
+   A key `permissions.toml` leaves out keeps the value 0.4 gave it, written as your own, so the
+   upgrade changes nothing a turn may do;
+3. writes out the old value of each default this build changed, unless you set that key:
+   for a data folder from 0.4, `agent_api.apply = true`. It runs once, as one change with its
+   `settings.changed` event (`setting` `permissions`, no `file`). A new data folder has nothing to
+   keep and starts on the defaults as they are.
 
 A start that stops anywhere starts over on the next start, and the import is all in the
 database or none of it. A file the import cannot use stops the start with the file and the
@@ -359,9 +362,9 @@ mode = "off"
 read = ["~/.aws/config"]
 ```
 
-- **The defaults are in the code, under a version**, and `settings.db` keeps only the keys you
-  changed. A key you never changed reads as its default. A new build that changes a default adds a
-  version and never moves your control to it by itself ([Settings](#settings)).
+- **The defaults are in the code**, and `settings.db` keeps only the keys you changed. A key you
+  never changed reads as its default. A build that changes a default writes your old value into
+  your settings on its first start, so nothing changes for you ([Settings](#settings)).
 - **A runner on another machine reads the server's policy**, never its own files
   ([The runner protocol](#the-runner-protocol)).
 - **Every turn reads it when it starts, and the API reads it for every request a turn token
@@ -1468,7 +1471,7 @@ names in the control plane's blob store, and the connector reads them from there
   removes any (`pruned` is never set).
 - **A turn token** may apply a turn of a session of its request tree, its own session
   included (`scope = "session"`: its own session only), only when `apply` is on in `[agent_api]`.
-  It is off by default from defaults version 2: only the main token applies until you turn it on.
+  It is off by default: only the main token applies until you turn it on.
   A read-only turn's token gets 403.
 
 ### `POST /api/v0/turns/<id>/review` — ask another agent to review a turn
@@ -1861,8 +1864,7 @@ these routes. A turn token and the turns token get **403**.
 
 | Route | What it does |
 |---|---|
-| `GET /api/v0/settings` | The settings' state: `version`, `defaults_version`, `latest_defaults_version`, `created`, and `imported` and `imported_files` from the upgrade. `ETag` is `version`. |
-| `PUT /api/v0/settings/defaults` | `{"version": N}`: run under version `N` of the defaults. |
+| `GET /api/v0/settings` | The settings' state: `version`, `created`, `changed` (the last change; absent when none), and `imported` and `imported_files` from the upgrade. `ETag` is `version`. |
 | `GET /api/v0/settings/permissions` | The policy as JSON, every value filled. Folders are as written, `~` and all. |
 | `PUT /api/v0/settings/permissions` | Replace the policy whole. A key left out takes its default. |
 | `GET /api/v0/settings/instructions` | `{"text": "..."}`, before `{session}` is filled in. The default text until you change it. |
@@ -1880,28 +1882,26 @@ these routes. A turn token and the turns token get **403**.
   keys whose value differs from the defaults, the instructions when they differ from the default
   text, and the agents you added, changed or removed. Putting a key back to its default stores
   nothing for it.
-- **The defaults have a version, so an upgrade never widens access by itself.** A build that
-  changes a default adds a new version and keeps the old ones. Each version writes every key out,
-so a change in the code's own fill-in values never changes one. Your control stays on the version it
-  has (`defaults_version`) until you move it with `PUT /api/v0/settings/defaults`, sending the
-  `ETag` of `GET /api/v0/settings` in `If-Match`. Your own changes stay; every key you never
-  changed takes the new version's value. A new data folder starts on the latest version; a data
-  folder from before 0.5 starts on version 1. A version this build does not have is **400**.
-- **The versions.** **1** is the defaults of 0.4. **2** (0.5) turns `agent_api.apply` off: a turn's
-  own token no longer applies a turn's changes to your folder; the main token always does. Turn it
-  back on with `PUT /api/v0/settings/permissions`. A control on version 1 keeps `apply` on until it
-  moves to 2, or until a `PUT /api/v0/settings/permissions` leaves `apply` out, which stores it off. The default agents are not versioned: they grant
-  nothing a turn naming their harness does not already get.
+- **An upgrade never changes what a turn may do.** The defaults are in the code and write every
+  key out, so a change in the code's own fill-in values never changes one. When a build changes a
+  default, its first start writes the old value into your policy, unless you set that key
+  already: once, as one change with its `settings.changed` event. To take the new default, change
+  that key. A new data folder has nothing to keep and starts on the defaults as they are.
+- **What changed in 0.5.** `agent_api.apply` is off: a turn's own token no longer applies a turn's
+  changes to your folder; the main token always does. A data folder from 0.4 gets
+  `agent_api.apply = true` written as above, so it keeps applying until you turn it off with
+  `PUT /api/v0/settings/permissions`. The default agents grant nothing a turn naming their harness
+  does not already get.
 - **The settings version.** `version` moves up by one with every change of the policy, the
-  instructions, the agents or the defaults version. Each turn records the version it started under:
+  instructions or the agents. Each turn records the version it started under:
   `settings_version` on its `turn.started` (and a runner gets it with the settings, below).
 - **A change and its event are saved together.** Each change is one transaction of `settings.db`
   that also stores its `settings.changed` event. The event then goes to the record. If the record
   cannot take it, `settings.db` keeps it and control tries again every few seconds, and after a
   restart, until it does; a retry never stores it twice. So no change is kept without its event.
-  The event says `setting` (`permissions`, `instructions`, `agents` or `defaults`), `keys` (what
-  changed: policy keys such as `limits.max_depth`, `text`, agent ids or `<id>.<field>`, `version`
-  and each key that moved) and `settings_version`. **Never a value**, so never a secret.
+  The event says `setting` (`permissions`, `instructions` or `agents`), `keys` (what changed:
+  policy keys such as `limits.max_depth`, `text`, agent ids or `<id>.<field>`) and
+  `settings_version`. **Never a value**, so never a secret.
 - **A `PUT` that changes nothing** makes no event and no new version.
 - **Versions.** Every reply sends `ETag`, the setting's version. A `PUT` must send it back in
   `If-Match`, or `*` to replace whatever is there. Without `If-Match`: **428**. When the setting
@@ -2440,16 +2440,16 @@ then on, a change that breaks a client gets a new version path, and the old one 
   ([Settings](#settings)). The first start copies the data folder beside it and imports
   `permissions.toml`, `instructions.md` and `agents.json` once; the files are not read after that,
   and `agentbus up` no longer writes a starter `permissions.toml` or `instructions.md`.
-- **New routes**: `GET /api/v0/settings` and `PUT /api/v0/settings/defaults`. The defaults have a
-  version, and an upgrade never moves a control to a new one by itself.
+- **New route**: `GET /api/v0/settings`. An upgrade that changes a default writes the old value
+  into the person's settings, so nothing changes for them.
 - **`settings.changed` changed shape**: `setting`, `keys` and `settings_version` in place of
   `file`, which now names the file only on an import. Agent changes are settings changes too. The
   event is saved with the change, never after it.
 - **`settings_version` on `turn.started`**, and on the runner's `GET /api/v0/runner/settings`.
-- **Defaults version 2: a turn token does not apply.** `agent_api.apply` is off by default, so only
-  the main token applies a turn's changes until the person turns it on. A key left out of a
-  `PUT /api/v0/settings/permissions` is off too. A data folder from before 0.5 starts on version 1
-  and keeps applying until it moves.
+- **A turn token does not apply by default.** `agent_api.apply` is off, so only the main token
+  applies a turn's changes until the person turns it on. A key left out of a
+  `PUT /api/v0/settings/permissions` is off too. A data folder from before 0.5 gets
+  `agent_api.apply = true` written into its settings on the first start, and keeps applying.
 - **A runner reads only its own jobs' blobs.** `GET /api/v0/runner/blobs/<hash>` and
   `POST /api/v0/runner/packs/fetch` answer only blobs reached from the runner's current jobs and
   those that ended in the last 10 minutes; any other gets **403**

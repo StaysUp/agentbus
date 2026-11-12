@@ -2,7 +2,6 @@ package api
 
 import (
 	"encoding/json"
-	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -216,39 +215,29 @@ func TestSettingsInstructionsReadWrite(t *testing.T) {
 }
 
 // GET /api/v0/settings is the settings' state; its ETag is the settings
-// version, which a change of the defaults version names in If-Match.
-func TestSettingsStateAndDefaults(t *testing.T) {
+// version, and changed is when the last change was made. There is no
+// defaults version, and no route to change one.
+func TestSettingsState(t *testing.T) {
 	e, _ := settingsEnv(t)
 	resp, out := send(t, e, "GET", "/api/v0/settings", "", "")
 	var in SettingsInfo
-	if resp.StatusCode != 200 || json.Unmarshal([]byte(out), &in) != nil || in.Version != 0 || in.Defaults != settings.LatestDefaults() ||
-		in.LatestDefaults != settings.LatestDefaults() || in.ImportedFiles == nil || resp.Header.Get("ETag") != `"0"` {
+	if resp.StatusCode != 200 || json.Unmarshal([]byte(out), &in) != nil || in.Version != 0 || in.Changed != nil ||
+		in.ImportedFiles == nil || resp.Header.Get("ETag") != `"0"` || strings.Contains(out, "defaults") {
 		t.Fatalf("GET: %d %s %s", resp.StatusCode, resp.Header.Get("ETag"), out)
 	}
 	if resp, _ := send(t, e, "PUT", "/api/v0/settings/instructions", "*", `{"text":"x"}`); resp.StatusCode != 200 {
 		t.Fatal(resp.StatusCode)
 	}
-	if resp, _ := send(t, e, "GET", "/api/v0/settings", "", ""); resp.Header.Get("ETag") != `"1"` {
-		t.Fatalf("ETag after a change %q", resp.Header.Get("ETag"))
+	resp, out = send(t, e, "GET", "/api/v0/settings", "", "")
+	if json.Unmarshal([]byte(out), &in) != nil || resp.Header.Get("ETag") != `"1"` || in.Changed == nil {
+		t.Fatalf("after a change: %s %s", resp.Header.Get("ETag"), out)
 	}
-	if resp, _ := send(t, e, "PUT", "/api/v0/settings/defaults", `"0"`, `{"version":1}`); resp.StatusCode != 412 {
-		t.Errorf("a stale version: %d", resp.StatusCode)
-	}
-	if resp, out := send(t, e, "PUT", "/api/v0/settings/defaults", `"1"`, `{"version":99}`); resp.StatusCode != 400 || !strings.Contains(out, "version must be") {
-		t.Errorf("no such version: %d %s", resp.StatusCode, out)
-	}
-	if resp, _ := send(t, e, "PUT", "/api/v0/settings/defaults", "", `{"version":1}`); resp.StatusCode != 428 {
-		t.Errorf("no If-Match: %d", resp.StatusCode)
-	}
-	// The version it runs under already: nothing changes.
-	latest := fmt.Sprintf(`{"version":%d}`, settings.LatestDefaults())
-	if resp, out := send(t, e, "PUT", "/api/v0/settings/defaults", `"1"`, latest); resp.StatusCode != 200 || resp.Header.Get("ETag") != `"1"` {
-		t.Errorf("the same version: %d %s", resp.StatusCode, out)
+	if resp, _ := send(t, e, "PUT", "/api/v0/settings/defaults", "*", `{"version":1}`); resp.StatusCode == 200 {
+		t.Errorf("PUT /api/v0/settings/defaults: %d", resp.StatusCode)
 	}
 }
 
-// Defaults version 2: a turn token does not apply until the person turns
-// apply on. A control on version 1 keeps apply on until it moves.
+// A turn token does not apply until the person turns apply on.
 func TestSettingsDefaultsApplyOff(t *testing.T) {
 	e, _ := settingsEnv(t)
 	apply := func() (bool, string) {
@@ -260,23 +249,9 @@ func TestSettingsDefaultsApplyOff(t *testing.T) {
 		}
 		return *p.AgentAPI.Apply, strings.Trim(resp.Header.Get("ETag"), `"`)
 	}
-	if on, _ := apply(); on {
-		t.Fatal("a new control: apply is on")
-	}
-	// Back to version 1, as a control from before 0.5 runs: apply is on.
-	if resp, out := send(t, e, "PUT", "/api/v0/settings/defaults", `"0"`, `{"version":1}`); resp.StatusCode != 200 {
-		t.Fatalf("to version 1: %d %s", resp.StatusCode, out)
-	}
-	if on, _ := apply(); !on {
-		t.Fatal("version 1: apply is off")
-	}
-	// Moved to version 2: off again, and the change names the key.
-	if resp, out := send(t, e, "PUT", "/api/v0/settings/defaults", `"1"`, `{"version":2}`); resp.StatusCode != 200 {
-		t.Fatalf("to version 2: %d %s", resp.StatusCode, out)
-	}
 	on, etag := apply()
 	if on {
-		t.Fatal("version 2: apply is on")
+		t.Fatal("a new control: apply is on")
 	}
 	// The person turns it on.
 	_, out := send(t, e, "GET", "/api/v0/settings/permissions", "", "")
@@ -297,7 +272,7 @@ func TestSettingsDefaultsApplyOff(t *testing.T) {
 func TestSettingsTurnsTokenRefused(t *testing.T) {
 	e, db := settingsEnv(t)
 	for _, r := range [][2]string{
-		{"GET", "/api/v0/settings"}, {"PUT", "/api/v0/settings/defaults"},
+		{"GET", "/api/v0/settings"},
 		{"GET", "/api/v0/settings/permissions"}, {"PUT", "/api/v0/settings/permissions"},
 		{"GET", "/api/v0/settings/instructions"}, {"PUT", "/api/v0/settings/instructions"},
 	} {

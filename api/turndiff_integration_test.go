@@ -187,7 +187,7 @@ func TestTurnDiffAndApply(t *testing.T) {
 	if code, out := as(t, e, tok, "POST", "/api/v0/turns/"+second.Turn+"/apply", ""); code != 403 || !strings.Contains(out, "apply is false") {
 		t.Fatalf("apply switched off: %d %s", code, out)
 	}
-	// Off by default too (defaults version 2): the person turns it on.
+	// Off by default too: the person turns it on.
 	os.WriteFile(perm, nil, 0o600)
 	if code, out := as(t, e, tok, "POST", "/api/v0/turns/"+second.Turn+"/apply", ""); code != 403 || !strings.Contains(out, "apply is false") {
 		t.Fatalf("apply by default: %d %s", code, out)
