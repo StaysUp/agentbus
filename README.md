@@ -5,13 +5,13 @@
   <img alt="AgentBus" src="docs/assets/agentbus-logo-light.svg" width="360">
 </picture>
 
-**A cross-vendor middleware framework for coding agents.**
+**Control every AI agent in a single place.**
 
 [![GitHub stars](https://img.shields.io/github/stars/staysup/agentbus?style=flat)](https://github.com/staysup/agentbus/stargazers)
 [![Latest release](https://img.shields.io/github/v/release/staysup/agentbus)](https://github.com/staysup/agentbus/releases)
 [![CI](https://github.com/StaysUp/agentbus/actions/workflows/ci.yml/badge.svg)](https://github.com/StaysUp/agentbus/actions/workflows/ci.yml)
 
-[Quickstart](#quickstart) &nbsp;&bull;&nbsp; [Add a machine](#add-a-machine) &nbsp;&bull;&nbsp; [Docs](#docs) &nbsp;&bull;&nbsp; [Cockpit](https://github.com/staysup/agentbus-cockpit) &nbsp;&bull;&nbsp; [Releases](https://github.com/staysup/agentbus/releases)
+[Quickstart](#quickstart) &nbsp;&bull;&nbsp; [Demo](#demo) &nbsp;&bull;&nbsp; [Cockpit](https://github.com/staysup/agentbus-cockpit) &nbsp;&bull;&nbsp; [Docs](#docs) &nbsp;&bull;&nbsp; [Releases](https://github.com/staysup/agentbus/releases)
 
 </div>
 
@@ -65,10 +65,6 @@ TOKEN=$(cat ~/.local/share/agentbus/token)
 curl -s http://127.0.0.1:8787/api/v0/turns -H "Authorization: Bearer $TOKEN" \
   -d '{"agent":"claude","folder":"'"$PWD"'","prompt":"Say hello in five words.","model":"haiku"}'
 ```
-
-The reply names the session and the turn. `GET /api/v0/turns?session=<id>` reads it back with its
-reply and cost. Send the next message with `"session":"<id>"`. `GET /api/v0/turns/<turn>/diff`
-shows what a turn changed, and `POST /api/v0/turns/<turn>/apply` puts it in your folder.
 
 | `agentbus up` flag | Default | What it does |
 |---|---|---|
