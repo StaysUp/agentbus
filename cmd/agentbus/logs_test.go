@@ -44,6 +44,7 @@ func TestServiceLogRotatesBySize(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("ANTHROPIC_BASE_URL", "")
 	t.Setenv("OPENAI_BASE_URL", "")
+	connectFake(t, home)
 	svc, err := start(config{listen: "127.0.0.1:0", home: home, upstream: mustURL("http://127.0.0.1:1"),
 		chatgpt: mustURL("http://127.0.0.1:1"), logf: t.Logf, logMax: 2000})
 	if err != nil {

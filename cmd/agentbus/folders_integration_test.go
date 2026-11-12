@@ -29,6 +29,7 @@ func TestFoldersLeaveOutCopies(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	connectFake(t, home)
 	svc, err := start(config{listen: "127.0.0.1:0", home: home, upstream: mustURL("http://127.0.0.1:1"),
 		chatgpt: mustURL("http://127.0.0.1:1"), logf: t.Logf, noReplay: true, folders: []string{mine},
 		heartbeat: 100 * time.Millisecond, turnWait: 2 * time.Second})

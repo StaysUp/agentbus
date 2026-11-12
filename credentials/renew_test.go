@@ -236,7 +236,7 @@ func TestRenewKeepsWhatHappenedMeanwhile(t *testing.T) {
 		*now = now.Add(58 * time.Minute)
 		f.during = func() { s.Remove("codex") }
 		var m *Missing
-		if _, err := s.Credential(need); !errors.As(err, &m) || !strings.Contains(m.Why, "no codex subscription is connected") {
+		if _, err := s.Credential(need); !errors.As(err, &m) || m.Why != NotConnected("codex") {
 			t.Fatalf("%v", err)
 		}
 		if st, _ := s.Status("codex"); st.Connected {

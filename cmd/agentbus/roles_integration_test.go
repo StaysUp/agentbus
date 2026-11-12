@@ -81,6 +81,10 @@ type proc struct {
 // claude first on its PATH. It is stopped when the test ends.
 func startProc(t *testing.T, bin, home, standInDir string, args ...string) *proc {
 	t.Helper()
+	// Control holds the sign-in every turn uses (0.5.1).
+	if args[0] == "up" || args[0] == "server" {
+		connectFake(t, home)
+	}
 	p := &proc{log: filepath.Join(t.TempDir(), "out.log"), done: make(chan struct{})}
 	logf, err := os.Create(p.log)
 	if err != nil {

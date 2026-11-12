@@ -93,11 +93,15 @@ type Config struct {
 	// runs (POST /api/v0/runner/attempts/{id}/record and /calls): a runner of a
 	// server, whose Store is its own. Its agents then call control's API,
 	// at Queue, with the turn token control minted. In agentbus up Store is
-	// the control plane's, nothing is sent, and the engine mints the token.
+	// the control plane's and nothing is sent; its agents get control's
+	// token too, as NoSecrets says.
 	Forward bool
 	// NoSecrets: this runner holds no credential. Its agents' model calls
 	// carry the turn token as a placeholder, and control's gateway adds the
-	// real credential (jobs/relay.go). Only with Forward.
+	// real credential (jobs/relay.go): on a runner of a server, and in
+	// agentbus up, whose built-in runner sends them to its own relay. A turn
+	// whose agent control has no credential for is refused before it starts
+	// (jobs.AttemptStarted.Signin).
 	NoSecrets bool
 
 	// StopWait bounds how long a runner waits for a stopped turn to end
@@ -470,7 +474,10 @@ type attempt struct {
 	pending []queue.AttemptEvent
 	until   time.Time // the lease, on this machine's clock
 
-	cancel, stale         chan struct{} // closed when a heartbeat hears it
+	cancel, stale chan struct{} // closed when a heartbeat hears it
+	// signin is control's word that the turn's agent can get no
+	// credential from it now (jobs.AttemptStarted.Signin).
+	signin                string
 	cancelOnce, staleOnce sync.Once
 
 	// The workspace, once known: its folder, and for a session's first job
@@ -691,7 +698,7 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	}
 	at.mu.Lock()
 	at.until = time.Now().Add(r.lease)
-	at.token = st.Token
+	at.token, at.signin = st.Token, st.Signin
 	at.mu.Unlock()
 	done := make(chan struct{})
 	defer close(done)
@@ -762,8 +769,15 @@ func (r *Runner) request(at *attempt) run.Request {
 	sp := at.job.Spec
 	req := run.Request{Turn: at.job.Turn, Prompt: sp.Prompt, Model: sp.Model, ReadOnly: sp.ReadOnly,
 		IdempotencyKey: at.job.IdempotencyKey}
-	if r.cfg.Forward && at.token != "" {
+	// The agent's token is control's: a runner of a server's always, and
+	// in up the one its calls carry to the relay as their placeholder.
+	if (r.cfg.Forward || r.cfg.NoSecrets) && at.token != "" {
 		req.Token, req.APIURL, req.Placeholder = at.token, r.cfg.Queue, r.cfg.NoSecrets
+	}
+	// Control adds this runner's agents' credentials, and has none for
+	// this agent now: the engine refuses the turn in control's words.
+	if r.cfg.NoSecrets {
+		req.Signin = at.signin
 	}
 	switch {
 	case sp.Session != "":

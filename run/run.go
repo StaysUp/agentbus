@@ -307,6 +307,11 @@ type Request struct {
 	// for this service's API.
 	Token, APIURL string
 	Placeholder   bool
+	// Signin, when set, is why control can give this turn's agent no
+	// credential now, such as "connect your claude subscription in
+	// Settings": the turn is refused with it, after a missing program and
+	// before anything is stored.
+	Signin string
 }
 
 // Turn is a turn that started.
@@ -405,7 +410,7 @@ func (e *Engine) Start(req Request) (*Turn, error) {
 	return e.start(turn{harness: req.Harness, folder: req.Folder, folderRef: req.FolderRef, session: id, id: req.Turn,
 		model: req.Model, readOnly: req.ReadOnly, prompt: req.Prompt, key: req.IdempotencyKey,
 		agentID: req.AgentID, access: req.Access, keyEnv: req.KeyEnv, origin: req.Origin, root: req.Root, depth: req.Depth,
-		token: req.Token, apiURL: req.APIURL, placeholder: req.Placeholder})
+		token: req.Token, apiURL: req.APIURL, placeholder: req.Placeholder, signin: req.Signin})
 }
 
 // next starts the next turn of req.Session, in its own agent and folder.
@@ -543,7 +548,7 @@ func (e *Engine) next(req Request) (*Turn, error) {
 		recoveredFrom: recovered, recoveredWhy: recoveredWhy, continuity: continuity, model: model,
 		readOnly: req.ReadOnly, prompt: req.Prompt, context: context, key: req.IdempotencyKey,
 		agentID: agentID, access: access, keyEnv: keyEnv, origin: req.Origin, root: req.Root, depth: req.Depth,
-		token: req.Token, apiURL: req.APIURL, placeholder: req.Placeholder}
+		token: req.Token, apiURL: req.APIURL, placeholder: req.Placeholder, signin: req.Signin}
 	if from != "" || continuity == ByTranscript {
 		// A fresh child: the history comes from the gateway, or from the
 		// transcript in its prompt.
@@ -620,6 +625,7 @@ type turn struct {
 	depth                    int
 	token, apiURL            string // control's token for the turn and its API (Request.Token)
 	placeholder              bool   // the token is the child's model credential
+	signin                   string // why control has no credential for the agent now
 }
 
 // start stores session.opened and turn.started, starts t's child in a slot
@@ -684,6 +690,10 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		return nil, refuse(http.StatusBadRequest, missingAgent(t.harness))
 	case err != nil:
 		return nil, refuse(http.StatusInternalServerError, "the agent could not be started")
+	}
+	if t.signin != "" {
+		e.cfg.Logf("run.refused agent=%s access=%s reason=signin", t.harness, t.access)
+		return nil, refuse(http.StatusBadRequest, t.signin)
 	}
 	// The turn's own token (api/tokens.go says what it may do). It goes into
 	// the child's environment only, beside the service's address; the main

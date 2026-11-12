@@ -51,6 +51,7 @@ func TestRunMissingAgentIsRefused(t *testing.T) {
 	} {
 		t.Run(tc.agent, func(t *testing.T) {
 			home := t.TempDir()
+			connectFake(t, home)
 			svc, err := start(config{listen: "127.0.0.1:0", home: home, upstream: mustURL(upstream),
 				chatgpt: mustURL("http://127.0.0.1:1"), logf: t.Logf, getenv: os.Getenv,
 				lookPath: func(string) (string, error) { return "", exec.ErrNotFound }})
@@ -88,6 +89,7 @@ func TestRunThatCannotStartIsClosed(t *testing.T) {
 	}
 	t.Setenv("ANTHROPIC_BASE_URL", "")
 	t.Setenv("OPENAI_BASE_URL", "")
+	connectFake(t, home)
 	svc, err := start(config{listen: "127.0.0.1:0", home: home, upstream: mustURL(upstream),
 		chatgpt: mustURL("http://127.0.0.1:1"), logf: t.Logf, getenv: os.Getenv,
 		lookPath: func(string) (string, error) { return bad, nil }})

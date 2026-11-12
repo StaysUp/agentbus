@@ -246,7 +246,7 @@ type Network struct {
 // Sandbox says whether each session runs inside a wall ([sandbox]). Read by
 // the runner that starts the agent (package sandbox).
 type Sandbox struct {
-	Mode string   `toml:"mode" json:"mode,omitempty" doc:"off (the default) or on. On, a session's agent reads and writes only the session's folder and home, read the system folders and the agent's program, and reach the network only through the runner's proxy. A runner that cannot build it refuses the turn. macOS uses sandbox-exec and Linux bwrap. agentbus up cannot build it (a session has no home of its own there). The copy's .git stays writable. Absent in a PUT: off."`
+	Mode string   `toml:"mode" json:"mode,omitempty" doc:"off (the default) or on. On, a session's agent reads and writes only the session's folder and home, read the system folders and the agent's program, and reach the network only through the runner's proxy. A runner that cannot build it refuses the turn. macOS uses sandbox-exec and Linux bwrap. A runner with -gateway local cannot build it (a session has no home of its own there). The copy's .git stays writable. Absent in a PUT: off."`
 	Read []string `toml:"read" json:"read" doc:"Files or folders under the home folder, each starting with ~/, copied into the session's home at the same place at the start of each turn, such as ~/.aws/config. Absent in a PUT: none."`
 }
 

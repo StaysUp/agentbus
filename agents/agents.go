@@ -52,7 +52,7 @@ type Agent struct {
 	ID      string    `json:"id" doc:"The agent's id. A turn names it in agent."`
 	Name    string    `json:"name" doc:"What the person calls it, such as Claude Code · sonnet. Unique, ignoring case."`
 	Harness string    `json:"harness" doc:"The program that runs the agent's loop: claude or codex."`
-	Access  string    `json:"access" doc:"How the harness reaches its model: subscription (its own sign-in) or openrouter (a key from an environment variable)."`
+	Access  string    `json:"access" doc:"How the harness reaches its model: subscription (the person's, connected on control) or openrouter (a key from an environment variable)."`
 	Model   string    `json:"model,omitempty" doc:"The model, passed as --model. Absent: the harness's own default. Required for openrouter, in OpenRouter's naming, such as deepseek/deepseek-v4.1-flash."`
 	KeyEnv  string    `json:"key_env,omitempty" doc:"For openrouter: the name of the environment variable on the runner's machine that holds the key. Never the key."`
 	Created time.Time `json:"created"`

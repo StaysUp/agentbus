@@ -26,7 +26,7 @@ func (agy) Info() Info {
 		// control (Login). It speaks the Gemini format only, so
 		// OpenRouter cannot serve it, and a Gemini API key is not wired yet.
 		Access: []Access{
-			{Kind: Subscription, Label: "Google sign-in", Models: []string{"gemini-3.8-flash-medium", "gemini-4-argon-medium"}},
+			{Kind: Subscription, Label: "Google sign-in", Models: []string{"gemini-3.8-flash-medium", "gemini-4-argon-medium"}, AnyModel: true},
 			{Kind: OpenRouter, Label: "OpenRouter key", Disabled: true, Models: []string{}},
 			{Kind: API, Label: "API key", Disabled: true, Models: []string{}},
 		},

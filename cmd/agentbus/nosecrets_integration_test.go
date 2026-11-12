@@ -335,8 +335,10 @@ func TestRunnerUsesConnectedSubscription(t *testing.T) {
 		j := queueTurn(t, ns.server, ns.tok, map[string]any{"agent": "claude", "folder_ref": ns.ref, "connector": ns.connector, "prompt": "hello"})
 		return waitJob(t, ns.server, ns.tok, j.ID)
 	}
-	// Nothing connected: refused.
-	run()
+	// Nothing connected: refused before the agent starts, in plain words.
+	if j := run(); j.State != queue.Failed || !strings.Contains(string(j.Result), `"refused":"connect your claude subscription in Settings"`) {
+		t.Fatalf("with nothing connected: job %s %s", j.State, j.Result)
+	}
 	if got := ns.anth.seen(); len(got) != 0 {
 		t.Fatalf("with nothing connected the vendor saw %v", got)
 	}
@@ -399,8 +401,8 @@ func TestRunnerUsesConnectedCodexSubscription(t *testing.T) {
 		j := queueTurn(t, ns.server, ns.tok, map[string]any{"agent": "codex", "folder_ref": ns.ref, "connector": ns.connector, "prompt": "hello"})
 		return j
 	}
-	// Not connected: refused, and the vendor sees nothing. codex then
-	// exits 1, and the turn's error is the relay's refusal.
+	// Not connected: refused before codex starts, in control's words, and
+	// the vendor sees nothing.
 	os.WriteFile(ns.release, nil, 0o600)
 	t.Setenv("AGENTBUS_FAKE_EXIT", "1")
 	refused := waitJob(t, ns.server, ns.tok, run().ID)
@@ -409,7 +411,7 @@ func TestRunnerUsesConnectedCodexSubscription(t *testing.T) {
 	}
 	waitFor(t, "the refused turn's error", func() bool {
 		code, raw := getAPI(t, ns.server, ns.tok, "/api/v0/turns/"+refused.Turn)
-		return code == 200 && strings.Contains(raw, `"state":"failed"`) && strings.Contains(raw, `"error":"no codex subscription is connected`)
+		return code == 200 && strings.Contains(raw, `"state":"failed"`) && strings.Contains(raw, `connect your codex subscription in Settings`)
 	})
 	t.Setenv("AGENTBUS_FAKE_EXIT", "")
 	os.Remove(ns.release)
@@ -530,7 +532,7 @@ func TestRunnerUsesConnectedAgySubscription(t *testing.T) {
 	}
 	waitFor(t, "the refused turn's error", func() bool {
 		code, raw := getAPI(t, ns.server, ns.tok, "/api/v0/turns/"+refused.Turn)
-		return code == 200 && strings.Contains(raw, `"state":"failed"`) && strings.Contains(raw, `no agy subscription is connected`)
+		return code == 200 && strings.Contains(raw, `"state":"failed"`) && strings.Contains(raw, `connect your agy subscription in Settings`)
 	})
 	t.Setenv("AGENTBUS_FAKE_EXIT", "")
 	os.Remove(ns.release)
@@ -630,6 +632,7 @@ func TestRunnerUsesConnectedAgySubscription(t *testing.T) {
 // back to the asking session as its next turn, all in the server's record.
 func TestRunnerAgentAsksAnother(t *testing.T) {
 	ns := startNoSecrets(t)
+	connectFake(t, ns.serverHome, "claude")
 	t.Setenv("AGENTBUS_FAKE_CALL", "")
 	asked := filepath.Join(t.TempDir(), "asked")
 	t.Setenv("AGENTBUS_FAKE_ASK", `{"agent":"claude","prompt":"answer me"}`)
@@ -688,6 +691,7 @@ func TestRunnerAgentAsksAnother(t *testing.T) {
 // already: what its start wrote is sent at once.
 func TestRunnerTurnShownBeforeItsFirstCall(t *testing.T) {
 	ns := startNoSecrets(t)
+	connectFake(t, ns.serverHome, "claude")
 	t.Setenv("AGENTBUS_FAKE_CALL", "")
 	t.Setenv("AGENTBUS_FAKE_WAIT", ns.release)
 	j := queueTurn(t, ns.server, ns.tok, map[string]any{"agent": "claude", "folder_ref": ns.ref, "connector": ns.connector, "prompt": "hello"})

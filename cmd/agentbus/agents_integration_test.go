@@ -33,6 +33,7 @@ func openRouterService(t *testing.T, home, upstream string) *service {
 	t.Setenv("CODEX_HOME", t.TempDir())
 	t.Setenv("ANTHROPIC_BASE_URL", "")
 	t.Setenv("OPENAI_BASE_URL", "")
+	connectFake(t, home)
 	svc, err := start(config{listen: "127.0.0.1:0", home: home, upstream: mustURL("http://127.0.0.1:1"),
 		chatgpt: mustURL("http://127.0.0.1:1"), openrouter: mustURL(upstream), logf: t.Logf,
 		lookPath: func(string) (string, error) { return self, nil }, noReplay: true,
@@ -64,10 +65,10 @@ func sendAPI(t *testing.T, svc *service, tok, method, path string, body any) (in
 }
 
 // An OpenRouter agent's turn reaches OpenRouter through the gateway: the
-// child is pointed at /openrouter of its base URL with the key from the
-// named variable, the call is forwarded to OpenRouter's /api/v1/messages
-// with that key, and the record names the agent and its access but never
-// holds the key.
+// child is pointed at /openrouter of its base URL with a placeholder as its
+// key, the call is forwarded to OpenRouter's /api/v1/messages with the key
+// from the named variable of control's environment (up's relay adds it, as
+// for a runner's), and neither the child nor the record holds the key.
 func TestOpenRouterAgentTurnGoesThroughTheGateway(t *testing.T) {
 	const keyValue = "test-key-value-0d1f"
 	t.Setenv("AB_TEST_OR_KEY", keyValue)
@@ -106,7 +107,6 @@ func TestOpenRouterAgentTurnGoesThroughTheGateway(t *testing.T) {
 	r := readReport(t, report)
 	for k, want := range map[string]string{
 		"ANTHROPIC_BASE_URL":                     base + "/openrouter",
-		"ANTHROPIC_AUTH_TOKEN":                   keyValue,
 		"ANTHROPIC_API_KEY":                      "",
 		"ANTHROPIC_DEFAULT_SONNET_MODEL":         "deepseek/deepseek-v4.1-flash",
 		"CLAUDE_CODE_SUBAGENT_MODEL":             "deepseek/deepseek-v4.1-flash",
@@ -115,6 +115,14 @@ func TestOpenRouterAgentTurnGoesThroughTheGateway(t *testing.T) {
 		if v, ok := envValue(r.Env, k); !ok || v != want {
 			t.Errorf("child %s = %q (set %v), want %q", k, v, ok, want)
 		}
+	}
+	for _, k := range []string{"ANTHROPIC_AUTH_TOKEN", "AB_TEST_OR_KEY"} {
+		if v, _ := envValue(r.Env, k); !strings.HasPrefix(v, jobs.TokenPrefix) {
+			t.Errorf("child %s is not the placeholder", k)
+		}
+	}
+	if strings.Contains(strings.Join(r.Env, "\n"), keyValue) {
+		t.Error("the child's environment holds the key")
 	}
 	if !strings.Contains(strings.Join(r.Args, " "), "--model deepseek/deepseek-v4.1-flash -- hi") {
 		t.Errorf("args %q", r.Args)

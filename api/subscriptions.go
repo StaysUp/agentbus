@@ -46,7 +46,7 @@ var subscriptionRoutes = []route{
 		tag:     "Settings",
 		summary: "List subscriptions",
 		doc: "The person's own subscriptions that control can add to the model calls of agents on their runners, which hold no sign-in: " +
-			"for each harness, whether it is connected and until when. A connected one is used on every approved runner. One machine (agentbus up) uses each harness's own sign-in and needs none of this.",
+			"for each harness, whether it is connected and until when. A connected one is used for every turn, on one machine (agentbus up) as on every approved runner; a turn whose harness is not connected is refused with \"connect your <harness> subscription in Settings\".",
 		replies: []reply{ok(200, SubscriptionList{}, "The subscriptions."), fail(404, noSubscriptions)},
 		serve:   plain((*API).listSubscriptions)},
 	{method: "POST", path: "/api/v0/subscriptions/{id}/connect", op: "connectSubscription",

@@ -37,7 +37,7 @@ func runWire(getenv func(string) string, environ func() []string, lookPath func(
 			// subscription token, connected once on control.
 			if h.Info().Login == nil {
 				return engine.Launch{}, engine.Refused(http.StatusBadRequest, "a "+h.Info().Label+
-					" subscription cannot be used on a runner yet; use an OpenRouter agent there, or run this agent with agentbus up")
+					" subscription cannot be connected on control yet; use an OpenRouter agent")
 			}
 			env, pre = h.WireRelay(baseURL, acc.Placeholder)
 			if f, ok := h.(harness.HomeFiles); ok {

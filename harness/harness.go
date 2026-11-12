@@ -157,7 +157,7 @@ type Access struct {
 	Kind     string
 	Label    string
 	Disabled bool     // listed, but no agent can use it yet
-	Models   []string // to offer, first the one to start from
+	Models   []string // to offer; a new subscription agent names none, an OpenRouter one the first
 	AnyModel bool     // any model name is accepted
 }
 
@@ -183,7 +183,7 @@ var OpenRouterModels = []string{"deepseek/deepseek-v4.1-flash", "openai/gpt-oss-
 // is not available yet.
 func standardAccess(subLabel string, subModels []string) []Access {
 	return []Access{
-		{Kind: Subscription, Label: subLabel, Models: subModels},
+		{Kind: Subscription, Label: subLabel, Models: subModels, AnyModel: true},
 		{Kind: OpenRouter, Label: "OpenRouter key", Models: OpenRouterModels, AnyModel: true},
 		{Kind: API, Label: "API key", Disabled: true, Models: []string{}},
 	}

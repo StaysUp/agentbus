@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/harness"
+	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/store"
 )
@@ -44,6 +45,7 @@ func runServiceVendors(t *testing.T, home string, getenv func(string) string, gr
 	// The service's own environment must not send an agent elsewhere.
 	t.Setenv("ANTHROPIC_BASE_URL", "")
 	t.Setenv("OPENAI_BASE_URL", "")
+	connectFake(t, home)
 	svc, err := start(config{listen: "127.0.0.1:0", home: home, upstream: mustURL(upstream),
 		chatgpt: mustURL(chatgpt), logf: t.Logf, getenv: getenv, runGrace: grace,
 		lookPath: func(string) (string, error) { return self, nil }, noReplay: noReplay,
@@ -216,7 +218,8 @@ func TestRunSetsBaseURLInChildOnlyAndClosesWithExitCode(t *testing.T) {
 	if u, _ := envValue(r.Env, "AGENTBUS_URL"); u != "http://"+svc.addr {
 		t.Errorf("child AGENTBUS_URL %q, want http://%s", u, svc.addr)
 	}
-	if v, _ := envValue(r.Env, "AGENTBUS_TOKEN"); !strings.HasPrefix(v, "abt_") || len(v) != 68 {
+	// Control's, which its model calls carry to up's relay too.
+	if v, _ := envValue(r.Env, "AGENTBUS_TOKEN"); !strings.HasPrefix(v, jobs.TokenPrefix) || v == tok {
 		t.Errorf("child AGENTBUS_TOKEN is not a turn token (%d bytes)", len(v))
 	}
 }
@@ -298,12 +301,12 @@ func TestRunReadOnlyFlags(t *testing.T) {
 		{"claude", false, "-p --output-format json --append-system-prompt HINT --allowedTools EDIT --disallowedTools PROTECT -- hi"},
 		{"claude", true, "-p --output-format json --append-system-prompt HINT --tools Read,Grep,Glob --allowedTools Read,Grep,Glob --strict-mcp-config -- hi"},
 		{"claude", nil, "-p --output-format json --append-system-prompt HINT --allowedTools EDIT --disallowedTools PROTECT -- hi"},
-		{"codex", nil, `-c openai_base_url="BASE/backend-api/codex" exec --skip-git-repo-check --json --sandbox workspace-write -c developer_instructions=HINT -c sandbox_workspace_write.network_access=true -- hi`},
-		{"codex", true, `-c openai_base_url="BASE/backend-api/codex" exec --skip-git-repo-check --json --sandbox read-only -c developer_instructions=HINT -- hi`},
+		{"codex", nil, codexRelayArgs + ` exec --skip-git-repo-check --json --sandbox workspace-write -c developer_instructions=HINT -c sandbox_workspace_write.network_access=true -- hi`},
+		{"codex", true, codexRelayArgs + ` exec --skip-git-repo-check --json --sandbox read-only -c developer_instructions=HINT -- hi`},
 		// False names workspace-write with network on: codex exec's own
 		// default is read-only, and its workspace-write has no network
 		// (acceptance soak, 2026-11-06). True gets neither.
-		{"codex", false, `-c openai_base_url="BASE/backend-api/codex" exec --skip-git-repo-check --json --sandbox workspace-write -c developer_instructions=HINT -c sandbox_workspace_write.network_access=true -- hi`},
+		{"codex", false, codexRelayArgs + ` exec --skip-git-repo-check --json --sandbox workspace-write -c developer_instructions=HINT -c sandbox_workspace_write.network_access=true -- hi`},
 	} {
 		report := filepath.Join(t.TempDir(), "report")
 		t.Setenv("AGENTBUS_FAKE_OUT", report)
@@ -321,7 +324,7 @@ func TestRunReadOnlyFlags(t *testing.T) {
 			t.Errorf("%s read_only %v: args %q, want %q", tc.agent, tc.readOnly, got, want)
 		}
 		// Both agents get a turn token, read-only or not.
-		if v, _ := envValue(rep.Env, "AGENTBUS_TOKEN"); !strings.HasPrefix(v, "abt_") || v == tok {
+		if v, _ := envValue(rep.Env, "AGENTBUS_TOKEN"); !strings.HasPrefix(v, jobs.TokenPrefix) || v == tok {
 			t.Errorf("%s read_only %v: no turn token in the child's environment", tc.agent, tc.readOnly)
 		}
 		waitClosed(t, svc.store, out["session"].(string))
@@ -511,6 +514,7 @@ func TestRunTurnCarriesAgentAndFolder(t *testing.T) {
 	t.Setenv("ANTHROPIC_BASE_URL", "")
 	t.Setenv("OPENAI_BASE_URL", "")
 	home := t.TempDir()
+	connectFake(t, home)
 	svc, err := start(config{listen: "127.0.0.1:0", home: home, upstream: mustURL(upstream.URL),
 		chatgpt: mustURL("http://127.0.0.1:1"), logf: t.Logf, getenv: os.Getenv,
 		lookPath: func(string) (string, error) { return self, nil }})
@@ -658,7 +662,10 @@ func TestCodexOwnInstructionsLeaveOutTheHint(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("AGENTBUS_FAKE_EXIT", "0")
-	for agent, want := range map[string]bool{"codex": false, "claude": true} {
+	// Each session has a home of its own since 0.5.1, so the person's own
+	// codex config is not read there, and codex gets the hint as claude
+	// does. A runner with -gateway local reads it (harness tests).
+	for agent, want := range map[string]bool{"codex": true, "claude": true} {
 		report := filepath.Join(t.TempDir(), "report")
 		t.Setenv("AGENTBUS_FAKE_OUT", report)
 		code, out, raw := postRun(t, svc, tok, map[string]any{"agent": agent, "folder": t.TempDir(), "prompt": "hi"})

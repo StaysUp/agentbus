@@ -71,6 +71,12 @@ the API is the file `token` in its data folder (`~/.local/share/agentbus`, or `$
 Then open a cockpit: [staysup/agentbus-cockpit](https://github.com/staysup/agentbus-cockpit). Follow
 its README and paste the token when it asks. `agentbus up -h` lists the options.
 
+Before the first turn, connect each subscription you use once, in the cockpit's Settings
+(Subscriptions, **Connect**). Every turn uses the sign-in kept there, on one machine as on many: a
+tool's own sign-in on the machine (`~/.claude`, `~/.codex`) is not used, and each session runs in a
+home of its own. A turn whose tool is not connected is refused with "connect your claude
+subscription in Settings".
+
 ## Several machines
 
 AgentBus has two parts:
@@ -102,8 +108,7 @@ machine, then a folder on it; the session stays on that machine.
 ![The Runners page: a machine waiting for approval, and the code field](docs/assets/cockpit-runners.png)
 
 By default a runner holds no secrets: control adds the sign-in or API key to each model call.
-Connect your subscriptions once in the cockpit (Agents, the agent's Connect step, then **Turn on for
-my runners**). Control and every runner must run the same release. `agentbus login -h` lists the
+Connect your subscriptions once in the cockpit (Settings, Subscriptions). Control and every runner must run the same release. `agentbus login -h` lists the
 options.
 
 ## Settings

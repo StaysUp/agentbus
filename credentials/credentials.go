@@ -65,6 +65,34 @@ func (p Plug) Credential(n Need) (Cred, error) {
 	return s.Credential(n)
 }
 
+// Readier is a Source that can say, without fetching or renewing anything,
+// why a need's credential cannot be given now.
+type Readier interface {
+	Ready(n Need) string
+}
+
+// Ready says why n's credential cannot be given now, or "": for a turn
+// that is about to start, so it is refused in plain words before its agent
+// sends a call. A source that cannot tell says "".
+func (p Plug) Ready(n Need) string {
+	s, ok := p[n.Access]
+	if !ok {
+		return "control adds no credential for access " + n.Access
+	}
+	if r, ok := s.(Readier); ok {
+		return r.Ready(n)
+	}
+	return ""
+}
+
+// Ready: as Credential, which reads only the environment.
+func (e Env) Ready(n Need) string {
+	if _, err := e.Credential(n); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
 // Env reads an API key from control's environment, by the name the agent
 // gives (its key_env).
 type Env struct {

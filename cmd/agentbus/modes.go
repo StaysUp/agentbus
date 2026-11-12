@@ -54,14 +54,17 @@ const (
 	gatewayLocal = "local"
 )
 
-// noSecrets: a runner whose agents' credentials come from the server.
-func (c config) noSecrets() bool { return c.mode == modeRunner && c.gatewayMode != gatewayLocal }
+// noSecrets: a process that runs turns whose agents' credentials come from
+// control: a runner of a server, through the server's relay, and agentbus
+// up, through its own. Only a runner with -gateway local uses its machine's
+// own sign-in and keys.
+func (c config) noSecrets() bool { return c.hasEngine() && c.gatewayMode != gatewayLocal }
 
 // canSandbox is this process's sandbox report: whether a session's wall can
 // be built here, and why not. A runner that gives sessions no home of its
-// own (agentbus up, -gateway local: noSecrets is false) cannot, whatever
-// the machine can, since the wall needs the session's home: every walled
-// turn would be refused (engine.NoHomes), so it says so before any turn.
+// own (-gateway local: noSecrets is false) cannot, whatever the machine
+// can, since the wall needs the session's home: every walled turn would be
+// refused (engine.NoHomes), so it says so before any turn.
 func (c config) canSandbox() (bool, string) {
 	if !c.noSecrets() {
 		return false, engine.NoHomes

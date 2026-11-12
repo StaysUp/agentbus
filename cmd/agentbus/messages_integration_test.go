@@ -125,6 +125,7 @@ func TestHarnessesListsFoundVersionsAndSignIn(t *testing.T) {
 	t.Setenv("AGENTBUS_FAKE_VERSION", "2.1.318 (Claude Code)")
 	t.Setenv("AGENTBUS_FAKE_AUTH_EXIT", "0")
 	home := t.TempDir()
+	connectFake(t, home)
 	svc, err := start(config{listen: "127.0.0.1:0", home: home, upstream: mustURL("http://127.0.0.1:1"),
 		chatgpt: mustURL("http://127.0.0.1:1"), logf: t.Logf,
 		lookPath: func(name string) (string, error) {
@@ -236,11 +237,11 @@ func TestRunWithSessionRunsNextTurnInSameSession(t *testing.T) {
 		{"claude", claudeResultA, idA, false, "",
 			"-p --output-format json --append-system-prompt HINT --resume ID --allowedTools EDIT --disallowedTools PROTECT -- --next"},
 		{"codex", codexEventsA, codexIDA, nil, "",
-			`-c openai_base_url="BASE/backend-api/codex" exec --skip-git-repo-check --sandbox workspace-write -c developer_instructions=HINT -c sandbox_workspace_write.network_access=true resume --json -- ID --next`},
+			codexRelayArgs + ` exec --skip-git-repo-check --sandbox workspace-write -c developer_instructions=HINT -c sandbox_workspace_write.network_access=true resume --json -- ID --next`},
 		{"codex", codexEventsA, codexIDA, true, "",
-			`-c openai_base_url="BASE/backend-api/codex" exec --skip-git-repo-check --sandbox read-only -c developer_instructions=HINT resume --json -- ID --next`},
+			codexRelayArgs + ` exec --skip-git-repo-check --sandbox read-only -c developer_instructions=HINT resume --json -- ID --next`},
 		{"codex", codexEventsA, codexIDA, false, "gpt-5.5",
-			`-c openai_base_url="BASE/backend-api/codex" exec --skip-git-repo-check --sandbox workspace-write -c developer_instructions=HINT -c sandbox_workspace_write.network_access=true resume --json --model gpt-5.5 -- ID --next`},
+			codexRelayArgs + ` exec --skip-git-repo-check --sandbox workspace-write -c developer_instructions=HINT -c sandbox_workspace_write.network_access=true resume --json --model gpt-5.5 -- ID --next`},
 	} {
 		name := tc.agent + " read_only " + strings.TrimSpace(strings.ReplaceAll(jsonOf(tc.readOnly), "null", "default"))
 		id, base := startRun(t, svc, tok, tc.agent, tc.first)

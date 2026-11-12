@@ -54,6 +54,7 @@ func TestLoopbackListenChecksHost(t *testing.T) {
 
 func TestNonLoopbackListen(t *testing.T) {
 	home := t.TempDir()
+	connectFake(t, home)
 	svc, err := start(config{listen: "0.0.0.0:0", home: home, upstream: mustURL("http://127.0.0.1:1"),
 		chatgpt: mustURL("http://127.0.0.1:1"), logf: t.Logf})
 	if err != nil {
@@ -97,6 +98,7 @@ func TestNonLoopbackHandsAgentsLoopback(t *testing.T) {
 	t.Setenv("AGENTBUS_FAKE_AGENT", "1")
 	t.Setenv("ANTHROPIC_BASE_URL", "")
 	t.Setenv("OPENAI_BASE_URL", "")
+	connectFake(t, home)
 	svc, err := start(config{listen: "0.0.0.0:0", home: home, upstream: mustURL("http://127.0.0.1:1"),
 		chatgpt: mustURL("http://127.0.0.1:1"), logf: t.Logf, noReplay: true,
 		lookPath: func(string) (string, error) { return self, nil }})
@@ -164,6 +166,7 @@ func TestRootRedirectsToDocs(t *testing.T) {
 	noFollow := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	for _, listen := range []string{"127.0.0.1:0", "0.0.0.0:0"} {
 		home := t.TempDir()
+		connectFake(t, home)
 		svc, err := start(config{listen: listen, home: home, upstream: mustURL("http://127.0.0.1:1"),
 			chatgpt: mustURL("http://127.0.0.1:1"), logf: t.Logf})
 		if err != nil {

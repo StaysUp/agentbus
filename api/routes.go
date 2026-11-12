@@ -390,7 +390,7 @@ var routes = slices.Concat([]route{
 		tag:     "Agents",
 		summary: "Save an agent",
 		doc: "Save a new agent: a harness, how it reaches its model, the model and a name. It gets a new id.\n\n" +
-			"access subscription uses the harness's own sign-in. access openrouter needs a model in OpenRouter's naming and reads its key, " +
+			"access subscription uses the person's subscription for the harness, connected once on control (GET /api/v0/subscriptions). access openrouter needs a model in OpenRouter's naming and reads its key, " +
 			"when a turn starts, from the environment variable key_env names on the runner's machine (OPENROUTER_API_KEY when absent). " +
 			"The key itself is never sent, stored or logged. access api and harness opencode are refused: not available yet.",
 		body:    AgentRequest{},

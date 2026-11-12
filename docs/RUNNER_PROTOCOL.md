@@ -36,7 +36,7 @@ the turn a client asked for keeps its id. The client API never shows jobs or att
 | `POST /api/v0/runner/heartbeat` | Idle heartbeat with `capacity`. A restarted runner sends it to check the identity it saved. |
 | `POST /api/v0/runner/removed` | Report a closed session's copy removed, or `error`. |
 | `GET /api/v0/runner/settings` | The policy and the instructions, read fresh, for the turn it is about to start. |
-| `POST /api/v0/runner/attempts/<id>/start` | Taken to running. `cancel` says the job was stopped. `token` is the attempt's turn token, minted by the server: its agent's API token and model credential, working while the attempt is current. |
+| `POST /api/v0/runner/attempts/<id>/start` | Taken to running. `cancel` says the job was stopped. `token` is the attempt's turn token, minted by the server: its agent's API token and model credential, working while the attempt is current. `signin`, when set, is why control can give the turn's agent no credential now, such as `connect your claude subscription in Settings`: a runner whose credentials come from control refuses the turn with it before the agent starts. |
 | `POST /api/v0/runner/attempts/<id>/heartbeat` | Renew the 30 s lease. Sent every 2 s. `cancel` says stop. |
 | `POST /api/v0/runner/attempts/<id>/events` | A batch numbered from `offset`. A repeat stores nothing new; a gap gets 409 with `next`. |
 | `POST /api/v0/runner/attempts/<id>/finish` | `status`, `reason`, `result`, `last_seq`. The same finish again gets the same answer. |

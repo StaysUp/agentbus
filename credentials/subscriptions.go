@@ -263,32 +263,58 @@ func (s *Subscriptions) Credential(n Need) (Cred, error) {
 	k, err := s.read(n.Harness)
 	switch {
 	case errors.Is(err, ErrNotConnected):
-		return Cred{}, &Missing{Why: "no " + n.Harness + " subscription is connected on control; connect it once in the cockpit (Agents, the agent's Connect step)"}
+		return Cred{}, &Missing{Why: NotConnected(n.Harness)}
 	case err != nil:
-		return Cred{}, &Missing{Why: "the " + n.Harness + " subscription kept on control cannot be read; connect it again"}
+		return Cred{}, &Missing{Why: "the " + n.Harness + " subscription kept on control cannot be read; connect it again in Settings"}
 	}
 	if s.renews(n.Harness, k) && (k.Refused || s.due(n.Harness, k)) {
 		var rerr error
 		k, _, rerr = s.renew(n.Harness)
 		switch {
 		case errors.Is(rerr, ErrNotConnected):
-			return Cred{}, &Missing{Why: "no " + n.Harness + " subscription is connected on control; connect it once in the cockpit (Agents, the agent's Connect step)"}
+			return Cred{}, &Missing{Why: NotConnected(n.Harness)}
 		case k.Refused:
-			return Cred{}, &Missing{Why: "the vendor refused to renew the " + n.Harness + " sign-in kept on control; connect it again"}
+			return Cred{}, &Missing{Why: "the vendor refused to renew the " + n.Harness + " sign-in kept on control; connect it again in Settings"}
 		case rerr != nil && !s.now().Before(k.ExpiresAt):
-			return Cred{}, &Missing{Why: "the " + n.Harness + " sign-in on control has expired and could not be renewed just now; try again soon, or connect it again"}
+			return Cred{}, &Missing{Why: "the " + n.Harness + " sign-in on control has expired and could not be renewed just now; try again soon, or connect it again in Settings"}
 		}
 		// A renewal that failed for now leaves a token with time left: it
 		// is used, and the next call tries again.
 	}
 	if !s.now().Before(k.ExpiresAt) {
-		return Cred{}, &Missing{Why: "the " + n.Harness + " subscription's token has expired; connect it again"}
+		return Cred{}, &Missing{Why: "the " + n.Harness + " subscription's token has expired; connect it again in Settings"}
 	}
 	c := Cred{Token: k.Token}
 	if h := s.OAuth[n.Harness].AccountHeader; h != "" && k.Account != "" {
 		c.Headers = map[string]string{h: k.Account}
 	}
 	return c, nil
+}
+
+// NotConnected is what a turn whose harness's subscription is not connected
+// on control is told: it names the harness and where to connect it, never
+// a vendor's error.
+func NotConnected(harness string) string {
+	return "connect your " + harness + " subscription in Settings"
+}
+
+// Ready says why n's subscription cannot be used now, or "": none is
+// connected, the vendor refused to renew it, or its time is up and nothing
+// renews it. One whose time is up but that control renews (codex's, agy's)
+// is ready: the first call renews it (Credential). It renews nothing here.
+func (s *Subscriptions) Ready(n Need) string {
+	k, err := s.read(n.Harness)
+	switch {
+	case errors.Is(err, ErrNotConnected):
+		return NotConnected(n.Harness)
+	case err != nil:
+		return "the " + n.Harness + " subscription kept on control cannot be read; connect it again in Settings"
+	case k.Refused:
+		return "the vendor refused to renew the " + n.Harness + " sign-in kept on control; connect it again in Settings"
+	case !s.renews(n.Harness, k) && !s.now().Before(k.ExpiresAt):
+		return "the " + n.Harness + " subscription's token has expired; connect it again in Settings"
+	}
+	return ""
 }
 
 // RenewDue renews every OAuth sign-in that is due, as control does on its

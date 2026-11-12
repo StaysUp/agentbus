@@ -26,8 +26,12 @@ func (codex) Info() Info {
 		// visible here. The run's -c replaces it, so that endpoint is
 		// bypassed.
 		OwnEndpointEnv: "OPENAI_BASE_URL",
-		Access:         standardAccess("ChatGPT sign-in", []string{"gpt-5.5"}),
-		Replay:         FormatOpenAI,
+		// No model of our own to offer: which ones a ChatGPT sign-in may
+		// use is the account's (gpt-5.5 was refused on one, 2026-11-12). A
+		// new agent names none, so codex picks its own, and a typed name is
+		// tried as it is: a refusal shows the vendor's own words.
+		Access: standardAccess("ChatGPT sign-in", []string{}),
+		Replay: FormatOpenAI,
 		// codex on OpenRouter sends its input items without the content
 		// kinds codex puts on them for chatgpt.com, which is how the codex
 		// format finds the prompt and the context (codex-cli 0.167.0,

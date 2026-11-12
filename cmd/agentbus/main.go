@@ -405,26 +405,36 @@ func start(c config) (*service, error) {
 			orUp, _ = url.Parse(openrouter)
 		}
 		// Each records the calls it carries in this record, as a runner's
-		// own gateway does (jobs/relay.go).
-		recorded := func(u *url.URL, as ...adapter.Adapter) []*gateway.Gateway {
-			var gs []*gateway.Gateway
+		// own gateway does (jobs/relay.go). In up, the built-in runner's
+		// gateways record each of its calls in this same record already,
+		// before they send it to this relay: its calls go through gateways
+		// that record nothing (own), and only get the credential here. Any
+		// other runner's calls are recorded here, as in server.
+		upstream := func(u *url.URL, as ...adapter.Adapter) (gs, own []*gateway.Gateway) {
 			for _, a := range as {
 				g := gateway.New(u, a, sink)
 				gs = append(gs, g)
 				relayGws = append(relayGws, g)
+				if c.mode == modeUp {
+					own = append(own, gateway.New(u, a, unrecorded{}))
+				}
 			}
-			return gs
+			return gs, own
+		}
+		relayed := func(up jobs.Upstream, as ...adapter.Adapter) jobs.Upstream {
+			up.Gateways, up.Own = upstream(up.URL, as...)
+			return up
 		}
 		relay := map[string]jobs.Upstream{
-			relayAnthropic: {URL: c.upstream, Access: credentials.AccessSubscription, Harness: "claude", Gateways: recorded(c.upstream, anthropic.Adapter{})},
-			relayChatGPT:   {URL: c.chatgpt, Access: credentials.AccessSubscription, Harness: "codex", Gateways: recorded(c.chatgpt, openai.Adapter{})},
+			relayAnthropic: relayed(jobs.Upstream{URL: c.upstream, Access: credentials.AccessSubscription, Harness: "claude"}, anthropic.Adapter{}),
+			relayChatGPT:   relayed(jobs.Upstream{URL: c.chatgpt, Access: credentials.AccessSubscription, Harness: "codex"}, openai.Adapter{}),
 			// agy's Code Assist methods only: the Google sign-in reaches
 			// nothing else of that host.
-			relayCloudCode: {URL: c.cloudCodeOr(), Access: credentials.AccessSubscription, Harness: "agy", Under: "v1internal:",
-				Gateways: recorded(c.cloudCodeOr(), gemini.Adapter{})},
+			relayCloudCode: relayed(jobs.Upstream{URL: c.cloudCodeOr(), Access: credentials.AccessSubscription, Harness: "agy", Under: "v1internal:"},
+				gemini.Adapter{}),
 			// OpenRouter takes both API formats: the Responses one's calls
 			// go to the openai adapter, any other to the anthropic one.
-			relayOpenRouter: {URL: orUp, Access: credentials.AccessOpenRouter, Gateways: recorded(orUp, openai.Adapter{}, anthropic.Adapter{})},
+			relayOpenRouter: relayed(jobs.Upstream{URL: orUp, Access: credentials.AccessOpenRouter}, openai.Adapter{}, anthropic.Adapter{}),
 		}
 		creds := credentials.Plug{credentials.AccessOpenRouter: credentials.Env{Getenv: c.getenvOr()}, credentials.AccessSubscription: subs}
 		js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollToken, Heartbeat: c.heartbeat, Agents: saved, Settings: cfgStore,
@@ -548,11 +558,11 @@ func start(c config) (*service, error) {
 				return a.Name
 			}
 		}
-		// A runner that holds no secrets runs each session in a home of its
-		// own: its agents' credentials come from control, so nothing of this
-		// user's home is needed. agentbus up and a runner with -gateway local
-		// use the harness's own sign-in, which lives in this user's home, so
-		// their turns run there.
+		// A runner that holds no secrets, agentbus up's built-in one too,
+		// runs each session in a home of its own: its agents' credentials
+		// come from control, so nothing of this user's home is needed. A
+		// runner with -gateway local uses the harness's own sign-in, which
+		// lives in this user's home, so its turns run there.
 		homes := ""
 		if c.noSecrets() {
 			homes = filepath.Join(c.home, homesDir)
@@ -597,9 +607,14 @@ func start(c config) (*service, error) {
 	// A runner that holds no secret sends each call on to the server's
 	// relay, which adds the credential and records the call in control's
 	// record (jobs/relay.go). It records the call here too, for its own
-	// record, and names each call's exchange to the relay.
+	// record, and names each call's exchange to the relay. agentbus up sends
+	// each call to its own relay, on its own address: one record, written
+	// here, so no exchange is named.
 	if c.noSecrets() {
 		srv := strings.TrimSuffix(c.server, "/") + jobs.RelayPrefix
+		if c.mode == modeUp {
+			srv = baseURL + jobs.RelayPrefix
+		}
 		anthURL, orURL = mustParse(srv+relayAnthropic), mustParse(srv+relayOpenRouter)
 		chatURL, ccURL = mustParse(srv+relayChatGPT), mustParse(srv+relayCloudCode)
 	}
@@ -642,7 +657,7 @@ func start(c config) (*service, error) {
 	for _, g := range gws {
 		g.KeepBodies(keep)
 		g.SetLog(svcLog.Printf)
-		if c.noSecrets() {
+		if c.noSecrets() && c.mode == modeRunner {
 			g.SendExchange()
 		}
 		// forbid in permissions.toml, applied to each run turn's replies.
@@ -863,6 +878,11 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 	if s.remote != nil {
 		s.remote.Enrolled(rn.ID(), rn.Token())
 	}
+	// up's own runner: its gateways record its calls, so the relay does not
+	// again (jobs.Upstream.Own).
+	if c.mode == modeUp && s.jobsSrv != nil {
+		s.jobsSrv.SetOwnRunner(rn.ID())
+	}
 	svcLog.Printf("runner.start id=%s capacity=%d machine=%s folders=%d", rn.ID(), capacity, s.folders.Connector(), len(s.folders.List(queue.MaxFolders)))
 	s.stopRunner = cancel
 	s.runnerDone = make(chan struct{})
@@ -877,6 +897,13 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 	}()
 	return nil
 }
+
+// unrecorded is the sink of up's relay gateways for its own runner's calls
+// (jobs.Upstream.Own): that runner's gateways record each of them in up's
+// one record.
+type unrecorded struct{}
+
+func (unrecorded) Emit(event.Event) {}
 
 // The relay's names for the vendors it adds credentials for: under
 // jobs.RelayPrefix of the server.

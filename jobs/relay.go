@@ -35,6 +35,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/staysup/agentbus/agents"
 	"github.com/staysup/agentbus/credentials"
 	"github.com/staysup/agentbus/gateway"
 	"github.com/staysup/agentbus/queue"
@@ -60,16 +61,20 @@ type Upstream struct {
 	// other (one gateway per API format of the host, as OpenRouter's two).
 	// At least one.
 	Gateways []*gateway.Gateway
+	// Own, in agentbus up, are the same gateways recording nothing, one for
+	// each of Gateways in its order: for the calls of up's own runner,
+	// whose gateway records them in this same record (Server.SetOwnRunner).
+	Own []*gateway.Gateway
 }
 
-// gatewayFor is the gateway of up that takes a call of method on path.
-func (up Upstream) gatewayFor(method, path string) *gateway.Gateway {
-	for _, g := range up.Gateways {
+// gatewayFor is the gateway of gs that takes a call of method on path.
+func gatewayFor(gs []*gateway.Gateway, method, path string) *gateway.Gateway {
+	for _, g := range gs {
 		if g.Watches(method, path) {
 			return g
 		}
 	}
-	return up.Gateways[0]
+	return gs[0]
 }
 
 // SettleWait bounds how long control waits, before it stores a turn's
@@ -83,7 +88,7 @@ const SettleWait = 5 * time.Second
 func (s *Server) settle(session, turn string) bool {
 	ok := true
 	for _, up := range s.cfg.Relay {
-		for _, g := range up.Gateways {
+		for _, g := range append(up.Gateways, up.Own...) {
 			ok = g.Settle(session, turn, SettleWait) && ok
 		}
 	}
@@ -144,7 +149,11 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request) {
 	}
 	session := assignedSession(j)
 	rl := gateway.Relayed{Session: session, Turn: j.Turn, Path: "/" + rest}
-	g := up.gatewayFor(r.Method, rl.Path)
+	gs := up.Gateways
+	if len(up.Own) > 0 && s.own(tokenRunner(tok)) {
+		gs = up.Own
+	}
+	g := gatewayFor(gs, r.Method, rl.Path)
 	// Read once the call holds its turn open: the record and a renewal can
 	// take a while.
 	rl.Prepare = func(rl *gateway.Relayed) {
@@ -203,6 +212,15 @@ func (s *Server) credential(j queue.Job, up Upstream) (credentials.Cred, int, st
 	return cred, 0, ""
 }
 
+// savedAgent is control's saved agent id, or an error when control keeps
+// none or the agent is gone.
+func (s *Server) savedAgent(id string) (agents.Agent, error) {
+	if s.cfg.Agents == nil {
+		return agents.Agent{}, errors.New("jobs: no saved agents")
+	}
+	return s.cfg.Agents.Get(id)
+}
+
 // agentOf is the agent whose credential j's calls get (the rule above), or
 // why there is none.
 func (s *Server) agentOf(j queue.Job) (queue.Spec, string) {
@@ -217,14 +235,20 @@ func (s *Server) agentOf(j queue.Job) (queue.Spec, string) {
 		}
 		sp = queue.Spec{Harness: c.Harness, AgentID: c.AgentID}
 		if sp.AgentID != "" {
-			if s.cfg.Agents == nil {
-				return sp, "control keeps no saved agents"
+			ag, err := s.savedAgent(sp.AgentID)
+			switch {
+			case err == nil:
+				sp.Harness, sp.Access, sp.KeyEnv = ag.Harness, ag.Access, ag.KeyEnv
+			case c.Access == "" || c.Access == credentials.AccessSubscription:
+				// The agent was removed since: the session goes on, on its
+				// harness's subscription, as the record holds it. A
+				// subscription goes only to its own vendor (credential).
+				sp.Access = credentials.AccessSubscription
+			default:
+				// A key's variable comes from control's saved agents only,
+				// never from the record, which a runner writes.
+				return sp, "this session's agent was removed, and only a saved agent names the variable of its key; save the agent again, or start a new conversation"
 			}
-			ag, err := s.cfg.Agents.Get(sp.AgentID)
-			if err != nil {
-				return sp, "this session's agent is not one of control's saved agents"
-			}
-			sp.Harness, sp.Access, sp.KeyEnv = ag.Harness, ag.Access, ag.KeyEnv
 		}
 	}
 	return sp, ""

@@ -123,6 +123,55 @@ func TestExpiredAndMissing(t *testing.T) {
 	}
 }
 
+// Ready says, in plain words and without renewing anything, why a turn's
+// agent can get no credential: nothing connected names the harness and
+// Settings, an expired token says so, and a working one says nothing. A key
+// not set names its variable.
+func TestReady(t *testing.T) {
+	now := time.Now()
+	s := &Subscriptions{Dir: t.TempDir(), Now: func() time.Time { return now }}
+	p := Plug{AccessSubscription: s, AccessOpenRouter: Env{Getenv: func(string) string { return "" }}}
+	need := Need{Access: AccessSubscription, Harness: "claude"}
+	if why := p.Ready(need); why != "connect your claude subscription in Settings" {
+		t.Fatalf("not connected: %q", why)
+	}
+	if err := s.Put("claude", fakeToken, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if why := p.Ready(need); why != "" {
+		t.Fatalf("connected: %q", why)
+	}
+	now = now.Add(2 * time.Minute)
+	if why := p.Ready(need); !strings.Contains(why, "connect it again in Settings") || strings.Contains(why, fakeToken) {
+		t.Fatalf("expired: %q", why)
+	}
+	// One that control renews is ready past its time: the first call
+	// renews it. Once the vendor refused a renewal, it is not.
+	s.OAuth = map[string]OAuth{"codex": {URL: "http://127.0.0.1:1", ClientID: "x"}}
+	if err := s.Keep("codex", Signin{Token: fakeToken, Refresh: "fake-refresh", Expires: now.Add(time.Minute)}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Minute)
+	codex := Need{Access: AccessSubscription, Harness: "codex"}
+	if why := p.Ready(codex); why != "" {
+		t.Fatalf("renewable, past its time: %q", why)
+	}
+	k, _ := s.read("codex")
+	k.Refused = true
+	if err := s.write("codex", k); err != nil {
+		t.Fatal(err)
+	}
+	if why := p.Ready(codex); !strings.Contains(why, "refused to renew") {
+		t.Fatalf("renewal refused: %q", why)
+	}
+	if why := p.Ready(Need{Access: AccessOpenRouter, KeyEnv: "AB_UNSET"}); !strings.Contains(why, "AB_UNSET") {
+		t.Fatalf("key not set: %q", why)
+	}
+	if why := p.Ready(Need{Access: "api"}); why == "" {
+		t.Fatal("an access with no source is ready")
+	}
+}
+
 func TestEnvByName(t *testing.T) {
 	e := Env{Getenv: func(k string) string {
 		if k == "AB_KEY" {

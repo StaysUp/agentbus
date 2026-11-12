@@ -107,3 +107,11 @@ func assignedSession(j queue.Job) string {
 	}
 	return ""
 }
+
+// tokenRunner is the runner a turn token was minted for, read from its
+// shape only: call it on a token turnJob accepted.
+func tokenRunner(tok string) string {
+	rest, _ := strings.CutPrefix(tok, TokenPrefix)
+	id, _, _ := strings.Cut(rest, ".")
+	return id
+}

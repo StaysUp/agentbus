@@ -31,6 +31,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/staysup/agentbus/blobs"
@@ -116,6 +117,21 @@ type Server struct {
 	// Logf writes one line to the service log for each runner that
 	// enrolls. Set before serving; nil: none.
 	Logf func(format string, args ...any)
+	// ownRunner is this process's own runner, agentbus up's built-in one
+	// (SetOwnRunner): the relay records none of its calls.
+	ownRunner atomic.Value // string
+}
+
+// SetOwnRunner names this process's own runner, in agentbus up: its
+// gateways record each of its calls in this record, so the relay sends
+// them through Upstream.Own and records them again nowhere. Every other
+// runner's calls the relay records, as always.
+func (s *Server) SetOwnRunner(id string) { s.ownRunner.Store(id) }
+
+// own says the runner is this process's own (SetOwnRunner).
+func (s *Server) own(runner string) bool {
+	id, _ := s.ownRunner.Load().(string)
+	return id != "" && id == runner
 }
 
 // New returns the jobs.
@@ -126,6 +142,9 @@ func New(cfg Config) (*Server, error) {
 	for name, up := range cfg.Relay {
 		if len(up.Gateways) == 0 {
 			return nil, errors.New("server: the relay " + name + " has no gateway to record its calls")
+		}
+		if len(up.Own) != 0 && len(up.Own) != len(up.Gateways) {
+			return nil, errors.New("server: the relay " + name + " has not one unrecording gateway for each")
 		}
 	}
 	if cfg.Lease == 0 {
@@ -533,6 +552,13 @@ type AttemptStarted struct {
 	// agent's token for control's API, and the placeholder credential of its
 	// model calls. It works while the attempt is current.
 	Token string `json:"token"`
+	// Signin, when set, is why the turn's agent can get no credential from
+	// control now, such as "connect your claude subscription in Settings"
+	// (signin). A runner whose agents' credentials come from control
+	// refuses the turn with it before the agent starts, so the person reads
+	// it rather than a vendor's error. A runner with its own sign-in
+	// (-gateway local) does not use it.
+	Signin string `json:"signin,omitempty"`
 }
 
 func (s *Server) start(w http.ResponseWriter, r *http.Request, rn queue.Runner) {
@@ -546,7 +572,33 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request, rn queue.Runner) 
 		s.queueError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, AttemptStarted{Attempt: a, Cancel: c, Token: s.mint(rn.ID, a.ID, a.Number)})
+	st := AttemptStarted{Attempt: a, Cancel: c, Token: s.mint(rn.ID, a.ID, a.Number)}
+	if j, err := s.cfg.Queue.Current(rn.ID, a.ID, a.Number); err == nil {
+		st.Signin = s.signin(j)
+	}
+	writeJSON(w, http.StatusOK, st)
+}
+
+// signin says why the agent of j's turn can get no credential from control
+// now (credentials.Plug.Ready), or "". A job whose agent control cannot
+// tell yet gets "": the relay says why on its first call.
+func (s *Server) signin(j queue.Job) string {
+	if j.Kind != queue.KindTurn && j.Kind != queue.KindReview {
+		return ""
+	}
+	r, ok := s.cfg.Credentials.(interface{ Ready(credentials.Need) string })
+	if !ok {
+		return ""
+	}
+	sp, why := s.agentOf(j)
+	if why != "" || sp.Harness == "" {
+		return ""
+	}
+	access := sp.Access
+	if access == "" {
+		access = credentials.AccessSubscription
+	}
+	return r.Ready(credentials.Need{Access: access, Harness: sp.Harness, KeyEnv: sp.KeyEnv})
 }
 
 // AttemptBeat is the answer to a heartbeat.

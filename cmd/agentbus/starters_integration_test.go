@@ -29,6 +29,7 @@ func startersService(t *testing.T, mode, home string, found ...string) *service 
 		}
 		return "", errors.New("not found")
 	}
+	connectFake(t, home)
 	svc, err := start(config{mode: mode, listen: "127.0.0.1:0", home: home, upstream: mustURL("http://127.0.0.1:1"),
 		chatgpt: mustURL("http://127.0.0.1:1"), logf: t.Logf, lookPath: look, noReplay: true,
 		heartbeat: 100 * time.Millisecond, turnWait: 2 * time.Second})

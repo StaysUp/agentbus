@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/staysup/agentbus/credentials"
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/store"
 )
@@ -26,13 +27,44 @@ func startService(t *testing.T, home string, upstreamURL string) *service {
 	t.Helper()
 	up, _ := url.Parse(upstreamURL)
 	// codex's upstream is unreachable here: no test reaches chatgpt.com.
-	svc, err := start(config{listen: "127.0.0.1:0", home: home, upstream: up, chatgpt: mustURL("http://127.0.0.1:1"), logf: t.Logf})
+	// The gateway passing each call on with the agent's own sign-in, as a
+	// runner with -gateway local does: agentbus up sends every call to its
+	// relay since 0.5.1 (nosecrets and up_signin tests).
+	svc, err := start(config{listen: "127.0.0.1:0", home: home, upstream: up, chatgpt: mustURL("http://127.0.0.1:1"), logf: t.Logf,
+		gatewayMode: gatewayLocal})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(svc.stop)
 	return svc
 }
+
+// connectFake keeps a fake subscription token for each of harnesses in a
+// data folder, as the cockpit's Connect would: every turn of agentbus up
+// gets its credential from control since 0.5.1. Without harnesses: claude
+// and codex. The token is fake and lasts an hour; nothing renews it.
+func connectFake(t *testing.T, home string, harnesses ...string) {
+	t.Helper()
+	if len(harnesses) == 0 {
+		harnesses = []string{"claude", "codex"}
+	}
+	subs := &credentials.Subscriptions{Dir: filepath.Join(home, subscriptionsDir)}
+	for _, h := range harnesses {
+		if err := subs.Put(h, fakeSubscription, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// codexRelayArgs is how codex is pointed at a turn's base URL (BASE) when
+// its credential comes from control: a provider of its own, whose key is
+// the placeholder (harness codex WireRelay).
+const codexRelayArgs = `-c model_provider=agentbus_chatgpt -c model_providers.agentbus_chatgpt.name="OpenAI" ` +
+	`-c model_providers.agentbus_chatgpt.base_url="BASE/backend-api/codex" -c model_providers.agentbus_chatgpt.env_key="AGENTBUS_CODEX_TOKEN" ` +
+	`-c model_providers.agentbus_chatgpt.wire_api="responses" -c model_providers.agentbus_chatgpt.supports_websockets=false`
+
+// fakeSubscription is connectFake's token.
+const fakeSubscription = "fake-subscription-token-for-tests"
 
 func readToken(t *testing.T, home string) string {
 	t.Helper()

@@ -41,8 +41,8 @@ type AccessOption struct {
 	Kind     string   `json:"kind" doc:"subscription, openrouter or api."`
 	Label    string   `json:"label" doc:"Its name for a screen."`
 	Disabled bool     `json:"disabled,omitempty" doc:"True when an agent cannot use it yet, as for api."`
-	Models   []string `json:"models" doc:"Models to offer, first the one to start from. An agent may name another one when any_model is true."`
-	AnyModel bool     `json:"any_model,omitempty" doc:"True when any model name is accepted, as an OpenRouter model id."`
+	Models   []string `json:"models" doc:"Models to offer. A new subscription agent names none, so the harness picks its own; an OpenRouter one starts with the first. An agent may name another one when any_model is true."`
+	AnyModel bool     `json:"any_model,omitempty" doc:"True when any model name is accepted: an OpenRouter model id, or for a subscription any name its account may offer. A model the vendor refuses fails the turn with the vendor's own words."`
 	KeyEnv   string   `json:"key_env,omitempty" doc:"For openrouter: the variable a new agent reads its key from unless it names another."`
 	KeySet   *bool    `json:"key_set,omitempty" doc:"For openrouter: whether key_env is set in this service's environment. Its value is never sent."`
 }
