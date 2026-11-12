@@ -35,12 +35,25 @@ have (Claude Code, codex, Antigravity), signed in as you, and records every step
 
 ## Install
 
-You need macOS or Linux, and `claude`, `codex` or `agy` installed and signed in. Pick one:
+You need macOS or Linux, and `claude`, `codex` or `agy` installed and signed in. Use **one** of
+these:
+
+**Homebrew** (macOS or Linux):
 
 ```sh
 brew install staysup/tap/agentbus
-curl -fsSL https://raw.githubusercontent.com/staysup/agentbus/main/install.sh | sh   # into ~/.local/bin
-go install github.com/staysup/agentbus/cmd/agentbus@latest                          # Go 1.27.1 or later
+```
+
+**Install script** (puts the binary in `~/.local/bin`):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/staysup/agentbus/main/install.sh | sh
+```
+
+**From source** (Go 1.27.1 or later):
+
+```sh
+go install github.com/staysup/agentbus/cmd/agentbus@latest
 ```
 
 The install script takes `AGENTBUS_INSTALL_DIR` (another folder) and `AGENTBUS_VERSION` (another
