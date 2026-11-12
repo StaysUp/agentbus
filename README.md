@@ -50,100 +50,45 @@ release). Check the install with `agentbus version`.
 agentbus up
 ```
 
-It listens on `http://127.0.0.1:8787` and prints its data folder: `$AGENTBUS_HOME`, else
-`$XDG_DATA_HOME/agentbus`, else `~/.local/share/agentbus`. The file `token` there guards every API
-call.
+This runs everything on this machine and listens on `http://127.0.0.1:8787`. The token that guards
+the API is the file `token` in its data folder (`~/.local/share/agentbus`, or `$AGENTBUS_HOME`).
 
-Then open a cockpit. The browser cockpit is
-[staysup/agentbus-cockpit](https://github.com/staysup/agentbus-cockpit): follow its README and paste
-the token when it asks.
+Then open a cockpit: [staysup/agentbus-cockpit](https://github.com/staysup/agentbus-cockpit). Follow
+its README and paste the token when it asks. `agentbus up -h` lists the options.
 
-| `agentbus up` flag | Default | What it does |
-|---|---|---|
-| `-listen` | `127.0.0.1:8787` | The address. `0.0.0.0` can be reached from the network; the token guards it. |
-| `-origin` | none | Allow only this browser origin, such as `http://localhost:5173`. |
-| `-max-runs` | `4` | How many turns run at once, 1 to 64. More wait in the queue. |
-| `-replay` | `true` | Continue sessions from AgentBus's own record. `false` uses the agent's own resume. |
+## Several machines
 
-## One program per machine
+AgentBus has two parts:
 
-- **Control** keeps the API, the record, the job queue, the settings and the saved agents. It never
-  touches your folders.
-- **A runner** is the one program on each machine that holds code. It makes each session's copy,
-  runs the agents, and applies changes back into the folder.
+- **Control** is the one place that keeps everything: the record of every turn, the queue, your
+  settings and agents, and the API the cockpit uses. It does no work itself.
+- **A runner** does the work. Each machine that should run agents runs one. It asks control for
+  work, makes a copy of the folder for each session, runs the agents there, and applies the changes
+  to your folder when you say so.
 
-| Command | What runs |
-|---|---|
-| `agentbus up` | Control and this machine's runner, in one process. One machine needs only this. |
-| `agentbus server` | Control alone. |
-| `agentbus runner` | A runner. `agentbus login` sets one up (below). |
+`agentbus up` is both, in one program, for one machine. For several machines, run control once,
+reachable from the others (`agentbus server -listen 0.0.0.0`), and a runner on each machine.
 
-A session runs on one machine for its whole life: you pick the machine, then a folder on it.
-Runners pull their work, so they work behind a router.
+**Every runner must reach control's address.** That works on one network, over a VPN such as
+Tailscale, or with control on a server the machines can reach. There is no hosted relay yet.
 
-## Add a machine
+To add a machine:
 
-Control runs `agentbus server -listen 0.0.0.0` somewhere you can reach. On each
-machine that should do work:
+1. Install AgentBus on it (see Install above).
+2. Run `agentbus login http://<control>:8787`. It prints a code.
+3. In the cockpit, open **Runners** (at the foot of the Agents column), type the code and press
+   **Approve**.
 
-**1. Install the binary into a folder of its own.** It must not replace another `agentbus` on your
-`PATH`, such as an older one in `~/.local/bin`:
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/staysup/agentbus/main/install.sh | \
-  AGENTBUS_INSTALL_DIR="$HOME/.local/agentbus/bin" sh
-"$HOME/.local/agentbus/bin/agentbus" version
-```
-
-Run it by its full path, as below. The service it sets up runs that same file.
-
-**2. Sign the machine in.** Give it a data folder of its own, and name control's address:
-
-```sh
-AGENTBUS_HOME="$HOME/.local/share/agentbus-runner" \
-  "$HOME/.local/agentbus/bin/agentbus" login http://<control>:8787
-```
-
-It prints a code and waits up to 15 minutes. It takes the runner's flags too: `-name` (default:
-the host name), `-capacity` (turns at once, default 4), `-gateway local` (use this machine's own
-sign-ins instead of control's), and `-no-service` (print the command instead of setting up a
-service).
-
-**3. Approve it.** In the cockpit, open **Runners** (at the foot of the Agents column). The machine
-is under **Waiting for approval**. Type the code it shows and press **Approve**. Within 2 seconds
-the machine saves its credential (`runner.json`, mode 0600) and sets up the service.
+The runner then keeps running in the background, also after a restart (a launchd agent on macOS, a
+systemd user service on Linux). The Runners page shows the machine as **Online**. When you start a
+session, you pick the machine, then a folder on it; the session stays on that machine.
 
 ![The Runners page: a machine waiting for approval, and the code field](docs/assets/cockpit-runners.png)
 
-**4. The service.** It starts now and at every login:
-
-| | macOS | Linux |
-|---|---|---|
-| Kind | launchd agent `art.lorebug.agentbus.runner` | systemd user unit `agentbus-runner.service` |
-| File | `~/Library/LaunchAgents/art.lorebug.agentbus.runner.plist` | `~/.config/systemd/user/agentbus-runner.service` |
-| Status | `launchctl print gui/$(id -u)/art.lorebug.agentbus.runner` | `systemctl --user status agentbus-runner.service` |
-| Logs | `logs/runner-launchd.log` in the data folder | `journalctl --user -u agentbus-runner.service` |
-| Restart | `launchctl kickstart -k gui/$(id -u)/art.lorebug.agentbus.runner` | `systemctl --user restart agentbus-runner.service` |
-| Remove | `launchctl bootout gui/$(id -u)/art.lorebug.agentbus.runner`, then delete the file | `systemctl --user disable --now agentbus-runner.service`, then delete the file |
-
-On Linux, `loginctl enable-linger` keeps it running while you are logged out. A file of that name
-already there is never changed: login says so and prints the command to run instead. The service
-keeps the `PATH` of the shell you ran login from, so run it where `claude`, `codex` and `agy` are
-found.
-
-**5. Check it is online.** The Runners page shows the machine as **Online** (it asked for work in the
-last minute), and whether it can build a session's sandbox. `GET /api/v0/runners` on control says
-the same. New sessions can now pick this machine.
-
-To upgrade, replace the binary at the same path and restart the service. Control and every runner
-must run the same release. An offline machine can be removed on the Runners page; its sessions stay
-in the record.
-
-**Sign-ins.** By default a runner holds no secrets: control adds the credential to each model call.
-For an OpenRouter agent, control reads the key from its own environment. For your own
-subscriptions, connect each once in the cockpit (Agents, the agent's Connect step)
-and press **Turn on for my runners** there (it sets `subscriptions_on_runners = "own"`). Or start the runner with `-gateway local`
-to use the machine's own sign-ins.
+By default a runner holds no secrets: control adds the sign-in or API key to each model call.
+Connect your subscriptions once in the cockpit (Agents, the agent's Connect step, then **Turn on for
+my runners**). Control and every runner must run the same release. `agentbus login -h` lists the
+options.
 
 ## Settings
 
