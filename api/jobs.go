@@ -67,7 +67,7 @@ var runnerRoutes = []route{
 		summary: "Take work",
 		doc: "Long poll, up to 30 seconds, for a job (with its new attempt and lease) or a cleanup (a closed session's workspace to remove). " +
 			"A job of a session goes to the runner that holds its workspace, and a job that names a machine (spec.connector) to that machine's runner only. " +
-			"With folders true it is a folder job of the runner's own machine (an apply, a typed folder's check), in one of its 4 folder places; without it a turn, a review or a command.",
+			"With folders true it is a folder job of the runner's own machine (an apply, a typed folder's check), in one of its 4 folder places; without it a turn or a review.",
 		body:    jobs.TakeRequest{Protocol: jobs.ProtocolVersion},
 		replies: []reply{ok(200, jobs.TakenWork{}, "A job, or a cleanup."), {status: 204, doc: "Nothing to do.", empty: true}, badRequest, noAttempt, storeFailed},
 		self:    true, serve: jobsRoute},

@@ -33,23 +33,32 @@ import (
 const specIntro = "agentbus runs on your machine, between your coding agents and their vendors. " +
 	"It stores each step of their work as an event. This API reads those events, starts agents, " +
 	"and takes a program's own events.\n\n" +
-	"This document is generated from the code at startup. The contract in words is `docs/CLIENT_API.md`; " +
-	"a short guide for coding agents is at `/docs/llms.txt`.\n\n" +
+	"This document is generated from the code at startup, and it is the contract. " +
+	"A short guide for coding agents is at `/docs/llms.txt`.\n\n" +
+	"- `agentbus up` runs turns on this machine. `agentbus server` queues them for runners on other machines. " +
+	"A runner's own service starts no turns (404) and keeps no settings of its own (409 on a change).\n" +
 	"- Three nouns: an agent is a saved setup, a session is a conversation, and a turn is one message, its reply and its changes. " +
 	"Every action is on a turn: start, stop, diff, apply, review and its model calls.\n" +
-	"- Every request but this document sends `Authorization: Bearer <token>`: the file `token` in the data folder. Never put it in a URL.\n" +
+	"- Every request but this document sends `Authorization: Bearer <token>`: the file `token` in the data folder. Never put it in a URL. " +
+	"The data folder is `$AGENTBUS_HOME`, else `$XDG_DATA_HOME/agentbus`, else `~/.local/share/agentbus`; `token` and `turns_token` there are mode 0600.\n" +
 	"- A turn exists from the moment it is asked for: `queued`, then `running`, then `finished`, `failed` or `stopped`.\n" +
 	"- Runners talk to this service through the runner protocol, under `/api/v0/runner/`. It is described on its own, at `/api/v0/runner/openapi.json`, and is not a public promise.\n" +
 	"- A turn started by `POST /api/v0/turns` gets its own token in `$AGENTBUS_TOKEN`, and this service's address in `$AGENTBUS_URL`. " +
 	"With it the agent reads its session and asks other agents: it starts turns, continues the sessions it started, asks for reviews and reads their results, on the operations that say so. " +
 	"Each result comes back to the asking session as a later turn. It never changes policy or saved agents, never sees a token, " +
-	"and stops working when the turn's child exits. A read-only turn's token only reads.\n" +
+	"and stops working when the turn's child exits. A read-only turn's token only reads. " +
+	"An asked turn finds who asked it in `$AGENTBUS_ASKED_BY_SESSION` and `$AGENTBUS_ASKED_BY_TURN`. " +
+	"Its copy does not hold the asker's unapplied changes: read them through this API.\n" +
 	"- The turns token, the file `turns_token` in the data folder, may only start, stop, review and read turns, on the operations that say so. " +
 	"A program that only starts and follows turns uses it in place of the main token.\n" +
 	"- On loopback, the default, the `Host` must be `127.0.0.1`, `localhost` or `[::1]` with the service's port, or the answer is 403. " +
 	"On another address, such as `0.0.0.0`, any `Host` is accepted and the token is the guard.\n" +
 	"- A browser page from any origin may call the API: CORS answers `Access-Control-Allow-Origin: *` and allows `Authorization`. " +
-	"No cookies are used, so the token is the guard. `agentbus up -origin <url>` locks it to that one origin.\n" +
+	"No cookies are used, so the token is the guard. `agentbus up -origin <url>` locks it to that one origin. " +
+	"A preflight (`OPTIONS`) under `/api/` gets 204 without a token and allows `Authorization`, `Content-Type` and `If-Match`; " +
+	"replies expose `ETag` and the `X-Piece-*` headers. A preflight elsewhere gets 403.\n" +
+	"- A path with a `.`, `..` or empty segment, or an encoded dot, slash or backslash, gets 400 before any route. " +
+	"Everything under `/api` is answered here and never sent on to a vendor.\n" +
 	"- Start up with `GET /api/v0/sessions`, then stream `GET /api/v0/events` from its `store` and `seq`. Nothing is lost or counted twice.\n" +
 	"- A cursor is a `store` and a `seq`. A cursor of another store gets 409: start over from the snapshot.\n" +
 	"- v0 may change without notice. Ignore kinds and fields you do not know."
@@ -76,12 +85,15 @@ var turnTokenDoc = map[int]string{
 		"The review's result comes back to the asking session as a later turn. Caps: " + askCaps,
 	askedTurn: "A turn token may stop only a turn its request tree asked for, unless its turn is read-only.",
 	anyRead:   "A turn token may call this too.",
+	applyTurnTok: "A turn token may call this for a turn of a session in its scope only when [agent_api] apply is on (off by default), " +
+		"and never from a read-only turn.",
+	renameSession: "A turn token may rename a session in its scope, unless its turn is read-only. It never closes one.",
 	toolList: "A turn token may call this: its list holds the tools its turn may call under [agent_api] (none of them when tools is false), " +
 		"and each call is checked by the operation it names.",
 }
 
 // askCaps names the caps on asked work. A request past one gets 403 saying which.
-var askCaps = fmt.Sprintf("[limits] in permissions.toml: by default at most %d levels below the person's turn, %d jobs asked by one turn, "+
+var askCaps = fmt.Sprintf("[limits] in the settings (PUT /api/v0/settings/permissions): by default at most %d levels below the person's turn, %d jobs asked by one turn, "+
 	"%d in one request tree, and no cost cap (max_cost_usd_per_tree). [agent_api] there can turn each kind of call off, "+
 	"and narrow the scope to the token's own session.", settings.DefaultMaxDepth, settings.DefaultMaxJobsPerTurn, settings.DefaultMaxJobsPerTree)
 
@@ -364,9 +376,11 @@ func (c *components) kindSchemas() {
 	}}
 	one = append(one, openapi3.NewSchemaRef("#/components/schemas/ProgramEvent", nil))
 	c.schemas["Event"] = &openapi3.SchemaRef{Value: &openapi3.Schema{
-		Description: "One step of an agent's work. Ignore kinds and fields you do not know.",
-		AllOf:       openapi3.SchemaRefs{openapi3.NewSchemaRef("#/components/schemas/EventFields", nil)},
-		OneOf:       one,
+		Description: "One step of an agent's work. Ignore kinds and fields you do not know. " +
+			"A built-in kind has two parts, such as turn.started; a program's has three and starts with x. " +
+			"A runner's reports on its attempts stay in the queue and never reach this API.",
+		AllOf: openapi3.SchemaRefs{openapi3.NewSchemaRef("#/components/schemas/EventFields", nil)},
+		OneOf: one,
 	}}
 }
 
@@ -401,6 +415,43 @@ func describe(runner bool) (*openapi3.T, error) {
 	}
 	errorReply := func(desc string) *openapi3.ResponseRef {
 		return &openapi3.ResponseRef{Value: openapi3.NewResponse().WithDescription(desc).WithJSONSchemaRef(errRef)}
+	}
+	// An error reply that two or more operations give with the same words is
+	// described once, in components.responses, and each operation points at
+	// it: the 403 alone is on almost every route.
+	uses := map[string]int{}
+	for _, rt := range routes {
+		if rt.self != runner {
+			continue
+		}
+		for _, r := range rt.replies {
+			if r.errorOnly() {
+				uses[replyKey(r.status, r.doc)]++
+			}
+		}
+		for _, r := range accessReplies(rt) {
+			uses[replyKey(r.status, r.doc)]++
+		}
+	}
+	doc.Components.Responses = openapi3.ResponseBodies{}
+	sharedName := map[string]string{}
+	errorFor := func(status int, desc, name string) *openapi3.ResponseRef {
+		key := replyKey(status, desc)
+		if uses[key] < 2 {
+			return errorReply(desc)
+		}
+		if sharedName[key] == "" {
+			if name == "" {
+				name = strings.ReplaceAll(http.StatusText(status), " ", "")
+			}
+			for n, base := 2, name; doc.Components.Responses[name] != nil; n++ {
+				name = base + strconv.Itoa(n)
+			}
+			sharedName[key] = name
+			doc.Components.Responses[name] = errorReply(desc)
+		}
+		name = sharedName[key]
+		return &openapi3.ResponseRef{Ref: "#/components/responses/" + name, Value: doc.Components.Responses[name].Value}
 	}
 	// Each tag's routes, counted, so a route cannot name a tag that is not
 	// listed and a listed tag cannot be empty.
@@ -500,6 +551,8 @@ func describe(runner bool) (*openapi3.T, error) {
 					WithContent(openapi3.NewContentWithJSONSchema(&openapi3.Schema{}))}
 			case r.empty:
 				resp = &openapi3.ResponseRef{Value: openapi3.NewResponse().WithDescription(r.doc)}
+			case r.body == nil && !(rt.versioned && r.status == http.StatusServiceUnavailable):
+				resp = errorFor(r.status, r.doc, "")
 			case r.body == nil:
 				resp = errorReply(r.doc)
 			default:
@@ -519,18 +572,11 @@ func describe(runner bool) (*openapi3.T, error) {
 			}
 			op.Responses.Set(strconv.Itoa(r.status), resp)
 		}
-		forbidden := "The service is on loopback and the Host header does not name it on 127.0.0.1, localhost or [::1]."
-		if !rt.public && !rt.self {
-			forbidden += " Or a turn token was sent where it may not read: another session, or an operation that does not take one."
-			if !rt.turns {
-				forbidden += " Or the turns token was sent: it may only start, stop, review and read turns."
-			}
+		for _, r := range accessReplies(rt) {
+			op.Responses.Set(strconv.Itoa(r.status), errorFor(r.status, r.doc, r.name))
 		}
-		op.Responses.Set("403", errorReply(forbidden))
 		if rt.public {
 			op.Security = openapi3.NewSecurityRequirements()
-		} else {
-			op.Responses.Set("401", errorReply("A missing or wrong token."))
 		}
 		item := doc.Paths.Value(rt.path)
 		if item == nil {
@@ -557,6 +603,40 @@ func describe(runner bool) (*openapi3.T, error) {
 		c.kindSchemas()
 	}
 	return doc, nil
+}
+
+// replyKey names an error reply by its status and words.
+func replyKey(status int, doc string) string { return strconv.Itoa(status) + " " + doc }
+
+// errorOnly says r is an error reply described by its words alone, which
+// describe may share between operations.
+func (r reply) errorOnly() bool { return r.body == nil && !r.stream && !r.raw && !r.empty }
+
+// accessReply is a reply every route of a kind gives: the 403 for a wrong
+// Host or token, and the 401. name is its entry in components.responses.
+type accessReply struct {
+	status    int
+	doc, name string
+}
+
+// accessReplies are the 403 and, for a route with a token, the 401 that
+// describe adds to rt.
+func accessReplies(rt route) []accessReply {
+	forbidden := "The service is on loopback and the Host header does not name it on 127.0.0.1, localhost or [::1]."
+	name := "ForbiddenHost"
+	if !rt.public && !rt.self {
+		forbidden += " Or a turn token was sent where it may not read: another session, or an operation that does not take one."
+		name = "ForbiddenToken"
+		if !rt.turns {
+			forbidden += " Or the turns token was sent: it may only start, stop, review and read turns."
+			name = "ForbiddenMainToken"
+		}
+	}
+	out := []accessReply{{status: http.StatusForbidden, doc: forbidden, name: name}}
+	if !rt.public {
+		out = append(out, accessReply{status: http.StatusUnauthorized, doc: "A missing or wrong token.", name: "Unauthorized"})
+	}
+	return out
 }
 
 // runnerIntro opens the runner protocol's description.

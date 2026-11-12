@@ -1,7 +1,7 @@
 # The runner protocol
 
-How runners talk to control: one runner on each machine, which holds that machine's folders. The client API, for people, programs and agents, is in
-[CLIENT_API.md](CLIENT_API.md).
+How runners talk to control: one runner on each machine, which holds that machine's folders. The client API, for people, programs and agents, is
+described at `/api/v0/openapi.json` and `/docs` on the running service.
 
 
 `agentbus runner -server <url>` is a runner; so is the one built into `agentbus up`. Both speak this

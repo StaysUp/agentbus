@@ -1,7 +1,6 @@
 package api
 
 // GET /api/v0/version: which build of AgentBus this service is.
-// docs/CLIENT_API.md is the contract.
 
 import "net/http"
 

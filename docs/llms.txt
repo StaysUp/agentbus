@@ -1,8 +1,8 @@
 # AgentBus: the API for agents
 
 > AgentBus runs coding agents (Claude Code, codex, Antigravity) for a person and records every step.
-> This page is short on purpose: read it whole. The long reference is `GET /docs/reference.md`.
-> The full description of every route is `GET /api/v0/openapi.json`.
+> This page is short on purpose: read it whole. The full description of every route, and the
+> contract, is `GET /api/v0/openapi.json` (`/docs` shows it as a page).
 
 ## Three nouns
 
@@ -73,5 +73,5 @@ work, ask for a review of your turn, then end your turn.
 
 A 403 says why: a read-only turn asking for anything; a session outside your tree; continuing your
 own session or the person's; a folder outside yours; a call the person switched off in
-`[agent_api]` of `permissions.toml`; a limit in `[limits]` (depth 2, 10 asks per turn, 30 per tree
+`[agent_api]` of the settings; a limit in `[limits]` (depth 2, 10 asks per turn, 30 per tree
 by default). A 404 means no such turn, session or agent. Errors are JSON: `{"error":"..."}`.

@@ -1,5 +1,6 @@
 // Package api is the client API: what cockpits and programs call, under
-// /api, on the gateway's own address. docs/CLIENT_API.md is the contract.
+// /api, on the gateway's own address. The route table (routes.go) and its
+// description (spec.go) are the contract.
 //
 // The whole /api namespace is ours: /api, /s/<session>/api and everything under
 // either is answered here and never forwarded to a vendor. Reserved says which

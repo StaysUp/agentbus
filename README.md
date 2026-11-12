@@ -11,622 +11,227 @@
 [![Latest release](https://img.shields.io/github/v/release/staysup/agentbus)](https://github.com/staysup/agentbus/releases)
 [![CI](https://github.com/StaysUp/agentbus/actions/workflows/ci.yml/badge.svg)](https://github.com/StaysUp/agentbus/actions/workflows/ci.yml)
 
-[Quickstart](#quickstart) &nbsp;&bull;&nbsp; [Demo](#demo) &nbsp;&bull;&nbsp; [Docs](#docs) &nbsp;&bull;&nbsp; [Cockpit](https://github.com/staysup/agentbus-cockpit) &nbsp;&bull;&nbsp; [Releases](https://github.com/staysup/agentbus/releases)
+[Quickstart](#quickstart) &nbsp;&bull;&nbsp; [Add a machine](#add-a-machine) &nbsp;&bull;&nbsp; [Docs](#docs) &nbsp;&bull;&nbsp; [Cockpit](https://github.com/staysup/agentbus-cockpit) &nbsp;&bull;&nbsp; [Releases](https://github.com/staysup/agentbus/releases)
 
 </div>
 
-![AgentBus API docs](docs/assets/api-docs.png)
+![The AgentBus cockpit: a session, and one turn's model calls](docs/assets/cockpit-session.png)
 
-AgentBus is a cross-vendor middleware framework for coding agents. It sits between your agents and every model vendor.
+AgentBus sits between your coding agents and every model vendor. It runs the agents you already
+have (Claude Code, codex, Antigravity), signed in as you, and records every step.
+
+- **You see every model call**, and what it cost. Each request and reply is stored on your machine.
+- **The conversation is kept.** Each turn is a fresh agent run. AgentBus keeps the history and
+  continues the conversation from its own record, on any agent or model.
+- **Your folder stays as it is.** Each session works in its own copy. Its changes reach your folder
+  only when you apply a turn.
+- **One API.** Cockpits, programs and agents all use the same HTTP API.
 
 ## Demo
 
 [![AgentBus demo](https://img.youtube.com/vi/si0HHQFcCD0/maxresdefault.jpg)](https://youtu.be/si0HHQFcCD0)
 
-Click to watch on YouTube.
-
-## Why
-
-- **You see every model call.** Each request and reply an agent makes passes through AgentBus and
-  is stored on your machine.
-- **You see the cost.** Every call is priced, and each turn and session shows its total.
-- **The conversation is kept.** Each turn is a fresh one-shot agent run. AgentBus keeps the history
-  and continues the conversation from its own store.
-- **Any vendor.** Claude Code and codex today, through one API. Every vendor tomorrow.
-
-AgentBus runs the agents you already have, signed in as you.
-
-## Prerequisites
-
-- `claude` (Claude Code) or `codex`, or both, installed and signed in.
-- macOS or Linux.
-- Go 1.27.1 or later, only if you install with `go install` or build from source.
-
 ## Install
 
-Pick one.
-
-**Homebrew:**
+You need macOS or Linux, and `claude`, `codex` or `agy` installed and signed in. Pick one:
 
 ```sh
 brew install staysup/tap/agentbus
+curl -fsSL https://raw.githubusercontent.com/staysup/agentbus/main/install.sh | sh   # into ~/.local/bin
+go install github.com/staysup/agentbus/cmd/agentbus@latest                          # Go 1.27.1 or later
 ```
 
-**Install script** (puts `agentbus` in `~/.local/bin`):
-
-```sh
-curl -fsSL https://raw.githubusercontent.com/staysup/agentbus/main/install.sh | sh
-```
-
-**Go:**
-
-```sh
-go install github.com/staysup/agentbus/cmd/agentbus@latest
-```
-
-**Build from source:**
-
-```sh
-git clone https://github.com/staysup/agentbus.git
-cd agentbus
-go install ./cmd/agentbus
-```
-
-On Linux, a build with cgo (the default where gcc is installed) and one without it (`CGO_ENABLED=0`, as
-releases are built) both run `agentbus up` in a user namespace of their own, where a session's copy
-can be an overlay mount without root. The service's first log line says whether it got one, and why
-not.
-
-Both Go routes put `agentbus` in `$(go env GOPATH)/bin`. That folder must be on your `PATH`:
-
-```sh
-export PATH="$PATH:$(go env GOPATH)/bin"
-```
-
-Check the install with `agentbus version`.
+The install script takes `AGENTBUS_INSTALL_DIR` (another folder) and `AGENTBUS_VERSION` (another
+release). Check the install with `agentbus version`.
 
 ## Quickstart
-
-### 1. Start the service
 
 ```sh
 agentbus up
 ```
 
-It listens on `http://127.0.0.1:8787` and prints its data folder:
+It listens on `http://127.0.0.1:8787` and prints its data folder: `$AGENTBUS_HOME`, else
+`$XDG_DATA_HOME/agentbus`, else `~/.local/share/agentbus`. The file `token` there guards every API
+call.
 
-```
-agentbus: 2026/11/06 12:00:00 listening on http://127.0.0.1:8787, data folder /Users/you/.local/share/agentbus
-```
+Then open a cockpit. The browser cockpit is
+[staysup/agentbus-cockpit](https://github.com/staysup/agentbus-cockpit): follow its README and paste
+the token when it asks.
 
-The data folder is `$AGENTBUS_HOME` if set, else `$XDG_DATA_HOME/agentbus`, else
-`~/.local/share/agentbus`. On first start AgentBus writes a random token to `token` in that folder,
-readable only by you. Every API request needs it.
-
-Flags:
-
-| Flag | Default | What it does |
-|---|---|---|
-| `-listen` | `127.0.0.1:8787` | The address: an IP, with or without a port. With no port it uses 8787. `0.0.0.0` can be reached from the network. |
-| `-origin` | none | An optional lock: allow only this browser origin, such as `http://localhost:5173`. Without it any origin may call the API. |
-| `-replay` | `true` | Continue Claude and codex sessions from AgentBus's own store. `false` uses the agent's own resume. |
-| `-max-runs` | `4` | How many turns run at once, 1 to 64. More wait in the queue. |
-
-### 2. Open a cockpit
-
-A cockpit is any client of the API. The browser cockpit is in its own repository,
-[staysup/agentbus-cockpit](https://github.com/staysup/agentbus-cockpit). It works with the plain
-`agentbus up` from step 1. Follow the cockpit's README, and paste the token from the token file
-when it asks.
-
-A page from any origin may call the API, because every call needs the token in a header and a
-foreign page does not have it. AgentBus uses no cookies, so there is nothing for the browser to
-send on your behalf. To lock the API to one origin anyway, start it with
-`agentbus up -origin http://localhost:5173`.
-
-### Reach it from another machine or a container
-
-By default the service answers this machine only. To reach it from elsewhere, listen on every
-address:
-
-```sh
-agentbus up -listen 0.0.0.0
-```
-
-In Docker, run that inside the container and publish the port to your own machine only:
-
-```sh
-docker run -p 127.0.0.1:8788:8787 ...
-```
-
-The cockpit then uses `http://127.0.0.1:8788` with the same token.
-
-On `0.0.0.0` the service can be reached from the network. The token guards every API call. The
-agents' model traffic answers callers on the service's own machine only. There is no HTTPS, so
-across a network use an SSH tunnel or a private network. If you put a reverse proxy in front, pass
-on `/api` and `/docs` only: the proxy's requests look local to the service.
-
-### 3. Or start a turn with curl
-
-Open a second terminal in any folder. First check that the service finds your harnesses:
+Or start a turn with curl:
 
 ```sh
 TOKEN=$(cat ~/.local/share/agentbus/token)
-
-curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8787/api/v0/harnesses
-```
-
-Each one says `found`, its `version` and `signed_in`. `GET /api/v0/agents` lists your saved
-agents; a new data folder has `claude`, `codex` and `agy`, each on its own subscription. `agy` is
-Google's Antigravity CLI (Gemini) on its own Google sign-in; it has no sign-in status command, so
-its `signed_in` is left out.
-
-`found` means the harness's program is on the service's `PATH`. `signed_in` is the harness's own
-answer, and it is left out when it gives no clear one. Start a turn only with an agent whose
-harness is found and signed in.
-
-Then start a turn:
-
-```sh
-curl -s http://127.0.0.1:8787/api/v0/turns \
-  -H "Authorization: Bearer $TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"agent":"claude","folder":"'"$PWD"'","prompt":"Say hello in five words.","model":"haiku","read_only":true}'
-```
-
-Use your own token path if the data folder is elsewhere. `folder` must be an absolute path to a
-folder that exists. The agent works in its own copy of it, made exactly as the folder is now,
-under the data folder, so your folder is not changed; send `"isolate":false` to work in the folder
-itself. `isolation` in `permissions.toml` picks how the copy is made: `auto` (the default: one
-APFS clone on macOS; on Linux an overlay mount, without root in a user namespace of its own,
-else a reflink or plain copy), `overlay`, `copy`, `git` (a worktree, in a repo) or `none`. The
-table of what `auto` picks, the AppArmor step Ubuntu 24.04 needs for overlay without root, and
-`share_read_only` for a big `node_modules`, are in `docs/CLIENT_API.md` ("Isolation").
-`model` is passed to the agent as `--model`; a small
-model keeps this first turn cheap. `read_only` gives the agent read tools only. For codex, use
-`"agent":"codex"` and one of its models, or leave `model` out.
-
-The reply names the new session (`session`), the turn (`turn`) and its state (`running`, or
-`queued` while it waits for a runner):
-
-```json
-{"session":"8c1f…","turn":"t_5d0c19a2e7b3f481","state":"running","base_url":"http://127.0.0.1:8787/s/8c1f…/t/t_5d0c19a2e7b3f481"}
-```
-
-If the service cannot find the agent's program, the reply is HTTP 400 and nothing is stored:
-
-```json
-{"error":"agent claude cannot start: the program claude is not on the service's PATH. Install Claude Code and run claude once to sign in, then try again. If it is installed, start agentbus from a shell where claude runs."}
-```
-
-Read the turn back, with its reply, state and cost (`GET /api/v0/turns/<turn>` reads just one):
-
-```sh
-curl -s "http://127.0.0.1:8787/api/v0/turns?session=<id>" -H "Authorization: Bearer $TOKEN"
-```
-
-To make a retry safe, add `"idempotency_key":"<your id>"`. Sending the same body again returns the
-same turn and starts nothing.
-
-To continue the conversation, send the next prompt with `"session":"<id>"` and no agent or folder.
-
-To stop a running turn, and every process it started:
-
-```sh
-curl -s -X POST "http://127.0.0.1:8787/api/v0/turns/<turn>/stop" -H "Authorization: Bearer $TOKEN"
-```
-
-The next turn of the session continues after it, and the agent is told that you stopped it.
-
-## Talking to agents
-
-A session is one conversation. You write; an agent answers. Everything else is asked for in the
-chat, in plain words.
-
-- **Saved agents.** An agent is a saved setup: a harness (`claude` or `codex`), its access (your
-  subscription, or an OpenRouter key read from a variable by name), a model and a name. A new data
-  folder has `claude` and `codex`. Add more with `POST /api/v0/agents`
-  ([Agents](docs/CLIENT_API.md#agents)), or with "+ Agent" in the cockpit.
-- **Switch model or agent on any message.** Each message may name a `model`, an `agent`, or both.
-  The conversation carries on with the new one. A message that names neither keeps the last ones.
-- **Messages queue.** Send the next message while a turn runs. It waits and runs after it.
-- **Ask other agents.** An agent can hand work to another agent, or to many at once. It does not
-  wait: it starts the work and ends its turn. **Each answer comes back as the next turn** of its
-  session. Inside a turn the agent uses `agentbus-api`, which sends its turn's own token. You can
-  ask in the chat: "have codex review this", "ask all three". The asked agent works in a new copy of
-  your folder, without the asking session's unapplied changes. It is told which session and turn
-  asked it, and reads that turn's changes, with each file's diff, through the API.
-- **A copy per conversation.** Each new session works in its own copy of your folder, made as the
-  folder is now, uncommitted edits included. Your folder does not change while agents work.
-  Several sessions on one folder never touch each other's files. How the copy is made:
-  [Isolation](docs/CLIENT_API.md#isolation).
-- **Every turn has a diff.** `GET /api/v0/turns/<turn>/diff` shows each file the turn added,
-  changed or removed, with each text file's own diff. Git is not asked.
-- **Apply up to a turn, all or nothing.** `POST /api/v0/turns/<turn>/apply` makes your folder
-  match the session at that turn. It applies every turn not yet applied, up to that one, in one
-  step. It checks every file first. If a file changed in your folder since, it writes nothing and
-  answers 409 with each file and why.
-- **Review is optional.** Reading the diff and saying "apply" is a review. To have an agent check
-  the work, ask for it. A review runs read-only in the author's copy, on another agent, and ends
-  with a verdict (pass, fail or unknown) and its findings. Any P1 makes it fail.
-
-Programs and CI can do all this too, through the same turns: ask for a review with
-`POST /api/v0/turns/<turn>/review`, and read its verdict on the review turn
-([The client API](docs/CLIENT_API.md)).
-
-With curl, using the session from step 3:
-
-```sh
-# The next message, on another model:
 curl -s http://127.0.0.1:8787/api/v0/turns -H "Authorization: Bearer $TOKEN" \
-  -d '{"session":"<id>","prompt":"Now add a test for it.","model":"sonnet"}'
-
-# A saved agent on OpenRouter (the key stays in OPENROUTER_API_KEY, in the service's environment):
-curl -s http://127.0.0.1:8787/api/v0/agents -H "Authorization: Bearer $TOKEN" \
-  -d '{"name":"DeepSeek","harness":"claude","access":"openrouter","model":"deepseek/deepseek-v4.1-flash"}'
-
-# Hand the session to it for the next message:
-curl -s http://127.0.0.1:8787/api/v0/turns -H "Authorization: Bearer $TOKEN" \
-  -d '{"session":"<id>","prompt":"Check the test.","agent":"<the new agent id>"}'
-
-# What a turn did, then make your folder match the session at that turn:
-curl -s http://127.0.0.1:8787/api/v0/turns/<turn>/diff -H "Authorization: Bearer $TOKEN"
-curl -s -X POST http://127.0.0.1:8787/api/v0/turns/<turn>/apply -H "Authorization: Bearer $TOKEN"
+  -d '{"agent":"claude","folder":"'"$PWD"'","prompt":"Say hello in five words.","model":"haiku"}'
 ```
+
+The reply names the session and the turn. `GET /api/v0/turns?session=<id>` reads it back with its
+reply and cost. Send the next message with `"session":"<id>"`. `GET /api/v0/turns/<turn>/diff`
+shows what a turn changed, and `POST /api/v0/turns/<turn>/apply` puts it in your folder.
+
+| `agentbus up` flag | Default | What it does |
+|---|---|---|
+| `-listen` | `127.0.0.1:8787` | The address. `0.0.0.0` can be reached from the network; the token guards it. |
+| `-origin` | none | Allow only this browser origin, such as `http://localhost:5173`. |
+| `-max-runs` | `4` | How many turns run at once, 1 to 64. More wait in the queue. |
+| `-replay` | `true` | Continue sessions from AgentBus's own record. `false` uses the agent's own resume. |
+
+There is no HTTPS. Across a network, use an SSH tunnel or a private network. In Docker, publish
+the port to your own machine only: `docker run -p 127.0.0.1:8788:8787 …`.
 
 ## One program per machine
 
-Control and the machines that do the work:
+- **Control** keeps the API, the record, the job queue, the settings and the saved agents. It never
+  touches your folders.
+- **A runner** is the one program on each machine that holds code. It makes each session's copy,
+  runs the agents, and applies changes back into the folder.
 
-- **Control** keeps the API, the job queue, the record, the settings, the saved agents, the
-  gateway, and a store of file contents. It never reads or writes your folder.
-- **A runner** is the one program of each machine that does work. It holds that machine's
-  folders, makes each session's copy from its folder, runs the session's agents, and applies the
-  changes back into the folder when you ask.
+| Command | What runs |
+|---|---|
+| `agentbus up` | Control and this machine's runner, in one process. One machine needs only this. |
+| `agentbus server` | Control alone. |
+| `agentbus runner` | A runner. `agentbus login` sets one up (below). |
 
-| Command | What runs | For |
-|---|---|---|
-| `agentbus up` | Control and this machine's runner, in one process | One person on one machine. The default. |
-| `agentbus server` | Control alone | The machine that holds the record. |
-| `agentbus runner -server <url>` | This machine's runner | Every other machine that holds code and runs agents. |
+A session runs on one machine for its whole life: you pick the machine, then a folder on it.
+Runners pull their work, so they work behind a router.
 
-On one machine, `agentbus up` is all you need. Its copy is a clone or an overlay of your folder,
-and nothing goes over HTTP. Its runner uses each harness's own sign-in, as you do.
+## Add a machine
 
-**More machines.** Run `agentbus runner` on each machine that holds code. A session runs on the
-machine that holds its folder, for its whole life: you pick the machine, then type (or pick) a
-folder on it. Runners pull their work and are never called, so they work behind a router.
+Control runs `agentbus server -listen 0.0.0.0` (or `agentbus up`) somewhere you can reach. On each
+machine that should do work:
+
+**1. Install the binary into a folder of its own.** It must not replace another `agentbus` on your
+`PATH`, such as an older one in `~/.local/bin`:
 
 ```sh
-# Control, on the machine that keeps the record:
-agentbus server -listen 0.0.0.0
-
-# On each machine with code, once:
-agentbus login http://devbox:8787
+curl -fsSL https://raw.githubusercontent.com/staysup/agentbus/main/install.sh | \
+  AGENTBUS_INSTALL_DIR="$HOME/.local/agentbus/bin" sh
+"$HOME/.local/agentbus/bin/agentbus" version
 ```
 
-`agentbus login` shows a code. Open the cockpit's Runners page, find the machine under waiting
-machines, and type the code to approve it (or refuse it). Until then the machine gets no work.
-Once approved, it saves its runner credential in its data folder (`runner.json`) and sets up the
-runner as a service: a systemd user unit on Linux, a launchd agent on macOS. Where it cannot (no
-systemd user session, or a unit of that name already there), it prints the one command to run.
-It takes `agentbus runner`'s flags (`-name`, `-folder`, `-labels`, `-capacity`, `-gateway`), and
-`-no-service` to only print the command. The Runners page also shows whether each machine can
-build a session's sandbox, and why not; and it removes a machine that is offline, so its
-credential works no more (its sessions stay in the record).
+Until a release with `agentbus login` is out, build it from a clone of this repository instead:
+`go build -o "$HOME/.local/agentbus/bin/agentbus" ./cmd/agentbus`. Run it by its full path, as below. The service it sets up runs that same file.
 
-The old way still works: copy the server's `enroll_token` file to the machine (mode 0600) and run
-`agentbus runner -server http://devbox:8787 -enroll-token-file ./enroll_token`.
+**2. Sign the machine in.** Give it a data folder of its own, and name control's address:
 
-A runner on the same machine as its server needs its own data folder (`AGENTBUS_HOME`). For a
-runner in a Lima VM and a server on the Mac's loopback, start the server with
-`-host host.lima.internal`.
+```sh
+AGENTBUS_HOME="$HOME/.local/share/agentbus-runner" \
+  "$HOME/.local/agentbus/bin/agentbus" login http://<control>:8787
+```
 
-A session starts in any folder you type for the machine you picked. Typing it is the grant for
-that session. `agentbus server` has no folders of its own, so it asks that machine's runner: the
-runner checks that the folder exists and that it can read it, and keeps it. No restart and no
-`-folder` flag is needed. A turn names the machine in `connector`, its id from
-`GET /api/v0/runners`. `GET /api/v0/folders` lists every folder used so far on each machine, and a
-turn can name one by `folder_ref` and `connector` instead.
+It prints a code and waits up to 15 minutes. It takes the runner's flags too: `-name` (default:
+the host name), `-capacity` (turns at once, default 4), `-gateway local` (use this machine's own
+sign-ins instead of control's), and `-no-service` (print the command instead of setting up a
+service).
 
-At the end of each turn the runner puts what changed in control's store, by the SHA-256 of each
-file, so it sends only what control lacks. An apply is a job of the same runner, on the folder's
-machine, and does not wait behind the turns running there.
+**3. Approve it.** In the cockpit, open **Runners** (at the foot of the Agents column). The machine
+is under **Waiting for approval**. Type the code it shows and press **Approve**. Within 2 seconds
+the machine saves its credential (`runner.json`, mode 0600) and sets up the service.
+
+![The Runners page: a machine waiting for approval, and the code field](docs/assets/cockpit-runners.png)
+
+**4. The service.** It starts now and at every login:
+
+| | macOS | Linux |
+|---|---|---|
+| Kind | launchd agent `art.lorebug.agentbus.runner` | systemd user unit `agentbus-runner.service` |
+| File | `~/Library/LaunchAgents/art.lorebug.agentbus.runner.plist` | `~/.config/systemd/user/agentbus-runner.service` |
+| Status | `launchctl print gui/$(id -u)/art.lorebug.agentbus.runner` | `systemctl --user status agentbus-runner.service` |
+| Logs | `logs/runner-launchd.log` in the data folder | `journalctl --user -u agentbus-runner.service` |
+| Restart | `launchctl kickstart -k gui/$(id -u)/art.lorebug.agentbus.runner` | `systemctl --user restart agentbus-runner.service` |
+| Remove | `launchctl bootout gui/$(id -u)/art.lorebug.agentbus.runner`, then delete the file | `systemctl --user disable --now agentbus-runner.service`, then delete the file |
+
+On Linux, `loginctl enable-linger` keeps it running while you are logged out. A file of that name
+already there is never changed: login says so and prints the command to run instead. The service
+keeps the `PATH` of the shell you ran login from, so run it where `claude`, `codex` and `agy` are
+found.
+
+**5. Check it is online.** The Runners page shows the machine as **Online** (it asked for work in the
+last minute), and whether it can build a session's sandbox. `GET /api/v0/runners` on control says
+the same. New sessions can now pick this machine.
+
+To upgrade, replace the binary at the same path and restart the service. Control and every runner
+must run the same release. An offline machine can be removed on the Runners page; its sessions stay
+in the record.
+
+**Sign-ins.** By default a runner holds no secrets: control adds the credential to each model call.
+For an OpenRouter agent, control reads the key from its own environment. For your own
+subscriptions, connect each once on control (`agentbus connect claude`, or Connect in the cockpit)
+and press **Turn on for my runners** there (it sets `subscriptions_on_runners = "own"`). Or start the runner with `-gateway local`
+to use the machine's own sign-ins.
 
 ### Upgrading to 0.5
 
-`agentbus connector` is retired. It changes nothing: it prints the `agentbus runner` line to run
-instead, with the flags you gave it, and exits 2. To move a machine over:
+- **`agentbus connector` is retired.** It changes nothing and prints the `agentbus runner` line to
+  run instead. Stop the connector and run that line with the same data folder: its `folders.json`
+  keeps the machine's id and folders. If the connector shared control's data folder, give the
+  runner a new one (`AGENTBUS_HOME`) and copy `folders.json` into it. Install the agents' programs
+  on that machine: the runner now runs its sessions.
+- **Enroll tokens still work**: `agentbus runner -server <url> -enroll-token-file ./enroll_token`.
+  `agentbus login` needs none.
+- **Settings move into control.** The first start of 0.5 copies the data folder beside it, then
+  imports `permissions.toml`, `instructions.md` and `agents.json` once and never reads them again.
 
-1. Stop the connector.
-2. Start `agentbus runner` there with the same flags (`-server`, `-folder`, `-enroll-token-file`,
-   `-name`) and the same data folder. The data folder's `folders.json` keeps the machine's id and
-   its folders' references, so the sessions and applies that name them reach the new runner.
-3. If the connector shared control's data folder (both ran as one user next to each other, as in
-   a container), give the runner its own: make a new folder, copy `folders.json` into it (copy, do
-   not move), and start the runner with `AGENTBUS_HOME` set to it. Two programs on one data
-   folder would share `events.db`.
-4. The runner also runs the agents of every session in that machine's folders, so install the
-   agents' programs there (`claude`, `codex`, `agy`). Until a runner runs there, those sessions'
-   turns wait in the queue and their applies are refused with 503.
+## Settings
 
-A session made before 0.5 whose copy another machine built from a snapshot keeps running on that
-machine until it closes; its applies go to the folder's machine. The old connector's row stays in
-control's queue and shows in `GET /api/v0/runners` only while no runner reports its machine.
-Control and every runner must run the same release (runner protocol 4).
+Control keeps the settings in `settings.db`: the permissions every turn runs under and the
+instructions every turn gets. Change them on the cockpit's Settings page, or with
+`PUT /api/v0/settings/permissions` and `PUT /api/v0/settings/instructions`. A change applies to the
+next turn. Runners read control's settings before each turn. The keys and their defaults are in
+`/docs`, under Settings. In short:
 
-**Runners hold no secrets.** Control gives each runner turn a token of its own. The agent uses it
-as its model credential. Control's gateway swaps it for the real one on the way out:
+- `read_folders`, `allow`, `forbid`, `edit`, `subagents`: what a turn may read, run and edit
+  without asking. `forbid` reads command text only; it is not a sandbox.
+- `isolation`: how a session's copy is made (`auto`, `overlay`, `copy`, `git` or `none`).
+- `[limits]` and `[agent_api]`: what agents may ask other agents for.
+- `[network]`: on Linux, close agents off to a list of hosts. Off by default.
+- `[sandbox]`: a wall around each session's agent, on macOS and Linux runners. Off by default.
 
-- An OpenRouter agent: control reads the key from its own environment, by the variable's name
-  (`key_env`).
-- A subscription agent: your own subscription, for runners on your own machines. Connect it once
-  on control with `agentbus connect claude`, `agentbus connect codex` or `agentbus connect agy`
-  (or Connect in the cockpit), and set `subscriptions_on_runners = "own"` in control's
-  `permissions.toml`. It is off by default. codex's login shows a link and a one-time code: open
-  the link, sign in to ChatGPT, and enter the code there. Control keeps the ChatGPT sign-in in its
-  own data folder, never in `~/.codex` or the Keychain, and renews it before it expires. agy's
-  login shows a link: sign in to Google, and paste the code the browser shows. Control keeps agy's
-  sign-in in a home of agy's own in its data folder, as agy wrote it, and runs `agy models` there
-  to let agy renew it before it expires. Connecting agy needs control on Linux.
+## Running it
 
-A runner finds `claude`, `codex` and `agy` on its own `PATH`, and control finds `agy` on its own
-to connect and renew it. A runner started as a service gets the
-service's `PATH`, which is often short. With codex installed by npm into `~/.npm-global/bin`, a
-systemd user unit needs that folder in its `PATH`:
-
-```ini
-[Service]
-Environment=PATH=%h/.npm-global/bin:%h/.local/bin:/usr/local/bin:/usr/bin:/bin
-```
-
-Then `systemctl --user daemon-reload` and restart the unit. Without it, a codex turn on that
-runner is refused before it starts: the program is not on the service's `PATH`.
-
-`agentbus runner -gateway local` makes a runner use its own machine's sign-in and keys instead.
-
-**Each conversation gets a home of its own** on a runner that holds no secrets: an empty folder in
-the runner's data folder, `homes/<session>`, made at the session's first turn and kept for its
-next ones. The agent gets it as `HOME`, and as its own config folder (Claude Code's
-`CLAUDE_CONFIG_DIR`, codex's `CODEX_HOME`). So a turn sees none of the runner user's settings,
-memory, plugins or transcripts, and none of another conversation's. No sign-in goes into it. The
-home is removed when the session is closed, and a review's when the review ends. `agentbus up`
-and `-gateway local` run turns in your own home, because the harness's own sign-in lives there.
-
-A runner's turn reaches control's record while it runs: its events, model calls and replies. A
-cockpit pointed at control shows it live. The runner reads its policy and instructions from
-control before each turn ([Permissions](#permissions)). `-capacity` sets how many jobs it runs at
-once (1 to 64, default 4).
-
-### Network control (Linux)
-
-Network control is off by default: agents reach any host. Turn it on in control's
-`permissions.toml` with `contain = "on"` and an `allow` list:
-
-```toml
-[network]
-contain = "on"
-allow = ["github.com", "*.npmjs.org"]
-```
-
-Then each agent reaches only its runner's gateway, control, and the hosts in `allow`, through a
-proxy. Anything else is refused and recorded as `network.refused`. It works the same for
-`agentbus up` and `agentbus runner`.
-
-It is Linux only. A runner that cannot close an agent off, such as one on a Mac, refuses the turn
-with the reason. Details: `docs/CLIENT_API.md`, "Network control".
+- **Logs** are in `logs/` in the data folder. `logs/service.log` is one line per request and per
+  turn, with no token, header or body; it rolls at 10 MiB. `logs/runs/<session>.log` is what the
+  agents printed, so it may hold your data.
+- **Your data stays on your machine.** `events.db` holds every model request and reply, unencrypted,
+  until you remove it. Headers, and so your sign-ins, are never stored. To clear it, stop the
+  service and delete the data folder.
+- **Overlay copies without root (Linux).** The service starts itself again in a user namespace of
+  its own, so a copy is an overlay mount. Your own tools outside see an empty folder at the copy's
+  path and reach it at `/proc/<pid>/root/<path>`; the log names the path. Ubuntu 24.04 and later
+  need an AppArmor profile for this, which `install.sh` installs when run as root, or prints the
+  command for. Without it, sessions use plain copies.
+- **Keep the data folder on the machine's own disk.** A disk that keeps file times only to the
+  second (a Mac folder shared into Docker, a network share) makes every apply look changed.
 
 ## Known limits
 
-- **OpenRouter turns show a cost of $0.** The price table has no OpenRouter prices yet.
-- **A session stays on one runner.** Its copy lives there, so its later turns go to the same
-  runner. Moving a session between runners comes later.
-- **Copies on shared or network disks are slow.** A copy is a clone (APFS) or a reflink (xfs,
-  btrfs) only when the folder and the data folder are on the same disk that can make one.
-  Elsewhere, such as a network disk, every file is copied byte by byte.
-- **Keep the data folder on a disk that keeps exact file times.** Some disks keep a file's time
-  only to the second, such as a Mac folder shared into Docker, a network share or FAT. With the
-  data folder there, every apply of a changed file is refused as "changed in your folder", even
-  when it is not. Put the data folder (`AGENTBUS_HOME`) on the machine's own disk.
-- **A first transfer of a big folder is slow.** A runner on another machine gets a 50,000-file
-  folder (414 MB) in about 30 s the first time. Later sessions send only what changed: about 4 s.
-- **Network control is Linux-only, and off by default.** On macOS, `contain = "on"` refuses
-  every turn.
-- **Not yet tested on Ubuntu 24.04**, which restricts user namespaces. Network control and the
-  rootless overlay may need its AppArmor profile there (`install.sh` prints the command).
-- **An asked agent reads the asker's changes but cannot run them.** Its copy is made from your
-  folder, so "have codex review this" gets the diff of the asking turn through the API, not those
-  files in its copy. Tests it runs run on your folder as it is. A copy started from the asking
-  session's latest checkpoint is a later option.
-- **agy (Antigravity) runs on its own Google sign-in only.** It speaks the Gemini format, so it has
-  no OpenRouter access. On a runner that holds no secrets it uses the sign-in connected on control.
-  It reads the folder's `AGENTS.md` and `GEMINI.md` itself, but it has no flag
-  for instructions of a run's own, so `instructions.md` and the "asked by" line do not reach it.
-  A turn with `forbid` set, or with `subagents = false`, is refused: the gateway's guard does not
-  read Gemini replies yet, and agy has no switch for its subagents. Its permissions for a turn
-  replace your own agy settings for that turn: it reads and writes its folder, and runs only the
-  commands `allow` lists. A tool call no rule allows ends its turn there, since headless agy cannot
-  ask and does not tell the model. With network control on, agy cannot reach Google's
-  sign-in service. The context view of its model calls is not split into pieces yet.
-- **agy's Google sign-in on runners is your own risk with Google.** Google's Antigravity terms
-  (clause 6) call using third-party tools to access the service a breach, and Google has suspended
-  accounts for it. AgentBus keeps this as close to agy's own use as it can: Google's own,
-  unmodified agy signs in, renews its own sign-in and runs every turn, on your own machines. Control
-  never reads agy's refresh token or its client secret; it passes the access token on to Google's
-  Code Assist only. Google has not said this is allowed. The risk sits on your Google account, and
-  it is off unless you set `subscriptions_on_runners = "own"`. A runner's agy also sends the turn's
-  placeholder to Google's account lookup, which refuses it; that token works only with control.
-- **agy on a runner is not yet checked with a real turn.** Its sign-in on control, the relay and
-  the renewal were tested with stand-ins and live up to Google's answer, not with a real reply.
-  claude and codex on a runner were checked with real turns on 2026-11-11.
-- **The API as tools (MCP) is off by default.** `[agent_api] tools = true` turns it on for claude
-  and codex turns. agy turns get no tools; they use `agentbus-api`.
+- OpenRouter turns show a cost of $0: the price table has no OpenRouter prices yet.
+- A session stays on the machine that holds its folder.
+- Network control is Linux only. On macOS, `contain = "on"` refuses every turn unless the sandbox
+  is on.
+- On ext4 a copy is a full copy. A clone (APFS) or a reflink (xfs, btrfs) is used where the disk
+  can make one.
+- An asked agent works in a fresh copy of your folder. It reads the asking turn's changes through
+  the API, but does not have those files.
+- agy runs on its own Google sign-in only, and gets no instructions of AgentBus's. A turn with
+  `forbid` set, or `subagents = false`, is refused on agy. Using agy's sign-in on runners is at your
+  own risk with Google: its terms (clause 6) forbid third-party tools, and it stays off unless you
+  set `subscriptions_on_runners = "own"`.
+- The API as tools (MCP) is off by default: `[agent_api] tools = true` turns it on for claude and
+  codex.
 
 ## Docs
 
-The running service describes its own API. None of these need the token or the internet:
+The running service describes its own API, without the token or the internet:
 
-- `http://127.0.0.1:8787/docs`: an interactive reference.
-- `http://127.0.0.1:8787/api/v0/openapi.json`: the OpenAPI 3.1 description. Generate a client from
-  it in any language. There are no client SDKs.
-- `http://127.0.0.1:8787/docs/llms.txt`: one plain file for coding agents.
+- `http://127.0.0.1:8787/docs`: the API reference, as a page.
+- `http://127.0.0.1:8787/api/v0/openapi.json`: the same, as OpenAPI 3.1. It is the contract.
+  Generate a client from it in any language.
+- `http://127.0.0.1:8787/docs/llms.txt`: one short page for coding agents.
 
-The contract in words is [docs/CLIENT_API.md](docs/CLIENT_API.md).
-
-## Your data
-
-Everything stays on your machine, in the data folder: `events.db` (a SQLite file, the record),
-`jobs.db` (the job queue), `token`, `turns_token`, `enroll_token`, `runner.json`,
-`folders.json`, `settings.db` (your settings and saved agents), `blobs/`,
-`sessions/`, `homes/` (a runner's) and `logs/`. `turns_token` is a second token for a program that only starts, stops
-and reads turns. `enroll_token` adds a runner the old way; the built-in one reads it. A runner keeps
-its identity in `runner.json`, from that or from `agentbus login`. A data folder from before 0.5 may also hold `connector.json`, the
-retired connector's identity, which nothing reads now. `blobs/` is control's store of file
-contents. `sessions/` holds the copies and git worktrees sessions run in, each named after its
-session. A data folder from before 0.4 may also hold `worktrees/`, with its older copies, which
-are still used and removed there. `subscriptions/`
-appears once you connect a subscription; its files are readable by you only. Nothing is sent
-anywhere except the model calls themselves, to the vendor your agent already uses.
-
-`events.db` holds each turn's model requests and replies, so it holds whatever your agent read or
-printed during a turn, such as a file it opened or a command's output. It is not encrypted, and it
-is kept until you remove it. Request headers, including your sign-in, are never stored.
-
-To clear it, stop `agentbus up` and delete the data folder. A new one is made on the next start.
-
-## Permissions
-
-A turn runs with no person to click "allow". So a claude turn is refused anything that needs a
-"may I?", such as `go test` or reading a folder outside its own. The permissions say what turns
-may do. Control keeps them in `settings.db` in the data folder; change them with
-`PUT /api/v0/settings/permissions` (the keys are the same as below, as JSON). Up to 0.4 they were
-the file `permissions.toml`, in this shape; the first start of 0.5 copies the data folder beside
-it, imports the file once, and never reads it again:
-
-```toml
-read_folders = ["~/.agents"]           # claude may Read, Grep and Glob there
-allow = ["go test", "make test"]       # claude gets --allowedTools Bash(go test:*),...
-forbid = ["git push", "git checkout"]  # the gateway refuses these, for claude and codex
-edit = "session"                       # where a turn may edit files: "session" or "none"
-subagents = true                       # false: no turn starts the agent's own subagents
-
-[limits]                     # work agents ask other agents for
-max_depth = 2                # levels of asking below your turn
-max_jobs_per_turn = 10       # turns and reviews one turn may ask for
-max_jobs_per_tree = 30       # turns and reviews everything started from one of your sessions may ask for
-max_cost_usd_per_tree = 0.0  # dollars that work may cost before asking stops; 0 is off
-
-[agent_api]                  # what a turn's own token may do
-scope = "tree"               # "tree": its request tree; "session": its own session only
-read = true                  # read sessions, turns and calls
-list_agents = true           # list saved agents and harnesses
-start = true                 # start a session on a saved agent
-continue = true              # continue a session its tree started
-review = true                # ask for a review
-cancel = true                # stop turns it asked for
-rename = true                # rename sessions
-```
-
-`agentbus up` makes it with empty lists and every other value at its default, as above. A key you
-leave out reads as its default, so an older file keeps working.
-**Upgrading:** a file made by an earlier version keeps its old comments, which say "jobs" in
-`[limits]` and `[agent_api]`. The keys mean the same; the comments above are the current wording. Every turn reads the file when it
-starts, and the API reads it for every request a turn's token sends, so an edit applies at once.
-A broken file stops the turn with the line and the problem.
-
-**Through the API.** `GET /api/v0/settings/permissions` reads the policy as JSON, and `PUT` writes
-it back. A `PUT` sends the `ETag` of its `GET` in `If-Match`, so it never undoes a hand edit made in
-between: that gets 412. Only the main token may do this. A turn's own token can never read or
-change the policy. Details: [docs/CLIENT_API.md](docs/CLIENT_API.md#settings).
-
-**On a runner.** `agentbus runner -server <url>` reads the server's policy before each turn, not a
-file of its own, so one policy holds on every machine. If it cannot reach the server, the turn
-does not start and fails with that reason. It never runs on an older copy.
-
-**Edits.** With `edit = "session"`, a turn edits files in its own session folder (its copy)
-without asking: claude gets `Edit(//<folder>/**)`, codex runs with `--sandbox workspace-write`.
-`"none"` edits nothing: claude is denied Edit, Write and NotebookEdit, whatever your own Claude
-Code settings allow, and codex runs read-only, with no network. A `read_only` turn never
-edits. No turn may edit the data folder's own files (this file, `instructions.md`, `agents.json`,
-the tokens): a turn that could would raise its own limits. That rule is not a setting. It covers
-the tools that edit files: a command in `allow` that runs any code (`python3`, `node`, `sh`) can
-still write them, so allow only commands you would let change your policy.
-
-**Subagents.** With `subagents = false`, a turn cannot start the agent's own subagents. claude
-gets `--disallowedTools Task,Agent,Workflow`, and codex runs with `--disable multi_agent --disable
-multi_agent_v2`. Both are flags of that turn only: your `~/.claude/settings.json` and
-`~/.codex/config.toml` are never changed. The default, `true`, changes nothing.
-
-**Limits.** A request past a limit is refused, and the refusal names the limit.
-
-`read_folders` grants reads only in the default and acceptEdits modes. Under your own Claude Code
-"auto" mode, claude may still write there.
-A `read_only` turn stays read-only.
-
-`forbid` works for claude and codex; an agy turn with `forbid` set is refused. The gateway reads
-each model reply. When a shell command in
-it matches an entry, the agent never gets that call, and the model is told a rule refused it. Each
-command in a chain is checked on its own, so `cd repo && git -C repo push` matches `git push`.
-Every refusal is stored as a `tool.refused` event. claude also gets `--disallowedTools`.
-
-The guard reads the command text. It cannot see a command built while the agent runs, or one run
-from a script the agent wrote earlier. For a hard rule, also take away what the command needs. For
-"never push", give the agent no push credentials.
-
-codex gets nothing from `read_folders` and `allow`. Its sandbox can read every folder already.
-Details: [docs/CLIENT_API.md](docs/CLIENT_API.md#permissionstoml).
-
-## Instructions
-
-Every turn gets the same short instructions, as an instruction of its agent's own (Claude Code's
-`--append-system-prompt`, codex's `developer_instructions`), never inside your prompt. Before them
-goes the `AGENTS.md` of the turn's folder, for a harness that does not read it by itself. codex
-reads it, so it is not given it again. Claude Code reads `AGENTS.md` only when the folder has no
-`CLAUDE.md`; beside a `CLAUDE.md` of its own it is given `AGENTS.md`, unless that `CLAUDE.md` is a
-symlink to it or imports it with a line `@AGENTS.md`. An asked agent also gets who asked it, after
-them. They are the
-instructions in the settings: by default, how to search the session's earlier turns and ask
-other agents with `agentbus-api`. Change them to change what every agent is told; `{session}`
-becomes the session id. Empty text gives no instructions. Up to 0.4 they were the file
-`instructions.md`, which 0.5 imports once. Each turn reads it when it starts. Keep it the same within a session, so
-the prompt cache holds. `GET` and `PUT /api/v0/settings/instructions` read and write them, and a
-runner on another machine uses its server's.
-
-## How it works
-
-- **The agent changes one setting**, its API address. It also gets the instructions in
-  `instructions.md` (Claude Code's `--append-system-prompt`, codex's `developer_instructions`),
-  saying how to search its session's earlier turns and ask other agents with the turn's own token.
-  Your prompt is never changed.
-- **Traffic passes through.** Requests go to the vendor with their headers, so the agent's own
-  sign-in is used. Headers are never stored. The one change: a turn that continues a session gets
-  the earlier turns' history put in front of its requests. For codex, the earlier turn's thread id
-  also replaces the new one, so the vendor reads the history from its cache.
-- **Adapters read a copy** of each body and turn the vendor's format into the same events.
-- **Your sign-in stays on your machine.** Agents reach the service on loopback, even when it
-  listens on `0.0.0.0`, and the model traffic answers callers on that machine only.
-
-| Path | What it is |
-|---|---|
-| `cmd/agentbus/` | The `agentbus` command |
-| `api/` | The client API and its generated docs |
-| `run/` | Starts one turn of a stock agent CLI, watches it and stops it |
-| `queue/` | Jobs, attempts, runners and reviews, in `jobs.db` beside the record |
-| `jobs/` | The runner protocol, under `/api/v0/runner/` |
-| `runner/` | Takes jobs through the runner protocol and runs each one with `run/` |
-| `isolation/` | The runner's side: a session's own copy, from a clone or a snapshot; checkpoint, diff, changeset, close |
-| `connector/` | The folder side, in each machine's runner: checking a typed folder, and applying a session's changes into it |
-| `folders/` | The folders of one machine, known to control by reference only |
-| `blobs/` | The content-addressed store every file travels through, and its HTTP client |
-| `workspace/` | What a job changed, and git worktrees |
-| `gateway/` | The pass-through proxy that feeds adapters |
-| `adapter/` | One adapter per API format: Anthropic, OpenAI |
-| `event/` | The vendor-neutral events |
-| `store/` | The SQLite store |
-| `replay/` | Own replay: continues Claude and codex conversations from the store |
-| `cost/` | Prices every model call |
-
-Third-party code shipped in the binary is listed in [THIRD_PARTY.md](THIRD_PARTY.md).
+How runners talk to control is in [docs/RUNNER_PROTOCOL.md](docs/RUNNER_PROTOCOL.md). Third-party
+code in the binary is listed in [THIRD_PARTY.md](THIRD_PARTY.md).
 
 ## License
 

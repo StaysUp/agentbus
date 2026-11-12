@@ -116,8 +116,10 @@ var Kinds = []KindInfo{
 	{ModelRequested, "The harness sent a request to the model: model and tools_offered.", nil},
 	{ModelResponded, "The model replied: status, text, stop_reason, usage, latency_ms, cost_usd, or error.", nil},
 	{ToolRequested, "The model asked for a tool: tool_id, tool_name, tool_input.", []string{"tool_id"}},
-	{ToolCompleted, "A tool's result reached the model: tool_id, tool_output, tool_error.", []string{"tool_id"}},
-	{TurnCompleted, "The turn ended, from the model's stop reason: outcome and stop_reason.", []string{"outcome"}},
+	{ToolCompleted, "A tool's result reached the model: tool_id, tool_output, tool_error. Match it to its call by tool_id, never by turn.", []string{"tool_id"}},
+	{TurnCompleted, "The turn ended, from the model's stop reason: outcome and stop_reason. " +
+		"For traffic pointed at the gateway by hand, the turn id is a hash of the conversation, and a turn with no turn.completed is running, " +
+		"waiting on tools (stop reason tool_use), stopped (an error or a non-200 reply), or left behind (a later turn started).", []string{"outcome"}},
 	{EventsDropped, "Events were lost because the output did not keep up: dropped, and sessions or all_sessions.", []string{"dropped"}},
 	{SessionRegistered, "Older stores only: a launcher or a run registered the session, with agent and folder. Nothing writes it now.", []string{"session"}},
 	{SessionOpened, "A run's child is starting: hold names it; agent and folder say what and where; turn is the turn it runs. Stored just before the child starts.", []string{"session", "hold"}},
@@ -461,7 +463,7 @@ const (
 
 // Origin says who started a turn when the person did not.
 type Origin struct {
-	Kind string `json:"kind" doc:"asked: another agent's turn started this turn through the API with its turn token. result: AgentBus started this turn to deliver the result of work this session asked for; text is that result."`
+	Kind string `json:"kind" doc:"asked: another agent's turn started this turn through the API with its turn token. result: AgentBus started this turn to deliver the result of work this session asked for; text is that result. Its prompt starts [AgentBus] This message is from AgentBus, not from the person, and names the agent, the turn, its state and session, the changed files (at most 50), a review's verdict and findings, and the reply (at most 8 KiB)."`
 	// For asked: the session and turn that asked. For result: the session
 	// and turn of the work whose result this is.
 	Session string `json:"session,omitempty" doc:"asked: the session of the turn that asked. result: the session the work ran in."`

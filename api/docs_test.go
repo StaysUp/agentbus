@@ -19,7 +19,7 @@ func getNoToken(t *testing.T, e *env, path, host string) (*http.Response, string
 	return do(t, r)
 }
 
-// The description, the reference page, the viewer and the guide for agents
+// The description, the viewer and the guide for agents
 // are served without the token, from the binary, with no session data.
 func TestDocsServedWithoutToken(t *testing.T) {
 	e := newEnv(t)

@@ -4,6 +4,22 @@ package run
 // (settings.Store), read at the start of every turn, so an edit applies to
 // the next turn without a restart. A policy that cannot be used stops the
 // turn: a turn never runs without the policy the person wrote.
+//
+// What each list becomes, per harness (the flags are built in harness/):
+//
+//	read_folders      claude: --allowedTools Read(//<folder>/**),Grep(…),Glob(…); codex: nothing (its sandbox reads every folder)
+//	allow             claude: --allowedTools Bash(<cmd>:*); codex: nothing yet
+//	forbid            both: the gateway's guard; claude also --disallowedTools Bash(<cmd>:*)
+//	edit = "session"  claude: --allowedTools Edit(//<folder>/**), and a deny Edit(//<file>) on each data folder file;
+//	                  codex: --sandbox workspace-write -c sandbox_workspace_write.network_access=true
+//	edit = "none"     claude: --disallowedTools Edit,Write,NotebookEdit; codex: --sandbox read-only (no network)
+//	subagents = false claude: --disallowedTools Task,Agent,Workflow; codex: --disable multi_agent --disable multi_agent_v2
+//
+// read_folders only grants reads, in Claude Code's default and acceptEdits
+// modes; under the person's own auto mode it may still write there. A
+// read_only turn stays read-only: allow does not widen it. A forbid wins over
+// an allow and over the person's own settings. Each turn's flags are in its
+// header line in logs/runs/<session>.log.
 
 import (
 	"os"

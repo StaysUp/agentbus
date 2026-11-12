@@ -2,8 +2,8 @@ package api
 
 // The API describes itself: GET /api/v0/openapi.json is its OpenAPI 3.1
 // description, generated from the route table at startup (spec.go), /docs an
-// interactive reference built from it, /docs/llms.txt a short page for coding
-// agents and /docs/reference.md the long one. The runner protocol has its own
+// interactive reference built from it, and /docs/llms.txt a short page for
+// coding agents. The runner protocol has its own
 // description, /api/v0/runner/openapi.json, and page, /docs/runner. All of it is in the binary,
 // served without the token (none of it holds session data) and without the
 // internet. The viewer is Redoc's standalone bundle, vendored in viewer/
@@ -69,8 +69,6 @@ func (a *API) public(w http.ResponseWriter, r *http.Request) bool {
 		w.Header().Set("Content-Security-Policy", docsPolicy)
 	case "/docs/llms.txt":
 		body, ctype = docs.LLMs, "text/markdown; charset=utf-8"
-	case "/docs/reference.md":
-		body, ctype = docs.Reference, "text/markdown; charset=utf-8"
 	case "/docs/redoc.standalone.js":
 		body, ctype = redocJS, "text/javascript; charset=utf-8"
 	default:

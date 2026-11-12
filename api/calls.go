@@ -124,5 +124,5 @@ const callContextDoc = "The gateway keeps each model request's body, split into 
 	"tool definition and message (Anthropic Messages), or the instructions, each tool and each input item " +
 	"(OpenAI Responses). Each piece is stored once under its SHA-256, so a system prompt sent on every call is kept once. " +
 	"request holds every other top-level field. reply, when kept, is the model's reply rebuilt as the message the harness sends back next. " +
-	"For a replayed turn the stored request is the one the vendor received, with the earlier turn's history in front. Headers are never stored. A call has no stored body when it is not a " +
+	"For a replayed turn the stored request is the one the vendor received, with the earlier turn's history in front. Bodies are kept in full, unencrypted, until the data folder is removed; headers are never stored. A call has no stored body when it is not a " +
 	"model call, when the gateway could not read the request, or when the store fell behind."

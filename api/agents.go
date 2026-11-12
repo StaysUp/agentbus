@@ -1,8 +1,7 @@
 package api
 
 // /api/v0/agents: the saved agents. An agent is a harness, how it reaches its
-// model, the model and a name; a turn names one by id. docs/CLIENT_API.md is
-// the contract.
+// model, the model and a name; a turn names one by id.
 
 import (
 	"errors"

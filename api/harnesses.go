@@ -4,7 +4,7 @@ package api
 // find, their versions, whether each is signed in, and the access and models
 // each offers. Each runner probes its own machine and reports it (package
 // runner, queue.Capabilities); this service never runs an agent's program to
-// answer. The "+ Agent" form reads it. docs/CLIENT_API.md is the contract.
+// answer. The "+ Agent" form reads it.
 
 import (
 	"context"

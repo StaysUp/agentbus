@@ -86,7 +86,7 @@ const (
 // are gone: only the state and why it failed are left.
 type View struct {
 	Harness string   `json:"harness" doc:"The harness being connected."`
-	State   string   `json:"state" doc:"running, connected or failed."`
+	State   string   `json:"state" doc:"running, connected or failed. A login still running after 10 minutes is stopped and fails."`
 	Output  []string `json:"output" doc:"While it runs: the links the login printed, where to sign in; nothing else it prints is shown. Empty once it ended."`
 	Code    string   `json:"code,omitempty" doc:"While it runs: a one-time code to enter at the link (codex's device login). Then nothing is sent back: the login ends by itself once the browser accepts it. Gone once it ended."`
 	Paste   bool     `json:"paste" doc:"While it runs: the login waits for the code the browser shows, sent with POST .../connect/input (claude and agy). False for a device login, and once it ended."`

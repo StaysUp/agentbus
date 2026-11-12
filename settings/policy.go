@@ -4,7 +4,7 @@ package settings
 // read beyond its own, commands it may run, commands it may never run, where
 // it may edit, whether it may start subagents, the limits on work agents ask
 // for, and what a turn's own token may call. The file store keeps it in
-// permissions.toml. A key left out holds its default. docs/CLIENT_API.md says
+// permissions.toml. A key left out holds its default. run/permissions.go says
 // what each list becomes for each agent.
 
 import (
@@ -211,9 +211,9 @@ const (
 type Policy struct {
 	ReadFolders   []string `toml:"read_folders" json:"read_folders" doc:"Folders claude may read and search beyond its own folder: absolute, or starting with ~/. Each must exist on the machine that runs the turn."`
 	Allow         []string `toml:"allow" json:"allow" doc:"Commands claude may run without asking: a command and its leading arguments, such as \"go test\"."`
-	Forbid        []string `toml:"forbid" json:"forbid" doc:"Commands claude and codex may never run. The gateway refuses them."`
+	Forbid        []string `toml:"forbid" json:"forbid" doc:"Commands claude and codex may never run. The gateway refuses them. It matches each simple command by its leading words and the program's base name, through pipes, sh -c, sudo and env. It reads the command text, so it is not a sandbox: a command built at run time is not seen."`
 	Edit          string   `toml:"edit" json:"edit,omitempty" doc:"Where a turn may edit files without asking: session (its own session's folder) or none. Absent in a PUT: session."`
-	Isolation     string   `toml:"isolation" json:"isolation,omitempty" doc:"Where a new session's turns run: auto (copy on macOS; overlay on Linux where the runner can mount one, else copy), overlay, copy (a copy of its folder as it is now), git (a git worktree with the folder's uncommitted edits, in a repo) or none (the folder itself). Absent in a PUT: auto."`
+	Isolation     string   `toml:"isolation" json:"isolation,omitempty" doc:"Where a new session's turns run: auto (copy on macOS; overlay on Linux where the runner can mount one, else copy), overlay, copy (a copy of its folder as it is now), git (a git worktree with the folder's uncommitted edits, in a repo) or none (the folder itself). On ext4, copy and the overlay's snapshot copy every byte: use xfs, btrfs, git or none for a big folder. Absent in a PUT: auto."`
 	ShareReadOnly []string `toml:"share_read_only" json:"share_read_only" doc:"Folders at the top of a session's folder, such as node_modules, that a copy links to one shared read-only copy of instead of copying. A turn cannot write there. Absent in a PUT: none."`
 	Subagents     *bool    `toml:"subagents" json:"subagents,omitempty" doc:"Whether a turn may start the agent's own subagents. Absent in a PUT: true."`
 	// SubscriptionsOnRunners is read by control's gateway only (jobs/relay.go).
@@ -255,14 +255,14 @@ type AgentAPI struct {
 // Network says what a turn's agent may reach ([network]). Read by the
 // runner that starts the agent (netjail).
 type Network struct {
-	Contain string   `toml:"contain" json:"contain,omitempty" doc:"Whether each agent runs closed off from the network: off (the default; agents reach any host) or on. On, it reaches only its runner's gateway, the server's API and the hosts in allow; anything else is refused and recorded as network.refused. Linux only: a runner that cannot close an agent off refuses the turn. Absent in a PUT: off."`
+	Contain string   `toml:"contain" json:"contain,omitempty" doc:"Whether each agent runs closed off from the network: off (the default; agents reach any host) or on. On, it reaches only its runner's gateway, the server's API and the hosts in allow; anything else is refused and recorded as network.refused. Linux only: a runner that cannot close an agent off refuses the turn, so on a Mac on refuses every turn unless [sandbox] is on. Host names are checked, not addresses. Absent in a PUT: off."`
 	Allow   []string `toml:"allow" json:"allow" doc:"Host names a closed-off agent may reach, on any port, such as github.com. *.example.com also allows every name under example.com. Absent in a PUT: none."`
 }
 
 // Sandbox says whether each session runs inside a wall ([sandbox]). Read by
 // the runner that starts the agent (package sandbox).
 type Sandbox struct {
-	Mode string   `toml:"mode" json:"mode,omitempty" doc:"off (the default) or on. On, a session's agent reads and writes only the session's folder and home, read the system folders and the agent's program, and reach the network only through the runner's proxy. A runner that cannot build it refuses the turn. Absent in a PUT: off."`
+	Mode string   `toml:"mode" json:"mode,omitempty" doc:"off (the default) or on. On, a session's agent reads and writes only the session's folder and home, read the system folders and the agent's program, and reach the network only through the runner's proxy. A runner that cannot build it refuses the turn. macOS uses sandbox-exec and Linux bwrap. agentbus up cannot build it (a session has no home of its own there). The copy's .git stays writable. Absent in a PUT: off."`
 	Read []string `toml:"read" json:"read" doc:"Files or folders under the home folder, each starting with ~/, copied into the session's home at the same place at the start of each turn, such as ~/.aws/config. Absent in a PUT: none."`
 }
 

@@ -377,7 +377,7 @@ var routes = slices.Concat([]route{
 		tag:     "Agents",
 		summary: "List agents",
 		doc: "The saved agents, in the order they were made. A turn names one by id in agent.\n\n" +
-			"A new data folder starts with two: claude (Claude Code) and codex (Codex), each on its own subscription with its default model.",
+			"A new data folder starts with three: claude (Claude Code), codex (Codex) and agy (Antigravity), each on its own subscription with its default model.",
 		replies: []reply{ok(200, AgentList{}, "The agents."), badRequest},
 		turn:    anyRead,
 		tools: []tool{{name: "list_agents", effect: effectNone,
@@ -499,7 +499,7 @@ var routes = slices.Concat([]route{
 		summary: "Call the API as tools",
 		doc: "The operations an agent uses, as tools, over the Model Context Protocol: stateless Streamable HTTP, one JSON-RPC message per POST, answered as JSON. " +
 			"A turn's harness is pointed here with the turn's own token, so its agent sees list_agents, ask_agent, review_turn and the rest as tools of its own.\n\n" +
-			"tools/list answers the tools the token may call: a turn token's under [agent_api] in permissions.toml, and a read-only turn's reads only. " +
+			"tools/list answers the tools the token may call: a turn token's under [agent_api] in the settings, and a read-only turn's reads only. " +
 			"The list is discovery only. tools/call sends the operation it names through this API with the same token, so it is refused, limited and answered exactly as that HTTP call is. " +
 			"A tool's answer is the operation's JSON; one that failed is an error result that starts with its HTTP status. " +
 			"Each operation's tools are in its x-agentbus-tools. No session is kept: a token that has stopped working gets 401.",

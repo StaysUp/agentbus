@@ -298,7 +298,6 @@ func TestRunnerProtocolDescribedApart(t *testing.T) {
 		"/docs":                       "/api/v0/openapi.json",
 		"/docs/runner":                "/api/v0/runner/openapi.json",
 		"/docs/llms.txt":              "/api/v0/turns",
-		"/docs/reference.md":          "/api/v0/turns",
 	} {
 		r, _ := http.NewRequest("GET", e.srv.URL+p, nil)
 		resp, out := do(t, r)

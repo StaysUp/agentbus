@@ -27,10 +27,10 @@ const (
 
 // Finding is one problem a reviewer named.
 type Finding struct {
-	Severity string `json:"severity"` // P1, P2 or P3
-	File     string `json:"file,omitempty"`
-	Line     int    `json:"line,omitempty"`
-	Summary  string `json:"summary"`
+	Severity string `json:"severity" doc:"P1, P2 or P3. Any P1 makes the verdict fail."`
+	File     string `json:"file,omitempty" doc:"The file the finding is about, when it names one."`
+	Line     int    `json:"line,omitempty" doc:"The line in file, when it names one."`
+	Summary  string `json:"summary" doc:"What the reviewer found, in its words."`
 }
 
 // MaxFindings bounds the findings kept from one review.

@@ -64,8 +64,8 @@ may hold other projects' Go code. Go's own tools skip folders that start with `_
 - **A turn that cannot start stores nothing.** If the agent's program is missing, the API answers
   HTTP 400 with how to install it. Keep that check before anything is written.
 - **The client API describes itself.** Routes and types in `api/routes.go` generate the OpenAPI
-  description. Change the route table, not a hand-written spec. `docs/CLIENT_API.md` is the
-  contract in words; keep it in step.
+  description, and that description is the contract. A behaviour change edits the route's
+  `summary` and `doc`, or the types' `doc` tags. There is no hand-written copy to keep in step.
 - **One program, one flow.** `agentbus up`, `server` and `runner` are modes of one binary
   (`connector` was retired in 0.5 and only says what to run instead). Every turn is a job, and
   every runner, the built-in one too, takes jobs through the runner protocol over HTTP. A runner
