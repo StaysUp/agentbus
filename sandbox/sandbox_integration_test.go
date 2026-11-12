@@ -101,7 +101,12 @@ func probe(list string) {
 	}
 }
 
-// probeCase is one probe and what the wall must answer. open says the
+// probeCase is one probe and what the wall must answer. A write is
+// answered by this machine, not by the probe: allowed means the file holds
+// what the probe wrote, here, after it ends. A write the wall lets happen
+// in a folder of its own (Linux's private /tmp, and the folders bwrap makes
+// there to bind a session's paths) never reaches this machine, so it is
+// denied. open says the
 // probe is also run with no wall and must be allowed there, which shows the
 // probe can see what it tries; false where the answer outside depends on
 // the machine (the internet) or means nothing (the proxy's own refusal).
@@ -118,8 +123,11 @@ type tree struct {
 	root, homes, copyA, homeA, copyB, homeB, outside, user string
 }
 
-func makeTree(t *testing.T) tree {
-	root, err := filepath.EvalSymlinks(t.TempDir())
+func makeTree(t *testing.T) tree { return makeTreeIn(t, t.TempDir()) }
+
+// makeTreeIn lays the tree out in dir.
+func makeTreeIn(t *testing.T, dir string) tree {
+	root, err := filepath.EvalSymlinks(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,9 +230,9 @@ func TestProbes(t *testing.T) {
 		{"other.home.list", "list", tr.homeB, false, true},
 		{"outside.read", "read", filepath.Join(tr.outside, "file.txt"), false, true},
 		{"outside.write", "write", filepath.Join(tr.outside, "new.txt"), false, true},
-		// Linux gives the session a /tmp of its own; macOS none. Either
-		// way nothing reaches this machine's /tmp (checked below).
-		{"tmp.write", "write", hostTmp, !mac, false},
+		// Linux gives the session a /tmp of its own, macOS none; either
+		// way nothing reaches this machine's /tmp.
+		{"tmp.write", "write", hostTmp, false, true},
 		{"homes.write", "write", filepath.Join(tr.homes, "beside"), false, true},
 		{"grant.read", "read", filepath.Join(tr.homeA, ".aws", "config"), true, true},
 		{"grant.original.read", "read", filepath.Join(tr.user, ".aws", "config"), false, true},
@@ -265,6 +273,18 @@ func TestProbes(t *testing.T) {
 	for _, c := range cases {
 		fmt.Fprintf(&list, "%s %s %s\n", c.name, c.op, c.arg)
 	}
+	// reset puts every write's target back as it was before a run.
+	reset := func() {
+		for _, c := range cases {
+			if c.op == "write" {
+				os.Remove(c.arg)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(tr.user, ".aws", "config"), []byte("[profile probe]\nregion = eu-west-1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reset()
 	run := func(walled bool) map[string]bool {
 		cmd := exec.Command(self)
 		cmd.Dir = tr.copyA
@@ -288,17 +308,19 @@ func TestProbes(t *testing.T) {
 			name, res, _ := strings.Cut(sc.Text(), " ")
 			got[name] = res == "allowed"
 		}
+		for _, c := range cases {
+			if c.op == "write" {
+				said := got[c.name]
+				got[c.name] = wroteHere(c.arg)
+				if said && !got[c.name] {
+					t.Logf("%s: the write stayed inside the wall (walled %t)", c.name, walled)
+				}
+			}
+		}
 		return got
 	}
 	open := run(false)
-	// What the walled probes wrote must not stay for the open run's
-	// answers: the open run goes first, then these are cleared.
-	for _, p := range []string{filepath.Join(tr.copyB, "new.txt"), filepath.Join(tr.outside, "new.txt"), filepath.Join(tr.homes, "beside"), hostTmp} {
-		os.Remove(p)
-	}
-	if err := os.WriteFile(filepath.Join(tr.user, ".aws", "config"), []byte("[profile probe]\nregion = eu-west-1\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	reset()
 	walled := run(true)
 	n := 0
 	for _, c := range cases {
@@ -312,12 +334,6 @@ func TestProbes(t *testing.T) {
 			n++
 		}
 	}
-	if _, err := os.Stat(hostTmp); err == nil {
-		t.Errorf("tmp.write: the session wrote this machine's /tmp")
-	}
-	if b, err := os.ReadFile(filepath.Join(tr.user, ".aws", "config")); err != nil || !bytes.HasPrefix(b, []byte("[profile probe]")) {
-		t.Errorf("grant.original.write: the granted original changed")
-	}
 	open0 := 0
 	for _, v := range open {
 		if v {
@@ -325,6 +341,12 @@ func TestProbes(t *testing.T) {
 		}
 	}
 	t.Logf("%s: %d of %d probes allowed in the sandbox, %d with none", runtime.GOOS, n, len(cases), open0)
+}
+
+// wroteHere says p, on this machine, holds what a write probe writes.
+func wroteHere(p string) bool {
+	b, err := os.ReadFile(p)
+	return err == nil && string(b) == "probe"
 }
 
 // TestAgentsStart runs claude --version and codex --version in a wall, as
@@ -387,6 +409,59 @@ func TestReadOnlyCopy(t *testing.T) {
 	}
 	if got, want := strings.TrimSpace(out.String()), "copy.read allowed\ncopy.write denied\nhome.write allowed"; got != want {
 		t.Errorf("got\n%s\nwant\n%s", got, want)
+	}
+	if wroteHere(filepath.Join(tr.copyA, "new.txt")) || !wroteHere(filepath.Join(tr.homeA, "x")) {
+		t.Errorf("on this machine: the copy written, or the home not")
+	}
+}
+
+// A runner whose data folder is in /tmp: the session's copy and home are
+// there too. Linux gives the session a private /tmp and binds the copy and
+// home over it, so they are still this machine's folders; the folder that
+// holds them is not.
+func TestSessionInTmp(t *testing.T) {
+	dir, err := os.MkdirTemp("/tmp", "sbx-data")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(dir)
+	tr := makeTreeIn(t, dir)
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	box, err := New(Spec{Copy: tr.copyA, Home: tr.homeA, Read: Program(self)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer box.Close()
+	want := map[string]bool{
+		filepath.Join(tr.copyA, "new.txt"):   true,
+		filepath.Join(tr.homeA, "x"):         true,
+		filepath.Join(tr.homeA, TmpDir, "x"): true,
+		filepath.Join(tr.homes, "beside"):    false,
+		filepath.Join(tr.copyB, "new.txt"):   false,
+		filepath.Join(tr.root, "beside"):     false,
+	}
+	var list strings.Builder
+	for p := range want {
+		fmt.Fprintf(&list, "w write %s\n", p)
+	}
+	cmd := exec.Command(self)
+	cmd.Dir = tr.copyA
+	cmd.Env = append([]string{"PATH=/usr/bin:/bin", "HOME=" + tr.homeA, probeEnv + "=" + list.String()}, box.Env()...)
+	var out bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &out
+	if err := box.Start(cmd); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("probe: %v\n%s", err, out.String())
+	}
+	for p, w := range want {
+		if got := wroteHere(p); got != w {
+			t.Errorf("%s: on this machine %t, want %t", p, got, w)
+		}
 	}
 }
 
