@@ -75,13 +75,25 @@ func agent(v string) {
 	fmt.Printf("ambient: %s\n", capAmb())
 }
 
+// needJail skips a test on a machine that cannot close an agent off, with
+// the reason, or fails it when AGENTBUS_TEST_WALL is "required": the CI job
+// that installs the AppArmor profile on Ubuntu 24.04 sets it, so a skip
+// there cannot pass for a result.
+func needJail(t *testing.T) {
+	t.Helper()
+	if err := Check(); err != nil {
+		if os.Getenv("AGENTBUS_TEST_WALL") == "required" {
+			t.Fatalf("this machine cannot close an agent off: %v", err)
+		}
+		t.Skipf("this machine cannot close an agent off: %v", err)
+	}
+}
+
 // A real agent closed off: it reaches the forwarded address and an
 // allowed host through the proxy, and nothing else; the proxy reports the
 // refusal. As a normal user and as root.
 func TestAgentClosedOff(t *testing.T) {
-	if err := Check(); err != nil {
-		t.Skipf("this machine cannot close an agent off: %v", err)
-	}
+	needJail(t)
 	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { io.WriteString(w, "ok") })
 	gw := httptest.NewServer(ok) // forwarded, as a gateway is
 	defer gw.Close()
@@ -131,9 +143,7 @@ func TestAgentClosedOff(t *testing.T) {
 // A helper that cannot ready the namespace refuses with why, and nothing
 // runs.
 func TestStartRefusesWithWhy(t *testing.T) {
-	if err := Check(); err != nil {
-		t.Skipf("this machine cannot close an agent off: %v", err)
-	}
+	needJail(t)
 	// An address no namespace has: the helper cannot listen there.
 	j := New(Spec{Forward: []string{"192.0.2.1:9"}})
 	defer j.Close()
@@ -168,4 +178,29 @@ func rejoin() error {
 	defer f.Close()
 	runtime.LockOSThread() // the thread ends with the agent
 	return unix.Setns(int(f.Fd()), unix.CLONE_NEWNET)
+}
+
+// A helper refused permission marks its reason, and the runner adds the
+// AppArmor advice itself, outside the namespace: CI on Ubuntu 24.04 showed
+// the helper, inside it, reading a root-owned test binary as open to
+// others. Other reasons pass as they are.
+func TestReceiveAddsAdviceOutside(t *testing.T) {
+	for _, c := range []struct{ sent, want string }{
+		{"refused: " + refusedPerm + "loopback could not be brought up", "loopback could not be brought up" + AppArmorAdvice()},
+		{"refused: 192.0.2.1:9 could not be listened on", "192.0.2.1:9 could not be listened on"},
+	} {
+		pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.Sendmsg(pair[1], []byte(c.sent), nil, nil, 0); err != nil {
+			t.Fatal(err)
+		}
+		_, why := receive(pair[0], 0)
+		unix.Close(pair[0])
+		unix.Close(pair[1])
+		if why != c.want || strings.Contains(why, refusedPerm) {
+			t.Errorf("%q: got %q, want %q", c.sent, why, c.want)
+		}
+	}
 }

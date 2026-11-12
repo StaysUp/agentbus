@@ -180,11 +180,13 @@ func listenUnix(t *testing.T, p string) string {
 // needWall skips a test that builds a session's wall on a Linux machine
 // that cannot build one, with the machine's own reason (Can): Ubuntu 24.04
 // and later refuse user namespaces to a program without an AppArmor
-// profile, as GitHub's runners do. A Mac always can, so there it fails.
+// profile, as GitHub's runners do. A Mac always can, so there it fails, and
+// so it does where AGENTBUS_TEST_WALL is "required": the CI job that
+// installs the profile on Ubuntu 24.04 sets it.
 func needWall(t *testing.T) {
 	t.Helper()
 	if ok, why := Can(); !ok {
-		if runtime.GOOS == "linux" {
+		if runtime.GOOS == "linux" && os.Getenv("AGENTBUS_TEST_WALL") != "required" {
 			t.Skipf("this machine cannot build a session's wall: %s", why)
 		}
 		t.Fatalf("this machine cannot build a session's wall: %s", why)
