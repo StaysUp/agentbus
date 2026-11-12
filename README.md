@@ -138,8 +138,8 @@ next turn. Runners read control's settings before each turn. The keys and their 
   the API, but does not have those files.
 - agy runs on its own Google sign-in only, and gets no instructions of AgentBus's. A turn with
   `forbid` set, or `subagents = false`, is refused on agy. Using agy's sign-in on runners is at your
-  own risk with Google: its terms (clause 6) forbid third-party tools, and it stays off unless you
-  set `subscriptions_on_runners = "own"`.
+  own risk with Google: its terms (clause 6) forbid third-party tools. A sign-in connected on control
+  is used on every approved runner; to keep agy's off your runners, do not connect it.
 - The API as tools (MCP) is off by default: `[agent_api] tools = true` turns it on for claude and
   codex.
 

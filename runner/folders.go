@@ -28,9 +28,6 @@ import (
 // FolderSide is what a runner does to its machine's folders (connector.Jobs).
 // Its errors are in fixed wording for the person: they name no path.
 type FolderSide interface {
-	// SnapshotJob takes a snapshot of the folder ref; its trees and files
-	// are in the control plane's store once it answers.
-	SnapshotJob(ctx context.Context, ref string) (queue.SnapshotTaken, error)
 	// ApplyJob makes the folder ref as the changeset blob to holds it, from
 	// as the changeset from holds it ("": the copy's base). conflicts, when
 	// not empty, refused it: nothing was written. partial: not every file
@@ -59,7 +56,7 @@ func applyFinish(status, reason string, res queue.Result) queue.Finish {
 	return queue.Finish{Status: status, Reason: reason, Result: mustJSON(res)}
 }
 
-// folderWork does a snapshot, an apply or a folder job of this machine. It stops
+// folderWork does an apply or a folder job of this machine. It stops
 // reading the folder and the store once the job is cancelled, the attempt
 // is no longer current, or the runner stops: an apply stopped so writes
 // nothing, as no file is put in place before every one is staged.
@@ -94,16 +91,6 @@ func (r *Runner) folderWork(ctx context.Context, at *attempt) queue.Finish {
 	}
 	if _, ok := r.cfg.Folders.Path(sp.FolderRef); !ok {
 		return refuse(folderUnknown, nil)
-	}
-	if at.job.Kind == queue.KindSnapshot {
-		t, err := r.cfg.FolderSide.SnapshotJob(ctx, sp.FolderRef)
-		if err != nil {
-			r.cfg.Logf("the snapshot of %s could not be taken: %s", sp.FolderRef, err)
-			return queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup,
-				Result: mustJSON(queue.Result{Refused: "the snapshot of the folder could not be taken: " + err.Error()})}
-		}
-		at.event("folder.snapshot", map[string]any{"snapshot": t.ID, "files": t.Files})
-		return queue.Finish{Status: queue.Finished, Result: mustJSON(queue.Result{Snapshot: &t})}
 	}
 	if !blobs.Valid(sp.ApplyTo) || (sp.ApplyFrom != "" && !blobs.Valid(sp.ApplyFrom)) {
 		return refuse("this apply was asked for before this build; ask for it again", nil)

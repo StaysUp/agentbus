@@ -8,7 +8,8 @@ package settings
 //     followed), named with the date and "before-settings-db" (CopyName),
 //     unless the folder is new;
 //  3. imports permissions.toml, instructions.md and agents.json into the
-//     database, in one transaction that also marks the import done;
+//     database, in one transaction that also marks the import done; a new
+//     folder gets its starting agents there instead (Starters);
 //  4. writes out the old value of each default this build changed, so
 //     nothing changes for the person, and removes the keys it retired
 //     from the stored policy (writeSteps).
@@ -54,6 +55,12 @@ type Upgrade struct {
 	Skip []string
 	// Agents reads an agents.json as database rows (agents.ImportRows).
 	Agents func([]byte) ([]AgentRow, error)
+	// Starters are the agent rows a new data folder starts with
+	// (agents.Starters), written with the import; nil writes none, so the
+	// folder has every default agent. It is called only while the import is
+	// not done: never for a folder with a service's files already, which
+	// keeps its agents, nor on a later start.
+	Starters func() []AgentRow
 	// Now is the clock; nil is time.Now.
 	Now func() time.Time
 }
@@ -109,7 +116,10 @@ func (u Upgrade) Run() (*DB, Report, error) {
 	// keep, so it starts with all of them done. The database is made with
 	// its count, so a start that stops after this keeps it.
 	done := len(upgradeSteps)
-	if !hasDB && !newFolder(u.Dir) {
+	// The folder is new on a start that stopped before the import too: the
+	// service writes its other files only after this.
+	fresh := newFolder(u.Dir)
+	if !hasDB && !fresh {
 		done = 0
 		// One rule for where the copy comes from and where it goes: the
 		// data folder's real path, however it was named (relative, or
@@ -128,7 +138,11 @@ func (u Upgrade) Run() (*DB, Report, error) {
 		return nil, rep, err
 	}
 	db.SetProtected(u.Dir)
-	if rep.Imported, rep.Done, err = db.importFiles(u.Dir, u.Agents); err != nil {
+	starters := u.Starters
+	if !fresh {
+		starters = nil
+	}
+	if rep.Imported, rep.Done, err = db.importFiles(u.Dir, u.Agents, starters); err != nil {
 		db.Close()
 		return nil, rep, err
 	}
@@ -370,7 +384,7 @@ func copyFile(src, dst string, mode fs.FileMode) error {
 
 // importFiles imports dir's settings files, once. done is false when the
 // import was done before.
-func (d *DB) importFiles(dir string, readAgents func([]byte) ([]AgentRow, error)) (files []string, done bool, err error) {
+func (d *DB) importFiles(dir string, readAgents func([]byte) ([]AgentRow, error), starters func() []AgentRow) (files []string, done bool, err error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	if t, err := meta(d.db, "imported"); err != nil {
@@ -452,6 +466,13 @@ func (d *DB) importFiles(dir string, readAgents func([]byte) ([]AgentRow, error)
 		cs = append(cs, Change{Setting: SettingAgents, Keys: keys, File: AgentsFile})
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return fail(AgentsFile, errors.New("it could not be read"))
+	} else if starters != nil {
+		// A new data folder's agents: where it starts, not a change.
+		for _, r := range starters() {
+			if err := putAgent(tx, r, now); err != nil {
+				return nil, false, err
+			}
+		}
 	}
 	if len(cs) > 0 {
 		if err := addChanges(tx, s.version, cs, now); err != nil {

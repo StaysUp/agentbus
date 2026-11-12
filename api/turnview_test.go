@@ -288,8 +288,9 @@ func TestRunnerProtocolDescribedApart(t *testing.T) {
 			}
 		}
 	}
-	if n != 20 {
-		t.Errorf("the runner protocol has %d operations, want 20", n)
+	// 19: the snapshot route is retired in 0.5.1.
+	if n != 19 {
+		t.Errorf("the runner protocol has %d operations, want 19", n)
 	}
 	e := newEnv(t)
 	for p, want := range map[string]string{

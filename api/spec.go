@@ -641,7 +641,7 @@ func accessReplies(rt route) []accessReply {
 
 // runnerIntro opens the runner protocol's description.
 const runnerIntro = "How a runner, the one program of each machine, talks to control: register, take jobs, report their attempts, and move files as blobs. " +
-	"A job is the queue's word for work: a turn, a review, an apply or a snapshot. A runner takes a job as an attempt, and every call after take names the attempt and its number. " +
+	"A job is the queue's word for work: a turn, a review, an apply or a folder check. A runner takes a job as an attempt, and every call after take names the attempt and its number. " +
 	"This protocol is our own code's, between our own binaries. It is not a public promise and may change in any release. " +
 	"The client API, for people, programs and agents, is at `/api/v0/openapi.json`."
 

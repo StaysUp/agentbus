@@ -31,17 +31,7 @@ func TestBlobRoots(t *testing.T) {
 		if _, _, err := q.Start(r.ID, a.ID, 1, lease); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := q.Snapshot(r.ID, a.ID, 1); err != nil {
-			t.Fatal(err)
-		}
-		_, sa := takeFolder(t, q, conn)
-		if _, _, err := q.Start(conn.ID, sa.ID, 1, lease); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := q.End(conn.ID, sa.ID, 1, Finish{Status: Finished,
-			Result: mustResult(Result{Snapshot: &SnapshotTaken{ID: tree, Times: tree + "-times", Git: tree + "-git"}})}); err != nil {
-			t.Fatal(err)
-		}
+		storedSnapshot(t, q, a.ID, SnapshotTaken{ID: tree, Times: tree + "-times", Git: tree + "-git"})
 		if _, err := q.End(r.ID, a.ID, 1, Finish{Status: Finished, Session: j.Session, Result: mustResult(Result{Changeset: cs}),
 			Workspace: &Workspace{Kind: WorkspaceCopy, Folder: "s"}}); err != nil {
 			t.Fatal(err)
@@ -76,6 +66,22 @@ func TestBlobRoots(t *testing.T) {
 	}
 	if !slices.Contains(roots.Changesets, "cs2") || !slices.Contains(roots.Trees, "tree2") || !slices.Contains(roots.Blobs, "tree2-times") {
 		t.Fatalf("the open session's roots went: %+v", roots)
+	}
+}
+
+// storedSnapshot stores a finished snapshot job that attempt asked for, as
+// a store from before 0.5.1 holds one: the kind is retired, so nothing
+// makes one now.
+func storedSnapshot(t *testing.T, q *Queue, attempt string, taken SnapshotTaken) {
+	t.Helper()
+	j, _, err := q.create(DefaultTeam, "snapshot", "snapshot/"+attempt, Spec{}, Links{}, Limits{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := nanos(q.now())
+	if _, err := q.db.Exec(`UPDATE jobs SET state = ?, result = ?, updated = ?, ended = ? WHERE id = ?`,
+		Finished, string(mustResult(Result{Snapshot: &taken})), now, now, j.ID); err != nil {
+		t.Fatal(err)
 	}
 }
 

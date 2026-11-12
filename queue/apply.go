@@ -13,7 +13,7 @@ import (
 var ErrNotApplicable = errors.New("queue: the turn's changes cannot be applied")
 
 // ErrMachineOffline: no runner on the folder's machine has asked for work
-// within RunnerFresh, so a new snapshot or apply of its folder would wait
+// within RunnerFresh, so a new apply of its folder would wait
 // for nothing. No job is made.
 var ErrMachineOffline = errors.New("queue: the folder's machine is offline")
 
@@ -241,42 +241,3 @@ func (q *Queue) firstSpec(team, session string) (Spec, error) {
 // ApplyKey is the idempotency key of the n-th apply job of turn. Like
 // ResultKey it holds a "/", so no caller's key can take it first.
 func ApplyKey(turn string, n int) string { return fmt.Sprintf("apply/%s/%d", turn, n) }
-
-// SnapshotKey is the idempotency key of the snapshot job an attempt asks
-// for. It holds a "/", so no caller's key can take it first.
-func SnapshotKey(attempt string) string { return "snapshot/" + attempt }
-
-// Snapshot makes, or finds, the snapshot job the runner's attempt asks for:
-// a snapshot of the folder its job names, on the folder's machine, for
-// the runner to build the session's copy from. Only the runner holding the
-// attempt, while it is current, may ask, and only for a first turn in an
-// isolated copy of a folder. While no runner has taken it, a folder's
-// machine not seen within RunnerFresh is ErrMachineOffline: the runner stops
-// waiting. Since 0.5 no runner of this build asks for one.
-func (q *Queue) Snapshot(runnerID, attemptID string, number int) (Job, error) {
-	var a Attempt
-	var j Job
-	err := q.tx(func(tx *sql.Tx) error {
-		var err error
-		a, j, err = current(tx, q.now(), runnerID, attemptID, number)
-		return err
-	})
-	if err != nil {
-		return Job{}, err
-	}
-	sp := j.Spec
-	if j.Kind != KindTurn || sp.FolderRef == "" || sp.Connector == "" || !sp.Isolate {
-		return Job{}, ErrNotApplicable
-	}
-	job, _, err := q.create(j.Team, KindSnapshot, SnapshotKey(a.ID), Spec{FolderRef: sp.FolderRef, Connector: sp.Connector},
-		Links{}, Limits{}, "")
-	if err != nil || job.State != Queued {
-		return job, err
-	}
-	if ok, err := q.MachineSeen(j.Team, sp.Connector); err != nil {
-		return Job{}, err
-	} else if !ok {
-		return job, ErrMachineOffline
-	}
-	return job, nil
-}

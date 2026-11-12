@@ -76,9 +76,6 @@ func (w *world) real() error {
 	}
 
 	// The person's own subscription, through the server.
-	if err := w.subscriptionsOn(); err != nil {
-		return err
-	}
 	if w.o.connect {
 		w.connect("claude")
 	}
@@ -124,20 +121,6 @@ func (w *world) connected(harness string) bool {
 		}
 	}
 	return false
-}
-
-// subscriptionsOn sets subscriptions_on_runners = "own" in the scratch
-// server's policy.
-func (w *world) subscriptionsOn() error {
-	var p map[string]any
-	if code, out := w.api.call("GET", "/api/v0/settings/permissions", nil, &p); code != 200 {
-		return fmt.Errorf("GET permissions: %d %s", code, out)
-	}
-	p["subscriptions_on_runners"] = "own"
-	if code, out := w.api.callMatch("PUT", "/api/v0/settings/permissions", p, "*"); code != 200 {
-		return fmt.Errorf("PUT permissions: %d %s", code, out)
-	}
-	return nil
 }
 
 // realTurn runs one turn on agent on the real runner, and reports what the

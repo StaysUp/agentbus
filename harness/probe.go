@@ -40,17 +40,36 @@ func ProbeAll(ctx context.Context, lookPath func(string) (string, error), enviro
 	return out
 }
 
+// Found are the names of the runnable harnesses whose program lookPath
+// finds, in registry order: what a runner on this machine reports as found.
+// nil lookPath finds none.
+func Found(lookPath func(string) (string, error)) []string {
+	var out []string
+	for _, h := range registry {
+		if _, ok := find(h.Info(), lookPath); ok {
+			out = append(out, h.Info().Name)
+		}
+	}
+	return out
+}
+
+// find is where lookPath finds info's program, and whether it does.
+func find(info Info, lookPath func(string) (string, error)) (string, bool) {
+	if lookPath == nil {
+		return "", false
+	}
+	bin, err := lookPath(info.Name)
+	return bin, err == nil
+}
+
 // Probe finds one harness's program and asks it its version and sign-in
 // status: its own offline status command, whose exit code is the answer, 0
 // signed in and 1 not. That command's output is discarded, since it can name
 // the account. It never returns the path.
 func Probe(ctx context.Context, info Info, lookPath func(string) (string, error), environ func() []string) Report {
 	rep := Report{Name: info.Name}
-	if lookPath == nil {
-		return rep
-	}
-	bin, err := lookPath(info.Name)
-	if err != nil {
+	bin, ok := find(info, lookPath)
+	if !ok {
 		return rep
 	}
 	rep.Found = true

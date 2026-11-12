@@ -153,6 +153,43 @@ func TestResolveFallsBackToHarness(t *testing.T) {
 	}
 }
 
+// A new data folder starts with the defaults whose harness was found, and
+// none when none was; a turn naming a default it started without still runs
+// that harness on its own subscription.
+func TestStarters(t *testing.T) {
+	for _, tc := range []struct {
+		found []string
+		want  []string
+	}{{[]string{Claude}, []string{Claude}}, {nil, nil}, {[]string{"agy", Codex}, []string{Codex, "agy"}}} {
+		db, err := settings.OpenDB(filepath.Join(t.TempDir(), settings.DBFile), fixed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { db.Close() })
+		for _, r := range Starters(tc.found) {
+			if err := db.SetAgent(r, []string{r.ID}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		s, err := Open(db, fixed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var got []string
+		for _, a := range s.List() {
+			got = append(got, a.ID)
+		}
+		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+			t.Fatalf("found %v: agents %v, want %v", tc.found, got, tc.want)
+		}
+		for _, h := range []string{Claude, Codex, "agy"} {
+			if a, err := s.Resolve(h); err != nil || a.Harness != h || a.Access != Subscription {
+				t.Fatalf("found %v: a turn naming %s: %+v %v", tc.found, h, a, err)
+			}
+		}
+	}
+}
+
 // An agents.json of 0.4 is read as rows: a default as it was is left out,
 // a changed default and an added agent are kept whole, a default the file
 // lacks is removed. A file that cannot be used is refused.

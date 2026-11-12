@@ -38,7 +38,6 @@ import (
 	"github.com/staysup/agentbus/credentials"
 	"github.com/staysup/agentbus/gateway"
 	"github.com/staysup/agentbus/queue"
-	"github.com/staysup/agentbus/settings"
 )
 
 // RelayPrefix is the path the relay answers under: /relay/<name>/<the
@@ -185,17 +184,6 @@ func (s *Server) credential(j queue.Job, up Upstream) (credentials.Cred, int, st
 	if access == credentials.AccessSubscription {
 		if sp.Harness != up.Harness {
 			return none, http.StatusForbidden, "this turn's agent runs " + sp.Harness + ", so control adds its subscription to no call on this path"
-		}
-		p := settings.DefaultPolicy()
-		if s.cfg.Settings != nil {
-			var err error
-			if p, _, err = s.cfg.Settings.Policy(); err != nil {
-				return none, http.StatusServiceUnavailable, "control's permissions cannot be used, so it adds no subscription; fix them"
-			}
-		}
-		if p.SubscriptionsOnRunners != settings.SubscriptionsOwn {
-			return none, http.StatusForbidden, "subscriptions on runners are off: set subscriptions_on_runners = \"own\" in control's permissions.toml, " +
-				"for runners on your own machines, or use an agent with an API key"
 		}
 	}
 	if s.cfg.Credentials == nil {

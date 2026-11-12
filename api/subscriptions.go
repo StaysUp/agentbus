@@ -3,8 +3,8 @@ package api
 // The person's own subscriptions, for runners on their own machines: each
 // harness's sign-in, connected once on control with the vendor's own login
 // (package credentials), so control's gateway adds it to the model calls of
-// agents on those runners, which hold none. Used only when the policy says
-// subscriptions_on_runners = "own". The main token only: a turn token never
+// agents on those runners, which hold none. Every runner is the person's
+// own: a machine joins only when they approve its code. The main token only: a turn token never
 // sees or starts these. No reply ever holds a token.
 
 import (
@@ -14,12 +14,10 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/credentials"
-	"github.com/staysup/agentbus/settings"
 )
 
 // SubscriptionList is GET /api/v0/subscriptions.
 type SubscriptionList struct {
-	On            bool                `json:"on" doc:"subscriptions_on_runners is \"own\": control adds a connected subscription to runners' calls."`
 	Subscriptions []SubscriptionState `json:"subscriptions" doc:"One per harness whose subscription can be connected here."`
 }
 
@@ -48,8 +46,7 @@ var subscriptionRoutes = []route{
 		tag:     "Settings",
 		summary: "List subscriptions",
 		doc: "The person's own subscriptions that control can add to the model calls of agents on their runners, which hold no sign-in: " +
-			"for each harness, whether it is connected and until when. Only for runners on the person's own machines, and only with " +
-			"subscriptions_on_runners = \"own\". One machine (agentbus up) uses each harness's own sign-in and needs none of this.",
+			"for each harness, whether it is connected and until when. A connected one is used on every approved runner. One machine (agentbus up) uses each harness's own sign-in and needs none of this.",
 		replies: []reply{ok(200, SubscriptionList{}, "The subscriptions."), fail(404, noSubscriptions)},
 		serve:   plain((*API).listSubscriptions)},
 	{method: "POST", path: "/api/v0/subscriptions/{id}/connect", op: "connectSubscription",
@@ -95,11 +92,6 @@ func (a *API) listSubscriptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := SubscriptionList{Subscriptions: []SubscriptionState{}}
-	if a.cfg.Settings != nil {
-		if p, _, err := a.cfg.Settings.Policy(); err == nil {
-			out.On = p.SubscriptionsOnRunners == settings.SubscriptionsOwn
-		}
-	}
 	names := make([]string, 0, len(m.Logins))
 	for h := range m.Logins {
 		names = append(names, h)

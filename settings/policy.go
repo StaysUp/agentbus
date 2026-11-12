@@ -89,14 +89,6 @@ share_read_only = []
 # files are never changed.
 subagents = true
 
-# subscriptions_on_runners: whether control adds your own subscription's
-# sign-in to the model calls of agents on your runners, which hold none.
-#   "off"  never: a subscription agent runs only where its harness is signed
-#          in (agentbus up on this machine). API-key agents work either way.
-#   "own"  yes, for the runners you run on your own machines. Connect the
-#          subscription once in the cockpit: Agents, the agent's Connect step.
-subscriptions_on_runners = "off"
-
 # Work agents ask other agents for. A request tree is the person's session and
 # every session work asked for from it, at any depth. A limit reached refuses
 # the request and says which limit.
@@ -163,12 +155,6 @@ const (
 	EditNone    = "none"
 )
 
-// SubscriptionsOnRunners values.
-const (
-	SubscriptionsOff = "off"
-	SubscriptionsOwn = "own"
-)
-
 // Isolation values: where a new session's turns run.
 const (
 	IsolationAuto    = "auto"
@@ -216,12 +202,10 @@ type Policy struct {
 	Isolation     string   `toml:"isolation" json:"isolation,omitempty" doc:"Where a new session's turns run: auto (copy on macOS; overlay on Linux where the runner can mount one, else copy), overlay, copy (a copy of its folder as it is now), git (a git worktree with the folder's uncommitted edits, in a repo) or none (the folder itself). On ext4, copy and the overlay's snapshot copy every byte: use xfs, btrfs, git or none for a big folder. Absent in a PUT: auto."`
 	ShareReadOnly []string `toml:"share_read_only" json:"share_read_only" doc:"Folders at the top of a session's folder, such as node_modules, that a copy links to one shared read-only copy of instead of copying. A turn cannot write there. Absent in a PUT: none."`
 	Subagents     *bool    `toml:"subagents" json:"subagents,omitempty" doc:"Whether a turn may start the agent's own subagents. Absent in a PUT: true."`
-	// SubscriptionsOnRunners is read by control's gateway only (jobs/relay.go).
-	SubscriptionsOnRunners string   `toml:"subscriptions_on_runners" json:"subscriptions_on_runners,omitempty" doc:"Whether control adds the person's own subscription sign-in to model calls of agents on their runners: off or own (runners on their own machines; connect the subscription once on control). Absent in a PUT: off."`
-	Limits                 Limits   `toml:"limits" json:"limits" doc:"The limits on work agents ask for."`
-	AgentAPI               AgentAPI `toml:"agent_api" json:"agent_api" doc:"What a turn's own token may call."`
-	Network                Network  `toml:"network" json:"network" doc:"What a turn's agent may reach on the network (Linux runners, and any runner with [sandbox] on)."`
-	Sandbox                Sandbox  `toml:"sandbox" json:"sandbox" doc:"A wall around each session's agent (a proof of concept)."`
+	Limits        Limits   `toml:"limits" json:"limits" doc:"The limits on work agents ask for."`
+	AgentAPI      AgentAPI `toml:"agent_api" json:"agent_api" doc:"What a turn's own token may call."`
+	Network       Network  `toml:"network" json:"network" doc:"What a turn's agent may reach on the network (Linux runners, and any runner with [sandbox] on)."`
+	Sandbox       Sandbox  `toml:"sandbox" json:"sandbox" doc:"A wall around each session's agent (a proof of concept)."`
 
 	// where and fix say, in a turn's refusal, where the policy came from and
 	// what to do: set by the store that read it (Error).
@@ -290,9 +274,6 @@ func (p *Policy) fill() {
 		on := true
 		p.Subagents = &on
 	}
-	if p.SubscriptionsOnRunners == "" {
-		p.SubscriptionsOnRunners = SubscriptionsOff
-	}
 	setInt := func(v **int, d int) {
 		if *v == nil {
 			*v = &d
@@ -346,11 +327,6 @@ func (p *Policy) Check() error {
 	case "", IsolationAuto, IsolationOverlay, IsolationCopy, IsolationGit, IsolationNone:
 	default:
 		return fmt.Errorf("isolation must be %q, %q, %q, %q or %q", IsolationAuto, IsolationOverlay, IsolationCopy, IsolationGit, IsolationNone)
-	}
-	switch p.SubscriptionsOnRunners {
-	case "", SubscriptionsOff, SubscriptionsOwn:
-	default:
-		return fmt.Errorf("subscriptions_on_runners must be %q or %q", SubscriptionsOff, SubscriptionsOwn)
 	}
 	for _, f := range p.ShareReadOnly {
 		if f == "" || f == "." || f == ".." || f == ".git" || strings.ContainsAny(f, "/\\") || strings.ContainsFunc(f, isControl) {
@@ -433,11 +409,11 @@ func parsePolicy(b []byte) (Policy, error) {
 		// Not a parse error: a value of the wrong type, such as a string
 		// where a list belongs.
 		return Policy{}, errors.New("a value has the wrong type: read_folders, allow, forbid and share_read_only are lists of strings, such as [\"go test\"]; " +
-			"edit, isolation, subscriptions_on_runners, scope, contain and mode are strings; [network] allow and [sandbox] read are lists of strings; subagents is true or false; the [limits] are numbers; the [agent_api] switches are true or false")
+			"edit, isolation, scope, contain and mode are strings; [network] allow and [sandbox] read are lists of strings; subagents is true or false; the [limits] are numbers; the [agent_api] switches are true or false")
 	}
 	extra := slices.DeleteFunc(md.Undecoded(), func(k toml.Key) bool { return len(k) == 1 && slices.Contains(retiredKeys, k[0]) })
 	if len(extra) > 0 {
-		return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, subscriptions_on_runners, [limits], [agent_api], [network] and [sandbox] (see the README)", strconv.Quote(extra[0].String()))
+		return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, [limits], [agent_api], [network] and [sandbox] (see the README)", strconv.Quote(extra[0].String()))
 	}
 	if err := p.Check(); err != nil {
 		return Policy{}, err
@@ -514,11 +490,11 @@ func DecodePolicy(b []byte) (Policy, error) {
 		switch {
 		case errors.As(err, &te) && te.Field != "":
 			return Policy{}, fmt.Errorf("%s has the wrong type: read_folders, allow, forbid and share_read_only are lists of strings; "+
-				"edit, isolation, subscriptions_on_runners, scope, contain and mode are strings; network.allow and sandbox.read are lists of strings; subagents and the agent_api switches are true or false; the limits are numbers", te.Field)
+				"edit, isolation, scope, contain and mode are strings; network.allow and sandbox.read are lists of strings; subagents and the agent_api switches are true or false; the limits are numbers", te.Field)
 		case errors.As(err, &se):
 			return Policy{}, errors.New("the body is not valid JSON")
 		case strings.HasPrefix(err.Error(), "json: unknown field "):
-			return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, subscriptions_on_runners, limits, agent_api, network and sandbox",
+			return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, limits, agent_api, network and sandbox",
 				strings.TrimPrefix(err.Error(), "json: unknown field "))
 		}
 		return Policy{}, errors.New("the body must be one JSON object: the policy")
@@ -544,7 +520,7 @@ func FormatPolicy(p Policy) []byte {
 	p.fill()
 	values := map[string]any{
 		"read_folders": p.ReadFolders, "allow": p.Allow, "forbid": p.Forbid, "edit": p.Edit, "isolation": p.Isolation,
-		"share_read_only": p.ShareReadOnly, "subagents": *p.Subagents, "subscriptions_on_runners": p.SubscriptionsOnRunners,
+		"share_read_only": p.ShareReadOnly, "subagents": *p.Subagents,
 		"limits.max_depth": *p.Limits.MaxDepth, "limits.max_jobs_per_turn": *p.Limits.MaxJobsPerTurn,
 		"limits.max_jobs_per_tree": *p.Limits.MaxJobsPerTree, "limits.max_cost_usd_per_tree": *p.Limits.MaxCostUSDPerTree,
 		"agent_api.scope": p.AgentAPI.Scope, "agent_api.read": *p.AgentAPI.Read, "agent_api.list_agents": *p.AgentAPI.ListAgents,

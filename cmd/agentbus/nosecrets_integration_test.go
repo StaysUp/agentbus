@@ -325,31 +325,27 @@ func TestRunnerHoldsNoKey(t *testing.T) {
 	}
 }
 
+// A subscription connected on control is used for a turn on an approved
+// runner, with no setting: every runner is the person's own. With nothing
+// connected the relay refuses, and the vendor sees nothing.
 func TestRunnerUsesConnectedSubscription(t *testing.T) {
 	ns := startNoSecrets(t)
 	run := func() queue.Job {
 		j := queueTurn(t, ns.server, ns.tok, map[string]any{"agent": "claude", "folder_ref": ns.ref, "connector": ns.connector, "prompt": "hello"})
 		return waitJob(t, ns.server, ns.tok, j.ID)
 	}
-	// Off by default: the relay refuses, and the vendor sees nothing.
-	run()
-	if got := ns.anth.seen(); len(got) != 0 {
-		t.Fatalf("with subscriptions off the vendor saw %v", got)
-	}
-	// On, but nothing connected: refused too.
-	putPolicy(t, ns.server, ns.tok, "subscriptions_on_runners = \"own\"\n")
+	// Nothing connected: refused.
 	run()
 	if got := ns.anth.seen(); len(got) != 0 {
 		t.Fatalf("with nothing connected the vendor saw %v", got)
 	}
 	var list struct {
-		On            bool
 		Subscriptions []struct {
 			Harness   string
 			Connected bool
 		}
 	}
-	if code := callAPI(t, ns.server, ns.tok, "GET", "/api/v0/subscriptions", nil, &list); code != 200 || !list.On ||
+	if code := callAPI(t, ns.server, ns.tok, "GET", "/api/v0/subscriptions", nil, &list); code != 200 ||
 		len(list.Subscriptions) != 3 || list.Subscriptions[0].Harness != "agy" || list.Subscriptions[0].Connected ||
 		list.Subscriptions[1].Harness != "claude" || list.Subscriptions[1].Connected ||
 		list.Subscriptions[2].Harness != "codex" || list.Subscriptions[2].Connected {
@@ -394,7 +390,6 @@ func TestRunnerUsesConnectedCodexSubscription(t *testing.T) {
 	ns.chat.mu.Lock()
 	ns.chat.stream = sample
 	ns.chat.mu.Unlock()
-	putPolicy(t, ns.server, ns.tok, "subscriptions_on_runners = \"own\"\n")
 	t.Setenv("AGENTBUS_FAKE_CALL", "")
 	t.Setenv("AGENTBUS_FAKE_CODEX_BODY", `{"model":"gpt-5.5","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hello"}]}]}`)
 	t.Setenv("AGENTBUS_FAKE_THREAD", "fake-thread-1")
@@ -518,7 +513,6 @@ func TestRunnerUsesConnectedAgySubscription(t *testing.T) {
 	ns.cc.stream = []byte(`data: {"response":{"candidates":[{"content":{"role":"model","parts":[{"text":"pong"}]},"finishReason":"STOP"}],` +
 		`"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1,"totalTokenCount":4},"modelVersion":"gemini-3.8-flash","responseId":"r1"}}` + "\r\n\r\n")
 	ns.cc.mu.Unlock()
-	putPolicy(t, ns.server, ns.tok, "subscriptions_on_runners = \"own\"\n")
 	t.Setenv("AGENTBUS_FAKE_CALL", "")
 	t.Setenv("AGENTBUS_FAKE_AGY_BODY", `{"model":"gemini-3.8-flash","project":"p","requestId":"q","request":{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}}`)
 	t.Setenv("AGENTBUS_FAKE_STDOUT", `{"conversation_id":"fake-conv-1","status":"SUCCESS","response":"pong"}`+"\n")

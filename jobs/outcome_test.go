@@ -52,7 +52,7 @@ func newOutcomeEnv(t *testing.T) *outcomeEnv {
 func (e *outcomeEnv) take(t *testing.T, kind string) (queue.Job, string) {
 	t.Helper()
 	var taken TakenWork
-	folders := kind == queue.KindApply || kind == queue.KindFolder || kind == queue.KindSnapshot
+	folders := kind == queue.KindApply || kind == queue.KindFolder
 	if code := send(t, e.srv, e.tok, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion, Folders: folders}, &taken); code != 200 || taken.Job.Kind != kind {
 		t.Fatalf("take: %d %+v", code, taken.Job)
 	}
@@ -537,4 +537,17 @@ func startFinisher(t *testing.T, s *Server) {
 	stop, done := make(chan struct{}), make(chan struct{})
 	go func() { s.RunFinisher(stop); close(done) }()
 	t.Cleanup(func() { close(stop); <-done })
+}
+
+// The snapshot route is retired (0.5.1): no runner of 0.5 asks for one, so
+// an attempt's snapshot request is not a route.
+func TestSnapshotRouteRetired(t *testing.T) {
+	e := newOutcomeEnv(t)
+	if _, _, err := e.q.Create(queue.DefaultTeam, queue.KindTurn, "", queue.Spec{Harness: "claude", Prompt: "x"}, queue.Links{}); err != nil {
+		t.Fatal(err)
+	}
+	_, base := e.take(t, queue.KindTurn)
+	if code := send(t, e.srv, e.tok, "POST", base+"/snapshot", AttemptCall{Number: 1}, nil); code != http.StatusNotFound && code != http.StatusMethodNotAllowed {
+		t.Fatalf("snapshot: %d, want no route", code)
+	}
 }

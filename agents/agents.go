@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -146,8 +147,9 @@ type file struct {
 	Agents []Agent `json:"agents"`
 }
 
-// Defaults are the agents every control has unless the person changed or
-// removed them: one per harness, on its own subscription. Their ids are the
+// Defaults are the agents a control has unless the person changed or removed
+// them, or its data folder started without them (Starters): one per harness,
+// on its own subscription. Their ids are the
 // harness names, so a turn that names claude or codex finds them. A default
 // agent grants nothing a turn naming its harness does not already get.
 func Defaults(now time.Time) []Agent {
@@ -155,6 +157,21 @@ func Defaults(now time.Time) []Agent {
 	for _, h := range harness.All() {
 		i := h.Info()
 		out = append(out, Agent{ID: i.Name, Name: i.Label, Harness: i.Name, Access: Subscription, Created: now, Updated: now})
+	}
+	return out
+}
+
+// Starters are the rows a new data folder starts with, so that its agents
+// are the defaults whose harness is in found: a removed row for each other
+// default. found nil starts with none (agentbus server, which has no
+// machine yet). A turn that names a removed default's id still starts that
+// harness on its own subscription (Resolve), as old clients expect.
+func Starters(found []string) []settings.AgentRow {
+	var out []settings.AgentRow
+	for _, d := range Defaults(time.Time{}) {
+		if !slices.Contains(found, d.Harness) {
+			out = append(out, settings.AgentRow{ID: d.ID, Removed: true})
+		}
 	}
 	return out
 }
