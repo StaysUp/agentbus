@@ -784,7 +784,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 			append(sandbox.Program(l.Path), e.apiProgram()...), netSpec)
 		if why != "" {
 			e.cfg.Logf("run.refused agent=%s reason=sandbox", t.harness)
-			return nil, refuse(http.StatusBadRequest, why+", so the turn did not start. Fix it on this runner, or set [sandbox] mode = \"off\" in the permissions.")
+			return nil, refuse(http.StatusBadRequest, why+", so the turn did not start. Fix it on this runner, or turn off \"Run each session in a sandbox\" in the cockpit's Settings (Grants, Sandbox).")
 		}
 		jail = box
 		cmd.Env = setEnv(cmd.Env, box.Env())
@@ -965,11 +965,11 @@ type wall interface {
 // contain is on, every host when it is off.
 func (e *Engine) sandbox(p settings.Policy, session, folder string, readOnly, offline bool, read []string, net netjail.Spec) (*sandbox.Box, string) {
 	if e.cfg.Homes == "" || !SessionShape.MatchString(session) {
-		return nil, "[sandbox] mode is \"on\" in the permissions, and this runner gives sessions no home of their own (agentbus up uses this user's home)"
+		return nil, "the sandbox is on in Settings, and this runner gives sessions no home of their own (agentbus up uses this user's home)"
 	}
 	home := filepath.Join(e.cfg.Homes, session)
 	if info, err := os.Lstat(home); err != nil || !info.IsDir() {
-		return nil, "[sandbox] mode is \"on\" in the permissions, and this session has no home of its own: it began before homes"
+		return nil, "the sandbox is on in Settings, and this session has no home of its own: it began before homes"
 	}
 	userHome, _ := os.UserHomeDir()
 	if err := sandbox.CopyGrants(home, home+grantsRecord, userHome, p.Sandbox.Read); err != nil {

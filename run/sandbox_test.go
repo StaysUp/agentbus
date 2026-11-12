@@ -38,7 +38,7 @@ func sandboxEngine(t *testing.T, policy string, homes bool, script string) (*Eng
 
 // [sandbox] mode = "on" where the wall cannot be built refuses the turn
 // with why, before anything is stored: a runner with no home per session
-// (agentbus up), and a grant that is not there.
+// (agentbus up), and a grant that is not there. It names the Settings switch.
 func TestSandboxRefusedBeforeStart(t *testing.T) {
 	for _, c := range []struct {
 		name, policy string
@@ -54,6 +54,11 @@ func TestSandboxRefusedBeforeStart(t *testing.T) {
 			var r *Refusal
 			if !errors.As(err, &r) || r.Status != 400 || !strings.Contains(r.Msg, c.want) || !strings.Contains(r.Msg, "so the turn did not start") {
 				t.Fatalf("Start: %v, want a 400 refusal saying %q", err, c.want)
+			}
+			// It points to the switch a person can reach: the cockpit's
+			// Settings, not a file key (0.5.1).
+			if !strings.Contains(r.Msg, `turn off "Run each session in a sandbox" in the cockpit's Settings`) || strings.Contains(r.Msg, "[sandbox] mode") {
+				t.Errorf("refusal %q does not point to the Settings switch", r.Msg)
 			}
 			if snap, _ := st.Snapshot(); len(snap.Sessions) != 0 {
 				t.Errorf("%d sessions stored, want none", len(snap.Sessions))
