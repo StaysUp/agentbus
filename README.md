@@ -58,23 +58,12 @@ Then open a cockpit. The browser cockpit is
 [staysup/agentbus-cockpit](https://github.com/staysup/agentbus-cockpit): follow its README and paste
 the token when it asks.
 
-Or start a turn with curl:
-
-```sh
-TOKEN=$(cat ~/.local/share/agentbus/token)
-curl -s http://127.0.0.1:8787/api/v0/turns -H "Authorization: Bearer $TOKEN" \
-  -d '{"agent":"claude","folder":"'"$PWD"'","prompt":"Say hello in five words.","model":"haiku"}'
-```
-
 | `agentbus up` flag | Default | What it does |
 |---|---|---|
 | `-listen` | `127.0.0.1:8787` | The address. `0.0.0.0` can be reached from the network; the token guards it. |
 | `-origin` | none | Allow only this browser origin, such as `http://localhost:5173`. |
 | `-max-runs` | `4` | How many turns run at once, 1 to 64. More wait in the queue. |
 | `-replay` | `true` | Continue sessions from AgentBus's own record. `false` uses the agent's own resume. |
-
-There is no HTTPS. Across a network, use an SSH tunnel or a private network. In Docker, publish
-the port to your own machine only: `docker run -p 127.0.0.1:8788:8787 …`.
 
 ## One program per machine
 
@@ -94,7 +83,7 @@ Runners pull their work, so they work behind a router.
 
 ## Add a machine
 
-Control runs `agentbus server -listen 0.0.0.0` (or `agentbus up`) somewhere you can reach. On each
+Control runs `agentbus server -listen 0.0.0.0` somewhere you can reach. On each
 machine that should do work:
 
 **1. Install the binary into a folder of its own.** It must not replace another `agentbus` on your
@@ -156,25 +145,6 @@ subscriptions, connect each once in the cockpit (Agents, the agent's Connect ste
 and press **Turn on for my runners** there (it sets `subscriptions_on_runners = "own"`). Or start the runner with `-gateway local`
 to use the machine's own sign-ins.
 
-### Upgrading to 0.5
-
-- **Upgrade control and every runner together.** The runner protocol is now 4: control refuses a
-  0.4 runner, and a 0.5 runner cannot join 0.4 control.
-- **`agentbus connect` is removed.** Connect a subscription in the cockpit instead (Agents, the
-  agent's Connect step). It keeps the sign-in on control as before.
-- **`agentbus connector` is retired.** It changes nothing and prints the `agentbus runner` line to
-  run instead. Stop the connector and run that line with the same data folder: its `folders.json`
-  keeps the machine's id and folders. If the connector shared control's data folder, give the
-  runner a new one (`AGENTBUS_HOME`) and copy `folders.json` into it. Install the agents' programs
-  on that machine: the runner now runs its sessions.
-- **Enroll tokens still work**: `agentbus runner -server <url> -enroll-token-file ./enroll_token`.
-  `agentbus login` needs none.
-- **Settings move into control.** The first start of 0.5 copies the data folder beside it, then
-  imports `permissions.toml`, `instructions.md` and `agents.json` once and never reads them again.
-- **A default that changed keeps your old value.** In 0.5 an agent's own token no longer applies a
-  turn (`[agent_api] apply`). A 0.4 data folder gets `apply = true` written into its settings, so
-  nothing changes for you. Turn it off on the Settings page to take the new default.
-
 ## Settings
 
 Control keeps the settings in `settings.db`: the permissions every turn runs under and the
@@ -189,22 +159,6 @@ next turn. Runners read control's settings before each turn. The keys and their 
 - `[limits]` and `[agent_api]`: what agents may ask other agents for.
 - `[network]`: on Linux, close agents off to a list of hosts. Off by default.
 - `[sandbox]`: a wall around each session's agent, on macOS and Linux runners. Off by default.
-
-## Running it
-
-- **Logs** are in `logs/` in the data folder. `logs/service.log` is one line per request and per
-  turn, with no token, header or body; it rolls at 10 MiB. `logs/runs/<session>.log` is what the
-  agents printed, so it may hold your data.
-- **Your data stays on your machine.** `events.db` holds every model request and reply, unencrypted,
-  until you remove it. Headers, and so your sign-ins, are never stored. To clear it, stop the
-  service and delete the data folder.
-- **Overlay copies without root (Linux).** The service starts itself again in a user namespace of
-  its own, so a copy is an overlay mount. Your own tools outside see an empty folder at the copy's
-  path and reach it at `/proc/<pid>/root/<path>`; the log names the path. Ubuntu 24.04 and later
-  need an AppArmor profile for this, which `install.sh` installs when run as root, or prints the
-  command for. Without it, sessions use plain copies.
-- **Keep the data folder on the machine's own disk.** A disk that keeps file times only to the
-  second (a Mac folder shared into Docker, a network share) makes every apply look changed.
 
 ## Known limits
 
