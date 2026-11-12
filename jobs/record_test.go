@@ -34,7 +34,7 @@ func TestRecordRoute(t *testing.T) {
 	a, b := enroll(t, srv, 1), enroll(t, srv, 1)
 	makeJob(t, q, queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"})
 	var taken TakenWork
-	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{}, &taken); code != 200 {
+	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, &taken); code != 200 {
 		t.Fatalf("take: %d", code)
 	}
 	turn, session := taken.Job.Turn, taken.Job.Session
@@ -113,7 +113,7 @@ func TestCallsOfAnotherTurnRefused(t *testing.T) {
 	a := enroll(t, srv, 1)
 	makeJob(t, q, queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"})
 	var taken TakenWork
-	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{}, &taken); code != 200 {
+	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, &taken); code != 200 {
 		t.Fatalf("take: %d", code)
 	}
 	session := taken.Job.Session
@@ -160,7 +160,7 @@ func TestRecordRouteReview(t *testing.T) {
 	a := enroll(t, srv, 3)
 	author := makeJob(t, q, queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"})
 	var taken TakenWork
-	send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{}, &taken)
+	send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, &taken)
 	send(t, srv, a.Token, "POST", "/api/v0/runner/attempts/"+taken.Attempt.ID+"/start", AttemptCall{Number: 1}, nil)
 	ev := func(id, session, turn string, kind event.Kind) json.RawMessage {
 		b, _ := json.Marshal(event.Event{ID: id, Kind: kind, Time: time.Now().UTC(), Session: session, Turn: turn})
@@ -199,7 +199,7 @@ func TestRecordRouteReview(t *testing.T) {
 	turns := map[string]string{}
 	for range 2 {
 		var w TakenWork
-		if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{}, &w); code != 200 {
+		if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, &w); code != 200 {
 			t.Fatalf("take a review: %d", code)
 		}
 		turns[w.Job.ID] = w.Job.Turn

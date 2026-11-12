@@ -12,8 +12,10 @@ cockpit never calls them.
 All of it is under `/api/v0/runner/`. A running service describes it at
 `/api/v0/runner/openapi.json`, without the token, and shows it at `/docs/runner`. It is apart from
 the client API on purpose: **it is our binaries' own protocol and not a public promise.** It may
-change in any release until third parties write runners. This is protocol version 2: the routes
-moved under `/api/v0/runner/` in 0.4, and a runner of an older build is refused at register.
+change in any release until third parties write runners. This is protocol version 3: the routes
+moved under `/api/v0/runner/` in 0.4 (2), and in 0.5 the relay records every model call it carries
+(3). Register and every take carry `protocol`; a runner of another version is refused (400) at
+either, so a runner already running when control is upgraded stops at its next take.
 
 **Words.** A **job** is the queue's word for work: a turn, a review, an apply, a snapshot or a
 command. A
@@ -23,8 +25,8 @@ the turn a client asked for keeps its id. The client API never shows jobs or att
 
 | Call | What it does |
 |---|---|
-| `POST /api/v0/runner/register` | Register with name, labels, capacity and protocol 2, with the enrollment token. Returns the runner and its token, once. |
-| `POST /api/v0/runner/take` | Long poll, up to 30 s: a job with its new attempt and lease, or a cleanup. 204 when there is nothing. |
+| `POST /api/v0/runner/register` | Register with name, labels, capacity and protocol 3, with the enrollment token. Returns the runner and its token, once. |
+| `POST /api/v0/runner/take` | `{"wait_ms": n, "protocol": 3}`. Long poll, up to 30 s: a job with its new attempt and lease, or a cleanup. 204 when there is nothing. |
 | `POST /api/v0/runner/heartbeat` | Idle heartbeat with `capacity`. A restarted runner sends it to check the identity it saved. |
 | `POST /api/v0/runner/removed` | Report a closed session's copy removed, or `error`. |
 | `GET /api/v0/runner/settings` | The policy and the instructions, read fresh, for the turn it is about to start. |
@@ -33,13 +35,31 @@ the turn a client asked for keeps its id. The client API never shows jobs or att
 | `POST /api/v0/runner/attempts/<id>/events` | A batch numbered from `offset`. A repeat stores nothing new; a gap gets 409 with `next`. |
 | `POST /api/v0/runner/attempts/<id>/finish` | `status`, `reason`, `result`, `last_seq`. The same finish again gets the same answer. |
 | `POST /api/v0/runner/attempts/<id>/snapshot` | For a first turn in an isolated copy of a folder on another machine: the snapshot job, made once, on the folder's connector. Ask again until `snapshot` is set. |
-| `POST /api/v0/runner/attempts/<id>/calls` | A runner of a server, while the turn runs: `{"number": n, "calls":[…], "replies":[…]}`, the turn's model calls as its record kept them, each body as base64 so its bytes arrive as kept (`top`, each piece's `bytes`, a reply's `message`), a piece's `bytes` left out when the server holds it. Answers `{"stored": n, "missing":[…]}`: send the calls whose pieces are missing again, with those pieces' bytes. Each call must be of the session control assigned the job. |
-| `POST /api/v0/runner/attempts/<id>/record` | A runner of a server, while the turn runs and at its end: `{"number": n, "events":[…]}`, at most 500, the turn's events from its own record. The server's record keeps each once, by its id, without its `folder` (the runner's path). Every event must be of the session control assigned the job: a turn job's session, or for a review the one control named when it made the job (`links.review_session`). |
+| `POST /api/v0/runner/attempts/<id>/calls` | A runner of a server that keeps its own sign-in (`-gateway local`), while the turn runs: `{"number": n, "calls":[…], "replies":[…]}`, the turn's model calls as its record kept them, each body as base64 so its bytes arrive as kept (`top`, each piece's `bytes`, a reply's `message`), a piece's `bytes` left out when the server holds it. Answers `{"stored": n, "missing":[…]}`: send the calls whose pieces are missing again, with those pieces' bytes. Each call must be of the session control assigned the job. A runner that holds no secret (`-gateway server`, the default) never sends calls: the relay recorded each one (below). |
+| `POST /api/v0/runner/attempts/<id>/record` | A runner of a server, while the turn runs and at its end: `{"number": n, "events":[…]}`, at most 500, the turn's events from its own record. The server's record keeps each once, by its id, without its `folder` (the runner's path). A runner that holds no secret leaves out every event of a model call (one with an `exchange`) except `tool.refused` and `replay.failed`, which only its own gateway makes: the relay recorded the rest. One rule decides who records a call: the server records every call its relay carries, and only those. A call that never reached the server reached no vendor: it stays in the runner's own record and log. The server stores a turn's `session.closed` only after the relay has recorded the turn's calls, each counted from its arrival, before its credential is read. It waits at most 5 s, then stores it with `unsettled: true`. Every event must be of the session control assigned the job: a turn job's session, or for a review the one control named when it made the job (`links.review_session`). |
 | `POST /api/v0/runner/blobs` | `{"hashes":[…]}`, at most 10,000: answers `{"missing":[…]}`, the ones the store lacks, so only those are sent. |
 | `PUT /api/v0/runner/blobs/<hash>` | A file's content, streamed, up to 4 GiB: kept only when its SHA-256 is `<hash>`. 204. |
 | `GET /api/v0/runner/blobs/<hash>` | A file's content, streamed. |
 | `POST /api/v0/runner/packs` | Many blobs in one body, a **pack**: frames of `<hash> <size>\n` and then that many bytes, at most 1,000 blobs and 8 MiB of them. Each is checked against its hash. `{"kept": n}`. |
 | `POST /api/v0/runner/packs/fetch` | `{"hashes":[…]}`, 1 to 1,000: their blobs as one pack, in that order, streamed. 404 with `{"missing":[…]}` when one is not held. |
+
+**The relay records every call it carries.** A runner that holds no secret sends each model call
+of its agent to the server's relay, `/relay/<anthropic|chatgpt|cloudcode|openrouter>/…`, with the
+attempt's token as its credential. The relay checks the token, adds the real credential, and
+records the call in the server's record from its own copy, as a gateway on the agent's machine
+does: `model.requested`, then the reply as it streams (`model.responded` with its usage and cost,
+the tool events, `turn.completed`), and the call's context. Every event has the session and turn of
+the job the token names, whatever the request says. A call the relay refuses (403, 503) is recorded
+with the refusal as its reply. A vendor it cannot reach or read answers **502** with
+`{"error": "control could not reach the model's vendor: <what happened>; cause: <one word>"}`,
+is recorded as a failed `model.responded`, and the service log gets one
+`gateway.upstream_failed … via=relay session=… turn=… exchange=… class=… reason=…` line, never a
+header, a token or a body. A reply cut off before its end is recorded with
+`the reply was cut off` in its error. The runner's gateway names each call in the
+`X-Agentbus-Exchange` header, and the relay records the call under that name, so a `tool.refused`
+the runner sends names the same call. The relay ignores a name of another session's call, of
+another turn's, or of its own, and names the call itself; the header never reaches a vendor. A
+call with no current attempt's token is refused (401) and recorded nowhere.
 
 The runner's own routes carry no runner id: its token names the runner. Every call after take
 names its attempt id and number. A call for an attempt that is not current

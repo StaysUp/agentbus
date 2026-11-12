@@ -34,7 +34,7 @@ func TestCommandFinishKeepsEvent(t *testing.T) {
 		t.Fatal(err)
 	}
 	var taken TakenWork
-	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{}, &taken); code != 200 || taken.Job.Kind != queue.KindCommand {
+	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, &taken); code != 200 || taken.Job.Kind != queue.KindCommand {
 		t.Fatalf("take: %d %+v", code, taken.Job)
 	}
 	base := "/api/v0/runner/attempts/" + taken.Attempt.ID
@@ -83,7 +83,7 @@ func TestCommandFinishKeepsEvent(t *testing.T) {
 	if _, _, err := q.Create(queue.DefaultTeam, queue.KindCommand, "", queue.Spec{Session: "s1", Command: "sleep 9"}, queue.Links{}); err != nil {
 		t.Fatal(err)
 	}
-	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{}, &taken); code != 200 {
+	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, &taken); code != 200 {
 		t.Fatalf("take: %d", code)
 	}
 	base = "/api/v0/runner/attempts/" + taken.Attempt.ID
@@ -99,7 +99,7 @@ func TestCommandFinishKeepsEvent(t *testing.T) {
 	if _, _, err := q.Create(queue.DefaultTeam, queue.KindCommand, "", queue.Spec{Session: "s1", CommandID: "cmd_3", Command: "ls"}, queue.Links{}); err != nil {
 		t.Fatal(err)
 	}
-	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{}, &taken); code != 200 {
+	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, &taken); code != 200 {
 		t.Fatalf("take: %d", code)
 	}
 	base = "/api/v0/runner/attempts/" + taken.Attempt.ID

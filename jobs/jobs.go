@@ -22,6 +22,7 @@ import (
 	"github.com/staysup/agentbus/agents"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -50,8 +51,12 @@ const (
 )
 
 // ProtocolVersion is the runner protocol this server speaks. 2: the routes
-// under /api/v0/runner/, and a job's turn named when the job is made.
-const ProtocolVersion = 2
+// under /api/v0/runner/, and a job's turn named when the job is made. 3: the
+// relay records every model call it carries, so a runner that holds no
+// secret sends none of them (relay.go). Every register and every take names
+// it, and a runner of another version is refused, so a runner and a server
+// of different builds never both record a call, or both leave it out.
+const ProtocolVersion = 3
 
 // Config is what the server needs.
 type Config struct {
@@ -104,6 +109,11 @@ type Server struct {
 func New(cfg Config) (*Server, error) {
 	if cfg.Queue == nil || cfg.Token == "" || cfg.EnrollToken == "" || cfg.Token == cfg.EnrollToken {
 		return nil, errors.New("server: a queue and two different tokens are required")
+	}
+	for name, up := range cfg.Relay {
+		if len(up.Gateways) == 0 {
+			return nil, errors.New("server: the relay " + name + " has no gateway to record its calls")
+		}
 	}
 	if cfg.Lease == 0 {
 		cfg.Lease = Lease
@@ -358,7 +368,7 @@ func (s *Server) enroll(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if b.Protocol != ProtocolVersion {
-		fail(w, http.StatusBadRequest, "protocol must be 1")
+		fail(w, http.StatusBadRequest, protocolWhy)
 		return
 	}
 	if b.Name == "" || len(b.Name) > 128 || b.Capacity < 1 || b.Capacity > MaxCapacity || len(b.Labels) > 64 {
@@ -402,7 +412,13 @@ type TakeRequest struct {
 	// WaitMS is how long to wait for a job, up to 30000. Zero answers at
 	// once.
 	WaitMS int64 `json:"wait_ms"`
+	// Protocol is the runner protocol the runner speaks: ProtocolVersion.
+	Protocol int `json:"protocol"`
 }
+
+// protocolWhy refuses a runner of another protocol version.
+var protocolWhy = "this runner speaks another runner protocol than control (" + strconv.Itoa(ProtocolVersion) +
+	"): run the same agentbus release on both"
 
 // TakenWork is the answer to a take that found work: a job, or a closed
 // session whose workspace the runner must remove and then report removed.
@@ -417,6 +433,10 @@ func (s *Server) take(w http.ResponseWriter, r *http.Request, rn queue.Runner) {
 	var b TakeRequest
 	if !decode(r, &b) || b.WaitMS < 0 {
 		fail(w, http.StatusBadRequest, "the body must be one JSON object with wait_ms, 0 or more")
+		return
+	}
+	if b.Protocol != ProtocolVersion {
+		fail(w, http.StatusBadRequest, protocolWhy)
 		return
 	}
 	wait := min(time.Duration(b.WaitMS)*time.Millisecond, s.cfg.MaxWait)

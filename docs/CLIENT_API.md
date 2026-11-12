@@ -45,7 +45,7 @@ gets it as `AGENTBUS_TOKEN`, with `AGENTBUS_URL` set to the server, and, on a ru
 server` (the default), as its model credential: the `key_env` variable of an OpenRouter agent, or
 `CLAUDE_CODE_OAUTH_TOKEN` for a claude subscription, or `AGENTBUS_CODEX_TOKEN` for a codex one
 (codex reads it as the key of a provider set on its command line for the turn, below). The
-runner's gateway records each call and sends it to the server's relay,
+runner's gateway sends each call to the server's relay,
 `/relay/<anthropic|chatgpt|cloudcode|openrouter>/…`, which checks the token, takes the agent the turn names (or, for a next turn that names none, the
 session's latest agent as its record holds it, with that saved agent's access and `key_env` from
 the server's own saved agents), and swaps in the real credential: an OpenRouter key from the
@@ -55,6 +55,19 @@ goes only to its own vendor: claude's on `/relay/anthropic`, codex's ChatGPT sig
 `/relay/chatgpt`, with its account in `ChatGPT-Account-ID`, as codex sends it, and agy's Google
 sign-in on `/relay/cloudcode`, for Code Assist's methods (`/relay/cloudcode/v1internal:…`) only. A refusal names
 what to do, as a 401 or 403 the agent shows.
+
+**The relay records every call it carries**, with an API key or a subscription alike, in the
+server's record: the request, then the reply as it streams, under the turn and session of the job
+the token names, with the same events a gateway on the agent's machine writes (`model.requested`,
+`model.responded` with usage and cost, the tool events). So a remote turn's calls appear once, from
+the server, whether or not the runner sends anything more. A call the relay refuses is recorded
+with the refusal as its reply. A vendor the server cannot reach answers 502 with
+`{"error": "control could not reach the model's vendor: …; cause: <one word>"}`, recorded as a
+failed `model.responded`, and logged in `logs/service.log` as `gateway.upstream_failed … via=relay`.
+A reply cut off is recorded with `the reply was cut off` in its error. A call that never reached the
+server reached no vendor; it stays in the runner's own record.
+On one machine
+(`agentbus up`) nothing changes: the agent's calls go through this service's own gateway.
 
 | Path | Who calls it | Sign-in |
 |---|---|---|
@@ -2079,7 +2092,9 @@ separate source field: read the kind. Built-in kinds have two parts, `<subject>.
 program's kinds have three and start with `x.`, which no built-in kind does.
 
 **Observed by the gateway**, from the agent's traffic with its model. These say what the agent and
-the model did; AgentBus only reads them off the wire.
+the model did; AgentBus only reads them off the wire. For a turn on a runner that holds no secret,
+the gateway is the server's relay, which writes them from its own copy of each call; `tool.refused`
+and `replay.failed` still come from the runner's gateway, under the same `exchange`.
 
 | Kind | From |
 |---|---|
@@ -2284,6 +2299,14 @@ Invalid API key · Please run /login
 `v0` may change without notice. **The prefix stays `/api/v0` through 0.4**: v0 allows breaking
 changes, and the 0.4 cleanup is one. `/api/v1` comes when third parties depend on the API; from
 then on, a change that breaks a client gets a new version path, and the old one stays for a while.
+
+**What 0.5 changes after 0.4.**
+
+- **Control records every model call of a remote turn itself.** The relay records each call it
+  carries (request, then the streamed reply) in the server's record; a runner that holds no secret
+  no longer sends its copy of its calls, only what it alone sees ([Where it
+  listens](#where-it-listens)). A call the relay refuses is recorded with why. A vendor the relay
+  cannot reach gets a 502 that says so, with the cause in one word, and a line in the service log.
 
 **What 0.4 changes after 0.3.** The API is now three nouns, agent, session and turn, and every
 action is on a turn. The old routes are removed with no alias: 0.3 had no outside users.

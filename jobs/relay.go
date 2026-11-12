@@ -2,11 +2,10 @@ package jobs
 
 // Control's gateway for runners' model calls. A runner holds no secret: its
 // agent's model calls carry the turn's token as their credential (a
-// placeholder), the runner's own gateway records them and sends them here,
-// and the relay swaps the token for the real credential on the way out: an
-// API key from control's environment, or the person's own subscription
-// connected on control (package credentials). The vendor's reply goes back
-// as it came.
+// placeholder), the runner's own gateway sends them here, and the relay swaps
+// the token for the real credential on the way out: an API key from
+// control's environment, or the person's own subscription connected on
+// control (package credentials). The vendor's reply goes back as it came.
 //
 // Which credential, by one rule: that of the agent the token's job names; a
 // job that names none continues on the agent its session's latest turn ran
@@ -14,19 +13,30 @@ package jobs
 // Either way a saved agent's access and key variable come from control's
 // saved agents, never from a runner: a runner can at most pick among the
 // person's own agents, and never names a variable.
-// The relay records nothing itself: the runner's record of the call reaches
-// control with the turn (record.go).
+//
+// The relay records every call it carries, in control's record, with the
+// session and turn of the job the token names: the request, then the reply
+// as it streams (model.requested, model.responded, tool events, usage and
+// cost), through a gateway of control's own for the vendor (Upstream.Gateways)
+// that does what a gateway on the agent's machine does. One rule: control
+// records every call it carries, and a runner that holds no secret sends
+// none of its calls (runner/record.go). A call the relay refuses, or whose
+// vendor it cannot reach, is recorded too, with why. A call that never
+// reached control reached no vendor: it stays in the runner's own record. A
+// call without a running turn's token is refused and recorded nowhere: it
+// names no session.
 
 import (
+	"encoding/json"
 	"errors"
-	"io"
-	"log"
 	"net/http"
-	"net/http/httputil"
 	"net/url"
+	"regexp"
 	"strings"
+	"time"
 
 	"github.com/staysup/agentbus/credentials"
+	"github.com/staysup/agentbus/gateway"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/settings"
 )
@@ -46,6 +56,70 @@ type Upstream struct {
 	// as "v1internal:" for agy's Code Assist methods. Any other path gets
 	// no credential.
 	Under string
+	// Gateways record the calls relayed here, each forwarding to URL: the
+	// first that reads a call's path takes it, and the first takes any
+	// other (one gateway per API format of the host, as OpenRouter's two).
+	// At least one.
+	Gateways []*gateway.Gateway
+}
+
+// gatewayFor is the gateway of up that takes a call of method on path.
+func (up Upstream) gatewayFor(method, path string) *gateway.Gateway {
+	for _, g := range up.Gateways {
+		if g.Watches(method, path) {
+			return g
+		}
+	}
+	return up.Gateways[0]
+}
+
+// SettleWait bounds how long control waits, before it stores a turn's
+// session.closed, for the relay to finish recording the turn's calls: their
+// events are written off the reply's path, and can land after the runner
+// sent the end. Under the runner's own wait for the answer.
+const SettleWait = 5 * time.Second
+
+// settle waits until every call of (session, turn) the relay carried is
+// recorded, at most SettleWait; false when it could not confirm that.
+func (s *Server) settle(session, turn string) bool {
+	ok := true
+	for _, up := range s.cfg.Relay {
+		for _, g := range up.Gateways {
+			ok = g.Settle(session, turn, SettleWait) && ok
+		}
+	}
+	return ok
+}
+
+// exchangeID is the shape of a gateway's exchange id.
+var exchangeID = regexp.MustCompile(`^x-[0-9a-f]{8}-[0-9]{1,20}$`)
+
+// exchangeOf is the runner's name for the call r carries
+// (gateway.ExchangeHeader), when control may record the call under it: the
+// shape of a gateway's id, none of control's own gateways', and no call of
+// another session or of another turn of this one. Otherwise empty, and
+// control's gateway names the call.
+func (s *Server) exchangeOf(r *http.Request, session, turn string) string {
+	x := r.Header.Get(gateway.ExchangeHeader)
+	if !exchangeID.MatchString(x) {
+		return ""
+	}
+	for _, up := range s.cfg.Relay {
+		for _, g := range up.Gateways {
+			if g.Names(x) {
+				return ""
+			}
+		}
+	}
+	if s.cfg.Record != nil {
+		if sess, found, err := s.cfg.Record.CallSession(x); err != nil || (found && sess != session) {
+			return ""
+		}
+		if other, err := s.cfg.Record.OtherTurns(x, session, turn); err != nil || other {
+			return ""
+		}
+	}
+	return x
 }
 
 // Relay answers RelayPrefix. It is nil without Config.Relay.
@@ -55,9 +129,6 @@ func (s *Server) Relay() http.Handler {
 	}
 	return http.HandlerFunc(s.relay)
 }
-
-// discard is the proxy's logger: net/http's messages can quote a header.
-var discard = log.New(io.Discard, "", 0)
 
 func (s *Server) relay(w http.ResponseWriter, r *http.Request) {
 	name, rest, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, RelayPrefix), "/")
@@ -72,83 +143,76 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusUnauthorized, "the call carries no turn token of a turn running now; control adds credentials only to a running turn's calls")
 		return
 	}
+	session := assignedSession(j)
+	rl := gateway.Relayed{Session: session, Turn: j.Turn, Path: "/" + rest}
+	g := up.gatewayFor(r.Method, rl.Path)
+	// Read once the call holds its turn open: the record and a renewal can
+	// take a while.
+	rl.Prepare = func(rl *gateway.Relayed) {
+		rl.Exchange = s.exchangeOf(r, session, j.Turn)
+		cred, status, why := s.credential(j, up)
+		if why != "" {
+			b, _ := json.Marshal(JobError{Error: why})
+			rl.Refuse = &gateway.Refusal{Status: status, ContentType: "application/json", Body: b}
+			return
+		}
+		rl.Header = func(h http.Header) {
+			h.Del("X-Api-Key")
+			h.Set("Authorization", "Bearer "+cred.Token)
+			for k, v := range cred.Headers {
+				h.Set(k, v)
+			}
+		}
+	}
+	g.ServeRelayed(w, r, rl)
+}
+
+// credential is what control adds to the calls of j's turn on up, or the
+// status and words of the refusal.
+func (s *Server) credential(j queue.Job, up Upstream) (credentials.Cred, int, string) {
+	none := credentials.Cred{}
 	sp, why := s.agentOf(j)
 	if why != "" {
-		fail(w, http.StatusForbidden, why)
-		return
+		return none, http.StatusForbidden, why
 	}
 	access := sp.Access
 	if access == "" {
 		access = credentials.AccessSubscription
 	}
 	if access != up.Access {
-		fail(w, http.StatusForbidden, "this turn's agent reaches its model by "+access+", so control adds no credential to a call on this path")
-		return
+		return none, http.StatusForbidden, "this turn's agent reaches its model by " + access + ", so control adds no credential to a call on this path"
 	}
 	if access == credentials.AccessSubscription {
 		if sp.Harness != up.Harness {
-			fail(w, http.StatusForbidden, "this turn's agent runs "+sp.Harness+", so control adds its subscription to no call on this path")
-			return
+			return none, http.StatusForbidden, "this turn's agent runs " + sp.Harness + ", so control adds its subscription to no call on this path"
 		}
 		p := settings.DefaultPolicy()
 		if s.cfg.Settings != nil {
 			var err error
 			if p, _, err = s.cfg.Settings.Policy(); err != nil {
-				fail(w, http.StatusServiceUnavailable, "control's permissions cannot be used, so it adds no subscription; fix them")
-				return
+				return none, http.StatusServiceUnavailable, "control's permissions cannot be used, so it adds no subscription; fix them"
 			}
 		}
 		if p.SubscriptionsOnRunners != settings.SubscriptionsOwn {
-			fail(w, http.StatusForbidden, "subscriptions on runners are off: set subscriptions_on_runners = \"own\" in control's permissions.toml, "+
-				"for runners on your own machines, or use an agent with an API key")
-			return
+			return none, http.StatusForbidden, "subscriptions on runners are off: set subscriptions_on_runners = \"own\" in control's permissions.toml, " +
+				"for runners on your own machines, or use an agent with an API key"
 		}
 	}
-	var err error
 	if s.cfg.Credentials == nil {
-		fail(w, http.StatusForbidden, "control keeps no credentials for runners")
-		return
+		return none, http.StatusForbidden, "control keeps no credentials for runners"
 	}
 	cred, err := s.cfg.Credentials.Credential(credentials.Need{Access: access, Harness: sp.Harness, KeyEnv: sp.KeyEnv})
 	var missing *credentials.Missing
 	switch {
 	case errors.As(err, &missing):
-		fail(w, http.StatusForbidden, missing.Why)
-		return
+		return none, http.StatusForbidden, missing.Why
 	case err != nil:
-		s.internal(w)
-		return
+		if s.Logf != nil {
+			s.Logf("relay.credential_failed session=%s turn=%s access=%s", assignedSession(j), j.Turn, access)
+		}
+		return none, http.StatusInternalServerError, "control could not read its credentials"
 	}
-	u := up.URL
-	p := &httputil.ReverseProxy{
-		Rewrite: func(pr *httputil.ProxyRequest) {
-			pr.Out.URL.Scheme, pr.Out.URL.Host = u.Scheme, u.Host
-			pr.Out.URL.Path, pr.Out.URL.RawPath = strings.TrimSuffix(u.Path, "/")+"/"+rest, ""
-			pr.Out.Host = u.Host
-			pr.Out.Header.Del("X-Api-Key")
-			pr.Out.Header.Set("Authorization", "Bearer "+cred.Token)
-			for k, v := range cred.Headers {
-				pr.Out.Header.Set(k, v)
-			}
-		},
-		FlushInterval: -1, // a streamed reply goes on as it comes
-		// chatgpt.com streams codex's reply with no Content-Type. Go's
-		// server would then add one it guessed from the first bytes,
-		// "text/plain; charset=utf-8", and the runner's gateway would read
-		// the stream as one JSON body and record no reply (2026-11-11). A
-		// nil value keeps the header out, as the vendor sent it.
-		ModifyResponse: func(res *http.Response) error {
-			if _, ok := res.Header["Content-Type"]; !ok {
-				w.Header()["Content-Type"] = nil
-			}
-			return nil
-		},
-		ErrorLog: discard,
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
-			fail(w, http.StatusBadGateway, "control could not reach the model's vendor")
-		},
-	}
-	p.ServeHTTP(w, r)
+	return cred, 0, ""
 }
 
 // agentOf is the agent whose credential j's calls get (the rule above), or

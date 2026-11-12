@@ -256,6 +256,35 @@ func TestRunnerHoldsNoKey(t *testing.T) {
 	if jj := waitJob(t, ns.server, ns.tok, j.ID); jj.State != queue.Finished {
 		t.Fatalf("job %s %s %s", jj.State, jj.Reason, jj.Result)
 	}
+	// The call is in the server's record once, from the relay's own copy:
+	// the runner sent none of its call's events. Both name the call by the
+	// runner's exchange.
+	runnerIDs := map[string]bool{}
+	recs, _ := ns.runner.store.After(0, store.Filter{Turn: turn}, 1000)
+	for _, r := range recs {
+		var e event.Event
+		if json.Unmarshal(r.Data, &e) == nil && e.Exchange == exchange {
+			runnerIDs[e.ID] = true
+		}
+	}
+	if len(runnerIDs) == 0 {
+		t.Fatalf("the runner's record has no call %s", exchange)
+	}
+	counts := map[string]int{}
+	recs, _ = ns.server.store.After(0, store.Filter{Turn: turn}, 1000)
+	for _, r := range recs {
+		var e event.Event
+		if json.Unmarshal(r.Data, &e) != nil || e.Exchange == "" {
+			continue
+		}
+		if runnerIDs[e.ID] {
+			t.Fatalf("the runner sent its copy of a call's event: %s", r.Data)
+		}
+		counts[string(e.Kind)]++
+	}
+	if counts["model.requested"] != 1 || counts["model.responded"] != 1 {
+		t.Fatalf("the server's record of the call: %v", counts)
+	}
 	// Once the attempt ended, its token adds no credential and calls no API.
 	req, _ := http.NewRequest("POST", "http://"+ns.server.addr+"/relay/openrouter/v1/messages", strings.NewReader(`{}`))
 	req.Header.Set("Authorization", "Bearer "+placeholder)
@@ -422,26 +451,10 @@ func TestRunnerUsesConnectedCodexSubscription(t *testing.T) {
 	if strings.Contains(string(b), "fake-chatgpt") || strings.Contains(string(b), "fake-account-1") {
 		t.Fatal("the agent's environment or arguments hold the sign-in")
 	}
-	// The running turn's token on the Anthropic path: refused, nothing sent.
-	req, _ := http.NewRequest("POST", "http://"+ns.server.addr+"/relay/anthropic/v1/messages", strings.NewReader(`{}`))
-	req.Header.Set("Authorization", "Bearer "+placeholder)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != http.StatusForbidden || len(ns.anth.seen()) != 0 {
-		t.Fatalf("a codex turn's token on the Anthropic path: %d, %v", resp.StatusCode, ns.anth.seen())
-	}
-	os.WriteFile(ns.release, nil, 0o600)
-	jj := waitJob(t, ns.server, ns.tok, j.ID)
-	if jj.State != queue.Finished {
-		t.Fatalf("job %s %s %s", jj.State, jj.Reason, jj.Result)
-	}
 	// The streamed reply is in the server's record: its text, its usage,
 	// and the turn's reply.
 	waitFor(t, "the codex reply in the server's record", func() bool {
-		recs, _ := ns.server.store.After(0, store.Filter{Turn: jj.Turn}, 1000)
+		recs, _ := ns.server.store.After(0, store.Filter{Turn: j.Turn}, 1000)
 		for _, r := range recs {
 			var e event.Event
 			if r.Kind == "model.responded" && json.Unmarshal(r.Data, &e) == nil {
@@ -454,9 +467,37 @@ func TestRunnerUsesConnectedCodexSubscription(t *testing.T) {
 		return false
 	})
 	waitFor(t, "the turn's reply", func() bool {
-		code, raw := getAPI(t, ns.server, ns.tok, "/api/v0/turns/"+jj.Turn)
+		code, raw := getAPI(t, ns.server, ns.tok, "/api/v0/turns/"+j.Turn)
 		return code == 200 && strings.Contains(raw, `"reply":"pong"`)
 	})
+	// The running turn's token on the Anthropic path: refused, nothing sent.
+	req, _ := http.NewRequest("POST", "http://"+ns.server.addr+"/relay/anthropic/v1/messages", strings.NewReader(`{}`))
+	req.Header.Set("Authorization", "Bearer "+placeholder)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || len(ns.anth.seen()) != 0 {
+		t.Fatalf("a codex turn's token on the Anthropic path: %d, %v", resp.StatusCode, ns.anth.seen())
+	}
+	// The refusal is in the server's record, as a call of the turn: the
+	// relay records every call a running turn's token makes.
+	waitFor(t, "the refused call in the server's record", func() bool {
+		recs, _ := ns.server.store.After(0, store.Filter{Turn: j.Turn}, 1000)
+		for _, r := range recs {
+			var e event.Event
+			if r.Kind == "model.responded" && json.Unmarshal(r.Data, &e) == nil && e.Vendor == "anthropic" {
+				return e.Status == http.StatusForbidden && strings.Contains(e.Error, "control adds its subscription to no call on this path")
+			}
+		}
+		return false
+	})
+	os.WriteFile(ns.release, nil, 0o600)
+	jj := waitJob(t, ns.server, ns.tok, j.ID)
+	if jj.State != queue.Finished {
+		t.Fatalf("job %s %s %s", jj.State, jj.Reason, jj.Result)
+	}
 	var list struct {
 		Subscriptions []struct {
 			Harness           string

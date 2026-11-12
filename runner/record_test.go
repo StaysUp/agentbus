@@ -182,3 +182,75 @@ func TestForwardSendsALargeCall(t *testing.T) {
 		t.Fatalf("the call did not go: refused %d", fc.refused)
 	}
 }
+
+// A runner that holds no secret sends none of its model calls: control's
+// relay recorded each from its own copy. It sends the turn's own events and,
+// of a call's events, only those its gateway made itself (a refused tool
+// call, a failed replay). A runner with its own sign-in sends them all.
+func TestForwardLeavesRelayedCallsToControl(t *testing.T) {
+	for _, noSecrets := range []bool{true, false} {
+		st, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now().UTC()
+		if err := st.KeepCall(body.Call{Exchange: "x-run-1", Session: "s1", Vendor: "anthropic", Time: now, Size: 2,
+			Request: body.Request{Top: json.RawMessage(`{}`), Pieces: []body.Piece{{Kind: body.Message, Label: "user", JSON: json.RawMessage(`{"a":1}`)}}}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.KeepCall(body.Call{Exchange: "x-run-2", Session: "s1", Vendor: "anthropic", Time: now, Size: 2,
+			Request: body.Request{Top: json.RawMessage(`{}`), Pieces: []body.Piece{{Kind: body.Message, Label: "user", JSON: json.RawMessage(`{"c":3}`)}}}}); err != nil {
+			t.Fatal(err)
+		}
+		if err := st.KeepReply(body.Reply{Exchange: "x-run-1", Status: 200, Stop: "end_turn", Time: now, Message: json.RawMessage(`{"b":2}`)}); err != nil {
+			t.Fatal(err)
+		}
+		evs := []event.Event{
+			{ID: "own-start", Kind: event.TurnStarted},
+			{ID: "gw-end", Kind: event.TurnCompleted, Exchange: "x-run-1"},
+			{ID: "gw-req", Kind: event.ModelRequested, Exchange: "x-run-1"},
+			{ID: "gw-tool", Kind: event.ToolRequested, Exchange: "x-run-1"},
+			{ID: "gw-refused", Kind: event.ToolRefused, Exchange: "x-run-1"},
+			{ID: "gw-replay", Kind: event.ReplayFailed, Exchange: "x-run-1"},
+			{ID: "gw-resp", Kind: event.ModelResponded, Exchange: "x-run-1"},
+			// A call that never reached control's relay: control did not
+			// record it, and it reached no vendor. It stays here.
+			{ID: "un-req", Kind: event.ModelRequested, Exchange: "x-run-2"},
+			{ID: "un-resp", Kind: event.ModelResponded, Exchange: "x-run-2", Status: 502, Error: "the vendor could not be reached (dial)"},
+			{ID: "own-closed", Kind: event.SessionClosed},
+		}
+		for _, e := range evs {
+			e.Time, e.Session, e.Turn = now, "s1", "t_1"
+			if _, _, err := st.Append(e); err != nil {
+				t.Fatal(err)
+			}
+		}
+		fc := &fakeControl{events: map[string]bool{}, calls: map[string]jobs.SentCall{}, replies: map[string]jobs.ReplyRecord{}}
+		srv := httptest.NewServer(fc)
+		r := &Runner{cfg: Config{Queue: srv.URL, Store: st, Forward: true, NoSecrets: noSecrets, Logf: t.Logf}, short: srv.Client(), token: "tok"}
+		at := &attempt{r: r}
+		at.a.ID, at.a.Number = "t_1", 1
+		at.forward(context.Background(), "s1", true)
+		srv.Close()
+		st.Close()
+		var sent []string
+		for id := range fc.events {
+			sent = append(sent, id)
+		}
+		want := map[string]bool{"own-start": true, "gw-refused": true, "gw-replay": true, "own-closed": true}
+		if noSecrets {
+			if len(fc.events) != len(want) || len(fc.calls) != 0 || len(fc.replies) != 0 {
+				t.Fatalf("no secrets: sent events %v, %d calls, %d replies", sent, len(fc.calls), len(fc.replies))
+			}
+			for id := range want {
+				if !fc.events[id] {
+					t.Fatalf("no secrets: %s was not sent: %v", id, sent)
+				}
+			}
+			continue
+		}
+		if len(fc.events) != len(evs) || len(fc.calls) != 2 || len(fc.replies) != 1 {
+			t.Fatalf("own sign-in: sent events %v, %d calls, %d replies", sent, len(fc.calls), len(fc.replies))
+		}
+	}
+}

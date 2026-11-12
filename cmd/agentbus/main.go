@@ -40,6 +40,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/staysup/agentbus/adapter"
 	"github.com/staysup/agentbus/adapter/anthropic"
 	"github.com/staysup/agentbus/adapter/gemini"
 	"github.com/staysup/agentbus/adapter/openai"
@@ -330,6 +331,11 @@ func start(c config) (*service, error) {
 	var issuer queue.FolderIssuer // nil, not a nil *folders.Registry, in server
 	var bs *blobs.Store           // the control plane's blob store (up, server)
 	var blobSweep *jobs.Sweeper   // and what cleans it
+	// Every model.responded is priced, and every turn.started of a run's
+	// session gets the run's agent and folder, before it is stored.
+	sink := cost.Sink{Table: cost.Default(), Next: engine.TurnSink(st, st)}
+	// The relay's gateways, which record the runners' calls it carries.
+	var relayGws []*gateway.Gateway
 	if c.hasEngine() {
 		if fr, err = folders.Open(filepath.Join(c.home, "folders.json")); err != nil {
 			st.Close()
@@ -380,13 +386,27 @@ func start(c config) (*service, error) {
 		if orUp == nil {
 			orUp, _ = url.Parse(openrouter)
 		}
+		// Each records the calls it carries in this record, as a runner's
+		// own gateway does (jobs/relay.go).
+		recorded := func(u *url.URL, as ...adapter.Adapter) []*gateway.Gateway {
+			var gs []*gateway.Gateway
+			for _, a := range as {
+				g := gateway.New(u, a, sink)
+				gs = append(gs, g)
+				relayGws = append(relayGws, g)
+			}
+			return gs
+		}
 		relay := map[string]jobs.Upstream{
-			relayAnthropic: {URL: c.upstream, Access: credentials.AccessSubscription, Harness: "claude"},
-			relayChatGPT:   {URL: c.chatgpt, Access: credentials.AccessSubscription, Harness: "codex"},
+			relayAnthropic: {URL: c.upstream, Access: credentials.AccessSubscription, Harness: "claude", Gateways: recorded(c.upstream, anthropic.Adapter{})},
+			relayChatGPT:   {URL: c.chatgpt, Access: credentials.AccessSubscription, Harness: "codex", Gateways: recorded(c.chatgpt, openai.Adapter{})},
 			// agy's Code Assist methods only: the Google sign-in reaches
 			// nothing else of that host.
-			relayCloudCode:  {URL: c.cloudCodeOr(), Access: credentials.AccessSubscription, Harness: "agy", Under: "v1internal:"},
-			relayOpenRouter: {URL: orUp, Access: credentials.AccessOpenRouter},
+			relayCloudCode: {URL: c.cloudCodeOr(), Access: credentials.AccessSubscription, Harness: "agy", Under: "v1internal:",
+				Gateways: recorded(c.cloudCodeOr(), gemini.Adapter{})},
+			// OpenRouter takes both API formats: the Responses one's calls
+			// go to the openai adapter, any other to the anthropic one.
+			relayOpenRouter: {URL: orUp, Access: credentials.AccessOpenRouter, Gateways: recorded(orUp, openai.Adapter{}, anthropic.Adapter{})},
 		}
 		creds := credentials.Plug{credentials.AccessOpenRouter: credentials.Env{Getenv: c.getenvOr()}, credentials.AccessSubscription: subs}
 		js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollToken, Heartbeat: c.heartbeat, Agents: saved, Settings: cfgStore,
@@ -544,16 +564,14 @@ func start(c config) (*service, error) {
 		closeQ()
 		return nil, err
 	}
-	// Every model.responded is priced, and every turn.started of a run's
-	// session gets the run's agent and folder, before it is stored.
-	sink := cost.Sink{Table: cost.Default(), Next: engine.TurnSink(st, st)}
 	anthURL, chatURL, orURL, ccURL := c.upstream, c.chatgpt, c.openrouter, c.cloudCodeOr()
 	if orURL == nil {
 		orURL, _ = url.Parse(openrouter)
 	}
 	// A runner that holds no secret sends each call on to the server's
-	// relay, which adds the credential (jobs/relay.go). It records the call
-	// here as before.
+	// relay, which adds the credential and records the call in control's
+	// record (jobs/relay.go). It records the call here too, for its own
+	// record, and names each call's exchange to the relay.
 	if c.noSecrets() {
 		srv := strings.TrimSuffix(c.server, "/") + jobs.RelayPrefix
 		anthURL, orURL = mustParse(srv+relayAnthropic), mustParse(srv+relayOpenRouter)
@@ -591,9 +609,16 @@ func start(c config) (*service, error) {
 	// Every model request's body is kept as pieces, for a call's context
 	// view, and every reply an adapter can rebuild, for own replay.
 	keep := keeper{st: st, logf: svcLog.Printf}
+	for _, g := range relayGws {
+		g.KeepBodies(keep)
+		g.SetLog(svcLog.Printf)
+	}
 	for _, g := range gws {
 		g.KeepBodies(keep)
 		g.SetLog(svcLog.Printf)
+		if c.noSecrets() {
+			g.SendExchange()
+		}
 		// forbid in permissions.toml, applied to each run turn's replies.
 		if eng != nil {
 			g.SetGuard(eng)
@@ -606,7 +631,7 @@ func start(c config) (*service, error) {
 		orOAI.SetRewriter(codexReplay)
 	}
 	host, _, _ := net.SplitHostPort(c.listen)
-	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: gws, api: a, eng: eng, store: st, blobs: bs, blobSwp: blobSweep,
+	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: append(gws, relayGws...), api: a, eng: eng, store: st, blobs: bs, blobSwp: blobSweep,
 		queue: q, remote: remote, settings: cfgStore, folders: fr, log: svcLog, logins: logins, done: make(chan error, 1)}
 	if q != nil {
 		s.subs = subs

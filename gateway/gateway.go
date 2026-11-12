@@ -59,6 +59,9 @@ type Gateway struct {
 	guard   Guard      // nil unless SetGuard was called
 	refused refusals   // which rule refused each call (guard.go)
 	prefix  string     // cut from the vendor path before anything reads it (SetPrefix)
+	// sendExchange: each call's exchange goes upstream in ExchangeHeader
+	// (SendExchange).
+	sendExchange bool
 
 	// logf is the service log, for why an upstream call failed; nil unless
 	// SetLog was called.
@@ -101,6 +104,7 @@ func New(upstream *url.URL, a adapter.Adapter, sink event.Sink) *Gateway {
 	g.proxy = &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(upstream)
+			rl := relayedOf(r.In.Context())
 			// ReverseProxy drops query parts it cannot parse before Rewrite,
 			// so the agent's query is put back, after the upstream's own.
 			switch {
@@ -111,9 +115,13 @@ func New(upstream *url.URL, a adapter.Adapter, sink event.Sink) *Gateway {
 			default:
 				r.Out.URL.RawQuery = upstream.RawQuery + "&" + r.In.URL.RawQuery
 			}
-			for _, h := range forwarded {
-				if v, ok := r.In.Header[h]; ok {
-					r.Out.Header[h] = v
+			// A relayed call's hops are the runner's, not the agent's: they
+			// stay here, as control's relay always kept them.
+			if rl == nil {
+				for _, h := range forwarded {
+					if v, ok := r.In.Header[h]; ok {
+						r.Out.Header[h] = v
+					}
 				}
 			}
 			// The one header not passed on. With the agent's Accept-Encoding,
@@ -123,8 +131,17 @@ func New(upstream *url.URL, a adapter.Adapter, sink event.Sink) *Gateway {
 			// read. LiteLLM never forwards it to Anthropic either. A vendor that
 			// compresses anyway still goes through decode.
 			r.Out.Header.Del("Accept-Encoding")
+			// The exchange header is the gateways' own: whatever the agent
+			// sent under it goes nowhere, and a vendor never gets it.
+			r.Out.Header.Del(ExchangeHeader)
+			if rl != nil && rl.Header != nil {
+				rl.Header(r.Out.Header)
+			}
+			if ex, ok := r.In.Context().Value(exchangeKey{}).(*exchange); ok && g.sendExchange && rl == nil {
+				r.Out.Header.Set(ExchangeHeader, ex.id)
+			}
 		},
-		Transport:      transport,
+		Transport:      refuser{transport},
 		FlushInterval:  -1,
 		ModifyResponse: g.modifyResponse,
 		ErrorHandler:   g.errorHandler,
@@ -197,6 +214,9 @@ type exchange struct {
 	// forbid: the run turn's forbid entries, which the guard applies to the
 	// reply (guard.go).
 	forbid []string
+	// relayed: control's relay took the call for a runner's turn
+	// (ServeRelayed).
+	relayed bool
 
 	// unknowns keeps each schema.unexpected shape once per exchange, and at
 	// most adapter.MaxUnexpected, across the request and the reply.
@@ -221,6 +241,23 @@ type exchangeKey struct{}
 
 // turnKey names a run's turn: its session and the turn its base URL names.
 type turnKey struct{ session, turn string }
+
+// hold counts the run turn (session, turn) as open until the returned func
+// runs.
+func (g *Gateway) hold(session, turn string) func() {
+	k := turnKey{session, turn}
+	g.openMu.Lock()
+	g.open[k]++
+	g.openMu.Unlock()
+	return func() {
+		g.openMu.Lock()
+		if g.open[k]--; g.open[k] <= 0 {
+			delete(g.open, k)
+		}
+		g.openMu.Unlock()
+		g.opened.Broadcast()
+	}
+}
 
 // track counts a run turn's exchange as open until ex.done.
 func (g *Gateway) track(ex *exchange, session, turn string) {
@@ -376,6 +413,13 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	g.serve(w, r, session, runTurn)
+}
+
+// serve records and forwards a call of session, and of the run turn runTurn
+// when it is set; r's path is the vendor's.
+func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, session, runTurn string) {
+	rl := relayedOf(r.Context())
 	// An agent may first try a WebSocket on its model-call path, as codex-cli
 	// 0.164.0 does with a GET and Upgrade on /backend-api/codex/responses
 	// (2026-11-05). The gateway cannot read a WebSocket, so passing it on would
@@ -399,12 +443,17 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	r.ContentLength = int64(len(body))
 
+	id := fmt.Sprintf("x-%s-%d", g.run, g.seq.Add(1))
+	if rl != nil && rl.Exchange != "" {
+		id = rl.Exchange
+	}
 	ex := &exchange{
-		id:      fmt.Sprintf("x-%s-%d", g.run, g.seq.Add(1)),
+		id:      id,
 		session: session,
 		client:  clientName(r.UserAgent()),
 		turn:    runTurn,
 		start:   g.now(),
+		relayed: rl != nil,
 	}
 	if runTurn != "" {
 		g.track(ex, session, runTurn)
@@ -427,17 +476,18 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// A call the guard refused earlier goes back to the model under its
 		// real name, with the refusal as its output (guard.go). The vendor
 		// then gets the body plain, as after a rewrite.
-		if fixed, ok := g.fixHistory(g.adapter.Vendor(), plain); ok {
+		// A relayed call was fixed by the runner's gateway already.
+		if fixed, ok := g.fixHistory(g.adapter.Vendor(), plain); ok && rl == nil {
 			plain = fixed
 			r.Body = io.NopCloser(bytes.NewReader(plain))
 			r.ContentLength = int64(len(plain))
 			r.Header.Del("Content-Encoding")
 		}
-		if g.guard != nil && runTurn != "" {
+		if g.guard != nil && runTurn != "" && rl == nil {
 			ex.forbid = g.guard.Forbid(session, runTurn)
 		}
 		var replayed int
-		if g.rewrite != nil && runTurn != "" {
+		if g.rewrite != nil && runTurn != "" && rl == nil {
 			rw := g.rewrite.Rewrite(session, runTurn, plain)
 			g.emit(ex, rw.Events)
 			if rw.Refuse != nil {
@@ -497,6 +547,16 @@ func turnID(session string, basis []byte) string {
 }
 
 func (g *Gateway) modifyResponse(resp *http.Response) error {
+	// chatgpt.com streams codex's reply with no Content-Type. Go's server
+	// would then add one it guessed from the first bytes, "text/plain;
+	// charset=utf-8", and the runner's gateway would read the stream as one
+	// JSON body and record no reply (2026-11-11). A nil value keeps the
+	// header out of a relayed reply, as the vendor sent it.
+	if rl := relayedOf(resp.Request.Context()); rl != nil {
+		if _, ok := resp.Header["Content-Type"]; !ok {
+			rl.w.Header()["Content-Type"] = nil
+		}
+	}
 	ex, ok := resp.Request.Context().Value(exchangeKey{}).(*exchange)
 	if !ok {
 		return nil
@@ -592,21 +652,29 @@ func upstreamFailure(err error) (msg string, status int) {
 func (g *Gateway) errorHandler(w http.ResponseWriter, r *http.Request, err error) {
 	msg, status := upstreamFailure(err)
 	ex, ok := r.Context().Value(exchangeKey{}).(*exchange)
+	rl := relayedOf(r.Context())
+	class, reason := causeOf(err)
 	// The cause goes to the service log, so a 502 can be traced; the agent
 	// and the event get the fixed words. A call the agent closed is no
 	// failure.
 	if g.logf != nil && status != 0 {
-		class, reason := causeOf(err)
-		session, turn, exchange, after := "", "", "", int64(0)
+		session, turn, exchange, after, via := "", "", "", int64(0), "agent"
+		if rl != nil {
+			session, turn, via = rl.Session, rl.Turn, "relay"
+		}
 		if ok {
 			session, turn, exchange, after = ex.session, ex.turn, ex.id, g.now().Sub(ex.start).Milliseconds()
 		}
-		g.logf("gateway.upstream_failed vendor=%s prefix=%s session=%s turn=%s exchange=%s after_ms=%d class=%s reason=%s",
-			g.adapter.Vendor(), g.prefix, session, turn, exchange, after, class, reason)
+		g.logf("gateway.upstream_failed vendor=%s prefix=%s via=%s session=%s turn=%s exchange=%s after_ms=%d class=%s reason=%s",
+			g.adapter.Vendor(), g.prefix, via, session, turn, exchange, after, class, reason)
 	}
 	if ok {
 		g.emit(ex, []event.Event{{Kind: event.ModelResponded, Status: status, Error: msg}})
 		g.flushed(ex.done)
+	}
+	if rl != nil {
+		relayFailed(w, msg, reason)
+		return
 	}
 	// The agent that closed its connection reads no reply; any other gets 502.
 	http.Error(w, "gateway: "+msg, http.StatusBadGateway)
@@ -767,6 +835,13 @@ func (g *Gateway) dropped(n int, sessions []string) event.Event {
 
 func (g *Gateway) emit(ex *exchange, evs []event.Event) {
 	for _, e := range evs {
+		// A relayed call's turn has its turn.started from the runner's
+		// engine, with the person's words as sent, written before its agent
+		// started. On the runner the store kept that one and dropped the
+		// gateway's; here the gateway's could arrive first, so it is not made.
+		if ex.relayed && e.Kind == event.TurnStarted {
+			continue
+		}
 		if e.Kind == event.SchemaUnexpected {
 			x, ok := ex.admit(e.Unexpected)
 			if !ok {

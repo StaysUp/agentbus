@@ -52,7 +52,7 @@ var runnerRoutes = []route{
 		summary: "Take work",
 		doc: "Long poll, up to 30 seconds, for a job (with its new attempt and lease) or a cleanup (a closed session's workspace to remove). " +
 			"A job of a session goes to the runner that holds its workspace.",
-		body:    jobs.TakeRequest{},
+		body:    jobs.TakeRequest{Protocol: jobs.ProtocolVersion},
 		replies: []reply{ok(200, jobs.TakenWork{}, "A job, or a cleanup."), {status: 204, doc: "Nothing to do.", empty: true}, badRequest, noAttempt, storeFailed},
 		self:    true, serve: jobsRoute},
 	{method: "POST", path: "/api/v0/runner/heartbeat", op: "runnerHeartbeat",

@@ -226,6 +226,13 @@ func (s *Server) record(w http.ResponseWriter, r *http.Request, rn queue.Runner)
 	}
 	n := 0
 	for _, e := range evs {
+		// The turn's end is stored after the calls the relay carried for it
+		// are: a reader that sees the end sees all of them. One the relay
+		// could not confirm leaves the turn marked unsettled, as the runner
+		// marks one its own gateway could not.
+		if e.Kind == event.SessionClosed && e.Turn != "" && !s.settle(e.Session, e.Turn) {
+			e.Unsettled = true
+		}
 		stored, err := s.cfg.Record.AppendOnce(e)
 		if err != nil {
 			s.internal(w)
