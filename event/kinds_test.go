@@ -83,3 +83,18 @@ func jsonNames() []string {
 	}
 	return names
 }
+
+// turn.changed says its file list can be cut: workspace.Changes.Fit and
+// MaxChanges leave files out, and say so in truncated (0.5.1).
+func TestTurnChangedSaysTheListCanBeCut(t *testing.T) {
+	for _, k := range Kinds {
+		if k.Kind != TurnChanged {
+			continue
+		}
+		if strings.Contains(k.Doc, "every changed file") || !strings.Contains(k.Doc, "truncated says it is not complete") {
+			t.Errorf("turn.changed doc does not say the list can be cut: %q", k.Doc)
+		}
+		return
+	}
+	t.Fatal("turn.changed is not in Kinds")
+}

@@ -93,9 +93,10 @@ const (
 
 	// TurnChanged: control's record of what a turn changed in its copy, or
 	// in the folder it ran in, stored when control accepts the turn job's
-	// finish. Changes holds every changed file and the diffs. TurnApplied:
-	// an apply of a session's turns to the person's folder ended. Applied
-	// says which turns, who asked, how it ended and the files.
+	// finish. Changes holds the changed files and the diffs. The list can be
+	// cut: truncated says it is not complete.
+	// TurnApplied: an apply of a session's turns to the person's folder
+	// ended. Applied says which turns, who asked, how it ended and the files.
 	TurnChanged Kind = "turn.changed"
 	TurnApplied Kind = "turn.applied"
 )
@@ -140,7 +141,7 @@ var Kinds = []KindInfo{
 	{RunnerGone, "A runner or a connector stopped asking control for work for a minute: runner is its id. It may come back; a turn it was running whose lease runs out ends as runner_lost. No session. Show it as a warning.", []string{"runner"}},
 	{RunnerRemoved, "The person removed a runner that was offline (POST /api/v0/runners/{id}/remove): runner is its id. Its token works no more and it is no longer listed; its sessions, jobs and their events stay. No session.", []string{"runner"}},
 	{SettingsChanged, "The settings changed, through the API or by the one-time import of the settings files: setting is permissions, instructions or agents; keys names what changed (a policy key such as limits.max_depth, text for the instructions, an agent id or id.field such as a_1234.model); settings_version is the settings version the change made. On an import, file is the file the setting came from. A build that changed a default writes the old value into the person's policy on its first start: a change of permissions with no file, whose keys are those defaults. Names only: never a value, so never a secret. The change and this event are stored together: the settings database keeps the event until the record has it. No session.", []string{"setting", "settings_version"}},
-	{TurnChanged, "What the turn changed in its session's copy, or in the folder it ran in, from its start to its end. Stored by control once it accepts the turn's end, at most once per turn: changes holds every changed file (path, change, size, sha256 at the end, sha256_before at the start) and, for small text files, each one's unified diff (at most 1 MiB for the whole turn; diffs_cut says some were left out) and content. A binary file has its path, size and hashes only. GET /api/v0/turns/{id}/diff reads it. Absent for a turn that ran in no folder, and for turns from before 0.5, whose changes are in their job.", []string{"session", "turn", "changes"}},
+	{TurnChanged, "What the turn changed in its session's copy, or in the folder it ran in, from its start to its end. Stored by control once it accepts the turn's end, at most once per turn: changes holds the changed files (path, change, size, sha256 at the end, sha256_before at the start) and, for small text files, each one's unified diff (at most 1 MiB for the whole turn; diffs_cut says some were left out) and content. A binary file has its path, size and hashes only. The file list can be cut: truncated says it is not complete, because files were left out (past 1,000, or when the whole was too large to send; count still counts them) or because the copy held more files than a checkpoint keeps (then count misses some too). GET /api/v0/turns/{id}/diff reads it. Absent for a turn that ran in no folder, and for turns from before 0.5, whose changes are in their job.", []string{"session", "turn", "changes"}},
 	{TurnApplied, "An apply of the session's turns to the person's folder ended (POST /api/v0/turns/{id}/apply): turn is the turn asked for, and applied holds every turn whose changes it carried, who asked (by: the person or an agent, never a token), the result (applied, refused or failed), the files written or removed, and on a refusal the files that refused it, each with why. Stored once per apply. Show a refusal as a warning.", []string{"session", "turn", "applied"}},
 	{SessionRenamed, "The session was given a name with PATCH /api/v0/sessions/{id}: title is the new name, old_title the one it had before (absent when it had none). The latest names the session in GET /api/v0/sessions; earlier names stay in the record.", []string{"session", "title"}},
 }
@@ -377,8 +378,8 @@ type TurnChanges struct {
 	From     string `json:"from,omitempty" doc:"The checkpoint the turn started from. In an isolated copy only."`
 	To       string `json:"to,omitempty" doc:"The checkpoint the turn ended with. The same as from: the turn changed nothing."`
 	Count    int    `json:"count" doc:"Every file the turn added, modified or deleted."`
-	// Truncated: Files holds fewer than Count.
-	Truncated bool `json:"truncated,omitempty" doc:"files holds fewer files than count: past 1000 files, or to fit the record."`
+	// Truncated: Files is not every change.
+	Truncated bool `json:"truncated,omitempty" doc:"files is not every change: files were left out past 1000, or to fit the runner's finish, and count still counts them; or the copy held more files than a checkpoint keeps, and count misses some too."`
 	// Partial: taken while the turn may still have run.
 	Partial bool `json:"partial,omitempty" doc:"Taken while the turn may still have run, so it may miss later changes."`
 	// DiffsCut: some files' diffs were left out, as all diffs together
