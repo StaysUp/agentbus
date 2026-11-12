@@ -123,7 +123,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		return 1
 	}
 	if args[0] == "login" {
-		return runLogin(args[1:], home, getenv, stdout, stderr, systemLogin())
+		return runLogin(args[1:], home, stdout, stderr, systemLogin())
 	}
 	c, ok := parse(args, home, stderr)
 	if !ok {

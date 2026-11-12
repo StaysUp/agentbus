@@ -93,10 +93,11 @@ To add a machine:
 2. Run `agentbus login http://<control>:8787`. It prints a code.
 3. In the cockpit, open **Runners** (at the foot of the Agents column), type the code and press
    **Approve**.
+4. Run the command `agentbus login` prints after approval. It starts the runner, which works while
+   that command runs.
 
-The runner then keeps running in the background, also after a restart (a launchd agent on macOS, a
-systemd user service on Linux). The Runners page shows the machine as **Online**. When you start a
-session, you pick the machine, then a folder on it; the session stays on that machine.
+The Runners page then shows the machine as **Online**. When you start a session, you pick the
+machine, then a folder on it; the session stays on that machine.
 
 ![The Runners page: a machine waiting for approval, and the code field](docs/assets/cockpit-runners.png)
 

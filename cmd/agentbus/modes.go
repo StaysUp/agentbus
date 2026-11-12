@@ -87,7 +87,7 @@ func (c config) modeName() string {
 const usage = `usage: agentbus up     [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false] [-max-runs 4]
        agentbus server [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false]
        agentbus runner -server URL [-enroll-token-file F (the old way to join)] [-gateway server|local] [-capacity 4] [-name NAME] [-folder DIR]... [-labels a,b] [-listen 127.0.0.1:0] [-replay=false]
-       agentbus login URL [-no-service] [runner's flags]   (on a machine, once: sign it in to the control at URL; approve it on the Runners page)
+       agentbus login URL [runner's flags]   (on a machine, once: sign it in to the control at URL; approve it on the Runners page)
        agentbus version
 
 For agents and scripts:

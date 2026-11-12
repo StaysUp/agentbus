@@ -4,10 +4,9 @@ package main
 // (POST /api/v0/runner/login), shows the code control gave, and waits while
 // the person types that code on the cockpit's Runners page. Once approved it
 // saves its runner identity in its data folder (runner.json), as an enroll
-// does, and sets the runner up as a service where it can: a systemd user
-// unit on Linux, a launchd agent on macOS. Where it cannot, it prints the
-// one command to run. It takes agentbus runner's flags, which the service
-// then runs with.
+// does, and prints the one command that starts the runner. It sets up no
+// background service: the runner runs where that command is run. It takes
+// agentbus runner's flags, which that command carries.
 //
 // It replaces copying control's enroll_token by hand, which still works for
 // the setups made with it (agentbus runner -enroll-token-file). A later
@@ -37,15 +36,14 @@ import (
 	"github.com/staysup/agentbus/sandbox"
 )
 
-const loginUsage = "usage: agentbus login URL [-no-service] [agentbus runner's flags: -name NAME -folder DIR -labels a,b -capacity 4 -gateway server|local]\n" +
+const loginUsage = "usage: agentbus login URL [agentbus runner's flags: -name NAME -folder DIR -labels a,b -capacity 4 -gateway server|local]\n" +
 	"  URL is control's address, such as http://192.168.1.10:8787"
 
 // loginDeps is what agentbus login reaches outside itself, so a test can
 // stand in for it.
 type loginDeps struct {
-	http    *http.Client
-	service serviceSetup
-	// self is this program's path, which the service runs.
+	http *http.Client
+	// self is this program's path, which the printed command runs.
 	self string
 	// caps is what the machine reports when it asks: its OS and whether it
 	// can build a session's wall, which the Runners page shows.
@@ -62,9 +60,8 @@ func systemLogin() loginDeps {
 		self = p
 	}
 	return loginDeps{
-		http:    &http.Client{Timeout: 15 * time.Second},
-		service: systemService(),
-		self:    self,
+		http: &http.Client{Timeout: 15 * time.Second},
+		self: self,
 		caps: func() *queue.Capabilities {
 			can, why := sandbox.Can()
 			return &queue.Capabilities{OS: runtime.GOOS, Arch: runtime.GOARCH, Sandbox: queue.NewSandboxReport(can, why)}
@@ -75,25 +72,20 @@ func systemLogin() loginDeps {
 	}
 }
 
-func runLogin(args []string, home string, getenv func(string) string, stdout, stderr io.Writer, d loginDeps) int {
+func runLogin(args []string, home string, stdout, stderr io.Writer, d loginDeps) int {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		fmt.Fprintln(stderr, "agentbus login needs control's address, such as agentbus login http://192.168.1.10:8787")
 		fmt.Fprintln(stderr, loginUsage)
 		return 2
 	}
 	target := strings.TrimRight(args[0], "/")
-	// The service starts in another folder: it needs the data folder whole.
+	// The runner may start in another folder: the command needs the data
+	// folder whole.
 	if abs, err := filepath.Abs(home); err == nil {
 		home = abs
 	}
 	var flags []string
-	noService := false
 	for _, a := range args[1:] {
-		switch a {
-		case "-no-service", "--no-service":
-			noService = true
-			continue
-		}
 		if a == "-server" || strings.HasPrefix(a, "-server=") || strings.HasPrefix(a, "--server") {
 			fmt.Fprintln(stderr, "agentbus login: control's address is its first argument, not -server")
 			return 2
@@ -217,18 +209,7 @@ func runLogin(args []string, home string, getenv func(string) string, stdout, st
 	fmt.Fprintf(stdout, "Approved: this machine is runner %s of %s. Its credential is in %s (mode 0600).\n", st.Runner.ID, target, statePath)
 
 	command := append([]string{d.self}, runArgs...)
-	line := shellLine(command)
-	envHome := "AGENTBUS_HOME=" + shellQuote(home)
-	if noService {
-		fmt.Fprintf(stdout, "Start the runner with:\n\n    %s %s\n", envHome, line)
-		return 0
-	}
-	did, err := d.service.install(command, home, getenv("PATH"))
-	if err != nil {
-		fmt.Fprintf(stdout, "The runner was not set up as a service: %v.\nStart it with:\n\n    %s %s\n", err, envHome, line)
-		return 0
-	}
-	fmt.Fprint(stdout, did)
+	fmt.Fprintf(stdout, "Start the runner with: AGENTBUS_HOME=%s %s\n", shellQuote(home), shellLine(command))
 	return 0
 }
 

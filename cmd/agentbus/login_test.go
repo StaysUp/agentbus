@@ -3,8 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/xml"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -47,7 +45,6 @@ func loginControl(t *testing.T) (*httptest.Server, *jobs.Server, *queue.Queue) {
 
 func testDeps(srv *httptest.Server, ctx context.Context) loginDeps {
 	return loginDeps{http: srv.Client(), self: "/opt/agentbus/agentbus", poll: 20 * time.Millisecond,
-		service: serviceSetup{goos: "test"},
 		caps: func() *queue.Capabilities {
 			return &queue.Capabilities{OS: "linux", Sandbox: &queue.SandboxReport{Can: false, Why: "bwrap is missing"}}
 		},
@@ -71,14 +68,15 @@ func waitCode(t *testing.T, out *syncBuf) string {
 
 // agentbus login shows a code, waits for the person to approve it, then
 // saves the runner identity agentbus runner starts with, and prints the
-// command where it sets up no service. The machine took no job before.
+// one line that starts it. It sets up no service. The machine took no job
+// before.
 func TestLoginApproved(t *testing.T) {
 	srv, js, q := loginControl(t)
 	home := filepath.Join(t.TempDir(), "data")
 	var out, errb syncBuf
 	done := make(chan int)
 	go func() {
-		done <- runLogin([]string{srv.URL, "-name", "box", "-folder", "/srv/app", "-no-service"}, home, func(string) string { return "" },
+		done <- runLogin([]string{srv.URL, "-name", "box", "-folder", "/srv/app"}, home,
 			&out, &errb, testDeps(srv, context.Background()))
 	}()
 	code := waitCode(t, &out)
@@ -109,7 +107,7 @@ func TestLoginApproved(t *testing.T) {
 		t.Fatalf("runner.json mode %v", info.Mode().Perm())
 	}
 	if !strings.Contains(out.String(), rn.ID) ||
-		!strings.Contains(out.String(), "/opt/agentbus/agentbus runner -server "+srv.URL+" -name box -folder /srv/app") {
+		!strings.Contains(out.String(), "Start the runner with: AGENTBUS_HOME="+home+" /opt/agentbus/agentbus runner -server "+srv.URL+" -name box -folder /srv/app\n") {
 		t.Fatalf("out: %s", out.String())
 	}
 	// The saved token is the runner's: control takes its heartbeat.
@@ -125,7 +123,7 @@ func TestLoginApproved(t *testing.T) {
 
 	// A second login on the same data folder is refused, and keeps the first.
 	var b2 bytes.Buffer
-	if c := runLogin([]string{srv.URL}, home, func(string) string { return "" }, &b2, &b2, testDeps(srv, context.Background())); c != 1 ||
+	if c := runLogin([]string{srv.URL}, home, &b2, &b2, testDeps(srv, context.Background())); c != 1 ||
 		!strings.Contains(b2.String(), "already holds a runner's sign-in") {
 		t.Fatalf("second login: %d %s", c, b2.String())
 	}
@@ -138,7 +136,7 @@ func TestLoginRefused(t *testing.T) {
 	var out, errb syncBuf
 	done := make(chan int)
 	go func() {
-		done <- runLogin([]string{srv.URL}, home, func(string) string { return "" }, &out, &errb, testDeps(srv, context.Background()))
+		done <- runLogin([]string{srv.URL}, home, &out, &errb, testDeps(srv, context.Background()))
 	}()
 	waitCode(t, &out)
 	pend, _ := q.PendingLogins(queue.DefaultTeam)
@@ -171,96 +169,13 @@ func TestLoginRefusesLines(t *testing.T) {
 		{[]string{srv.URL}, control, "a control's data folder"},
 	} {
 		var b bytes.Buffer
-		if code := runLogin(c.args, c.home, func(string) string { return "" }, &b, &b, testDeps(srv, context.Background())); code == 0 ||
+		if code := runLogin(c.args, c.home, &b, &b, testDeps(srv, context.Background())); code == 0 ||
 			!strings.Contains(b.String(), c.want) {
 			t.Errorf("%v: exit %d, %q; want %q", c.args, code, b.String(), c.want)
 		}
 	}
 	if pend, _ := q.PendingLogins(queue.DefaultTeam); len(pend) != 0 {
 		t.Fatalf("asked control: %v", pend)
-	}
-}
-
-// The systemd unit and the launchd agent run the runner's command line as
-// it was given, quoted for each, with the data folder and PATH.
-func TestServiceFiles(t *testing.T) {
-	cmd := []string{"/opt/a b/agentbus", "runner", "-server", "http://h:8787", "-name", `it's "100%" $HOME`}
-	u := unitText(cmd, "/home/me/data", "/usr/bin:/home/me/.local/bin")
-	for _, want := range []string{
-		`ExecStart="/opt/a b/agentbus" "runner" "-server" "http://h:8787" "-name" "it's \"100%%\" $$HOME"`,
-		`Environment="AGENTBUS_HOME=/home/me/data"`, `Environment="PATH=/usr/bin:/home/me/.local/bin"`, "WantedBy=default.target",
-	} {
-		if !strings.Contains(u, want) {
-			t.Errorf("unit lacks %s:\n%s", want, u)
-		}
-	}
-	p := plistText(append(cmd, "<&>"), "/Users/me/data", "/usr/bin", "/Users/me/data/logs/runner-launchd.log")
-	var doc struct {
-		Strings []string `xml:"dict>array>string"`
-	}
-	if err := xml.Unmarshal([]byte(p), &doc); err != nil {
-		t.Fatalf("plist is not XML: %v\n%s", err, p)
-	}
-	if got := strings.Join(doc.Strings, "|"); got != strings.Join(append(cmd, "<&>"), "|") {
-		t.Fatalf("ProgramArguments %q", got)
-	}
-}
-
-// A unit already there, such as one set up by hand, is left as it is, and
-// nothing is started; with none, the unit is written and started.
-func TestSystemdInstall(t *testing.T) {
-	home := t.TempDir()
-	var ran []string
-	s := serviceSetup{goos: "linux", userHome: home, lookPath: func(string) (string, error) { return "/usr/bin/systemctl", nil },
-		run: func(name string, args ...string) error {
-			ran = append(ran, name+" "+strings.Join(args, " "))
-			return nil
-		}}
-	did, err := s.install([]string{"/bin/agentbus", "runner", "-server", "http://h"}, "/d", "/usr/bin")
-	if err != nil || !strings.Contains(did, "systemctl --user status agentbus-runner.service") {
-		t.Fatalf("install: %v %q", err, did)
-	}
-	if strings.Join(ran, ";") != "systemctl --user show-environment;systemctl --user daemon-reload;systemctl --user enable --now agentbus-runner.service" {
-		t.Fatalf("ran %q", ran)
-	}
-	unit := filepath.Join(home, ".config", "systemd", "user", systemdUnit)
-	before, _ := os.ReadFile(unit)
-	ran = nil
-	if _, err := s.install([]string{"/other"}, "/d", ""); err == nil || !strings.Contains(err.Error(), "left as it is") {
-		t.Fatalf("a second install: %v", err)
-	}
-	after, _ := os.ReadFile(unit)
-	if !bytes.Equal(before, after) || len(ran) != 1 {
-		t.Fatalf("the unit there was changed, or a start ran: %q", ran)
-	}
-	// No user service manager: nothing written.
-	s.userHome = t.TempDir()
-	s.run = func(string, ...string) error { return errors.New("no bus") }
-	if _, err := s.install([]string{"/bin/agentbus"}, "/d", ""); err == nil {
-		t.Fatal("installed with no service manager")
-	}
-	if _, err := os.Stat(filepath.Join(s.userHome, ".config")); !os.IsNotExist(err) {
-		t.Fatal("a unit was written with no service manager")
-	}
-}
-
-func TestLaunchdInstall(t *testing.T) {
-	home, data := t.TempDir(), t.TempDir()
-	var ran []string
-	s := serviceSetup{goos: "darwin", userHome: home, uid: 501,
-		run: func(name string, args ...string) error {
-			ran = append(ran, name+" "+strings.Join(args, " "))
-			return nil
-		}}
-	if _, err := s.install([]string{"/bin/agentbus", "runner"}, data, "/usr/bin"); err != nil {
-		t.Fatal(err)
-	}
-	plist := filepath.Join(home, "Library", "LaunchAgents", launchdPlist)
-	if len(ran) != 1 || ran[0] != "launchctl bootstrap gui/501 "+plist {
-		t.Fatalf("ran %q", ran)
-	}
-	if _, err := s.install([]string{"/bin/agentbus"}, data, ""); err == nil {
-		t.Fatal("an agent there was replaced")
 	}
 }
 
@@ -292,7 +207,7 @@ func TestRunnerEnrollToken(t *testing.T) {
 
 // Of two logins on one data folder, the one approved second does not replace
 // the first one's identity; and a relative data folder is saved, and handed
-// to the service, whole (review of 2026-11-12, round 1).
+// to the printed command, whole (review of 2026-11-12, round 1).
 func TestLoginKeepsFirstIdentity(t *testing.T) {
 	srv, js, q := loginControl(t)
 	dir := t.TempDir()
@@ -300,11 +215,11 @@ func TestLoginKeepsFirstIdentity(t *testing.T) {
 	var out1, out2, err1, err2 syncBuf
 	done1, done2 := make(chan int), make(chan int)
 	go func() {
-		done1 <- runLogin([]string{srv.URL, "-name", "one", "-no-service"}, "data", func(string) string { return "" }, &out1, &err1, testDeps(srv, context.Background()))
+		done1 <- runLogin([]string{srv.URL, "-name", "one"}, "data", &out1, &err1, testDeps(srv, context.Background()))
 	}()
 	code1 := waitCode(t, &out1)
 	go func() {
-		done2 <- runLogin([]string{srv.URL, "-name", "two", "-no-service"}, "data", func(string) string { return "" }, &out2, &err2, testDeps(srv, context.Background()))
+		done2 <- runLogin([]string{srv.URL, "-name", "two"}, "data", &out2, &err2, testDeps(srv, context.Background()))
 	}()
 	code2 := waitCode(t, &out2)
 	pend, _ := q.PendingLogins(queue.DefaultTeam)
