@@ -56,6 +56,10 @@ type Result struct {
 	// beside ChangesEvent: the session's next turn starts from it.
 	Checkpoint   string `json:"checkpoint,omitempty"`
 	AppliedEvent string `json:"applied_event,omitempty"`
+	// OutcomeDue: the job ended with no finish (its runner was lost), so
+	// no finisher wrote its outcome; control's sweep writes it to the
+	// record and sets the pointer in its place (OutcomesDue, KeepOutcome).
+	OutcomeDue bool `json:"outcome_due,omitempty"`
 }
 
 // SnapshotTaken is a snapshot a connector took: its id, the blob of its

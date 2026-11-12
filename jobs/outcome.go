@@ -128,6 +128,9 @@ func AppliedOf(j queue.Job, res queue.Result) *event.Applied {
 	default:
 		a.Result = "failed"
 		a.Error = "the apply did not finish: it ended " + queue.TurnState(j.State)
+		if j.Reason == queue.ReasonRunnerLost {
+			a.Error = "the apply did not finish: its runner stopped answering"
+		}
 		if j.Reason != "" {
 			a.Error += " (" + j.Reason + ")"
 		}

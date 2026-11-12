@@ -777,6 +777,13 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 				} else if n > 0 {
 					svcLog.Printf("record.lost_turns_closed n=%d", n)
 				}
+				// An apply whose runner was lost: its turn.applied, which
+				// no finish wrote.
+				if n, err := jobs.CloseLostApplies(s.queue, s.store); err != nil {
+					svcLog.Printf("record.lost_applies_failed")
+				} else if n > 0 {
+					svcLog.Printf("record.lost_applies_closed n=%d", n)
+				}
 				// A runner that stopped answering, or came back.
 				if tick++; tick%10 == 0 {
 					gone, back, err := presence.Check(s.queue, time.Now().UTC())
