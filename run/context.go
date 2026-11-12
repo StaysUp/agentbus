@@ -163,6 +163,7 @@ func (e *Engine) RemoveHome(session string) error {
 		return nil
 	}
 	dir := filepath.Join(e.cfg.Homes, session)
+	_ = os.Remove(dir + grantsRecord)
 	if err := os.RemoveAll(dir); err == nil {
 		return nil
 	}

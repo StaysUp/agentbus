@@ -205,3 +205,39 @@ func TestCloseEndsUpgradedConnection(t *testing.T) {
 		t.Fatal("the connection is still open after Close")
 	}
 }
+
+// An open proxy lets through the public internet only: never this
+// machine, its local link, a private or shared network, or one of this
+// machine's own addresses (reviews of 2026-11-11, rounds 1 and 2). Pass and
+// allow still reach what they name.
+func TestOpenReachesPublicOnly(t *testing.T) {
+	j := New(Spec{Open: true, Pass: []string{"127.0.0.1:9000"}, Allow: []string{"10.0.0.5"}})
+	refused := []string{"127.0.0.1:5432", "localhost:80", "a.localhost:80", "[::1]:22", "169.254.169.254:80", "0.0.0.0:80",
+		"192.168.1.5:5432", "10.1.2.3:80", "172.17.0.1:2375", "100.100.1.1:80", "[fd00::1]:80", "[fe80::1]:80"}
+	if own, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range own {
+			if n, ok := a.(*net.IPNet); ok && n.IP.IsGlobalUnicast() {
+				refused = append(refused, net.JoinHostPort(n.IP.String(), "80"))
+			}
+		}
+	}
+	for _, target := range refused {
+		if why := j.check(target); why == "" {
+			t.Errorf("%s: let through", target)
+		}
+	}
+	for _, target := range []string{"127.0.0.1:9000", "10.0.0.5:22", "203.0.113.7:443"} {
+		if why := j.check(target); why != "" {
+			t.Errorf("%s: refused: %s", target, why)
+		}
+	}
+	if why := New(Spec{}).check("203.0.113.7:443"); why == "" {
+		t.Error("a closed proxy let an unlisted host through")
+	}
+	// What an open proxy lets through by name it dials at the address it
+	// checked (review of 2026-11-11, round 3): a name cannot answer
+	// differently the second time.
+	if why, addr := j.vet("203.0.113.7:443"); why != "" || addr != "203.0.113.7:443" {
+		t.Errorf("vet = %q %q", why, addr)
+	}
+}

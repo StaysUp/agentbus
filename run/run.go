@@ -42,6 +42,7 @@ import (
 	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/logfile"
 	"github.com/staysup/agentbus/netjail"
+	"github.com/staysup/agentbus/sandbox"
 	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 )
@@ -764,33 +765,49 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		added = append(added, event.Added{Kind: event.AddedMCPInstructions, Bytes: len(settings.ToolServerInstructions),
 			Text: settings.ToolServerInstructions})
 	}
-	// Closed off from the network, when the policy says so: before anything
-	// is stored, a runner that cannot do it refuses the turn.
-	var jail *netjail.Jail
-	if on, why := e.contained(perm); why != "" {
+	w, why := writesFor(h, t.folder, t.readOnly, perm, e.cfg.Protect)
+	if why != "" {
+		e.cfg.Logf("run.edit session=%s turn=%s left_out=%s", t.session, t.id, why)
+	}
+	// Inside the session's sandbox, or closed off from the network, when the
+	// policy says so: before anything is stored, a runner that cannot do it
+	// refuses the turn. The sandbox closes the network off too.
+	var jail wall
+	forward, pass := reach(e.cfg.BaseURL, apiURL)
+	session, turn := t.session, t.id
+	netSpec := netjail.Spec{Forward: forward, Pass: pass, Allow: perm.Network.Allow,
+		Refused: func(target, why string) {
+			if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.NetworkRefused,
+				Time: e.cfg.Now().UTC(), Session: session, Turn: turn, Host: target, Error: why}); err != nil {
+				e.cfg.Logf("store.error what=network_refused session=%s turn=%s", session, turn)
+			}
+		}}
+	if perm.Sandbox.Mode == settings.SandboxOn {
+		// A read-only turn cannot write its folder in the wall. Nor can a
+		// turn that may edit nothing, of a harness whose own sandbox kept it
+		// from writing: that one is off in the wall (harness.Turn.Walled).
+		readOnly := w.ReadOnly || (h.Info().OwnSandbox && len(w.Edit) == 0)
+		box, why := e.sandbox(perm, t.session, t.folder, readOnly, readOnly && h.Info().OwnSandbox,
+			append(sandbox.Program(l.Path), e.apiProgram()...), netSpec)
+		if why != "" {
+			e.cfg.Logf("run.refused agent=%s reason=sandbox", t.harness)
+			return nil, refuse(http.StatusBadRequest, why+", so the turn did not start. Fix it on this runner, or set [sandbox] mode = \"off\" in the permissions.")
+		}
+		jail = box
+		cmd.Env = setEnv(cmd.Env, box.Env())
+	} else if on, why := e.contained(perm); why != "" {
 		e.cfg.Logf("run.refused agent=%s reason=network", t.harness)
 		return nil, refuse(http.StatusBadRequest, why)
 	} else if on {
-		forward, pass := reach(e.cfg.BaseURL, apiURL)
-		session, turn := t.session, t.id
-		jail = netjail.New(netjail.Spec{Forward: forward, Pass: pass, Allow: perm.Network.Allow,
-			Refused: func(target, why string) {
-				if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.NetworkRefused,
-					Time: e.cfg.Now().UTC(), Session: session, Turn: turn, Host: target, Error: why}); err != nil {
-					e.cfg.Logf("store.error what=network_refused session=%s turn=%s", session, turn)
-				}
-			}})
-		cmd.Env = setEnv(cmd.Env, jail.Env())
+		j := netjail.New(netSpec)
+		jail = j
+		cmd.Env = setEnv(cmd.Env, j.Env())
 	}
 	defer func() {
 		if !started && jail != nil {
 			jail.Close()
 		}
 	}()
-	w, why := writesFor(h, t.folder, t.readOnly, perm, e.cfg.Protect)
-	if why != "" {
-		e.cfg.Logf("run.edit session=%s turn=%s left_out=%s", t.session, t.id, why)
-	}
 	spec := turnSpec(hint, t.resumeID, t.model, w, perm, t.context+t.prompt)
 	if tools {
 		spec.Tools = strings.TrimSuffix(apiURL, "/") + ToolPath
@@ -930,6 +947,68 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		close(res.done)
 	}()
 	return res, nil
+}
+
+// wall is what a turn or a command starts in: netjail's namespace, or the
+// session's sandbox.
+type wall interface {
+	Start(*exec.Cmd) error
+	Close()
+}
+
+// sandbox builds the wall around one of session's turns or commands in
+// folder (read only when readOnly; with no network beyond its gateway and
+// the API when offline, see wallNet), with read readable too, or says why it cannot (fixed wording).
+// It needs the session's own home: the grants are copied into it first.
+// The network goes through the proxy: the hosts in [network] allow when
+// contain is on, every host when it is off.
+func (e *Engine) sandbox(p settings.Policy, session, folder string, readOnly, offline bool, read []string, net netjail.Spec) (*sandbox.Box, string) {
+	if e.cfg.Homes == "" || !SessionShape.MatchString(session) {
+		return nil, "[sandbox] mode is \"on\" in the permissions, and this runner gives sessions no home of their own (agentbus up uses this user's home)"
+	}
+	home := filepath.Join(e.cfg.Homes, session)
+	if info, err := os.Lstat(home); err != nil || !info.IsDir() {
+		return nil, "[sandbox] mode is \"on\" in the permissions, and this session has no home of its own: it began before homes"
+	}
+	userHome, _ := os.UserHomeDir()
+	if err := sandbox.CopyGrants(home, home+grantsRecord, userHome, p.Sandbox.Read); err != nil {
+		return nil, err.Error()
+	}
+	net = wallNet(p, offline, net)
+	box, err := sandbox.New(sandbox.Spec{Copy: folder, ReadOnly: readOnly, Home: home, Read: append(read, p.ReadFolders...), Net: net})
+	if err != nil {
+		return nil, err.Error()
+	}
+	return box, ""
+}
+
+// wallNet is what the proxy of a walled turn or command lets through: the
+// hosts in [network] allow when contain is on, the public internet when it
+// is off. An offline one reaches its gateway and the API only: a turn of a
+// harness whose own read-only sandbox kept it off the network, which is
+// off in the wall (harness.Info.OwnSandbox).
+func wallNet(p settings.Policy, offline bool, net netjail.Spec) netjail.Spec {
+	if offline {
+		net.Allow, net.Open = nil, false
+		return net
+	}
+	net.Open = p.Network.Contain != settings.ContainOn
+	return net
+}
+
+// grantsRecord ends the name of the file beside a session's home that
+// records the [sandbox] read entries copied into it (sandbox.CopyGrants).
+// The session cannot write it: it is not in its home.
+const grantsRecord = ".grants"
+
+// apiProgram is what a turn reads to run agentbus-api: the link and the
+// program it names, one file, never the folder that holds it (which may
+// hold anything, such as a download folder or the data folder).
+func (e *Engine) apiProgram() []string {
+	if e.cfg.APIDir == "" {
+		return nil
+	}
+	return []string{filepath.Join(e.cfg.APIDir, APIClient)}
 }
 
 // contained says whether a turn on policy p runs closed off from the
@@ -1077,7 +1156,7 @@ func turnArgs(h harness.Harness, hint, resumeID, model string, w Writes, perm se
 func turnSpec(hint, resumeID, model string, w Writes, perm settings.Policy, prompt string) harness.Turn {
 	return harness.Turn{Hint: hint, ResumeID: resumeID, Model: model, Writes: w,
 		ReadFolders: perm.ReadFolders, Allow: perm.Allow, Forbid: perm.Forbid,
-		NoSubagents: perm.Subagents != nil && !*perm.Subagents, Prompt: prompt}
+		NoSubagents: perm.Subagents != nil && !*perm.Subagents, Walled: perm.Sandbox.Mode == settings.SandboxOn, Prompt: prompt}
 }
 
 // withAPI is perm with the agent's way to the API allowed without asking,

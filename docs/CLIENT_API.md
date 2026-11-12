@@ -368,6 +368,9 @@ allow = ["github.com", "registry.npmjs.org"]
   names a closed-off agent may reach, on any port, such as `"github.com"`; `"*.example.com"` also
   allows every name under `example.com`. No scheme, port or path. Empty by default: only the
   runner's gateway and the server. See [Network control](#network-control).
+- `[sandbox]`: a wall around each session (a proof of concept). `mode` is `"off"` (the default) or
+  `"on"`; `read` lists paths under `~` copied into the session's home. See
+  [The session sandbox](#the-session-sandbox-a-proof-of-concept).
 
 What each list becomes:
 
@@ -608,7 +611,8 @@ curl -s -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/
   it. One command or turn of a session runs at a time on its runner.
 - **Where it runs.** By `/bin/sh -c`, in the session's copy (or its folder, for a session that
   runs in the folder as it is), in the session's own home when its runner gives it one, and closed
-  off from the network when `[network] contain` is on, as the session's turns are. It gets no
+  off from the network when `[network] contain` is on, or in its sandbox when `[sandbox]` is on,
+  as the session's turns are. It gets no
   AgentBus token and no model credential: a runner that holds no secrets has no sign-in to give it.
 - **It is the person's command.** The agents' `allow` and `forbid` lists do not apply. It changes
   the copy only. Its changes go out with the session's next turn's changes; apply them as usual.
@@ -2039,7 +2043,44 @@ as root: the agent gets a user namespace of its own, so even as root it cannot j
 network again.
 
 **macOS has no network control.** A runner on a Mac says so at start. With `contain = "off"` its
-agents reach any host. `contain = "on"` refuses every turn there.
+agents reach any host. `contain = "on"` refuses every turn there, unless `[sandbox]` is on (below).
+
+### The session sandbox (a proof of concept)
+
+Off by default. Turn it on with `[sandbox]` in `permissions.toml`:
+
+```toml
+[sandbox]
+mode = "on"                 # "off" (the default) or "on"
+read = ["~/.aws/config"]    # optional: copied into the session's home at each turn's start
+```
+
+On, the runner builds a wall around each turn's whole agent process, and around each `!` command.
+Inside it a session:
+
+- reads and writes its own copy and its own home, and nothing else of the runner user's home;
+- reads the system folders, the agent's own program, `agentbus-api` and the `read_folders`;
+- finds each `read` entry, a path under `~`, copied into its home at the same place. The copy is
+  made again at each turn's start, and an entry taken out is removed from the home then (a copy
+  the session made of it itself stays);
+- reaches the network only through the runner's proxy: the hosts in `[network] allow` when
+  `contain` is on; when it is off, every host on the public internet, and nothing of the runner's
+  own machine or its networks (loopback, private, shared and link-local addresses) unless named in
+  `allow`. Its gateway and the API stay reachable.
+
+codex's own sandbox cannot be built inside this one on macOS, so in the wall codex runs with
+`--sandbox danger-full-access`, and a codex turn that may not edit (`edit = "none"`, `read_only`)
+finds its copy read only and reaches only its gateway and the API, as codex's own read-only
+sandbox kept it. A read-only turn of any agent finds its copy read only too.
+
+macOS uses Seatbelt (`/usr/bin/sandbox-exec`); Linux uses bubblewrap (`/usr/bin/bwrap`, from the
+`bubblewrap` package) inside the agent's own network namespace. **A runner that cannot build the
+wall refuses the turn or command before it starts**, with the reason: no `sandbox-exec` or
+`bwrap`, a user namespace refused, a `read` entry missing or over 16 MiB in all, or no home per
+session (`agentbus up` runs turns in this user's home, so it cannot sandbox them).
+
+What it does not cover yet: a session can learn on macOS that a file exists (not read it); the
+copy's `.git` is writable; Landlock is not used on Linux; the browser bridge is not granted.
 
 ### Reviews
 

@@ -82,3 +82,35 @@ func TestTOMLString(t *testing.T) {
 		t.Errorf("tomlString %s", got)
 	}
 }
+
+// Inside the runner's sandbox codex's own sandbox is off, whether the turn
+// may write or not, and the network flag goes with it: macOS cannot build
+// a Seatbelt sandbox inside another (2026-11-11). Outside it, as before.
+func TestCodexWalled(t *testing.T) {
+	sandbox := func(a []string) string {
+		i := slices.Index(a, "--sandbox")
+		if i < 0 || i+1 >= len(a) {
+			return ""
+		}
+		return a[i+1]
+	}
+	writes := Writes{Edit: []string{"/f"}}
+	for _, c := range []struct {
+		turn    Turn
+		want    string
+		network bool
+	}{
+		{Turn{Writes: writes, Walled: true, Prompt: "p"}, "danger-full-access", false},
+		{Turn{Writes: Writes{ReadOnly: true}, Walled: true, Prompt: "p"}, "danger-full-access", false},
+		{Turn{Writes: writes, Prompt: "p"}, "workspace-write", true},
+		{Turn{Writes: Writes{ReadOnly: true}, Prompt: "p"}, "read-only", false},
+	} {
+		a := codex{}.Args(c.turn)
+		if got := sandbox(a); got != c.want {
+			t.Errorf("walled %t, read only %t: --sandbox %s, want %s", c.turn.Walled, c.turn.Writes.ReadOnly, got, c.want)
+		}
+		if got := slices.Contains(a, "sandbox_workspace_write.network_access=true"); got != c.network {
+			t.Errorf("walled %t: network flag %t, want %t", c.turn.Walled, got, c.network)
+		}
+	}
+}

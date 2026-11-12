@@ -21,6 +21,7 @@ func (codex) Info() Info {
 		// Answers with network access denied (codex-cli 0.164.0,
 		// 2026-11-05, run under a sandbox profile that denies the network).
 		StatusArgs: []string{"login", "status"},
+		OwnSandbox: true,
 		// Known limit: an openai_base_url in codex's own config.toml is not
 		// visible here. The run's -c replaces it, so that endpoint is
 		// bypassed.
@@ -176,7 +177,15 @@ func (codex) Args(t Turn) []string {
 	// folder codex could not be kept out of the data folder's files
 	// in, runs read-only (Edit).
 	write := !t.Writes.ReadOnly && len(t.Writes.Edit) > 0
-	a = append(a, "--sandbox", codexSandbox(!write))
+	switch {
+	case t.Walled:
+		// Inside the runner's sandbox codex's own cannot be built: every
+		// command would exit 71 (codex-cli 0.164.0, 2026-11-11). The wall
+		// is the boundary, and keeps the folder read only when !write.
+		a = append(a, "--sandbox", "danger-full-access")
+	default:
+		a = append(a, "--sandbox", codexSandbox(!write))
+	}
 	// The hint as codex's developer_instructions, which codex puts in a
 	// developer message of the context before the prompt; own replay
 	// keeps it from the session's first turn.
@@ -193,7 +202,7 @@ func (codex) Args(t Turn) []string {
 	// A turn that may write may also reach the network, as Claude Code
 	// can under typical settings: the person's decision, 2026-11-06. Per
 	// turn, on the command line; ~/.codex/config.toml is never edited.
-	if write {
+	if write && !t.Walled {
 		a = append(a, codexNetwork()...)
 	}
 	// permissions.toml gives codex no flags. read_folders: codex's
@@ -355,7 +364,8 @@ func tomlString(s string) string {
 // codexSandbox is the value of codex's --sandbox for a turn: read-only when
 // read_only is true, else workspace-write, which lets codex write in the
 // turn's folder (and its temporary folders) and nowhere else (codex-cli
-// 0.164.0, `codex exec --help`). danger-full-access is never used.
+// 0.164.0, `codex exec --help`). danger-full-access is used only inside the
+// runner's sandbox (Turn.Walled).
 func codexSandbox(readOnly bool) string {
 	if readOnly {
 		return "read-only"

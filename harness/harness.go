@@ -49,6 +49,11 @@ type Info struct {
 	// Product is what to install, for the reply when the program is
 	// missing, such as "the Codex CLI".
 	Product string
+	// OwnSandbox: it keeps a turn that may not edit from writing with a
+	// sandbox of its own (codex's --sandbox read-only). Inside the runner's
+	// sandbox that one is off (Turn.Walled), so the wall keeps the turn's
+	// folder read only in its place.
+	OwnSandbox bool
 	// StatusArgs is its own offline sign-in status command: exit 0 signed
 	// in, 1 not. Its output is never read, since it can name the account.
 	StatusArgs []string
@@ -227,6 +232,13 @@ type Turn struct {
 	// AGENTBUS_TOKEN, read by the harness itself, so no token is in an
 	// argument or a file. Wired by run flags only, never a settings file.
 	Tools string
+	// Walled says the runner's sandbox walls the turn in (package sandbox):
+	// the harness's own sandbox stays off, since macOS cannot build one
+	// Seatbelt sandbox inside another ("sandbox_apply: Operation not
+	// permitted", measured 2026-11-11 on macOS 13.0.1). For a harness with
+	// Info.OwnSandbox the wall keeps the turn's folder read only when Writes
+	// allows no edit.
+	Walled bool
 	// Prompt is always last, after "--" or joined to its flag with "=", so
 	// it is never read as a flag.
 	Prompt string

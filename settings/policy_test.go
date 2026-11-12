@@ -219,3 +219,22 @@ func TestNetworkContainAutoRefused(t *testing.T) {
 		t.Error("JSON accepted contain \"auto\"")
 	}
 }
+
+// [sandbox]: off by default, on when asked, and read entries only under ~.
+func TestSandboxPolicy(t *testing.T) {
+	if p := DefaultPolicy(); p.Sandbox.Mode != SandboxOff || p.Sandbox.Read == nil {
+		t.Fatalf("default: %+v", p.Sandbox)
+	}
+	p, err := ParsePolicy([]byte("[sandbox]\nmode = \"on\"\nread = [\"~/.aws/config\"]\n"))
+	if err != nil || p.Sandbox.Mode != SandboxOn || len(p.Sandbox.Read) != 1 {
+		t.Fatalf("on: %+v %v", p.Sandbox, err)
+	}
+	if back, err := ParsePolicy(FormatPolicy(p)); err != nil || back.Sandbox.Mode != SandboxOn || back.Sandbox.Read[0] != "~/.aws/config" {
+		t.Errorf("FormatPolicy lost [sandbox]: %+v %v", back.Sandbox, err)
+	}
+	for _, bad := range []string{"mode = \"yes\"", "read = [\"/etc/passwd\"]", "read = [\"~/../x\"]", "read = [\"~/\"]", "read = [\"~\"]"} {
+		if _, err := ParsePolicy([]byte("[sandbox]\n" + bad + "\n")); err == nil || !strings.Contains(err.Error(), "[sandbox]") {
+			t.Errorf("%s: %v, want a refusal naming [sandbox]", bad, err)
+		}
+	}
+}

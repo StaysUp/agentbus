@@ -136,6 +136,23 @@ tools = false        # true: give each claude and codex turn the agentbus MCP to
 [network]
 contain = "off"
 allow = []           # e.g. ["github.com", "registry.npmjs.org"]
+
+# A wall around each session, built by the runner around the agent's whole
+# process and around each ! command. A proof of concept: off by default.
+# mode: "off" (the default) or "on". On, a session reads and writes only its
+# own folder and its own home; it reads the system folders and the agent's
+# own program; nothing else of your home and no other session. Its network
+# goes only through the runner's proxy: the public internet when contain is
+# "off" (this machine and its networks only by [network] allow), the allow
+# list when "on". macOS uses Seatbelt,
+# Linux bubblewrap inside the network namespace. A runner that cannot build
+# the wall refuses the turn, and a runner with no home per session (agentbus
+# up) cannot build it.
+# read: files or folders under your home, such as "~/.aws/config", copied
+# into the session's home at the start of each turn, at the same place.
+[sandbox]
+mode = "off"
+read = []            # e.g. ["~/.aws/config"]
 `
 
 // Edit values: where a turn may edit files without asking.
@@ -172,6 +189,12 @@ const (
 	ContainOn  = "on"
 )
 
+// Mode values of [sandbox]: whether each session runs inside a wall.
+const (
+	SandboxOff = "off"
+	SandboxOn  = "on"
+)
+
 // The defaults, as the starter file writes them.
 const (
 	DefaultMaxDepth       = 2
@@ -195,7 +218,8 @@ type Policy struct {
 	SubscriptionsOnRunners string   `toml:"subscriptions_on_runners" json:"subscriptions_on_runners,omitempty" doc:"Whether control adds the person's own subscription sign-in to model calls of agents on their runners: off or own (runners on their own machines; connect the subscription once on control). Absent in a PUT: off."`
 	Limits                 Limits   `toml:"limits" json:"limits" doc:"The limits on work agents ask for."`
 	AgentAPI               AgentAPI `toml:"agent_api" json:"agent_api" doc:"What a turn's own token may call."`
-	Network                Network  `toml:"network" json:"network" doc:"What a turn's agent may reach on the network (Linux runners only)."`
+	Network                Network  `toml:"network" json:"network" doc:"What a turn's agent may reach on the network (Linux runners, and any runner with [sandbox] on)."`
+	Sandbox                Sandbox  `toml:"sandbox" json:"sandbox" doc:"A wall around each session's agent and ! commands (a proof of concept)."`
 
 	// where and fix say, in a turn's refusal, where the policy came from and
 	// what to do: set by the store that read it (Error).
@@ -233,6 +257,13 @@ type Network struct {
 	Allow   []string `toml:"allow" json:"allow" doc:"Host names a closed-off agent may reach, on any port, such as github.com. *.example.com also allows every name under example.com. Absent in a PUT: none."`
 }
 
+// Sandbox says whether each session runs inside a wall ([sandbox]). Read by
+// the runner that starts the agent (package sandbox).
+type Sandbox struct {
+	Mode string   `toml:"mode" json:"mode,omitempty" doc:"off (the default) or on. On, a session's agent and its ! commands read and write only the session's folder and home, read the system folders and the agent's program, and reach the network only through the runner's proxy. A runner that cannot build it refuses the turn. Absent in a PUT: off."`
+	Read []string `toml:"read" json:"read" doc:"Files or folders under the home folder, each starting with ~/, copied into the session's home at the same place at the start of each turn, such as ~/.aws/config. Absent in a PUT: none."`
+}
+
 // DefaultPolicy is the policy of a missing or empty file.
 func DefaultPolicy() Policy {
 	var p Policy
@@ -242,7 +273,7 @@ func DefaultPolicy() Policy {
 
 // fill sets every value left out to its default.
 func (p *Policy) fill() {
-	for _, l := range []*[]string{&p.ReadFolders, &p.Allow, &p.Forbid, &p.ShareReadOnly, &p.Network.Allow} {
+	for _, l := range []*[]string{&p.ReadFolders, &p.Allow, &p.Forbid, &p.ShareReadOnly, &p.Network.Allow, &p.Sandbox.Read} {
 		if *l == nil {
 			*l = []string{}
 		}
@@ -277,6 +308,9 @@ func (p *Policy) fill() {
 	}
 	if p.Network.Contain == "" {
 		p.Network.Contain = ContainOff
+	}
+	if p.Sandbox.Mode == "" {
+		p.Sandbox.Mode = SandboxOff
 	}
 	for _, b := range []**bool{&p.AgentAPI.Read, &p.AgentAPI.ListAgents, &p.AgentAPI.Start,
 		&p.AgentAPI.Continue, &p.AgentAPI.Review, &p.AgentAPI.Cancel, &p.AgentAPI.Rename, &p.AgentAPI.Apply} {
@@ -334,6 +368,16 @@ func (p *Policy) Check() error {
 	default:
 		return fmt.Errorf("[network] contain must be %q or %q", ContainOff, ContainOn)
 	}
+	switch p.Sandbox.Mode {
+	case "", SandboxOff, SandboxOn:
+	default:
+		return fmt.Errorf("[sandbox] mode must be %q or %q", SandboxOff, SandboxOn)
+	}
+	for _, f := range p.Sandbox.Read {
+		if err := grantShape(f); err != nil {
+			return fmt.Errorf("[sandbox] read entry %s %v", strconv.Quote(f), err)
+		}
+	}
 	for _, h := range p.Network.Allow {
 		if !hostShape(h) {
 			return fmt.Errorf("[network] allow entry %s must be a host name, such as \"github.com\" or \"*.github.com\": no scheme, port or path", strconv.Quote(h))
@@ -371,10 +415,10 @@ func ParsePolicy(b []byte) (Policy, error) {
 		// Not a parse error: a value of the wrong type, such as a string
 		// where a list belongs.
 		return Policy{}, errors.New("a value has the wrong type: read_folders, allow, forbid and share_read_only are lists of strings, such as [\"go test\"]; " +
-			"edit, isolation, subscriptions_on_runners, scope and contain are strings; [network] allow is a list of strings; subagents is true or false; the [limits] are numbers; the [agent_api] switches are true or false")
+			"edit, isolation, subscriptions_on_runners, scope, contain and mode are strings; [network] allow and [sandbox] read are lists of strings; subagents is true or false; the [limits] are numbers; the [agent_api] switches are true or false")
 	}
 	if extra := md.Undecoded(); len(extra) > 0 {
-		return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, subscriptions_on_runners, [limits], [agent_api] and [network] (see the README)", strconv.Quote(extra[0].String()))
+		return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, subscriptions_on_runners, [limits], [agent_api], [network] and [sandbox] (see the README)", strconv.Quote(extra[0].String()))
 	}
 	if err := p.Check(); err != nil {
 		return Policy{}, err
@@ -400,11 +444,11 @@ func DecodePolicy(b []byte) (Policy, error) {
 		switch {
 		case errors.As(err, &te) && te.Field != "":
 			return Policy{}, fmt.Errorf("%s has the wrong type: read_folders, allow, forbid and share_read_only are lists of strings; "+
-				"edit, isolation, subscriptions_on_runners, scope and contain are strings; network.allow is a list of strings; subagents and the agent_api switches are true or false; the limits are numbers", te.Field)
+				"edit, isolation, subscriptions_on_runners, scope, contain and mode are strings; network.allow and sandbox.read are lists of strings; subagents and the agent_api switches are true or false; the limits are numbers", te.Field)
 		case errors.As(err, &se):
 			return Policy{}, errors.New("the body is not valid JSON")
 		case strings.HasPrefix(err.Error(), "json: unknown field "):
-			return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, subscriptions_on_runners, limits, agent_api and network",
+			return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, subscriptions_on_runners, limits, agent_api, network and sandbox",
 				strings.TrimPrefix(err.Error(), "json: unknown field "))
 		}
 		return Policy{}, errors.New("the body must be one JSON object: the policy")
@@ -438,6 +482,7 @@ func FormatPolicy(p Policy) []byte {
 		"agent_api.cancel": *p.AgentAPI.Cancel, "agent_api.rename": *p.AgentAPI.Rename,
 		"agent_api.apply": *p.AgentAPI.Apply, "agent_api.tools": *p.AgentAPI.Tools,
 		"network.contain": p.Network.Contain, "network.allow": p.Network.Allow,
+		"sandbox.mode": p.Sandbox.Mode, "sandbox.read": p.Sandbox.Read,
 	}
 	var out bytes.Buffer
 	section := ""
@@ -525,6 +570,23 @@ func folderShape(f string) error {
 	}
 	if f != "~" && !strings.HasPrefix(f, "~/") && !filepath.IsAbs(f) {
 		return errors.New("must be an absolute path or start with ~/")
+	}
+	return nil
+}
+
+// grantShape refuses a [sandbox] read entry that is not a path under the
+// home folder: it starts with ~/, names something below it, and never
+// climbs out with "..".
+func grantShape(f string) error {
+	if strings.ContainsFunc(f, isControl) {
+		return errors.New("has a control character")
+	}
+	rest, ok := strings.CutPrefix(f, "~/")
+	if !ok {
+		return errors.New("must start with ~/")
+	}
+	if c := filepath.Clean(rest); c == "." || c == ".." || strings.HasPrefix(c, "../") || filepath.IsAbs(c) {
+		return errors.New("must name a file or folder under ~, not ~ itself or above it")
 	}
 	return nil
 }

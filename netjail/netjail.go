@@ -41,6 +41,10 @@ type Spec struct {
 	// Allow are host names the proxy lets through on any port. An entry
 	// "*.example.com" also matches every name under example.com.
 	Allow []string
+	// Open lets the proxy through to every host on the public internet
+	// (public): the agent still reaches the network only through it, and
+	// this machine and its networks only through Forward, Pass and Allow.
+	Open bool
 	// Refused is told each connection the proxy refused: the host:port the
 	// agent asked for, and why. Nil tells no one.
 	Refused func(target, why string)
@@ -101,6 +105,31 @@ func New(spec Spec) *Jail {
 	return j
 }
 
+// NewHost is a jail with no namespace: its proxy listens on a free port of
+// this machine's loopback, now, and is served until Close. The forwarded
+// addresses are not served: the agent reaches them as they are. It is for
+// a wall that lets the agent reach only these ports, as Seatbelt does on
+// macOS (package sandbox); on its own it closes nothing off.
+func NewHost(spec Spec) (*Jail, error) {
+	j := New(spec)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return nil, &Error{Why: "the proxy could not listen on this machine's loopback"}
+	}
+	j.proxy = l.Addr().String()
+	j.mu.Lock()
+	j.lns = []net.Listener{l}
+	srv := &http.Server{Handler: http.HandlerFunc(j.proxyHTTP), ErrorLog: log.New(io.Discard, "", 0),
+		ReadHeaderTimeout: 30 * time.Second}
+	j.srv = srv
+	j.mu.Unlock()
+	go srv.Serve(l)
+	return j, nil
+}
+
+// Proxy is the proxy's ip:port, as the agent reaches it.
+func (j *Jail) Proxy() string { return j.proxy }
+
 // Env is what the agent's environment needs: the proxy, for every client
 // that reads either spelling, and loopback left out of it.
 func (j *Jail) Env() []string {
@@ -158,6 +187,9 @@ func (j *Jail) Close() {
 // dial is every connection the runner makes for the agent: tracked, so
 // Close ends it, whatever is still using it.
 func (j *Jail) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	if to, ok := ctx.Value(dialTo{}).(string); ok {
+		addr = to
+	}
 	c, err := (&net.Dialer{Timeout: dialTimeout}).DialContext(ctx, network, addr)
 	if err != nil {
 		return nil, err
@@ -258,21 +290,78 @@ func closeWrite(c net.Conn) {
 
 // check says why the proxy refuses target (host:port), or "".
 func (j *Jail) check(target string) string {
+	why, _ := j.vet(target)
+	return why
+}
+
+// vet says why the proxy refuses target (host:port), or "" and the address
+// to dial: target as it is, or for a host an open proxy lets through, the
+// address it checked, so a name cannot answer differently when dialled.
+func (j *Jail) vet(target string) (why, dial string) {
 	host, port, err := net.SplitHostPort(target)
 	if err != nil || host == "" || port == "" {
-		return "the address is not host:port"
+		return "the address is not host:port", ""
 	}
 	host = strings.TrimSuffix(strings.ToLower(host), ".")
 	for _, p := range j.spec.Pass {
 		if strings.EqualFold(p, net.JoinHostPort(host, port)) {
-			return ""
+			return "", target
 		}
 	}
 	if Allowed(j.spec.Allow, host) {
-		return ""
+		return "", target
 	}
-	return host + " is not in [network] allow of permissions.toml"
+	if j.spec.Open {
+		ip := public(host)
+		if ip == nil {
+			return host + " is not on the public internet, which is all an open proxy reaches; name it in [network] allow", ""
+		}
+		return "", net.JoinHostPort(ip.String(), port)
+	}
+	return host + " is not in [network] allow of permissions.toml", ""
 }
+
+// public says host is, and resolves only to, addresses of the public
+// internet: global unicast, not private (RFC 1918, fc00::/7), not shared
+// (100.64.0.0/10, as Tailscale uses), and none of this machine's own. The
+// one rule an open proxy keeps: whatever is local, on this machine or its
+// networks, is reached only through Forward, Pass or allow. A name that
+// does not resolve is not public. It returns the address to dial, the
+// first one checked, or nil when host is not public.
+func public(host string) net.IP {
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return nil
+	}
+	var ips []net.IP
+	if ip := net.ParseIP(host); ip != nil {
+		ips = []net.IP{ip}
+	} else {
+		ctx, cancel := context.WithTimeout(context.Background(), dialTimeout)
+		defer cancel()
+		addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil || len(addrs) == 0 {
+			return nil
+		}
+		for _, a := range addrs {
+			ips = append(ips, a.IP)
+		}
+	}
+	own, _ := net.InterfaceAddrs()
+	for _, ip := range ips {
+		if !ip.IsGlobalUnicast() || ip.IsPrivate() || shared.Contains(ip) {
+			return nil
+		}
+		for _, a := range own {
+			if n, ok := a.(*net.IPNet); ok && n.IP.Equal(ip) {
+				return nil
+			}
+		}
+	}
+	return ips[0]
+}
+
+// shared is the shared address space, 100.64.0.0/10 (RFC 6598).
+var shared = &net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
 
 // Allowed says whether host is in allow: the same name, or a name under an
 // entry that starts with "*.". Case does not matter.
@@ -305,11 +394,12 @@ func (j *Jail) refuse(w http.ResponseWriter, target, why string) {
 // HTTP.
 func (j *Jail) proxyHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodConnect {
-		if why := j.check(r.Host); why != "" {
+		why, addr := j.vet(r.Host)
+		if why != "" {
 			j.refuse(w, r.Host, why)
 			return
 		}
-		j.tunnel(w, r)
+		j.tunnel(w, r, addr)
 		return
 	}
 	if !r.URL.IsAbs() || r.URL.Host == "" {
@@ -317,16 +407,22 @@ func (j *Jail) proxyHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	target := hostPort(r.URL)
-	if why := j.check(target); why != "" {
+	why, addr := j.vet(target)
+	if why != "" {
 		j.refuse(w, target, why)
 		return
 	}
-	j.plain.ServeHTTP(w, r)
+	j.plain.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), dialTo{}, addr)))
 }
 
-// tunnel connects to r.Host and passes bytes both ways.
-func (j *Jail) tunnel(w http.ResponseWriter, r *http.Request) {
-	up, err := j.dial(r.Context(), "tcp", r.Host)
+// dialTo is the context key of the address a plain HTTP request is dialled
+// at: the one vet checked.
+type dialTo struct{}
+
+// tunnel connects to addr, the address vet checked for r.Host, and passes
+// bytes both ways.
+func (j *Jail) tunnel(w http.ResponseWriter, r *http.Request, addr string) {
+	up, err := j.dial(r.Context(), "tcp", addr)
 	if err != nil {
 		http.Error(w, "agentbus: the host could not be reached", http.StatusBadGateway)
 		return

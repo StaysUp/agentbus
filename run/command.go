@@ -24,6 +24,7 @@ import (
 
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/netjail"
+	"github.com/staysup/agentbus/settings"
 )
 
 // The limits of a command.
@@ -99,19 +100,44 @@ func (e *Engine) RunCommand(ctx context.Context, c Command) (event.Event, error)
 			cmd.Env = append(cmd.Env, "HOME="+dir)
 		}
 	}
-	var jail *netjail.Jail
-	if on, why := e.contained(perm); why != "" {
+	// The session's slot, as a turn takes it: one turn or command of a
+	// session runs on this engine at a time, whatever the queue believes.
+	// Taken before the sandbox is built, which copies the grants into the
+	// session's home: a turn running there keeps its home as it is.
+	if code, msg := e.runs.take(c.Session); code != 0 {
+		return event.Event{}, refuse(code, msg)
+	}
+	taken := true
+	defer func() {
+		if taken {
+			e.runs.release(nil, c.Session)
+		}
+	}()
+	// In the session's sandbox, or closed off from the network, as its
+	// turns are.
+	var jail wall
+	session := c.Session
+	netSpec := netjail.Spec{Allow: perm.Network.Allow, Refused: func(target, why string) {
+		if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.NetworkRefused,
+			Time: e.cfg.Now().UTC(), Session: session, Host: target, Error: why}); err != nil {
+			e.cfg.Logf("store.error what=network_refused session=%s", session)
+		}
+	}}
+	if perm.Sandbox.Mode == settings.SandboxOn {
+		box, why := e.sandbox(perm, c.Session, c.Folder, false, false, nil, netSpec)
+		if why != "" {
+			return event.Event{}, refuse(http.StatusBadRequest, why+", so the command did not run. Fix it on this runner, or set [sandbox] mode = \"off\" in the permissions.")
+		}
+		jail = box
+		cmd.Env = setEnv(cmd.Env, box.Env())
+		defer box.Close()
+	} else if on, why := e.contained(perm); why != "" {
 		return event.Event{}, refuse(http.StatusBadRequest, strings.ReplaceAll(why, "the turn did not start", "the command did not run"))
 	} else if on {
-		session := c.Session
-		jail = netjail.New(netjail.Spec{Allow: perm.Network.Allow, Refused: func(target, why string) {
-			if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.NetworkRefused,
-				Time: e.cfg.Now().UTC(), Session: session, Host: target, Error: why}); err != nil {
-				e.cfg.Logf("store.error what=network_refused session=%s", session)
-			}
-		}})
-		cmd.Env = setEnv(cmd.Env, jail.Env())
-		defer jail.Close()
+		j := netjail.New(netSpec)
+		jail = j
+		cmd.Env = setEnv(cmd.Env, j.Env())
+		defer j.Close()
 	}
 	// Its own session, so its process tree is tracked as a turn's is
 	// (procTree), even what calls setsid. Stdin stays empty. The output goes
@@ -129,21 +155,14 @@ func (e *Engine) RunCommand(ctx context.Context, c Command) (event.Event, error)
 		start = func() error { return jail.Start(cmd) }
 	}
 	begun := e.cfg.Now()
-	// The session's slot, as a turn takes it: one turn or command of a
-	// session runs on this engine at a time, whatever the queue believes.
-	if code, msg := e.runs.take(c.Session); code != 0 {
-		pipes.closeWriters()
-		pipes.closeReaders()
-		return event.Event{}, refuse(code, msg)
-	}
 	id := newEventID()
 	code, msg, lt := e.runs.start(cmd, start, c.Session, id)
 	pipes.closeWriters() // the child holds its own copies
 	if code != 0 {
 		pipes.closeReaders()
-		e.runs.release(nil, c.Session)
 		return event.Event{}, refuse(code, strings.ReplaceAll(msg, "the agent could not be started", "the command could not be started"))
 	}
+	taken = false // released once the command has ended, below
 	copied := pipes.copy(stdout, stderr)
 	e.cfg.Logf("command.start session=%s pid=%d", c.Session, cmd.Process.Pid)
 	done := make(chan error, 1)
