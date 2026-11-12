@@ -65,19 +65,33 @@ func (f *finisher) run(stop <-chan struct{}) {
 	}
 }
 
-// pass ends each finish saved now, one at a time.
+// finishPage is how many saved finishes a pass reads at a time.
+var finishPage = 100
+
+// pass ends each finish saved now, one at a time, oldest first. It reads
+// them a page at a time, each page from past the last one it read: a
+// finish whose write fails is tried again next pass, and never holds up
+// the finishes after it, however many fail.
 func (f *finisher) pass() {
-	list, err := f.q.Accepted(100)
 	f.mu.Lock()
 	n := f.passes + 1
 	f.mu.Unlock()
 	failed := map[string]bool{}
-	if err == nil {
+	var after queue.Place
+	for {
+		list, err := f.q.Accepted(after, finishPage)
+		if err != nil {
+			break
+		}
 		for _, a := range list {
 			if _, err := endAccepted(f.rec, f.q, a); err != nil {
 				failed[a.Attempt] = true // tried again next pass
 			}
 		}
+		if len(list) < finishPage {
+			break
+		}
+		after = list[len(list)-1].Place
 	}
 	f.mu.Lock()
 	f.passes = n

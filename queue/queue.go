@@ -1657,17 +1657,30 @@ type AcceptedFinish struct {
 	Number          int
 	Job             Job
 	Finish          Finish
+	// Place is where it sits in the order Accepted reads: a later read
+	// from here starts past it.
+	Place Place
+}
+
+// Place is a saved finish's place in the order Accepted reads them: its
+// attempt's take, then the attempt's id. The zero Place is before all.
+type Place struct {
+	taken   int64
+	attempt string
 }
 
 // Accepted reads the finishes control accepted and has not ended, oldest
-// first, at most limit, in one read: each finish's fields from its attempt,
-// its result from its job, as Accept saved them.
-func (q *Queue) Accepted(limit int) ([]AcceptedFinish, error) {
+// first, past after (Place), at most limit, in one read: each finish's
+// fields from its attempt, its result from its job, as Accept saved them.
+// A reader that could not end one reads on from its Place, so the
+// finishes after it never wait behind it.
+func (q *Queue) Accepted(after Place, limit int) ([]AcceptedFinish, error) {
 	var out []AcceptedFinish
 	err := q.tx(func(tx *sql.Tx) error {
 		out = nil
-		rows, err := tx.Query(`SELECT a.runner, a.id, a.number, a.job, a.result FROM attempts a
-			WHERE a.finish_hash IS NOT NULL AND a.ended IS NULL ORDER BY a.taken LIMIT ?`, limit)
+		rows, err := tx.Query(`SELECT a.runner, a.id, a.number, a.job, a.result, a.taken FROM attempts a
+			WHERE a.finish_hash IS NOT NULL AND a.ended IS NULL AND (a.taken > ? OR (a.taken = ? AND a.id > ?))
+			ORDER BY a.taken, a.id LIMIT ?`, after.taken, after.taken, after.attempt, limit)
 		if err != nil {
 			return fmt.Errorf("queue: read accepted finishes: %w", err)
 		}
@@ -1676,7 +1689,7 @@ func (q *Queue) Accepted(limit int) ([]AcceptedFinish, error) {
 			var a AcceptedFinish
 			var job string
 			var fields sql.NullString
-			if err := rows.Scan(&a.Runner, &a.Attempt, &a.Number, &job, &fields); err != nil {
+			if err := rows.Scan(&a.Runner, &a.Attempt, &a.Number, &job, &fields, &a.Place.taken); err != nil {
 				rows.Close()
 				return fmt.Errorf("queue: read accepted finishes: %w", err)
 			}
@@ -1684,6 +1697,7 @@ func (q *Queue) Accepted(limit int) ([]AcceptedFinish, error) {
 				rows.Close()
 				return fmt.Errorf("queue: read accepted finishes: %w", err)
 			}
+			a.Place.attempt = a.Attempt
 			out, jobIDs = append(out, a), append(jobIDs, job)
 		}
 		rows.Close()

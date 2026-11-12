@@ -114,7 +114,7 @@ func TestAcceptedFinishKeepsItsBlobs(t *testing.T) {
 	if err != nil || !slices.Contains(mine.Changesets, "cs_accepted") {
 		t.Fatalf("the runner's roots %+v %v", mine.Changesets, err)
 	}
-	list, err := q.Accepted(10)
+	list, err := q.Accepted(Place{}, 10)
 	if err != nil || len(list) != 1 {
 		t.Fatalf("accepted %+v %v", list, err)
 	}

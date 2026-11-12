@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -729,7 +730,7 @@ func TestAcceptFinish(t *testing.T) {
 		}
 		c.add(lease)
 	}
-	list, err := q.Accepted(10)
+	list, err := q.Accepted(Place{}, 10)
 	if err != nil || len(list) != 1 || list[0].Attempt != a.ID || list[0].Runner != r.ID || list[0].Number != 1 ||
 		list[0].Job.State != Running || string(list[0].Finish.Result) != string(fa.Result) || list[0].Finish.LastSeq != 3 {
 		t.Fatalf("accepted %+v %v", list, err)
@@ -738,7 +739,7 @@ func TestAcceptFinish(t *testing.T) {
 	if err != nil || done.State != Finished || string(done.Result) != string(fa.Result) {
 		t.Fatalf("end: %+v %v", done, err)
 	}
-	if list, _ := q.Accepted(10); len(list) != 0 {
+	if list, _ := q.Accepted(Place{}, 10); len(list) != 0 {
 		t.Fatalf("still accepted after its end: %+v", list)
 	}
 	if _, ended, err := q.Accept(r.ID, a.ID, 1, fa); err != nil || !ended {
@@ -746,5 +747,52 @@ func TestAcceptFinish(t *testing.T) {
 	}
 	if again, err := q.End(r.ID, a.ID, 1, fa); err != nil || !again.Updated.Equal(done.Updated) {
 		t.Fatalf("the same finish after the end: %v", err)
+	}
+}
+
+// Accepted reads on from a Place: past it, in take order, so a reader
+// that cannot end the first finishes still reaches the later ones
+// (0.5.1).
+func TestAcceptedFromPlace(t *testing.T) {
+	q, c := open(t)
+	r := runner(t, q, 5)
+	var ids []string
+	for i := range 5 {
+		if i != 2 {
+			c.add(time.Millisecond) // the second and third share a take time
+		}
+		job(t, q, "")
+		_, a := take(t, q, r)
+		if _, _, err := q.Start(r.ID, a.ID, 1, lease); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := q.Accept(r.ID, a.ID, 1, Finish{Status: Finished, Result: json.RawMessage(`{}`)}); err != nil {
+			t.Fatal(err)
+		}
+		ids = append(ids, a.ID)
+	}
+	var got []string
+	var after Place
+	for {
+		page, err := q.Accepted(after, 2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, a := range page {
+			got = append(got, a.Attempt)
+		}
+		if len(page) < 2 {
+			break
+		}
+		after = page[len(page)-1].Place
+	}
+	if ids[1] > ids[2] {
+		ids[1], ids[2] = ids[2], ids[1] // one take time: by id
+	}
+	if !slices.Equal(got, ids) {
+		t.Fatalf("read %v, want %v in take order, each once", got, ids)
+	}
+	if all, err := q.Accepted(Place{}, 10); err != nil || len(all) != 5 {
+		t.Fatalf("from the start: %d %v", len(all), err)
 	}
 }
