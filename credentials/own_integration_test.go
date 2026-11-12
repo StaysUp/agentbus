@@ -3,7 +3,6 @@
 package credentials
 
 import (
-	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -157,30 +156,25 @@ func TestOwnLoginKeepsItsHome(t *testing.T) {
 	}
 }
 
-// In a terminal (agentbus connect agy): the link and the prompt to paste the
-// code, and the login's folder is handed on with the sign-in, not removed.
-func TestOwnLoginInATerminal(t *testing.T) {
-	exp := time.Now().Add(time.Hour)
-	l := agyLogin(t, "fake-agy-access-0", exp, filepath.Join(t.TempDir(), "marker"))
-	var out strings.Builder
-	dir := t.TempDir()
-	si, err := Run(context.Background(), l, dir, time.Now(), strings.NewReader("good-code\n"), &out)
-	if err != nil || si.Token != "fake-agy-access-0" || si.Refresh != "" || si.Home == "" {
-		t.Fatalf("%v %+v", err, si.Home)
+// A wrong code connects nothing, and the login's folder, which a kept login
+// would hand on, is removed.
+func TestOwnLoginWrongCode(t *testing.T) {
+	s, _ := ownStore(t, "exit 0")
+	m := &Manager{Store: s, Logins: map[string]Login{"agy": agyLogin(t, "fake-agy-access-0", time.Now().Add(time.Hour), filepath.Join(t.TempDir(), "marker"))}}
+	if _, err := m.Connect("agy"); err != nil {
+		t.Fatal(err)
 	}
-	if _, err := os.Stat(filepath.Join(si.Home, fakeAgyFile)); err != nil {
-		t.Fatalf("the login's folder was not handed on: %v", err)
+	waitFor(t, func() bool { v, _ := m.View("agy"); return len(v.Output) == 1 || v.State != Running })
+	if err := m.Input("agy", "bad"); err != nil {
+		t.Fatal(err)
 	}
-	if s := out.String(); s != "Sign in here: https://accounts.google.test/o/oauth2/auth?client_id=x&state=y\n"+
-		"Then paste the code the browser shows, and press Enter.\n" {
-		t.Fatalf("%q", s)
+	if v := waitState(t, m, "agy"); v.State != Failed || len(v.Output) != 0 || v.Paste {
+		t.Fatalf("%+v", v)
 	}
-	// A wrong code: no sign-in, and no folder left.
-	dir = t.TempDir()
-	if _, err := Run(context.Background(), l, dir, time.Now(), strings.NewReader("bad\n"), &strings.Builder{}); err == nil {
-		t.Fatal("a wrong code connected")
+	if st, _ := s.Status("agy"); st.Connected {
+		t.Fatalf("a wrong code connected: %+v", st)
 	}
-	if left, _ := os.ReadDir(dir); len(left) != 0 {
+	if left, _ := os.ReadDir(s.Dir); len(left) != 0 {
 		t.Fatalf("left %v", left)
 	}
 }

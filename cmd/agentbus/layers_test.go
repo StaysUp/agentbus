@@ -126,7 +126,6 @@ var controlAllowed = []string{
 	// The vendor's own login, which prints a subscription's token, and the
 	// folder control keeps those tokens in.
 	"credentials/connect.go Manager.Connect exec.Command",
-	"credentials/connect.go Run exec.CommandContext",
 	// The terminal the login runs in: a device, not a folder.
 	"credentials/pty_darwin.go openPty os.OpenFile",
 	"credentials/pty_linux.go openPty os.OpenFile",

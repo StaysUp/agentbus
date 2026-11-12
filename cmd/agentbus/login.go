@@ -13,7 +13,7 @@ package main
 // the setups made with it (agentbus runner -enroll-token-file). A later
 // build may take no address to mean lorebug.art; this one needs one.
 //
-// Not agentbus connect: that keeps a subscription's token on control.
+// Not the cockpit's Connect: that keeps a subscription's sign-in on control.
 
 import (
 	"context"

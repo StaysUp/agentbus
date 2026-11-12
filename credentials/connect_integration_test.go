@@ -3,7 +3,6 @@
 package credentials
 
 import (
-	"context"
 	"errors"
 	"regexp"
 	"strings"
@@ -136,8 +135,5 @@ func TestConnectNotOnPath(t *testing.T) {
 	want := "agentbus-no-such-login is not on PATH (searched: /nowhere/bin); add the folder that holds agentbus-no-such-login to PATH"
 	if !errors.As(err, &missing) || missing.Why != want {
 		t.Fatalf("%v", err)
-	}
-	if _, err := Run(context.Background(), l, t.TempDir(), time.Now(), strings.NewReader(""), &strings.Builder{}); err == nil || err.Error() != want {
-		t.Fatalf("run: %v", err)
 	}
 }

@@ -3,7 +3,6 @@
 package credentials
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -75,26 +74,6 @@ echo "Successfully logged in"`)}}
 	}
 }
 
-// In a terminal (agentbus connect codex): the link and the code, nothing
-// else, and no prompt to paste anything.
-func TestDeviceLoginInATerminal(t *testing.T) {
-	access := fakeJWT("access-0", time.Now().Add(time.Hour))
-	l := deviceLogin(t, `printf '%s' '`+authJSON(access)+`' > "$FAKE_CODEX_HOME/auth.json"; echo "token `+access+`"`)
-	var out strings.Builder
-	dir := t.TempDir()
-	si, err := Run(context.Background(), l, dir, time.Now(), strings.NewReader(""), &out)
-	if err != nil || si.Token != access || si.Refresh != "fake-refresh-0" || si.Account != "acct-1" {
-		t.Fatalf("%v", err)
-	}
-	if s := out.String(); s != "Sign in here: https://auth.example.test/codex/device\nEnter this one-time code there: ABCD-EFGH2\n"+
-		"The login ends by itself once the browser accepts it.\n" {
-		t.Fatalf("%q", s)
-	}
-	if left, _ := os.ReadDir(dir); len(left) != 0 {
-		t.Fatalf("left in the subscriptions folder: %v", left)
-	}
-}
-
 // A login that ends without a sign-in, or with one that names no expiry,
 // fails, and leaves no folder.
 func TestDeviceLoginWithoutSignin(t *testing.T) {
@@ -116,21 +95,35 @@ func TestDeviceLoginWithoutSignin(t *testing.T) {
 	}
 }
 
-// Stopped in the terminal (Ctrl-C): the login is stopped and its folder,
-// which may hold a sign-in, is removed.
+// A connect stopped midway, at the Manager's Wait or when control stops,
+// fails and leaves no folder: the login's folder may hold part of a sign-in.
 func TestDeviceLoginStopped(t *testing.T) {
-	dir := t.TempDir()
-	l := deviceLogin(t, `echo partial > "$FAKE_CODEX_HOME/auth.json"; sleep 30`)
-	ctx, cancel := context.WithCancel(context.Background())
-	time.AfterFunc(500*time.Millisecond, cancel)
-	start := time.Now()
-	if _, err := Run(ctx, l, dir, time.Now(), strings.NewReader(""), &strings.Builder{}); err == nil || !strings.Contains(err.Error(), "stopped") {
-		t.Fatalf("%v", err)
-	}
-	if time.Since(start) > 10*time.Second {
-		t.Fatal("the login was not stopped")
-	}
-	if left, _ := os.ReadDir(dir); len(left) != 0 {
-		t.Fatalf("left %v", left)
+	for _, how := range []string{"wait", "stop"} {
+		dir := t.TempDir()
+		m := &Manager{Store: &Subscriptions{Dir: dir},
+			Logins: map[string]Login{"codex": deviceLogin(t, `echo partial > "$FAKE_CODEX_HOME/auth.json"; sleep 30`)}}
+		if how == "wait" {
+			m.Wait = 500 * time.Millisecond
+		}
+		if _, err := m.Connect("codex"); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(t, func() bool { v, _ := m.View("codex"); return v.Code != "" || v.State != Running })
+		if how == "stop" {
+			m.Stop()
+		}
+		start := time.Now()
+		if v := waitState(t, m, "codex"); v.State != Failed || v.Code != "" || len(v.Output) != 0 {
+			t.Fatalf("%s: %+v", how, v)
+		}
+		if time.Since(start) > 10*time.Second {
+			t.Fatalf("%s: the login was not stopped", how)
+		}
+		if st, _ := m.Store.Status("codex"); st.Connected {
+			t.Fatalf("%s: connected %+v", how, st)
+		}
+		if left, _ := os.ReadDir(dir); len(left) != 0 {
+			t.Fatalf("%s: left %v", how, left)
+		}
 	}
 }

@@ -75,9 +75,14 @@ const usage = `usage: agentbus up     [-listen 127.0.0.1:8787] [-origin http://l
        agentbus server [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false]
        agentbus runner -server URL [-enroll-token-file F (the old way to join)] [-gateway server|local] [-capacity 4] [-name NAME] [-folder DIR]... [-labels a,b] [-listen 127.0.0.1:0] [-replay=false]
        agentbus login URL [-no-service] [runner's flags]   (on a machine, once: sign it in to the control at URL; approve it on the Runners page)
-       agentbus connect HARNESS           (on control, once: keep your own subscription's token for your runners)
-       agentbus api METHOD PATH [BODY]   (inside a turn: calls this service with the turn's token)
-       agentbus version`
+       agentbus version
+
+For agents and scripts:
+       agentbus api METHOD PATH [BODY]   (inside a turn: calls this service with the turn's token)`
+
+// connectRemoved is what agentbus connect says since 0.5: the cockpit's
+// Connect keeps a subscription's sign-in on control instead.
+const connectRemoved = "agentbus connect was removed in 0.5: connect a subscription in the cockpit (Agents, the agent's Connect step)."
 
 // parse reads a mode's command line into a config. It returns the exit code
 // 2 and writes why to stderr when the line is not one it takes.

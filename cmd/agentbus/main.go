@@ -108,6 +108,10 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	if args[0] == "api" {
 		return apiCall(args[1:], getenv, os.Stdin, stdout, stderr)
 	}
+	if args[0] == "connect" {
+		fmt.Fprintln(stderr, connectRemoved)
+		return 2
+	}
 
 	// net/http writes some of its own messages to the global logger, and they
 	// can quote a vendor reply's headers. Nothing else here uses that logger.
@@ -118,9 +122,6 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	if err != nil {
 		own.Print(err)
 		return 1
-	}
-	if args[0] == "connect" {
-		return runConnect(args[1:], home, os.Stdin, stdout, stderr)
 	}
 	if args[0] == "login" {
 		return runLogin(args[1:], home, getenv, stdout, stderr, systemLogin())
@@ -981,68 +982,6 @@ func subscriptionLogins(c config, subs *credentials.Subscriptions) *credentials.
 		m.Logins[h.Info().Name] = login
 	}
 	return m
-}
-
-// runConnect is agentbus connect HARNESS: the harness's own login, run here
-// on control in this terminal, once. The token it prints is kept in the data
-// folder's subscriptions (never shown), and control's gateway adds it to the
-// model calls of agents on the person's runners when permissions.toml says
-// subscriptions_on_runners = "own".
-func runConnect(args []string, home string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if len(args) != 1 {
-		fmt.Fprintln(stderr, "usage: agentbus connect HARNESS   (such as claude)")
-		return 2
-	}
-	subs := subscriptionStore(home)
-	l, ok := subscriptionLogins(config{}, subs).Logins[args[0]]
-	if !ok {
-		fmt.Fprintf(stderr, "agentbus connect: %s has no login AgentBus can keep a token from; harnesses: %s\n", args[0], loginNames())
-		return 2
-	}
-	if err := os.MkdirAll(home, 0o700); err != nil {
-		fmt.Fprintf(stderr, "agentbus connect: the data folder %s could not be made\n", home)
-		return 1
-	}
-	fmt.Fprintf(stdout, "Running %s %s. Sign in when it asks; AgentBus keeps the sign-in it gives and never shows it.\n\n",
-		args[0], strings.Join(l.Args, " "))
-	// Ctrl-C stops the login, and its folder goes with it.
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	si, err := credentials.Run(ctx, l, subs.Dir, time.Now(), stdin, stdout)
-	if err != nil {
-		fmt.Fprintf(stderr, "agentbus connect: %v\n", err)
-		return 1
-	}
-	err = subs.Keep(args[0], si)
-	if si.Home != "" {
-		_ = os.RemoveAll(si.Home) // kept, it is no longer there
-	}
-	if err != nil {
-		fmt.Fprintf(stderr, "agentbus connect: the sign-in could not be kept in %s\n", subs.Dir)
-		return 1
-	}
-	how := fmt.Sprintf("for %d days", int(l.Valid.Hours()/24))
-	switch {
-	case l.Keep != "":
-		how = "in " + args[0] + "'s own home there, and control runs " + args[0] + " to renew it before it expires"
-	case si.Refresh != "":
-		how = "and control renews it before it expires"
-	}
-	fmt.Fprintf(stdout, "\nConnected: %s's sign-in is kept in %s, readable by you only, %s.\n"+
-		"Control adds it to your runners' calls once the permissions say subscriptions_on_runners = \"own\" (PUT /api/v0/settings/permissions).\n",
-		args[0], subs.Dir, how)
-	return 0
-}
-
-// loginNames are the harnesses agentbus connect takes.
-func loginNames() string {
-	var n []string
-	for _, h := range harness.All() {
-		if h.Info().Login != nil {
-			n = append(n, h.Info().Name)
-		}
-	}
-	return strings.Join(n, ", ")
 }
 
 // settleTimeout bounds how long a turn's session.closed waits for the

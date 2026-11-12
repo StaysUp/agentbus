@@ -263,7 +263,7 @@ func (s *Subscriptions) Credential(n Need) (Cred, error) {
 	k, err := s.read(n.Harness)
 	switch {
 	case errors.Is(err, ErrNotConnected):
-		return Cred{}, &Missing{Why: "no " + n.Harness + " subscription is connected on control; connect it once (agentbus connect " + n.Harness + ", or Connect in the cockpit)"}
+		return Cred{}, &Missing{Why: "no " + n.Harness + " subscription is connected on control; connect it once in the cockpit (Agents, the agent's Connect step)"}
 	case err != nil:
 		return Cred{}, &Missing{Why: "the " + n.Harness + " subscription kept on control cannot be read; connect it again"}
 	}
@@ -272,7 +272,7 @@ func (s *Subscriptions) Credential(n Need) (Cred, error) {
 		k, _, rerr = s.renew(n.Harness)
 		switch {
 		case errors.Is(rerr, ErrNotConnected):
-			return Cred{}, &Missing{Why: "no " + n.Harness + " subscription is connected on control; connect it once (agentbus connect " + n.Harness + ", or Connect in the cockpit)"}
+			return Cred{}, &Missing{Why: "no " + n.Harness + " subscription is connected on control; connect it once in the cockpit (Agents, the agent's Connect step)"}
 		case k.Refused:
 			return Cred{}, &Missing{Why: "the vendor refused to renew the " + n.Harness + " sign-in kept on control; connect it again"}
 		case rerr != nil && !s.now().Before(k.ExpiresAt):
@@ -363,8 +363,8 @@ func (s *Subscriptions) renew(harness string) (kept, bool, error) {
 
 // settle keeps next, a renewal's result, in place of was, the sign-in it
 // renewed, only while was is still the one kept. A sign-in connected or
-// removed since (in this process, or by agentbus connect in another) is left
-// as it is, and returned as it is now.
+// removed since, in this process or another, is left as it is, and returned
+// as it is now.
 func (s *Subscriptions) settle(harness string, was, next kept, why error) (kept, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

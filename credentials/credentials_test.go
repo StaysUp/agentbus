@@ -1,9 +1,9 @@
 package credentials
 
 import (
-	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -145,7 +145,7 @@ func TestEnvByName(t *testing.T) {
 }
 
 // Only links leave the login: a token cut across reads, styled with escape
-// sequences, or printed twice is never shown, in the terminal or the view,
+// sequences, or printed twice is never shown, as it is read or in the view,
 // and it is still found.
 func TestOnlyLinksLeaveTheLogin(t *testing.T) {
 	l := fakeLogin(t, `echo "Open https://example.test/auth"
@@ -154,13 +154,20 @@ sleep 0.2
 printf 'ke-oat01-AAAABBBBCCCCDDDDEEEEFFFF0000 again `+fakeToken+`\n'
 printf 'x sk-fa\033(Bke-oat01-AAAA\033[1mBBBBCCCCDDDDEEEEFFFF0000 y\n'
 printf 'https://example.test/x?t=`+fakeToken+`\n'`)
-	var out strings.Builder
-	si, err := Run(context.Background(), l, t.TempDir(), time.Now(), strings.NewReader(""), &out)
-	if err != nil || si.Token != fakeToken {
-		t.Fatalf("%q %v", si.Token, err)
+	cmd := exec.Command(l.Path)
+	r, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if s := out.String(); s != "Sign in here: https://example.test/auth\nThen paste the code the browser shows, and press Enter.\n" {
-		t.Fatalf("%q", s)
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	var shown []string
+	read := &connecting{login: l}
+	read.take(r, func(s string) { shown = append(shown, s) })
+	cmd.Wait()
+	if si, _ := l.signin(read.text, "", time.Now()); si.Token != fakeToken || len(shown) != 1 || shown[0] != "https://example.test/auth" {
+		t.Fatalf("%q %q", shown, si.Token)
 	}
 	c := &connecting{login: l}
 	c.take(strings.NewReader("a https://example.test/a "+fakeToken+"\nx sk-fa\x1b(Bke-oat01-AAAABBBBCCCCDDDDEEEEFFFF0000\n"), func(string) {})

@@ -94,7 +94,7 @@ subagents = true
 #   "off"  never: a subscription agent runs only where its harness is signed
 #          in (agentbus up on this machine). API-key agents work either way.
 #   "own"  yes, for the runners you run on your own machines. Connect the
-#          subscription once on control: agentbus connect claude.
+#          subscription once in the cockpit: Agents, the agent's Connect step.
 subscriptions_on_runners = "off"
 
 # Work agents ask other agents for. A request tree is the person's session and

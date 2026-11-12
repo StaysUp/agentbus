@@ -9,11 +9,10 @@ package credentials
 // One rule keeps the token out of sight: only links leave the login, and a
 // one-time code the person enters at the link, matched by its exact shape.
 // Of everything it prints, the person is shown those alone; no other text,
-// so no form of the token, reaches a reply, the terminal or a log.
+// so no form of the token, reaches a reply or a log.
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"io"
 	"io/fs"
@@ -24,7 +23,6 @@ import (
 	"runtime"
 	"strconv"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -384,73 +382,6 @@ func (m *Manager) Stop() {
 			stopGroup(c.cmd)
 		}
 	}
-}
-
-// Run runs l in a terminal: in is the person's typing; out is shown the
-// links the login prints, and a prompt for the code or the one-time code to
-// enter, never anything else. dir is the subscriptions folder, where a login
-// that keeps its sign-in in a file gets its own folder. It returns the
-// sign-in the login gave. When ctx ends (the person stopped it), the login
-// is stopped and its folder removed.
-func Run(ctx context.Context, l Login, dir string, now time.Time, in io.Reader, out io.Writer) (Signin, error) {
-	if why := l.usable(); why != "" {
-		return Signin{}, errors.New(why)
-	}
-	c := &connecting{login: l}
-	cmd := exec.CommandContext(ctx, l.Path, l.Args...)
-	// Stopped, the login is asked to end, as Ctrl-C asks it, and a child it
-	// left holding its output no longer holds this read.
-	cmd.Cancel = func() error { return cmd.Process.Signal(syscall.SIGTERM) }
-	env, home, err := l.home(dir)
-	if err != nil {
-		return Signin{}, err
-	}
-	// A kept login's folder goes to the caller with the sign-in, for
-	// Subscriptions.Keep; any other is removed here.
-	handed := false
-	defer func() {
-		if !handed {
-			removeHome(home)
-		}
-	}()
-	cmd.Env, cmd.Stdin = env, in
-	r, w, err := os.Pipe()
-	if err != nil {
-		return Signin{}, err
-	}
-	cmd.Stdout, cmd.Stderr = w, w
-	if err := cmd.Start(); err != nil {
-		r.Close()
-		w.Close()
-		return Signin{}, notStarted(l, err)
-	}
-	w.Close()
-	unread := context.AfterFunc(ctx, func() { r.Close() })
-	defer unread()
-	c.take(r, func(s string) {
-		switch {
-		case s == c.view().Code:
-			io.WriteString(out, "Enter this one-time code there: "+s+"\nThe login ends by itself once the browser accepts it.\n")
-		case l.Code != nil:
-			io.WriteString(out, "Sign in here: "+s+"\n")
-		default:
-			io.WriteString(out, "Sign in here: "+s+"\nThen paste the code the browser shows, and press Enter.\n")
-		}
-	})
-	r.Close()
-	werr := cmd.Wait()
-	if ctx.Err() != nil {
-		return Signin{}, errors.New("the login was stopped")
-	}
-	si, ok := l.signin(c.text, home, now)
-	if !ok {
-		if werr != nil {
-			return Signin{}, errors.New(l.ended() + " (exit " + strconv.Itoa(cmd.ProcessState.ExitCode()) + ")")
-		}
-		return Signin{}, errors.New(l.ended())
-	}
-	handed = si.Home != ""
-	return si, nil
 }
 
 // removeHome removes a login's own folder, which may hold a copy of the

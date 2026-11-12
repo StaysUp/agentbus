@@ -156,7 +156,7 @@ in the record.
 
 **Sign-ins.** By default a runner holds no secrets: control adds the credential to each model call.
 For an OpenRouter agent, control reads the key from its own environment. For your own
-subscriptions, connect each once on control (`agentbus connect claude`, or Connect in the cockpit)
+subscriptions, connect each once in the cockpit (Agents, the agent's Connect step)
 and press **Turn on for my runners** there (it sets `subscriptions_on_runners = "own"`). Or start the runner with `-gateway local`
 to use the machine's own sign-ins.
 
@@ -164,6 +164,8 @@ to use the machine's own sign-ins.
 
 - **Upgrade control and every runner together.** The runner protocol is now 4: control refuses a
   0.4 runner, and a 0.5 runner cannot join 0.4 control.
+- **`agentbus connect` is removed.** Connect a subscription in the cockpit instead (Agents, the
+  agent's Connect step). It keeps the sign-in on control as before.
 - **`agentbus connector` is retired.** It changes nothing and prints the `agentbus runner` line to
   run instead. Stop the connector and run that line with the same data folder: its `folders.json`
   keeps the machine's id and folders. If the connector shared control's data folder, give the
