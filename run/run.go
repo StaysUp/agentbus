@@ -736,7 +736,10 @@ func (e *Engine) start(t turn) (*Turn, error) {
 			e.cfg.Logf("run.tools session=%s turn=%s left_out=%s", t.session, t.id, why)
 		}
 	}
-	hint = withTools(hint, t.session, tools)
+	// The turn may apply as its token may: [agent_api] apply on, and not a
+	// read-only turn (a review), whose token refuses it (api turnRefusal).
+	apply := !t.readOnly && perm.AgentAPI.Apply != nil && *perm.AgentAPI.Apply
+	hint = withTools(hint, t.session, tools, apply)
 	// The folder's AGENTS.md, then the instructions, then who asked: the
 	// same for every harness, each once.
 	doc, why := folderDoc(h, t.folder)
@@ -755,8 +758,8 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	}
 	// The tool server gives its own instructions when the agent connects.
 	if tools {
-		added = append(added, event.Added{Kind: event.AddedMCPInstructions, Bytes: len(settings.ToolServerInstructions),
-			Text: settings.ToolServerInstructions})
+		text := settings.ToolServerInstructions(apply)
+		added = append(added, event.Added{Kind: event.AddedMCPInstructions, Bytes: len(text), Text: text})
 	}
 	w, why := writesFor(h, t.folder, t.readOnly, perm, e.cfg.Protect)
 	if why != "" {

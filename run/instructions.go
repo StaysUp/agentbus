@@ -32,11 +32,12 @@ func (e *Engine) fillInstructions(text, session string) string {
 
 // withTools fills {tools} in text, a turn's instructions of session: how
 // the turn calls AgentBus, by the agentbus MCP tools when tools, else by
-// agentbus-api, with the session named in it.
-func withTools(text, session string, tools bool) string {
-	how := settings.APIText
+// agentbus-api, with the session named in it. apply is [agent_api] apply:
+// the text offers applying only when the turn may.
+func withTools(text, session string, tools, apply bool) string {
+	how := settings.APIText(apply)
 	if tools {
-		how = settings.ToolsText
+		how = settings.ToolsText(apply)
 	}
 	return strings.ReplaceAll(text, "{tools}", strings.ReplaceAll(how, "{session}", session))
 }

@@ -99,6 +99,11 @@ func TestMCPInitialize(t *testing.T) {
 	if code != 200 || dig(v, "result", "protocolVersion") != "2025-06-18" || dig(v, "result", "capabilities", "tools") == nil {
 		t.Fatalf("initialize: %d %v", code, v)
 	}
+	// [agent_api] apply is off by default, so apply_turn is not listed and
+	// the server's instructions do not offer it (0.5.1).
+	if got := dig(v, "result", "instructions"); got != settings.ToolServerInstructions(false) {
+		t.Errorf("instructions with apply off: %v", got)
+	}
 	if code, _ := rpc(t, e, mcpWriteTok, `{"jsonrpc":"2.0","method":"notifications/initialized"}`); code != 202 {
 		t.Errorf("notification: %d, want 202", code)
 	}

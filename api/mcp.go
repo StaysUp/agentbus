@@ -134,7 +134,7 @@ func (a *API) mcp(w http.ResponseWriter, r *http.Request) {
 			"protocolVersion": v,
 			"capabilities":    map[string]any{"tools": map[string]any{"listChanged": false}},
 			"serverInfo":      map[string]any{"name": "agentbus", "version": a.cfg.Build.Version},
-			"instructions":    settings.ToolServerInstructions,
+			"instructions":    settings.ToolServerInstructions(a.lists(r, "apply_turn")),
 		}, nil)
 	case "ping":
 		reply(req.ID, map[string]any{}, nil)
@@ -176,6 +176,16 @@ func rpcID(id json.RawMessage) bool {
 	case json.Number:
 		_, err := x.Int64()
 		return err == nil
+	}
+	return false
+}
+
+// lists says r's token sees the tool named name (toolList).
+func (a *API) lists(r *http.Request, name string) bool {
+	for _, t := range a.toolList(r) {
+		if t.Name == name {
+			return true
+		}
 	}
 	return false
 }
