@@ -72,10 +72,17 @@ var subscriptionRoutes = []route{
 		idDoc:   "A harness, such as claude. Another shape gets 404.",
 		tag:     "Settings",
 		summary: "Answer a login",
-		doc:     "Send one line to the running login, such as the code the browser showed after signing in.",
+		doc:     "Send one line to the running login, such as the code the browser showed after signing in. A login still running 30 seconds after it is stopped: the connect fails with rejected set, as when the login says it did not take the code.",
 		body:    ConnectInput{},
 		replies: []reply{{status: 204, doc: "Sent.", empty: true}, badRequest, fail(409, "No login is running for it.")},
 		serve:   (*API).connectInput},
+	{method: "DELETE", path: "/api/v0/subscriptions/{id}/connect", op: "cancelConnect",
+		idDoc:   "A harness, such as claude. Another shape gets 404.",
+		tag:     "Settings",
+		summary: "Cancel a connect",
+		doc:     "Stop the harness's running login. The connect then fails, with cancelled set; a new POST .../connect starts again. A token kept from an earlier connect stays. No body is read.",
+		replies: []reply{{status: 204, doc: "Stopped.", empty: true}, badRequest, fail(404, noSubscriptions), fail(409, "No login is running for it.")},
+		serve:   (*API).cancelConnect},
 	{method: "DELETE", path: "/api/v0/subscriptions/{id}", op: "disconnectSubscription",
 		idDoc:   "A harness, such as claude. Another shape gets 404.",
 		tag:     "Settings",
@@ -159,6 +166,21 @@ func (a *API) connectInput(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 	if err := a.cfg.Subscriptions.Input(id, in.Line); err != nil {
+		writeError(w, http.StatusConflict, "no login is running for "+id)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *API) cancelConnect(w http.ResponseWriter, r *http.Request, id string) {
+	if !noBody(w, r) {
+		return
+	}
+	if a.cfg.Subscriptions == nil {
+		writeError(w, http.StatusNotFound, noSubscriptions)
+		return
+	}
+	if err := a.cfg.Subscriptions.Cancel(id); err != nil {
 		writeError(w, http.StatusConflict, "no login is running for "+id)
 		return
 	}

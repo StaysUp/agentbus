@@ -88,7 +88,11 @@ type View struct {
 	Output  []string `json:"output" doc:"While it runs: the links the login printed, where to sign in; nothing else it prints is shown. Empty once it ended."`
 	Code    string   `json:"code,omitempty" doc:"While it runs: a one-time code to enter at the link (codex's device login). Then nothing is sent back: the login ends by itself once the browser accepts it. Gone once it ended."`
 	Paste   bool     `json:"paste" doc:"While it runs: the login waits for the code the browser shows, sent with POST .../connect/input (claude and agy). False for a device login, and once it ended."`
-	Error   string   `json:"error,omitempty" doc:"Why it failed."`
+	// Rejected and Cancelled say why a failed connect ended, for a client
+	// that words it itself; Error says it in full.
+	Rejected  bool   `json:"rejected,omitempty" doc:"It failed because the login did not take the code sent: it said so, or gave no token within 30 seconds of it. Connect again for a new link."`
+	Cancelled bool   `json:"cancelled,omitempty" doc:"It failed because it was cancelled (DELETE .../connect)."`
+	Error     string `json:"error,omitempty" doc:"Why it failed."`
 }
 
 // maxLines bounds the links kept.
@@ -113,6 +117,15 @@ type connecting struct {
 	why     string
 	late    bool // it ran past the Manager's Wait and was stopped
 	refused bool // it printed a Refused line
+	// unanswered: it was still running AnswerWait after a code was typed,
+	// and was stopped. claude setup-token 2.1.321 (2026-11-12) given a code
+	// with the right state and a wrong value printed nothing and kept
+	// running; the person saw "Checking it." until Wait.
+	unanswered bool
+	cancelled  bool        // Cancel stopped it
+	exited     bool        // the login's process ended
+	ending     bool        // its end is being decided: too late to cancel
+	answer     *time.Timer // stops it AnswerWait after the latest code
 	// onRefused is called once, when the login prints a Refused line.
 	onRefused func()
 	tty       *os.File // the login's terminal: what is written is its typing
@@ -123,7 +136,8 @@ func (c *connecting) view() View {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return View{Harness: c.harness, State: c.state, Output: append([]string{}, c.links...), Code: c.code,
-		Paste: c.state == Running && c.login.Code == nil, Error: c.why}
+		Paste: c.state == Running && c.login.Code == nil, Error: c.why,
+		Rejected: c.state == Failed && (c.refused || c.unanswered) && !c.cancelled, Cancelled: c.state == Failed && c.cancelled}
 }
 
 // take reads the login's output until it ends: each ended line's links are
@@ -188,6 +202,11 @@ type Manager struct {
 	// Wait bounds how long a login may run, such as one left waiting for a
 	// code no one sends. Zero: MaxWait.
 	Wait time.Duration
+	// AnswerWait bounds how long a login may keep running after a code is
+	// typed into it: a login that took the code prints its token and ends
+	// within a few seconds. Past it, the code is taken as rejected and the
+	// login is stopped. Zero: DefaultAnswerWait.
+	AnswerWait time.Duration
 	// Logf writes one line to the service log for each step of a connect:
 	// started, link or code shown, input received, connected or failed. Never a
 	// link, a code or a token. Nil: none.
@@ -202,6 +221,12 @@ type Manager struct {
 
 // MaxWait is how long a login may run by default.
 const MaxWait = 10 * time.Minute
+
+// DefaultAnswerWait is how long a login may run after a code by default.
+const DefaultAnswerWait = 30 * time.Second
+
+// rejected is why a connect whose login did not take the code failed.
+const rejected = "the code was rejected: it may be incomplete, expired, already used, or from an earlier sign-in; try again, Connect gives a new link"
 
 func (m *Manager) logf(format string, args ...any) {
 	if m.Logf != nil {
@@ -283,6 +308,14 @@ func (m *Manager) Connect(harness string) (View, error) {
 	go func() {
 		err := cmd.Wait()
 		late.Stop()
+		// Ended by itself: what it printed decides, not the wait after a
+		// code, which stops counting now.
+		c.mu.Lock()
+		c.exited = true
+		if c.answer != nil {
+			c.answer.Stop()
+		}
+		c.mu.Unlock()
 		// What it printed last may still be in the terminal. A child it
 		// left holding the terminal is stopped after a moment, and given
 		// up on after another.
@@ -299,9 +332,15 @@ func (m *Manager) Connect(harness string) (View, error) {
 		c.mu.Lock()
 		si, ok := l.signin(c.text, home, m.Store.now())
 		c.text = nil
-		wasLate, wasRefused := c.late, c.refused
+		wasLate, wasRefused, wasUnanswered, wasCancelled := c.late, c.refused, c.unanswered, c.cancelled
+		// From here a Cancel finds nothing to stop: what was read above
+		// decides how the connect ends.
+		c.ending = true
 		c.mu.Unlock()
 		state, why := Failed, ""
+		// A cancelled connect keeps nothing, even a token the login printed
+		// just before: the person asked for it to stop.
+		ok = ok && !wasCancelled
 		if ok {
 			// Keep takes a kept login's folder; what is left is removed.
 			if m.Store.Keep(harness, si) != nil {
@@ -313,8 +352,12 @@ func (m *Manager) Connect(harness string) (View, error) {
 		removeHome(home)
 		switch {
 		case ok:
+		case wasCancelled:
+			why = "the connect was cancelled"
 		case wasRefused:
-			why = "the login did not accept the code: it may be incomplete, expired, already used, or from an earlier sign-in; connect again for a new link"
+			why = rejected
+		case wasUnanswered:
+			why = rejected + " (the login gave no token within " + m.answerWait().String() + " of the code)"
 		case wasLate:
 			why = "the login waited too long (" + wait.String() + ") and was stopped; connect again"
 		case err != nil:
@@ -361,7 +404,7 @@ func (m *Manager) Input(harness, line string) error {
 	c := m.running[harness]
 	m.mu.Unlock()
 	if c == nil || c.view().State != Running {
-		return errors.New("credentials: no login is running")
+		return ErrNotRunning
 	}
 	// Enter is a carriage return, as a terminal sends it: a login that
 	// reads the terminal raw (claude's) takes it as Enter, and one that
@@ -370,6 +413,58 @@ func (m *Manager) Input(harness, line string) error {
 		return err
 	}
 	m.logf("subscription.input_received harness=%s", harness)
+	// A login that took the code ends soon: one still running past
+	// AnswerWait did not take it. A next code starts the wait again.
+	c.mu.Lock()
+	if c.answer != nil {
+		c.answer.Stop()
+	}
+	c.answer = time.AfterFunc(m.answerWait(), func() {
+		c.mu.Lock()
+		running := c.state == Running && !c.exited
+		if running {
+			c.unanswered = true
+		}
+		c.mu.Unlock()
+		if running {
+			stopGroup(c.cmd)
+		}
+	})
+	c.mu.Unlock()
+	return nil
+}
+
+func (m *Manager) answerWait() time.Duration {
+	if m.AnswerWait > 0 {
+		return m.AnswerWait
+	}
+	return DefaultAnswerWait
+}
+
+// ErrNotRunning is a cancel or an input with no login running.
+var ErrNotRunning = errors.New("credentials: no login is running")
+
+// Cancel stops harness's running login. The connect then fails as
+// cancelled, keeping nothing, and a new Connect starts a new login. A login
+// whose end is already being decided is not running: ErrNotRunning.
+func (m *Manager) Cancel(harness string) error {
+	m.mu.Lock()
+	c := m.running[harness]
+	m.mu.Unlock()
+	if c == nil {
+		return ErrNotRunning
+	}
+	c.mu.Lock()
+	running := c.state == Running && !c.ending
+	if running {
+		c.cancelled = true
+	}
+	c.mu.Unlock()
+	if !running {
+		return ErrNotRunning
+	}
+	stopGroup(c.cmd)
+	m.logf("subscription.cancelled harness=%s", harness)
 	return nil
 }
 
