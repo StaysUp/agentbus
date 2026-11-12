@@ -179,7 +179,7 @@ var routes = slices.Concat([]route{
 		replies: []reply{ok(202, Started{}, "The turn: running, or queued behind the session's earlier turns or for a runner."), turnRefused,
 			fail(403, "A turn token's request is refused: error says why, such as a cap on asked work."),
 			fail(404, "This service keeps no queue, or the session sent has no events."),
-			fail(409, "The session sent cannot be continued from here, it is closed, or the idempotency key names another turn. A session whose turn is running is not refused: the new turn waits behind it (queued)."),
+			fail(409, "The session sent cannot be continued from here, it is closed, its machine was removed, or the idempotency key names another turn. A session whose turn is running is not refused: the new turn waits behind it (queued)."),
 			fail(http.StatusTooManyRequests, "Too many turns are waiting; wait for some to end."), turnFailed, stopping},
 		turns: true,
 		serve: plain((*API).run)},
@@ -285,7 +285,7 @@ var routes = slices.Concat([]route{
 		replies: []reply{ok(202, Started{}, "The review turn, queued."),
 			badRequest, fail(403, "A turn token's request is refused: error says why, such as a cap on asked work."),
 			fail(404, "This service keeps no queue, or no turn of this service has this id."),
-			fail(409, "The turn cannot be reviewed: it has not ended, it recorded no changed files, its session is closed, or the key names another turn."),
+			fail(409, "The turn cannot be reviewed: it has not ended, it recorded no changed files, its session is closed, its session's machine was removed, or the key names another turn."),
 			fail(http.StatusTooManyRequests, "Too many turns are waiting; wait for some to end."), storeFailed},
 		turn: askReview,
 		tools: []tool{{name: "review_turn", effect: effectStarts, id: "turn",
@@ -462,7 +462,7 @@ var routes = slices.Concat([]route{
 		tag:     "Agents",
 		summary: "Remove a runner",
 		doc: "Remove a machine that is offline: its runner token works no more, so it never takes work again, and it leaves the list. " +
-			"Its sessions, jobs and their events stay in the record. A runner.removed event is stored. " +
+			"Its sessions, jobs and their events stay in the record, but its sessions take no more turns or reviews: a turn or review of one waiting now ends failed, and a new one gets 409, each saying the machine was removed. Their applies still go to the folder's machine. A runner.removed event is stored. " +
 			"An online runner is refused: stop it on its machine first. To add the machine again, run agentbus login on it. Takes the main token only. No body is read.",
 		replies: []reply{{status: 204, doc: "Removed.", empty: true}, badRequest, fail(404, "No runner by that id."),
 			fail(409, "It is online."), storeFailed},

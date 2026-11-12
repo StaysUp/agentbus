@@ -244,8 +244,9 @@ func (q *Queue) pendingLogin(tx *sql.Tx, team, id string) (Login, string, string
 
 // RemoveRunner removes a runner of team that is offline: its token stops
 // working at once and it is no longer listed. Its jobs, attempts and sessions
-// stay. It answers ErrNotFound for no such runner (or one removed already)
-// and ErrRunnerOnline for one seen within RunnerFresh.
+// stay, but its sessions take no more work: their queued turns and reviews
+// end with why (removed.go). It answers ErrNotFound for no such runner (or
+// one removed already) and ErrRunnerOnline for one seen within RunnerFresh.
 func (q *Queue) RemoveRunner(team, id string) error {
 	return q.tx(func(tx *sql.Tx) error {
 		var seen int64
@@ -263,6 +264,6 @@ func (q *Queue) RemoveRunner(team, id string) error {
 		if _, err := tx.Exec(`UPDATE runners SET removed = ? WHERE id = ?`, nanos(now), id); err != nil {
 			return fmt.Errorf("queue: remove runner: %w", err)
 		}
-		return nil
+		return endRemovedTx(tx, now)
 	})
 }

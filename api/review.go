@@ -98,9 +98,12 @@ func (a *API) reviewTurn(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	rv, created, err := a.cfg.Queue.ReviewLinked(queue.DefaultTeam, j.ID, as, b.IdempotencyKey, b.IncludeReply, links, lim)
 	var limit *queue.LimitError
+	var removed *queue.RunnerRemovedError
 	switch {
 	case errors.As(err, &limit):
 		writeError(w, http.StatusForbidden, limit.Msg)
+	case errors.As(err, &removed):
+		writeError(w, http.StatusConflict, removed.Error())
 	case errors.Is(err, queue.ErrNotFound):
 		writeError(w, http.StatusNotFound, noTurn)
 	case errors.Is(err, queue.ErrNotReviewable):

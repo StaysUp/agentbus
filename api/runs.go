@@ -238,9 +238,13 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 	// turns that have not ended, as a delivered result does.
 	job, created, err := a.cfg.Queue.CreateTurnLinked(queue.DefaultTeam, body.IdempotencyKey, spec, links, queueLimits(policyOf(r)))
 	var limit *queue.LimitError
+	var removed *queue.RunnerRemovedError
 	switch {
 	case errors.As(err, &limit):
 		writeError(w, http.StatusForbidden, limit.Msg)
+		return
+	case errors.As(err, &removed):
+		writeError(w, http.StatusConflict, removed.Error())
 		return
 	case errors.Is(err, queue.ErrKeyConflict):
 		writeError(w, http.StatusConflict, "idempotency_key already started a turn with other fields; send a new key for a new turn")

@@ -853,13 +853,18 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, lim Limit
 			}
 		}
 		if session != "" {
-			var closed sql.NullInt64
-			err := tx.QueryRow(`SELECT closed FROM sessions WHERE id = ? AND team = ?`, session, team).Scan(&closed)
+			var closed, removed sql.NullInt64
+			var machine string
+			err := tx.QueryRow(`SELECT s.closed, r.removed, r.name FROM sessions s JOIN runners r ON r.id = s.runner
+				WHERE s.id = ? AND s.team = ?`, session, team).Scan(&closed, &removed, &machine)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return fmt.Errorf("queue: read session: %w", err)
 			}
 			if closed.Valid {
 				return ErrSessionClosed
+			}
+			if removed.Valid && !folderKind(kind) {
+				return &RunnerRemovedError{Machine: machine}
 			}
 			if errors.Is(err, sql.ErrNoRows) && kind == KindTurn {
 				var ended bool
@@ -1346,6 +1351,10 @@ func sweepTx(tx *sql.Tx, now time.Time) (int, error) {
 		}
 	}
 	if err := endFoldersTx(tx, now); err != nil {
+		return 0, err
+	}
+	// A session whose runner was removed takes no more work (removed.go).
+	if err := endRemovedTx(tx, now); err != nil {
 		return 0, err
 	}
 	// Whatever ended a session's first turn, its queued turns end here,

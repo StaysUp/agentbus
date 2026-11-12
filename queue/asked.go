@@ -13,6 +13,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/staysup/agentbus/workspace"
@@ -217,7 +218,10 @@ func (q *Queue) Deliver(team string, name func(id string) string) (int, error) {
 		}
 		d, _, err := q.create(team, KindTurn, ResultKey(j.ID), spec, links, Limits{}, spec.Session)
 		why := ""
+		var removed *RunnerRemovedError
 		switch {
+		case errors.As(err, &removed):
+			why = "the asking session's machine " + strconv.Quote(removed.Machine) + " was removed"
 		case err == nil:
 			n++
 		case errors.Is(err, ErrFull):
