@@ -383,6 +383,8 @@ type Change struct {
 	// start.
 	Size   int64  `json:"size"`
 	SHA256 string `json:"sha256"`
+	// SHA256Before is the file at the start; empty for an added file.
+	SHA256Before string `json:"sha256_before,omitempty"`
 	// Content: the whole file at the end, when it is small UTF-8 text.
 	Content *string `json:"content,omitempty"`
 	// Diff: this file's unified diff from the turn's start to its end, when
@@ -410,6 +412,9 @@ type Changes struct {
 	// ContentLeftOut: some small text files have no content here, to keep
 	// the result small.
 	ContentLeftOut bool `json:"content_left_out,omitempty"`
+	// DiffsCut: some files' diffs were left out because all diffs together
+	// passed their budget, or to keep the result small.
+	DiffsCut bool `json:"diffs_cut,omitempty"`
 	// From and To, in an isolated session: the checkpoints the changes are
 	// between, which an apply names. The same name twice: the turn changed
 	// nothing. Empty for a folder used as it is, which cannot be applied.
@@ -440,12 +445,12 @@ func Diff(before, after *Snapshot, read func(rel string, max int) ([]byte, bool)
 		case !ok:
 			c.Files = append(c.Files, Change{Path: p, Change: "added", Size: e.size, SHA256: e.hash})
 		case old.hash != e.hash || old.mode != e.mode:
-			c.Files = append(c.Files, Change{Path: p, Change: "modified", Size: e.size, SHA256: e.hash})
+			c.Files = append(c.Files, Change{Path: p, Change: "modified", Size: e.size, SHA256: e.hash, SHA256Before: old.hash})
 		}
 	}
 	for p, e := range before.files {
 		if _, ok := after.files[p]; !ok {
-			c.Files = append(c.Files, Change{Path: p, Change: "deleted", Size: e.size, SHA256: e.hash})
+			c.Files = append(c.Files, Change{Path: p, Change: "deleted", Size: e.size, SHA256: e.hash, SHA256Before: e.hash})
 		}
 	}
 	sort.Slice(c.Files, func(i, j int) bool { return c.Files[i].Path < c.Files[j].Path })
@@ -491,7 +496,7 @@ func (c *Changes) Fit(max int) {
 	}
 	for i := range c.Files {
 		if c.Files[i].Diff != nil {
-			c.Files[i].Diff, c.Files[i].DiffLeftOut = nil, true
+			c.Files[i].Diff, c.Files[i].DiffLeftOut, c.DiffsCut = nil, true, true
 		}
 	}
 	for len(c.Files) > 0 && size() > max {

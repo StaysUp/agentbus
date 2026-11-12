@@ -95,6 +95,15 @@ of its content, never from a connector to a runner:
   start. Its finish carries the `command.ran` event as `result.ran`, and control keeps it once the
   finish is accepted; one of another session or command, with a turn, or of another kind refuses
   the finish with **400**. A command job that ends without one gets `command.failed` from control.
+- **Outcomes go to control's record, the job keeps a pointer** (from 0.5). Once control accepts a
+  finish, it stores what the job did as an event and replaces it in the job's result with that
+  event's id: a turn's `result.changes` becomes `turn.changed` (`result.changes_event`, and
+  `result.checkpoint` keeps the end checkpoint the next turn starts from), an apply's
+  `result.apply` and `result.refused` become `turn.applied` (`result.applied_event`), and a
+  command's `result.ran` is kept once as `command.ran` (`result.ran_event`). A finish sent again
+  is answered the same and stores nothing twice. A runner may not send `turn.changed` or
+  `turn.applied` in a turn's record (**400**): they are control's own. A job from before 0.5 keeps
+  its outcome in its result, and readers read it there.
 - A connector that takes work asks for it about once a second. One not seen for a minute is gone:
   a turn that needs a snapshot of its folder is refused (`the folder's connector is not connected:
   start agentbus connector on the folder's machine, then send the turn again`), and so is an apply
@@ -140,9 +149,11 @@ server's: what it lacks it fetches again, so every blob in it older than an hour
 the policy and the instructions from the server (`GET /api/v0/runner/settings`, with its own
 token), never from its own data folder. So a `forbid` rule set on the server holds on every runner
 from the next turn. Folders in `read_folders` must exist on the runner, with `~` the runner's home.
+The reply also carries `settings_version`, the settings version it was read at (0 from a server
+before 0.5), which the turn records on its `turn.started`. The runner reads it all in one call.
 
 **When the server's settings cannot be had, the turn does not start.** That is a server that
-cannot be reached, a server whose files are broken, or a server too old to serve the route. The job
+cannot be reached, a server whose stored settings cannot be used, or a server too old to serve the route. The job
 fails with reason `setup`, and its result says why, such as `the server's settings cannot be used,
 so the turn did not start: the server could not be reached`. A runner never falls back to a policy
 it read before: a `forbid` rule just added on the server must hold, and an old copy would miss it.

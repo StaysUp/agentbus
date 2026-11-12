@@ -21,7 +21,13 @@ func (e *Engine) instructions(session string) (string, error) {
 			return "", err
 		}
 	}
-	return strings.TrimRight(strings.ReplaceAll(text, "{session}", session), " \t\r\n"), nil
+	return e.fillInstructions(text, session), nil
+}
+
+// fillInstructions is text, the store's instructions, for a turn of
+// session: {session} filled in and trailing space cut.
+func (e *Engine) fillInstructions(text, session string) string {
+	return strings.TrimRight(strings.ReplaceAll(text, "{session}", session), " \t\r\n")
 }
 
 // withTools fills {tools} in text, a turn's instructions of session: how

@@ -234,10 +234,10 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 			}
 		}
 	}
-	// 37 with POST /api/v0/mcp, which starts a turn only as the
+	// 39 with POST /api/v0/mcp, which starts a turn only as the
 	// POST /api/v0/turns it sends a tool call through.
-	if len(ops) != 37 {
-		t.Errorf("%d endpoints, want 37: %v", len(ops), ops)
+	if len(ops) != 39 {
+		t.Errorf("%d endpoints, want 39: %v", len(ops), ops)
 	}
 	for _, want := range []string{"POST /api/v0/turns", "GET /api/v0/turns", "GET /api/v0/turns/{id}", "POST /api/v0/turns/{id}/stop",
 		"GET /api/v0/turns/{id}/diff", "POST /api/v0/turns/{id}/apply", "POST /api/v0/turns/{id}/review",

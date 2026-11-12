@@ -51,9 +51,10 @@ as on macOS, refuses the turn with the reason.
 - `GET /` redirects to `/docs`.
 - The token is the file `token` in the data folder: `$AGENTBUS_HOME`, else
   `$XDG_DATA_HOME/agentbus`, else `~/.local/share/agentbus`.
-- `permissions.toml` in the data folder has three lists: `read_folders`, `allow` and `forbid`, the
-  `edit` rule, the `subagents` switch, `[limits]` and `[agent_api]`. A key left out reads as its
-  default. Every turn reads it when it starts; the API reads it for each request a turn token
+- The permissions (`GET` and `PUT /api/v0/settings/permissions`, kept in `settings.db`; up to 0.4
+  the file `permissions.toml`, imported once) have three lists: `read_folders`, `allow` and
+  `forbid`, the `edit` rule, the `subagents` switch, `[limits]` and `[agent_api]`. A key never
+  changed reads as its default, from the defaults version the settings run under. Every turn reads it when it starts; the API reads it for each request a turn token
   sends. claude gets one
   `--allowedTools` with `Read(//<folder>/**),Grep(//<folder>/**),Glob(//<folder>/**)` per folder
   (reading only) and `Bash(<cmd>:*)` per allowed command, and `--disallowedTools Bash(<cmd>:*),…`. A
@@ -69,15 +70,17 @@ as on macOS, refuses the turn with the reason.
   person's own settings, and codex `--sandbox read-only`. `subagents = false` (default true) stops
   a turn starting the agent's own subagents: claude gets `--disallowedTools Task,Agent,Workflow`,
   codex `--disable multi_agent --disable multi_agent_v2`; no settings file is edited. No turn edits the data
-  folder's own files (`permissions.toml`, `instructions.md`, `agents.json`, the tokens): claude gets
+  folder's own files (`settings.db`, `permissions.toml`, `instructions.md`, `agents.json`, the tokens): claude gets
   a deny rule on each. `[limits]`: `max_depth` (2), `max_jobs_per_turn` (10), `max_jobs_per_tree`
   (30), `max_cost_usd_per_tree` (0, off). `[agent_api]`: `scope` (`"tree"` or `"session"`), and
-  `read`, `list_agents`, `start`, `continue`, `review`, `cancel`, `rename`, `apply`, each true unless set false. A
-  broken file answers 400 and nothing is stored; a turn token's requests get 503 then. A missing
-  file is every default.
-- `instructions.md` in the data folder is the text every turn gets as its agent's own instruction
+  `read`, `list_agents`, `start`, `continue`, `review`, `cancel`, `rename`, `apply`, each true unless set false.
+  Stored permissions that cannot be used answer 400 and nothing is stored; a turn token's requests
+  get 503 then. Each change is saved with its `settings.changed` event (keys, never values), and
+  each turn records `settings_version` on its `turn.started`.
+- The instructions (`GET` and `PUT /api/v0/settings/instructions`; up to 0.4 the file
+  `instructions.md`) are the text every turn gets as its agent's own instruction
   (`--append-system-prompt`, `developer_instructions`), with `{session}` replaced by the session id.
-  Missing: the default text. Empty: none. Before it goes the folder's `AGENTS.md` for a harness that
+  Never changed: the default text. Empty: none. Before it goes the folder's `AGENTS.md` for a harness that
   does not read it by itself (claude beside a `CLAUDE.md` that neither is it nor imports it); after
   it, for an asked agent, who asked. On a runner that holds no secrets each session runs in a home
   of its own (`homes/<session>` in its data folder), removed when the session is closed.

@@ -31,6 +31,7 @@ import (
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/settings"
+	"github.com/staysup/agentbus/workspace"
 )
 
 // The protocol's timings.
@@ -123,6 +124,15 @@ func New(cfg Config) (*Server, error) {
 	}
 	if cfg.MaxWait == 0 {
 		cfg.MaxWait = MaxWait
+	}
+	if cfg.Record != nil {
+		// The queue reads the changes a turn's review and asked result
+		// describe from the record, where the finish moves them.
+		rec := cfg.Record
+		cfg.Queue.ReadChangesWith(func(j queue.Job) (*workspace.Changes, error) {
+			c, err := Changes(rec, j)
+			return WorkspaceChanges(c), err
+		})
 	}
 	s := &Server{cfg: cfg, token: sha256.Sum256([]byte(cfg.Token)), enrol: sha256.Sum256([]byte(cfg.EnrollToken)), mux: http.NewServeMux(),
 		tokenKey: sha256.Sum256([]byte("agentbus runner turn tokens\x00" + cfg.Token))}
@@ -301,9 +311,11 @@ func (s *Server) runnerBeat(w http.ResponseWriter, r *http.Request, rn queue.Run
 func (s *Server) runnerSettings(w http.ResponseWriter, r *http.Request, rn queue.Runner) {
 	snap := settings.RunnerSettings{Permissions: settings.DefaultPolicy(), Instructions: settings.DefaultInstructions}
 	if st := s.cfg.Settings; st != nil {
-		var err error
-		if snap.Permissions, snap.PermissionsVersion, err = st.Policy(); err == nil {
-			snap.Instructions, snap.InstructionsVersion, err = st.Instructions()
+		// One read, so the version names the policy and instructions sent.
+		got, err := settings.Read(st)
+		if err == nil {
+			snap = settings.RunnerSettings{Permissions: got.Policy, PermissionsVersion: got.PolicyVersion,
+				Instructions: got.Instructions, InstructionsVersion: got.InstructionsVersion, SettingsVersion: got.Revision}
 		}
 		var se *settings.Error
 		if errors.As(err, &se) {
@@ -603,11 +615,12 @@ func (s *Server) finish(w http.ResponseWriter, r *http.Request, rn queue.Runner)
 		s.queueError(w, err)
 		return
 	}
-	// A command's end is kept only once the finish is accepted: the same
-	// finish sent again keeps it once, so a write that fails here is retried
-	// by the runner (and by CloseCommands).
-	if j.Kind == queue.KindCommand && s.cfg.Record != nil {
-		if err := CommandEnded(s.cfg.Record, j, ran); err != nil {
+	// A job's outcomes go to the record only once the finish is accepted
+	// (outcome.go): the same finish sent again keeps each once, so a write
+	// that fails here is retried by the runner (and, for a command, by
+	// CloseCommands).
+	if s.cfg.Record != nil {
+		if err := keepOutcomes(s.cfg.Record, s.cfg.Queue, j, ran); err != nil {
 			s.internal(w)
 			return
 		}

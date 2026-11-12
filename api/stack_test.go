@@ -30,6 +30,8 @@ type stack struct {
 	turnWait    time.Duration
 	// before runs on the store before the engine opens it.
 	before func(st *store.Store)
+	// settings, when set, is the settings store, in place of permissions.
+	settings settings.Store
 }
 
 // stackEnv is an API on loopback with a whole stack behind it.
@@ -53,6 +55,9 @@ func stackEnv(t *testing.T, s stack) *env {
 	var cfgStore settings.Store
 	if s.permissions != "" {
 		cfgStore = settings.NewFiles(filepath.Dir(s.permissions))
+	}
+	if s.settings != nil {
+		cfgStore = s.settings
 	}
 	eng, err := run.New(run.Config{Store: st, BaseURL: base, Wire: s.wire, MaxRuns: s.maxRuns, Settings: cfgStore,
 		RunGrace: s.grace})

@@ -26,6 +26,7 @@ type RunnerSettings struct {
 	PermissionsVersion  Version `json:"permissions_version" doc:"The policy's version, as GET /api/v0/settings/permissions sends it in ETag."`
 	Instructions        string  `json:"instructions" doc:"The text every turn gets, before {session} is filled in."`
 	InstructionsVersion Version `json:"instructions_version" doc:"The instructions' version."`
+	SettingsVersion     int64   `json:"settings_version" doc:"The settings version these were read at: it moves up by one with every change of the settings. A turn records it on its turn.started. 0 from a server before 0.5."`
 }
 
 // Remote reads the server's settings.
@@ -85,6 +86,25 @@ func (r *Remote) Instructions() (string, Version, error) {
 		return "", "", &Error{Setting: "instructions", Where: remoteWhere, Why: "the server sent instructions this runner refuses: " + err.Error(), Fix: remoteFix}
 	}
 	return s.Instructions, s.InstructionsVersion, nil
+}
+
+// Snapshot is the server's settings, from one read.
+func (r *Remote) Snapshot() (Snapshot, error) {
+	s, err := r.fetch("settings")
+	if err != nil {
+		return Snapshot{}, err
+	}
+	p := s.Permissions
+	if err := p.Check(); err != nil {
+		return Snapshot{}, &Error{Setting: "permissions", Where: remoteWhere, Why: "the server sent a policy this runner refuses: " + err.Error(), Fix: remoteFix}
+	}
+	p.fill()
+	p.where, p.fix = folderWhere, folderFix
+	if err := CheckInstructions([]byte(s.Instructions)); err != nil {
+		return Snapshot{}, &Error{Setting: "instructions", Where: remoteWhere, Why: "the server sent instructions this runner refuses: " + err.Error(), Fix: remoteFix}
+	}
+	return Snapshot{Policy: p, PolicyVersion: s.PermissionsVersion, Instructions: s.Instructions,
+		InstructionsVersion: s.InstructionsVersion, Revision: s.SettingsVersion}, nil
 }
 
 // SetPolicy is refused: a runner's settings are the server's.

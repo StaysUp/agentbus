@@ -14,6 +14,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/staysup/agentbus/workspace"
 )
 
 // Asker is the turn whose agent asked for a job, with its turn token.
@@ -203,7 +205,11 @@ func (q *Queue) Deliver(team string, name func(id string) string) (int, error) {
 		if err != nil {
 			return n, err
 		}
-		spec := Spec{Session: j.Links.Asker.Session, Prompt: ResultPrompt(j, name)}
+		c, err := q.changesOf(j)
+		if err != nil {
+			return n, err
+		}
+		spec := Spec{Session: j.Links.Asker.Session, Prompt: ResultPrompt(j, c, name)}
 		res := &ResultOf{Job: j.ID, Kind: j.Kind, Session: resultSession(j), Turn: j.Turn, Agent: agentName(j.Spec)}
 		links := Links{ResultOf: res}
 		if j.Links.Chain != nil {
@@ -244,6 +250,7 @@ func ResultKey(id string) string { return "result/" + id }
 // ErrKeyConflict.
 func hashLinks(l Links) Links {
 	l.ReviewSession = "" // named by control, not asked for
+	l.ApplyBy = nil      // who asked, not what
 	if l.Asker != nil {
 		l.Asker = nil
 		if l.Chain != nil {
@@ -290,10 +297,10 @@ const MaxResultLine = 500
 const MaxResultPrompt = 32 << 10
 
 // ResultPrompt is the prompt of the turn that delivers job j's result: who
-// did the work, how it ended, where, what it changed, and its final reply,
+// did the work, how it ended, where, what it changed (c), and its final reply,
 // or a review's verdict and findings. It says that AgentBus wrote it, not the
 // person. name gives a saved agent's name; nil names it by id.
-func ResultPrompt(j Job, name func(id string) string) string {
+func ResultPrompt(j Job, c *workspace.Changes, name func(id string) string) string {
 	r, _ := ReadResult(j.Result)
 	var b strings.Builder
 	what := "the turn you asked for"
@@ -355,16 +362,16 @@ func ResultPrompt(j Job, name func(id string) string) string {
 				fmt.Fprintf(&b, "- %s %s %s\n", short(f.Severity), short(loc), short(f.Summary))
 			}
 		}
-	} else if r.Changes != nil {
-		fmt.Fprintf(&b, "Changed files: %d\n", r.Changes.Count)
-		for i, f := range r.Changes.Files {
+	} else if c != nil {
+		fmt.Fprintf(&b, "Changed files: %d\n", c.Count)
+		for i, f := range c.Files {
 			if i == MaxResultFiles {
 				b.WriteString("- (more; the list stops here)\n")
 				break
 			}
 			fmt.Fprintf(&b, "- %s (%s)\n", short(f.Path), short(f.Change))
 		}
-		if r.Changes.Truncated && len(r.Changes.Files) <= MaxResultFiles {
+		if c.Truncated && len(c.Files) <= MaxResultFiles {
 			b.WriteString("- (more; the list stops here)\n")
 		}
 	}

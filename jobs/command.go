@@ -3,7 +3,8 @@ package jobs
 // A command job in control's record (the person's "!", queue.KindCommand):
 // its runner's start stores command.started, and its end stores command.ran
 // (the runner's own event, from the finish) or command.failed. The API
-// stores command.queued when it makes the job, and answers at once.
+// stores command.queued when it makes the job, and answers at once. Once
+// command.ran is in the record, the job keeps only its id (outcome.go).
 
 import (
 	"encoding/json"
