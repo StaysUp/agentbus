@@ -180,16 +180,19 @@ if [ "$os" = linux ] && needs_apparmor; then
   say ""
   say "This system's AppArmor allows user namespaces only to a program with a profile. Without one,"
   say "agentbus cannot build the session wall or [network] contain, and a copy is a plain copy."
-  if [ "$(id -u)" = 0 ] && plain_path "$(readlink -f "$dir/agentbus")" && [ -z "$(open_to_others "$dir/agentbus")" ]; then
+  # The path checked, printed and given the profile is one: the binary's
+  # own, links resolved, so a command printed here is the one that passed.
+  bin=$(readlink -f "$dir/agentbus" 2>/dev/null) || bin=
+  if [ "$(id -u)" = 0 ] && plain_path "$bin" && [ -z "$(open_to_others "$bin")" ]; then
     answer="${AGENTBUS_APPARMOR:-}"
     if [ -z "$answer" ] && [ -r /dev/tty ]; then
-      printf 'Install the AppArmor profile /etc/apparmor.d/agentbus for %s? [y/N] ' "$dir/agentbus"
+      printf 'Install the AppArmor profile /etc/apparmor.d/agentbus for %s? [y/N] ' "$bin"
       read -r answer < /dev/tty || answer=
     fi
     case "$answer" in
-      y | Y | yes) install_apparmor "$dir/agentbus" ;;
+      y | Y | yes) install_apparmor "$bin" ;;
       *) say "Not installed. To install it later, run once:"
-         say "  curl -fsSL https://raw.githubusercontent.com/$repo/main/install.sh | sudo sh -s apparmor $dir/agentbus" ;;
+         say "  curl -fsSL https://raw.githubusercontent.com/$repo/main/install.sh | sudo sh -s apparmor $bin" ;;
     esac
   else
     say "A profile is given only to a binary that only root can change, at a path of plain characters,"
