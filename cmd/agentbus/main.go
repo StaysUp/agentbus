@@ -285,7 +285,7 @@ func start(c config) (*service, error) {
 		cfgStore = remote
 	} else {
 		sdb, upgraded, err = settings.Upgrade{Dir: c.home, Lock: filepath.Join(c.home, "events.db") + ".lock",
-			Skip: []string{copiesDir, oldCopiesDir, "blobs"}, Agents: agents.ImportRows}.Run()
+			Skip: []string{copiesDir, oldCopiesDir, "blobs"}, Agents: agents.ImportRows, Starters: starters(c)}.Run()
 		if err != nil {
 			return nil, err
 		}
@@ -927,6 +927,23 @@ func mustParse(s string) *url.URL {
 		panic(err)
 	}
 	return u
+}
+
+// starters are the agents a new data folder starts with: in up, one for each
+// harness its built-in runner finds, as that runner reports them; in server,
+// none, since no machine is there yet. The person adds agents from what the
+// runners report.
+func starters(c config) func() []settings.AgentRow {
+	return func() []settings.AgentRow {
+		if c.mode != modeUp {
+			return agents.Starters(nil)
+		}
+		look := c.lookPath
+		if look == nil {
+			look = exec.LookPath
+		}
+		return agents.Starters(harness.Found(look))
+	}
 }
 
 // subscriptionStore is control's connected subscriptions in home, with how

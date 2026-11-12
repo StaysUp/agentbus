@@ -377,7 +377,9 @@ var routes = slices.Concat([]route{
 		tag:     "Agents",
 		summary: "List agents",
 		doc: "The saved agents, in the order they were made. A turn names one by id in agent.\n\n" +
-			"A new data folder starts with three: claude (Claude Code), codex (Codex) and agy (Antigravity), each on its own subscription with its default model.",
+			"A new data folder of agentbus up starts with one agent for each harness its machine has, of claude (Claude Code), codex (Codex) and agy (Antigravity), " +
+			"each on its own subscription with its default model, its id the harness's name. One of agentbus server starts with none: add them from what GET /api/v0/harnesses reports. " +
+			"A data folder made before 0.5.1 keeps the agents it had.",
 		replies: []reply{ok(200, AgentList{}, "The agents."), badRequest},
 		turn:    anyRead,
 		tools: []tool{{name: "list_agents", effect: effectNone,
@@ -416,7 +418,7 @@ var routes = slices.Concat([]route{
 		tag:     "Agents",
 		summary: "Remove an agent",
 		doc: "Remove a saved agent. Its sessions stay and can still be continued. " +
-			"A turn that names claude or codex still starts once that agent is removed: that harness on its own subscription. No body is read.",
+			"A turn that names claude, codex or agy still starts once that agent is removed, or when the data folder started without it: that harness on its own subscription. No body is read.",
 		replies: []reply{{status: 204, doc: "Removed.", empty: true}, badRequest, fail(404, "No such agent."), storeFailed},
 		serve:   (*API).removeSaved},
 	{method: "GET", path: "/api/v0/harnesses", op: "listHarnesses",

@@ -102,6 +102,73 @@ func TestUpgradeNewFolder(t *testing.T) {
 	}
 }
 
+// A new data folder starts with the agent rows Starters gives, written with
+// the import, also on a start after one that stopped before the import. A
+// later start, and a folder with a service's files already, never ask.
+func TestUpgradeStarters(t *testing.T) {
+	rows := []AgentRow{{ID: "codex", Removed: true}, {ID: "agy", Removed: true}}
+	ids := func(d *DB) string {
+		t.Helper()
+		got, err := d.Agents()
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, r := range got {
+			if !r.Removed {
+				t.Fatalf("row %+v is not removed", r)
+			}
+			out = append(out, r.ID)
+		}
+		return strings.Join(out, ",")
+	}
+	for _, stopped := range []bool{false, true} {
+		dir := home(t)
+		if stopped {
+			// The database made, and the start stopped before the import.
+			d, err := OpenDB(filepath.Join(dir, DBFile), fixedNow)
+			if err != nil {
+				t.Fatal(err)
+			}
+			d.Close()
+		}
+		u := upgrade(dir)
+		u.Starters = func() []AgentRow { return rows }
+		d, _, err := u.Run()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := ids(d); got != "codex,agy" {
+			t.Fatalf("stopped %v: agents %q", stopped, got)
+		}
+		if in, _ := d.Info(); in.Version != 0 {
+			t.Fatalf("stopped %v: version %d, want 0", stopped, in.Version)
+		}
+		d.Close()
+		u.Starters = func() []AgentRow { t.Fatal("asked again"); return nil }
+		if d, _, err = u.Run(); err != nil {
+			t.Fatal(err)
+		}
+		if got := ids(d); got != "codex,agy" {
+			t.Fatalf("stopped %v: the next start changed the agents to %q", stopped, got)
+		}
+		d.Close()
+	}
+
+	dir := home(t)
+	write(t, filepath.Join(dir, "events.db"), "record")
+	u := upgrade(dir)
+	u.Starters = func() []AgentRow { t.Fatal("asked for a folder of 0.4"); return nil }
+	d, _, err := u.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if got := ids(d); got != "" {
+		t.Fatalf("a folder of 0.4 got agent rows %q", got)
+	}
+}
+
 // A data folder of 0.4: copied beside it first, the session copies and blobs
 // left out; then its files imported, each as a change naming its file and
 // keys. The files stay, and are never read again.
