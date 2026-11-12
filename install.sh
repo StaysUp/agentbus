@@ -11,7 +11,9 @@
 # and later), agentbus needs an AppArmor profile for the session wall,
 # [network] contain and overlay copies without root. A profile is given only
 # to a binary that only root can change, so it is never written for one in
-# ~/.local/bin. Installing as root into such a folder offers it:
+# ~/.local/bin. Installing as root on such a system puts the binary in
+# /usr/local/bin (unless AGENTBUS_INSTALL_DIR says otherwise), offers the
+# profile, and names any other agentbus that would run without it:
 #
 #   curl -fsSL https://raw.githubusercontent.com/staysup/agentbus/main/install.sh | sudo AGENTBUS_INSTALL_DIR=/usr/local/bin sh
 #
@@ -123,6 +125,13 @@ case "$(uname -s)" in
   *) fail "unsupported system $(uname -s); macOS and Linux only" ;;
 esac
 
+# Where AppArmor restricts user namespaces, the wall needs a profile, and a
+# profile is given only to a binary only root can change: as root, the
+# binary goes in /usr/local/bin, not in root's own ~/.local/bin.
+if [ -z "${AGENTBUS_INSTALL_DIR:-}" ] && [ "$os" = linux ] && [ "$(id -u)" = 0 ] && needs_apparmor; then
+  dir=/usr/local/bin
+fi
+
 case "$(uname -m)" in
   x86_64 | amd64) arch=amd64 ;;
   arm64 | aarch64) arch=arm64 ;;
@@ -176,6 +185,7 @@ chmod 755 "$dir/.agentbus.new"
 mv -f "$dir/.agentbus.new" "$dir/agentbus"
 
 say "Installed $dir/agentbus"
+profiled=
 if [ "$os" = linux ] && needs_apparmor; then
   say ""
   say "This system's AppArmor allows user namespaces only to a program with a profile. Without one,"
@@ -190,7 +200,7 @@ if [ "$os" = linux ] && needs_apparmor; then
       read -r answer < /dev/tty || answer=
     fi
     case "$answer" in
-      y | Y | yes) install_apparmor "$bin" ;;
+      y | Y | yes) install_apparmor "$bin"; profiled=$bin ;;
       *) say "Not installed. To install it later, run once:"
          say "  curl -fsSL https://raw.githubusercontent.com/$repo/main/install.sh | sudo sh -s apparmor $bin" ;;
     esac
@@ -200,10 +210,31 @@ if [ "$os" = linux ] && needs_apparmor; then
     say "To have them, install agentbus with its profile into /usr/local/bin, once:"
     say "  curl -fsSL https://raw.githubusercontent.com/$repo/main/install.sh | sudo AGENTBUS_INSTALL_DIR=/usr/local/bin sh"
   fi
+  # Another agentbus found first on PATH runs without the profile: the
+  # one on root's PATH, and the one in the sudo user's ~/.local/bin, the
+  # install script's default without sudo.
+  if [ -n "$profiled" ]; then
+    others=$(command -v agentbus 2>/dev/null || true)
+    if [ -n "${SUDO_USER:-}" ]; then
+      home=$(getent passwd "$SUDO_USER" 2>/dev/null | cut -d: -f6)
+      [ -z "$home" ] || others="$others
+$home/.local/bin/agentbus"
+    fi
+    printf '%s\n' "$others" | while IFS= read -r o; do
+      [ -n "$o" ] && [ -e "$o" ] || continue
+      [ "$(readlink -f "$o" 2>/dev/null)" = "$profiled" ] && continue
+      say "Another agentbus is at $o and has no profile. If it comes first on PATH, the wall stays off:"
+      say "  remove it (rm $o), or run $profiled directly."
+    done
+  fi
 fi
 case ":$PATH:" in
   *":$dir:"*) ;;
   *) say "Note: $dir is not on your PATH. Add it, or run $dir/agentbus directly." ;;
 esac
 say ""
-say "Next: agentbus up"
+if [ -n "$profiled" ]; then
+  say "Next: $profiled up"
+else
+  say "Next: agentbus up"
+fi
