@@ -303,7 +303,7 @@ type Event struct {
 	// ErrorTail, only on a run's session.closed of a child that exited with
 	// an error and was not stopped: the last lines it wrote to stderr,
 	// bounded, with anything shaped like a secret hidden.
-	ErrorTail string `json:"error_tail,omitempty" doc:"On a run's session.closed of an agent that exited with an error: the last lines it wrote to stderr, at most 20 lines and 2 KiB, with anything shaped like a token or key replaced by [hidden]. Absent when it exited 0, was stopped, or wrote nothing there."`
+	ErrorTail string `json:"error_tail,omitempty" doc:"On a run's session.closed of an agent that exited with an error: the last lines it wrote to stderr, at most 20 lines and 2 KiB, with anything shaped like a token or key replaced by [hidden]. Absent when it exited 0, was stopped, or wrote nothing there, and when all it kept is one line whose start was cut (it may begin inside a secret)."`
 
 	// Changes, only on turn.changed: what the turn changed.
 	Changes *TurnChanges `json:"changes,omitempty" doc:"On turn.changed: every file the turn added, modified or deleted, with diffs."`

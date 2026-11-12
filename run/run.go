@@ -934,8 +934,8 @@ func (e *Engine) start(t turn) (*Turn, error) {
 			code, stopped, ended.Sub(begun).Round(time.Millisecond))
 		var tail string
 		if code != 0 && !stopped {
-			b, _ := errs.Bytes()
-			tail = errorTail(b, append(secretValues(cmd.Env), tok, childTok)...)
+			b, cut := errs.Bytes()
+			tail = errorTail(b, cut, append(secretValues(cmd.Env), tok, childTok)...)
 		}
 		if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.SessionClosed,
 			Time: ended.UTC(), Session: t.session, Turn: t.id, Hold: holdID, ExitCode: &code, ResumeID: ids.ID(),

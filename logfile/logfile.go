@@ -136,8 +136,10 @@ func (t *Tail) Write(p []byte) (int, error) {
 	defer t.mu.Unlock()
 	n := len(p)
 	if len(p) >= t.Max {
+		// Cut only when bytes were dropped: one write of exactly Max into
+		// an empty buffer keeps it all.
+		t.cut = t.cut || len(p) > t.Max || len(t.buf) > 0
 		t.buf = append(t.buf[:0], p[len(p)-t.Max:]...)
-		t.cut = true
 		return n, nil
 	}
 	if over := len(t.buf) + len(p) - t.Max; over > 0 {

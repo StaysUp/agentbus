@@ -6,6 +6,7 @@ package run
 // reason sits in the runner's own log (logs/runs/<session>.log).
 
 import (
+	"bytes"
 	"regexp"
 	"strings"
 	"unicode"
@@ -39,8 +40,17 @@ var (
 // holds them: at most ErrorTailLines lines and ErrorTailMax bytes, the end
 // kept, as UTF-8 with no control characters but newlines and tabs, with each
 // of hide and anything shaped like a secret replaced. Empty when b holds no
-// text.
-func errorTail(b []byte, hide ...string) string {
+// text. cut says b lost its start (the buffer kept only its last bytes):
+// then its first line is dropped, as it may start inside a secret that
+// neither hide nor the shapes would know.
+func errorTail(b []byte, cut bool, hide ...string) string {
+	if cut {
+		i := bytes.IndexByte(b, '\n')
+		if i < 0 {
+			return "" // one cut line: all of it may be part of a secret
+		}
+		b = b[i+1:]
+	}
 	s := strings.ToValidUTF8(string(b), "�")
 	for _, h := range hide {
 		if len(h) >= 6 {

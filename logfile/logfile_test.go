@@ -60,6 +60,16 @@ func TestTailKeepsTheLastBytes(t *testing.T) {
 	if b, _ := tl.Bytes(); string(b) != "56789" {
 		t.Errorf("%q", b)
 	}
+	// One write of exactly Max into an empty tail drops nothing (0.5.1).
+	exact := &Tail{Max: 5}
+	exact.Write([]byte("abcde"))
+	if b, cut := exact.Bytes(); string(b) != "abcde" || cut {
+		t.Errorf("exactly Max: %q %v", b, cut)
+	}
+	exact.Write([]byte("fghij"))
+	if b, cut := exact.Bytes(); string(b) != "fghij" || !cut {
+		t.Errorf("Max again: %q %v", b, cut)
+	}
 }
 
 func TestAppendTailBoundsTheFileAtALineBreak(t *testing.T) {
