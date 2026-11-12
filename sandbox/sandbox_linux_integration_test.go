@@ -18,6 +18,7 @@ func TestRootReach(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("root only")
 	}
+	needWall(t)
 	tr := makeTree(t)
 	file := func(dir string, mode os.FileMode, uid int) string {
 		d := filepath.Join(tr.root, dir)

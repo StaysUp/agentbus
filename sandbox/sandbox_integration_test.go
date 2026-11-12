@@ -179,7 +179,22 @@ func listenUnix(t *testing.T, p string) string {
 
 // TestProbes runs the research's 33 probes (2026-11-11-session-sandbox.md
 // in the notes) in a wall around session A.
+// needWall skips a test that builds a session's wall on a Linux machine
+// that cannot build one, with the machine's own reason (Can): Ubuntu 24.04
+// and later refuse user namespaces to a program without an AppArmor
+// profile, as GitHub's runners do. A Mac always can, so there it fails.
+func needWall(t *testing.T) {
+	t.Helper()
+	if ok, why := Can(); !ok {
+		if runtime.GOOS == "linux" {
+			t.Skipf("this machine cannot build a session's wall: %s", why)
+		}
+		t.Fatalf("this machine cannot build a session's wall: %s", why)
+	}
+}
+
 func TestProbes(t *testing.T) {
+	needWall(t)
 	tr := makeTree(t)
 	// The gateway, forwarded; a site the proxy lets through; another
 	// loopback port, reached by nothing.
@@ -325,6 +340,13 @@ func TestProbes(t *testing.T) {
 	n := 0
 	for _, c := range cases {
 		if c.open && !open[c.name] {
+			// Running a setuid program depends on the machine (GitHub's
+			// macOS runners refuse it with no wall at all): there the
+			// probe shows nothing, so it gives no result.
+			if c.name == "exec.setuid" {
+				t.Logf("%s: denied with no sandbox on this machine, so it gives no result here", c.name)
+				continue
+			}
 			t.Errorf("%s: denied with no sandbox, so the probe shows nothing", c.name)
 		}
 		if walled[c.name] != c.allowed {
@@ -359,6 +381,7 @@ func TestAgentsStart(t *testing.T) {
 			if err != nil {
 				t.Skipf("%s is not installed here", name)
 			}
+			needWall(t)
 			tr := makeTree(t)
 			box, err := New(Spec{Copy: tr.copyA, Home: tr.homeA, Read: Program(path)})
 			if err != nil && os.Geteuid() == 0 && strings.Contains(err.Error(), "run as root") {
@@ -390,6 +413,7 @@ func TestAgentsStart(t *testing.T) {
 
 // A wall with ReadOnly: the copy is read, never written; the home still is.
 func TestReadOnlyCopy(t *testing.T) {
+	needWall(t)
 	tr := makeTree(t)
 	self, err := os.Executable()
 	if err != nil {
@@ -427,6 +451,7 @@ func TestReadOnlyCopy(t *testing.T) {
 // home over it, so they are still this machine's folders; the folder that
 // holds them is not.
 func TestSessionInTmp(t *testing.T) {
+	needWall(t)
 	dir, err := os.MkdirTemp("/tmp", "sbx-data")
 	if err != nil {
 		t.Fatal(err)
@@ -475,6 +500,7 @@ func TestSessionInTmp(t *testing.T) {
 // A program granted as one file, through a link (as agentbus-api is), runs
 // in the wall, and the other files of its folder stay unreadable.
 func TestOneFileGrant(t *testing.T) {
+	needWall(t)
 	tr := makeTree(t)
 	self, err := os.Executable()
 	if err != nil {
