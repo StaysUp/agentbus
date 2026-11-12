@@ -33,6 +33,7 @@ import (
 	"github.com/staysup/agentbus/queue"
 	engine "github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/runner"
+	"github.com/staysup/agentbus/sandbox"
 )
 
 // The modes. up is the zero value of config.mode.
@@ -57,6 +58,18 @@ const (
 
 // noSecrets: a runner whose agents' credentials come from the server.
 func (c config) noSecrets() bool { return c.mode == modeRunner && c.gatewayMode != gatewayLocal }
+
+// canSandbox is this process's sandbox report: whether a session's wall can
+// be built here, and why not. A runner that gives sessions no home of its
+// own (agentbus up, -gateway local: noSecrets is false) cannot, whatever
+// the machine can, since the wall needs the session's home: every walled
+// turn would be refused (engine.NoHomes), so it says so before any turn.
+func (c config) canSandbox() (bool, string) {
+	if !c.noSecrets() {
+		return false, engine.NoHomes
+	}
+	return sandbox.Can()
+}
 
 // hasQueue: the service keeps the job queue (up, server).
 func (c config) hasQueue() bool { return c.mode != modeRunner }

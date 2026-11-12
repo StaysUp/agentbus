@@ -968,7 +968,7 @@ type wall interface {
 // contain is on, every host when it is off.
 func (e *Engine) sandbox(p settings.Policy, session, folder string, readOnly, offline bool, read []string, net netjail.Spec) (*sandbox.Box, string) {
 	if e.cfg.Homes == "" || !SessionShape.MatchString(session) {
-		return nil, "the sandbox is on in Settings, and this runner gives sessions no home of their own (agentbus up uses this user's home)"
+		return nil, "the sandbox is on in Settings, and " + NoHomes
 	}
 	home := filepath.Join(e.cfg.Homes, session)
 	if info, err := os.Lstat(home); err != nil || !info.IsDir() {
