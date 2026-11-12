@@ -96,7 +96,12 @@ func (u Upgrade) Run() (*DB, Report, error) {
 	if !hasDB && !errors.Is(statErr, fs.ErrNotExist) {
 		return nil, rep, fmt.Errorf("settings: %s could not be read: %w", path, statErr)
 	}
+	// A data folder from before settings.db keeps the defaults it ran under
+	// (Defaults04); a new one starts on the latest. The database is made
+	// with its version, so a start that stops after this keeps it.
+	dv := LatestDefaults()
 	if !hasDB && !newFolder(u.Dir) {
+		dv = Defaults04
 		// One rule for where the copy comes from and where it goes: the
 		// data folder's real path, however it was named (relative, or
 		// through links). The walk starts at the folder itself, and the copy
@@ -109,7 +114,7 @@ func (u Upgrade) Run() (*DB, Report, error) {
 			return nil, rep, err
 		}
 	}
-	db, err := OpenDB(path, now)
+	db, err := openDB(path, now, dv)
 	if err != nil {
 		return nil, rep, err
 	}
@@ -268,12 +273,11 @@ func (d *DB) importFiles(dir string, readAgents func([]byte) ([]AgentRow, error)
 		return nil, false, fmt.Errorf("settings: %s in the data folder could not be imported into %s, so the service did not start: %v. Fix the file, or move it out of the data folder for the defaults, and start again", file, DBFile, err)
 	}
 	if exists(filepath.Join(dir, PolicyFile)) {
-		p, _, err := old.Policy()
+		// A key the file leaves out held its default under 0.4: it takes the
+		// value of the defaults the database starts on (Defaults04 for a
+		// folder from before settings.db), not fill's.
+		p, err := old.policyOver(s.defaults.Policy)
 		if err != nil {
-			var se *Error
-			if errors.As(err, &se) {
-				err = errors.New(se.Why)
-			}
 			return fail(PolicyFile, err)
 		}
 		if err := putSetting(tx, SettingPermissions, overlayOf(s.defaults.Policy, p), now); err != nil {

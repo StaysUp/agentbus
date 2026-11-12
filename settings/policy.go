@@ -123,7 +123,8 @@ continue = true      # continue a session its tree started (never its own or the
 review = true        # ask for a review of a turn in its scope
 cancel = true        # stop turns its tree asked for
 rename = true        # rename sessions in its scope
-apply = true         # apply a turn's changes to the person's folder, for a turn in its scope
+apply = false        # apply a turn's changes to the person's folder, for a turn in its scope;
+                     # off by default: only the main token applies
 tools = false        # true: give each claude and codex turn the agentbus MCP tools (MCP), which
                      # call this API as its token may, and hide claude's own Task, Agent,
                      # ListAgents and SendMessage. false: agents call it with agentbus-api
@@ -252,7 +253,7 @@ type AgentAPI struct {
 	Review     *bool  `toml:"review" json:"review,omitempty" doc:"Ask for a review of a turn in its scope. Absent in a PUT: true."`
 	Cancel     *bool  `toml:"cancel" json:"cancel,omitempty" doc:"Stop turns its tree asked for. Absent in a PUT: true."`
 	Rename     *bool  `toml:"rename" json:"rename,omitempty" doc:"Rename sessions in its scope. Absent in a PUT: true."`
-	Apply      *bool  `toml:"apply" json:"apply,omitempty" doc:"Apply a turn's changes to the person's folder, for a turn of a session in its scope. Absent in a PUT: true."`
+	Apply      *bool  `toml:"apply" json:"apply,omitempty" doc:"Apply a turn's changes to the person's folder, for a turn of a session in its scope. Off by default: only the main token applies. Absent in a PUT: false."`
 	Tools      *bool  `toml:"tools" json:"tools,omitempty" doc:"Give each turn the agentbus MCP tools over MCP (POST /api/v0/mcp), which call this API as its token may. claude's own Task, Agent, ListAgents and SendMessage tools are hidden then. false: agents call the API with agentbus-api only. Absent in a PUT: false."`
 }
 
@@ -323,11 +324,17 @@ func (p *Policy) fill() {
 		p.Sandbox.Mode = SandboxOff
 	}
 	for _, b := range []**bool{&p.AgentAPI.Read, &p.AgentAPI.ListAgents, &p.AgentAPI.Start,
-		&p.AgentAPI.Continue, &p.AgentAPI.Review, &p.AgentAPI.Cancel, &p.AgentAPI.Rename, &p.AgentAPI.Apply} {
+		&p.AgentAPI.Continue, &p.AgentAPI.Review, &p.AgentAPI.Cancel, &p.AgentAPI.Rename} {
 		if *b == nil {
 			on := true
 			*b = &on
 		}
+	}
+	// Only the main token applies unless the person says so (defaults
+	// version 2). Version 1 writes its own value out (defaultsV1).
+	if p.AgentAPI.Apply == nil {
+		off := false
+		p.AgentAPI.Apply = &off
 	}
 	// Off until it is shown to help: the fresh-agent test of 2026-11-11
 	// found no gain over agentbus-api.
@@ -415,6 +422,16 @@ func (p *Policy) Check() error {
 // error says what is wrong in words of its own and the line when the parser
 // gives one.
 func ParsePolicy(b []byte) (Policy, error) {
+	p, err := parsePolicy(b)
+	if err != nil {
+		return Policy{}, err
+	}
+	p.fill()
+	return p, nil
+}
+
+// parsePolicy is ParsePolicy with each key left out still unset.
+func parsePolicy(b []byte) (Policy, error) {
 	var p Policy
 	md, err := toml.Decode(string(b), &p)
 	if err != nil {
@@ -433,8 +450,36 @@ func ParsePolicy(b []byte) (Policy, error) {
 	if err := p.Check(); err != nil {
 		return Policy{}, err
 	}
-	p.fill()
 	return p, nil
+}
+
+// over is p, read with the keys it leaves out unset, on top of base: each key
+// p leaves out takes base's value, and the result is filled.
+func (p Policy) over(base Policy) (Policy, error) {
+	b, err := json.Marshal(p)
+	if err != nil {
+		return Policy{}, err
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(b, &top); err != nil {
+		return Policy{}, err
+	}
+	set := flat{}
+	for k, v := range top {
+		var sub map[string]json.RawMessage
+		if bytes.HasPrefix(v, []byte("{")) && json.Unmarshal(v, &sub) == nil {
+			for sk, sv := range sub {
+				if string(sv) != "null" {
+					set[k+"."+sk] = sv
+				}
+			}
+			continue
+		}
+		if string(v) != "null" {
+			set[k] = v
+		}
+	}
+	return applyOverlay(base, set)
 }
 
 // DecodePolicy reads a policy sent as JSON, as PUT

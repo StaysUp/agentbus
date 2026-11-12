@@ -39,9 +39,18 @@ the turn a client asked for keeps its id. The client API never shows jobs or att
 | `POST /api/v0/runner/attempts/<id>/record` | A runner of a server, while the turn runs and at its end: `{"number": n, "events":[…]}`, at most 500, the turn's events from its own record. The server's record keeps each once, by its id, without its `folder` (the runner's path). A runner that holds no secret leaves out every event of a model call (one with an `exchange`) except `tool.refused` and `replay.failed`, which only its own gateway makes: the relay recorded the rest. One rule decides who records a call: the server records every call its relay carries, and only those. A call that never reached the server reached no vendor: it stays in the runner's own record and log. The server stores a turn's `session.closed` only after the relay has recorded the turn's calls, each counted from its arrival, before its credential is read. It waits at most 5 s, then stores it with `unsettled: true`. Every event must be of the session control assigned the job: a turn job's session, or for a review the one control named when it made the job (`links.review_session`). |
 | `POST /api/v0/runner/blobs` | `{"hashes":[…]}`, at most 10,000: answers `{"missing":[…]}`, the ones the store lacks, so only those are sent. |
 | `PUT /api/v0/runner/blobs/<hash>` | A file's content, streamed, up to 4 GiB: kept only when its SHA-256 is `<hash>`. 204. |
-| `GET /api/v0/runner/blobs/<hash>` | A file's content, streamed. |
+| `GET /api/v0/runner/blobs/<hash>` | A file's content, streamed. Only a blob of the runner's own jobs (below); any other gets 403. |
 | `POST /api/v0/runner/packs` | Many blobs in one body, a **pack**: frames of `<hash> <size>\n` and then that many bytes, at most 1,000 blobs and 8 MiB of them. Each is checked against its hash. `{"kept": n}`. |
-| `POST /api/v0/runner/packs/fetch` | `{"hashes":[…]}`, 1 to 1,000: their blobs as one pack, in that order, streamed. 404 with `{"missing":[…]}` when one is not held. |
+| `POST /api/v0/runner/packs/fetch` | `{"hashes":[…]}`, 1 to 1,000: their blobs as one pack, in that order, streamed. 404 with `{"missing":[…]}` when one is not held. 403 when one is not of the runner's own jobs. |
+
+**A runner reads only its own jobs' blobs.** Both reads answer only blobs reached from the jobs of
+each session the runner holds an attempt of that has not ended or ended in the last 10 minutes,
+and from its own jobs of no session: their snapshots (the trees and every file in them, the times
+blob, `.git`), their changesets and the files those name, and the session's own snapshot. A
+connector's apply and snapshot jobs are its jobs too. Any other blob gets **403** `this runner
+holds no job that reads this blob`, whether the store holds it or not. Sending blobs and asking
+which are missing are not limited.
+
 
 **The relay records every call it carries.** A runner that holds no secret sends each model call
 of its agent to the server's relay, `/relay/<anthropic|chatgpt|cloudcode|openrouter>/…`, with the

@@ -87,6 +87,20 @@ func (f *Files) Policy() (Policy, Version, error) {
 	return p, v, nil
 }
 
+// policyOver reads permissions.toml as Policy does, with each key the file
+// leaves out taking base's value (the defaults the import runs under).
+func (f *Files) policyOver(base Policy) (Policy, error) {
+	b, _, err := readFile(filepath.Join(f.dir, PolicyFile))
+	if err != nil {
+		return Policy{}, err
+	}
+	p, err := parsePolicy(b)
+	if err != nil {
+		return Policy{}, err
+	}
+	return p.over(base)
+}
+
 // SetPolicy writes p as permissions.toml (FormatPolicy).
 func (f *Files) SetPolicy(p Policy, match Version) (Policy, Version, error) {
 	if err := p.Check(); err != nil {

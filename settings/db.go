@@ -105,6 +105,15 @@ CREATE INDEX IF NOT EXISTS changes_unpublished ON changes(seq) WHERE published I
 // OpenDB opens or makes the settings database at path. A new one starts on
 // the latest defaults, at settings version 0. now nil is time.Now.
 func OpenDB(path string, now func() time.Time) (*DB, error) {
+	return openDB(path, now, LatestDefaults())
+}
+
+// Defaults04 is the version of the defaults 0.4 ran under. A data folder from
+// before settings.db starts on it, so the upgrade changes nothing it did.
+const Defaults04 = 1
+
+// openDB is OpenDB, with a new database starting on defaults version dv.
+func openDB(path string, now func() time.Time, dv int) (*DB, error) {
 	if now == nil {
 		now = time.Now
 	}
@@ -124,7 +133,7 @@ func OpenDB(path string, now func() time.Time) (*DB, error) {
 	}
 	t := now().UTC().Format(time.RFC3339Nano)
 	if _, err := db.Exec(`INSERT OR IGNORE INTO meta(key, value) VALUES ('version', '0'), ('defaults', ?), ('created', ?)`,
-		strconv.Itoa(LatestDefaults()), t); err != nil {
+		strconv.Itoa(dv), t); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("settings: the database %s could not be made: %w", path, err)
 	}

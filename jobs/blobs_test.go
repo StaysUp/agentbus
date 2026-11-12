@@ -2,18 +2,21 @@ package jobs
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/staysup/agentbus/blobs"
 	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/workspace"
 )
 
 // The pack routes take and give many blobs a request, on a runner's token
@@ -49,7 +52,30 @@ func TestBlobPacks(t *testing.T) {
 			t.Fatalf("%s not kept", h)
 		}
 	}
+	// A runner reads only what its jobs name (blobscope.go): this one's
+	// turn changed every file, and one more that is not held.
+	gone := strings.Repeat("ab", 32)
 	own, _ := blobs.Open(t.TempDir())
+	if err := (blobs.Local{Store: own, From: c}).Fetch(ctx, hs[:1]); err == nil || !strings.Contains(err.Error(), "403") {
+		t.Fatalf("a fetch with no job: %v", err)
+	}
+	cs := workspace.Changeset{Space: "s_1", Checkpoint: "t"}
+	for i, h := range append(slices.Clone(hs), gone) {
+		cs.Files = append(cs.Files, workspace.FileChange{Path: fmt.Sprintf("f%d", i), Now: &workspace.File{Hash: h, Size: 1, Mode: 0o644}})
+	}
+	csb, _ := json.Marshal(cs)
+	csh, _ := st.PutBytes(csb)
+	makeJob(t, q, queue.Spec{Harness: "claude", Prompt: "p", Session: "s_1"})
+	var taken TakenWork
+	if code := send(t, srv, e.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, &taken); code != 200 || taken.Job == nil {
+		t.Fatalf("take: %d", code)
+	}
+	base := "/api/v0/runner/attempts/" + taken.Attempt.ID
+	send(t, srv, e.Token, "POST", base+"/start", AttemptCall{Number: 1}, nil)
+	res, _ := json.Marshal(queue.Result{Changeset: csh})
+	if code := send(t, srv, e.Token, "POST", base+"/finish", FinishCall{Number: 1, Status: queue.Finished, Result: res}, nil); code != 200 {
+		t.Fatalf("finish: %d", code)
+	}
 	if err := (blobs.Local{Store: own, From: c}).Fetch(ctx, hs); err != nil {
 		t.Fatal(err)
 	}
@@ -58,8 +84,7 @@ func TestBlobPacks(t *testing.T) {
 			t.Fatalf("%s not fetched", h)
 		}
 	}
-	// Not held: 404, the missing named.
-	gone := strings.Repeat("ab", 32)
+	// Named but not held: 404, the missing named.
 	if err := c.GetPack(ctx, []string{hs[0], gone}, func(string, io.Reader) error { return nil }); !errors.Is(err, blobs.ErrNotFound) {
 		t.Fatalf("a pack with a blob not held: %v", err)
 	}

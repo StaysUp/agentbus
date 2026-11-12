@@ -122,8 +122,10 @@ func TestMCPToolListFollowsTheToken(t *testing.T) {
 			t.Errorf("main token: %s missing from %v", want, all)
 		}
 	}
-	if w := toolNames(t, e, mcpWriteTok); !slices.Equal(w, all) {
-		t.Errorf("write turn: %v, want %v", w, all)
+	// apply is off for a turn token by default (defaults version 2).
+	allButApply := slices.DeleteFunc(slices.Clone(all), func(n string) bool { return n == "apply_turn" })
+	if w := toolNames(t, e, mcpWriteTok); !slices.Equal(w, allButApply) {
+		t.Errorf("write turn: %v, want %v", w, allButApply)
 	}
 	ro := toolNames(t, e, mcpReadTok)
 	want := []string{"list_turns", "get_turn", "turn_diff", "search_history", "list_agents"}
@@ -148,6 +150,8 @@ func TestMCPToolListFollowsAgentAPI(t *testing.T) {
 	}
 	off := func(set func(*settings.AgentAPI)) settings.AgentAPI {
 		p := settings.DefaultPolicy()
+		yes := true
+		p.AgentAPI.Apply = &yes // every switch on, then one off
 		set(&p.AgentAPI)
 		return p.AgentAPI
 	}

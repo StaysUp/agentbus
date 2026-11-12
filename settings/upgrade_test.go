@@ -368,3 +368,41 @@ func TestUpgradeFolderNamedThroughItself(t *testing.T) {
 		t.Fatalf("a copy inside the folder: %v", m)
 	}
 }
+
+// A data folder from before settings.db starts on the defaults 0.4 ran
+// under, so a turn token still applies; a key its permissions.toml leaves
+// out takes that version's value. A new folder starts on the latest, where
+// it does not.
+func TestUpgradeKeepsDefaultsOf04(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		files map[string]string
+		dv    int
+		apply bool
+	}{
+		{"new", nil, LatestDefaults(), false},
+		{"record only", map[string]string{"events.db": "record"}, Defaults04, true},
+		{"file without apply", map[string]string{PolicyFile: "forbid = [\"rm\"]\n"}, Defaults04, true},
+		{"file with apply off", map[string]string{PolicyFile: "[agent_api]\napply = false\n"}, Defaults04, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := home(t)
+			for f, s := range tc.files {
+				write(t, filepath.Join(dir, f), s)
+			}
+			d, _, err := upgrade(dir).Run()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer d.Close()
+			in, _ := d.Info()
+			p, _, err := d.Policy()
+			if err != nil || in.Defaults != tc.dv || *p.AgentAPI.Apply != tc.apply {
+				t.Fatalf("defaults %d, apply %v, %v; want %d, %v", in.Defaults, *p.AgentAPI.Apply, err, tc.dv, tc.apply)
+			}
+			if strings.Contains(stored(t, d, SettingPermissions), "apply") != (tc.dv == Defaults04 && !tc.apply) {
+				t.Fatalf("stored %s", stored(t, d, SettingPermissions))
+			}
+		})
+	}
+}

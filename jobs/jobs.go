@@ -101,6 +101,7 @@ type Server struct {
 	token, enrol [32]byte
 	tokenKey     [32]byte // signs runners' turn tokens (tokens.go)
 	mux          *http.ServeMux
+	reads        readScopes // what each runner may read (blobscope.go)
 	// Logf writes one line to the service log for each runner that
 	// enrolls. Set before serving; nil: none.
 	Logf func(format string, args ...any)

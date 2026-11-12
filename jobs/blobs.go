@@ -71,12 +71,19 @@ func (s *Server) blobPut(w http.ResponseWriter, r *http.Request, _ queue.Runner)
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) blobGet(w http.ResponseWriter, r *http.Request, _ queue.Runner) {
+func (s *Server) blobGet(w http.ResponseWriter, r *http.Request, rn queue.Runner) {
 	if s.cfg.Blobs == nil {
 		fail(w, http.StatusNotFound, "this service keeps no blob store")
 		return
 	}
 	h := r.PathValue("id")
+	if !blobs.Valid(h) {
+		fail(w, http.StatusNotFound, "no such blob")
+		return
+	}
+	if !s.readable(w, r, rn, []string{h}) {
+		return
+	}
 	rc, err := s.cfg.Blobs.Open(r.Context(), h)
 	if err != nil {
 		fail(w, http.StatusNotFound, "no such blob")
@@ -91,6 +98,21 @@ func (s *Server) blobGet(w http.ResponseWriter, r *http.Request, _ queue.Runner)
 	}
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.Copy(w, rc)
+}
+
+// readable says rn may read every blob of hs (mayRead), and answers the
+// request when it may not.
+func (s *Server) readable(w http.ResponseWriter, r *http.Request, rn queue.Runner, hs []string) bool {
+	ok, err := s.mayRead(r.Context(), rn, hs)
+	switch {
+	case err != nil:
+		fail(w, http.StatusInternalServerError, "the runner's jobs could not be read to check this read")
+		return false
+	case !ok:
+		fail(w, http.StatusForbidden, notYours)
+		return false
+	}
+	return true
 }
 
 // blobPack keeps every blob of the pack the body holds (blobs.ReadPack).
@@ -115,7 +137,7 @@ func (s *Server) blobPack(w http.ResponseWriter, r *http.Request, _ queue.Runner
 }
 
 // blobFetch answers the blobs asked for as one pack, in the order asked.
-func (s *Server) blobFetch(w http.ResponseWriter, r *http.Request, _ queue.Runner) {
+func (s *Server) blobFetch(w http.ResponseWriter, r *http.Request, rn queue.Runner) {
 	if s.cfg.Blobs == nil {
 		fail(w, http.StatusNotFound, "this service keeps no blob store")
 		return
@@ -123,6 +145,15 @@ func (s *Server) blobFetch(w http.ResponseWriter, r *http.Request, _ queue.Runne
 	var b blobs.FetchRequest
 	if !decode(r, &b) || len(b.Hashes) == 0 || len(b.Hashes) > blobs.PackCount {
 		fail(w, http.StatusBadRequest, "the body must be one JSON object with hashes, 1 to 1000")
+		return
+	}
+	for _, h := range b.Hashes {
+		if !blobs.Valid(h) {
+			fail(w, http.StatusBadRequest, "each hash must be 64 lowercase hex digits")
+			return
+		}
+	}
+	if !s.readable(w, r, rn, b.Hashes) {
 		return
 	}
 	missing, err := s.cfg.Blobs.Missing(r.Context(), b.Hashes)

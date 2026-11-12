@@ -187,7 +187,12 @@ func TestTurnDiffAndApply(t *testing.T) {
 	if code, out := as(t, e, tok, "POST", "/api/v0/turns/"+second.Turn+"/apply", ""); code != 403 || !strings.Contains(out, "apply is false") {
 		t.Fatalf("apply switched off: %d %s", code, out)
 	}
+	// Off by default too (defaults version 2): the person turns it on.
 	os.WriteFile(perm, nil, 0o600)
+	if code, out := as(t, e, tok, "POST", "/api/v0/turns/"+second.Turn+"/apply", ""); code != 403 || !strings.Contains(out, "apply is false") {
+		t.Fatalf("apply by default: %d %s", code, out)
+	}
+	os.WriteFile(perm, []byte("[agent_api]\napply = true\n"), 0o600)
 	code, st = applyAs(t, e, tok, second.Turn)
 	if code != 200 || st.State != "applied" || !slices.Equal(st.Files, []string{"a.txt"}) || read("a.txt") != "one\nthree\n" {
 		t.Fatalf("apply by a turn token: %d %+v, a.txt %q", code, st, read("a.txt"))

@@ -330,3 +330,45 @@ func TestDBBrokenPolicy(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Version 2 differs from version 1 in one key: a turn token's apply is off.
+// A database on version 1 that never set it applies; moving to 2 turns it
+// off and names the key; the person can turn it on again.
+func TestDefaultsV2ApplyOff(t *testing.T) {
+	v1, _ := DefaultsFor(1)
+	v2, ok := DefaultsFor(2)
+	if !ok || !*v1.Policy.AgentAPI.Apply || *v2.Policy.AgentAPI.Apply {
+		t.Fatalf("apply: v1 %v, v2 %v", *v1.Policy.AgentAPI.Apply, *v2.Policy.AgentAPI.Apply)
+	}
+	if k := changedKeys(v1.Policy, v2.Policy); strings.Join(k, ",") != "agent_api.apply" {
+		t.Fatalf("version 2 changes %v", k)
+	}
+	dir := t.TempDir()
+	d, err := openDB(filepath.Join(dir, DBFile), fixedNow, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if p, _, _ := d.Policy(); !*p.AgentAPI.Apply {
+		t.Fatal("version 1: apply is off")
+	}
+	if _, err := d.SetDefaults(2, "*"); err != nil {
+		t.Fatal(err)
+	}
+	p, v, _ := d.Policy()
+	if *p.AgentAPI.Apply {
+		t.Fatal("version 2: apply is on")
+	}
+	cs, _, _ := d.Changes()
+	if last := cs[len(cs)-1]; strings.Join(last.Keys, ",") != "version,permissions.agent_api.apply" {
+		t.Fatalf("the move names %v", last.Keys)
+	}
+	on := true
+	p.AgentAPI.Apply = &on
+	if _, _, err := d.SetPolicy(p, v); err != nil {
+		t.Fatal(err)
+	}
+	if p, _, _ := d.Policy(); !*p.AgentAPI.Apply || stored(t, d, SettingPermissions) != `{"agent_api.apply":true}` {
+		t.Fatalf("turned on: %v, stored %s", *p.AgentAPI.Apply, stored(t, d, SettingPermissions))
+	}
+}

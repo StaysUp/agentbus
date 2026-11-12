@@ -21,7 +21,7 @@ type Defaults struct {
 
 // defaultSets is every version, oldest first. Version n is defaultSets[n-1].
 // A version, once released, never changes: add a new one instead.
-var defaultSets = []func() Defaults{defaultsV1}
+var defaultSets = []func() Defaults{defaultsV1, defaultsV2}
 
 // DefaultsFor is version v of the defaults, and false when there is none.
 func DefaultsFor(v int) (Defaults, bool) {
@@ -56,6 +56,36 @@ func defaultsV1() Defaults {
 			Limits:                 Limits{MaxDepth: num(2), MaxJobsPerTurn: num(10), MaxJobsPerTree: num(30), MaxCostUSDPerTree: &cost},
 			AgentAPI: AgentAPI{Scope: ScopeTree, Read: on(), ListAgents: on(), Start: on(), Continue: on(),
 				Review: on(), Cancel: on(), Rename: on(), Apply: on(), Tools: off()},
+			Network: Network{Contain: ContainOff, Allow: []string{}},
+			Sandbox: Sandbox{Mode: SandboxOff, Read: []string{}},
+		},
+		Instructions: DefaultInstructions,
+	}
+}
+
+// defaultsV2 are the defaults of 0.5, written out in full: version 1 with
+// one change. A turn's own token no longer applies a turn's changes to the
+// person's folder (agent_api.apply off); only the main token does, until
+// the person turns it on.
+func defaultsV2() Defaults {
+	on := func() *bool { b := true; return &b }
+	off := func() *bool { b := false; return &b }
+	num := func(n int) *int { return &n }
+	cost := 0.0
+	return Defaults{
+		Policy: Policy{
+			ReadFolders:            []string{},
+			Allow:                  []string{},
+			Forbid:                 []string{},
+			Edit:                   EditSession,
+			Isolation:              IsolationAuto,
+			ShareReadOnly:          []string{},
+			Subagents:              on(),
+			Commands:               on(),
+			SubscriptionsOnRunners: SubscriptionsOff,
+			Limits:                 Limits{MaxDepth: num(2), MaxJobsPerTurn: num(10), MaxJobsPerTree: num(30), MaxCostUSDPerTree: &cost},
+			AgentAPI: AgentAPI{Scope: ScopeTree, Read: on(), ListAgents: on(), Start: on(), Continue: on(),
+				Review: on(), Cancel: on(), Rename: on(), Apply: off(), Tools: off()},
 			Network: Network{Contain: ContainOff, Allow: []string{}},
 			Sandbox: Sandbox{Mode: SandboxOff, Read: []string{}},
 		},

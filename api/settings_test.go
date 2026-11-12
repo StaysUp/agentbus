@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -240,8 +241,54 @@ func TestSettingsStateAndDefaults(t *testing.T) {
 		t.Errorf("no If-Match: %d", resp.StatusCode)
 	}
 	// The version it runs under already: nothing changes.
-	if resp, out := send(t, e, "PUT", "/api/v0/settings/defaults", `"1"`, `{"version":1}`); resp.StatusCode != 200 || resp.Header.Get("ETag") != `"1"` {
+	latest := fmt.Sprintf(`{"version":%d}`, settings.LatestDefaults())
+	if resp, out := send(t, e, "PUT", "/api/v0/settings/defaults", `"1"`, latest); resp.StatusCode != 200 || resp.Header.Get("ETag") != `"1"` {
 		t.Errorf("the same version: %d %s", resp.StatusCode, out)
+	}
+}
+
+// Defaults version 2: a turn token does not apply until the person turns
+// apply on. A control on version 1 keeps apply on until it moves.
+func TestSettingsDefaultsApplyOff(t *testing.T) {
+	e, _ := settingsEnv(t)
+	apply := func() (bool, string) {
+		t.Helper()
+		resp, out := send(t, e, "GET", "/api/v0/settings/permissions", "", "")
+		var p settings.Policy
+		if resp.StatusCode != 200 || json.Unmarshal([]byte(out), &p) != nil {
+			t.Fatalf("GET permissions: %d %s", resp.StatusCode, out)
+		}
+		return *p.AgentAPI.Apply, strings.Trim(resp.Header.Get("ETag"), `"`)
+	}
+	if on, _ := apply(); on {
+		t.Fatal("a new control: apply is on")
+	}
+	// Back to version 1, as a control from before 0.5 runs: apply is on.
+	if resp, out := send(t, e, "PUT", "/api/v0/settings/defaults", `"0"`, `{"version":1}`); resp.StatusCode != 200 {
+		t.Fatalf("to version 1: %d %s", resp.StatusCode, out)
+	}
+	if on, _ := apply(); !on {
+		t.Fatal("version 1: apply is off")
+	}
+	// Moved to version 2: off again, and the change names the key.
+	if resp, out := send(t, e, "PUT", "/api/v0/settings/defaults", `"1"`, `{"version":2}`); resp.StatusCode != 200 {
+		t.Fatalf("to version 2: %d %s", resp.StatusCode, out)
+	}
+	on, etag := apply()
+	if on {
+		t.Fatal("version 2: apply is on")
+	}
+	// The person turns it on.
+	_, out := send(t, e, "GET", "/api/v0/settings/permissions", "", "")
+	body := strings.Replace(out, `"apply":false`, `"apply":true`, 1)
+	if body == out {
+		t.Fatalf("no apply key in %s", out)
+	}
+	if resp, out := send(t, e, "PUT", "/api/v0/settings/permissions", `"`+etag+`"`, body); resp.StatusCode != 200 {
+		t.Fatalf("PUT apply on: %d %s", resp.StatusCode, out)
+	}
+	if on, _ := apply(); !on {
+		t.Fatal("apply turned on, still off")
 	}
 }
 

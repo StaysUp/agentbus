@@ -130,6 +130,12 @@ func TestRunTurnIDOnEveryEvent(t *testing.T) {
 		return count(turnEvents(t, svc.store, "byhand"), "model.responded") == 1
 	})
 
+	// Each turn's turn.changed is kept after its finish, so it can land
+	// after the replies: wait for both, or the seq below moves under the read.
+	waitFor(t, "each turn's turn.changed", func() bool {
+		return count(turnEvents(t, svc.store, session), "turn.changed") == 2
+	})
+
 	// GET /turns: newest first, with state and cost, filtered by session.
 	var list store.TurnList
 	getJSON(t, svc, tok, turnsPath+"?session="+session, &list)

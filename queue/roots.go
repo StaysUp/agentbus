@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 // BlobRoots are the blobs the queue still names, from which every blob a
@@ -31,12 +32,59 @@ func (q *Queue) BlobRoots() (BlobRoots, error) {
 	if err != nil {
 		return out, fmt.Errorf("queue: read blob roots: %w", err)
 	}
+	if err := out.addJobs(rows); err != nil {
+		return out, err
+	}
+	// A session's own snapshot id, for a session made from one.
+	srows, err := q.db.Query(`SELECT snapshot FROM sessions WHERE closed IS NULL AND snapshot <> ''`)
+	if err != nil {
+		return out, fmt.Errorf("queue: read blob roots: %w", err)
+	}
+	return out, out.addSnapshots(srows)
+}
+
+// RunnerBlobRoots are the roots of the blobs a runner may read: those of
+// every job of each session it holds an attempt of that has not ended or
+// ended within recent, the snapshot jobs of those sessions' attempts
+// included; of each job it holds so with no session; and each such
+// session's own snapshot. A connector's apply and snapshot jobs are its
+// jobs too.
+func (q *Queue) RunnerBlobRoots(runnerID string, recent time.Duration) (BlobRoots, error) {
+	var out BlobRoots
+	since := nanos(q.now().Add(-recent))
+	const held = `WITH held AS (SELECT j.id, COALESCE(j.session, (SELECT t.session FROM attempts sa JOIN jobs t ON t.id = sa.job
+			WHERE j.kind = 'snapshot' AND sa.id = substr(j.idem_key, length('snapshot/') + 1))) AS session
+		FROM attempts r JOIN jobs j ON j.id = r.job WHERE r.runner = ? AND (r.ended IS NULL OR r.ended >= ?)),
+	ss AS (SELECT DISTINCT session FROM held WHERE session IS NOT NULL) `
+	rows, err := q.db.Query(held+`
+		SELECT spec, result FROM jobs WHERE id IN (SELECT id FROM held)
+		UNION ALL
+		SELECT spec, result FROM jobs WHERE session IN (SELECT session FROM ss)
+		UNION ALL
+		SELECT s.spec, s.result FROM jobs t JOIN attempts a ON a.job = t.id
+			JOIN jobs s ON s.team = t.team AND s.idem_key = 'snapshot/' || a.id AND s.kind = 'snapshot'
+			WHERE t.session IN (SELECT session FROM ss)`, runnerID, since)
+	if err != nil {
+		return out, fmt.Errorf("queue: read blob roots: %w", err)
+	}
+	if err := out.addJobs(rows); err != nil {
+		return out, err
+	}
+	srows, err := q.db.Query(held+`SELECT snapshot FROM sessions WHERE id IN (SELECT session FROM ss) AND snapshot <> ''`, runnerID, since)
+	if err != nil {
+		return out, fmt.Errorf("queue: read blob roots: %w", err)
+	}
+	return out, out.addSnapshots(srows)
+}
+
+// addJobs adds the roots of each job's spec and result that rows reads.
+func (out *BlobRoots) addJobs(rows *sql.Rows) error {
 	defer rows.Close()
 	for rows.Next() {
 		var spec string
 		var result *string
 		if err := rows.Scan(&spec, &result); err != nil {
-			return out, fmt.Errorf("queue: read blob roots: %w", err)
+			return fmt.Errorf("queue: read blob roots: %w", err)
 		}
 		var sp Spec
 		if json.Unmarshal([]byte(spec), &sp) == nil {
@@ -53,22 +101,22 @@ func (q *Queue) BlobRoots() (BlobRoots, error) {
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return out, fmt.Errorf("queue: read blob roots: %w", err)
+		return fmt.Errorf("queue: read blob roots: %w", err)
 	}
-	// A session's own snapshot id, for a session made from one.
-	srows, err := q.db.Query(`SELECT snapshot FROM sessions WHERE closed IS NULL AND snapshot <> ''`)
-	if err != nil {
-		return out, fmt.Errorf("queue: read blob roots: %w", err)
-	}
-	defer srows.Close()
-	for srows.Next() {
+	return nil
+}
+
+// addSnapshots adds each session snapshot id rows reads as a tree.
+func (out *BlobRoots) addSnapshots(rows *sql.Rows) error {
+	defer rows.Close()
+	for rows.Next() {
 		var id string
-		if err := srows.Scan(&id); err != nil {
-			return out, fmt.Errorf("queue: read blob roots: %w", err)
+		if err := rows.Scan(&id); err != nil {
+			return fmt.Errorf("queue: read blob roots: %w", err)
 		}
 		out.Trees = appendSet(out.Trees, id)
 	}
-	return out, srows.Err()
+	return rows.Err()
 }
 
 func appendSet(to []string, hs ...string) []string {
