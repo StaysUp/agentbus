@@ -337,3 +337,53 @@ func TestUpRemovedDefaultAgentIsRefused(t *testing.T) {
 		t.Fatalf("a turn naming a removed default: %d %s", code, raw)
 	}
 }
+
+// In agentbus up a turn's token gets a credential only for its own turn's
+// path: one sent on another session's or turn's path is refused, and the
+// vendor sees nothing, so no call is recorded, guarded or priced as another
+// turn's (review, 2026-11-12).
+func TestUpTokenGetsNoCredentialOnAnotherTurnsPath(t *testing.T) {
+	vendor := newFakeVendor(t)
+	home := t.TempDir()
+	svc := runServiceWith(t, home, nil, 0, vendor.URL, true)
+	tok := readToken(t, home)
+	report, release := filepath.Join(t.TempDir(), "report"), filepath.Join(t.TempDir(), "release")
+	t.Setenv("AGENTBUS_FAKE_OUT", report)
+	t.Setenv("AGENTBUS_FAKE_WAIT", release)
+	t.Setenv("AGENTBUS_FAKE_EXIT", "0")
+	code, out, raw := postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": t.TempDir(), "prompt": "hi"})
+	if code != http.StatusAccepted {
+		t.Fatalf("turn: %d %s", code, raw)
+	}
+	session, turn := out["session"].(string), out["turn"].(string)
+	waitFor(t, "the running turn's report", func() bool { _, err := os.Stat(report); return err == nil })
+	placeholder := envOf(t, report)["CLAUDE_CODE_OAUTH_TOKEN"]
+	for _, path := range []string{"/s/othersession/t/t_other/v1/messages", "/s/" + session + "/t/t_other/v1/messages", "/v1/messages"} {
+		req, _ := http.NewRequest("POST", "http://"+svc.addr+path, strings.NewReader(`{"model":"claude-x","messages":[{"role":"user","content":"x"}]}`))
+		req.Header.Set("Authorization", "Bearer "+placeholder)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusForbidden || !strings.Contains(string(b), "another turn's") {
+			t.Errorf("%s: %d %s", path, resp.StatusCode, b)
+		}
+	}
+	// Its own turn's path still gets the sign-in.
+	req, _ := http.NewRequest("POST", "http://"+svc.addr+"/s/"+session+"/t/"+turn+"/v1/messages",
+		strings.NewReader(`{"model":"claude-x","messages":[{"role":"user","content":"own"}]}`))
+	req.Header.Set("Authorization", "Bearer "+placeholder)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	os.WriteFile(release, nil, 0o600)
+	waitClosed(t, svc.store, session)
+	if got := vendor.seen(); resp.StatusCode != http.StatusOK || len(got) != 1 || got[0] != "/v1/messages Bearer "+fakeSubscription {
+		t.Fatalf("own path: %d; the vendor saw %v", resp.StatusCode, got)
+	}
+}

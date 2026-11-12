@@ -427,7 +427,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, session, runTurn string) {
 	rl := relayedOf(r.Context())
 	if g.credential != nil && rl == nil {
-		header, refuse := g.credential(r)
+		header, refuse := g.credential(r, session, runTurn)
 		r = r.WithContext(context.WithValue(r.Context(), credKey{}, &credCall{header: header, refuse: refuse}))
 	}
 	// An agent may first try a WebSocket on its model-call path, as codex-cli

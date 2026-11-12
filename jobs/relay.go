@@ -157,6 +157,9 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request) {
 const (
 	noRelay = "control relays no model calls on this path"
 	noTurn  = "the call carries no turn token of a turn running now; control adds credentials only to a running turn's calls"
+	// otherTurn: a gateway of agentbus up took a call on another turn's
+	// path than its token's.
+	otherTurn = "the call's token is another turn's than its path names; control adds a credential only to a turn's own calls"
 )
 
 // turnCredential is the credential for one call of j's turn on up: what
@@ -188,7 +191,7 @@ func refusal(status int, why string) *gateway.Refusal {
 // the gateway records each call once, as it does every call it carries.
 func (s *Server) Local(name string) gateway.Credential {
 	up, ok := s.cfg.Relay[name]
-	return func(r *http.Request) (func(http.Header), *gateway.Refusal) {
+	return func(r *http.Request, session, turn string) (func(http.Header), *gateway.Refusal) {
 		if !ok || !strings.HasPrefix(strings.TrimPrefix(r.URL.Path, "/"), up.Under) {
 			return nil, refusal(http.StatusNotFound, noRelay)
 		}
@@ -196,6 +199,12 @@ func (s *Server) Local(name string) gateway.Credential {
 		j, _, found := s.turnJob(tok)
 		if !found {
 			return nil, refusal(http.StatusUnauthorized, noTurn)
+		}
+		// The gateway records the call under the session and turn its path
+		// names: only the token's own, so a call is never recorded, guarded
+		// or priced as another turn's.
+		if session != assignedSession(j) || turn != j.Turn {
+			return nil, refusal(http.StatusForbidden, otherTurn)
 		}
 		return s.turnCredential(j, up)
 	}

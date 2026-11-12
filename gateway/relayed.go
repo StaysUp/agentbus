@@ -157,8 +157,10 @@ func relayFailed(w http.ResponseWriter, msg, reason string) {
 // control's relay gives a runner's call, without a hop over HTTP. It reads
 // the call's placeholder (its turn's token) and returns what sets the
 // credential on the request to the vendor, or the refusal answered in the
-// vendor's place. It never puts a value in an event or a log.
-type Credential func(r *http.Request) (header func(http.Header), refuse *Refusal)
+// vendor's place. session and turn are the ones the call's path names,
+// which the gateway records it under: a token gets a credential for its
+// own turn's calls only. It never puts a value in an event or a log.
+type Credential func(r *http.Request, session, turn string) (header func(http.Header), refuse *Refusal)
 
 // SetCredential makes every call get its credential from c: the agent's
 // own header is replaced, never passed on. Call it before serving.
