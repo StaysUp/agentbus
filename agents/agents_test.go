@@ -138,12 +138,22 @@ func TestCheckRefuses(t *testing.T) {
 	}
 }
 
-func TestResolveFallsBackToHarness(t *testing.T) {
-	s, _ := openAt(t, t.TempDir())
+// Each turn reads the agent it names, as it is now: a default the person
+// removed is removed, and its harness name gives no way past the saved
+// agents (his rule, 2026-11-12).
+func TestResolveRemovedDefault(t *testing.T) {
+	s, db := openAt(t, t.TempDir())
 	s.Remove(Codex)
-	a, err := s.Resolve(Codex)
-	if err != nil || a.Harness != Codex || a.Access != Subscription || a.ID != "" {
+	if a, err := s.Resolve(Codex); !errors.Is(err, ErrRemoved) {
 		t.Fatalf("removed default: %+v %v", a, err)
+	}
+	// It stays removed once read again from the database.
+	again, err := Open(db, fixed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, err := again.Resolve(Codex); !errors.Is(err, ErrRemoved) {
+		t.Fatalf("removed default, read again: %+v %v", a, err)
 	}
 	if a, err := s.Resolve(Claude); err != nil || a.ID != Claude {
 		t.Fatalf("saved default: %+v %v", a, err)
@@ -182,6 +192,8 @@ func TestStarters(t *testing.T) {
 		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
 			t.Fatalf("found %v: agents %v, want %v", tc.found, got, tc.want)
 		}
+		// A default the folder started without was never the person's: a
+		// turn naming its harness still runs it on its subscription.
 		for _, h := range []string{Claude, Codex, "agy"} {
 			if a, err := s.Resolve(h); err != nil || a.Harness != h || a.Access != Subscription {
 				t.Fatalf("found %v: a turn naming %s: %+v %v", tc.found, h, a, err)

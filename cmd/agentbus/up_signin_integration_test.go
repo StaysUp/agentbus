@@ -322,3 +322,18 @@ func TestUpRelayRecordsADirectCall(t *testing.T) {
 		t.Fatalf("up's record holds %d model.requested of the direct call, want 1", requested)
 	}
 }
+
+// A default agent the person removed is removed: a turn naming its harness
+// is refused too, with no way past the saved agents.
+func TestUpRemovedDefaultAgentIsRefused(t *testing.T) {
+	home := t.TempDir()
+	svc := runService(t, home, nil, 0)
+	tok := readToken(t, home)
+	if code, _ := sendAPI(t, svc, tok, "DELETE", "/api/v0/agents/codex", nil); code != http.StatusNoContent {
+		t.Fatalf("remove: %d", code)
+	}
+	code, _, raw := postRun(t, svc, tok, map[string]any{"agent": "codex", "folder": t.TempDir(), "prompt": "hi"})
+	if code != http.StatusBadRequest || !strings.Contains(raw, `agent \"codex\" was removed; pick another`) {
+		t.Fatalf("a turn naming a removed default: %d %s", code, raw)
+	}
+}

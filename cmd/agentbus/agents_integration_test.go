@@ -407,11 +407,12 @@ func TestSavedAgentsKeptAndDefaultsSeeded(t *testing.T) {
 	if args := strings.Join(readReport(t, report).Args, " "); !strings.Contains(args, "--model haiku -- hi") {
 		t.Errorf("the agent's model is not used: %s", args)
 	}
-	code, out, raw = postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": t.TempDir(), "prompt": "hi"})
-	if code != http.StatusAccepted {
+	// The default the person removed is removed: a turn naming it is
+	// refused, and names no way past the saved agents.
+	code, _, raw = postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": t.TempDir(), "prompt": "hi"})
+	if code != http.StatusBadRequest || !strings.Contains(raw, "was removed; pick another") {
 		t.Fatalf("removed default: %d %s", code, raw)
 	}
-	waitClosed(t, svc.store, out["session"].(string))
 }
 
 // An isolated session in a repo's subfolder keeps that subfolder: its next

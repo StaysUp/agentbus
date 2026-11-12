@@ -414,7 +414,7 @@ var routes = slices.Concat([]route{
 		tag:     "Agents",
 		summary: "Remove an agent",
 		doc: "Remove a saved agent. Its sessions stay and can still be continued. " +
-			"A turn that names claude, codex or agy still starts once that agent is removed, or when the data folder started without it: that harness on its own subscription. No body is read.",
+			"A turn that names it afterwards is refused with \"was removed; pick another\", for a default agent (claude, codex, agy) too. No body is read.",
 		replies: []reply{{status: 204, doc: "Removed.", empty: true}, badRequest, fail(404, "No such agent."), storeFailed},
 		serve:   (*API).removeSaved},
 	{method: "GET", path: "/api/v0/harnesses", op: "listHarnesses",

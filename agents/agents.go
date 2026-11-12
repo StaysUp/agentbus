@@ -150,6 +150,12 @@ type Store struct {
 // refused, and names another.
 var ErrRemoved = errors.New("agents: the agent was removed")
 
+// removedByPerson is the data of the row of an agent the person removed,
+// so it is told from a default a new data folder started without (Starters),
+// whose harness a turn may still name. Rows removed before 0.5.1 hold no
+// data, and read as started without.
+var removedByPerson = json.RawMessage(`{"removed_by":"person"}`)
+
 type file struct {
 	Agents []Agent `json:"agents"`
 }
@@ -171,8 +177,9 @@ func Defaults(now time.Time) []Agent {
 // Starters are the rows a new data folder starts with, so that its agents
 // are the defaults whose harness is in found: a removed row for each other
 // default. found nil starts with none (agentbus server, which has no
-// machine yet). A turn that names a removed default's id still starts that
-// harness on its own subscription (Resolve), as old clients expect.
+// machine yet). A turn that names such a default's id still starts that
+// harness on its own subscription (Resolve), as old clients expect; one the
+// person removed (Remove) does not.
 func Starters(found []string) []settings.AgentRow {
 	var out []settings.AgentRow
 	for _, d := range Defaults(time.Time{}) {
@@ -220,7 +227,7 @@ func Open(b Backend, now func() time.Time) (*Store, error) {
 		return nil, err
 	}
 	for _, r := range rows {
-		if r.Removed {
+		if r.Removed && string(r.Data) == string(removedByPerson) {
 			s.removed[r.ID] = true
 		}
 	}
@@ -393,7 +400,7 @@ func (s *Store) Remove(id string) error {
 	if i < 0 {
 		return ErrNotFound
 	}
-	if err := s.b.SetAgent(settings.AgentRow{ID: id, Removed: true}, []string{id}); err != nil {
+	if err := s.b.SetAgent(settings.AgentRow{ID: id, Removed: true, Data: removedByPerson}, []string{id}); err != nil {
 		return fmt.Errorf("agents: the agent could not be removed: %w", err)
 	}
 	s.list = append(append([]Agent(nil), s.list[:i]...), s.list[i+1:]...)
@@ -401,23 +408,25 @@ func (s *Store) Remove(id string) error {
 	return nil
 }
 
-// Resolve is the agent a turn names: a saved agent by id, or, for a harness
-// name no saved agent has as its id (one the person removed), that harness
-// on its own subscription with its default model. Programs written before
-// saved agents send the harness name.
+// Resolve is the agent a turn names, as it is now: a saved agent by id.
+// One the person removed, a default too (claude, codex, agy), is
+// ErrRemoved: each turn reads the agent it names, so a harness name gives
+// no way past the saved agents (his rule, 2026-11-12). The harness name of
+// a default the person never had, as a data folder that started without it
+// (Starters), is that harness on its own subscription.
 func (s *Store) Resolve(id string) (Agent, error) {
 	a, err := s.Get(id)
 	if err == nil {
 		return a, nil
-	}
-	if known(id) {
-		return Agent{Harness: id, Access: Subscription}, nil
 	}
 	s.mu.Lock()
 	gone := s.removed[id]
 	s.mu.Unlock()
 	if gone {
 		return Agent{}, ErrRemoved
+	}
+	if known(id) {
+		return Agent{Harness: id, Access: Subscription}, nil
 	}
 	return Agent{}, err
 }

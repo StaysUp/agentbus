@@ -60,7 +60,9 @@ type Change struct {
 }
 
 // AgentRow is a saved agent as the database keeps it: Data is the agent as
-// JSON, or nil when Removed says the person removed a default agent.
+// JSON. A Removed row is an agent that is not there: one the person
+// removed, whose Data then says so (agents.Store.Remove), or a default a
+// new data folder started without, with no Data.
 type AgentRow struct {
 	ID      string
 	Data    json.RawMessage
@@ -456,7 +458,7 @@ func putInstructions(tx *sql.Tx, text string, now time.Time) error {
 
 func putAgent(tx *sql.Tx, r AgentRow, now time.Time) error {
 	var data any
-	if !r.Removed {
+	if r.Data != nil {
 		data = string(r.Data)
 	}
 	_, err := tx.Exec(`INSERT INTO agents(id, ord, data, removed, updated)
