@@ -99,7 +99,7 @@ type Config struct {
 	// NoSecrets: this runner holds no credential. Its agents' model calls
 	// carry the turn token as a placeholder, and control's gateway adds the
 	// real credential (jobs/relay.go): on a runner of a server, and in
-	// agentbus up, whose built-in runner sends them to its own relay. A turn
+	// agentbus up, whose gateways add it in the same process. A turn
 	// whose agent control has no credential for is refused before it starts
 	// (jobs.AttemptStarted.Signin).
 	NoSecrets bool
@@ -770,7 +770,7 @@ func (r *Runner) request(at *attempt) run.Request {
 	req := run.Request{Turn: at.job.Turn, Prompt: sp.Prompt, Model: sp.Model, ReadOnly: sp.ReadOnly,
 		IdempotencyKey: at.job.IdempotencyKey}
 	// The agent's token is control's: a runner of a server's always, and
-	// in up the one its calls carry to the relay as their placeholder.
+	// in up the one its calls carry as their placeholder.
 	if (r.cfg.Forward || r.cfg.NoSecrets) && at.token != "" {
 		req.Token, req.APIURL, req.Placeholder = at.token, r.cfg.Queue, r.cfg.NoSecrets
 	}

@@ -4,8 +4,9 @@ package main
 
 // agentbus up uses the subscription connected on control, as a runner of a
 // server does (0.5.1): its agent gets the turn's token as a placeholder, its
-// gateway sends each call to up's own relay, which adds the token, and each
-// session runs in a home of its own. Every credential here is fake.
+// gateway swaps in the connected sign-in in up's own process (the relay's
+// answer, with no hop over HTTP), and each session runs in a home of its
+// own. Every credential here is fake.
 
 import (
 	"io"
@@ -89,7 +90,7 @@ func TestUpUsesTheSubscriptionConnectedOnControl(t *testing.T) {
 
 // agentbus up is control for other runners too: their calls go through up's
 // relay and are recorded in up's record once, and so are the calls of up's
-// own runner, whose gateway records them before the relay.
+// own runner, which its gateway records and sends to the vendor itself.
 func TestUpRecordsEveryRunnersCallsOnce(t *testing.T) {
 	vendor := newFakeVendor(t)
 	home := t.TempDir()
@@ -264,5 +265,60 @@ func TestUpTurnShowsTheVendorsRefusal(t *testing.T) {
 	turn := got.Turn
 	if turn.Error != refusal {
 		t.Fatalf("the turn's error is %q, want the vendor's %q", turn.Error, refusal)
+	}
+}
+
+// In agentbus up the agent's gateway gets each call's credential in
+// control's own process, so no call of up's own runner goes over /relay.
+// A turn's token sent straight to /relay while the turn runs is not lost
+// from the record: the relay records every call it carries, in up as on a
+// server, under the turn the token names (chosen over refusing it: /relay
+// serves the runners of other machines in up too).
+func TestUpRelayRecordsADirectCall(t *testing.T) {
+	vendor := newFakeVendor(t)
+	home := t.TempDir()
+	svc := runServiceWith(t, home, nil, 0, vendor.URL, true)
+	tok := readToken(t, home)
+	report, release := filepath.Join(t.TempDir(), "report"), filepath.Join(t.TempDir(), "release")
+	t.Setenv("AGENTBUS_FAKE_OUT", report)
+	t.Setenv("AGENTBUS_FAKE_WAIT", release)
+	t.Setenv("AGENTBUS_FAKE_EXIT", "0")
+	code, out, raw := postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": t.TempDir(), "prompt": "hi"})
+	if code != http.StatusAccepted {
+		t.Fatalf("turn: %d %s", code, raw)
+	}
+	session := out["session"].(string)
+	waitFor(t, "the running turn's report", func() bool { _, err := os.Stat(report); return err == nil })
+	placeholder := envOf(t, report)["CLAUDE_CODE_OAUTH_TOKEN"]
+	if !strings.HasPrefix(placeholder, jobs.TokenPrefix) {
+		t.Fatal("no placeholder")
+	}
+	req, _ := http.NewRequest("POST", "http://"+svc.addr+jobs.RelayPrefix+"anthropic/v1/messages",
+		strings.NewReader(`{"model":"claude-x","messages":[{"role":"user","content":"straight to the relay"}]}`))
+	req.Header.Set("Authorization", "Bearer "+placeholder)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("the direct call: %d", resp.StatusCode)
+	}
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	waitClosed(t, svc.store, session)
+	if got := vendor.seen(); len(got) != 1 || got[0] != "/v1/messages Bearer "+fakeSubscription {
+		t.Fatalf("the vendor saw %v", got)
+	}
+	var requested int
+	for _, e := range storedEvents(t, svc.store) {
+		if e.Session == session && e.Kind == "model.requested" {
+			requested++
+		}
+	}
+	if requested != 1 {
+		t.Fatalf("up's record holds %d model.requested of the direct call, want 1", requested)
 	}
 }

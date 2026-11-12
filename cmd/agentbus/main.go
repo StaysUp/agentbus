@@ -407,24 +407,16 @@ func start(c config) (*service, error) {
 			orUp, _ = url.Parse(openrouter)
 		}
 		// Each records the calls it carries in this record, as a runner's
-		// own gateway does (jobs/relay.go). In up, the built-in runner's
-		// gateways record each of its calls in this same record already,
-		// before they send it to this relay: its calls go through gateways
-		// that record nothing (own), and only get the credential here. Any
-		// other runner's calls are recorded here, as in server.
-		upstream := func(u *url.URL, as ...adapter.Adapter) (gs, own []*gateway.Gateway) {
-			for _, a := range as {
-				g := gateway.New(u, a, sink)
-				gs = append(gs, g)
-				relayGws = append(relayGws, g)
-				if c.mode == modeUp {
-					own = append(own, gateway.New(u, a, unrecorded{}))
-				}
-			}
-			return gs, own
-		}
+		// own gateway does (jobs/relay.go). It records every call it
+		// carries: in up too, where only other machines' runners use it,
+		// since up's own gateways get the credential in this process
+		// (jobs.Server.Local).
 		relayed := func(up jobs.Upstream, as ...adapter.Adapter) jobs.Upstream {
-			up.Gateways, up.Own = upstream(up.URL, as...)
+			for _, a := range as {
+				g := gateway.New(up.URL, a, sink)
+				up.Gateways = append(up.Gateways, g)
+				relayGws = append(relayGws, g)
+			}
 			return up
 		}
 		relay := map[string]jobs.Upstream{
@@ -609,14 +601,11 @@ func start(c config) (*service, error) {
 	// A runner that holds no secret sends each call on to the server's
 	// relay, which adds the credential and records the call in control's
 	// record (jobs/relay.go). It records the call here too, for its own
-	// record, and names each call's exchange to the relay. agentbus up sends
-	// each call to its own relay, on its own address: one record, written
-	// here, so no exchange is named.
-	if c.noSecrets() {
+	// record, and names each call's exchange to the relay. agentbus up's
+	// gateways go to the vendors themselves, and get each call's credential
+	// in this process, from the same answer the relay gives (below).
+	if c.mode == modeRunner && c.noSecrets() {
 		srv := strings.TrimSuffix(c.server, "/") + jobs.RelayPrefix
-		if c.mode == modeUp {
-			srv = baseURL + jobs.RelayPrefix
-		}
 		anthURL, orURL = mustParse(srv+relayAnthropic), mustParse(srv+relayOpenRouter)
 		chatURL, ccURL = mustParse(srv+relayChatGPT), mustParse(srv+relayCloudCode)
 	}
@@ -634,6 +623,9 @@ func start(c config) (*service, error) {
 	orAnth.SetPrefix(openRouterPrefix)
 	orOAI.SetPrefix(openRouterPrefix)
 	gws = append(gws, orAnth, orOAI)
+	// Each gateway's relay name: where control finds its calls' credential.
+	relayOf := map[*gateway.Gateway]string{anth: relayAnthropic, oai: relayChatGPT, gem: relayCloudCode,
+		orAnth: relayOpenRouter, orOAI: relayOpenRouter}
 	// A turn's session.closed waits for the gateway to write all of the
 	// turn's calls: their events and replies are written off the reply's
 	// path and can land after the child has exited.
@@ -661,6 +653,9 @@ func start(c config) (*service, error) {
 		g.SetLog(svcLog.Printf)
 		if c.noSecrets() && c.mode == modeRunner {
 			g.SendExchange()
+		}
+		if c.mode == modeUp && c.noSecrets() && runnerJobs != nil {
+			g.SetCredential(runnerJobs.Local(relayOf[g]))
 		}
 		// forbid in permissions.toml, applied to each run turn's replies.
 		if eng != nil {
@@ -880,11 +875,6 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 	if s.remote != nil {
 		s.remote.Enrolled(rn.ID(), rn.Token())
 	}
-	// up's own runner: its gateways record its calls, so the relay does not
-	// again (jobs.Upstream.Own).
-	if c.mode == modeUp && s.jobsSrv != nil {
-		s.jobsSrv.SetOwnRunner(rn.ID())
-	}
 	svcLog.Printf("runner.start id=%s capacity=%d machine=%s folders=%d", rn.ID(), capacity, s.folders.Connector(), len(s.folders.List(queue.MaxFolders)))
 	s.stopRunner = cancel
 	s.runnerDone = make(chan struct{})
@@ -921,13 +911,6 @@ func (s *service) deliveredAgent(asking queue.Spec) (queue.Spec, string) {
 	}
 	return queue.Spec{Harness: ag.Harness, AgentID: ag.ID, Access: ag.Access, KeyEnv: ag.KeyEnv, AgentModel: ag.Model}, ""
 }
-
-// unrecorded is the sink of up's relay gateways for its own runner's calls
-// (jobs.Upstream.Own): that runner's gateways record each of them in up's
-// one record.
-type unrecorded struct{}
-
-func (unrecorded) Emit(event.Event) {}
 
 // The relay's names for the vendors it adds credentials for: under
 // jobs.RelayPrefix of the server.

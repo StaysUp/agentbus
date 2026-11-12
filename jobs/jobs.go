@@ -31,7 +31,6 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/staysup/agentbus/blobs"
@@ -117,21 +116,6 @@ type Server struct {
 	// Logf writes one line to the service log for each runner that
 	// enrolls. Set before serving; nil: none.
 	Logf func(format string, args ...any)
-	// ownRunner is this process's own runner, agentbus up's built-in one
-	// (SetOwnRunner): the relay records none of its calls.
-	ownRunner atomic.Value // string
-}
-
-// SetOwnRunner names this process's own runner, in agentbus up: its
-// gateways record each of its calls in this record, so the relay sends
-// them through Upstream.Own and records them again nowhere. Every other
-// runner's calls the relay records, as always.
-func (s *Server) SetOwnRunner(id string) { s.ownRunner.Store(id) }
-
-// own says the runner is this process's own (SetOwnRunner).
-func (s *Server) own(runner string) bool {
-	id, _ := s.ownRunner.Load().(string)
-	return id != "" && id == runner
 }
 
 // New returns the jobs.
@@ -142,9 +126,6 @@ func New(cfg Config) (*Server, error) {
 	for name, up := range cfg.Relay {
 		if len(up.Gateways) == 0 {
 			return nil, errors.New("server: the relay " + name + " has no gateway to record its calls")
-		}
-		if len(up.Own) != 0 && len(up.Own) != len(up.Gateways) {
-			return nil, errors.New("server: the relay " + name + " has not one unrecording gateway for each")
 		}
 	}
 	if cfg.Lease == 0 {

@@ -62,6 +62,9 @@ type Gateway struct {
 	// sendExchange: each call's exchange goes upstream in ExchangeHeader
 	// (SendExchange).
 	sendExchange bool
+	// credential, when set, is where each call gets its credential
+	// (SetCredential); nil passes the agent's own on.
+	credential Credential
 
 	// logf is the service log, for why an upstream call failed; nil unless
 	// SetLog was called.
@@ -136,6 +139,9 @@ func New(upstream *url.URL, a adapter.Adapter, sink event.Sink) *Gateway {
 			r.Out.Header.Del(ExchangeHeader)
 			if rl != nil && rl.Header != nil {
 				rl.Header(r.Out.Header)
+			}
+			if c := credOf(r.In.Context()); c != nil && c.header != nil {
+				c.header(r.Out.Header)
 			}
 			if ex, ok := r.In.Context().Value(exchangeKey{}).(*exchange); ok && g.sendExchange && rl == nil {
 				r.Out.Header.Set(ExchangeHeader, ex.id)
@@ -420,6 +426,10 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // when it is set; r's path is the vendor's.
 func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, session, runTurn string) {
 	rl := relayedOf(r.Context())
+	if g.credential != nil && rl == nil {
+		header, refuse := g.credential(r)
+		r = r.WithContext(context.WithValue(r.Context(), credKey{}, &credCall{header: header, refuse: refuse}))
+	}
 	// An agent may first try a WebSocket on its model-call path, as codex-cli
 	// 0.164.0 does with a GET and Upgrade on /backend-api/codex/responses
 	// (2026-11-05). The gateway cannot read a WebSocket, so passing it on would

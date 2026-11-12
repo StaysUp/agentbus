@@ -113,19 +113,23 @@ func (g *Gateway) cutRequest(rl *relayed, r *http.Request) {
 	g.flushed(ex.done)
 }
 
-// refuser answers a relayed call that carries a Refusal in the vendor's
-// place; any other goes on to next.
+// refuser answers a call that carries a Refusal in the vendor's place, a
+// relayed one's or its credential's; any other goes on to next.
 type refuser struct{ next http.RoundTripper }
 
 func (t refuser) RoundTrip(req *http.Request) (*http.Response, error) {
-	rl := relayedOf(req.Context())
-	if rl == nil || rl.Refuse == nil {
+	var f *Refusal
+	if rl := relayedOf(req.Context()); rl != nil {
+		f = rl.Refuse
+	} else if c := credOf(req.Context()); c != nil {
+		f = c.refuse
+	}
+	if f == nil {
 		return t.next.RoundTrip(req)
 	}
 	if req.Body != nil {
 		_ = req.Body.Close()
 	}
-	f := rl.Refuse
 	h := http.Header{}
 	if f.ContentType != "" {
 		h.Set("Content-Type", f.ContentType)
@@ -146,4 +150,29 @@ func relayFailed(w http.ResponseWriter, msg, reason string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadGateway)
 	_, _ = w.Write(b)
+}
+
+// Credential is where a gateway's calls get their credential when the
+// gateway runs in control's own process (agentbus up): the same answer
+// control's relay gives a runner's call, without a hop over HTTP. It reads
+// the call's placeholder (its turn's token) and returns what sets the
+// credential on the request to the vendor, or the refusal answered in the
+// vendor's place. It never puts a value in an event or a log.
+type Credential func(r *http.Request) (header func(http.Header), refuse *Refusal)
+
+// SetCredential makes every call get its credential from c: the agent's
+// own header is replaced, never passed on. Call it before serving.
+func (g *Gateway) SetCredential(c Credential) { g.credential = c }
+
+type credKey struct{}
+
+// credCall is what a call's Credential gave.
+type credCall struct {
+	header func(http.Header)
+	refuse *Refusal
+}
+
+func credOf(ctx context.Context) *credCall {
+	c, _ := ctx.Value(credKey{}).(*credCall)
+	return c
 }

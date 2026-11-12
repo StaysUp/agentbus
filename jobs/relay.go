@@ -59,10 +59,6 @@ type Upstream struct {
 	// other (one gateway per API format of the host, as OpenRouter's two).
 	// At least one.
 	Gateways []*gateway.Gateway
-	// Own, in agentbus up, are the same gateways recording nothing, one for
-	// each of Gateways in its order: for the calls of up's own runner,
-	// whose gateway records them in this same record (Server.SetOwnRunner).
-	Own []*gateway.Gateway
 }
 
 // gatewayFor is the gateway of gs that takes a call of method on path.
@@ -86,7 +82,7 @@ const SettleWait = 5 * time.Second
 func (s *Server) settle(session, turn string) bool {
 	ok := true
 	for _, up := range s.cfg.Relay {
-		for _, g := range append(up.Gateways, up.Own...) {
+		for _, g := range up.Gateways {
 			ok = g.Settle(session, turn, SettleWait) && ok
 		}
 	}
@@ -136,41 +132,73 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request) {
 	name, rest, _ := strings.Cut(strings.TrimPrefix(r.URL.Path, RelayPrefix), "/")
 	up, ok := s.cfg.Relay[name]
 	if !ok || !strings.HasPrefix(rest, up.Under) {
-		fail(w, http.StatusNotFound, "control relays no model calls on this path")
+		fail(w, http.StatusNotFound, noRelay)
 		return
 	}
 	tok, _ := bearer(r)
 	j, _, ok := s.turnJob(tok)
 	if !ok {
-		fail(w, http.StatusUnauthorized, "the call carries no turn token of a turn running now; control adds credentials only to a running turn's calls")
+		fail(w, http.StatusUnauthorized, noTurn)
 		return
 	}
 	session := assignedSession(j)
 	rl := gateway.Relayed{Session: session, Turn: j.Turn, Path: "/" + rest}
-	gs := up.Gateways
-	if len(up.Own) > 0 && s.own(tokenRunner(tok)) {
-		gs = up.Own
-	}
-	g := gatewayFor(gs, r.Method, rl.Path)
+	g := gatewayFor(up.Gateways, r.Method, rl.Path)
 	// Read once the call holds its turn open: the record and a renewal can
 	// take a while.
 	rl.Prepare = func(rl *gateway.Relayed) {
 		rl.Exchange = s.exchangeOf(r, session, j.Turn)
-		cred, status, why := s.credential(j, up)
-		if why != "" {
-			b, _ := json.Marshal(JobError{Error: why})
-			rl.Refuse = &gateway.Refusal{Status: status, ContentType: "application/json", Body: b}
-			return
-		}
-		rl.Header = func(h http.Header) {
-			h.Del("X-Api-Key")
-			h.Set("Authorization", "Bearer "+cred.Token)
-			for k, v := range cred.Headers {
-				h.Set(k, v)
-			}
-		}
+		rl.Header, rl.Refuse = s.turnCredential(j, up)
 	}
 	g.ServeRelayed(w, r, rl)
+}
+
+// Why the relay, or a gateway of agentbus up, adds no credential to a call.
+const (
+	noRelay = "control relays no model calls on this path"
+	noTurn  = "the call carries no turn token of a turn running now; control adds credentials only to a running turn's calls"
+)
+
+// turnCredential is the credential for one call of j's turn on up: what
+// sets it on the request to the vendor, or the refusal answered in the
+// vendor's place. The one answer, whether the call came over the relay
+// from a runner or from a gateway of agentbus up in this process (Local).
+func (s *Server) turnCredential(j queue.Job, up Upstream) (func(http.Header), *gateway.Refusal) {
+	cred, status, why := s.credential(j, up)
+	if why != "" {
+		return nil, refusal(status, why)
+	}
+	return func(h http.Header) {
+		h.Del("X-Api-Key")
+		h.Set("Authorization", "Bearer "+cred.Token)
+		for k, v := range cred.Headers {
+			h.Set(k, v)
+		}
+	}, nil
+}
+
+func refusal(status int, why string) *gateway.Refusal {
+	b, _ := json.Marshal(JobError{Error: why})
+	return &gateway.Refusal{Status: status, ContentType: "application/json", Body: b}
+}
+
+// Local is the credential for the calls of the relay's upstream name made
+// through a gateway in this process: agentbus up's own runner's agents.
+// It is the relay's own answer (turnCredential) with no hop over HTTP, so
+// the gateway records each call once, as it does every call it carries.
+func (s *Server) Local(name string) gateway.Credential {
+	up, ok := s.cfg.Relay[name]
+	return func(r *http.Request) (func(http.Header), *gateway.Refusal) {
+		if !ok || !strings.HasPrefix(strings.TrimPrefix(r.URL.Path, "/"), up.Under) {
+			return nil, refusal(http.StatusNotFound, noRelay)
+		}
+		tok, _ := bearer(r)
+		j, _, found := s.turnJob(tok)
+		if !found {
+			return nil, refusal(http.StatusUnauthorized, noTurn)
+		}
+		return s.turnCredential(j, up)
+	}
 }
 
 // credential is what control adds to the calls of j's turn on up, or the
