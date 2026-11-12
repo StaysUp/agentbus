@@ -687,7 +687,8 @@ func TestTurnWaitsBehindReviewInItsSession(t *testing.T) {
 
 // An accepted finish is the attempt's one finish: another finish is refused
 // before control writes anything for it. Its lease no longer counts: past
-// it, the sweep leaves it, Accepted lists it whole, and End ends it.
+// it, the sweep leaves it and does not count it, Accepted lists it whole,
+// and End ends it.
 func TestAcceptFinish(t *testing.T) {
 	q, c := open(t)
 	r := runner(t, q, 2)
@@ -711,8 +712,22 @@ func TestAcceptFinish(t *testing.T) {
 		t.Fatalf("another finish ends: %v", err)
 	}
 	c.add(10 * lease) // long past the lease: control stopped in between
-	if _, err := q.Sweep(); err != nil {
-		t.Fatal(err)
+	// The sweep does not count it as expired either, on any pass: it logs
+	// what it counts, once a second. It counts what it settles: a lease
+	// with no saved finish, once.
+	job(t, q, "")
+	if _, b := take(t, q, r); b.ID == "" {
+		t.Fatal("no attempt")
+	}
+	c.add(10 * lease)
+	if n, err := q.Sweep(); err != nil || n != 1 {
+		t.Fatalf("sweep: %d expired, %v; want the one with no finish", n, err)
+	}
+	for i := 0; i < 2; i++ {
+		if n, err := q.Sweep(); err != nil || n != 0 {
+			t.Fatalf("sweep %d: %d expired, %v; want none", i, n, err)
+		}
+		c.add(lease)
 	}
 	list, err := q.Accepted(10)
 	if err != nil || len(list) != 1 || list[0].Attempt != a.ID || list[0].Runner != r.ID || list[0].Number != 1 ||

@@ -1143,7 +1143,7 @@ func workspaceOf(db querier, j Job) (*Workspace, error) {
 func (q *Queue) Take(runnerID string, lease time.Duration, folders bool) (job Job, att Attempt, ok bool, cleanup *Workspace, err error) {
 	err = q.tx(func(tx *sql.Tx) error {
 		now := q.now()
-		if err := sweepTx(tx, now); err != nil {
+		if _, err := sweepTx(tx, now); err != nil {
 			return err
 		}
 		var team string
@@ -1304,44 +1304,46 @@ func reasonIf(ok bool, r string) string {
 
 // sweepTx settles every attempt whose lease ran out, ends the queued
 // turns of every ended session (sessionEnded), and ends every folder job
-// that waited too long (endFoldersTx).
-func sweepTx(tx *sql.Tx, now time.Time) error {
+// that waited too long (endFoldersTx). It answers how many attempts it
+// settled. A saved finish (Accept) is not one: its lease no longer counts,
+// and the finisher ends it.
+func sweepTx(tx *sql.Tx, now time.Time) (int, error) {
 	rows, err := tx.Query(`SELECT `+attemptCols+` FROM attempts WHERE state IN ('taken','running') AND lease_until <= ?
 		AND finish_hash IS NULL`, nanos(now))
 	if err != nil {
-		return fmt.Errorf("queue: read leases: %w", err)
+		return 0, fmt.Errorf("queue: read leases: %w", err)
 	}
 	var expired []Attempt
 	for rows.Next() {
 		a, err := scanAttempt(rows)
 		if err != nil {
 			rows.Close()
-			return fmt.Errorf("queue: read leases: %w", err)
+			return 0, fmt.Errorf("queue: read leases: %w", err)
 		}
 		expired = append(expired, a)
 	}
 	rows.Close()
 	if err := rows.Err(); err != nil {
-		return err
+		return 0, err
 	}
 	for _, a := range expired {
 		j, err := scanJob(tx.QueryRow(`SELECT `+jobCols+` FROM jobs WHERE id = ?`, a.Job))
 		if err != nil {
-			return fmt.Errorf("queue: read job: %w", err)
+			return 0, fmt.Errorf("queue: read job: %w", err)
 		}
 		if err := expire(tx, now, a, j); err != nil {
-			return err
+			return 0, err
 		}
 		if err := endSnapshotsTx(tx, now, a.ID); err != nil {
-			return err
+			return 0, err
 		}
 	}
 	if err := endFoldersTx(tx, now); err != nil {
-		return err
+		return 0, err
 	}
 	// Whatever ended a session's first turn, its queued turns end here,
 	// before any runner can take one.
-	return endSessionsTx(tx, now)
+	return len(expired), endSessionsTx(tx, now)
 }
 
 // endSnapshotsTx stops the snapshot job the attempt asked for (Snapshot),
@@ -1414,15 +1416,15 @@ func (q *Queue) Lost(ids []string) (map[string]bool, error) {
 	return out, nil
 }
 
-// Sweep settles every attempt whose lease ran out, and says how many.
+// Sweep settles every attempt whose lease ran out, and says how many: the
+// ones it settled (sweepTx), so a saved finish, which it leaves to the
+// finisher, is never reported as expired.
 func (q *Queue) Sweep() (int, error) {
 	var n int
 	err := q.tx(func(tx *sql.Tx) error {
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM attempts WHERE state IN ('taken','running') AND lease_until <= ?`,
-			nanos(q.now())).Scan(&n); err != nil {
-			return fmt.Errorf("queue: read leases: %w", err)
-		}
-		return sweepTx(tx, q.now())
+		var err error
+		n, err = sweepTx(tx, q.now())
+		return err
 	})
 	if err == nil && n > 0 {
 		q.wake()
