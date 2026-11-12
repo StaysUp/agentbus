@@ -70,7 +70,13 @@ func helper(fdText string) {
 		os.Exit(126)
 	}
 	if err := loopbackUp(); err != nil {
-		fail("loopback could not be brought up in the agent's namespace (" + errnoText(err) + ")" + hint(err))
+		// The runner adds what to do: in this namespace a root-owned file
+		// shows no owner, so the advice cannot be made here.
+		why := "loopback could not be brought up in the agent's namespace (" + errnoText(err) + ")"
+		if permission(err) {
+			why = refusedPerm + why
+		}
+		fail(why)
 	}
 	var fds []int
 	if listen != "" {
@@ -257,6 +263,9 @@ func receive(fd, n int) ([]net.Listener, string) {
 	case m == 0:
 		closeAll()
 		return nil, "the helper that readies the agent's namespace ended before it was ready"
+	case strings.HasPrefix(msg, "refused: "+refusedPerm):
+		closeAll()
+		return nil, strings.TrimPrefix(msg, "refused: "+refusedPerm) + AppArmorAdvice()
 	case strings.HasPrefix(msg, "refused: "):
 		closeAll()
 		return nil, strings.TrimPrefix(msg, "refused: ")
@@ -283,9 +292,16 @@ func receive(fd, n int) ([]net.Listener, string) {
 	return lns, ""
 }
 
+// refusedPerm begins the helper's reason when Linux refused it permission,
+// so the runner, outside the namespace, adds AppArmorAdvice.
+const refusedPerm = "perm: "
+
+func permission(err error) bool { return errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) }
+
 // hint is what to do when Linux refuses a user namespace its capabilities.
+// Run outside the namespace only: see AppArmorAdvice.
 func hint(err error) string {
-	if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) {
+	if permission(err) {
 		return AppArmorAdvice()
 	}
 	if errors.Is(err, unix.ENOSPC) || errors.Is(err, unix.EUSERS) {

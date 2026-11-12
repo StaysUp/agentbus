@@ -7,6 +7,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/staysup/agentbus/queue"
 )
 
 // fakeInfo is a file's owner and mode, as Lstat would give them.
@@ -76,7 +78,7 @@ func TestAppArmorAdvice(t *testing.T) {
 		{"own profile", appArmor{restricted: true, label: "agentbus (unconfined)", bin: "/usr/local/bin/agentbus"}, nil},
 		{"another profile", appArmor{restricted: true, label: "snap.x (enforce)", bin: "/usr/local/bin/agentbus"}, nil},
 		{"no profile", appArmor{restricted: true, label: "unconfined", bin: "/usr/local/bin/agentbus"},
-			[]string{"; AppArmor", "kernel.apparmor_restrict_unprivileged_userns is 1", "without one",
+			[]string{"; AppArmor", "Ubuntu 24.04", "agentbus has none",
 				"curl -fsSL " + installScript + " | sudo sh -s apparmor /usr/local/bin/agentbus"}},
 		// The helper reads its label after the kernel moved it.
 		{"in the helper", appArmor{restricted: true, label: "unprivileged_userns (enforce)", bin: "/usr/local/bin/agentbus"},
@@ -85,10 +87,14 @@ func TestAppArmorAdvice(t *testing.T) {
 			[]string{"sudo sh -s apparmor /usr/local/bin/agentbus"}},
 		{"a binary the person can change", appArmor{restricted: true, label: "unconfined",
 			bin: "/home/u/.local/bin/agentbus", open: "/home/u/.local/bin/agentbus"},
-			[]string{"only root can change", "/home/u/.local/bin/agentbus can be changed by another user",
-				"| sudo AGENTBUS_INSTALL_DIR=/usr/local/bin sh", "then run /usr/local/bin/agentbus"}},
-		{"a path with a space", appArmor{restricted: true, label: "unconfined", bin: "/opt/Agent Bus/it's"},
-			[]string{`sudo sh -s apparmor '/opt/Agent Bus/it'\''s'`}},
+			[]string{"only root can change", "| sudo AGENTBUS_INSTALL_DIR=/usr/local/bin sh"}},
+		// Review rounds 1 and 2: a path with a space was offered a
+		// profile command that the shell split, then one install.sh
+		// refuses. Such a path gets the install instead.
+		{"a path with a space", appArmor{restricted: true, label: "unconfined", bin: "/opt/Agent Bus/agentbus"},
+			[]string{"cannot name its path", "| sudo AGENTBUS_INSTALL_DIR=/usr/local/bin sh"}},
+		{"a path with a quote", appArmor{restricted: true, label: "unconfined", bin: "/opt/it's/agentbus"},
+			[]string{"| sudo AGENTBUS_INSTALL_DIR=/usr/local/bin sh"}},
 		{"binary unknown", appArmor{restricted: true, label: "unconfined"},
 			[]string{"| sudo AGENTBUS_INSTALL_DIR=/usr/local/bin sh"}},
 	} {
@@ -108,9 +114,26 @@ func TestAppArmorAdvice(t *testing.T) {
 			}
 			rest = rest[i+len(w):]
 		}
-		// A command for a path that others can change is never offered.
-		if c.a.open != "" && strings.Contains(got, "sh -s apparmor") {
+		// A profile command is offered only for a path install.sh accepts.
+		if (c.a.open != "" || !ProfilePathPlain(c.a.bin)) && strings.Contains(got, "sh -s apparmor") {
 			t.Errorf("%s: offers a profile for a path others can change: %q", c.name, got)
+		}
+	}
+}
+
+// Every advice fits whole in the runner's report, after the longest reason
+// it follows, for a binary at the usual path: a cut would lose the command.
+func TestAppArmorAdviceFitsTheReport(t *testing.T) {
+	reason := (&Error{Why: "loopback could not be brought up in the agent's namespace (operation not permitted)"}).Error()
+	bin := "/usr/local/bin/agentbus"
+	for _, a := range []appArmor{
+		{restricted: true, label: "unconfined", bin: bin},
+		{restricted: true, label: "unconfined", bin: bin, open: bin},
+		{restricted: true, label: "unconfined", bin: "/opt/a b/agentbus"},
+		{restricted: true, label: "unconfined"},
+	} {
+		if why := reason + appArmorAdvice(a); len(why) > queue.MaxSandboxWhy {
+			t.Errorf("%d bytes, over %d: %s", len(why), queue.MaxSandboxWhy, why)
 		}
 	}
 }

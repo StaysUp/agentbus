@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"regexp"
 	"time"
+	"unicode/utf8"
 
 	"github.com/staysup/agentbus/harness"
 )
@@ -51,6 +52,19 @@ type SandboxReport struct {
 
 // MaxSandboxWhy bounds SandboxReport.Why.
 const MaxSandboxWhy = 500
+
+// NewSandboxReport is the report a runner sends: why cut to MaxSandboxWhy
+// bytes, on a character's edge, so a long reason never stops it enrolling.
+func NewSandboxReport(can bool, why string) *SandboxReport {
+	if len(why) > MaxSandboxWhy {
+		cut := MaxSandboxWhy - len("…")
+		for cut > 0 && !utf8.RuneStart(why[cut]) {
+			cut--
+		}
+		why = why[:cut] + "…"
+	}
+	return &SandboxReport{Can: can, Why: why}
+}
 
 // RoleConnector is the Capabilities.Role of a connector of a build before
 // 0.5, when a machine's folders had a program of their own.

@@ -23,7 +23,9 @@ const installScript = "https://raw.githubusercontent.com/staysup/agentbus/main/i
 
 // AppArmorAdvice is what is missing and the one command that adds it, when
 // AppArmor's user namespace rule is what refuses this program; "" when it
-// is not. It begins with "; " to follow a reason.
+// is not. It begins with "; " to follow a reason. Call it outside the
+// namespace the refusal happened in: inside, a file root owns shows no
+// owner, so every path would read as one others can change.
 func AppArmorAdvice() string { return appArmorAdvice(readAppArmor()) }
 
 // appArmor is what the advice is made from.
@@ -87,25 +89,20 @@ func appArmorAdvice(a appArmor) string {
 	if a.label != "unconfined" && !strings.HasPrefix(a.label, "unprivileged_userns") && a.label != "" {
 		return ""
 	}
-	why := "; AppArmor allows a user namespace with capabilities only to a program with a profile " +
-		"(kernel.apparmor_restrict_unprivileged_userns is 1, as on Ubuntu 24.04), and agentbus runs without one"
+	// Short: the runner reports it to control within queue.MaxSandboxWhy,
+	// after the reason it follows.
+	why := "; AppArmor (Ubuntu 24.04) gives user namespaces only to a program with a profile, and agentbus has none"
+	install := "; install it with one, once: curl -fsSL " + installScript + " | sudo AGENTBUS_INSTALL_DIR=/usr/local/bin sh"
+	// A profile is offered only for a path install.sh accepts: one only
+	// root can change, made of plain characters. Any other gets the
+	// install into /usr/local/bin.
 	switch {
 	case a.bin == "":
-		return why + "; install agentbus with its profile, once: curl -fsSL " + installScript +
-			" | sudo AGENTBUS_INSTALL_DIR=/usr/local/bin sh"
+		return why + install
+	case !ProfilePathPlain(a.bin):
+		return why + ". A profile cannot name its path" + install
 	case a.open != "":
-		return why + ". A profile is given only to a binary that only root can change, and " + a.open +
-			" can be changed by another user; install agentbus with its profile, once: curl -fsSL " + installScript +
-			" | sudo AGENTBUS_INSTALL_DIR=/usr/local/bin sh, then run /usr/local/bin/agentbus"
+		return why + ". A profile needs a binary only root can change" + install
 	}
-	return why + "; add it, once: curl -fsSL " + installScript + " | sudo sh -s apparmor " + shellQuote(a.bin)
-}
-
-// shellQuote is s as one word to a POSIX shell: as it is when it holds
-// nothing the shell reads, otherwise in single quotes.
-func shellQuote(s string) string {
-	if s != "" && strings.Trim(s, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._-+") == "" {
-		return s
-	}
-	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
+	return why + "; add it, once: curl -fsSL " + installScript + " | sudo sh -s apparmor " + a.bin
 }

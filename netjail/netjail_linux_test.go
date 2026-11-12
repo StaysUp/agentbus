@@ -179,3 +179,28 @@ func rejoin() error {
 	runtime.LockOSThread() // the thread ends with the agent
 	return unix.Setns(int(f.Fd()), unix.CLONE_NEWNET)
 }
+
+// A helper refused permission marks its reason, and the runner adds the
+// AppArmor advice itself, outside the namespace: CI on Ubuntu 24.04 showed
+// the helper, inside it, reading a root-owned test binary as open to
+// others. Other reasons pass as they are.
+func TestReceiveAddsAdviceOutside(t *testing.T) {
+	for _, c := range []struct{ sent, want string }{
+		{"refused: " + refusedPerm + "loopback could not be brought up", "loopback could not be brought up" + AppArmorAdvice()},
+		{"refused: 192.0.2.1:9 could not be listened on", "192.0.2.1:9 could not be listened on"},
+	} {
+		pair, err := unix.Socketpair(unix.AF_UNIX, unix.SOCK_SEQPACKET|unix.SOCK_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.Sendmsg(pair[1], []byte(c.sent), nil, nil, 0); err != nil {
+			t.Fatal(err)
+		}
+		_, why := receive(pair[0], 0)
+		unix.Close(pair[0])
+		unix.Close(pair[1])
+		if why != c.want || strings.Contains(why, refusedPerm) {
+			t.Errorf("%q: got %q, want %q", c.sent, why, c.want)
+		}
+	}
+}

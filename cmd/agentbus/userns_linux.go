@@ -53,6 +53,10 @@ const (
 var mountCaps = []uintptr{unix.CAP_SYS_ADMIN, unix.CAP_DAC_OVERRIDE, unix.CAP_DAC_READ_SEARCH,
 	unix.CAP_FOWNER, unix.CAP_CHOWN, unix.CAP_MKNOD, unix.CAP_FSETID}
 
+// usernsPerm begins the child's reason when Linux refused it permission,
+// so the parent adds apparmorHint.
+const usernsPerm = "perm: "
+
 // apparmorHint is what to do when AppArmor refuses the namespace: what is
 // missing and the one command that adds it; "" when AppArmor is not why.
 func apparmorHint() string { return netjail.AppArmorAdvice() }
@@ -142,7 +146,13 @@ func usernsStart(logf func(string, ...any)) (int, bool) {
 			// The child ended before it could say: a signal, or a crash.
 			return exitCode(cmd), true
 		}
-		return outside(strings.TrimSuffix(line, "\n"))
+		why := strings.TrimSuffix(line, "\n")
+		// The child was refused permission: the advice is made here,
+		// outside its namespace, where root's files show their owner.
+		if rest, ok := strings.CutPrefix(why, usernsPerm); ok {
+			why = rest + apparmorHint()
+		}
+		return outside(why)
 	}
 	go func() {
 		for s := range sig {
@@ -178,7 +188,7 @@ func usernsInside(home string, logf func(string, ...any)) (int, bool) {
 	if err := unix.Mount("", "/", "", unix.MS_REC|unix.MS_SLAVE, ""); err != nil {
 		why := "the namespace was made but cannot mount (make-rslave: " + errnoText(err) + ")"
 		if errors.Is(err, unix.EACCES) || errors.Is(err, unix.EPERM) {
-			why += apparmorHint()
+			why = usernsPerm + why
 		}
 		return refuse(why)
 	}

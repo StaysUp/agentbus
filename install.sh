@@ -36,6 +36,16 @@ needs_apparmor() {
   [ "$(cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null)" = 1 ]
 }
 
+# plain_path: $1 holds only the characters a profile's path may hold.
+# AppArmor reads that path as a pattern, and these are never part of one.
+# netjail.ProfilePathChars is the same set, and a test checks both agree.
+# Spelled out, not as ranges: A-Z under a UTF-8 locale may take in ü.
+plain_path() {
+  case "$1" in
+    "" | *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789/._+-]*) return 1 ;;
+  esac
+}
+
 # open_to_others prints the first of $1 and the folders above it that a
 # user other than root may change: not owned by root, or writable by its
 # group or others. Nothing when only root can change them. Whoever can
@@ -78,11 +88,8 @@ install_apparmor() {
   [ "$(id -u)" = 0 ] || fail "the AppArmor profile needs root: run it with sudo"
   bin=$(readlink -f "$1" 2>/dev/null) || fail "no agentbus binary at $1"
   { [ -f "$bin" ] && [ -x "$bin" ]; } || fail "no agentbus binary at $1"
-  # A profile's path is a pattern: it may hold only plain characters, so it
-  # names this one file.
-  case "$bin" in
-    *[!A-Za-z0-9/._+-]*) fail "a profile cannot name $bin: its path may hold only letters, digits and / . _ + -" ;;
-  esac
+  plain_path "$bin" || fail "a profile cannot name $bin: its path may hold only letters, digits and / . _ + -. Install agentbus with its profile into /usr/local/bin instead:
+  curl -fsSL https://raw.githubusercontent.com/$repo/main/install.sh | sudo AGENTBUS_INSTALL_DIR=/usr/local/bin sh"
   open=$(open_to_others "$bin")
   [ -z "$open" ] || fail "a profile is given only to a binary that only root can change, and $open can be changed by another user. Install agentbus with its profile into /usr/local/bin instead:
   curl -fsSL https://raw.githubusercontent.com/$repo/main/install.sh | sudo AGENTBUS_INSTALL_DIR=/usr/local/bin sh"
@@ -173,7 +180,7 @@ if [ "$os" = linux ] && needs_apparmor; then
   say ""
   say "This system's AppArmor allows user namespaces only to a program with a profile. Without one,"
   say "agentbus cannot build the session wall or [network] contain, and a copy is a plain copy."
-  if [ "$(id -u)" = 0 ] && [ -z "$(open_to_others "$dir/agentbus")" ]; then
+  if [ "$(id -u)" = 0 ] && plain_path "$(readlink -f "$dir/agentbus")" && [ -z "$(open_to_others "$dir/agentbus")" ]; then
     answer="${AGENTBUS_APPARMOR:-}"
     if [ -z "$answer" ] && [ -r /dev/tty ]; then
       printf 'Install the AppArmor profile /etc/apparmor.d/agentbus for %s? [y/N] ' "$dir/agentbus"
@@ -182,10 +189,11 @@ if [ "$os" = linux ] && needs_apparmor; then
     case "$answer" in
       y | Y | yes) install_apparmor "$dir/agentbus" ;;
       *) say "Not installed. To install it later, run once:"
-         say "  curl -fsSL https://raw.githubusercontent.com/$repo/main/install.sh | sudo sh -s apparmor '$dir/agentbus'" ;;
+         say "  curl -fsSL https://raw.githubusercontent.com/$repo/main/install.sh | sudo sh -s apparmor $dir/agentbus" ;;
     esac
   else
-    say "A profile is given only to a binary that only root can change, so not to '$dir/agentbus'."
+    say "A profile is given only to a binary that only root can change, at a path of plain characters,"
+    say "so not to $dir/agentbus."
     say "To have them, install agentbus with its profile into /usr/local/bin, once:"
     say "  curl -fsSL https://raw.githubusercontent.com/$repo/main/install.sh | sudo AGENTBUS_INSTALL_DIR=/usr/local/bin sh"
   fi

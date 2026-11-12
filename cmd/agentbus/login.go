@@ -67,7 +67,7 @@ func systemLogin() loginDeps {
 		self:    self,
 		caps: func() *queue.Capabilities {
 			can, why := sandbox.Can()
-			return &queue.Capabilities{OS: runtime.GOOS, Arch: runtime.GOARCH, Sandbox: &queue.SandboxReport{Can: can, Why: why}}
+			return &queue.Capabilities{OS: runtime.GOOS, Arch: runtime.GOARCH, Sandbox: queue.NewSandboxReport(can, why)}
 		},
 		signals: func(ctx context.Context) (context.Context, context.CancelFunc) {
 			return signal.NotifyContext(ctx, os.Interrupt)
