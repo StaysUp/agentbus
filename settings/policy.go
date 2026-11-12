@@ -474,13 +474,6 @@ func (p Policy) over(base Policy) (Policy, error) {
 	return applyOverlay(base, set)
 }
 
-// retiredKeys are policy keys an older build had and this one does not. A
-// file or a body that still holds one is read with it left out, so a
-// permissions.toml written before, or an older client, keeps working.
-// commands: the switch of the person's own "!" commands, retired in 0.5,
-// where a "!" is a message to the session's agent.
-var retiredKeys = []string{"commands"}
-
 // withoutRetired is the JSON object b with its retiredKeys left out, or b
 // itself when it holds none or is not an object (the decoder then says
 // what is wrong).

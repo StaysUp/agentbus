@@ -10,7 +10,8 @@ package settings
 //  3. imports permissions.toml, instructions.md and agents.json into the
 //     database, in one transaction that also marks the import done;
 //  4. writes out the old value of each default this build changed, so
-//     nothing changes for the person (writeOldDefaults).
+//     nothing changes for the person, and removes the keys it retired
+//     from the stored policy (writeSteps).
 //
 // The copy is made in a folder of its own name with .partial on the end and
 // renamed when whole, and the database is made only once the copy is whole.
@@ -29,6 +30,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -62,6 +64,7 @@ type Report struct {
 	Imported []string // the files it imported
 	Done     bool     // false when the import was done already
 	Kept     []string // the policy keys whose old default it wrote out
+	Removed  []string // the retired policy keys it removed from the stored policy
 }
 
 // CopyName is the copy of the data folder dir made at t: beside it, its name
@@ -129,7 +132,7 @@ func (u Upgrade) Run() (*DB, Report, error) {
 		db.Close()
 		return nil, rep, err
 	}
-	if rep.Kept, err = db.writeOldDefaults(); err != nil {
+	if rep.Kept, rep.Removed, err = db.writeSteps(); err != nil {
 		db.Close()
 		return nil, rep, err
 	}
@@ -168,17 +171,19 @@ func setUpgradesDone(tx *sql.Tx) error {
 	return err
 }
 
-// writeOldDefaults writes out, once, the old value of each default changed
-// since the database last ran, into the person's policy, unless they set
-// that key themselves: so an upgrade never changes what a turn may do. The
-// write is one change, with its settings.changed event naming the keys, in
-// the transaction that marks the steps done. keys is what it wrote; none
-// when nothing was waiting.
-func (d *DB) writeOldDefaults() (keys []string, err error) {
+// writeSteps runs, once, the upgrade steps the database has not written.
+// A changed default's old value goes into the person's policy, unless they
+// set that key themselves: so an upgrade never changes what a turn may do. A
+// retired key is removed from the stored policy, where a save before this
+// build left it. The write is one change, with its settings.changed event
+// naming the keys (never a value), in the transaction that marks the steps
+// done. kept and removed are the keys it wrote and removed; none when
+// nothing was waiting.
+func (d *DB) writeSteps() (kept, removed []string, err error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	fail := func(err error) ([]string, error) {
-		return nil, fmt.Errorf("settings: the old defaults could not be kept: %w", err)
+	fail := func(err error) ([]string, []string, error) {
+		return nil, nil, fmt.Errorf("settings: the upgrade steps could not be written: %w", err)
 	}
 	tx, err := d.db.Begin()
 	if err != nil {
@@ -194,31 +199,42 @@ func (d *DB) writeOldDefaults() (keys []string, err error) {
 		return fail(err)
 	}
 	if n == len(upgradeSteps) && legacy == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	s, err := readState(tx)
 	if err != nil {
 		return fail(err)
 	}
-	// An overlay that is not readable has no value to keep: turns refuse
-	// until the person writes the policy again, and that write is theirs.
+	// An overlay that is not readable has no value to keep and no key to
+	// remove: turns refuse until the person writes the policy again, and
+	// that write is theirs.
 	if s.overlay != nil {
 		o := flat{}
 		for k, v := range s.overlay {
 			o[k] = v
 		}
 		for _, st := range upgradeSteps[n:] {
-			if _, set := o[st.Key]; !set {
+			_, set := o[st.Key]
+			switch {
+			case st.Retired && set:
+				delete(o, st.Key)
+				if i := slices.Index(kept, st.Key); i >= 0 {
+					// Written by an earlier step of this start: never stored.
+					kept = slices.Delete(kept, i, i+1)
+				} else {
+					removed = append(removed, st.Key)
+				}
+			case !st.Retired && !set:
 				o[st.Key] = st.Old
-				keys = append(keys, st.Key)
+				kept = append(kept, st.Key)
 			}
 		}
-		if len(keys) > 0 {
+		if keys := append(slices.Clone(kept), removed...); len(keys) > 0 {
 			if err := putSetting(tx, SettingPermissions, o, d.now()); err != nil {
 				return fail(err)
 			}
 			if err := addChanges(tx, s.version, []Change{{Setting: SettingPermissions, Keys: keys}}, d.now()); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 	}
@@ -228,7 +244,7 @@ func (d *DB) writeOldDefaults() (keys []string, err error) {
 	if err := tx.Commit(); err != nil {
 		return fail(err)
 	}
-	return keys, nil
+	return kept, removed, nil
 }
 
 // lockDir takes the lock at path, refusing when another service holds it.

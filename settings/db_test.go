@@ -56,17 +56,27 @@ func TestDefaultsWrittenInFull(t *testing.T) {
 }
 
 // Each upgrade step names a policy key and an old value that differs from
-// today's default; before the steps, a turn token applies, as in 0.4.
+// today's default, or a retired key the policy no longer has, at its top;
+// before the steps, a turn token applies, as in 0.4.
 func TestUpgradeSteps(t *testing.T) {
 	now := flatten(defaultPolicy())
-	for _, st := range upgradeSteps {
-		if _, ok := now[st.Key]; !ok {
+	var last *upgradeStep
+	for i, st := range upgradeSteps {
+		_, ok := now[st.Key]
+		switch {
+		case st.Retired && (ok || strings.Contains(st.Key, ".")):
+			t.Errorf("retired step %s: the policy has the key, or it is not at the top", st.Key)
+		case !st.Retired && !ok:
 			t.Errorf("step %s: no such key", st.Key)
+		case !st.Retired:
+			last = &upgradeSteps[i]
 		}
 	}
-	last := upgradeSteps[len(upgradeSteps)-1]
-	if string(now[last.Key]) == string(last.Old) {
+	if last != nil && string(now[last.Key]) == string(last.Old) {
 		t.Errorf("the last step %s keeps the default it changes", last.Key)
+	}
+	if strings.Join(retiredKeys, ",") != "commands" {
+		t.Errorf("retired keys %v", retiredKeys)
 	}
 	if p := policyBefore(0); !*p.AgentAPI.Apply {
 		t.Error("before the steps, apply is off")

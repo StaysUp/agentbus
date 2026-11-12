@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -521,5 +522,133 @@ func TestUpgradeFromDefaultsVersionNothingToKeep(t *testing.T) {
 				t.Fatalf("the defaults version is still stored: %q", dv)
 			}
 		})
+	}
+}
+
+// storedDB is a settings database as the build before this one left it (one
+// upgrade step written, imported), with overlay as the stored policy.
+func storedDB(t *testing.T, dir, overlay string) {
+	t.Helper()
+	d, err := openDB(filepath.Join(dir, DBFile), fixedNow, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`INSERT INTO meta(key, value) VALUES ('imported', '2026-11-12T00:00:00Z'), ('imported_files', '[]')`,
+		`INSERT INTO settings(name, value, updated) VALUES ('permissions', '` + overlay + `', '')`,
+	} {
+		if _, err := d.db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d.Close()
+}
+
+// A stored policy that holds commands, retired in 0.5, loses it on the first
+// start, as one change whose settings.changed event names the key, and keeps
+// the rest. A second start does nothing.
+func TestUpgradeRemovesRetiredKey(t *testing.T) {
+	dir := home(t)
+	storedDB(t, dir, `{"commands":false,"forbid":["rm"]}`)
+	d, rep, err := upgrade(dir).Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(rep.Removed, ",") != "commands" || len(rep.Kept) != 0 {
+		t.Fatalf("removed %v kept %v", rep.Removed, rep.Kept)
+	}
+	var got []Change
+	d.SetSink(func(c Change) error { got = append(got, c); return nil }, nil)
+	if s := stored(t, d, SettingPermissions); s != `{"forbid":["rm"]}` {
+		t.Fatalf("stored %s", s)
+	}
+	if len(got) != 1 || got[0].Setting != SettingPermissions || strings.Join(got[0].Keys, ",") != "commands" || got[0].File != "" || got[0].Version != 1 {
+		t.Fatalf("events %+v", got)
+	}
+	if p, _, err := d.Policy(); err != nil || p.Forbid[0] != "rm" {
+		t.Fatalf("policy %+v %v", p, err)
+	}
+	if n, _ := upgradesDone(d.db); n != len(upgradeSteps) {
+		t.Fatalf("%d steps done", n)
+	}
+	d.Close()
+
+	d, rep, err = upgrade(dir).Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if len(rep.Removed) != 0 || len(rep.Kept) != 0 {
+		t.Fatalf("second start: removed %v kept %v", rep.Removed, rep.Kept)
+	}
+	if cs, _, _ := d.Changes(); len(cs) != 1 {
+		t.Fatalf("second start: %d changes", len(cs))
+	}
+}
+
+// A stored policy without a retired key is not written, and makes no change.
+func TestUpgradeNoRetiredKey(t *testing.T) {
+	dir := home(t)
+	storedDB(t, dir, `{"forbid":["rm"]}`)
+	d, rep, err := upgrade(dir).Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if len(rep.Removed) != 0 || len(rep.Kept) != 0 {
+		t.Fatalf("removed %v kept %v", rep.Removed, rep.Kept)
+	}
+	if cs, _, _ := d.Changes(); len(cs) != 0 {
+		t.Fatalf("%d changes", len(cs))
+	}
+	if s := stored(t, d, SettingPermissions); s != `{"forbid":["rm"]}` {
+		t.Fatalf("stored %s", s)
+	}
+	if n, _ := upgradesDone(d.db); n != len(upgradeSteps) {
+		t.Fatalf("%d steps done", n)
+	}
+}
+
+// A settings.db on 0.4's defaults version that holds commands and never set
+// apply: both steps run in one change naming both keys.
+func TestUpgradeKeepsAndRemovesInOneChange(t *testing.T) {
+	dir := home(t)
+	legacyDB(t, dir, 1, `{"commands":false}`)
+	d, rep, err := upgrade(dir).Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if strings.Join(rep.Kept, ",") != "agent_api.apply" || strings.Join(rep.Removed, ",") != "commands" {
+		t.Fatalf("kept %v removed %v", rep.Kept, rep.Removed)
+	}
+	if s := stored(t, d, SettingPermissions); s != `{"agent_api.apply":true}` {
+		t.Fatalf("stored %s", s)
+	}
+	cs, _, err := d.Changes()
+	if err != nil || len(cs) != 1 || strings.Join(cs[0].Keys, ",") != "agent_api.apply,commands" {
+		t.Fatalf("changes %+v %v", cs, err)
+	}
+}
+
+// A 0.4 permissions.toml that still sets commands imports as if it did not:
+// the stored policy never holds it, and no step removes anything after.
+func TestUpgradeImportsFileWithRetiredKey(t *testing.T) {
+	dir := home(t)
+	write(t, filepath.Join(dir, PolicyFile), "commands = true\nforbid = [\"rm\"]\n")
+	d, rep, err := upgrade(dir).Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if strings.Join(rep.Imported, ",") != PolicyFile || len(rep.Removed) != 0 {
+		t.Fatalf("imported %v removed %v", rep.Imported, rep.Removed)
+	}
+	if s := stored(t, d, SettingPermissions); strings.Contains(s, "commands") || !strings.Contains(s, `"forbid":["rm"]`) {
+		t.Fatalf("stored %s", s)
+	}
+	cs, _, err := d.Changes()
+	if err != nil || len(cs) != 1 || cs[0].File != PolicyFile || slices.Contains(cs[0].Keys, "commands") {
+		t.Fatalf("changes %+v %v", cs, err)
 	}
 }
