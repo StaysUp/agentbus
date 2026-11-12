@@ -219,11 +219,28 @@ func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 	return r, nil
 }
 
+// ErrIdentityThere: SaveIdentity found an identity saved in its place.
+var ErrIdentityThere = errors.New("runner: a runner's identity is already saved there")
+
 // SaveIdentity keeps a runner's identity in path, the runner's StateFile, as
 // Enroll reads it: what agentbus login does once the person approved the
-// machine.
+// machine. It never replaces one already there (ErrIdentityThere), so of two
+// logins on one data folder the first to be approved keeps it. Whole or not
+// at all: written aside, then linked into place.
 func SaveIdentity(path string, rn queue.Runner, token string, heartbeatMS, leaseMS int64) error {
-	return saveState(path, state{rn.ID, token, heartbeatMS, leaseMS})
+	b, _ := json.Marshal(state{rn.ID, token, heartbeatMS, leaseMS})
+	tmp := path + "." + queue.NewID("") + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+		return errors.New("runner: the state file could not be written")
+	}
+	defer os.Remove(tmp)
+	if err := os.Link(tmp, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return ErrIdentityThere
+		}
+		return errors.New("runner: the state file could not be written")
+	}
+	return nil
 }
 
 // HasIdentity says path holds a runner's identity Enroll would try.

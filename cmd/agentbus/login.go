@@ -82,6 +82,10 @@ func runLogin(args []string, home string, getenv func(string) string, stdout, st
 		return 2
 	}
 	target := strings.TrimRight(args[0], "/")
+	// The service starts in another folder: it needs the data folder whole.
+	if abs, err := filepath.Abs(home); err == nil {
+		home = abs
+	}
 	var flags []string
 	noService := false
 	for _, a := range args[1:] {
@@ -202,6 +206,11 @@ func runLogin(args []string, home string, getenv func(string) string, stdout, st
 	}
 	statePath := filepath.Join(home, runnerState)
 	if err := runner.SaveIdentity(statePath, *st.Runner, started.Token, st.Heartbeat, st.Lease); err != nil {
+		if errors.Is(err, runner.ErrIdentityThere) {
+			fmt.Fprintf(stderr, "agentbus login: another sign-in saved %s first, and it was kept. "+
+				"Runner %s, which this one was approved as, will take no work: remove it on the Runners page\n", statePath, st.Runner.ID)
+			return 1
+		}
 		fmt.Fprintf(stderr, "agentbus login: approved, but %s could not be written\n", statePath)
 		return 1
 	}

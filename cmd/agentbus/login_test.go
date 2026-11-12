@@ -289,3 +289,54 @@ func TestRunnerEnrollToken(t *testing.T) {
 		t.Fatalf("the old way: %q %v", tok, err)
 	}
 }
+
+// Of two logins on one data folder, the one approved second does not replace
+// the first one's identity; and a relative data folder is saved, and handed
+// to the service, whole (review of 2026-11-12, round 1).
+func TestLoginKeepsFirstIdentity(t *testing.T) {
+	srv, js, q := loginControl(t)
+	dir := t.TempDir()
+	t.Chdir(dir)
+	var out1, out2, err1, err2 syncBuf
+	done1, done2 := make(chan int), make(chan int)
+	go func() {
+		done1 <- runLogin([]string{srv.URL, "-name", "one", "-no-service"}, "data", func(string) string { return "" }, &out1, &err1, testDeps(srv, context.Background()))
+	}()
+	code1 := waitCode(t, &out1)
+	go func() {
+		done2 <- runLogin([]string{srv.URL, "-name", "two", "-no-service"}, "data", func(string) string { return "" }, &out2, &err2, testDeps(srv, context.Background()))
+	}()
+	code2 := waitCode(t, &out2)
+	pend, _ := q.PendingLogins(queue.DefaultTeam)
+	if len(pend) != 2 {
+		t.Fatalf("pending %v", pend)
+	}
+	id := map[string]string{}
+	for _, p := range pend {
+		id[p.Name] = p.ID
+	}
+	first, err := js.ApproveLogin(id["one"], code1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c := <-done1; c != 0 {
+		t.Fatalf("first: %d %s", c, err1.String())
+	}
+	if _, err := js.ApproveLogin(id["two"], code2); err != nil {
+		t.Fatal(err)
+	}
+	if c := <-done2; c != 1 || !strings.Contains(err2.String(), "was kept") {
+		t.Fatalf("second: %d %s", c, err2.String())
+	}
+	b, _ := os.ReadFile(filepath.Join(dir, "data", runnerState))
+	if !strings.Contains(string(b), first.ID) {
+		t.Fatalf("the first identity was replaced: %s", b)
+	}
+	if !strings.Contains(out1.String(), "AGENTBUS_HOME="+filepath.Join(dir, "data")) {
+		t.Fatalf("the data folder is not whole in the command: %s", out1.String())
+	}
+	left, _ := filepath.Glob(filepath.Join(dir, "data", "*.tmp"))
+	if len(left) != 0 {
+		t.Fatalf("left behind: %v", left)
+	}
+}
