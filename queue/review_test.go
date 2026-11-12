@@ -248,8 +248,9 @@ func changesIn(j Job) *workspace.Changes {
 }
 
 // A turn whose changes moved to the record (Result.ChangesEvent) is
-// reviewed from what the queue's ChangesReader reads there; Outcomes keeps
-// the pointer on the job and its attempt.
+// reviewed from what the queue's ChangesReader reads there; End keeps the
+// finish's Kept result on the job and its attempt, and the same finish sent
+// again still matches it.
 func TestReviewReadsChangesFromRecord(t *testing.T) {
 	q, _ := open(t)
 	a := runner(t, q, 4)
@@ -258,17 +259,24 @@ func TestReviewReadsChangesFromRecord(t *testing.T) {
 	if _, _, err := q.Start(a.ID, att.ID, 1, lease); err != nil {
 		t.Fatal(err)
 	}
-	j, err := q.End(a.ID, att.ID, 1, Finish{Status: Finished, Result: authorResult(), Session: author.Session,
-		Workspace: &Workspace{Kind: WorkspaceWorktree, Folder: "/w/job_a", Repo: "/r", Base: "main"}})
+	sent, _ := ReadResult(authorResult())
+	kept := sent.Changes
+	pointer, _ := json.Marshal(Result{ChangesEvent: "evt_tc_" + author.ID})
+	f := Finish{Status: Finished, Result: authorResult(), Session: author.Session,
+		Workspace: &Workspace{Kind: WorkspaceWorktree, Folder: "/w/job_a", Repo: "/r", Base: "main"}, Kept: pointer}
+	j, err := q.End(a.ID, att.ID, 1, f)
 	if err != nil {
 		t.Fatal(err)
 	}
-	kept := changesIn(j)
-	if ok, err := q.Outcomes(DefaultTeam, j.ID, j.Attempt, Result{ChangesEvent: "evt_tc_" + j.ID}); err != nil || !ok {
-		t.Fatalf("outcomes: %v %v", ok, err)
+	if changesIn(j) != nil || string(j.Result) != string(pointer) {
+		t.Fatalf("the job kept %s, want %s", j.Result, pointer)
 	}
-	if ok, _ := q.Outcomes(DefaultTeam, j.ID, "att_other", Result{}); ok {
-		t.Fatal("another attempt's outcomes replaced the job's")
+	f.Kept = nil
+	if again, err := q.End(a.ID, att.ID, 1, f); err != nil || string(again.Result) != string(pointer) {
+		t.Fatalf("the same finish again: %v, %s", err, again.Result)
+	}
+	if len(j.Attempts) != 1 || string(j.Attempts[0].Result) != string(pointer) {
+		t.Fatalf("the attempt kept %+v", j.Attempts)
 	}
 	// No reader: nothing to describe, so no review.
 	if _, _, err := q.Review(DefaultTeam, j.ID, "codex", "", "", false); !errors.Is(err, ErrNotReviewable) {

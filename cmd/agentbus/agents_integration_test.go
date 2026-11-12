@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/folders"
+	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/store"
 )
@@ -342,10 +343,10 @@ func TestCopiedSessionKeptAcrossTurnsAndRemovedOnClose(t *testing.T) {
 	if next = waitJob(t, svc, tok, next.ID); next.State != queue.Finished {
 		t.Fatalf("next job %s %s %s", next.State, next.Reason, next.Result)
 	}
-	res, err := queue.ReadResult(next.Result)
-	if err != nil || res.Changes == nil || res.Changes.Count != 1 || res.Changes.Files[0].Path != "made.txt" ||
-		res.Changes.From != "base" || res.Changes.To != next.Turn {
-		t.Fatalf("second turn's changes %+v %v", res.Changes, err)
+	// A finished job's changes are in the record already: it ends only after.
+	c, err := jobs.Changes(svc.store, next)
+	if err != nil || c == nil || c.Count != 1 || c.Files[0].Path != "made.txt" || c.From != "base" || c.To != next.Turn {
+		t.Fatalf("second turn's changes %+v %v", c, err)
 	}
 	if _, err := os.Stat(filepath.Join(folder, "made.txt")); err == nil {
 		t.Fatal("the turn changed the person's folder")

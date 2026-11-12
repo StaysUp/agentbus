@@ -103,18 +103,25 @@ func CloseCommands(q *queue.Queue, st *store.Store) (int, error) {
 		if err != nil || j.Ended == nil {
 			continue
 		}
-		var ran *event.Event
-		if res, _ := queue.ReadResult(j.Result); len(res.Ran) > 0 {
-			var e event.Event
-			if json.Unmarshal(res.Ran, &e) == nil && e.Kind == event.CommandRan && e.Turn == "" {
-				e.Seq, e.Folder = 0, ""
-				ran = &e
-			}
-		}
-		if err := CommandEnded(st, j, ran); err != nil {
+		res, _ := queue.ReadResult(j.Result)
+		if err := CommandEnded(st, j, ranOf(res)); err != nil {
 			return n, err
 		}
 		n++
 	}
 	return n, nil
+}
+
+// ranOf is the command.ran a command job's result res carries, or nil.
+// CommandEnded checks it is the job's.
+func ranOf(res queue.Result) *event.Event {
+	if len(res.Ran) == 0 {
+		return nil
+	}
+	var e event.Event
+	if json.Unmarshal(res.Ran, &e) != nil || e.Kind != event.CommandRan || e.Turn != "" {
+		return nil
+	}
+	e.Seq, e.Folder = 0, ""
+	return &e
 }

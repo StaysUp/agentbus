@@ -103,6 +103,10 @@ func TestRunTurnIDOnEveryEvent(t *testing.T) {
 		t.Fatalf("second turn id %q, first %q: want two different ids", second, turn)
 	}
 	waitClosedN(t, svc, session, 2)
+	// Both turns are done once their jobs are: each job ends only after its
+	// outcome is in the record, so nothing moves the seq read below.
+	waitEnded(t, svc, turn)
+	waitEnded(t, svc, second)
 	waitFor(t, "the second reply", func() bool {
 		evs = turnEvents(t, svc.store, session)
 		return count(evs, "model.responded") == 3
@@ -128,12 +132,6 @@ func TestRunTurnIDOnEveryEvent(t *testing.T) {
 	resp.Body.Close()
 	waitFor(t, "the hand-pointed reply", func() bool {
 		return count(turnEvents(t, svc.store, "byhand"), "model.responded") == 1
-	})
-
-	// Each turn's turn.changed is kept after its finish, so it can land
-	// after the replies: wait for both, or the seq below moves under the read.
-	waitFor(t, "each turn's turn.changed", func() bool {
-		return count(turnEvents(t, svc.store, session), "turn.changed") == 2
 	})
 
 	// GET /turns: newest first, with state and cost, filtered by session.

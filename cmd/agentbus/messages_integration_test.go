@@ -286,13 +286,15 @@ func TestRunWithSessionRunsNextTurnInSameSession(t *testing.T) {
 		if strings.Contains(strings.Join(r.Env, "\n")+strings.Join(r.Args, "\n"), tok) {
 			t.Fatal("the token reached the child")
 		}
+		// Each turn's job ends only once its turn.changed is in the record,
+		// and the next turn's job starts only after: the order is fixed.
+		waitEnded(t, svc, next)
 		var kinds []string
 		for _, e := range runEvents(t, svc.store, id) {
-			if e.Kind != "turn.changed" { // control's, after the job's end
-				kinds = append(kinds, e.Kind)
-			}
+			kinds = append(kinds, e.Kind)
 		}
-		if got := strings.Join(kinds, " "); got != "session.opened turn.started context.added session.closed session.opened turn.started context.added session.closed" {
+		if got := strings.Join(kinds, " "); got != "session.opened turn.started context.added session.closed turn.changed "+
+			"session.opened turn.started context.added session.closed turn.changed" {
 			t.Fatalf("%s: events %s", name, got)
 		}
 		t.Setenv("AGENTBUS_FAKE_OUT", "")
@@ -377,6 +379,8 @@ func TestRunWithSessionRefusals(t *testing.T) {
 	}
 	os.WriteFile(release2, nil, 0o600)
 	waitClosedN(t, svc, running, 2)
+	waitIdle(t, svc, id)
+	waitIdle(t, svc, running)
 	t.Setenv("AGENTBUS_FAKE_WAIT", "")
 
 	// Body refusals, as runs.

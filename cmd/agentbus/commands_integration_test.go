@@ -36,6 +36,12 @@ func runCommand(t *testing.T, svc *service, tok, session string, body map[string
 	if out["state"] != "queued" || !strings.HasPrefix(id, "cmd_") || out["session"] != session {
 		t.Fatalf("queued: %v", out)
 	}
+	// The command is done when its job is: the job ends only once its end
+	// (command.ran or command.failed) is in the record.
+	waitFor(t, "the command's job ended", func() bool {
+		j, err := svc.queue.JobOfCommand(queue.DefaultTeam, id)
+		return err == nil && j.Ended != nil
+	})
 	return code, commandEnd(t, svc.store, session, id, 30*time.Second), ""
 }
 

@@ -216,6 +216,7 @@ type service struct {
 	folders  *folders.Registry // the folders this machine owns (up, runner)
 	blobs    *blobs.Store      // the control plane's blob store (up, server)
 	blobSwp  *jobs.Sweeper     // cleans it
+	jobsSrv  *jobs.Server      // the runner protocol; its finisher ends jobs (up, server)
 	log      *logfile.Log      // logs/service.log
 	logins   *credentials.Manager
 	done     chan error
@@ -654,7 +655,7 @@ func start(c config) (*service, error) {
 		orOAI.SetRewriter(codexReplay)
 	}
 	host, _, _ := net.SplitHostPort(c.listen)
-	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: append(gws, relayGws...), api: a, eng: eng, store: st, blobs: bs, blobSwp: blobSweep,
+	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: append(gws, relayGws...), api: a, eng: eng, store: st, blobs: bs, blobSwp: blobSweep, jobsSrv: runnerJobs,
 		queue: q, remote: remote, settings: cfgStore, sdb: sdb, folders: fr, log: svcLog, logins: logins, done: make(chan error, 1)}
 	sdbHanded = true
 	if q != nil {
@@ -708,6 +709,16 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 	// reaches (jobs.Sweeper).
 	// The sweeps that run beside the queue's, each on its own clock.
 	var beside sync.WaitGroup
+	// Control's one finisher: it alone writes each saved finish's outcome
+	// and then ends its job (jobs/finisher.go). It runs until the runner
+	// has stopped, since the runner finishes its jobs through the API.
+	if s.jobsSrv != nil {
+		beside.Add(1)
+		go func() {
+			defer beside.Done()
+			s.jobsSrv.RunFinisher(stop)
+		}()
+	}
 	if s.blobSwp != nil {
 		beside.Add(1)
 		go func() { defer beside.Done(); s.blobSwp.Run(ctx) }()

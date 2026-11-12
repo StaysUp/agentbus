@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/harness"
+	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -99,6 +100,31 @@ func waitClosed(t *testing.T, st *store.Store, session string) runEvent {
 	return *c
 }
 
+// waitEnded waits for turn's job to end and answers it. A turn is done when
+// its job is: the job ends only once its outcome (turn.changed) is in the
+// record, so a test that waits here reads the whole turn at once. Its
+// session.closed, in the record a moment before, is not that point.
+func waitEnded(t *testing.T, svc *service, turn string) queue.Job {
+	t.Helper()
+	var j queue.Job
+	waitFor(t, "the turn's job ended", func() bool {
+		var err error
+		j, err = svc.queue.JobByTurn(queue.DefaultTeam, turn)
+		return err == nil && j.Ended != nil
+	})
+	return j
+}
+
+// waitIdle waits until none of session's jobs is open: each has ended, so
+// each one's outcome is in the record and nothing more is written for them.
+func waitIdle(t *testing.T, svc *service, session string) {
+	t.Helper()
+	waitFor(t, "the session's jobs ended", func() bool {
+		js, err := svc.queue.List(queue.DefaultTeam, queue.Filter{Session: session, Open: true}, 10)
+		return err == nil && len(js) == 0
+	})
+}
+
 func readReport(t *testing.T, path string) fakeReport {
 	t.Helper()
 	var b []byte
@@ -145,15 +171,21 @@ func TestRunSetsBaseURLInChildOnlyAndClosesWithExitCode(t *testing.T) {
 		t.Fatalf("reply %s", raw)
 	}
 
+	waitEnded(t, svc, turn)
 	c := waitClosed(t, svc.store, id)
 	if c.ExitCode == nil || *c.ExitCode != 3 || c.Hold == "" {
 		t.Fatalf("session.closed %+v, want exit_code 3 and a hold", c)
 	}
 	// Nothing writes session.registered any more: session.opened carries
 	// the agent and folder, and the run stores its turn's turn.started.
+	// The turn's job ended, so what it changed (turn.changed) is in too.
 	evs := runEvents(t, svc.store, id)
-	if len(evs) != 4 || evs[0].Kind != "session.opened" || evs[0].Hold != c.Hold || evs[1].Kind != "turn.started" || evs[2].Kind != "context.added" {
-		t.Fatalf("events %+v", evs)
+	kinds := make([]string, len(evs))
+	for i, e := range evs {
+		kinds[i] = e.Kind
+	}
+	if got := strings.Join(kinds, " "); got != "session.opened turn.started context.added session.closed turn.changed" || evs[0].Hold != c.Hold {
+		t.Fatalf("events %s: %+v", got, evs)
 	}
 	if evs[0].Agent != "claude" || evs[0].Folder != folder {
 		t.Fatalf("session.opened %+v, want agent claude and the folder", evs[0])

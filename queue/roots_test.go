@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"slices"
 	"testing"
+	"time"
 )
 
 // A session's snapshot and changesets are roots until it closes; a snapshot
@@ -82,4 +83,43 @@ func mustResult(r Result) []byte {
 		panic(err)
 	}
 	return b
+}
+
+// A finish control accepted and has not ended keeps its blobs: its result
+// is the job's, so the changeset it names is a root, for the sweep and for
+// the runner, however long control is stopped before it ends the job.
+func TestAcceptedFinishKeepsItsBlobs(t *testing.T) {
+	q, c := open(t)
+	r := runner(t, q, 2)
+	j := job(t, q, "")
+	_, a := take(t, q, r)
+	if _, _, err := q.Start(r.ID, a.ID, 1, lease); err != nil {
+		t.Fatal(err)
+	}
+	f := Finish{Status: Finished, Session: j.Session, Result: mustResult(Result{Changeset: "cs_accepted"})}
+	if _, _, err := q.Accept(r.ID, a.ID, 1, f); err != nil {
+		t.Fatal(err)
+	}
+	c.add(24 * time.Hour) // control stopped a long time
+	if _, err := q.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	roots, err := q.BlobRoots()
+	if err != nil || !slices.Contains(roots.Changesets, "cs_accepted") {
+		t.Fatalf("blob roots %+v %v", roots.Changesets, err)
+	}
+	mine, err := q.RunnerBlobRoots(r.ID, 10*time.Minute)
+	if err != nil || !slices.Contains(mine.Changesets, "cs_accepted") {
+		t.Fatalf("the runner's roots %+v %v", mine.Changesets, err)
+	}
+	list, err := q.Accepted(10)
+	if err != nil || len(list) != 1 {
+		t.Fatalf("accepted %+v %v", list, err)
+	}
+	if done, err := q.End(list[0].Runner, list[0].Attempt, list[0].Number, list[0].Finish); err != nil || done.State != Finished {
+		t.Fatalf("end: %+v %v", done, err)
+	}
+	if roots, _ := q.BlobRoots(); !slices.Contains(roots.Changesets, "cs_accepted") {
+		t.Fatalf("after the end: %+v", roots.Changesets)
+	}
 }

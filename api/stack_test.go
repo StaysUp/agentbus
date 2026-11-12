@@ -110,10 +110,16 @@ func stackEnv(t *testing.T, s stack) *env {
 	done := make(chan struct{}, 2)
 	go func() { rn.Run(ctx); done <- struct{}{} }()
 	go func() { cn.Run(ctx); done <- struct{}{} }()
+	// Control's finisher stops after the runner, as in the service: the
+	// runner finishes its jobs as it stops.
+	finStop, finDone := make(chan struct{}), make(chan struct{})
+	go func() { js.RunFinisher(finStop); close(finDone) }()
 	t.Cleanup(func() {
 		cancel()
 		<-done
 		<-done
+		close(finStop)
+		<-finDone
 		eng.StopAll()
 		srv.Close()
 		q.Close()

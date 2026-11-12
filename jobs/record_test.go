@@ -31,6 +31,7 @@ func TestRecordRoute(t *testing.T) {
 	}
 	srv := httptest.NewServer(s)
 	t.Cleanup(func() { srv.Close(); q.Close(); st.Close() })
+	startFinisher(t, s)
 	a, b := enroll(t, srv, 1), enroll(t, srv, 1)
 	makeJob(t, q, queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"})
 	var taken TakenWork
@@ -110,6 +111,7 @@ func TestCallsOfAnotherTurnRefused(t *testing.T) {
 	}
 	srv := httptest.NewServer(s)
 	t.Cleanup(func() { srv.Close(); q.Close(); st.Close() })
+	startFinisher(t, s)
 	a := enroll(t, srv, 1)
 	makeJob(t, q, queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"})
 	var taken TakenWork
@@ -157,6 +159,7 @@ func TestRecordRouteReview(t *testing.T) {
 	}
 	srv := httptest.NewServer(s)
 	t.Cleanup(func() { srv.Close(); q.Close(); st.Close() })
+	startFinisher(t, s)
 	a := enroll(t, srv, 3)
 	author := makeJob(t, q, queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"})
 	var taken TakenWork

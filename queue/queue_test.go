@@ -674,3 +674,52 @@ func TestTurnWaitsBehindReviewInItsSession(t *testing.T) {
 		t.Fatalf("took %s, want the waiting turn", j.ID)
 	}
 }
+
+// An accepted finish is the attempt's one finish: another finish is refused
+// before control writes anything for it. Its lease no longer counts: past
+// it, the sweep leaves it, Accepted lists it whole, and End ends it.
+func TestAcceptFinish(t *testing.T) {
+	q, c := open(t)
+	r := runner(t, q, 2)
+	job(t, q, "")
+	_, a := take(t, q, r)
+	if _, _, err := q.Start(r.ID, a.ID, 1, lease); err != nil {
+		t.Fatal(err)
+	}
+	fa := Finish{Status: Finished, Result: json.RawMessage(`{"checkpoint":"cp_A"}`), LastSeq: 3}
+	fb := Finish{Status: Finished, Result: json.RawMessage(`{"checkpoint":"cp_B"}`)}
+	if _, ended, err := q.Accept(r.ID, a.ID, 1, fa); err != nil || ended {
+		t.Fatalf("accept: %v %v", ended, err)
+	}
+	if _, ended, err := q.Accept(r.ID, a.ID, 1, fa); err != nil || ended {
+		t.Fatalf("the same finish again: %v %v", ended, err)
+	}
+	if _, _, err := q.Accept(r.ID, a.ID, 1, fb); !errors.Is(err, ErrFinishConflict) {
+		t.Fatalf("another finish accepted: %v", err)
+	}
+	if _, err := q.End(r.ID, a.ID, 1, fb); !errors.Is(err, ErrFinishConflict) {
+		t.Fatalf("another finish ends: %v", err)
+	}
+	c.add(10 * lease) // long past the lease: control stopped in between
+	if _, err := q.Sweep(); err != nil {
+		t.Fatal(err)
+	}
+	list, err := q.Accepted(10)
+	if err != nil || len(list) != 1 || list[0].Attempt != a.ID || list[0].Runner != r.ID || list[0].Number != 1 ||
+		list[0].Job.State != Running || string(list[0].Finish.Result) != string(fa.Result) || list[0].Finish.LastSeq != 3 {
+		t.Fatalf("accepted %+v %v", list, err)
+	}
+	done, err := q.End(list[0].Runner, list[0].Attempt, list[0].Number, list[0].Finish)
+	if err != nil || done.State != Finished || string(done.Result) != string(fa.Result) {
+		t.Fatalf("end: %+v %v", done, err)
+	}
+	if list, _ := q.Accepted(10); len(list) != 0 {
+		t.Fatalf("still accepted after its end: %+v", list)
+	}
+	if _, ended, err := q.Accept(r.ID, a.ID, 1, fa); err != nil || !ended {
+		t.Fatalf("accept after the end: %v %v", ended, err)
+	}
+	if again, err := q.End(r.ID, a.ID, 1, fa); err != nil || !again.Updated.Equal(done.Updated) {
+		t.Fatalf("the same finish after the end: %v", err)
+	}
+}

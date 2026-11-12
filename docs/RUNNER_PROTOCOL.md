@@ -102,13 +102,19 @@ of its content, never from a connector to a runner:
   runner, in the session's lane with its turns: `spec.command_id`, `spec.command` and
   `spec.timeout_ms`. It waits for what runs in the session, a review of it included. The runner
   runs it in the session's copy with no turn and no token. Control stores `command.started` at its
-  start. Its finish carries the `command.ran` event as `result.ran`, and control keeps it once the
-  finish is accepted; one of another session or command, with a turn, or of another kind refuses
+  start. Its finish carries the `command.ran` event as `result.ran`, and control keeps it once,
+  before it ends the job; one of another session or command, with a turn, or of another kind refuses
   the finish with **400**. A command job that ends without one gets `command.failed` from control.
-- **Outcomes go to control's record, the job keeps a pointer** (from 0.5). Once control accepts a
-  finish, it stores what the job did as an event and replaces it in the job's result with that
-  event's id: a turn's `result.changes` becomes `turn.changed` (`result.changes_event`, and
-  `result.checkpoint` keeps the end checkpoint the next turn starts from), an apply's
+- **Outcomes go to control's record, the job keeps a pointer** (from 0.5). On a finish, control
+  saves it in its queue, as the job's result. Control's one finisher then stores what the job did
+  as an event and ends the job, with that event's id in place of the outcome. A job is never
+  finished before its outcome is in the record, so a reader that sees it finished can read the
+  outcome at once. Once saved, the finish is the attempt's only one: another gets **409**, and the
+  attempt's lease no longer counts. The answer comes once the job has ended (**200**). It is
+  **503** when that takes longer than 5 seconds, and **500** when the record could not be written.
+  The finish is saved either way: send the same finish again, which changes nothing. If control
+  stops in between, it ends the job when it starts again. The outcome event for each kind: a
+  turn's `result.changes` becomes `turn.changed` (`result.changes_event`, and `result.checkpoint` keeps the end checkpoint the next turn starts from), an apply's
   `result.apply` and `result.refused` become `turn.applied` (`result.applied_event`), and a
   command's `result.ran` is kept once as `command.ran` (`result.ran_event`). A finish sent again
   is answered the same and stores nothing twice. A runner may not send `turn.changed` or

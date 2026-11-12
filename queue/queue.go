@@ -478,6 +478,32 @@ type Finish struct {
 	// session's later jobs to this runner.
 	Session   string     `json:"session,omitempty"`
 	Workspace *Workspace `json:"workspace,omitempty"`
+	// Kept, when set, is the result the job keeps in place of Result: the
+	// same result with its outcomes already in control's record and only
+	// named here (the Result.*Event pointers). It is not part of the
+	// finish's hash, so a finish sent again still matches the first.
+	Kept json.RawMessage `json:"-"`
+}
+
+// CheckFinish says whether f can end job j, before anything is written:
+// End refuses the same finishes, with the same errors.
+func CheckFinish(j Job, f Finish) error {
+	if f.Status != Finished && f.Status != Failed && f.Status != Cancelled {
+		return ErrBadState
+	}
+	if j.Kind == KindTurn && f.Session != "" && f.Session == j.Session && f.Workspace != nil && j.Spec.Session == "" {
+		w := f.Workspace
+		if w.Kind != WorkspaceWorktree && w.Kind != WorkspaceCopy && w.Kind != WorkspaceFolder {
+			return ErrBadState
+		}
+		if w.Snapshot != "" && !SnapshotShape.MatchString(w.Snapshot) {
+			return ErrBadState
+		}
+		if w.Space != "" && !SpaceShape.MatchString(w.Space) || w.FolderRef != "" && !FolderRefShape.MatchString(w.FolderRef) {
+			return ErrBadState
+		}
+	}
+	return nil
 }
 
 // Queue is one jobs file. It is safe for concurrent use.
@@ -1220,13 +1246,23 @@ func current(tx *sql.Tx, now time.Time, runnerID, attemptID string, number int) 
 	if a.Number != number || j.Attempt != a.ID || (a.State != Taken && a.State != Running) {
 		return a, j, ErrStale
 	}
-	if !now.Before(a.LeaseUntil) {
+	if !now.Before(a.LeaseUntil) && !accepted(tx, a.ID) {
 		if err := expire(tx, now, a, j); err != nil {
 			return a, j, err
 		}
 		return a, j, committed{ErrStale}
 	}
 	return a, j, nil
+}
+
+// accepted says attempt id holds a finish control accepted and has not
+// ended yet (Accept): a finish hash and no end. Its lease no longer
+// counts, since the runner's part is done and control's is to end it
+// (Accepted).
+func accepted(tx *sql.Tx, id string) bool {
+	var n int
+	tx.QueryRow(`SELECT COUNT(*) FROM attempts WHERE id = ? AND finish_hash IS NOT NULL AND ended IS NULL`, id).Scan(&n)
+	return n > 0
 }
 
 // expire settles one attempt whose lease ran out: taken goes back to the
@@ -1266,7 +1302,8 @@ func reasonIf(ok bool, r string) string {
 // turns of every ended session (sessionEnded), and ends every folder job
 // that waited too long (endFoldersTx).
 func sweepTx(tx *sql.Tx, now time.Time) error {
-	rows, err := tx.Query(`SELECT `+attemptCols+` FROM attempts WHERE state IN ('taken','running') AND lease_until <= ?`, nanos(now))
+	rows, err := tx.Query(`SELECT `+attemptCols+` FROM attempts WHERE state IN ('taken','running') AND lease_until <= ?
+		AND finish_hash IS NULL`, nanos(now))
 	if err != nil {
 		return fmt.Errorf("queue: read leases: %w", err)
 	}
@@ -1527,11 +1564,144 @@ func (q *Queue) Events(team, attemptID string) ([]AttemptEvent, error) {
 	return evs, rows.Err()
 }
 
+// Accept saves finish f of the attempt before control writes the job's
+// outcome (jobs/outcome.go). The job's result is f's, in the job's own
+// result, where every reader of results reads it; the job stays running,
+// with no end, so no reader takes it as done. The attempt holds f's hash
+// (its one finish) and f's other fields (its result column, which holds
+// nothing else before the end). From then on another finish gets
+// ErrFinishConflict, from Accept or End, and writes nothing, and the
+// attempt's lease no longer counts: it never expires, and control ends it
+// with f (End), from Accepted: one finisher does that (jobs/finisher.go).
+// The same finish sent again changes nothing. It answers the attempt's job;
+// ended: the attempt ended already, by this same finish. A stale attempt
+// gets ErrStale, as End answers it.
+func (q *Queue) Accept(runnerID, attemptID string, number int, f Finish) (j Job, ended bool, err error) {
+	if err := CheckFinish(Job{}, f); err != nil {
+		return Job{}, false, err
+	}
+	if len(f.Result) == 0 {
+		f.Result = nil
+	}
+	f.Kept = nil
+	hash := hashOf(f)
+	rest := f
+	rest.Result = nil
+	fields, err := json.Marshal(rest)
+	if err != nil {
+		return Job{}, false, err
+	}
+	err = q.tx(func(tx *sql.Tx) error {
+		now := q.now()
+		var done sql.NullString
+		var number0 int
+		err := tx.QueryRow(`SELECT finish_hash, number, ended IS NOT NULL FROM attempts WHERE id = ? AND runner = ?`,
+			attemptID, runnerID).Scan(&done, &number0, &ended)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return fmt.Errorf("queue: read attempt: %w", err)
+		}
+		if done.Valid && number0 == number {
+			if done.String != hash {
+				return ErrFinishConflict
+			}
+			// Held already, ended or not: nothing changes. The finisher
+			// ends it (or has).
+			var jobID string
+			if err := tx.QueryRow(`SELECT job FROM attempts WHERE id = ?`, attemptID).Scan(&jobID); err != nil {
+				return fmt.Errorf("queue: read attempt: %w", err)
+			}
+			j, err = scanJob(tx.QueryRow(`SELECT `+jobCols+` FROM jobs WHERE id = ?`, jobID))
+			if err != nil {
+				return fmt.Errorf("queue: read job: %w", err)
+			}
+			return nil
+		}
+		ended = false
+		a, cur, err := current(tx, now, runnerID, attemptID, number)
+		if err != nil {
+			return err
+		}
+		if err := CheckFinish(cur, f); err != nil {
+			return err
+		}
+		var result any
+		if f.Result != nil {
+			result = string(f.Result)
+		}
+		if _, err := tx.Exec(`UPDATE attempts SET finish_hash = ?, result = ? WHERE id = ?`, hash, string(fields), a.ID); err != nil {
+			return fmt.Errorf("queue: write attempt: %w", err)
+		}
+		if _, err := tx.Exec(`UPDATE jobs SET result = ?, updated = ? WHERE id = ?`, result, nanos(now), cur.ID); err != nil {
+			return fmt.Errorf("queue: write job: %w", err)
+		}
+		cur.Result = f.Result
+		j = cur
+		return nil
+	})
+	return j, ended, err
+}
+
+// AcceptedFinish is a finish control accepted (Accept) and has not ended
+// the job with yet: control stopped between the two.
+type AcceptedFinish struct {
+	Runner, Attempt string
+	Number          int
+	Job             Job
+	Finish          Finish
+}
+
+// Accepted reads the finishes control accepted and has not ended, oldest
+// first, at most limit, in one read: each finish's fields from its attempt,
+// its result from its job, as Accept saved them.
+func (q *Queue) Accepted(limit int) ([]AcceptedFinish, error) {
+	var out []AcceptedFinish
+	err := q.tx(func(tx *sql.Tx) error {
+		out = nil
+		rows, err := tx.Query(`SELECT a.runner, a.id, a.number, a.job, a.result FROM attempts a
+			WHERE a.finish_hash IS NOT NULL AND a.ended IS NULL ORDER BY a.taken LIMIT ?`, limit)
+		if err != nil {
+			return fmt.Errorf("queue: read accepted finishes: %w", err)
+		}
+		var jobIDs []string
+		for rows.Next() {
+			var a AcceptedFinish
+			var job string
+			var fields sql.NullString
+			if err := rows.Scan(&a.Runner, &a.Attempt, &a.Number, &job, &fields); err != nil {
+				rows.Close()
+				return fmt.Errorf("queue: read accepted finishes: %w", err)
+			}
+			if err := json.Unmarshal([]byte(fields.String), &a.Finish); err != nil {
+				rows.Close()
+				return fmt.Errorf("queue: read accepted finishes: %w", err)
+			}
+			out, jobIDs = append(out, a), append(jobIDs, job)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		for i, id := range jobIDs {
+			j, err := scanJob(tx.QueryRow(`SELECT `+jobCols+` FROM jobs WHERE id = ?`, id))
+			if err != nil {
+				return fmt.Errorf("queue: read job: %w", err)
+			}
+			out[i].Job, out[i].Finish.Result = j, j.Result
+		}
+		return nil
+	})
+	return out, err
+}
+
 // End ends the attempt and its job with f. Sending the same f again for an
 // attempt that already ended answers the same job. Another f gets
 // ErrFinishConflict. A stale attempt gets ErrStale and changes nothing. A
 // cancel asked for before the finish does not change it: the finish that
-// arrives first is the one outcome.
+// arrives first is the one outcome. The job and its attempt keep f.Kept as
+// their result when it is set, else f.Result.
 func (q *Queue) End(runnerID, attemptID string, number int, f Finish) (Job, error) {
 	if f.Status != Finished && f.Status != Failed && f.Status != Cancelled {
 		return Job{}, ErrBadState
@@ -1545,8 +1715,9 @@ func (q *Queue) End(runnerID, attemptID string, number int, f Finish) (Job, erro
 		now := q.now()
 		var done sql.NullString
 		var number0 int
-		err := tx.QueryRow(`SELECT a.job, j.team, a.finish_hash, a.number FROM attempts a JOIN jobs j ON j.id = a.job
-			WHERE a.id = ? AND a.runner = ?`, attemptID, runnerID).Scan(&jobID, &team, &done, &number0)
+		var ended bool
+		err := tx.QueryRow(`SELECT a.job, j.team, a.finish_hash, a.number, a.ended IS NOT NULL FROM attempts a JOIN jobs j ON j.id = a.job
+			WHERE a.id = ? AND a.runner = ?`, attemptID, runnerID).Scan(&jobID, &team, &done, &number0, &ended)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -1555,16 +1726,25 @@ func (q *Queue) End(runnerID, attemptID string, number int, f Finish) (Job, erro
 		}
 		if done.Valid && number0 == number {
 			if done.String != hash {
-				return ErrFinishConflict
+				return ErrFinishConflict // another finish ended or was accepted
 			}
-			return nil // a retry of the same finish
+			if ended {
+				return nil // a retry of the same finish
+			}
+			// Accepted already (Accept): end it now.
 		}
 		a, j, err := current(tx, now, runnerID, attemptID, number)
 		if err != nil {
 			return err
 		}
+		if err := CheckFinish(j, f); err != nil {
+			return err
+		}
 		var result any
-		if f.Result != nil {
+		switch {
+		case f.Kept != nil:
+			result = string(f.Kept)
+		case f.Result != nil:
 			result = string(f.Result)
 		}
 		if _, err := tx.Exec(`UPDATE attempts SET state = ?, ended = ?, reason = ?, finish_hash = ?, result = ?, expected_seq = ?
@@ -1600,15 +1780,6 @@ func (q *Queue) End(runnerID, attemptID string, number int, f Finish) (Job, erro
 		// finish naming the same session changes nothing.
 		if j.Kind == KindTurn && f.Session != "" && f.Session == j.Session && f.Workspace != nil && j.Spec.Session == "" {
 			w := f.Workspace
-			if w.Kind != WorkspaceWorktree && w.Kind != WorkspaceCopy && w.Kind != WorkspaceFolder {
-				return ErrBadState
-			}
-			if w.Snapshot != "" && !SnapshotShape.MatchString(w.Snapshot) {
-				return ErrBadState
-			}
-			if w.Space != "" && !SpaceShape.MatchString(w.Space) || w.FolderRef != "" && !FolderRefShape.MatchString(w.FolderRef) {
-				return ErrBadState
-			}
 			if _, err := tx.Exec(`INSERT INTO sessions(id, team, runner, kind, folder, repo, base, snapshot, created) VALUES(?,?,?,?,?,?,?,?,?)
 				ON CONFLICT DO NOTHING`, f.Session, j.Team, runnerID, w.Kind, w.where(), w.Repo, w.Base, w.Snapshot, nanos(now)); err != nil {
 				return fmt.Errorf("queue: write session: %w", err)
@@ -1621,35 +1792,6 @@ func (q *Queue) End(runnerID, attemptID string, number int, f Finish) (Job, erro
 	}
 	q.wake() // a slot is free
 	return q.Get(team, jobID)
-}
-
-// Outcomes replaces the result of ended job id with res: the same result
-// with its outcomes moved to control's record and named there (the
-// Result.*Event pointers). It writes the job's result and its last
-// attempt's. A job not ended, or ended by another attempt since, is left as
-// it is: false.
-func (q *Queue) Outcomes(team, id, attempt string, res Result) (bool, error) {
-	b, err := json.Marshal(res)
-	if err != nil {
-		return false, err
-	}
-	var done bool
-	err = q.tx(func(tx *sql.Tx) error {
-		r, err := tx.Exec(`UPDATE jobs SET result = ? WHERE team = ? AND id = ? AND attempt = ? AND ended IS NOT NULL`,
-			string(b), team, id, attempt)
-		if err != nil {
-			return fmt.Errorf("queue: write result: %w", err)
-		}
-		if n, _ := r.RowsAffected(); n == 0 {
-			return nil
-		}
-		if _, err := tx.Exec(`UPDATE attempts SET result = ? WHERE id = ? AND job = ?`, string(b), attempt, id); err != nil {
-			return fmt.Errorf("queue: write result: %w", err)
-		}
-		done = true
-		return nil
-	})
-	return done, err
 }
 
 // Waiting reads team's turn and review jobs that no runner has started yet,

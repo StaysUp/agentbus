@@ -168,13 +168,12 @@ func TestUpRunsAJobOnItsOwnRunner(t *testing.T) {
 	if c, err := jobs.Changes(svc.store, j); err != nil || c == nil || c.Count != 1 {
 		t.Fatalf("changes %+v %v, result %s", c, err, j.Result)
 	}
+	// The job ended, so its turn.changed is in, after the turn's own end.
 	var kinds []string
 	for _, e := range runEvents(t, svc.store, res.Session) {
-		if e.Kind != "turn.changed" {
-			kinds = append(kinds, e.Kind)
-		}
+		kinds = append(kinds, e.Kind)
 	}
-	if len(kinds) < 3 || kinds[len(kinds)-1] != "session.closed" {
+	if len(kinds) < 4 || kinds[len(kinds)-2] != "session.closed" || kinds[len(kinds)-1] != "turn.changed" {
 		t.Fatalf("record of the job's session: %v", kinds)
 	}
 	// The data folder holds the queue beside the record, and the runner's
@@ -259,18 +258,10 @@ func TestServerAndRunner(t *testing.T) {
 		res.Session != j.Session || len(j.Attempts) != 1 || !j.Attempts[0].TurnStarted {
 		t.Fatalf("job %s %s: %s", j.State, j.Reason, j.Result)
 	}
-	// What the turn changed goes to the server's record (turn.changed) just
-	// after the job ends; then the job keeps only its id.
-	for deadline := time.Now().Add(10 * time.Second); !strings.Contains(string(j.Result), `"changes_event"`); {
-		if time.Now().After(deadline) {
-			t.Fatalf("the job's changes never moved to the record: %s", j.Result)
-		}
-		time.Sleep(50 * time.Millisecond)
-		if j, err = server.queue.Get(queue.DefaultTeam, j.ID); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if c, err := jobs.Changes(server.store, j); err != nil || c == nil || c.Count != 1 || strings.Contains(string(j.Result), `"changes":`) {
+	// What the turn changed is in the server's record (turn.changed) before
+	// the job ends, and the job keeps only its id.
+	if c, err := jobs.Changes(server.store, j); err != nil || c == nil || c.Count != 1 || !strings.Contains(string(j.Result), `"changes_event"`) ||
+		strings.Contains(string(j.Result), `"changes":`) {
 		t.Fatalf("changes %+v %v, result %s", c, err, j.Result)
 	}
 	turn := j.Turn

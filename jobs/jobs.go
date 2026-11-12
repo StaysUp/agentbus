@@ -102,6 +102,7 @@ type Server struct {
 	tokenKey     [32]byte // signs runners' turn tokens (tokens.go)
 	mux          *http.ServeMux
 	reads        readScopes // what each runner may read (blobscope.go)
+	fin          *finisher  // control's one ender of jobs, with a record (finisher.go)
 	// Logf writes one line to the service log for each runner that
 	// enrolls. Set before serving; nil: none.
 	Logf func(format string, args ...any)
@@ -137,6 +138,9 @@ func New(cfg Config) (*Server, error) {
 	}
 	s := &Server{cfg: cfg, token: sha256.Sum256([]byte(cfg.Token)), enrol: sha256.Sum256([]byte(cfg.EnrollToken)), mux: http.NewServeMux(),
 		tokenKey: sha256.Sum256([]byte("agentbus runner turn tokens\x00" + cfg.Token))}
+	if cfg.Record != nil {
+		s.fin = newFinisher(cfg.Queue, cfg.Record)
+	}
 	s.mux.HandleFunc("POST /api/v0/runner/register", s.enroll)
 	s.mux.HandleFunc("POST /api/v0/runner/removed", s.runner(s.removed))
 	s.mux.HandleFunc("POST /api/v0/runner/heartbeat", s.runner(s.runnerBeat))
@@ -607,24 +611,44 @@ func (s *Server) finish(w http.ResponseWriter, r *http.Request, rn queue.Runner)
 		fail(w, http.StatusBadRequest, "the body must be one JSON object with number, status and optionally reason, verdict, result and last_seq")
 		return
 	}
-	ran, ok := s.commandRan(w, rn, r.PathValue("id"), b)
+	_, ok := s.commandRan(w, rn, r.PathValue("id"), b) // checked here; the finisher reads it from the saved finish
 	if !ok {
 		return
 	}
-	j, err := s.cfg.Queue.End(rn.ID, r.PathValue("id"), b.Number, b.finish())
+	f := b.finish()
+	if s.fin == nil {
+		// No record: nothing to write first, so the finish ends the job.
+		j, err := s.cfg.Queue.End(rn.ID, r.PathValue("id"), b.Number, f)
+		if err != nil {
+			s.queueError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, j)
+		return
+	}
+	// The route only saves the finish (Accept) and waits: control's one
+	// finisher writes its outcome to the record and then ends the job
+	// (finisher.go). The same finish sent again changes nothing.
+	cur, ended, err := s.cfg.Queue.Accept(rn.ID, r.PathValue("id"), b.Number, f)
 	if err != nil {
 		s.queueError(w, err)
 		return
 	}
-	// A job's outcomes go to the record only once the finish is accepted
-	// (outcome.go): the same finish sent again keeps each once, so a write
-	// that fails here is retried by the runner (and, for a command, by
-	// CloseCommands).
-	if s.cfg.Record != nil {
-		if err := keepOutcomes(s.cfg.Record, s.cfg.Queue, j, ran); err != nil {
-			s.internal(w)
-			return
-		}
+	if ended {
+		writeJSON(w, http.StatusOK, cur)
+		return
+	}
+	j, err := s.fin.await(r.Context(), cur.Team, cur.ID, r.PathValue("id"), FinishWait)
+	switch {
+	case errors.Is(err, errOutcome):
+		s.internal(w) // saved: the finisher tries again; so may the runner
+		return
+	case errors.Is(err, errFinishing):
+		fail(w, http.StatusServiceUnavailable, "the finish is saved and is being ended; send it again")
+		return
+	case err != nil:
+		s.queueError(w, err)
+		return
 	}
 	writeJSON(w, http.StatusOK, j)
 }

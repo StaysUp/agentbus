@@ -29,6 +29,7 @@ func TestCommandFinishKeepsEvent(t *testing.T) {
 	}
 	srv := httptest.NewServer(s)
 	t.Cleanup(func() { srv.Close(); q.Close(); st.Close() })
+	startFinisher(t, s)
 	a := enroll(t, srv, 1)
 	if _, _, err := q.Create(queue.DefaultTeam, queue.KindCommand, "", queue.Spec{Session: "s1", Command: "ls"}, queue.Links{}); err != nil {
 		t.Fatal(err)
