@@ -716,15 +716,6 @@ func hashIn(rt *os.Root, name string) (hash string, mode fs.FileMode, exists boo
 // the answers in the queue's words.
 type Jobs struct{ *Connector }
 
-// SnapshotJob is Snapshot, for a snapshot job.
-func (j Jobs) SnapshotJob(ctx context.Context, ref string) (queue.SnapshotTaken, error) {
-	t, err := j.Snapshot(ctx, ref)
-	if err != nil {
-		return queue.SnapshotTaken{}, err
-	}
-	return queue.SnapshotTaken{ID: t.ID, Times: t.Times, Files: t.Files, Git: t.Git}, nil
-}
-
 // FolderJob is Folders.Add, for a folder job: a folder a person typed,
 // checked and registered. Its errors are one sentence each, naming no path.
 // A job stopped while the folder was checked registers nothing.

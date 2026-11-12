@@ -161,7 +161,6 @@ func New(cfg Config) (*Server, error) {
 	s.mux.HandleFunc("POST /api/v0/runner/attempts/{id}/heartbeat", s.runner(s.heartbeat))
 	s.mux.HandleFunc("POST /api/v0/runner/attempts/{id}/events", s.runner(s.events))
 	s.mux.HandleFunc("POST /api/v0/runner/attempts/{id}/finish", s.runner(s.finish))
-	s.mux.HandleFunc("POST /api/v0/runner/attempts/{id}/snapshot", s.runner(s.snapshot))
 	s.mux.HandleFunc("POST /api/v0/runner/attempts/{id}/record", s.runner(s.record))
 	s.mux.HandleFunc("POST /api/v0/runner/attempts/{id}/calls", s.runner(s.calls))
 	s.mux.HandleFunc("POST /api/v0/runner/blobs", s.runner(s.blobsMissing))

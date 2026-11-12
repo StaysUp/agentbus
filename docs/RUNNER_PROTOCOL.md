@@ -20,8 +20,9 @@ moved under `/api/v0/runner/` in 0.4 (2), in 0.5 the relay records every model c
 machine, with `agentbus connector` retired (4). Register and every take carry `protocol`; a runner of another version is refused (400) at
 either, so a runner already running when control is upgraded stops at its next take.
 
-**Words.** A **job** is the queue's word for work: a turn, a review, an apply, a snapshot or a
-folder check. A
+**Words.** A **job** is the queue's word for work: a turn, a review, an apply or a
+folder check. (A snapshot job, which a runner of 0.4 asked for to build a copy, is retired in
+0.5.1: one stored before is kept and read, and a runner refuses it as a kind it does not run.) A
 runner takes a job and runs it as an **attempt**. A turn or review job names its turn id when it is
 made (`turn` on the job). The runner starts the turn with that id, whichever attempt runs it, so
 the turn a client asked for keeps its id. The client API never shows jobs or attempts.
@@ -39,7 +40,6 @@ the turn a client asked for keeps its id. The client API never shows jobs or att
 | `POST /api/v0/runner/attempts/<id>/heartbeat` | Renew the 30 s lease. Sent every 2 s. `cancel` says stop. |
 | `POST /api/v0/runner/attempts/<id>/events` | A batch numbered from `offset`. A repeat stores nothing new; a gap gets 409 with `next`. |
 | `POST /api/v0/runner/attempts/<id>/finish` | `status`, `reason`, `result`, `last_seq`. The same finish again gets the same answer. |
-| `POST /api/v0/runner/attempts/<id>/snapshot` | For a first turn in an isolated copy of a folder: the snapshot job, made once, on the folder's machine. Ask again until `snapshot` is set. Since protocol 4 a session runs on its folder's machine, so the runner of this build never asks. |
 | `POST /api/v0/runner/attempts/<id>/calls` | A runner of a server that keeps its own sign-in (`-gateway local`), while the turn runs: `{"number": n, "calls":[…], "replies":[…]}`, the turn's model calls as its record kept them, each body as base64 so its bytes arrive as kept (`top`, each piece's `bytes`, a reply's `message`), a piece's `bytes` left out when the server holds it. Answers `{"stored": n, "missing":[…]}`: send the calls whose pieces are missing again, with those pieces' bytes. Each call must be of the session control assigned the job. A runner that holds no secret (`-gateway server`, the default) never sends calls: the relay recorded each one (below). |
 | `POST /api/v0/runner/attempts/<id>/record` | A runner of a server, while the turn runs and at its end: `{"number": n, "events":[…]}`, at most 500, the turn's events from its own record. The server's record keeps each once, by its id, without its `folder` (the runner's path). A runner that holds no secret leaves out every event of a model call (one with an `exchange`) except `tool.refused` and `replay.failed`, which only its own gateway makes: the relay recorded the rest. One rule decides who records a call: the server records every call its relay carries, and only those. A call that never reached the server reached no vendor: it stays in the runner's own record and log. The server stores a turn's `session.closed` only after the relay has recorded the turn's calls, each counted from its arrival, before its credential is read. It waits at most 5 s, then stores it with `unsettled: true`. Every event must be of the session control assigned the job: a turn job's session, or for a review the one control named when it made the job (`links.review_session`). |
 | `POST /api/v0/runner/blobs` | `{"hashes":[…]}`, at most 10,000: answers `{"missing":[…]}`, the ones the store lacks, so only those are sent. |
@@ -52,7 +52,7 @@ the turn a client asked for keeps its id. The client API never shows jobs or att
 each session the runner holds an attempt of that has not ended or ended in the last 10 minutes,
 and from its own jobs of no session: their snapshots (the trees and every file in them, the times
 blob, `.git`), their changesets and the files those name, and the session's own snapshot. Its
-apply and snapshot jobs are its jobs too. Any other blob gets **403** `this runner
+apply jobs, and snapshot jobs stored before 0.5.1, are its jobs too. Any other blob gets **403** `this runner
 holds no job that reads this blob`, whether the store holds it or not. Sending blobs and asking
 which are missing are not limited.
 
@@ -93,7 +93,7 @@ another machine's runner built from a snapshot stays with that runner; its appli
 folder's machine.
 
 A runner takes its jobs in two kinds of places. Turns and reviews take its `capacity`.
-**Folder jobs** (`apply`, `folder`, and a `snapshot` stored before 0.5) take one of 4 folder places
+**Folder jobs** (`apply` and `folder`) take one of 4 folder places
 of their own, asked for with `take`'s `folders: true`, so an apply never waits behind running
 turns. A `folder` job names a path a person typed for that machine (`spec.folder`): the runner
 checks that it is a directory it can read, registers it, and answers its reference in

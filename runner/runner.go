@@ -686,7 +686,7 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 		return
 	}
 	switch {
-	case job.Kind == queue.KindApply || job.Kind == queue.KindSnapshot || job.Kind == queue.KindFolder:
+	case job.Kind == queue.KindApply || job.Kind == queue.KindFolder:
 		at.finish(ctx, r.folderWork(ctx, at))
 		return
 	case job.Kind != queue.KindTurn && job.Kind != queue.KindReview:

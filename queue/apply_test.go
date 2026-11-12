@@ -144,21 +144,6 @@ func TestTakeRoutesByMachine(t *testing.T) {
 	if got := takes(t, q, onA); got != turn.ID {
 		t.Fatalf("the folder's machine took %q, want %s", got, turn.ID)
 	}
-	snap, err := q.Snapshot(onA.ID, mustAttempt(t, q, turn.ID), 1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, r := range []Runner{plain, onB, legacy} {
-		if got := takesFolder(t, q, r); got != "" {
-			t.Fatalf("%s took the snapshot", got)
-		}
-	}
-	if got := takes(t, q, onA); got != "" {
-		t.Fatalf("a turn place took the snapshot %s", got)
-	}
-	if got := takesFolder(t, q, onA); got != snap.ID {
-		t.Fatalf("the folder's machine took %q, want %s", got, snap.ID)
-	}
 	// A next turn of the session stays on the session's runner.
 	makeJob(t, q, Spec{Session: turn.Session})
 	if got := takes(t, q, onB); got != "" {
@@ -335,38 +320,6 @@ func TestApplyNeedsItsMachine(t *testing.T) {
 	}
 	if _, created, err := q.Apply(DefaultTeam, j.Turn); err != nil || !created {
 		t.Fatalf("apply with its machine back: %v %v", created, err)
-	}
-}
-
-// The snapshot job an attempt asked for ends with it: queued, it is
-// cancelled; taken, it is asked to stop.
-func TestSnapshotEndsWithItsAttempt(t *testing.T) {
-	q, _ := open(t)
-	rn := capsRunner(t, q, nil, &Capabilities{Connector: conA})
-	conn := rn
-	for _, taken := range []bool{false, true} {
-		turn := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Connector: conA, Isolate: true})
-		j, a := take(t, q, rn)
-		if j.ID != turn.ID {
-			t.Fatalf("took %s", j.ID)
-		}
-		if _, _, err := q.Start(rn.ID, a.ID, a.Number, lease); err != nil {
-			t.Fatal(err)
-		}
-		snap, err := q.Snapshot(rn.ID, a.ID, a.Number)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if taken && takesFolder(t, q, conn) != snap.ID {
-			t.Fatal("the folder's runner did not take the snapshot")
-		}
-		if _, err := q.End(rn.ID, a.ID, a.Number, Finish{Status: Cancelled}); err != nil {
-			t.Fatal(err)
-		}
-		got := state(t, q, snap.ID)
-		if !taken && got.State != Cancelled || taken && !got.CancelRequested {
-			t.Fatalf("taken %v: the snapshot job is %s, cancel %v", taken, got.State, got.CancelRequested)
-		}
 	}
 }
 

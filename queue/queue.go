@@ -79,11 +79,11 @@ const (
 	// folder, on the runner of the folder's machine (apply.go). It starts no
 	// turn.
 	KindApply = "apply"
-	// KindSnapshot takes a snapshot of a folder, on the runner of its
-	// machine, for a runner that builds a copy from it. Since 0.5 a session
-	// runs on its folder's machine, so the runner of this build asks for
-	// none; one stored before still runs. It starts no turn.
-	KindSnapshot = "snapshot"
+	// A "snapshot" job (a folder's snapshot, for a runner that built a copy
+	// from it before 0.5) is retired in 0.5.1: a session runs on its
+	// folder's machine, so nothing asks for one. One stored before is read
+	// as it is: its blobs stay kept (roots.go). A runner refuses one, as
+	// any kind it does not run.
 	// KindFolder checks a folder a person typed, on the runner of the machine
 	// named, and registers it there: its result is the folder's reference
 	// (folder.go). It starts no turn.
@@ -771,7 +771,7 @@ const reviewIn = `o.kind = 'review' AND EXISTS (SELECT 1 FROM attempts a JOIN at
 // job o: j waits for o. A session's turns are one lane, first in, first out:
 // each waits for one that runs, and for an older one still queued. A turn job
 // sent to a review's own session waits behind the review (reviewIn).
-// Snapshot, apply and folder jobs use no copy and never wait.
+// Apply and folder jobs use no copy and never wait.
 const laneTake = `(o.state IN ('taken','running') AND (
 		(j.kind = 'turn' AND o.session = j.session AND o.kind = 'turn')
 		OR (j.kind = 'turn' AND (` + reviewIn + `))))
@@ -1346,9 +1346,6 @@ func sweepTx(tx *sql.Tx, now time.Time) (int, error) {
 		if err := expire(tx, now, a, j); err != nil {
 			return 0, err
 		}
-		if err := endSnapshotsTx(tx, now, a.ID); err != nil {
-			return 0, err
-		}
 	}
 	if err := endFoldersTx(tx, now); err != nil {
 		return 0, err
@@ -1360,22 +1357,6 @@ func sweepTx(tx *sql.Tx, now time.Time) (int, error) {
 	// Whatever ended a session's first turn, its queued turns end here,
 	// before any runner can take one.
 	return len(expired), endSessionsTx(tx, now)
-}
-
-// endSnapshotsTx stops the snapshot job the attempt asked for (Snapshot),
-// once the attempt has ended: no one is left to build a copy from it. A
-// queued one is cancelled; a taken or running one is asked to stop.
-func endSnapshotsTx(tx *sql.Tx, now time.Time, attempt string) error {
-	key := SnapshotKey(attempt)
-	if _, err := tx.Exec(`UPDATE jobs SET state = ?, cancel = 1, updated = ?, ended = ? WHERE idem_key = ? AND kind = 'snapshot' AND state = 'queued'`,
-		Cancelled, nanos(now), nanos(now), key); err != nil {
-		return fmt.Errorf("queue: write job: %w", err)
-	}
-	if _, err := tx.Exec(`UPDATE jobs SET cancel = 1, updated = ? WHERE idem_key = ? AND kind = 'snapshot' AND state IN ('taken','running')`,
-		nanos(now), key); err != nil {
-		return fmt.Errorf("queue: write job: %w", err)
-	}
-	return nil
 }
 
 // A session is ended when its first job, the turn that opened it, has
@@ -1808,9 +1789,6 @@ func (q *Queue) End(runnerID, attemptID string, number int, f Finish) (Job, erro
 		if _, err := tx.Exec(`UPDATE jobs SET state = ?, reason = ?, verdict = ?, findings = ?, result = ?, updated = ?, ended = ? WHERE id = ?`,
 			f.Status, f.Reason, verdict, findings, result, nanos(now), nanos(now), j.ID); err != nil {
 			return fmt.Errorf("queue: write job: %w", err)
-		}
-		if err := endSnapshotsTx(tx, now, a.ID); err != nil {
-			return err
 		}
 		// A session's first job ties the session to this runner. A later
 		// finish naming the same session changes nothing.

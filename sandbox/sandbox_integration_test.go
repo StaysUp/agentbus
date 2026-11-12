@@ -177,8 +177,6 @@ func listenUnix(t *testing.T, p string) string {
 	return p
 }
 
-// TestProbes runs the research's 33 probes (2026-11-11-session-sandbox.md
-// in the notes) in a wall around session A.
 // needWall skips a test that builds a session's wall on a Linux machine
 // that cannot build one, with the machine's own reason (Can): Ubuntu 24.04
 // and later refuse user namespaces to a program without an AppArmor
@@ -193,6 +191,8 @@ func needWall(t *testing.T) {
 	}
 }
 
+// TestProbes runs the research's 33 probes (2026-11-11-session-sandbox.md
+// in the notes) in a wall around session A.
 func TestProbes(t *testing.T) {
 	needWall(t)
 	tr := makeTree(t)

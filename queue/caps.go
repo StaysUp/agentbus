@@ -147,7 +147,7 @@ const machineTake = `COALESCE(json_extract(j.spec, '$.connector'), '') = ''
 // folderKinds are the jobs a runner does to its machine's folders, not in a
 // session's copy: they take a runner's folder places (Take), not its turn
 // places, so an apply never waits behind running turns.
-const folderKinds = `('snapshot','apply','folder')`
+const folderKinds = `('apply','folder')`
 
 // FolderCapacity is how many folder jobs (folderKinds) one runner runs at
 // once, besides its capacity of turns and reviews. Applies of one folder
