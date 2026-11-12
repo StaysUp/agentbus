@@ -13,7 +13,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
+	"syscall"
 
 	"github.com/staysup/agentbus/netjail"
 )
@@ -45,6 +47,13 @@ func (b *Box) build(spec netjail.Spec) error {
 	}
 	if err := netjail.Check(); err != nil {
 		return &Error{Why: err.Error()}
+	}
+	if os.Geteuid() == 0 {
+		groups, _ := os.Getgroups()
+		if p, at := closedToRoot(bound(b.copy, b.home, b.read), append(groups, os.Getegid()), os.Stat); p != "" {
+			return &Error{Why: "a runner run as root cannot show the session " + p + ": in the sandbox root reads only what root owns or what is open to everyone, and " +
+				at + " is neither; install the agent where root owns it, or run the runner as the user who owns it"}
+		}
 	}
 	b.plat.args = bwrapArgs(b.copy, b.readOnly, b.home, b.read)
 	// The check makes its own network namespace: it runs outside netjail.
@@ -100,6 +109,75 @@ func bwrapArgs(copy string, readOnly bool, home string, read []path) []string {
 	a = append(a, bind, copy, copy, "--bind", home, home)
 	// The empty root read only: nothing written outside the binds and /tmp.
 	return append(a, "--remount-ro", "/", "--chdir", copy, "--cap-drop", "ALL")
+}
+
+// bound are the paths bwrapArgs binds from this machine, outside the
+// system folders: the copy, the home and the paths the agent reads.
+func bound(copy, home string, read []path) []string {
+	out := []string{copy, home}
+	for _, r := range read {
+		if !inSystem(r.real) {
+			out = append(out, r.real)
+		}
+	}
+	return out
+}
+
+// closedToRoot is the first of paths that root cannot reach in bwrap's user
+// namespace, and the folder or file on its way that stops it; empty when
+// root reaches them all. In that namespace root keeps its power to read
+// past permissions only for what root owns (user and group both 0), so a
+// folder of another user's that is closed to others (a home at 0750) stops
+// it, though root outside the wall reads it. Paths are real: no links.
+func closedToRoot(paths []string, groups []int, stat func(string) (os.FileInfo, error)) (string, string) {
+	for _, p := range paths {
+		steps := []string{}
+		for d := p; ; d = filepath.Dir(d) {
+			steps = append([]string{d}, steps...)
+			if d == filepath.Dir(d) {
+				break
+			}
+		}
+		for i, d := range steps {
+			info, err := stat(d)
+			if err != nil {
+				return p, d
+			}
+			// A folder on the way is passed through; the path itself is
+			// read, and listed when it is a folder.
+			var want os.FileMode = 1
+			if i == len(steps)-1 {
+				want = 4
+				if info.IsDir() {
+					want = 5
+				}
+			}
+			if !rootReaches(info, groups, want) {
+				return p, d
+			}
+		}
+	}
+	return "", ""
+}
+
+// rootReaches says root, in bwrap's user namespace, has want (bits of
+// r=4, w=2, x=1) on info.
+func rootReaches(info os.FileInfo, groups []int, want os.FileMode) bool {
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return true
+	}
+	if st.Uid == 0 && st.Gid == 0 {
+		return true
+	}
+	perm := info.Mode().Perm()
+	switch {
+	case st.Uid == 0:
+		perm >>= 6
+	case slices.Contains(groups, int(st.Gid)):
+		perm >>= 3
+	}
+	return perm&want == want
 }
 
 // systemDirs are the folders bwrapArgs binds read only, or links into

@@ -361,6 +361,13 @@ func TestAgentsStart(t *testing.T) {
 			}
 			tr := makeTree(t)
 			box, err := New(Spec{Copy: tr.copyA, Home: tr.homeA, Read: Program(path)})
+			if err != nil && os.Geteuid() == 0 && strings.Contains(err.Error(), "run as root") {
+				// Root's PATH names another user's agent, in a folder
+				// root cannot reach in the wall: refused, plainly, which
+				// is the answer wanted.
+				t.Logf("refused as root: %v", err)
+				return
+			}
 			if err != nil {
 				t.Fatal(err)
 			}
