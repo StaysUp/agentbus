@@ -288,7 +288,9 @@ func TestRunWithSessionRunsNextTurnInSameSession(t *testing.T) {
 		}
 		var kinds []string
 		for _, e := range runEvents(t, svc.store, id) {
-			kinds = append(kinds, e.Kind)
+			if e.Kind != "turn.changed" { // control's, after the job's end
+				kinds = append(kinds, e.Kind)
+			}
 		}
 		if got := strings.Join(kinds, " "); got != "session.opened turn.started context.added session.closed session.opened turn.started context.added session.closed" {
 			t.Fatalf("%s: events %s", name, got)

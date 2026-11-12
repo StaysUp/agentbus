@@ -522,8 +522,16 @@ func (s *service) turn(body map[string]any, method *string) (turnDone, string, e
 		return turnDone{}, "", fmt.Errorf("the attempt's events: %v", err)
 	}
 	when := map[string]time.Time{}
+	files := 0
 	for _, e := range list {
 		when[e.Kind] = e.Time
+		// What the turn changed is in the record (turn.changed); its count
+		// is also on the attempt's workspace.changes.
+		if e.Kind == "workspace.changes" {
+			var d struct{ Count int }
+			json.Unmarshal(e.Data, &d)
+			files = d.Count
+		}
 		if e.Kind == "workspace.ready" && method != nil {
 			var d struct{ Method, Kind string }
 			json.Unmarshal(e.Data, &d)
@@ -538,13 +546,7 @@ func (s *service) turn(body map[string]any, method *string) (turnDone, string, e
 			return turnDone{}, "", fmt.Errorf("the attempt has no %s event", k)
 		}
 	}
-	var res struct {
-		Changes struct {
-			Count int `json:"count"`
-		} `json:"changes"`
-	}
-	json.Unmarshal(job.Result, &res)
-	t := turnTimes{Total: total, Reply: reply, Queue: at.Taken.Sub(job.Created), Files: res.Changes.Count,
+	t := turnTimes{Total: total, Reply: reply, Queue: at.Taken.Sub(job.Created), Files: files,
 		Agent: when["turn.ended"].Sub(when["turn.created"]), Checkpoint: when["workspace.changes"].Sub(when["turn.ended"]),
 		Finish: job.Ended.Sub(when["workspace.changes"])}
 	startFrom := when["attempt.started"]

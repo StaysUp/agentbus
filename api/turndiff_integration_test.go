@@ -12,10 +12,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/isolation"
+	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/settings"
+	"github.com/staysup/agentbus/store"
 )
 
 // diffEnv starts an API whose turns run a shell that edits its folder by
@@ -37,6 +40,20 @@ func diffEnv(t *testing.T, perm string) (*env, string) {
 			Env: []string{"PATH=/usr/bin:/bin", "D=" + dir, "ANTHROPIC_BASE_URL=" + baseURL}}, nil
 	}
 	return stackEnv(t, stack{wire: wire, permissions: perm}), dir
+}
+
+// outcomeKept waits for the turn's job to end and its changes to move to
+// the record (jobs/outcome.go).
+func outcomeKept(t *testing.T, e *env, turn string) queue.Job {
+	t.Helper()
+	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		j := waitEnded(t, e, turn)
+		if res, _ := queue.ReadResult(j.Result); res.ChangesEvent != "" || res.Changes == nil {
+			return j
+		}
+	}
+	t.Fatalf("turn %s: its changes did not move to the record", turn)
+	return queue.Job{}
 }
 
 // waitEnded waits for the turn's job to end.
@@ -134,6 +151,9 @@ func TestTurnDiffAndApply(t *testing.T) {
 	if code != 200 || st.State != "applied" || st.Already || !slices.Equal(st.Files, []string{"a.txt", "b.txt", "gone.txt"}) {
 		t.Fatalf("apply: %d %+v", code, st)
 	}
+	if st.By == nil || st.By.Kind != "person" || !slices.Equal(st.Turns, []string{first.Turn}) {
+		t.Fatalf("apply: by %+v, turns %v", st.By, st.Turns)
+	}
 	if read("a.txt") != "one\nTWO\n" || read("b.txt") != "new\n" || read("gone.txt") != "<missing>" {
 		t.Fatalf("after the apply: a %q b %q gone %q", read("a.txt"), read("b.txt"), read("gone.txt"))
 	}
@@ -171,6 +191,36 @@ func TestTurnDiffAndApply(t *testing.T) {
 	code, st = applyAs(t, e, tok, second.Turn)
 	if code != 200 || st.State != "applied" || !slices.Equal(st.Files, []string{"a.txt"}) || read("a.txt") != "one\nthree\n" {
 		t.Fatalf("apply by a turn token: %d %+v, a.txt %q", code, st, read("a.txt"))
+	}
+	if st.By == nil || st.By.Kind != "agent" || st.By.Session != first.Session || st.By.Turn != third.Turn ||
+		!slices.Equal(st.Turns, []string{second.Turn}) {
+		t.Fatalf("apply by a turn token: by %+v, turns %v", st.By, st.Turns)
+	}
+	// Each apply is in the record once, as turn.applied, and the diff
+	// reads it from there.
+	var applied []event.Applied
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		recs, err := e.store.After(0, store.Filter{Session: first.Session, Only: true}, 1000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		applied = applied[:0]
+		for _, r := range recs {
+			var ev event.Event
+			if r.Kind == event.TurnApplied && json.Unmarshal(r.Data, &ev) == nil && ev.Applied != nil {
+				applied = append(applied, *ev.Applied)
+			}
+		}
+		if len(applied) >= 3 {
+			break
+		}
+	}
+	if len(applied) != 3 || applied[0].Result != "applied" || applied[1].Result != "refused" || len(applied[1].Conflicts) != 1 ||
+		applied[2].Result != "applied" || applied[2].By.Kind != "agent" {
+		t.Fatalf("turn.applied events: %+v", applied)
+	}
+	if d := diffOf(t, e, second.Turn); d.Apply.State != "applied" || d.Apply.By == nil || d.Apply.By.Kind != "agent" {
+		t.Errorf("diff after the agent's apply: %+v", d.Apply)
 	}
 	// A running turn cannot be applied.
 	if code, out := as(t, e, token, "POST", "/api/v0/turns/"+third.Turn+"/apply", ""); code != 400 || !strings.Contains(out, applyNotEnded) {
@@ -224,17 +274,21 @@ func TestTurnChangesAreTheCheckpointDiff(t *testing.T) {
 				st    Started
 				count int
 			}{{first, 3}, {second, 1}} {
-				j := waitEnded(t, e, c.st.Turn)
+				j := outcomeKept(t, e, c.st.Turn)
 				res, err := queue.ReadResult(j.Result)
-				if err != nil || res.Changes == nil || res.Changes.Count != c.count {
-					t.Fatalf("turn %s: result %s", c.st.Turn, j.Result)
+				if err != nil || res.Changes != nil || res.ChangesEvent == "" {
+					t.Fatalf("turn %s: the job keeps more than a pointer: %s", c.st.Turn, j.Result)
 				}
-				if d := diffOf(t, e, c.st.Turn); !reflect.DeepEqual(d.Files, turnFiles(*res.Changes)) {
-					t.Fatalf("turn %s: the diff %+v is not the result's %+v", c.st.Turn, d.Files, res.Changes)
+				changed, err := jobs.Changes(e.store, j)
+				if err != nil || changed == nil || changed.Count != c.count {
+					t.Fatalf("turn %s: turn.changed %+v, %v", c.st.Turn, changed, err)
+				}
+				if d := diffOf(t, e, c.st.Turn); !reflect.DeepEqual(d.Files, turnFiles(changed)) {
+					t.Fatalf("turn %s: the diff %+v is not the record's %+v", c.st.Turn, d.Files, changed)
 				}
 				if setting == settings.IsolationNone {
-					if res.Changes.From != "" || res.Changes.To != "" || res.Folder != "" {
-						t.Fatalf("turn %s in the folder: %+v in %s", c.st.Turn, res.Changes, res.Folder)
+					if changed.From != "" || changed.To != "" || res.Folder != "" {
+						t.Fatalf("turn %s in the folder: %+v in %s", c.st.Turn, changed, res.Folder)
 					}
 					continue
 				}
@@ -252,9 +306,9 @@ func TestTurnChangesAreTheCheckpointDiff(t *testing.T) {
 					t.Fatalf("turn %s ran in a %s copy (%s), not %s", c.st.Turn, s.Backend, s.Fallback, setting)
 				}
 				b, _ := isolation.Get(s.Backend)
-				want, err := b.Diff(s, res.Changes.From, res.Changes.To)
-				if err != nil || res.Changes.To != c.st.Turn || !reflect.DeepEqual(want, *res.Changes) {
-					t.Fatalf("turn %s: the result %+v is not the checkpoints' diff %+v (%v)", c.st.Turn, res.Changes, want, err)
+				want, err := b.Diff(s, changed.From, changed.To)
+				if err != nil || changed.To != c.st.Turn || !reflect.DeepEqual(jobs.EventChanges(&want), changed) {
+					t.Fatalf("turn %s: the record %+v is not the checkpoints' diff %+v (%v)", c.st.Turn, changed, want, err)
 				}
 			}
 			if b, err := os.ReadFile(filepath.Join(folder, "a.txt")); setting == settings.IsolationNone && string(b) != "one\nthree\n" {

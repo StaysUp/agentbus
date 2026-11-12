@@ -3,12 +3,14 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -102,15 +104,29 @@ func TestRunKeepsChildOutputInItsOwnLogAndItsExitInServiceLog(t *testing.T) {
 			t.Errorf("service.log holds %q:\n%s", never, s)
 		}
 	}
-	// The output stays out of the events too.
+	// The output stays out of the events too, but for the last stderr
+	// lines of an agent that failed, on its session.closed (error_tail).
 	recs, err := svc.store.After(0, store.Filter{}, 10000)
 	if err != nil {
 		t.Fatal(err)
 	}
+	tails := 0
 	for _, r := range recs {
-		if strings.Contains(string(r.Data), "not signed in") {
-			t.Errorf("an event holds the child's stderr: %s", r.Data)
+		if strings.Contains(string(r.Data), tok) {
+			t.Errorf("an event holds the token: %s", r.Data)
 		}
+		if !strings.Contains(string(r.Data), "not signed in") {
+			continue
+		}
+		var e event.Event
+		if json.Unmarshal(r.Data, &e) != nil || e.Kind != event.SessionClosed || !strings.Contains(e.ErrorTail, "not signed in") ||
+			strings.Contains(strings.Replace(string(r.Data), e.ErrorTail, "", 1), "not signed in") {
+			t.Errorf("an event holds the child's stderr outside session.closed's error_tail: %s", r.Data)
+		}
+		tails++
+	}
+	if tails != 1 {
+		t.Errorf("%d events hold the failed agent's last stderr lines, want its session.closed", tails)
 	}
 
 	// A second turn of the session appends under its own header.

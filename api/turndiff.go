@@ -1,9 +1,10 @@
 package api
 
 // A turn's full diff and its apply: GET /api/v0/turns/{id}/diff and
-// POST /api/v0/turns/{id}/apply. The diff is read from the record: the turn's
-// job result holds its file changes, and its events hold its model calls,
-// tool calls and commands. An apply is a job (queue.KindApply) that the
+// POST /api/v0/turns/{id}/apply. The diff is read from the record: the
+// turn's turn.changed holds its file changes, its turn.applied events its
+// applies, and its other events its model calls, tool calls and commands.
+// A turn from before 0.5 has its changes and applies in its jobs' results. An apply is a job (queue.KindApply) that the
 // runner holding the turn's session runs through its isolation backend.
 
 import (
@@ -15,6 +16,7 @@ import (
 
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/gateway"
+	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/store"
 	"github.com/staysup/agentbus/workspace"
@@ -39,7 +41,7 @@ type TurnDiff struct {
 	Apply      ApplyState `json:"apply" doc:"Whether the turn's changes were applied to the person's folder. state none when no apply was asked for."`
 }
 
-// TurnFiles is a turn's file changes, from its job result.
+// TurnFiles is a turn's file changes, from its turn.changed.
 type TurnFiles struct {
 	Isolated bool   `json:"isolated" doc:"The turn ran in an isolated copy, between two checkpoints: POST /api/v0/turns/{id}/apply can put its changes in the person's folder."`
 	From     string `json:"from,omitempty" doc:"The checkpoint the turn started from. In an isolated copy only."`
@@ -49,6 +51,7 @@ type TurnFiles struct {
 	Count          int          `json:"count" doc:"Every file the turn added, modified or deleted."`
 	Truncated      bool         `json:"truncated,omitempty" doc:"changes holds fewer files than count."`
 	Changes        []FileChange `json:"changes" doc:"Each changed file, sorted by path."`
+	DiffsCut       bool         `json:"diffs_cut,omitempty" doc:"Some text files have no diff here: all the turn's diffs together passed 1 MiB, and the later ones were left out (each marked diff_left_out)."`
 	ContentLeftOut bool         `json:"content_left_out,omitempty" doc:"Some small text files have no content here, to keep the result small."`
 	Error          string       `json:"error,omitempty" doc:"The workspace could not be read at the end of the turn."`
 }
@@ -58,9 +61,10 @@ type FileChange struct {
 	Path        string  `json:"path"`
 	Change      string  `json:"change" doc:"added, modified or deleted."`
 	Size        int64   `json:"size" doc:"The file at the end; for a deleted file, at the start."`
-	SHA256      string  `json:"sha256"`
+	SHA256      string  `json:"sha256" doc:"At the end; for a deleted file, at the start."`
+	SHA256Prior string  `json:"sha256_before,omitempty" doc:"At the turn's start. Absent for an added file, and for turns from before 0.5."`
 	Diff        *string `json:"diff,omitempty" doc:"The file's unified diff, from the turn's start to its end, for small text files whose earlier content is kept."`
-	DiffLeftOut bool    `json:"diff_left_out,omitempty" doc:"The content changed and no diff is here: a binary file, a link, a file over 256 KiB, past the 512 KiB budget of all diffs, or its earlier content is no longer kept."`
+	DiffLeftOut bool    `json:"diff_left_out,omitempty" doc:"The content changed and no diff is here: a binary file, a link, a file over 256 KiB, past the 1 MiB of all diffs (512 KiB before 0.5), or its earlier content is no longer kept."`
 	Content     *string `json:"content,omitempty" doc:"The whole file at the end, when it is small UTF-8 text."`
 }
 
@@ -115,6 +119,8 @@ type ApplyState struct {
 	State     string                `json:"state" doc:"none (never asked for), queued, running, applied, refused (a file in your folder changed, or the turn cannot be applied: error says why), or failed (the apply did not finish)."`
 	Turn      string                `json:"turn,omitempty"`
 	Session   string                `json:"session,omitempty"`
+	Turns     []string              `json:"turns,omitempty" doc:"Every turn whose changes the apply carried, oldest first: the session's turns after its previous apply, up to turn. Absent for an apply from before 0.5."`
+	By        *event.By             `json:"by,omitempty" doc:"Who asked for the apply: the person or an agent. Absent for an apply from before 0.5."`
 	Already   bool                  `json:"already,omitempty" doc:"The turn was applied before this request: nothing more was written, and files are what that apply wrote."`
 	Files     []string              `json:"files,omitempty" doc:"The files the apply wrote or removed in the person's folder, sorted."`
 	Count     int                   `json:"count,omitempty" doc:"How many files the apply wrote or removed. files may list fewer, with truncated."`
@@ -168,8 +174,13 @@ func (a *API) turnDiff(w http.ResponseWriter, r *http.Request, id string) {
 		case err == nil:
 			res, _ := queue.ReadResult(j.Result)
 			if j.Session == t.Session || res.Session == t.Session {
-				if j.Ended != nil && res.Changes != nil {
-					d.Files = turnFiles(*res.Changes)
+				if j.Ended != nil {
+					c, err := jobs.Changes(a.cfg.Store, j)
+					if err != nil {
+						a.internal(w)
+						return
+					}
+					d.Files = turnFiles(c)
 				}
 				if j.Ended == nil && d.State != queue.TurnStopped {
 					// As GET /api/v0/turns/{id}: running until its job has
@@ -195,12 +206,16 @@ func (a *API) turnDiff(w http.ResponseWriter, r *http.Request, id string) {
 	writeJSON(w, http.StatusOK, d)
 }
 
-// turnFiles is a job result's changes as the diff shows them.
-func turnFiles(c workspace.Changes) *TurnFiles {
-	f := &TurnFiles{Isolated: c.From != "" && c.To != "", From: c.From, To: c.To, Kind: c.Kind, Count: c.Count,
-		Truncated: c.Truncated, Changes: make([]FileChange, len(c.Files)), ContentLeftOut: c.ContentLeftOut, Error: c.Error}
+// turnFiles is a turn's changes as the diff shows them. nil for nil.
+func turnFiles(c *event.TurnChanges) *TurnFiles {
+	if c == nil {
+		return nil
+	}
+	f := &TurnFiles{Isolated: c.Isolated, From: c.From, To: c.To, Kind: workspace.KindSnapshot, Count: c.Count,
+		Truncated: c.Truncated, Changes: make([]FileChange, len(c.Files)), DiffsCut: c.DiffsCut,
+		ContentLeftOut: c.ContentLeftOut, Error: c.Error}
 	for i, ch := range c.Files {
-		f.Changes[i] = FileChange{Path: ch.Path, Change: ch.Change, Size: ch.Size, SHA256: ch.SHA256,
+		f.Changes[i] = FileChange{Path: ch.Path, Change: ch.Change, Size: ch.Size, SHA256: ch.SHA256, SHA256Prior: ch.SHA256Before,
 			Diff: ch.Diff, DiffLeftOut: ch.DiffLeftOut, Content: ch.Content}
 	}
 	return f
@@ -305,7 +320,7 @@ func (a *API) applyTurn(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, http.StatusNotFound, noTurns)
 		return
 	}
-	j, created, err := a.cfg.Queue.Apply(queue.DefaultTeam, id)
+	j, created, err := a.cfg.Queue.ApplyAs(queue.DefaultTeam, id, askedBy(r))
 	switch {
 	case errors.Is(err, queue.ErrNotFound):
 		writeError(w, http.StatusNotFound, applyNoJob)
@@ -338,7 +353,11 @@ func (a *API) applyTurn(w http.ResponseWriter, r *http.Request, id string) {
 			return
 		}
 	}
-	st := applyStateOf(j)
+	st, err := a.applyStateOf(j)
+	if err != nil {
+		a.internal(w)
+		return
+	}
 	st.Already = already
 	switch st.State {
 	case "applied":
@@ -397,37 +416,49 @@ func (a *API) applyState(turn string) (*ApplyState, error) {
 	if err != nil || !ok {
 		return nil, err
 	}
-	st := applyStateOf(j)
+	st, err := a.applyStateOf(j)
+	if err != nil {
+		return nil, err
+	}
 	return &st, nil
 }
 
-// applyStateOf is an apply job as the API shows it.
-func applyStateOf(j queue.Job) ApplyState {
-	st := ApplyState{Turn: j.Links.AppliesTurn, Session: j.Session}
-	res, _ := queue.ReadResult(j.Result)
-	if res.Apply != nil {
-		st.Files, st.Pruned, st.Conflicts = res.Apply.Files, res.Apply.Pruned, res.Apply.Conflicts
-		st.Count, st.Truncated = res.Apply.Count, res.Apply.Truncated
+// applyStateOf is an apply job as the API shows it: its state from the
+// job, and once it has ended, what it did from its turn.applied.
+func (a *API) applyStateOf(j queue.Job) (ApplyState, error) {
+	st := ApplyState{Turn: j.Links.AppliesTurn, Session: j.Session, Turns: j.Links.AppliesTurns}
+	if b := j.Links.ApplyBy; b != nil {
+		st.By = &event.By{Kind: b.Kind, Session: b.Session, Turn: b.Turn}
 	}
 	switch {
 	case j.State == queue.Queued:
 		st.State = "queued"
+		return st, nil
 	case j.Ended == nil:
 		st.State = "running"
-	case j.State == queue.Finished:
-		st.State = "applied"
-		if st.Files == nil {
-			st.Files = []string{}
-		}
-	case j.State == queue.Failed && (j.Reason == queue.ReasonConflict || j.Reason == queue.ReasonSetup):
-		st.State, st.Error = "refused", res.Refused
-	default:
-		st.State = "failed"
-		st.Error = "the apply did not finish: it ended " + queue.TurnState(j.State)
-		if j.Reason != "" {
-			st.Error += " (" + j.Reason + ")"
-		}
-		st.Error += ". Ask again: a file it already wrote counts as applied"
+		return st, nil
 	}
-	return st
+	ap, err := jobs.Applied(a.cfg.Store, j)
+	if err != nil {
+		return st, err
+	}
+	st.State, st.Error, st.Turns, st.By = ap.Result, ap.Error, ap.Turns, ap.By
+	if len(j.Links.AppliesTurns) == 0 {
+		st.Turns = nil // an apply from before 0.5 never named them
+	}
+	st.Files, st.Count, st.Truncated, st.Pruned = ap.Files, ap.Count, ap.Truncated, ap.Pruned
+	for _, c := range ap.Conflicts {
+		st.Conflicts = append(st.Conflicts, queue.ApplyConflict{Path: c.Path, Why: c.Why})
+	}
+	return st, nil
+}
+
+// askedBy is who sent request r, as an apply's turn.applied names it: an
+// agent (a turn's token, with its session and turn), else the person (the
+// main token). Never the token.
+func askedBy(r *http.Request) *queue.By {
+	if g := grantOf(r); g != nil {
+		return &queue.By{Kind: event.ByAgent, Session: g.Session, Turn: g.Turn}
+	}
+	return &queue.By{Kind: event.ByPerson}
 }

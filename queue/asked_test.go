@@ -178,7 +178,7 @@ func TestResultPrompt(t *testing.T) {
 	v := VerdictFail
 	p := ResultPrompt(Job{ID: "job_1", Kind: KindReview, State: Finished, Verdict: &v, Spec: Spec{AgentID: "codex", Model: "m-1"},
 		Findings: []Finding{{Severity: "P1", File: "a.go", Line: 3, Summary: "bad\nthing"}},
-		Result:   json.RawMessage(`{"session":"rs"}`)}, func(id string) string { return map[string]string{"codex": "Codex"}[id] })
+		Result:   json.RawMessage(`{"session":"rs"}`)}, nil, func(id string) string { return map[string]string{"codex": "Codex"}[id] })
 	for _, want := range []string{"the review you asked for", "Agent: Codex (id codex, model m-1)", "Verdict: fail", "- P1 a.go:3 bad thing", "Session: rs"} {
 		if !strings.Contains(p, want) {
 			t.Errorf("review prompt lacks %q:\n%s", want, p)
@@ -186,10 +186,10 @@ func TestResultPrompt(t *testing.T) {
 	}
 	long := strings.Repeat("x", MaxResultReply+100)
 	b, _ := json.Marshal(map[string]string{"reply_text": long})
-	if p := ResultPrompt(Job{Kind: KindTurn, State: Finished, Result: b}, nil); strings.Contains(p, long) || !strings.Contains(p, "cut here") {
+	if p := ResultPrompt(Job{Kind: KindTurn, State: Finished, Result: b}, nil, nil); strings.Contains(p, long) || !strings.Contains(p, "cut here") {
 		t.Error("a long reply was not cut")
 	}
-	p = ResultPrompt(Job{Kind: KindTurn, State: Failed, Reason: ReasonSetup, Result: json.RawMessage(`{"refused":"no such agent"}`)}, nil)
+	p = ResultPrompt(Job{Kind: KindTurn, State: Failed, Reason: ReasonSetup, Result: json.RawMessage(`{"refused":"no such agent"}`)}, nil, nil)
 	if !strings.Contains(p, "failed (setup)") || !strings.Contains(p, "Error: no such agent") {
 		t.Errorf("refused prompt:\n%s", p)
 	}
@@ -284,7 +284,7 @@ func TestResultPromptBounded(t *testing.T) {
 		fs = append(fs, Finding{Severity: "P1", File: strings.Repeat("d/", 2000), Summary: strings.Repeat("y\x00", 5000)})
 	}
 	p := ResultPrompt(Job{Kind: KindReview, State: Finished, Verdict: &v, Findings: fs,
-		Result: json.RawMessage(`{"error":"` + strings.Repeat("e", 100000) + `"}`)}, nil)
+		Result: json.RawMessage(`{"error":"` + strings.Repeat("e", 100000) + `"}`)}, nil, nil)
 	if len(p) > MaxResultPrompt+100 || strings.IndexByte(p, 0) >= 0 {
 		t.Fatalf("prompt of %d bytes, NUL %v", len(p), strings.IndexByte(p, 0) >= 0)
 	}
