@@ -66,14 +66,14 @@ func TestOpenAPISpecValid(t *testing.T) {
 		t.Errorf("openapi = %q, want 3.1", doc.OpenAPI)
 	}
 	// Every path is under /api/v0, and every operation but the description
-	// itself needs the token.
+	// itself and the sign-in code's trade needs the token.
 	for p, item := range doc.Paths.Map() {
 		if !strings.HasPrefix(p, "/api/v0/") {
 			t.Errorf("%s: not under /api/v0/", p)
 		}
 		for m, op := range item.Operations() {
 			public := op.Security != nil && len(*op.Security) == 0
-			if public != (p == "/api/v0/openapi.json") {
+			if public != (p == "/api/v0/openapi.json" || p == "/api/v0/signin") {
 				t.Errorf("%s %s: public = %v", m, p, public)
 			}
 			if op.Responses.Status(http.StatusForbidden) == nil {
@@ -239,9 +239,10 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 	// DELETE /api/v0/subscriptions/openrouter/key, which set and remove the
 	// OpenRouter key, and 44 with PATCH /api/v0/settings/permissions, which
 	// changes only the keys it is sent, and 45 with GET
-	// /api/v0/harnesses/{id}/models, which lists a harness's models.
-	if len(ops) != 45 {
-		t.Errorf("%d endpoints, want 45: %v", len(ops), ops)
+	// /api/v0/harnesses/{id}/models, which lists a harness's models, and 46
+	// with POST /api/v0/signin, the cockpit's one-time sign-in link.
+	if len(ops) != 46 {
+		t.Errorf("%d endpoints, want 46: %v", len(ops), ops)
 	}
 	for _, want := range []string{"POST /api/v0/turns", "GET /api/v0/turns", "GET /api/v0/turns/{id}", "POST /api/v0/turns/{id}/stop",
 		"GET /api/v0/turns/{id}/diff", "POST /api/v0/turns/{id}/apply", "POST /api/v0/turns/{id}/review",

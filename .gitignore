@@ -12,6 +12,9 @@
 /agentbus
 # goreleaser output
 /dist/
+# the cockpit's built files, packed at release time (tools/pack-cockpit.sh)
+/cockpit/dist/*
+!/cockpit/dist/.keep
 
 # local, internal-only agent rules (CLAUDE.local.md is a symlink to AGENTS.local.md)
 /AGENTS.local.md

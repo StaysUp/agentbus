@@ -5,6 +5,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -73,7 +75,7 @@ func TestRouteOpenRouter(t *testing.T) {
 	gw := func(name string) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hit = name })
 	}
-	h := route(nil, vendors{gw("anthropic"), gw("openai"), gw("or-anthropic"), gw("or-responses"), nil, gw("gemini")}, false)
+	h := route(nil, vendors{gw("anthropic"), gw("openai"), gw("or-anthropic"), gw("or-responses"), nil, gw("gemini"), nil}, false)
 	for path, want := range map[string]string{
 		"/s/abc/t/t_1/v1/messages":                         "anthropic",
 		"/s/abc/t/t_1/backend-api/codex/responses":         "openai",
@@ -100,7 +102,7 @@ func TestRouteOpenRouter(t *testing.T) {
 func TestRouteNoGemini(t *testing.T) {
 	hit := false
 	gw := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hit = true })
-	h := route(nil, vendors{gw, gw, gw, gw, nil, nil}, false)
+	h := route(nil, vendors{gw, gw, gw, gw, nil, nil, nil}, false)
 	r := httptest.NewRequest("POST", "/s/abc/t/t_1/v1internal:streamGenerateContent", nil)
 	r.RemoteAddr = "127.0.0.1:5000"
 	rec := httptest.NewRecorder()
@@ -136,7 +138,7 @@ func TestGatewayThisMachineOnly(t *testing.T) {
 		{true, "[::1]:5000", "/s/abc/t/t_1/openrouter/v1/messages", true},
 	} {
 		anth, oai = false, false
-		h := route(nil, vendors{reached("anthropic", &anth), reached("openai", &oai), reached("openrouter", &anth), reached("openrouter", &oai), nil, nil}, tc.open)
+		h := route(nil, vendors{reached("anthropic", &anth), reached("openai", &oai), reached("openrouter", &anth), reached("openrouter", &oai), nil, nil, nil}, tc.open)
 		r := httptest.NewRequest("POST", tc.path, nil)
 		r.RemoteAddr = tc.remote
 		r = r.WithContext(context.WithValue(r.Context(), http.LocalAddrContextKey, net.Addr(local)))
@@ -151,8 +153,8 @@ func TestGatewayThisMachineOnly(t *testing.T) {
 	}
 }
 
-// Only the vendor paths are this machine's alone. The root sends anyone to
-// the docs, and a path no vendor claims gets 404 from every caller, as on
+// Only the vendor paths are this machine's alone. In a runner, which serves
+// no cockpit, the root sends anyone to the docs, and a path no vendor claims gets 404 from every caller, as on
 // loopback: a browser asking for /favicon.ico is told there is none, not that
 // it is on the wrong machine.
 func TestRootAndUnroutedPaths(t *testing.T) {
@@ -181,7 +183,7 @@ func TestRootAndUnroutedPaths(t *testing.T) {
 				{"POST", "/s/abc/t/t_1/openrouter/v2/x", http.StatusNotFound, ""},
 			} {
 				reached = false
-				h := route(nil, vendors{gw, gw, gw, gw, nil, gw}, open)
+				h := route(nil, vendors{gw, gw, gw, gw, nil, gw, nil}, open)
 				r := httptest.NewRequest(tc.method, tc.path, nil)
 				r.RemoteAddr = remote
 				r = r.WithContext(context.WithValue(r.Context(), http.LocalAddrContextKey, net.Addr(local)))
@@ -193,5 +195,178 @@ func TestRootAndUnroutedPaths(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// In up and server the cockpit answers / and every GET path no vendor
+// claims, to any caller; a vendor path, a session's prefix, a write and the
+// API are what they were.
+func TestCockpitAtRoot(t *testing.T) {
+	gwReached, cockpitReached := false, false
+	gw := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { gwReached = true })
+	ck := fakeSite{func(w http.ResponseWriter, r *http.Request) { cockpitReached = true }}
+	local := &net.TCPAddr{IP: net.ParseIP("172.17.0.2"), Port: 8787}
+	for _, open := range []bool{false, true} {
+		for _, tc := range []struct {
+			method, path string
+			cockpit, gw  bool
+			code         int
+		}{
+			{"GET", "/", true, false, 200},
+			{"HEAD", "/", true, false, 200},
+			{"GET", "/?t=abc", true, false, 200},
+			{"GET", "/settings", true, false, 200},
+			{"GET", "/assets/index-1.js", true, false, 200},
+			{"GET", "/favicon.ico", false, false, 404},
+			{"GET", "/runners", false, false, 404},
+			{"POST", "/", false, false, 404},
+			{"POST", "/settings", false, false, 404},
+			{"GET", "/s/abc", false, false, 404},
+			{"GET", "/s/abc/favicon.ico", false, false, 404},
+			{"GET", "/s/abc/t/t_1/", false, false, 404},
+			{"GET", "/v1x", false, false, 404},
+			{"GET", "/backend-api", false, false, 404},
+		} {
+			gwReached, cockpitReached = false, false
+			h := route(nil, vendors{gw, gw, gw, gw, nil, gw, ck}, open)
+			r := httptest.NewRequest(tc.method, tc.path, nil)
+			r.RemoteAddr = "172.17.0.1:5000"
+			r = r.WithContext(context.WithValue(r.Context(), http.LocalAddrContextKey, net.Addr(local)))
+			w := httptest.NewRecorder()
+			h.ServeHTTP(w, r)
+			if w.Code != tc.code || cockpitReached != tc.cockpit || gwReached != tc.gw {
+				t.Errorf("open %v: %s %s: %d, cockpit %v, gateway %v; want %d, %v, %v",
+					open, tc.method, tc.path, w.Code, cockpitReached, gwReached, tc.code, tc.cockpit, tc.gw)
+			}
+		}
+		// A vendor path stays the gateway's, and this machine's alone.
+		gwReached, cockpitReached = false, false
+		h := route(nil, vendors{gw, gw, gw, gw, nil, gw, ck}, open)
+		r := httptest.NewRequest("GET", "/v1/models", nil)
+		r.RemoteAddr = "127.0.0.1:5000"
+		r = r.WithContext(context.WithValue(r.Context(), http.LocalAddrContextKey, net.Addr(local)))
+		h.ServeHTTP(httptest.NewRecorder(), r)
+		if !gwReached || cockpitReached {
+			t.Errorf("open %v: GET /v1/models reached gateway %v, cockpit %v", open, gwReached, cockpitReached)
+		}
+	}
+}
+
+// The link names the address the service listens on, and loopback for a
+// wildcard one.
+func TestSignInLink(t *testing.T) {
+	for listen, want := range map[string]string{
+		"127.0.0.1:8787":    "http://127.0.0.1:8787/?t=abc",
+		"0.0.0.0:9000":      "http://127.0.0.1:9000/?t=abc",
+		"[::]:9001":         "http://127.0.0.1:9001/?t=abc",
+		"[::1]:9002":        "http://[::1]:9002/?t=abc",
+		"192.168.1.10:9003": "http://192.168.1.10:9003/?t=abc",
+		// up passes the listener's own address, which is numeric; a named
+		// port is still only text here, never parsed as a URL.
+		"127.0.0.1:http-alt": "http://127.0.0.1:http-alt/?t=abc",
+	} {
+		if got := signInLink(listen, "abc"); got != want {
+			t.Errorf("%s: %s, want %s", listen, got, want)
+		}
+	}
+}
+
+// A browser opens only on a desktop of this person's: not over SSH, not
+// on a Linux with no display.
+func TestBrowserCommand(t *testing.T) {
+	env := func(kv ...string) func(string) string {
+		return func(k string) string {
+			for i := 0; i+1 < len(kv); i += 2 {
+				if kv[i] == k {
+					return kv[i+1]
+				}
+			}
+			return ""
+		}
+	}
+	found := func(string) (string, error) { return "/usr/bin/xdg-open", nil }
+	missing := func(string) (string, error) { return "", os.ErrNotExist }
+	for _, tc := range []struct {
+		name, goos string
+		getenv     func(string) string
+		look       func(string) (string, error)
+		want       string
+	}{
+		{"mac", "darwin", env(), found, "open"},
+		{"mac over ssh", "darwin", env("SSH_CONNECTION", "1 2 3 4"), found, ""},
+		{"linux desktop", "linux", env("DISPLAY", ":0"), found, "/usr/bin/xdg-open"},
+		{"linux wayland", "linux", env("WAYLAND_DISPLAY", "wayland-0"), found, "/usr/bin/xdg-open"},
+		{"linux no display", "linux", env(), found, ""},
+		{"linux no xdg-open", "linux", env("DISPLAY", ":0"), missing, ""},
+		{"linux over ssh", "linux", env("DISPLAY", ":10", "SSH_TTY", "/dev/pts/1"), found, ""},
+		{"other", "windows", env(), found, ""},
+	} {
+		got := strings.Join(browserCommand(tc.goos, tc.getenv, tc.look), " ")
+		if got != tc.want {
+			t.Errorf("%s: %q, want %q", tc.name, got, tc.want)
+		}
+	}
+}
+
+// fakeSite serves what the cockpit has here: /, /settings and
+// /assets/index-1.js.
+type fakeSite struct{ h http.HandlerFunc }
+
+func (f fakeSite) ServeHTTP(w http.ResponseWriter, r *http.Request) { f.h(w, r) }
+func (f fakeSite) Serves(r *http.Request) bool {
+	return (r.Method == "GET" || r.Method == "HEAD") &&
+		(r.URL.Path == "/" || r.URL.Path == "/settings" || r.URL.Path == "/assets/index-1.js")
+}
+
+// The browser is opened on a page of the person's own, never on the link:
+// a program's arguments are in the process list for every user to read.
+func TestOpenPageHoldsTheLinkPrivately(t *testing.T) {
+	home := t.TempDir()
+	link := "http://127.0.0.1:8787/?t=c0ffee"
+	page, err := writeOpenPage(home, link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(page, "c0ffee") {
+		t.Fatalf("the page's path %s holds the code", page)
+	}
+	info, err := os.Stat(page)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("the page's mode: %v %v", info, err)
+	}
+	b, _ := os.ReadFile(page)
+	for _, want := range []string{`content="0;url=http://127.0.0.1:8787/?t=c0ffee"`, `location.replace("http://127.0.0.1:8787/?t=c0ffee")`, `content="no-referrer"`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("the page lacks %s:\n%s", want, b)
+		}
+	}
+	// A later link's page is not removed by an earlier one's timer.
+	if _, err := writeOpenPage(home, link+"2"); err != nil {
+		t.Fatal(err)
+	}
+	removeOpenPage(page, link)
+	if _, err := os.Stat(page); err != nil {
+		t.Fatal("an earlier link's timer removed a later page")
+	}
+	removeOpenPage(page, link+"2")
+	if _, err := os.Stat(page); !os.IsNotExist(err) {
+		t.Fatalf("the page stayed: %v", err)
+	}
+	// A link that would break out of the attribute or the script is escaped.
+	if p := openPage(`http://x/?t="><script>`); strings.Contains(p, `"><script>`) {
+		t.Fatalf("not escaped: %s", p)
+	}
+}
+
+// The cockpit takes no body: one sent is refused before the cockpit sees it.
+func TestCockpitRefusesABody(t *testing.T) {
+	reached := false
+	ck := fakeSite{func(w http.ResponseWriter, r *http.Request) { reached = true }}
+	h := route(nil, vendors{nil, nil, nil, nil, nil, nil, ck}, false)
+	r := httptest.NewRequest("GET", "/settings", strings.NewReader("0123456789"))
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest || reached || w.Header().Get("Connection") != "close" {
+		t.Fatalf("GET /settings with a body: %d, reached %v, Connection %q", w.Code, reached, w.Header().Get("Connection"))
 	}
 }

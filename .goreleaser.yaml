@@ -3,6 +3,13 @@ version: 2
 
 project_name: agentbus
 
+before:
+  hooks:
+    # The cockpit, packed into the binary (package cockpit): built at the
+    # cockpit tag of the same name, so cockpit and control always match.
+    # Tag the cockpit first. COCKPIT_REPO may name a local checkout.
+    - sh tools/pack-cockpit.sh {{ .Tag }}
+
 builds:
   - id: agentbus
     main: ./cmd/agentbus

@@ -11,9 +11,11 @@
 // to that vendor's gateway, which forwards them and stores their events:
 // /backend-api/codex to chatgpt.com (codex), /v1 to api.anthropic.com (Claude
 // Code), /v1internal: to daily-cloudcode-pa.googleapis.com (agy), each with or
-// without /s/<session> in front. Any other path is
-// answered 404 here and sent nowhere. The vendor paths answer only callers on
-// this machine, whatever the address. GET / redirects to /docs.
+// without /s/<session> in front. In up and server, any other GET is the
+// cockpit's (package cockpit): its files, and its page at / and its own
+// routes; a runner redirects GET / to /docs. Any other path is answered 404
+// here and sent nowhere. The vendor paths answer only callers on this
+// machine, whatever the address.
 package main
 
 import (
@@ -23,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/staysup/agentbus/agents"
+	"github.com/staysup/agentbus/cockpit"
 	"io"
 	"io/fs"
 	"log"
@@ -148,6 +151,20 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	} else {
 		own.Printf("listening on http://%s, data folder %s; reachable from the network; the token guards the API; no HTTPS", svc.shown, home)
 	}
+	switch {
+	case c.mode == modeRunner:
+	case !cockpit.Packed():
+		// No cockpit to sign in to: no code is made.
+		fmt.Fprintf(stdout, "\nThe cockpit is not packed in this build. The API's docs: http://%s/docs\n\n", linkHost(svc.addr))
+	default:
+		// The cockpit's one-time sign-in link: printed, never the token.
+		link := signInLink(svc.addr, svc.api.NewSignInCode())
+		fmt.Fprintf(stdout, "\nOpen the cockpit (the link works once, for %d minutes; start agentbus up again for a new one):\n  %s\n\n",
+			int(api.SignInTTL.Minutes()), link)
+		if c.mode == modeUp && !c.noOpen {
+			openBrowser(home, link, getenv)
+		}
+	}
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
@@ -186,6 +203,9 @@ type config struct {
 	runGrace time.Duration
 	// logMax is where logs/service.log rotates, in bytes. Zero means 10 MiB.
 	logMax int64
+	// noOpen: agentbus up -open=false, which prints the sign-in link and
+	// opens no browser.
+	noOpen bool
 	// noReplay turns own replay off: claude's and codex's next turns use the
 	// vendor's resume. The zero value, replay on, is the default.
 	noReplay bool
@@ -674,8 +694,14 @@ func start(c config) (*service, error) {
 	if q != nil {
 		s.subs = subs
 	}
+	routed := vendors{anthropic: anth, openai: oai, openrouterAnth: orAnth, openrouterResps: orOAI, gemini: handler(gem), relay: relayHandler}
+	if q != nil {
+		// up and server: the cockpit at /. A runner's own service is for
+		// its agents only.
+		routed.cockpit = cockpitFiles
+	}
 	s.srv = &http.Server{
-		Handler:           logRequests(svcLog, route(a, vendors{anthropic: anth, openai: oai, openrouterAnth: orAnth, openrouterResps: orOAI, gemini: handler(gem), relay: relayHandler}, !loopback)),
+		Handler:           logRequests(svcLog, route(a, routed, !loopback)),
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          log.New(io.Discard, "", 0),
 	}
@@ -1119,6 +1145,16 @@ func (k keeper) KeepReply(r body.Reply) error {
 // machine can connect anyway. Paths no vendor claims get the same 404 from
 // any caller.
 // vendors are the gateways the router sends model calls to.
+// cockpitFiles serves the cockpit packed into this binary, or the page that
+// says none is (package cockpit). Tests set their own.
+var cockpitFiles = cockpit.Handler()
+
+// site is the cockpit's files (cockpit.Site).
+type site interface {
+	http.Handler
+	Serves(r *http.Request) bool
+}
+
 type vendors struct {
 	anthropic, openai               http.Handler // the vendors' own, for a subscription
 	openrouterAnth, openrouterResps http.Handler // OpenRouter's, under /openrouter
@@ -1129,6 +1165,10 @@ type vendors struct {
 	// gemini is agy's Code Assist gateway: to Google, or on a runner that
 	// holds no secret, to control's relay. Nil: none.
 	gemini http.Handler
+	// cockpit serves the cockpit's files and pages, in up and server: the
+	// requests no vendor claims that it Serves (package cockpit). Nil, as
+	// in a runner: / sends the caller to the docs.
+	cockpit site
 }
 
 func route(a *api.API, v vendors, open bool) http.Handler {
@@ -1138,18 +1178,23 @@ func route(a *api.API, v vendors, open bool) http.Handler {
 			return
 		}
 		if api.Reserved(r) {
+			if api.Public(r) {
+				boundPublic(w, r, a)
+				return
+			}
 			a.ServeHTTP(w, r)
 			return
 		}
-		if r.URL.Path == "/" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
-			http.Redirect(w, r, "/docs", http.StatusFound)
+		read := r.Method == http.MethodGet || r.Method == http.MethodHead
+		if v.cockpit == nil && r.URL.Path == "/" && read {
+			boundPublic(w, r, http.RedirectHandler("/docs", http.StatusFound))
 			return
 		}
 		if v.relay != nil && strings.HasPrefix(r.URL.Path, jobs.RelayPrefix) {
 			v.relay.ServeHTTP(w, r)
 			return
 		}
-		_, _, rest := gateway.SplitSession(r.URL.EscapedPath())
+		session, _, rest := gateway.SplitSession(r.URL.EscapedPath())
 		var gw http.Handler
 		switch {
 		case under(rest, "/backend-api/codex"):
@@ -1165,6 +1210,21 @@ func route(a *api.API, v vendors, open bool) http.Handler {
 		case under(rest, openRouterPrefix+"/v1"):
 			gw = v.openrouterAnth
 		default:
+			// The cockpit's files and pages, to any caller: they hold
+			// nothing of the person's. Never under a session's prefix,
+			// which is an agent's.
+			if v.cockpit != nil && session == "" && !strings.HasPrefix(r.URL.Path, "/s/") && v.cockpit.Serves(r) {
+				// A page or a file takes no body. One sent anyway is
+				// refused before it is read, and its connection closed
+				// soon: the server would otherwise wait for it with no
+				// deadline.
+				if r.ContentLength != 0 {
+					localError(w, "agentbus: a cockpit request takes no body", http.StatusBadRequest)
+					return
+				}
+				boundPublic(w, r, v.cockpit)
+				return
+			}
 			localError(w, "agentbus: no vendor is routed for this path", http.StatusNotFound)
 			return
 		}
@@ -1174,6 +1234,26 @@ func route(a *api.API, v vendors, open bool) http.Handler {
 		}
 		gw.ServeHTTP(w, r)
 	})
+}
+
+// publicWait bounds how long a reply served without a token may take to
+// read its request and to write itself: anyone may send one, so a caller
+// that sends slowly or stops reading holds a connection this long at most.
+// Tests shorten it.
+var publicWait = 30 * time.Second
+
+// boundPublic serves every reply that needs no token (the cockpit, the docs,
+// the descriptions, the sign-in trade) with a read and a write deadline of
+// publicWait, and clears the write deadline after: the next request on the
+// connection may be a token's stream, which must not inherit it. Net/http
+// resets the read deadline for each request itself.
+func boundPublic(w http.ResponseWriter, r *http.Request, h http.Handler) {
+	rc := http.NewResponseController(w)
+	until := time.Now().Add(publicWait)
+	_ = rc.SetReadDeadline(until)
+	_ = rc.SetWriteDeadline(until)
+	h.ServeHTTP(w, r)
+	_ = rc.SetWriteDeadline(time.Time{})
 }
 
 // under reports whether path is prefix or below it, by whole segments, so

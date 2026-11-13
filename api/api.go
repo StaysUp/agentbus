@@ -7,7 +7,9 @@
 // requests those are.
 //
 // The token is compared and never repeated: not in a URL, a log, an event or an
-// error. Error bodies use fixed wording.
+// error. The one reply that carries it is POST /api/v0/signin's, to a caller
+// on this service's own address that sent a one-time code (signin.go). Error
+// bodies use fixed wording.
 package api
 
 import (
@@ -149,6 +151,9 @@ type API struct {
 	// POST /api/v0/mcp (tools.go).
 	tools       []toolRoute
 	toolSchemas map[string]map[string]any
+
+	// signin holds the one-time sign-in codes (signin.go).
+	signin signIns
 }
 
 // New returns the API.
@@ -291,6 +296,12 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		// Before anything else, and without Allow-Origin: a page reaching
 		// us through DNS rebinding learns nothing.
 		writeError(w, http.StatusForbidden, "the Host header must name this service on 127.0.0.1, localhost or [::1]")
+		return
+	}
+	// The sign-in code's route takes no part in CORS: no page on another
+	// origin may read its reply (signin.go).
+	if r.URL.Path == SignInPath {
+		a.signIn(w, r)
 		return
 	}
 	// CORS mainly guards cookies, and this API has none: every request

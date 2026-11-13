@@ -519,6 +519,19 @@ var routes = slices.Concat([]route{
 		doc:     "This description. The runner protocol's is at /api/v0/runner/openapi.json.",
 		replies: []reply{ok(200, map[string]any{}, "This document.")},
 		public:  true},
+	{method: "POST", path: SignInPath, op: "signIn",
+		tag:     "Service",
+		summary: "Sign in with a code",
+		doc: "Trade a one-time sign-in code for the main token: how the cockpit that agentbus up serves signs in. " +
+			"agentbus up prints and opens http://127.0.0.1:<port>/?t=<code> when it starts; the page sends the code here once. A new link comes from starting agentbus up again. " +
+			"A code works once, for 10 minutes. Takes no token. " +
+			"Only this service's own address may call it: a request whose Origin is another address, or that the browser marks cross-site, is refused with 403, " +
+			"the reply never carries Access-Control-Allow-Origin, and no preflight for it is answered. The body must be application/json.",
+		body: SignInRequest{},
+		replies: []reply{ok(200, SignedIn{}, "The main token."), badRequest,
+			fail(http.StatusUnauthorized, "The code is wrong, used or expired."),
+			fail(http.StatusUnsupportedMediaType, "The body is not application/json.")},
+		public: true},
 }, runnerRoutes, settingsRoutes, subscriptionRoutes, []route{modelsRoute})
 
 // match reports whether p is rt's path, the id in it, and the values of its

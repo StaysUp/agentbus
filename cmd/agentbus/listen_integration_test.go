@@ -8,11 +8,15 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/staysup/agentbus/api"
+	"github.com/staysup/agentbus/cockpit"
 )
 
 // get sends GET path to addr with the given Host and token.
@@ -136,12 +140,15 @@ func TestNonLoopbackHandsAgentsLoopback(t *testing.T) {
 // server would otherwise wait for the body with no deadline.
 func TestRefusalDoesNotWaitForBody(t *testing.T) {
 	svc := startService(t, t.TempDir(), "http://127.0.0.1:1")
-	for _, path := range []string{"/nothing", "/a/../v1"} {
+	// The cockpit's / and pages too, whether packed or not: a GET with a
+	// body it never sends.
+	for _, req := range []string{"POST /nothing", "POST /a/../v1", "GET /", "GET /settings", "GET /assets/index.js"} {
+		method, path, _ := strings.Cut(req, " ")
 		c, err := net.Dial("tcp", svc.addr)
 		if err != nil {
 			t.Fatal(err)
 		}
-		fmt.Fprintf(c, "POST %s HTTP/1.1\r\nHost: %s\r\nContent-Length: 10\r\n\r\n", path, svc.addr)
+		fmt.Fprintf(c, "%s %s HTTP/1.1\r\nHost: %s\r\nAccept: text/html\r\nContent-Length: 10\r\n\r\n", method, path, svc.addr)
 		c.SetReadDeadline(time.Now().Add(3 * time.Second))
 		resp, err := http.ReadResponse(bufio.NewReader(c), nil)
 		if err != nil {
@@ -160,10 +167,11 @@ func TestRefusalDoesNotWaitForBody(t *testing.T) {
 	}
 }
 
-// The root redirects a browser to the docs on loopback and on 0.0.0.0, and
-// the docs it lands on answer. A path no vendor claims gets 404 on both.
-func TestRootRedirectsToDocs(t *testing.T) {
-	noFollow := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+// agentbus up serves the cockpit at / on loopback and on 0.0.0.0: in a
+// source build, the page that says it is not packed, which links to the docs
+// that answer. Its sign-in link's code trades once for the token, from the
+// service's own address. A file the cockpit does not have gets 404 on both.
+func TestRootServesTheCockpit(t *testing.T) {
 	for _, listen := range []string{"127.0.0.1:0", "0.0.0.0:0"} {
 		home := t.TempDir()
 		connectFake(t, home)
@@ -173,23 +181,45 @@ func TestRootRedirectsToDocs(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, port, _ := net.SplitHostPort(svc.addr)
-		base := "http://127.0.0.1:" + port
-		for _, method := range []string{"GET", "HEAD"} {
-			req, _ := http.NewRequest(method, base+"/", nil)
-			resp, err := noFollow.Do(req)
+		host := "127.0.0.1:" + port
+		code, body := get(t, svc.addr, host, "/", "")
+		want := "The cockpit is not packed in this build"
+		if cockpit.Packed() {
+			want = `<meta name="agentbus" content="served">`
+		}
+		if code != 200 || !strings.Contains(body, want) {
+			t.Errorf("%s: GET /: %d %s", listen, code, body)
+		}
+		if code, _ := get(t, svc.addr, host, "/docs", ""); code != 200 {
+			t.Errorf("%s: /docs: %d, want 200", listen, code)
+		}
+		if code, body := get(t, svc.addr, host, "/favicon.ico", ""); code != 404 {
+			t.Errorf("%s: /favicon.ico: %d %s, want 404", listen, code, body)
+		}
+
+		link := signInLink(svc.addr, svc.api.NewSignInCode())
+		u, _ := url.Parse(link)
+		tradeCode := func() (int, string) {
+			req, _ := http.NewRequest("POST", "http://"+svc.addr+api.SignInPath, strings.NewReader(`{"code":"`+u.Query().Get("t")+`"}`))
+			req.Host = host
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("Origin", "http://"+host)
+			resp, err := http.DefaultClient.Do(req)
 			if err != nil {
 				t.Fatal(err)
 			}
-			resp.Body.Close()
-			if resp.StatusCode != http.StatusFound || resp.Header.Get("Location") != "/docs" {
-				t.Errorf("%s: %s /: %d, Location %q; want 302 to /docs", listen, method, resp.StatusCode, resp.Header.Get("Location"))
-			}
+			defer resp.Body.Close()
+			b, _ := io.ReadAll(resp.Body)
+			return resp.StatusCode, string(b)
 		}
-		if code, _ := get(t, svc.addr, "127.0.0.1:"+port, "/", ""); code != 200 {
-			t.Errorf("%s: / followed to /docs: %d, want 200", listen, code)
+		if u.Host != host || u.Path != "/" {
+			t.Errorf("%s: the link %s", listen, u.Redacted())
 		}
-		if code, body := get(t, svc.addr, "127.0.0.1:"+port, "/favicon.ico", ""); code != 404 {
-			t.Errorf("%s: /favicon.ico: %d %s, want 404", listen, code, body)
+		if code, body := tradeCode(); code != 200 || !strings.Contains(body, readToken(t, home)) {
+			t.Errorf("%s: the code's first use: %d", listen, code)
+		}
+		if code, _ := tradeCode(); code != http.StatusUnauthorized {
+			t.Errorf("%s: the code's second use: %d", listen, code)
 		}
 		svc.stop()
 	}
