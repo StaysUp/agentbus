@@ -330,6 +330,7 @@ func TestUpRelayRecordsADirectCall(t *testing.T) {
 // is refused too, with no way past the saved agents.
 func TestUpRemovedDefaultAgentIsRefused(t *testing.T) {
 	home := t.TempDir()
+	keepDefaults(t, home)
 	svc := runService(t, home, nil, 0)
 	tok := readToken(t, home)
 	if code, _ := sendAPI(t, svc, tok, "DELETE", "/api/v0/agents/codex", nil); code != http.StatusNoContent {

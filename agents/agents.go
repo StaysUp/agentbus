@@ -16,7 +16,6 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
-	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -172,18 +171,15 @@ func Defaults(now time.Time) []Agent {
 	return out
 }
 
-// Starters are the rows a new data folder starts with, so that its agents
-// are the defaults whose harness is in found: a removed row for each other
-// default. found nil starts with none (agentbus server, which has no
-// machine yet). A turn that names such a default's id still starts that
-// harness on its own subscription (Resolve), as old clients expect; one the
-// person removed (Remove) does not.
-func Starters(found []string) []settings.AgentRow {
+// Starters are the rows a new data folder starts with: a removed row for
+// each default, so it starts with no agents, in up and server alike (his
+// call, 2026-11-13). The person adds each one. A turn that names such a
+// default's id still starts that harness on its own subscription (Resolve),
+// as old clients expect; one the person removed (Remove) does not.
+func Starters() []settings.AgentRow {
 	var out []settings.AgentRow
 	for _, d := range Defaults(time.Time{}) {
-		if !slices.Contains(found, d.Harness) {
-			out = append(out, settings.AgentRow{ID: d.ID, Removed: true})
-		}
+		out = append(out, settings.AgentRow{ID: d.ID, Removed: true})
 	}
 	return out
 }

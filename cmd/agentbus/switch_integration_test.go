@@ -50,6 +50,7 @@ func TestSwitchAgentPerMessage(t *testing.T) {
 	}))
 	defer up.Close()
 	home := t.TempDir()
+	keepDefaults(t, home) // turns name the default agents claude and codex
 	svc := openRouterService(t, home, up.URL+"/api")
 	tok := readToken(t, home)
 	code, ag := sendAPI(t, svc, tok, "POST", "/api/v0/agents", map[string]any{"name": "DeepSeek", "harness": "claude",

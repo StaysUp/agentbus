@@ -6,10 +6,26 @@ import (
 	"errors"
 	"net/http"
 	"os"
+	"path/filepath"
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/staysup/agentbus/agents"
+	"github.com/staysup/agentbus/settings"
 )
+
+// keepDefaults makes home a data folder from before new folders started
+// blank: its settings database holds no agent rows, so it has every default
+// agent (claude, codex, agy) until the person changes or removes one.
+func keepDefaults(t *testing.T, home string) {
+	t.Helper()
+	db, _, err := settings.Upgrade{Dir: home, Lock: filepath.Join(home, "events.db") + ".lock", Agents: agents.ImportRows}.Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+}
 
 // startersService is up (or mode) on home with only the harnesses in found
 // on its PATH, each the fake agent.
@@ -53,23 +69,30 @@ func agentIDs(t *testing.T, svc *service, tok string) []string {
 	return ids
 }
 
-// A new data folder of up starts with the agents whose harness its machine
-// has. It keeps them on the next start, when the machine has more, and a
-// turn that names a harness it started without still runs that harness on
-// its own subscription, as an old client sends it.
-func TestUpStartsWithTheAgentsItFinds(t *testing.T) {
+// A new data folder of up starts with no agents, whatever its machine has
+// (his call, 2026-11-13): the person adds each one. The folder keeps the
+// agents the person added on the next start, and a turn that names a
+// harness it started without still runs that harness on its own
+// subscription, as an old client sends it.
+func TestUpStartsWithNoAgents(t *testing.T) {
 	home := t.TempDir()
-	svc := startersService(t, modeUp, home, "claude")
+	svc := startersService(t, modeUp, home, "claude", "codex", "agy")
 	tok := readToken(t, home)
-	if got := agentIDs(t, svc, tok); !slices.Equal(got, []string{"claude"}) {
-		t.Fatalf("agents of a new folder with only claude: %v, want [claude]", got)
+	if got := agentIDs(t, svc, tok); len(got) != 0 {
+		t.Fatalf("agents of a new up folder with every harness found: %v, want none", got)
 	}
+	code, ag := sendAPI(t, svc, tok, "POST", "/api/v0/agents", map[string]any{"name": "Claude Code", "harness": "claude",
+		"access": "subscription"})
+	if code != http.StatusCreated {
+		t.Fatalf("add an agent: %d %v", code, ag)
+	}
+	id := ag["id"].(string)
 	svc.stop()
 
 	svc = startersService(t, modeUp, home, "claude", "codex", "agy")
 	t.Cleanup(svc.stop)
-	if got := agentIDs(t, svc, tok); !slices.Equal(got, []string{"claude"}) {
-		t.Fatalf("agents of the same folder once codex and agy are there: %v, want [claude]", got)
+	if got := agentIDs(t, svc, tok); !slices.Equal(got, []string{id}) {
+		t.Fatalf("agents of the same folder on the next start: %v, want [%s]", got, id)
 	}
 	t.Setenv("AGENTBUS_FAKE_EXIT", "0")
 	code, out, raw := postRun(t, svc, tok, map[string]any{"agent": "codex", "folder": t.TempDir(), "prompt": "hi"})

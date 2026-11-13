@@ -173,41 +173,31 @@ func TestResolveRemovedDefault(t *testing.T) {
 	}
 }
 
-// A new data folder starts with the defaults whose harness was found, and
-// none when none was; a turn naming a default it started without still runs
-// that harness on its own subscription.
+// A new data folder starts with no agents; a turn naming a default it
+// started without still runs that harness on its own subscription.
 func TestStarters(t *testing.T) {
-	for _, tc := range []struct {
-		found []string
-		want  []string
-	}{{[]string{Claude}, []string{Claude}}, {nil, nil}, {[]string{"agy", Codex}, []string{Codex, "agy"}}} {
-		db, err := settings.OpenDB(filepath.Join(t.TempDir(), settings.DBFile), fixed)
-		if err != nil {
+	db, err := settings.OpenDB(filepath.Join(t.TempDir(), settings.DBFile), fixed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	for _, r := range Starters() {
+		if err := db.SetAgent(r, []string{r.ID}); err != nil {
 			t.Fatal(err)
 		}
-		t.Cleanup(func() { db.Close() })
-		for _, r := range Starters(tc.found) {
-			if err := db.SetAgent(r, []string{r.ID}); err != nil {
-				t.Fatal(err)
-			}
-		}
-		s, err := Open(db, fixed)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var got []string
-		for _, a := range s.List() {
-			got = append(got, a.ID)
-		}
-		if strings.Join(got, ",") != strings.Join(tc.want, ",") {
-			t.Fatalf("found %v: agents %v, want %v", tc.found, got, tc.want)
-		}
-		// A default the folder started without was never the person's: a
-		// turn naming its harness still runs it on its subscription.
-		for _, h := range []string{Claude, Codex, "agy"} {
-			if a, err := s.Resolve(h); err != nil || a.Harness != h || a.Access != Subscription {
-				t.Fatalf("found %v: a turn naming %s: %+v %v", tc.found, h, a, err)
-			}
+	}
+	s, err := Open(db, fixed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := s.List(); len(got) != 0 {
+		t.Fatalf("agents of a new folder: %+v, want none", got)
+	}
+	// A default the folder started without was never the person's: a
+	// turn naming its harness still runs it on its subscription.
+	for _, h := range []string{Claude, Codex, "agy"} {
+		if a, err := s.Resolve(h); err != nil || a.Harness != h || a.Access != Subscription {
+			t.Fatalf("a turn naming %s: %+v %v", h, a, err)
 		}
 	}
 }

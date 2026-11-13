@@ -45,19 +45,6 @@ func ProbeAll(ctx context.Context, lookPath func(string) (string, error), enviro
 	return out
 }
 
-// Found are the names of the runnable harnesses whose program lookPath
-// finds, in registry order: what a runner on this machine reports as found.
-// nil lookPath finds none.
-func Found(lookPath func(string) (string, error)) []string {
-	var out []string
-	for _, h := range registry {
-		if _, ok := find(h.Info(), lookPath); ok {
-			out = append(out, h.Info().Name)
-		}
-	}
-	return out
-}
-
 // find is where lookPath finds info's program, and whether it does.
 func find(info Info, lookPath func(string) (string, error)) (string, bool) {
 	if lookPath == nil {

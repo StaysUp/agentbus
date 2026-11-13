@@ -369,10 +369,12 @@ func TestCopiedSessionKeptAcrossTurnsAndRemovedOnClose(t *testing.T) {
 	})
 }
 
-// The saved agents outlast a restart, and a removed default still lets a
-// turn name its harness.
+// A data folder from before new folders started blank keeps its default
+// agents; the saved agents outlast a restart, and a default the person
+// removed is refused.
 func TestSavedAgentsKeptAndDefaultsSeeded(t *testing.T) {
 	home := t.TempDir()
+	keepDefaults(t, home)
 	svc := runService(t, home, nil, 0)
 	tok := readToken(t, home)
 	code, list := sendAPI(t, svc, tok, "GET", "/api/v0/agents", nil)

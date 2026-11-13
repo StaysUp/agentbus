@@ -77,15 +77,19 @@ installed, and a Claude and a ChatGPT subscription.
    `pbcopy < ~/.local/share/agentbus/token` on a Mac, or `xclip -sel c < …/token` on Linux.
    Anyone with the token controls your agents, so keep it to yourself.
 
-2. **Connect your subscriptions.** In the cockpit, open **Settings** (at the foot of the Agents
-   column), then **Subscriptions**. Press **Connect** next to claude, and sign in as the tool asks.
-   Do the same for codex. You do this once.
+2. **Add your agents.** A new AgentBus starts with no agents. In the cockpit, press **+ Agent**
+   at the top of the Agents column, pick the tool, Claude Code, and press **Create agent**. Do the
+   same for Codex.
 
-3. **Ask claude something.** Back in the cockpit (**Cockpit** at the top of Settings), press
-   **New session**. Leave the agent on Claude Code, type the path of a project folder, write a first
+3. **Connect your subscriptions.** Open **Settings** (at the foot of the Agents column), then
+   **Subscriptions**. Press **Connect** next to claude, and sign in as the tool asks. Do the same
+   for codex. You do this once.
+
+4. **Ask claude something.** Back in the cockpit (**Cockpit** at the top of Settings), press
+   **New session**. Pick Claude Code as the agent, type the path of a project folder, write a first
    message such as "what does this project do?", and press **Start**.
 
-4. **Ask codex about it.** In the same conversation, switch the agent box beside Send to Codex, and
+5. **Ask codex about it.** In the same conversation, switch the agent box beside Send to Codex, and
    send "what do you think about above?". Codex reads Claude's answer and gives its own.
 
 Every turn and every model call is now in the record, with its cost. `agentbus up -h` lists the
