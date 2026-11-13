@@ -11,11 +11,11 @@
 [![Latest release](https://img.shields.io/github/v/release/staysup/agentbus)](https://github.com/staysup/agentbus/releases)
 [![CI](https://github.com/StaysUp/agentbus/actions/workflows/ci.yml/badge.svg)](https://github.com/StaysUp/agentbus/actions/workflows/ci.yml)
 
-[Quickstart](#quickstart) &nbsp;&bull;&nbsp; [Demo](#demo) &nbsp;&bull;&nbsp; [Cockpit](https://github.com/staysup/agentbus-cockpit) &nbsp;&bull;&nbsp; [Docs](#docs) &nbsp;&bull;&nbsp; [Releases](https://github.com/staysup/agentbus/releases)
+[Quickstart](#quickstart) &nbsp;&bull;&nbsp; [Demo](https://youtu.be/si0HHQFcCD0) &nbsp;&bull;&nbsp; [Cockpit](https://github.com/staysup/agentbus-cockpit) &nbsp;&bull;&nbsp; [Docs](#docs) &nbsp;&bull;&nbsp; [Releases](https://github.com/staysup/agentbus/releases)
 
 </div>
 
-![The AgentBus cockpit: a session, and one turn's model calls](docs/assets/cockpit-session.png)
+[![AgentBus demo](https://img.youtube.com/vi/si0HHQFcCD0/maxresdefault.jpg)](https://youtu.be/si0HHQFcCD0)
 
 AgentBus sits between your coding agents and every model vendor. It runs the agents you already
 have (Claude Code, codex, Antigravity), signed in as you, and records every step.
@@ -29,14 +29,9 @@ have (Claude Code, codex, Antigravity), signed in as you, and records every step
 - **Your folder stays as it is.** Each session works in its own copy. Its changes reach your folder
   only when you apply a turn.
 
-## Demo
-
-[![AgentBus demo](https://img.youtube.com/vi/si0HHQFcCD0/maxresdefault.jpg)](https://youtu.be/si0HHQFcCD0)
-
 ## Install
 
-You need macOS or Linux, and `claude`, `codex` or `agy` installed and signed in. Use **one** of
-these:
+You need macOS or Linux, and `claude`, `codex` or `agy` installed. Use **one** of these:
 
 **Homebrew** (macOS or Linux):
 
@@ -61,21 +56,39 @@ release). Check the install with `agentbus version`.
 
 ## Quickstart
 
-```sh
-agentbus up
-```
+A first run, from nothing to two vendors talking about the same work. You need `claude` and `codex`
+installed, and a Claude and a ChatGPT subscription.
 
-This runs everything on this machine and listens on `http://127.0.0.1:8787`. The token that guards
-the API is the file `token` in its data folder (`~/.local/share/agentbus`, or `$AGENTBUS_HOME`).
+1. **Start AgentBus.**
 
-Then open a cockpit: [staysup/agentbus-cockpit](https://github.com/staysup/agentbus-cockpit). Follow
-its README and paste the token when it asks. `agentbus up -h` lists the options.
+   ```sh
+   agentbus up
+   ```
 
-Before the first turn, connect each subscription you use once, in the cockpit's Settings
-(Subscriptions, **Connect**). Every turn uses the sign-in kept there, on one machine as on many: a
-tool's own sign-in on the machine (`~/.claude`, `~/.codex`) is not used, and each session runs in a
-home of its own. A turn whose tool is not connected is refused with "connect your claude
-subscription in Settings".
+   It prints a sign-in link, `http://127.0.0.1:8787/?t=…`, and opens it in your browser. The
+   cockpit comes with `agentbus up`: nothing else to install. The link works once, for 10 minutes.
+   No browser opened, or the link expired? Stop `agentbus up` (Ctrl-C) and start it again for a
+   new link.
+
+2. **Connect your subscriptions.** In the cockpit, open **Settings** (at the foot of the Agents
+   column), then **Subscriptions**. Press **Connect** next to claude, and sign in as the tool asks.
+   Do the same for codex. You do this once.
+
+3. **Ask claude something.** Back in the cockpit (**Cockpit** at the top of Settings), press
+   **New session**. Leave the agent on Claude Code, type the path of a project folder, write a first
+   message such as "what does this project do?", and press **Start**.
+
+4. **Ask codex about it.** In the same conversation, switch the agent box beside Send to Codex, and
+   send "what do you think about above?". Codex reads Claude's answer and gives its own.
+
+Every turn and every model call is now in the record, with its cost. `agentbus up -h` lists the
+options.
+
+### More on subscriptions
+
+Every turn uses the sign-in connected in Settings, on one machine as on many: a tool's own sign-in
+on the machine (`~/.claude`, `~/.codex`) is not used, and each session runs in a home of its own. A
+turn whose tool is not connected is refused with "connect your claude subscription in Settings".
 
 For OpenRouter agents, paste your OpenRouter key once in the same place (Subscriptions,
 OpenRouter key, **Save**). Control keeps it beside the subscriptions, readable by you only, and adds
@@ -105,8 +118,8 @@ AgentBus has two parts:
 `agentbus up` is both, in one program, for one machine. For several machines, run control once,
 reachable from the others (`agentbus server -listen 0.0.0.0`), and a runner on each machine.
 
-**Every runner must reach control's address.** That works on one network. Hosted relay will come as
-managed service.
+**Every runner must reach control's address.** That works on one network. A hosted relay, as a
+managed service, is planned and not available yet.
 
 To add a machine:
 
@@ -165,8 +178,9 @@ instructions every turn gets. Change them on the cockpit's Settings page, or wit
   can make one.
 - An asked agent works in a fresh copy of your folder. It reads the asking turn's changes through
   the API, but does not have those files.
-- agy runs on its own Google sign-in only, and gets no instructions of AgentBus's. A turn with
-  `forbid` set is refused on agy. agy cannot turn its own subagents off, so `subagents = false`
+- agy uses the Google sign-in connected once on control (Settings, Subscriptions), like the other
+  tools; to connect agy, control must run on Linux, not on a Mac. agy gets no instructions of
+  AgentBus's. A turn with `forbid` set is refused on agy. agy cannot turn its own subagents off, so `subagents = false`
   does not apply to it: its turn runs, and its `turn.started` says so (`unkept`). Using agy's sign-in on runners is at your
   own risk with Google: its terms (clause 6) forbid third-party tools. A sign-in connected on control
   is used on every approved runner; to keep agy's off your runners, do not connect it.
