@@ -109,10 +109,13 @@ func TestUpRecordsEveryRunnersCallsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	ref, machine := folders.Ref(folder), fr.Connector()
+	// The machine joins up's control the one way there is: signed in and
+	// approved.
+	signInRunner(t, "http://"+up.addr, tok, runnerHome, "far")
 	far, err := start(config{mode: modeRunner, listen: "127.0.0.1:0", home: runnerHome, upstream: mustURL("http://127.0.0.1:1"),
 		chatgpt: mustURL("http://127.0.0.1:1"), openrouter: mustURL("http://127.0.0.1:1"), logf: t.Logf, noReplay: true,
 		lookPath: func(string) (string, error) { return self, nil }, getenv: os.Getenv,
-		server: "http://" + up.addr, enrollFile: filepath.Join(home, "enroll_token"), runnerName: "far", folders: []string{folder}})
+		server: "http://" + up.addr, runnerName: "far", folders: []string{folder}})
 	if err != nil {
 		t.Fatal(err)
 	}
