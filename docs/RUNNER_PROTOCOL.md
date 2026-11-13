@@ -6,10 +6,10 @@ described at `/api/v0/openapi.json` and `/docs` on the running service.
 
 `agentbus runner -server <url>` is a runner; so is the one built into `agentbus up`. Both speak this
 protocol over HTTP. A runner pulls work and is never called, so it works behind NAT. These calls take the runner's own token,
-from `agentbus login` once the person approved the machine, or from register with the enrollment
-token (`enroll_token` in the data folder, the old way); never the main token. A removed runner's
-token works no more. The
-cockpit never calls them.
+from `agentbus login` once the person approved the machine; never the main token. `agentbus login`
+is the only way a machine joins: register takes an enrollment token that `agentbus up` makes at
+each start for its built-in runner, keeps in memory and never writes. A removed runner's token
+works no more; `agentbus login` on that machine starts a new sign-in. The cockpit never calls them.
 
 All of it is under `/api/v0/runner/`. A running service describes it at
 `/api/v0/runner/openapi.json`, without the token, and shows it at `/docs/runner`. It is apart from
@@ -29,7 +29,7 @@ the turn a client asked for keeps its id. The client API never shows jobs or att
 
 | Call | What it does |
 |---|---|
-| `POST /api/v0/runner/register` | Register with name, labels, capacity, protocol 4 and `capabilities` (its machine as `connector`, its `folders`), with the enrollment token. Returns the runner and its token, once. A `capabilities.role` is refused (400): `agentbus connector` was retired. |
+| `POST /api/v0/runner/register` | Register with name, labels, capacity, protocol 4 and `capabilities` (its machine as `connector`, its `folders`), with the enrollment token. Only the built-in runner of `agentbus up` holds that token. Returns the runner and its token, once. A `capabilities.role` is refused (400): `agentbus connector` was retired. |
 | `POST /api/v0/runner/login` | `agentbus login`: the same body as register, with no token. Returns a sign-in id, a code for the machine to show, and the runner token, once. The token works only for `GET /api/v0/runner/login` until the person types the code on the Runners page. Waits 15 minutes; at most 20 wait at once (429). |
 | `GET /api/v0/runner/login` | With that token: `state` pending, approved (with `runner`, `heartbeat_ms`, `lease_ms`), refused, expired, or removed. |
 | `POST /api/v0/runner/take` | `{"wait_ms": n, "protocol": 4, "folders": false}`. Long poll, up to 30 s: a job with its new attempt and lease, or a cleanup. 204 when there is nothing. With `folders: true`, only a folder job of the runner's own machine (below). |

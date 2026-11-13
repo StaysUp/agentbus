@@ -20,12 +20,10 @@ package main
 // in up the two share it on disk.
 
 import (
-	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 
@@ -86,7 +84,7 @@ func (c config) modeName() string {
 
 const usage = `usage: agentbus up     [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false] [-max-runs 4]
        agentbus server [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false]
-       agentbus runner -server URL [-enroll-token-file F (the old way to join)] [-gateway server|local] [-capacity 4] [-name NAME] [-folder DIR]... [-labels a,b] [-listen 127.0.0.1:0] [-replay=false]
+       agentbus runner -server URL [-gateway server|local] [-capacity 4] [-name NAME] [-folder DIR]... [-labels a,b] [-listen 127.0.0.1:0] [-replay=false]
        agentbus login URL [runner's flags]   (on a machine, once: sign it in to the control at URL; approve it on the Runners page)
        agentbus version
 
@@ -136,15 +134,22 @@ func parse(args []string, home string, stderr io.Writer) (config, bool) {
 	case modeRunner:
 		fl.IntVar(maxRuns, "capacity", engine.DefaultMaxRuns, "how many jobs this runner runs at once, 1 to 64")
 	}
-	var server, enrollFile, runnerName, gatewayMode, labels *string
+	var server, runnerName, gatewayMode, labels *string
 	var folderList folderFlags
 	if c.mode == modeRunner {
 		fl.Var(&folderList, "folder", "a folder on this machine that sessions may run in, by its absolute path; repeat it for each one. The server knows it only by its reference (GET /api/v0/folders). A folder a person types for this machine is added when its session starts, so none is required")
 		labels = fl.String("labels", "", "words a job can ask for in spec.labels, comma-separated, such as gpu,docker; default agentbus")
 		server = fl.String("server", "", "the server's URL, such as http://192.168.1.10:8787 (required)")
-		enrollFile = fl.String("enroll-token-file", "", "the server's enroll_token, copied here with mode 0600; default <data folder>/enroll_token. The old way: a machine signed in with agentbus login needs none")
 		runnerName = fl.String("name", "", "the runner's name; default the host name")
 		gatewayMode = fl.String("gateway", gatewayServer, "where agents' model calls get their credential: server (the server's gateway adds it; this runner holds no key or sign-in) or local (this machine's own sign-in and keys)")
+	}
+	if c.mode == modeRunner {
+		for _, a := range args[1:] {
+			if a == "-enroll-token-file" || strings.HasPrefix(a, "-enroll-token-file=") || strings.HasPrefix(a, "--enroll-token-file") {
+				fmt.Fprintln(stderr, enrollFileRemoved)
+				return c, false
+			}
+		}
 	}
 	if err := fl.Parse(args[1:]); err != nil {
 		return c, false
@@ -195,38 +200,14 @@ func parse(args []string, home string, stderr io.Writer) (config, bool) {
 				c.labels = append(c.labels, l)
 			}
 		}
-		c.enrollFile, c.enrollFileSet = *enrollFile, *enrollFile != ""
-		if c.enrollFile == "" {
-			c.enrollFile = home + string(os.PathSeparator) + "enroll_token"
-		}
 	}
 	return c, true
 }
 
-// readTokenFile reads a token file that must exist and only its owner may
-// read, such as a server's enroll_token copied to a runner. Its value is
-// never printed or put in an error.
-func readTokenFile(path string) (string, error) {
-	info, err := os.Stat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return "", fmt.Errorf("the token file %s does not exist; copy the server's enroll_token there with mode 0600", path)
-	}
-	if err != nil {
-		return "", fmt.Errorf("the token file %s could not be read", path)
-	}
-	if info.Mode().Perm()&0o077 != 0 {
-		return "", fmt.Errorf("the token file %s can be read by others (mode %v); make it 0600", path, info.Mode().Perm())
-	}
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return "", fmt.Errorf("the token file %s could not be read", path)
-	}
-	tok := strings.TrimSpace(string(b))
-	if tok == "" {
-		return "", fmt.Errorf("the token file %s is empty", path)
-	}
-	return tok, nil
-}
+// enrollFileRemoved is what agentbus runner says to -enroll-token-file
+// since 0.5.1: control writes no enrollment token, and a machine joins only
+// by agentbus login, which the person approves.
+const enrollFileRemoved = "agentbus runner: -enroll-token-file was removed in 0.5.1: sign this machine in with agentbus login URL, and approve it on control's Runners page"
 
 // folderFlags is -folder, given once per folder.
 type folderFlags []string
@@ -260,15 +241,3 @@ func signedIn(home string) bool { return runner.HasIdentity(filepath.Join(home, 
 
 // runnerState is the runner's identity in its data folder.
 const runnerState = "runner.json"
-
-// runnerEnrollToken is a runner's enrollment token, from its token file. A
-// machine signed in by agentbus login has its identity in runner.json and no
-// token file: it needs none then, and gets "". A token file named by
-// -enroll-token-file must be there.
-func runnerEnrollToken(c config) (string, error) {
-	_, err := os.Stat(c.enrollFile)
-	if errors.Is(err, os.ErrNotExist) && !c.enrollFileSet && signedIn(c.home) {
-		return "", nil
-	}
-	return readTokenFile(c.enrollFile)
-}

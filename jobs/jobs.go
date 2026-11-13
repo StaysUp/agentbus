@@ -4,7 +4,8 @@
 //
 // Two tokens:
 //   - the enrollment token (Config.EnrollToken): POST /api/v0/runner/register only.
-//     The old way to add a machine; agentbus login is the new (login.go).
+//     agentbus up makes it at each start for its built-in runner and never
+//     writes it; every other machine joins by agentbus login (login.go).
 //   - a runner token, made when a runner registers or signs in and returned
 //     once: every other call, for its own runner and the attempts it holds,
 //     and only once its runner exists (a sign-in the person approved) and is

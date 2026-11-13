@@ -69,7 +69,7 @@ const turnsTokenDoc = "The turns token (the file `turns_token` in the data folde
 
 // runnerTokenDoc is what an operation of the runner protocol adds to its
 // description: it checks its own token.
-const runnerTokenDoc = "Runner protocol: called by a runner, never by the cockpit. Takes the enrollment token (register) or the runner's own token (every other call), not the main token."
+const runnerTokenDoc = "Runner protocol: called by a runner, never by the cockpit. Takes the enrollment token (register, the built-in runner of agentbus up only) or the runner's own token (every other call), not the main token."
 
 // turnTokenDoc is what each turn-token rule adds to an operation's
 // description.

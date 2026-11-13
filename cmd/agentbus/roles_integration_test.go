@@ -413,12 +413,13 @@ func TestSessionRunsOnItsFolderMachine(t *testing.T) {
 	serverHome, addr := t.TempDir(), freeAddr(t)
 	sp := startProc(t, bin, serverHome, bins, "server", "-listen", addr, "-replay=false")
 	c := waitService(t, sp, addr, serverHome)
-	enroll := filepath.Join(serverHome, "enroll_token")
 	folder := personFolder(t)
 	homeA, homeB := t.TempDir(), t.TempDir()
+	signInRunner(t, c.base, c.token, homeA, "a")
+	signInRunner(t, c.base, c.token, homeB, "b")
 	// B first, so it is asking for work before A's session is queued.
-	startProc(t, bin, homeB, bins, "runner", "-server", c.base, "-enroll-token-file", enroll, "-name", "b", "-replay=false")
-	startProc(t, bin, homeA, bins, "runner", "-server", c.base, "-folder", folder, "-enroll-token-file", enroll, "-name", "a", "-replay=false")
+	startProc(t, bin, homeB, bins, "runner", "-server", c.base, "-name", "b", "-replay=false")
+	startProc(t, bin, homeA, bins, "runner", "-server", c.base, "-folder", folder, "-name", "a", "-replay=false")
 	// The folder, by its reference, once A reports it; and each machine.
 	var ref, machineA string
 	waitFor(t, "machine A's folder", func() bool {

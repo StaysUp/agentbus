@@ -3,14 +3,13 @@ package main
 // agentbus login: sign this machine in to a control. The machine asks control
 // (POST /api/v0/runner/login), shows the code control gave, and waits while
 // the person types that code on the cockpit's Runners page. Once approved it
-// saves its runner identity in its data folder (runner.json), as an enroll
-// does, and prints the one command that starts the runner. It sets up no
+// saves its runner identity in its data folder (runner.json) and prints the one command that starts the runner. It sets up no
 // background service: the runner runs where that command is run. It takes
 // agentbus runner's flags, which that command carries.
 //
-// It replaces copying control's enroll_token by hand, which still works for
-// the setups made with it (agentbus runner -enroll-token-file). A later
-// build may take no address to mean lorebug.art; this one needs one.
+// It is the only way a machine joins a control: control writes no
+// enrollment token since 0.5.1. A later build may take no address to mean
+// lorebug.art; this one needs one.
 //
 // Not the cockpit's Connect: that keeps a subscription's sign-in on control.
 
@@ -28,6 +27,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/staysup/agentbus/jobs"
@@ -91,7 +91,7 @@ func runLogin(args []string, home string, stdout, stderr io.Writer, d loginDeps)
 			return 2
 		}
 		if a == "-enroll-token-file" || strings.HasPrefix(a, "-enroll-token-file=") || strings.HasPrefix(a, "--enroll-token-file") {
-			fmt.Fprintln(stderr, "agentbus login: -enroll-token-file is agentbus runner's old way to join; agentbus login needs none")
+			fmt.Fprintln(stderr, "agentbus login: -enroll-token-file was removed in 0.5.1; agentbus login needs none")
 			return 2
 		}
 		flags = append(flags, a)
@@ -106,15 +106,20 @@ func runLogin(args []string, home string, stdout, stderr io.Writer, d loginDeps)
 		fmt.Fprintf(stderr, "agentbus login: %s is a control's data folder (it holds jobs.db); a runner needs one of its own: set AGENTBUS_HOME to a new folder\n", home)
 		return 1
 	}
-	if signedIn(home) {
-		fmt.Fprintf(stderr, "agentbus login: this data folder already holds a runner's sign-in (%s); its runner keeps working. "+
-			"To sign this machine in again, move that file away first, or set AGENTBUS_HOME to a new folder\n", filepath.Join(home, runnerState))
-		return 1
-	}
 	if err := os.MkdirAll(home, 0o700); err != nil {
 		fmt.Fprintf(stderr, "agentbus login: the data folder %s could not be made\n", home)
 		return 1
 	}
+	// One login at a time on a data folder, for its whole run. An identity
+	// already here is never read for its token, sent or asked about: this
+	// is always a new sign-in, and once approved the old file is kept
+	// beside the new one.
+	unlock, err := lockLogin(home)
+	if err != nil {
+		fmt.Fprintf(stderr, "agentbus login: %v\n", err)
+		return 1
+	}
+	defer unlock()
 	name := c.runnerName
 	if name == "" {
 		name, _ = os.Hostname()
@@ -197,16 +202,28 @@ func runLogin(args []string, home string, stdout, stderr io.Writer, d loginDeps)
 		return 1
 	}
 	statePath := filepath.Join(home, runnerState)
-	if err := runner.SaveIdentity(statePath, *st.Runner, started.Token, st.Heartbeat, st.Lease); err != nil {
-		if errors.Is(err, runner.ErrIdentityThere) {
-			fmt.Fprintf(stderr, "agentbus login: another sign-in saved %s first, and it was kept. "+
+	oldID, kept := "", ""
+	if _, err := os.Lstat(statePath); err == nil {
+		oldID = runner.SavedID(statePath)
+		kept = statePath + ".replaced-" + time.Now().UTC().Format("20060102T150405.000000000Z")
+		if err := os.Rename(statePath, kept); err != nil {
+			fmt.Fprintf(stderr, "agentbus login: approved, but the sign-in already in %s could not be kept aside; nothing was changed. "+
 				"Runner %s, which this one was approved as, will take no work: remove it on the Runners page\n", statePath, st.Runner.ID)
 			return 1
 		}
-		fmt.Fprintf(stderr, "agentbus login: approved, but %s could not be written\n", statePath)
+	}
+	if err := runner.SaveIdentity(statePath, *st.Runner, started.Token, st.Heartbeat, st.Lease); err != nil {
+		fmt.Fprintf(stderr, "agentbus login: approved, but %s could not be written. "+
+			"Runner %s, which this one was approved as, will take no work: remove it on the Runners page\n", statePath, st.Runner.ID)
 		return 1
 	}
 	fmt.Fprintf(stdout, "Approved: this machine is runner %s of %s. Its credential is in %s (mode 0600).\n", st.Runner.ID, target, statePath)
+	if kept != "" {
+		fmt.Fprintf(stdout, "The sign-in that was here is kept as %s.\n", kept)
+		if oldID != "" {
+			fmt.Fprintf(stdout, "The old runner %s may still be listed at control; remove it on the Runners page if so.\n", oldID)
+		}
+	}
 
 	command := append([]string{d.self}, runArgs...)
 	fmt.Fprintf(stdout, "Start the runner with: AGENTBUS_HOME=%s %s\n", shellQuote(home), shellLine(command))
@@ -243,6 +260,23 @@ func loginCall(ctx context.Context, c *http.Client, method, u, tok string, body,
 		}
 	}
 	return resp.StatusCode, nil
+}
+
+// lockLogin holds the data folder's login lock until the answer is called.
+// A second login there at once is refused.
+func lockLogin(home string) (func(), error) {
+	f, err := os.OpenFile(filepath.Join(home, "login.lock"), os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("the lock file in %s could not be opened", home)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("another login is running here (%s)", home)
+		}
+		return nil, fmt.Errorf("the data folder %s could not be locked", home)
+	}
+	return func() { f.Close() }, nil
 }
 
 func loopbackHost(h string) bool {

@@ -195,11 +195,9 @@ type config struct {
 
 	// mode is up (the zero value), server or runner (modes.go).
 	mode string
-	// A runner's: the server's URL, its enroll_token file, the runner's
-	// name, and where its agents send model calls.
-	server, enrollFile, runnerName, gatewayMode string
-	// enrollFileSet: -enroll-token-file was given, so it must be there.
-	enrollFileSet bool
+	// A runner's: the server's URL, the runner's name, and where its agents
+	// send model calls.
+	server, runnerName, gatewayMode string
 	// A runner's folders it owns (-folder), and its labels (-labels).
 	folders, labels []string
 }
@@ -312,19 +310,19 @@ func start(c config) (*service, error) {
 			}
 		}
 	}
-	// The enrollment token adds a runner. A service with a queue keeps it in
-	// its data folder: the built-in runner reads it, and a runner on
-	// another machine is given a copy. A runner reads the server's copy.
+	// The enrollment token adds the built-in runner of agentbus up, and no
+	// other: it is made new at each start, kept in memory and never written,
+	// so no other machine can hold it. Every other machine joins by agentbus
+	// login, which the person approves; a runner has no token of this kind.
 	var enrollToken string
 	switch {
 	case c.hasQueue():
-		if enrollToken, err = loadToken(filepath.Join(c.home, "enroll_token"), enrollTokenPrefix); err != nil {
+		if enrollToken, err = newToken(enrollTokenPrefix); err != nil {
 			return nil, err
 		}
-	case c.mode == modeRunner:
-		if enrollToken, err = runnerEnrollToken(c); err != nil {
-			return nil, err
-		}
+	case c.mode == modeRunner && !signedIn(c.home):
+		// Nothing is opened for a machine that never signed in.
+		return nil, runner.ErrNotSignedIn
 	}
 	st, err := store.Open(filepath.Join(c.home, "events.db"))
 	if err != nil {
@@ -1202,20 +1200,29 @@ func dataFolder(getenv func(string) string) (string, error) {
 // it from the main token and from a turn's own abt_ token.
 const turnsTokenPrefix = "abq_"
 
-// enrollTokenPrefix marks the enrollment token, which adds a runner.
+// enrollTokenPrefix marks the enrollment token, which adds the built-in
+// runner.
 const enrollTokenPrefix = "abe_"
+
+// newToken is a new token, prefix and 64 hex characters, kept nowhere.
+func newToken(prefix string) (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", errors.New("the token could not be made")
+	}
+	return prefix + hex.EncodeToString(b), nil
+}
 
 // loadToken reads a token, or makes it on first start with mode 0600: prefix
 // and 64 hex characters. Its value is never printed or put in an error.
 func loadToken(path, prefix string) (string, error) {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err == nil {
-		b := make([]byte, 32)
-		if _, err := rand.Read(b); err != nil {
+		tok, err := newToken(prefix)
+		if err != nil {
 			f.Close()
-			return "", errors.New("the token could not be made")
+			return "", err
 		}
-		tok := prefix + hex.EncodeToString(b)
 		if _, err := f.WriteString(tok + "\n"); err != nil {
 			f.Close()
 			return "", fmt.Errorf("the token file %s could not be written", path)

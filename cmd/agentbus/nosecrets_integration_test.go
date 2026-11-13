@@ -118,10 +118,11 @@ func startNoSecrets(t *testing.T) *noSecretsSetup {
 	ns.ref, ns.connector = folders.Ref(folder), fr.Connector()
 	// The runner's upstreams name nothing: with no secrets it sends every
 	// call to the server's relay.
+	signInRunner(t, "http://"+ns.server.addr, ns.tok, runnerHome, "far")
 	ns.runner, err = start(config{mode: modeRunner, listen: "127.0.0.1:0", home: runnerHome, upstream: mustURL("http://127.0.0.1:1"),
 		chatgpt: mustURL("http://127.0.0.1:1"), openrouter: mustURL("http://127.0.0.1:1"), logf: t.Logf, lookPath: look, noReplay: true,
 		getenv: func(k string) string { return os.Getenv(k) },
-		server: "http://" + ns.server.addr, enrollFile: filepath.Join(ns.serverHome, "enroll_token"), runnerName: "far", folders: []string{folder}})
+		server: "http://" + ns.server.addr, runnerName: "far", folders: []string{folder}})
 	if err != nil {
 		t.Fatal(err)
 	}

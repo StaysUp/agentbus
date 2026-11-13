@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -120,13 +121,6 @@ func TestLoginApproved(t *testing.T) {
 		t.Fatalf("heartbeat with the saved token: %v %v", err, resp)
 	}
 	resp.Body.Close()
-
-	// A second login on the same data folder is refused, and keeps the first.
-	var b2 bytes.Buffer
-	if c := runLogin([]string{srv.URL}, home, &b2, &b2, testDeps(srv, context.Background())); c != 1 ||
-		!strings.Contains(b2.String(), "already holds a runner's sign-in") {
-		t.Fatalf("second login: %d %s", c, b2.String())
-	}
 }
 
 // A refused sign-in saves nothing.
@@ -179,73 +173,138 @@ func TestLoginRefusesLines(t *testing.T) {
 	}
 }
 
-// A runner needs no enrollment token when agentbus login saved its identity,
-// unless -enroll-token-file names one; without either it says where it
-// looked.
-func TestRunnerEnrollToken(t *testing.T) {
-	home := t.TempDir()
-	c := config{home: home, enrollFile: filepath.Join(home, "enroll_token")}
-	if _, err := runnerEnrollToken(c); err == nil || !strings.Contains(err.Error(), "does not exist") {
-		t.Fatalf("neither: %v", err)
+// tokenLog is a transport that keeps the Authorization header of every
+// request it carries.
+type tokenLog struct {
+	mu   sync.Mutex
+	auth []string
+	next http.RoundTripper
+}
+
+func (l *tokenLog) RoundTrip(r *http.Request) (*http.Response, error) {
+	l.mu.Lock()
+	l.auth = append(l.auth, r.Header.Get("Authorization"))
+	l.mu.Unlock()
+	return l.next.RoundTrip(r)
+}
+
+// agentbus login on a data folder that holds a sign-in starts a new one. It
+// never sends the old token, nor shows it; once approved it keeps the old
+// file beside the new one and names the old runner. Refused, it changes
+// nothing.
+func TestLoginReplacesIdentity(t *testing.T) {
+	srv, js, q := loginControl(t)
+	home := filepath.Join(t.TempDir(), "data")
+	login := func(log *tokenLog, approve bool) (int, string) {
+		t.Helper()
+		var out, errb syncBuf
+		d := testDeps(srv, context.Background())
+		if log != nil {
+			log.next = srv.Client().Transport
+			d.http = &http.Client{Transport: log}
+		}
+		done := make(chan int)
+		go func() { done <- runLogin([]string{srv.URL, "-name", "box"}, home, &out, &errb, d) }()
+		code := waitCode(t, &out)
+		pend, _ := q.PendingLogins(queue.DefaultTeam)
+		if len(pend) != 1 {
+			t.Fatalf("pending %v", pend)
+		}
+		if approve {
+			if _, err := js.ApproveLogin(pend[0].ID, code); err != nil {
+				t.Fatal(err)
+			}
+		} else if err := js.RefuseLogin(pend[0].ID); err != nil {
+			t.Fatal(err)
+		}
+		return <-done, out.String() + errb.String()
 	}
-	if err := runner.SaveIdentity(filepath.Join(home, runnerState), queue.Runner{ID: "run_1"}, "abr_x", 2000, 30000); err != nil {
-		t.Fatal(err)
+	if c, o := login(nil, true); c != 0 {
+		t.Fatalf("first: %d %s", c, o)
 	}
-	if tok, err := runnerEnrollToken(c); err != nil || tok != "" {
-		t.Fatalf("signed in: %q %v", tok, err)
+	statePath := filepath.Join(home, runnerState)
+	before, _ := os.ReadFile(statePath)
+	oldID := runner.SavedID(statePath)
+	oldTok := regexp.MustCompile(`"token":"([^"]+)"`).FindSubmatch(before)
+	if oldID == "" || oldTok == nil {
+		t.Fatalf("first identity: %s", before)
 	}
-	c.enrollFileSet = true
-	if _, err := runnerEnrollToken(c); err == nil {
-		t.Fatal("a named token file that is not there was passed over")
+
+	// Refused: nothing changes.
+	log := &tokenLog{}
+	if c, o := login(log, false); c != 1 {
+		t.Fatalf("refused: %d %s", c, o)
 	}
-	c.enrollFileSet = false
-	os.WriteFile(c.enrollFile, []byte("abe_tok\n"), 0o600)
-	if tok, err := runnerEnrollToken(c); err != nil || tok != "abe_tok" {
-		t.Fatalf("the old way: %q %v", tok, err)
+	if now, _ := os.ReadFile(statePath); !bytes.Equal(now, before) {
+		t.Fatal("a refused sign-in changed runner.json")
+	}
+	if kept, _ := filepath.Glob(statePath + ".replaced-*"); len(kept) != 0 {
+		t.Fatalf("a refused sign-in kept a file aside: %v", kept)
+	}
+
+	// Approved: the new identity is saved, the old one kept beside it.
+	c, o := login(log, true)
+	if c != 0 {
+		t.Fatalf("again: %d %s", c, o)
+	}
+	newID := runner.SavedID(statePath)
+	if newID == "" || newID == oldID {
+		t.Fatalf("not replaced: %q", newID)
+	}
+	kept, _ := filepath.Glob(statePath + ".replaced-*")
+	if len(kept) != 1 {
+		t.Fatalf("kept %v", kept)
+	}
+	if b, _ := os.ReadFile(kept[0]); !bytes.Equal(b, before) {
+		t.Fatalf("the old identity was not kept whole: %q", b)
+	}
+	if !strings.Contains(o, "The old runner "+oldID+" may still be listed at control; remove it on the Runners page if so.") {
+		t.Fatalf("out: %s", o)
+	}
+	if strings.Contains(o, string(oldTok[1])) {
+		t.Fatal("the old token was shown")
+	}
+	for _, a := range log.auth {
+		if strings.Contains(a, string(oldTok[1])) {
+			t.Fatal("a request carried the old token")
+		}
+	}
+	if len(log.auth) == 0 {
+		t.Fatal("no request was seen")
 	}
 }
 
-// Of two logins on one data folder, the one approved second does not replace
-// the first one's identity; and a relative data folder is saved, and handed
+// Two logins on one data folder at once: the second is refused before it
+// asks control anything; and a relative data folder is saved, and handed
 // to the printed command, whole (review of 2026-11-12, round 1).
-func TestLoginKeepsFirstIdentity(t *testing.T) {
+func TestLoginOneAtATime(t *testing.T) {
 	srv, js, q := loginControl(t)
 	dir := t.TempDir()
 	t.Chdir(dir)
-	var out1, out2, err1, err2 syncBuf
-	done1, done2 := make(chan int), make(chan int)
+	var out1, err1 syncBuf
+	done1 := make(chan int)
 	go func() {
 		done1 <- runLogin([]string{srv.URL, "-name", "one"}, "data", &out1, &err1, testDeps(srv, context.Background()))
 	}()
 	code1 := waitCode(t, &out1)
-	go func() {
-		done2 <- runLogin([]string{srv.URL, "-name", "two"}, "data", &out2, &err2, testDeps(srv, context.Background()))
-	}()
-	code2 := waitCode(t, &out2)
+	var b bytes.Buffer
+	if c := runLogin([]string{srv.URL, "-name", "two"}, "data", &b, &b, testDeps(srv, context.Background())); c != 1 ||
+		!strings.Contains(b.String(), "another login is running here") {
+		t.Fatalf("second: %d %s", c, b.String())
+	}
 	pend, _ := q.PendingLogins(queue.DefaultTeam)
-	if len(pend) != 2 {
+	if len(pend) != 1 || pend[0].Name != "one" {
 		t.Fatalf("pending %v", pend)
 	}
-	id := map[string]string{}
-	for _, p := range pend {
-		id[p.Name] = p.ID
-	}
-	first, err := js.ApproveLogin(id["one"], code1)
+	first, err := js.ApproveLogin(pend[0].ID, code1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c := <-done1; c != 0 {
 		t.Fatalf("first: %d %s", c, err1.String())
 	}
-	if _, err := js.ApproveLogin(id["two"], code2); err != nil {
-		t.Fatal(err)
-	}
-	if c := <-done2; c != 1 || !strings.Contains(err2.String(), "was kept") {
-		t.Fatalf("second: %d %s", c, err2.String())
-	}
-	b, _ := os.ReadFile(filepath.Join(dir, "data", runnerState))
-	if !strings.Contains(string(b), first.ID) {
-		t.Fatalf("the first identity was replaced: %s", b)
+	if id := runner.SavedID(filepath.Join(dir, "data", runnerState)); id != first.ID {
+		t.Fatalf("saved %q, want %q", id, first.ID)
 	}
 	if !strings.Contains(out1.String(), "AGENTBUS_HOME="+filepath.Join(dir, "data")) {
 		t.Fatalf("the data folder is not whole in the command: %s", out1.String())
@@ -253,5 +312,59 @@ func TestLoginKeepsFirstIdentity(t *testing.T) {
 	left, _ := filepath.Glob(filepath.Join(dir, "data", "*.tmp"))
 	if len(left) != 0 {
 		t.Fatalf("left behind: %v", left)
+	}
+	// The lock ends with the login: the next one may start.
+	b.Reset()
+	if _, err := lockLogin(filepath.Join(dir, "data")); err != nil {
+		t.Fatalf("the lock outlived the login: %v", err)
+	}
+}
+
+// signInRunner signs a machine with data folder home in to the control at
+// base, as agentbus login and the person on the Runners page do together:
+// the sign-in, its approval with the main token, and the identity saved.
+func signInRunner(t *testing.T, base, mainToken, home, name string) {
+	t.Helper()
+	send := func(method, path, tok string, body, out any) {
+		t.Helper()
+		var rd *strings.Reader
+		if body != nil {
+			b, _ := json.Marshal(body)
+			rd = strings.NewReader(string(b))
+		} else {
+			rd = strings.NewReader("")
+		}
+		req, _ := http.NewRequest(method, base+path, rd)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("%s %s: %v", method, path, err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode/100 != 2 {
+			t.Fatalf("%s %s: HTTP %d", method, path, resp.StatusCode)
+		}
+		if out != nil {
+			if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+				t.Fatalf("%s %s: %v", method, path, err)
+			}
+		}
+	}
+	var started jobs.LoginStarted
+	send("POST", "/api/v0/runner/login", "", jobs.EnrollRequest{Name: name, Capacity: 1, Protocol: jobs.ProtocolVersion}, &started)
+	send("POST", "/api/v0/runners/pending/"+started.Login+"/approve", mainToken, map[string]string{"code": started.Code}, nil)
+	var st jobs.LoginState
+	send("GET", "/api/v0/runner/login", started.Token, nil, &st)
+	if st.State != queue.LoginApproved || st.Runner == nil {
+		t.Fatalf("sign-in of %s: %+v", name, st)
+	}
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.SaveIdentity(filepath.Join(home, runnerState), *st.Runner, started.Token, st.Heartbeat, st.Lease); err != nil {
+		t.Fatal(err)
 	}
 }

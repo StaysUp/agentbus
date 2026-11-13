@@ -39,12 +39,22 @@ func TestModeFlags(t *testing.T) {
 			t.Errorf("%v: exit %d, %q; want 2 and %q", c.args, code, b.String(), c.want)
 		}
 	}
-	// A runner whose server's enroll_token was not copied over says where it
-	// looked, and starts nothing.
+	// A runner never signed in says to run agentbus login, and starts
+	// nothing. -enroll-token-file, the old way to join, is refused by name.
 	var b bytes.Buffer
 	if code := run([]string{"runner", "-server", "http://127.0.0.1:1"}, env, &b, &b); code != 1 ||
-		!strings.Contains(b.String(), filepath.Join(home, "enroll_token")+" does not exist") {
-		t.Errorf("no enroll token: exit %d, %q", code, b.String())
+		!strings.Contains(b.String(), "run agentbus login") {
+		t.Errorf("not signed in: exit %d, %q", code, b.String())
+	}
+	b.Reset()
+	os.WriteFile(filepath.Join(home, "enroll_token"), []byte("abe_x\n"), 0o600)
+	if code := run([]string{"runner", "-server", "http://127.0.0.1:1", "-enroll-token-file", filepath.Join(home, "enroll_token")}, env, &b, &b); code != 2 ||
+		!strings.Contains(b.String(), "-enroll-token-file was removed") {
+		t.Errorf("-enroll-token-file: exit %d, %q", code, b.String())
+	}
+	b.Reset()
+	if code := run([]string{"runner", "-server", "http://127.0.0.1:1"}, env, &b, &b); code != 1 || !strings.Contains(b.String(), "run agentbus login") {
+		t.Errorf("an enroll_token in the data folder was used: exit %d, %q", code, b.String())
 	}
 	if _, err := os.Stat(filepath.Join(home, "events.db")); err == nil {
 		t.Error("a runner that could not start opened a store")

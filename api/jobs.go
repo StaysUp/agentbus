@@ -43,7 +43,7 @@ var runnerRoutes = []route{
 	{method: "POST", path: "/api/v0/runner/register", op: "registerRunner",
 		tag:     "Runners",
 		summary: "Register a runner",
-		doc:     "Add a runner, the one program of its machine, with the enrollment token: the old way, kept for setups made with it; agentbus login (POST /api/v0/runner/login) is the new. The reply holds its own token, this once.",
+		doc:     "Add the built-in runner of agentbus up, with the enrollment token that agentbus up makes at each start and never writes. Every other machine joins by agentbus login (POST /api/v0/runner/login). The reply holds the runner's own token, this once.",
 		body:    jobs.EnrollRequest{},
 		replies: []reply{ok(201, jobs.Enrolled{}, "The runner and its token."), badRequest, storeFailed},
 		self:    true, serve: jobsRoute},

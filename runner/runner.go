@@ -139,9 +139,10 @@ type state struct {
 	LeaseMS     int64  `json:"lease_ms"`
 }
 
-// ErrNotSignedIn: the runner has no enrollment token, and control does not
-// accept the identity agentbus login saved (refused, removed, or another
-// control), or there is none.
+// ErrNotSignedIn: the runner has no enrollment token (only the built-in
+// runner of agentbus up has one), and control does not accept the identity
+// agentbus login saved (refused, removed, or another control), or there is
+// none.
 var ErrNotSignedIn = errors.New("this machine is not signed in to this control, or control no longer accepts it: run agentbus login with control's address")
 
 // Enroll adds the runner to the control plane: with the identity saved in
@@ -241,6 +242,22 @@ func SaveIdentity(path string, rn queue.Runner, token string, heartbeatMS, lease
 		return errors.New("runner: the state file could not be written")
 	}
 	return nil
+}
+
+// SavedID is the runner id in the identity file at path, or "". It reads
+// the id alone, never the token.
+func SavedID(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	var st struct {
+		Runner string `json:"runner"`
+	}
+	if json.Unmarshal(b, &st) != nil {
+		return ""
+	}
+	return st.Runner
 }
 
 // HasIdentity says path holds a runner's identity Enroll would try.

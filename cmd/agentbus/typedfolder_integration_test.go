@@ -25,7 +25,6 @@ func TestTypedFolderOnServer(t *testing.T) {
 	serverHome, addr := t.TempDir(), freeAddr(t)
 	sp := startProc(t, bin, serverHome, bins, "server", "-listen", addr, "-replay=false")
 	c := waitService(t, sp, addr, serverHome)
-	enroll := filepath.Join(serverHome, "enroll_token")
 	folder := personFolder(t)
 	post := func(path string) (int, string) {
 		var e struct{ Error string }
@@ -39,7 +38,8 @@ func TestTypedFolderOnServer(t *testing.T) {
 	}
 
 	connHome := t.TempDir()
-	startProc(t, bin, connHome, bins, "runner", "-server", c.base, "-enroll-token-file", enroll, "-name", "run", "-replay=false")
+	signInRunner(t, c.base, c.token, connHome, "run")
+	startProc(t, bin, connHome, bins, "runner", "-server", c.base, "-name", "run", "-replay=false")
 
 	// Each refusal says what is wrong in one sentence. The first waits for
 	// the runner to be online.
@@ -116,8 +116,10 @@ func TestTypedFolderOnServer(t *testing.T) {
 	}
 
 	// With a second machine, a typed folder must name one. The missing
-	// path asks without starting a turn while the second one enrolls.
-	startProc(t, bin, t.TempDir(), bins, "runner", "-server", c.base, "-enroll-token-file", enroll, "-name", "run2", "-replay=false")
+	// path asks without starting a turn while the second one starts.
+	run2 := t.TempDir()
+	signInRunner(t, c.base, c.token, run2, "run2")
+	startProc(t, bin, run2, bins, "runner", "-server", c.base, "-name", "run2", "-replay=false")
 	for deadline := time.Now().Add(30 * time.Second); ; time.Sleep(50 * time.Millisecond) {
 		code, msg := post(missing)
 		if code == http.StatusBadRequest && msg == "2 machines are online; name the folder's machine as connector, from GET /api/v0/runners" {

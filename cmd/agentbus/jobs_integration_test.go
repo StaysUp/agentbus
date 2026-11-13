@@ -177,11 +177,15 @@ func TestUpRunsAJobOnItsOwnRunner(t *testing.T) {
 		t.Fatalf("record of the job's session: %v", kinds)
 	}
 	// The data folder holds the queue beside the record, and the runner's
-	// identity.
-	for _, f := range []string{"jobs.db", "enroll_token", "runner.json"} {
+	// identity. No enrollment token is written: no other machine can join
+	// with one.
+	for _, f := range []string{"jobs.db", "runner.json"} {
 		if _, err := os.Stat(filepath.Join(home, f)); err != nil {
 			t.Errorf("%s: %v", f, err)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(home, "enroll_token")); !os.IsNotExist(err) {
+		t.Errorf("enroll_token written: %v", err)
 	}
 }
 
@@ -239,9 +243,10 @@ func TestServerAndRunner(t *testing.T) {
 		t.Fatalf("with no runner the job is %s", j.State)
 	}
 
+	signInRunner(t, "http://"+server.addr, tok, runnerHome, "far")
 	r, err := start(config{mode: modeRunner, listen: "127.0.0.1:0", home: runnerHome, upstream: mustURL("http://127.0.0.1:1"),
 		chatgpt: mustURL("http://127.0.0.1:1"), logf: t.Logf, lookPath: look, noReplay: true,
-		server: "http://" + server.addr, enrollFile: filepath.Join(serverHome, "enroll_token"), runnerName: "far", folders: []string{folder}})
+		server: "http://" + server.addr, runnerName: "far", folders: []string{folder}})
 	if err != nil {
 		t.Fatal(err)
 	}
