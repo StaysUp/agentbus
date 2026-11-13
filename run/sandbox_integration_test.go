@@ -77,3 +77,46 @@ func TestSandboxEditNone(t *testing.T) {
 		})
 	}
 }
+
+// home_files are copied into a session's own home at the start of each
+// turn with the sandbox off, and with it on, where the turn reads them
+// inside the wall. A file it does not list stays out (TestCopyGrants*
+// cover the rest of the copy's rules).
+func TestHomeFilesTurn(t *testing.T) {
+	for _, sandboxOn := range []bool{false, true} {
+		t.Run(map[bool]string{false: "sandbox off", true: "sandbox on"}[sandboxOn], func(t *testing.T) {
+			policy := "home_files = [\"~/.aws/config\"]\n"
+			if sandboxOn {
+				canSandbox(t)
+				policy += "[sandbox]\nmode = \"on\"\n"
+			}
+			user, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("HOME", user)
+			if err := os.MkdirAll(filepath.Join(user, ".aws"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(user, ".aws", "config"), []byte("[default]\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(user, ".aws", "credentials"), []byte("not granted\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			e, _ := sandboxEngine(t, policy, true, `cat "$HOME/.aws/config" > "$HOME/got.txt"; exit 0`)
+			turn, err := e.Start(Request{Harness: "claude", Folder: t.TempDir(), Prompt: "hi"})
+			if err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			<-turn.Done()
+			home := filepath.Join(e.cfg.Homes, turn.Session)
+			if b, err := os.ReadFile(filepath.Join(home, "got.txt")); err != nil || string(b) != "[default]\n" {
+				t.Fatalf("the turn read %q %v from its home", b, err)
+			}
+			if _, err := os.Stat(filepath.Join(home, ".aws", "credentials")); err == nil {
+				t.Error("a file not listed was copied")
+			}
+		})
+	}
+}

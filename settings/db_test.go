@@ -77,8 +77,13 @@ func TestUpgradeSteps(t *testing.T) {
 	if last != nil && string(now[last.Key]) == string(last.Old) {
 		t.Errorf("the last step %s keeps the default it changes", last.Key)
 	}
-	if strings.Join(retiredKeys, ",") != "commands,subscriptions_on_runners,agent_api.continue" {
+	if strings.Join(retiredKeys, ",") != "commands,subscriptions_on_runners,agent_api.continue,sandbox.read" {
 		t.Errorf("retired keys %v", retiredKeys)
+	}
+	for _, m := range movedKeys {
+		if _, ok := now[m.To]; !ok {
+			t.Errorf("moved step %s: no key %s", m.From, m.To)
+		}
 	}
 	if p, err := ParsePolicy([]byte("[agent_api]\ncontinue = false\nstart = false\n")); err != nil || *p.AgentAPI.Start {
 		t.Errorf("a file with agent_api.continue: %+v %v", p.AgentAPI, err)

@@ -89,6 +89,12 @@ share_read_only = []
 # files are never changed.
 subagents = true
 
+# home_files: files or folders under your home, such as "~/.aws/config",
+# copied into each session's own home at the start of each turn, at the same
+# place. Every session has a home of its own, so it sees nothing else of
+# yours there. A file the session already has is never replaced.
+home_files = []      # e.g. ["~/.aws/config"]
+
 # Work agents ask other agents for. A request tree is the person's session and
 # every session work asked for from it, at any depth. A limit reached refuses
 # the request and says which limit.
@@ -140,12 +146,10 @@ allow = []           # e.g. ["github.com", "registry.npmjs.org"]
 # list when "on". macOS uses Seatbelt,
 # Linux bubblewrap inside the network namespace. A runner that cannot build
 # the wall refuses the turn, and a runner with no home per session (agentbus
-# up) cannot build it.
-# read: files or folders under your home, such as "~/.aws/config", copied
-# into the session's home at the start of each turn, at the same place.
+# up) cannot build it. The home_files are in the session's home, so it reads
+# them inside the wall too.
 [sandbox]
 mode = "off"
-read = []            # e.g. ["~/.aws/config"]
 `
 
 // Edit values: where a turn may edit files without asking.
@@ -201,6 +205,7 @@ type Policy struct {
 	Isolation     string   `toml:"isolation" json:"isolation,omitempty" doc:"Where a new session's turns run: auto (copy on macOS; overlay on Linux where the runner can mount one, else copy), overlay, copy (a copy of its folder as it is now), git (a git worktree with the folder's uncommitted edits, in a repo) or none (the folder itself). On ext4, copy and the overlay's snapshot copy every byte: use xfs, btrfs, git or none for a big folder. Absent in a PUT: auto."`
 	ShareReadOnly []string `toml:"share_read_only" json:"share_read_only" doc:"Folders at the top of a session's folder, such as node_modules, that a copy links to one shared read-only copy of instead of copying. A turn cannot write there. Absent in a PUT: none."`
 	Subagents     *bool    `toml:"subagents" json:"subagents,omitempty" doc:"Whether a turn may start the agent's own subagents. Absent in a PUT: true."`
+	HomeFiles     []string `toml:"home_files" json:"home_files" doc:"Files or folders under the home folder, each starting with ~/, copied into each session's own home at the same place at the start of each turn, such as ~/.aws/config. Sandbox on or off. A file the session already has is never replaced. Before 0.5.2 this was sandbox.read, which still reads as home_files. Absent in a PUT: none."`
 	Limits        Limits   `toml:"limits" json:"limits" doc:"The limits on work agents ask for."`
 	AgentAPI      AgentAPI `toml:"agent_api" json:"agent_api" doc:"What a turn's own token may call."`
 	Network       Network  `toml:"network" json:"network" doc:"What a turn's agent may reach on the network (Linux runners, and any runner with [sandbox] on)."`
@@ -244,8 +249,7 @@ type Network struct {
 // Sandbox says whether each session runs inside a wall ([sandbox]). Read by
 // the runner that starts the agent (package sandbox).
 type Sandbox struct {
-	Mode string   `toml:"mode" json:"mode,omitempty" doc:"off (the default) or on. On, a session's agent reads and writes only the session's folder and home, read the system folders and the agent's program, and reach the network only through the runner's proxy. A runner that cannot build it refuses the turn. macOS uses sandbox-exec and Linux bwrap. A runner with -gateway local cannot build it (a session has no home of its own there). The copy's .git stays writable. Absent in a PUT: off."`
-	Read []string `toml:"read" json:"read" doc:"Files or folders under the home folder, each starting with ~/, copied into the session's home at the same place at the start of each turn, such as ~/.aws/config. Absent in a PUT: none."`
+	Mode string `toml:"mode" json:"mode,omitempty" doc:"off (the default) or on. On, a session's agent reads and writes only the session's folder and home (home_files included), read the system folders and the agent's program, and reach the network only through the runner's proxy. A runner that cannot build it refuses the turn. macOS uses sandbox-exec and Linux bwrap. A runner with -gateway local cannot build it (a session has no home of its own there). The copy's .git stays writable. Absent in a PUT: off."`
 }
 
 // DefaultPolicy is the policy of a missing or empty file.
@@ -257,7 +261,7 @@ func DefaultPolicy() Policy {
 
 // fill sets every value left out to its default.
 func (p *Policy) fill() {
-	for _, l := range []*[]string{&p.ReadFolders, &p.Allow, &p.Forbid, &p.ShareReadOnly, &p.Network.Allow, &p.Sandbox.Read} {
+	for _, l := range []*[]string{&p.ReadFolders, &p.Allow, &p.Forbid, &p.ShareReadOnly, &p.HomeFiles, &p.Network.Allow} {
 		if *l == nil {
 			*l = []string{}
 		}
@@ -355,9 +359,9 @@ func (p *Policy) Check() error {
 	default:
 		return fmt.Errorf("[sandbox] mode must be %q or %q", SandboxOff, SandboxOn)
 	}
-	for _, f := range p.Sandbox.Read {
+	for _, f := range p.HomeFiles {
 		if err := grantShape(f); err != nil {
-			return fmt.Errorf("[sandbox] read entry %s %v", strconv.Quote(f), err)
+			return fmt.Errorf("home_files entry %s %v", strconv.Quote(f), err)
 		}
 	}
 	for _, h := range p.Network.Allow {
@@ -406,18 +410,24 @@ func parsePolicy(b []byte) (Policy, error) {
 		}
 		// Not a parse error: a value of the wrong type, such as a string
 		// where a list belongs.
-		return Policy{}, errors.New("a value has the wrong type: read_folders, allow, forbid and share_read_only are lists of strings, such as [\"go test\"]; " +
-			"edit, isolation, scope, contain and mode are strings; [network] allow and [sandbox] read are lists of strings; subagents is true or false; the [limits] are numbers; the [agent_api] switches are true or false")
+		return Policy{}, errors.New(wrongTypeTOML)
+	}
+	if err := movedOver(&p, b, md); err != nil {
+		return Policy{}, err
 	}
 	extra := slices.DeleteFunc(md.Undecoded(), func(k toml.Key) bool { return slices.Contains(retiredKeys, strings.Join(k, ".")) })
 	if len(extra) > 0 {
-		return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, [limits], [agent_api], [network] and [sandbox] (see the README)", strconv.Quote(extra[0].String()))
+		return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, home_files, [limits], [agent_api], [network] and [sandbox] (see the README)", strconv.Quote(extra[0].String()))
 	}
 	if err := p.Check(); err != nil {
 		return Policy{}, err
 	}
 	return p, nil
 }
+
+// wrongTypeTOML is a permissions.toml's error for a value of the wrong type.
+const wrongTypeTOML = "a value has the wrong type: read_folders, allow, forbid, share_read_only and home_files are lists of strings, such as [\"go test\"]; " +
+	"edit, isolation, scope, contain and mode are strings; [network] allow is a list of strings; subagents is true or false; the [limits] are numbers; the [agent_api] switches are true or false"
 
 // over is p, read with the keys it leaves out unset, on top of base: each key
 // p leaves out takes base's value, and the result is filled.
@@ -495,7 +505,7 @@ func DecodePolicy(b []byte) (Policy, error) {
 	if t := bytes.TrimLeft(b, " \t\r\n"); len(t) == 0 || t[0] != '{' {
 		return Policy{}, errors.New("the body must be one JSON object: the policy")
 	}
-	b = withoutRetired(b)
+	b = withoutRetired(withMoved(b))
 	d := json.NewDecoder(bytes.NewReader(b))
 	d.DisallowUnknownFields()
 	if err := d.Decode(&p); err != nil {
@@ -503,12 +513,12 @@ func DecodePolicy(b []byte) (Policy, error) {
 		var se *json.SyntaxError
 		switch {
 		case errors.As(err, &te) && te.Field != "":
-			return Policy{}, fmt.Errorf("%s has the wrong type: read_folders, allow, forbid and share_read_only are lists of strings; "+
-				"edit, isolation, scope, contain and mode are strings; network.allow and sandbox.read are lists of strings; subagents and the agent_api switches are true or false; the limits are numbers", te.Field)
+			return Policy{}, fmt.Errorf("%s has the wrong type: read_folders, allow, forbid, share_read_only and home_files are lists of strings; "+
+				"edit, isolation, scope, contain and mode are strings; network.allow is a list of strings; subagents and the agent_api switches are true or false; the limits are numbers", te.Field)
 		case errors.As(err, &se):
 			return Policy{}, errors.New("the body is not valid JSON")
 		case strings.HasPrefix(err.Error(), "json: unknown field "):
-			return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, limits, agent_api, network and sandbox",
+			return Policy{}, fmt.Errorf("unknown key %s; the keys are read_folders, allow, forbid, edit, isolation, share_read_only, subagents, home_files, limits, agent_api, network and sandbox",
 				strings.TrimPrefix(err.Error(), "json: unknown field "))
 		}
 		return Policy{}, errors.New("the body must be one JSON object: the policy")
@@ -534,7 +544,7 @@ func FormatPolicy(p Policy) []byte {
 	p.fill()
 	values := map[string]any{
 		"read_folders": p.ReadFolders, "allow": p.Allow, "forbid": p.Forbid, "edit": p.Edit, "isolation": p.Isolation,
-		"share_read_only": p.ShareReadOnly, "subagents": *p.Subagents,
+		"share_read_only": p.ShareReadOnly, "subagents": *p.Subagents, "home_files": p.HomeFiles,
 		"limits.max_depth": *p.Limits.MaxDepth, "limits.max_jobs_per_turn": *p.Limits.MaxJobsPerTurn,
 		"limits.max_jobs_per_tree": *p.Limits.MaxJobsPerTree, "limits.max_cost_usd_per_tree": *p.Limits.MaxCostUSDPerTree,
 		"agent_api.scope": p.AgentAPI.Scope, "agent_api.read": *p.AgentAPI.Read, "agent_api.list_agents": *p.AgentAPI.ListAgents,
@@ -542,7 +552,7 @@ func FormatPolicy(p Policy) []byte {
 		"agent_api.cancel": *p.AgentAPI.Cancel, "agent_api.rename": *p.AgentAPI.Rename,
 		"agent_api.apply": *p.AgentAPI.Apply, "agent_api.tools": *p.AgentAPI.Tools,
 		"network.contain": p.Network.Contain, "network.allow": p.Network.Allow,
-		"sandbox.mode": p.Sandbox.Mode, "sandbox.read": p.Sandbox.Read,
+		"sandbox.mode": p.Sandbox.Mode,
 	}
 	var out bytes.Buffer
 	section := ""

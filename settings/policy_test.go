@@ -220,22 +220,67 @@ func TestNetworkContainAutoRefused(t *testing.T) {
 	}
 }
 
-// [sandbox]: off by default, on when asked, and read entries only under ~.
+// [sandbox]: off by default, on when asked. home_files: empty by default,
+// entries only under ~, written back by FormatPolicy outside [sandbox].
 func TestSandboxPolicy(t *testing.T) {
-	if p := DefaultPolicy(); p.Sandbox.Mode != SandboxOff || p.Sandbox.Read == nil {
-		t.Fatalf("default: %+v", p.Sandbox)
+	if p := DefaultPolicy(); p.Sandbox.Mode != SandboxOff || p.HomeFiles == nil {
+		t.Fatalf("default: %+v %v", p.Sandbox, p.HomeFiles)
 	}
-	p, err := ParsePolicy([]byte("[sandbox]\nmode = \"on\"\nread = [\"~/.aws/config\"]\n"))
-	if err != nil || p.Sandbox.Mode != SandboxOn || len(p.Sandbox.Read) != 1 {
-		t.Fatalf("on: %+v %v", p.Sandbox, err)
+	p, err := ParsePolicy([]byte("home_files = [\"~/.aws/config\"]\n[sandbox]\nmode = \"on\"\n"))
+	if err != nil || p.Sandbox.Mode != SandboxOn || len(p.HomeFiles) != 1 {
+		t.Fatalf("on: %+v %v %v", p.Sandbox, p.HomeFiles, err)
 	}
-	if back, err := ParsePolicy(FormatPolicy(p)); err != nil || back.Sandbox.Mode != SandboxOn || back.Sandbox.Read[0] != "~/.aws/config" {
-		t.Errorf("FormatPolicy lost [sandbox]: %+v %v", back.Sandbox, err)
+	if back, err := ParsePolicy(FormatPolicy(p)); err != nil || back.Sandbox.Mode != SandboxOn || back.HomeFiles[0] != "~/.aws/config" {
+		t.Errorf("FormatPolicy lost a value: %+v %v %v", back.Sandbox, back.HomeFiles, err)
 	}
-	for _, bad := range []string{"mode = \"yes\"", "read = [\"/etc/passwd\"]", "read = [\"~/../x\"]", "read = [\"~/\"]", "read = [\"~\"]"} {
-		if _, err := ParsePolicy([]byte("[sandbox]\n" + bad + "\n")); err == nil || !strings.Contains(err.Error(), "[sandbox]") {
-			t.Errorf("%s: %v, want a refusal naming [sandbox]", bad, err)
+	if _, sb, _ := strings.Cut(string(FormatPolicy(p)), "\n[sandbox]\n"); strings.Contains(sb, "read =") {
+		t.Error("FormatPolicy wrote sandbox.read")
+	}
+	if _, err := ParsePolicy([]byte("[sandbox]\nmode = \"yes\"\n")); err == nil || !strings.Contains(err.Error(), "[sandbox]") {
+		t.Errorf("mode yes: %v, want a refusal naming [sandbox]", err)
+	}
+	for _, bad := range []string{`"/etc/passwd"`, `"~/../x"`, `"~/"`, `"~"`} {
+		if _, err := ParsePolicy([]byte("home_files = [" + bad + "]\n")); err == nil || !strings.Contains(err.Error(), "home_files") {
+			t.Errorf("%s: %v, want a refusal naming home_files", bad, err)
 		}
+		if _, err := DecodePolicy([]byte(`{"home_files":[` + bad + `]}`)); err == nil || !strings.Contains(err.Error(), "home_files") {
+			t.Errorf("JSON %s: %v, want a refusal naming home_files", bad, err)
+		}
+		// The old name reads as home_files, and is refused as it.
+		if _, err := ParsePolicy([]byte("[sandbox]\nread = [" + bad + "]\n")); err == nil || !strings.Contains(err.Error(), "home_files") {
+			t.Errorf("old %s: %v, want a refusal naming home_files", bad, err)
+		}
+		if _, err := DecodePolicy([]byte(`{"sandbox":{"read":[` + bad + `]}}`)); err == nil || !strings.Contains(err.Error(), "home_files") {
+			t.Errorf("old JSON %s: %v, want a refusal naming home_files", bad, err)
+		}
+	}
+}
+
+// sandbox.read moved to home_files in 0.5.2: a permissions.toml or a PUT
+// body that still holds it reads with its value as home_files, unless it
+// sets home_files too, which wins. A wrong type is still refused.
+func TestSandboxReadMoved(t *testing.T) {
+	p, err := ParsePolicy([]byte("[sandbox]\nmode = \"on\"\nread = [\"~/.aws/config\"]\n"))
+	if err != nil || p.Sandbox.Mode != SandboxOn || len(p.HomeFiles) != 1 || p.HomeFiles[0] != "~/.aws/config" {
+		t.Fatalf("file: %+v %v %v", p.Sandbox, p.HomeFiles, err)
+	}
+	p, err = DecodePolicy([]byte(`{"sandbox":{"mode":"on","read":["~/.aws/config"]}}`))
+	if err != nil || p.Sandbox.Mode != SandboxOn || len(p.HomeFiles) != 1 || p.HomeFiles[0] != "~/.aws/config" {
+		t.Fatalf("body: %+v %v %v", p.Sandbox, p.HomeFiles, err)
+	}
+	p, err = ParsePolicy([]byte("home_files = [\"~/.gitconfig\"]\n[sandbox]\nread = [\"~/.aws/config\"]\n"))
+	if err != nil || len(p.HomeFiles) != 1 || p.HomeFiles[0] != "~/.gitconfig" {
+		t.Fatalf("file with both: %v %v", p.HomeFiles, err)
+	}
+	p, err = DecodePolicy([]byte(`{"home_files":["~/.gitconfig"],"sandbox":{"read":["~/.aws/config"]}}`))
+	if err != nil || len(p.HomeFiles) != 1 || p.HomeFiles[0] != "~/.gitconfig" {
+		t.Fatalf("body with both: %v %v", p.HomeFiles, err)
+	}
+	if _, err := ParsePolicy([]byte("[sandbox]\nread = \"~/.aws/config\"\n")); err == nil || !strings.Contains(err.Error(), "wrong type") {
+		t.Errorf("file with a string: %v", err)
+	}
+	if _, err := DecodePolicy([]byte(`{"sandbox":{"read":"~/.aws/config"}}`)); err == nil || !strings.Contains(err.Error(), "wrong type") {
+		t.Errorf("body with a string: %v", err)
 	}
 }
 

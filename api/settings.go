@@ -109,7 +109,8 @@ var settingsRoutes = []route{
 			versionDoc + "The settings database keeps only the keys whose value differs from the defaults. " +
 			"The change and its settings.changed event, which names the keys that changed and never their values, are saved together. " +
 			"A PUT that changes nothing makes no event and no new settings version. " +
-			"A folder is checked for shape here, and for being there when a turn runs.",
+			"A folder is checked for shape here, and for being there when a turn runs. " +
+			"A body from an older client that holds sandbox.read is read with that value as home_files, unless it sets home_files too.",
 		body: settings.Policy{},
 		replies: []reply{ok(200, settings.Policy{}, "The policy, as stored."),
 			fail(http.StatusBadRequest, "A value is refused; error names the key."), settingsReadOnly, settingsChanged, settingsNoMatch, noSettings,

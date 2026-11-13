@@ -122,6 +122,9 @@ next turn. Runners read control's settings before each turn. The keys and their 
 - `read_folders`, `allow`, `forbid`, `edit`, `subagents`: what a turn may read, run and edit
   without asking. `forbid` reads command text only; it is not a sandbox.
 - `isolation`: how a session's copy is made (`auto`, `overlay`, `copy`, `git` or `none`).
+- `home_files`: files from your home, such as `~/.aws/config`, copied into each session's own
+  home at the start of each turn, sandbox on or off. Before 0.5.2 this was `[sandbox] read`;
+  the first start of 0.5.2 moves a stored value here, and the old name still reads.
 - `[limits]` and `[agent_api]`: what agents may ask other agents for.
 - `[network]`: on Linux, close agents off to a list of hosts. Off by default.
 - `[sandbox]`: a wall around each session's agent, on macOS and Linux runners. Off by default.

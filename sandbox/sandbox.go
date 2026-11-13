@@ -237,7 +237,7 @@ func interpreter(p string) string {
 // MaxGrant bounds what CopyGrants copies in all, in bytes.
 const MaxGrant = 16 << 20
 
-// CopyGrants copies each of grants, a path under userHome written "~/x",
+// CopyGrants copies each of grants (the policy's home_files), a path under userHome written "~/x",
 // into home at the same place ("x"): a file, or a folder's files at their
 // places in it (anything but a regular file or a folder is left out). Run
 // at the start of each turn.
@@ -257,7 +257,7 @@ const MaxGrant = 16 << 20
 func CopyGrants(home, record, userHome string, grants []string) (ret error) {
 	b, err := os.ReadFile(record)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return &Error{Why: "the record of the session's earlier [sandbox] read entries could not be read"}
+		return &Error{Why: "the record of the session's earlier home_files could not be read"}
 	}
 	old := map[string]bool{}
 	for _, rel := range strings.Split(string(b), "\n") {
@@ -265,7 +265,7 @@ func CopyGrants(home, record, userHome string, grants []string) (ret error) {
 			continue
 		}
 		if !underHome(rel) || filepath.Clean(rel) != rel {
-			return &Error{Why: "the record of the session's earlier [sandbox] read entries is not one this runner wrote"}
+			return &Error{Why: "the record of the session's earlier home_files is not one this runner wrote"}
 		}
 		old[rel] = true
 	}
@@ -273,7 +273,7 @@ func CopyGrants(home, record, userHome string, grants []string) (ret error) {
 		return nil
 	}
 	if userHome == "" && len(grants) > 0 {
-		return &Error{Why: "[sandbox] read names paths under ~, and this runner's home folder is not known"}
+		return &Error{Why: "home_files names paths under ~, and this runner's home folder is not known"}
 	}
 	root, err := os.OpenRoot(home)
 	if err != nil {
@@ -293,25 +293,25 @@ func CopyGrants(home, record, userHome string, grants []string) (ret error) {
 		rel, ok := strings.CutPrefix(g, "~/")
 		rel = filepath.Clean(rel)
 		if !ok || !underHome(rel) {
-			return &Error{Why: "a [sandbox] read entry is not a path under ~: " + g}
+			return &Error{Why: "a home_files entry is not a path under ~: " + g}
 		}
 		src, err := filepath.EvalSymlinks(filepath.Join(userHome, rel))
 		if err != nil {
-			return &Error{Why: "a [sandbox] read entry is not on this runner: " + g}
+			return &Error{Why: "a home_files entry is not on this runner: " + g}
 		}
 		info, err := os.Stat(src)
 		if err != nil {
-			return &Error{Why: "a [sandbox] read entry is not on this runner: " + g}
+			return &Error{Why: "a home_files entry is not on this runner: " + g}
 		}
 		add := func(src, rel string, size int64) error {
 			if seen[rel] {
 				return nil
 			}
 			if _, err := root.Lstat(rel); err == nil && !old[rel] {
-				return &Error{Why: "a [sandbox] read entry would replace a file the session has in its home: ~/" + rel}
+				return &Error{Why: "a home_files entry would replace a file the session has in its home: ~/" + rel}
 			}
 			if total += size; total > MaxGrant {
-				return &Error{Why: "the [sandbox] read entries are more than 16 MiB in all"}
+				return &Error{Why: "the home_files are more than 16 MiB in all"}
 			}
 			seen[rel] = true
 			files = append(files, file{src, rel, size})
@@ -323,19 +323,19 @@ func CopyGrants(home, record, userHome string, grants []string) (ret error) {
 		case info.IsDir():
 			err = filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
 				if err != nil {
-					return &Error{Why: "a [sandbox] read entry could not be read: " + g}
+					return &Error{Why: "a home_files entry could not be read: " + g}
 				}
 				if !d.Type().IsRegular() {
 					return nil
 				}
 				i, err := d.Info()
 				if err != nil {
-					return &Error{Why: "a [sandbox] read entry could not be read: " + g}
+					return &Error{Why: "a home_files entry could not be read: " + g}
 				}
 				return add(p, filepath.Join(rel, strings.TrimPrefix(p, src)), i.Size())
 			})
 		default:
-			err = &Error{Why: "a [sandbox] read entry is not a file or a folder: " + g}
+			err = &Error{Why: "a home_files entry is not a file or a folder: " + g}
 		}
 		if err != nil {
 			return err
@@ -344,7 +344,7 @@ func CopyGrants(home, record, userHome string, grants []string) (ret error) {
 
 	for rel := range old {
 		if err := root.Remove(rel); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return &Error{Why: "an earlier [sandbox] read entry could not be removed from the session's home"}
+			return &Error{Why: "an earlier home_files entry could not be removed from the session's home"}
 		}
 	}
 	var wrote []string
@@ -352,16 +352,16 @@ func CopyGrants(home, record, userHome string, grants []string) (ret error) {
 	// the next call removes it.
 	defer func() {
 		if err := os.WriteFile(record, []byte(strings.Join(wrote, "\n")), 0o600); err != nil && ret == nil {
-			ret = &Error{Why: "the record of the session's [sandbox] read entries could not be written"}
+			ret = &Error{Why: "the record of the session's home_files could not be written"}
 		}
 	}()
 	for _, f := range files {
 		if err := root.MkdirAll(filepath.Dir(f.rel), 0o700); err != nil {
-			return &Error{Why: "a [sandbox] read entry could not be copied into the session's home: ~/" + f.rel}
+			return &Error{Why: "a home_files entry could not be copied into the session's home: ~/" + f.rel}
 		}
 		wrote = append(wrote, f.rel)
 		if err := copyFile(root, f.src, f.rel, f.size); err != nil {
-			return &Error{Why: "a [sandbox] read entry could not be copied into the session's home: ~/" + f.rel}
+			return &Error{Why: "a home_files entry could not be copied into the session's home: ~/" + f.rel}
 		}
 	}
 	return nil

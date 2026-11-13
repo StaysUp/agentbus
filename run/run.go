@@ -728,6 +728,10 @@ func (e *Engine) start(t turn) (*Turn, error) {
 			return nil, refuse(http.StatusBadRequest, err.Error())
 		}
 	}
+	if why := e.copyHomeFiles(perm, t.session); why != "" {
+		e.cfg.Logf("run.refused agent=%s reason=home_files", t.harness)
+		return nil, refuse(http.StatusBadRequest, why+", so the turn did not start. Fix it on this runner, or change Home files in the cockpit's Settings.")
+	}
 	// The tool server ([agent_api] tools), for a harness that takes it, unless
 	// the person's own setting for the harness is in the way.
 	tools := h.Info().ToolServer && perm.AgentAPI.Tools != nil && *perm.AgentAPI.Tools
@@ -964,7 +968,8 @@ type wall interface {
 // sandbox builds the wall around one of session's turns in
 // folder (read only when readOnly; with no network beyond its gateway and
 // the API when offline, see wallNet), with read readable too, or says why it cannot (fixed wording).
-// It needs the session's own home: the grants are copied into it first.
+// It needs the session's own home, which holds the home_files already
+// (copyHomeFiles), so they are readable inside the wall.
 // The network goes through the proxy: the hosts in [network] allow when
 // contain is on, every host when it is off.
 func (e *Engine) sandbox(p settings.Policy, session, folder string, readOnly, offline bool, read []string, net netjail.Spec) (*sandbox.Box, string) {
@@ -974,10 +979,6 @@ func (e *Engine) sandbox(p settings.Policy, session, folder string, readOnly, of
 	home := filepath.Join(e.cfg.Homes, session)
 	if info, err := os.Lstat(home); err != nil || !info.IsDir() {
 		return nil, "the sandbox is on in Settings, and this session has no home of its own: it began before homes"
-	}
-	userHome, _ := os.UserHomeDir()
-	if err := sandbox.CopyGrants(home, home+grantsRecord, userHome, p.Sandbox.Read); err != nil {
-		return nil, err.Error()
 	}
 	net = wallNet(p, offline, net)
 	box, err := sandbox.New(sandbox.Spec{Copy: folder, ReadOnly: readOnly, Home: home, Read: append(read, p.ReadFolders...), Net: net})
@@ -1001,8 +1002,34 @@ func wallNet(p settings.Policy, offline bool, net netjail.Spec) netjail.Spec {
 	return net
 }
 
+// copyHomeFiles copies the policy's home_files into session's own home at
+// the start of each turn, sandbox on or off, and takes back any the policy no
+// longer lists (sandbox.CopyGrants), or says why it cannot (fixed wording). A
+// session with no home of its own gets none, since they would land in this
+// user's own home: a service without homes, or a session begun before them.
+func (e *Engine) copyHomeFiles(p settings.Policy, session string) string {
+	if e.cfg.Homes == "" || !SessionShape.MatchString(session) {
+		if len(p.HomeFiles) > 0 {
+			e.cfg.Logf("run.home_files session=%s left_out=no_homes", session)
+		}
+		return ""
+	}
+	home := filepath.Join(e.cfg.Homes, session)
+	if info, err := os.Lstat(home); err != nil || !info.IsDir() {
+		if len(p.HomeFiles) > 0 {
+			e.cfg.Logf("run.home_files session=%s left_out=no_home", session)
+		}
+		return ""
+	}
+	userHome, _ := os.UserHomeDir()
+	if err := sandbox.CopyGrants(home, home+grantsRecord, userHome, p.HomeFiles); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
 // grantsRecord ends the name of the file beside a session's home that
-// records the [sandbox] read entries copied into it (sandbox.CopyGrants).
+// records the home_files copied into it (sandbox.CopyGrants).
 // The session cannot write it: it is not in its home.
 const grantsRecord = ".grants"
 

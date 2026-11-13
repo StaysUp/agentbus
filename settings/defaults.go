@@ -1,6 +1,12 @@
 package settings
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"errors"
+	"strings"
+
+	"github.com/BurntSushi/toml"
+)
 
 // The defaults live in code: one set per build. A settings database holds
 // only what the person changed from them (DB).
@@ -28,22 +34,26 @@ func defaultPolicy() Policy {
 		Isolation:     IsolationAuto,
 		ShareReadOnly: []string{},
 		Subagents:     on(),
+		HomeFiles:     []string{},
 		Limits:        Limits{MaxDepth: num(2), MaxJobsPerTurn: num(10), MaxJobsPerTree: num(30), MaxCostUSDPerTree: &cost},
 		AgentAPI: AgentAPI{Scope: ScopeTree, Read: on(), ListAgents: on(), Start: on(),
 			Review: on(), Cancel: on(), Rename: on(), Apply: off(), Tools: off()},
 		Network: Network{Contain: ContainOff, Allow: []string{}},
-		Sandbox: Sandbox{Mode: SandboxOff, Read: []string{}},
+		Sandbox: Sandbox{Mode: SandboxOff},
 	}
 }
 
 // upgradeStep is one change of a default, or one key retired: the policy
 // key, as a dotted name, and its value before the change. A retired step's
 // key is gone from the policy: the step removes it from the stored policy,
-// and Old is not used.
+// and Old is not used. A retired step with MovedTo names the key that holds
+// its value now: the step writes the stored value there, unless the person
+// set that key, before it removes the old one.
 type upgradeStep struct {
 	Key     string
 	Old     json.RawMessage
 	Retired bool
+	MovedTo string
 }
 
 // upgradeSteps are the changes of a default and the retired keys, oldest
@@ -66,6 +76,9 @@ var upgradeSteps = []upgradeStep{
 	// (his call, 2026-11-12): a turn's token never continues a session;
 	// ask_agent starts a new one, and its result comes back on its own.
 	{Key: "agent_api.continue", Retired: true},
+	// 0.5.2: sandbox.read moves to home_files (his call, 2026-11-13): the
+	// files are copied into every session's home, sandbox on or off.
+	{Key: "sandbox.read", Retired: true, MovedTo: "home_files"},
 }
 
 // retiredKeys are the policy keys an older build had and this one does not:
@@ -84,6 +97,123 @@ func retiredOf(steps []upgradeStep) []string {
 		}
 	}
 	return keys
+}
+
+// movedKey is a key an older build had under another name: From, its old
+// dotted name, and To, its new one.
+type movedKey struct{ From, To string }
+
+// movedKeys are the moved steps' keys. A file or a body that holds the old
+// name is read with its value under the new one, unless it sets the new one
+// too, which then wins.
+var movedKeys = movedOf(upgradeSteps)
+
+func movedOf(steps []upgradeStep) []movedKey {
+	var keys []movedKey
+	for _, st := range steps {
+		if st.Retired && st.MovedTo != "" {
+			keys = append(keys, movedKey{st.Key, st.MovedTo})
+		}
+	}
+	return keys
+}
+
+// lookup is the value at a dotted key of top, a policy as a JSON object.
+func lookup(top map[string]json.RawMessage, key string) (json.RawMessage, bool) {
+	t, sub, nested := strings.Cut(key, ".")
+	raw, ok := top[t]
+	if !ok || !nested {
+		return raw, ok
+	}
+	var inner map[string]json.RawMessage
+	if json.Unmarshal(raw, &inner) != nil {
+		return nil, false
+	}
+	raw, ok = inner[sub]
+	return raw, ok
+}
+
+// place sets a dotted key of top to v.
+func place(top map[string]json.RawMessage, key string, v json.RawMessage) error {
+	t, sub, nested := strings.Cut(key, ".")
+	if !nested {
+		top[t] = v
+		return nil
+	}
+	inner := map[string]json.RawMessage{}
+	if raw, ok := top[t]; ok {
+		if err := json.Unmarshal(raw, &inner); err != nil {
+			return err
+		}
+	}
+	inner[sub] = v
+	out, err := json.Marshal(inner)
+	if err != nil {
+		return err
+	}
+	top[t] = out
+	return nil
+}
+
+// withMoved is the JSON object b with the value of each moved key under its
+// new name, unless b sets the new name too. The old name stays, for
+// withoutRetired to leave out. b itself when it holds none or is not an
+// object (the decoder then says what is wrong).
+func withMoved(b []byte) []byte {
+	var top map[string]json.RawMessage
+	if json.Unmarshal(b, &top) != nil {
+		return b
+	}
+	changed := false
+	for _, m := range movedKeys {
+		v, ok := lookup(top, m.From)
+		if _, set := lookup(top, m.To); !ok || set || string(v) == "null" {
+			continue
+		}
+		if place(top, m.To, v) == nil {
+			changed = true
+		}
+	}
+	if !changed {
+		return b
+	}
+	out, err := json.Marshal(top)
+	if err != nil {
+		return b
+	}
+	return out
+}
+
+// movedOver sets, in p decoded from the permissions.toml text b, each moved
+// key the file holds under its new name, unless the file sets the new name
+// too.
+func movedOver(p *Policy, b []byte, md toml.MetaData) error {
+	var patch map[string]json.RawMessage
+	for _, m := range movedKeys {
+		if !md.IsDefined(strings.Split(m.From, ".")...) || md.IsDefined(strings.Split(m.To, ".")...) {
+			continue
+		}
+		if patch == nil {
+			var all map[string]any
+			if _, err := toml.Decode(string(b), &all); err != nil {
+				return errors.New(wrongTypeTOML)
+			}
+			j, err := json.Marshal(all)
+			if err != nil || json.Unmarshal(j, &patch) != nil {
+				return errors.New(wrongTypeTOML)
+			}
+		}
+		v, _ := lookup(patch, m.From)
+		out := map[string]json.RawMessage{}
+		if err := place(out, m.To, v); err != nil {
+			return errors.New(wrongTypeTOML)
+		}
+		j, err := json.Marshal(out)
+		if err != nil || json.Unmarshal(j, p) != nil {
+			return errors.New(wrongTypeTOML)
+		}
+	}
+	return nil
 }
 
 // policyBefore is the defaults as they were before step n: every step from

@@ -788,3 +788,72 @@ func TestUpgradeImportsFileWithRetiredKey(t *testing.T) {
 		t.Fatalf("changes %+v %v", cs, err)
 	}
 }
+
+// A settings.db that 0.5.1 wrote, with its four steps done and sandbox.read
+// stored, has the value moved to home_files on the first start of 0.5.2:
+// one change whose settings.changed event names both keys, the rest kept.
+// A second start does nothing, and the policy keeps the files.
+func TestUpgradeMovesSandboxRead(t *testing.T) {
+	dir := home(t)
+	storedDB(t, dir, `{"sandbox.mode":"on","sandbox.read":["~/.aws/config"],"forbid":["rm"]}`)
+	d, err := openDB(filepath.Join(dir, DBFile), fixedNow, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.db.Exec(`INSERT INTO meta(key, value) VALUES ('upgrades', '4') ON CONFLICT(key) DO UPDATE SET value = excluded.value`); err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+	d, rep, err := upgrade(dir).Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(rep.Removed, ",") != "sandbox.read" || strings.Join(rep.Moved, ",") != "home_files" || len(rep.Kept) != 0 {
+		t.Fatalf("removed %v moved %v kept %v", rep.Removed, rep.Moved, rep.Kept)
+	}
+	var got []Change
+	d.SetSink(func(c Change) error { got = append(got, c); return nil }, nil)
+	if s := stored(t, d, SettingPermissions); s != `{"forbid":["rm"],"home_files":["~/.aws/config"],"sandbox.mode":"on"}` {
+		t.Fatalf("stored %s", s)
+	}
+	if len(got) != 1 || got[0].Setting != SettingPermissions || strings.Join(got[0].Keys, ",") != "sandbox.read,home_files" {
+		t.Fatalf("events %+v", got)
+	}
+	if p, _, err := d.Policy(); err != nil || strings.Join(p.HomeFiles, ",") != "~/.aws/config" || p.Sandbox.Mode != SandboxOn {
+		t.Fatalf("policy %+v %v", p, err)
+	}
+	d.Close()
+
+	d, rep, err = upgrade(dir).Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if len(rep.Removed) != 0 || len(rep.Moved) != 0 || len(rep.Kept) != 0 {
+		t.Fatalf("second start: removed %v moved %v kept %v", rep.Removed, rep.Moved, rep.Kept)
+	}
+	if cs, _, _ := d.Changes(); len(cs) != 1 {
+		t.Fatalf("second start: %d changes", len(cs))
+	}
+	if p, _, err := d.Policy(); err != nil || strings.Join(p.HomeFiles, ",") != "~/.aws/config" {
+		t.Fatalf("second start: policy %+v %v", p, err)
+	}
+}
+
+// A 0.4 permissions.toml with [sandbox] read imports with the value as
+// home_files, and the stored policy never holds sandbox.read.
+func TestUpgradeImportsFileWithSandboxRead(t *testing.T) {
+	dir := home(t)
+	write(t, filepath.Join(dir, PolicyFile), "[sandbox]\nread = [\"~/.aws/config\"]\n")
+	d, rep, err := upgrade(dir).Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if strings.Join(rep.Imported, ",") != PolicyFile || len(rep.Removed) != 0 || len(rep.Moved) != 0 {
+		t.Fatalf("imported %v removed %v moved %v", rep.Imported, rep.Removed, rep.Moved)
+	}
+	if s := stored(t, d, SettingPermissions); strings.Contains(s, "sandbox.read") || !strings.Contains(s, `"home_files":["~/.aws/config"]`) {
+		t.Fatalf("stored %s", s)
+	}
+}

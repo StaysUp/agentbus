@@ -2,6 +2,7 @@ package run
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,8 +38,8 @@ func sandboxEngine(t *testing.T, policy string, homes bool, script string) (*Eng
 }
 
 // [sandbox] mode = "on" where the wall cannot be built refuses the turn
-// with why, before anything is stored: a runner with no home per session
-// (agentbus up), and a grant that is not there. It names the Settings switch.
+// with why, before anything is stored: a runner with no home per session.
+// It names the Settings switch.
 func TestSandboxRefusedBeforeStart(t *testing.T) {
 	for _, c := range []struct {
 		name, policy string
@@ -46,7 +47,6 @@ func TestSandboxRefusedBeforeStart(t *testing.T) {
 		want         string
 	}{
 		{"no homes", "[sandbox]\nmode = \"on\"\n", false, "no home of their own"},
-		{"missing grant", "[sandbox]\nmode = \"on\"\nread = [\"~/.agentbus-sandbox-test-not-there\"]\n", true, "not on this runner"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			e, st := sandboxEngine(t, c.policy, c.homes, "exit 0")
@@ -64,6 +64,72 @@ func TestSandboxRefusedBeforeStart(t *testing.T) {
 				t.Errorf("%d sessions stored, want none", len(snap.Sessions))
 			}
 		})
+	}
+}
+
+// A home_files entry that is not on this runner refuses the turn before
+// anything is stored, sandbox on or off, and the refusal points to Home
+// files in Settings. The old name, sandbox.read, is read the same way.
+func TestHomeFilesRefusedBeforeStart(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	for _, policy := range []string{
+		"home_files = [\"~/.agentbus-home-files-test-not-there\"]\n",
+		"home_files = [\"~/.agentbus-home-files-test-not-there\"]\n[sandbox]\nmode = \"on\"\n",
+		"[sandbox]\nread = [\"~/.agentbus-home-files-test-not-there\"]\n",
+	} {
+		e, st := sandboxEngine(t, policy, true, "exit 0")
+		_, err := e.Start(Request{Harness: "claude", Folder: t.TempDir(), Prompt: "hi"})
+		var r *Refusal
+		if !errors.As(err, &r) || r.Status != 400 || !strings.Contains(r.Msg, "not on this runner") ||
+			!strings.Contains(r.Msg, "so the turn did not start") || !strings.Contains(r.Msg, "Home files in the cockpit's Settings") {
+			t.Fatalf("%q: Start: %v, want a 400 refusal pointing to Home files", policy, err)
+		}
+		if snap, _ := st.Snapshot(); len(snap.Sessions) != 0 {
+			t.Errorf("%q: %d sessions stored, want none", policy, len(snap.Sessions))
+		}
+	}
+}
+
+// A path outside ~ never reaches a turn: the policy refuses it, under its
+// new name and its old one.
+func TestHomeFilesOutsideHomeRefused(t *testing.T) {
+	for _, policy := range []string{"home_files = [\"/etc/passwd\"]\n", "[sandbox]\nread = [\"/etc/passwd\"]\n", "home_files = [\"~/../x\"]\n"} {
+		if _, err := settings.ParsePolicy([]byte(policy)); err == nil || !strings.Contains(err.Error(), "home_files") {
+			t.Errorf("%q: %v, want a refusal naming home_files", policy, err)
+		}
+	}
+	if err := sandboxCopy(t, []string{"/etc/passwd"}); err == "" || !strings.Contains(err, "not a path under ~") {
+		t.Errorf("copy of /etc/passwd: %q", err)
+	}
+}
+
+// sandboxCopy is copyHomeFiles for a policy with grants, on a session that
+// has a home, even if the policy's own check would have refused them.
+func sandboxCopy(t *testing.T, grants []string) string {
+	t.Helper()
+	e := &Engine{cfg: Config{Homes: t.TempDir(), Logf: func(string, ...any) {}}}
+	if err := os.MkdirAll(filepath.Join(e.cfg.Homes, "s1"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p := settings.DefaultPolicy()
+	p.HomeFiles = grants
+	return e.copyHomeFiles(p, "s1")
+}
+
+// A session with no home of its own gets no home_files, and is not refused:
+// they would land in this user's own home.
+func TestHomeFilesNoHome(t *testing.T) {
+	var logged []string
+	logf := func(f string, a ...any) { logged = append(logged, f) }
+	p := settings.DefaultPolicy()
+	p.HomeFiles = []string{"~/.agentbus-home-files-test-not-there"}
+	for _, e := range []*Engine{{cfg: Config{Logf: logf}}, {cfg: Config{Homes: t.TempDir(), Logf: logf}}} {
+		if why := e.copyHomeFiles(p, "s1"); why != "" {
+			t.Errorf("no home: %q", why)
+		}
+	}
+	if len(logged) != 2 {
+		t.Errorf("logged %q, want two left_out lines", logged)
 	}
 }
 

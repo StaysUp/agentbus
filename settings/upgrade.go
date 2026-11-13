@@ -72,6 +72,7 @@ type Report struct {
 	Done     bool     // false when the import was done already
 	Kept     []string // the policy keys whose old default it wrote out
 	Removed  []string // the retired policy keys it removed from the stored policy
+	Moved    []string // the policy keys it wrote a retired key's value into
 }
 
 // CopyName is the copy of the data folder dir made at t: beside it, its name
@@ -146,7 +147,7 @@ func (u Upgrade) Run() (*DB, Report, error) {
 		db.Close()
 		return nil, rep, err
 	}
-	if rep.Kept, rep.Removed, err = db.writeSteps(); err != nil {
+	if rep.Kept, rep.Removed, rep.Moved, err = db.writeSteps(); err != nil {
 		db.Close()
 		return nil, rep, err
 	}
@@ -189,15 +190,17 @@ func setUpgradesDone(tx *sql.Tx) error {
 // A changed default's old value goes into the person's policy, unless they
 // set that key themselves: so an upgrade never changes what a turn may do. A
 // retired key is removed from the stored policy, where a save before this
-// build left it. The write is one change, with its settings.changed event
-// naming the keys (never a value), in the transaction that marks the steps
-// done. kept and removed are the keys it wrote and removed; none when
+// build left it; a moved one's value is written under its new name first,
+// unless the person set that key. The write is one change, with its
+// settings.changed event naming the keys (never a value), in the transaction
+// that marks the steps done. kept, removed and moved are the keys it wrote
+// an old default into, removed, and wrote a moved value into; none when
 // nothing was waiting.
-func (d *DB) writeSteps() (kept, removed []string, err error) {
+func (d *DB) writeSteps() (kept, removed, moved []string, err error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	fail := func(err error) ([]string, []string, error) {
-		return nil, nil, fmt.Errorf("settings: the upgrade steps could not be written: %w", err)
+	fail := func(err error) ([]string, []string, []string, error) {
+		return nil, nil, nil, fmt.Errorf("settings: the upgrade steps could not be written: %w", err)
 	}
 	tx, err := d.db.Begin()
 	if err != nil {
@@ -213,7 +216,7 @@ func (d *DB) writeSteps() (kept, removed []string, err error) {
 		return fail(err)
 	}
 	if n == len(upgradeSteps) && legacy == "" {
-		return nil, nil, nil
+		return nil, nil, nil, nil
 	}
 	s, err := readState(tx)
 	if err != nil {
@@ -231,6 +234,10 @@ func (d *DB) writeSteps() (kept, removed []string, err error) {
 			_, set := o[st.Key]
 			switch {
 			case st.Retired && set:
+				if _, taken := o[st.MovedTo]; st.MovedTo != "" && !taken {
+					o[st.MovedTo] = o[st.Key]
+					moved = append(moved, st.MovedTo)
+				}
 				delete(o, st.Key)
 				if i := slices.Index(kept, st.Key); i >= 0 {
 					// Written by an earlier step of this start: never stored.
@@ -243,12 +250,12 @@ func (d *DB) writeSteps() (kept, removed []string, err error) {
 				kept = append(kept, st.Key)
 			}
 		}
-		if keys := append(slices.Clone(kept), removed...); len(keys) > 0 {
+		if keys := append(append(slices.Clone(kept), removed...), moved...); len(keys) > 0 {
 			if err := putSetting(tx, SettingPermissions, o, d.now()); err != nil {
 				return fail(err)
 			}
 			if err := addChanges(tx, s.version, []Change{{Setting: SettingPermissions, Keys: keys}}, d.now()); err != nil {
-				return nil, nil, err
+				return nil, nil, nil, err
 			}
 		}
 	}
@@ -258,7 +265,7 @@ func (d *DB) writeSteps() (kept, removed []string, err error) {
 	if err := tx.Commit(); err != nil {
 		return fail(err)
 	}
-	return kept, removed, nil
+	return kept, removed, moved, nil
 }
 
 // lockDir takes the lock at path, refusing when another service holds it.
