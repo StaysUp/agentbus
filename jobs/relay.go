@@ -50,8 +50,8 @@ const RelayPrefix = "/relay/"
 // Harness names the one harness whose subscription a call there gets.
 type Upstream struct {
 	URL     *url.URL
-	Access  string // subscription or openrouter
-	Harness string // for a subscription: the harness whose vendor this is
+	Access  string // subscription, openrouter or api
+	Harness string // for a subscription or api: the harness whose vendor this is
 	// Under, when set, is how every vendor path relayed here starts, such
 	// as "v1internal:" for agy's Code Assist methods. Any other path gets
 	// no credential.
@@ -139,8 +139,7 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusNotFound, noRelay)
 		return
 	}
-	tok, _ := bearer(r)
-	j, _, ok := s.turnJob(tok)
+	j, _, ok := s.turnJob(callToken(r))
 	if !ok {
 		fail(w, http.StatusUnauthorized, noTurn)
 		return
@@ -155,6 +154,16 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request) {
 		rl.Header, rl.Refuse = s.turnCredential(j, up)
 	}
 	g.ServeRelayed(w, r, rl)
+}
+
+// callToken is the turn token a model call carries as its credential: as
+// "Authorization: Bearer", or, for agy on the Gemini API, which sends its
+// key only there, in X-Goog-Api-Key (harness/agy.go WireAPI).
+func callToken(r *http.Request) string {
+	if tok, ok := bearer(r); ok {
+		return tok
+	}
+	return r.Header.Get("X-Goog-Api-Key")
 }
 
 // Why the relay, or a gateway of agentbus up, adds no credential to a call.
@@ -176,8 +185,16 @@ func (s *Server) turnCredential(j queue.Job, up Upstream) (func(http.Header), *g
 		return nil, refusal(status, why)
 	}
 	return func(h http.Header) {
+		// The agent's placeholder is in one of these: it goes, whichever
+		// header the real credential takes.
 		h.Del("X-Api-Key")
-		h.Set("Authorization", "Bearer "+cred.Token)
+		h.Del("X-Goog-Api-Key")
+		h.Del("Authorization")
+		if cred.Header == "" {
+			h.Set("Authorization", "Bearer "+cred.Token)
+		} else {
+			h.Set(cred.Header, cred.Token)
+		}
 		for k, v := range cred.Headers {
 			h.Set(k, v)
 		}
@@ -201,8 +218,7 @@ func (s *Server) Local(name string) gateway.Credential {
 		// another, or no running turn's token, is refused before the
 		// gateway records anything.
 		Turn: func(r *http.Request, session, turn string) *gateway.Refusal {
-			tok, _ := bearer(r)
-			j, _, found := s.turnJob(tok)
+			j, _, found := s.turnJob(callToken(r))
 			switch {
 			case !found:
 				return refusal(http.StatusUnauthorized, noTurn)
@@ -215,8 +231,7 @@ func (s *Server) Local(name string) gateway.Credential {
 			if !ok || !strings.HasPrefix(strings.TrimPrefix(r.URL.Path, "/"), up.Under) {
 				return nil, refusal(http.StatusNotFound, noRelay)
 			}
-			tok, _ := bearer(r)
-			j, _, found := s.turnJob(tok)
+			j, _, found := s.turnJob(callToken(r))
 			if !found {
 				// It ended since Turn let the call through.
 				return nil, refusal(http.StatusUnauthorized, noTurn)
@@ -241,9 +256,14 @@ func (s *Server) credential(j queue.Job, up Upstream) (credentials.Cred, int, st
 	if access != up.Access {
 		return none, http.StatusForbidden, "this turn's agent reaches its model by " + access + ", so control adds no credential to a call on this path"
 	}
-	if access == credentials.AccessSubscription {
+	// A subscription, or a vendor's API key, goes to its own vendor only.
+	if access == credentials.AccessSubscription || access == credentials.AccessAPI {
 		if sp.Harness != up.Harness {
-			return none, http.StatusForbidden, "this turn's agent runs " + sp.Harness + ", so control adds its subscription to no call on this path"
+			what := "subscription"
+			if access == credentials.AccessAPI {
+				what = "API key"
+			}
+			return none, http.StatusForbidden, "this turn's agent runs " + sp.Harness + ", so control adds its " + what + " to no call on this path"
 		}
 	}
 	if s.cfg.Credentials == nil {

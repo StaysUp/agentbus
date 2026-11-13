@@ -1,16 +1,19 @@
 package credentials
 
-// API keys the person sets in Settings, such as their OpenRouter key: pasted
-// once, kept in the subscriptions' folder beside the subscriptions' tokens,
-// in a file of its own readable by its owner only, and written the same way
-// (write). A key set there wins over the variable an agent names (key_env),
+// API keys the person sets in Settings, such as their OpenRouter key and
+// their Anthropic and OpenAI API keys: pasted once, kept in the
+// subscriptions' folder beside the subscriptions' tokens, in a file of its
+// own readable by its owner only, and written the same way (write). An
+// OpenRouter key set there wins over the variable an agent names (key_env),
 // which still works for agents saved before keys could be set in Settings.
+// A vendor's API key is only ever the one set there (APIKeys).
 
 import (
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -27,20 +30,34 @@ type keptKey struct {
 	SetAt time.Time `json:"set_at"`
 }
 
-// MaxKeyLen bounds a key's length. OpenRouter's are about 73 characters.
+// The keys a vendor's API takes, by their names in Settings: each is a
+// harness's Info.APIKey.Name.
+const (
+	KeyAnthropic = "anthropic"
+	KeyOpenAI    = "openai"
+	KeyGemini    = "gemini"
+)
+
+// KeyNames are every key that can be set in Settings. No other name has a
+// file.
+var KeyNames = []string{AccessOpenRouter, KeyAnthropic, KeyOpenAI, KeyGemini}
+
+// MaxKeyLen bounds a key's length. OpenRouter's are about 73 characters,
+// Anthropic's about 108, OpenAI's up to about 170, Gemini's 39.
 const MaxKeyLen = 512
 
 // ErrBadKey is a key that cannot be one: empty, too long, or holding a space
 // or a control character. Its text never quotes the key.
 var ErrBadKey = errors.New("the key must be one line of at most 512 characters with no spaces")
 
-// KeyFile is access's key file. Its name holds a dot, which no harness's
-// name does (harnessShape), so it is never a subscription's file.
-func (s *Subscriptions) KeyFile(access string) (string, error) {
-	if access != AccessOpenRouter {
-		return "", errors.New("credentials: no key is kept for this access")
+// KeyFile is the file of the key named name (KeyNames). Its name holds a
+// dot, which no harness's name does (harnessShape), so it is never a
+// subscription's file.
+func (s *Subscriptions) KeyFile(name string) (string, error) {
+	if !slices.Contains(KeyNames, name) {
+		return "", errors.New("credentials: no key is kept by this name")
 	}
-	return filepath.Join(s.Dir, access+".key.json"), nil
+	return filepath.Join(s.Dir, name+".key.json"), nil
 }
 
 // CleanKey is key as pasted, with the spaces and line ends around it
@@ -179,4 +196,42 @@ func (k KeyFirst) Ready(n Need) string {
 func (k KeyFirst) KeySet(n Need) bool {
 	_, err := k.Credential(n)
 	return err == nil
+}
+
+// VendorKey is the key a harness's access "api" takes: its name in Settings
+// (KeyNames), its name for the person, and the header it goes in (Cred).
+type VendorKey struct {
+	Name, Label, Header string
+}
+
+// APIKeys gives an agent on access "api" its vendor's key, set in Settings.
+// Of is each harness's key, by the harness's name. There is no variable to
+// fall back on: the key is only ever the one set in Settings.
+type APIKeys struct {
+	Kept *Subscriptions
+	Of   map[string]VendorKey
+}
+
+// Credential is the key of n.Harness's vendor set in Settings.
+func (k APIKeys) Credential(n Need) (Cred, error) {
+	v, ok := k.Of[n.Harness]
+	if !ok || k.Kept == nil {
+		return Cred{}, &Missing{Why: "control adds no API key to " + n.Harness + "'s calls"}
+	}
+	kk, err := k.Kept.readKey(v.Name)
+	switch {
+	case errors.Is(err, ErrNotConnected):
+		return Cred{}, &Missing{Why: "set your " + v.Label + " in Settings"}
+	case err != nil:
+		return Cred{}, &Missing{Why: "the " + v.Label + " kept on control cannot be read; set it again in Settings"}
+	}
+	return Cred{Token: kk.Key, Header: v.Header}, nil
+}
+
+// Ready: as Credential, which reads only files.
+func (k APIKeys) Ready(n Need) string {
+	if _, err := k.Credential(n); err != nil {
+		return err.Error()
+	}
+	return ""
 }

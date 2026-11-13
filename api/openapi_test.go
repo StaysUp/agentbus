@@ -238,11 +238,12 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 	// /api/v0/subscriptions/{id}/connect, which stops a login, and PUT and
 	// DELETE /api/v0/subscriptions/openrouter/key, which set and remove the
 	// OpenRouter key, and 44 with PATCH /api/v0/settings/permissions, which
-	// changes only the keys it is sent, and 45 with GET
-	// /api/v0/harnesses/{id}/models, which lists a harness's models, and 46
-	// with POST /api/v0/signin, the cockpit's one-time sign-in link.
-	if len(ops) != 46 {
-		t.Errorf("%d endpoints, want 46: %v", len(ops), ops)
+	// changes only the keys it is sent, 45 with GET
+	// /api/v0/harnesses/{id}/models, which lists a harness's models, 46
+	// with POST /api/v0/signin, the cockpit's one-time sign-in link, and 52
+	// with PUT and DELETE of the anthropic, openai and gemini API keys.
+	if len(ops) != 52 {
+		t.Errorf("%d endpoints, want 52: %v", len(ops), ops)
 	}
 	for _, want := range []string{"POST /api/v0/turns", "GET /api/v0/turns", "GET /api/v0/turns/{id}", "POST /api/v0/turns/{id}/stop",
 		"GET /api/v0/turns/{id}/diff", "POST /api/v0/turns/{id}/apply", "POST /api/v0/turns/{id}/review",

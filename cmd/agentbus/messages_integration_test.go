@@ -182,7 +182,7 @@ func TestHarnessesListsFoundVersionsAndSignIn(t *testing.T) {
 	}
 	cl, cx, ag, oc := got.Harnesses[0], got.Harnesses[1], got.Harnesses[2], got.Harnesses[3]
 	// agy has no sign-in status command: signed_in is left out.
-	if ag.Name != "agy" || ag.Found || ag.SignedIn != nil || len(ag.Access) != 3 || ag.Access[0].Disabled || !ag.Access[1].Disabled {
+	if ag.Name != "agy" || ag.Found || ag.SignedIn != nil || len(ag.Access) != 3 || ag.Access[0].Disabled || !ag.Access[1].Disabled || ag.Access[2].Disabled {
 		t.Errorf("agy: %+v", ag)
 	}
 	if cl.Name != "claude" || !cl.Found || cl.Version != "2.1.318" || cl.SignedIn == nil || !*cl.SignedIn {
@@ -195,7 +195,7 @@ func TestHarnessesListsFoundVersionsAndSignIn(t *testing.T) {
 		t.Errorf("opencode: %+v", oc)
 	}
 	if len(cl.Access) != 3 || cl.Access[0].Kind != "subscription" || cl.Access[1].Kind != "openrouter" ||
-		cl.Access[2].Kind != "api" || !cl.Access[2].Disabled || cl.Access[0].Disabled || cl.Access[1].Disabled {
+		cl.Access[2].Kind != "api" || cl.Access[2].Disabled || cl.Access[0].Disabled || cl.Access[1].Disabled {
 		t.Errorf("claude access: %+v", cl.Access)
 	}
 	if strings.Contains(raw, self) || strings.Contains(raw, "example.com") {

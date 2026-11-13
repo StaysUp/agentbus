@@ -190,7 +190,10 @@ type config struct {
 	cloudCode *url.URL
 	// openrouter is OpenRouter's API; nil means openrouter above.
 	openrouter *url.URL
-	logf       func(string, ...any)
+	// apiKeys are the vendor APIs of access "api", by harness; a harness
+	// absent here uses its own (harness.APIKey.URL).
+	apiKeys map[string]*url.URL
+	logf    func(string, ...any)
 	// self is this program's path, which agentbus-api links to
 	// (apiLink). Empty tells turns to use curl.
 	self string
@@ -443,10 +446,19 @@ func start(c config) (*service, error) {
 			// go to the openai adapter, any other to the anthropic one.
 			relayOpenRouter: relayed(jobs.Upstream{URL: orUp, Access: credentials.AccessOpenRouter}, openai.Adapter{}, anthropic.Adapter{}),
 		}
+		// Each vendor's API, for agents on its API key set in Settings
+		// (harness.Info.APIKey): their calls go to that vendor only.
+		apiKeys := map[string]credentials.VendorKey{}
+		for _, h := range harness.All() {
+			if k := h.Info().APIKey; k != nil {
+				relay[relayAPIKey(h.Info().Name)] = relayed(jobs.Upstream{URL: c.apiKeyURL(h.Info()), Access: credentials.AccessAPI, Harness: h.Info().Name}, formatAdapter(k.Format))
+				apiKeys[h.Info().Name] = credentials.VendorKey{Name: k.Name, Label: k.Label, Header: k.Header}
+			}
+		}
 		// An OpenRouter key set in Settings, kept with the subscriptions,
 		// wins over the variable an agent names.
 		creds := credentials.Plug{credentials.AccessOpenRouter: credentials.KeyFirst{Kept: subs, Env: credentials.Env{Getenv: c.getenvOr()}},
-			credentials.AccessSubscription: subs}
+			credentials.AccessSubscription: subs, credentials.AccessAPI: credentials.APIKeys{Kept: subs, Of: apiKeys}}
 		js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollToken, Heartbeat: c.heartbeat, Agents: saved, Settings: cfgStore,
 			Folders: issuer, Blobs: bs, Sweeper: blobSweep, Record: st, Relay: relay, Credentials: creds})
 		if err != nil {
@@ -645,6 +657,33 @@ func start(c config) (*service, error) {
 	// Each gateway's relay name: where control finds its calls' credential.
 	relayOf := map[*gateway.Gateway]string{anth: relayAnthropic, oai: relayChatGPT, gem: relayCloudCode,
 		orAnth: relayOpenRouter, orOAI: relayOpenRouter}
+	// An agent on its vendor's API key, under /key/<harness> of its base
+	// URL: to the vendor's API, or, on a runner that holds no secret, to
+	// control's relay, which adds the key set in Settings.
+	keyed := map[string]http.Handler{}
+	for _, h := range harness.All() {
+		k := h.Info().APIKey
+		if k == nil {
+			continue
+		}
+		u := c.apiKeyURL(h.Info())
+		if c.mode == modeRunner && c.noSecrets() {
+			u = mustParse(strings.TrimSuffix(c.server, "/") + jobs.RelayPrefix + relayAPIKey(h.Info().Name))
+		}
+		g := gateway.New(u, formatAdapter(k.Format), sink)
+		g.SetPrefix(apiKeyPrefix(h.Info().Name))
+		gws = append(gws, g)
+		relayOf[g] = relayAPIKey(h.Info().Name)
+		keyed[apiKeyPrefix(h.Info().Name)] = g
+		if claudeReplay != nil {
+			switch k.Format {
+			case harness.FormatAnthropic:
+				g.SetRewriter(claudeReplay)
+			case harness.FormatOpenAI:
+				g.SetRewriter(codexReplay)
+			}
+		}
+	}
 	// A turn's session.closed waits for the gateway to write all of the
 	// turn's calls: their events and replies are written off the reply's
 	// path and can land after the child has exited.
@@ -694,7 +733,7 @@ func start(c config) (*service, error) {
 	if q != nil {
 		s.subs = subs
 	}
-	routed := vendors{anthropic: anth, openai: oai, openrouterAnth: orAnth, openrouterResps: orOAI, gemini: handler(gem), relay: relayHandler}
+	routed := vendors{anthropic: anth, openai: oai, openrouterAnth: orAnth, openrouterResps: orOAI, gemini: handler(gem), keyed: keyed, relay: relayHandler}
 	if q != nil {
 		// up and server: the cockpit at /. A runner's own service is for
 		// its agents only.
@@ -948,8 +987,15 @@ const (
 
 // modelSources are where control reads the lists of models
 // (api.ModelSources): OpenRouter's list-models call with the OpenRouter key,
-// and agy's own listing, run unmodified in its home on control.
+// each vendor's list-models call with its API key set in Settings, and agy's
+// own listing, run unmodified in its home on control.
 func modelSources(c config, subs *credentials.Subscriptions) *api.ModelSources {
+	apiBase := map[string]string{}
+	for _, h := range harness.All() {
+		if k := h.Info().APIKey; k != nil {
+			apiBase[k.Name] = c.apiKeyURL(h.Info()).String()
+		}
+	}
 	or := c.openrouter
 	if or == nil {
 		or = mustParse(openrouter)
@@ -963,7 +1009,42 @@ func modelSources(c config, subs *credentials.Subscriptions) *api.ModelSources {
 				return k
 			}
 			return c.getenvOr()(agents.DefaultKeyEnv)
+		},
+		APIBase: apiBase,
+		// A vendor's API key: only ever the one set in Settings.
+		APIKey: func(name string) string {
+			k, _ := subs.Key(name)
+			return k
 		}}
+}
+
+// relayAPIKey is the relay's name for the vendor API of harness's access
+// "api".
+func relayAPIKey(harness string) string { return "key-" + harness }
+
+// apiKeyPrefix is the path under a turn's base URL that the service forwards
+// to the vendor API of harness's access "api" (harness.Info.APIKey).
+func apiKeyPrefix(harness string) string { return "/key/" + harness }
+
+// apiKeyURL is where the calls of info's access "api" go: c.apiKeys's entry
+// for it, or the vendor's own API.
+func (c config) apiKeyURL(info harness.Info) *url.URL {
+	if u := c.apiKeys[info.Name]; u != nil {
+		return u
+	}
+	return mustParse(info.APIKey.URL)
+}
+
+// formatAdapter is the adapter that reads calls of an API format.
+func formatAdapter(format string) adapter.Adapter {
+	switch format {
+	case harness.FormatOpenAI:
+		return openai.Adapter{}
+	case harness.FormatGemini:
+		return gemini.Adapter{}
+	default:
+		return anthropic.Adapter{}
+	}
 }
 
 // cloudCodeOr is c.cloudCode, or agy's own Code Assist host.
@@ -1051,8 +1132,8 @@ func subscriptionStore(home string) *credentials.Subscriptions {
 }
 
 // subscriptionsProtected are the files of subs that no turn may edit: each
-// harness's sign-in, the home of a harness that keeps its own, and the
-// OpenRouter key set in Settings.
+// harness's sign-in, the home of a harness that keeps its own, and every key
+// set in Settings.
 func subscriptionsProtected(subs *credentials.Subscriptions) []string {
 	var out []string
 	for _, h := range harness.All() {
@@ -1065,8 +1146,10 @@ func subscriptionsProtected(subs *credentials.Subscriptions) []string {
 			}
 		}
 	}
-	if p, err := subs.KeyFile(credentials.AccessOpenRouter); err == nil {
-		out = append(out, p)
+	for _, name := range credentials.KeyNames {
+		if p, err := subs.KeyFile(name); err == nil {
+			out = append(out, p)
+		}
 	}
 	return out
 }
@@ -1169,6 +1252,9 @@ type vendors struct {
 	// requests no vendor claims that it Serves (package cockpit). Nil, as
 	// in a runner: / sends the caller to the docs.
 	cockpit site
+	// keyed are the gateways of agents on their vendor's API key, by their
+	// prefix (apiKeyPrefix).
+	keyed map[string]http.Handler
 }
 
 func route(a *api.API, v vendors, open bool) http.Handler {
@@ -1205,6 +1291,8 @@ func route(a *api.API, v vendors, open bool) http.Handler {
 			gw = v.gemini
 		case under(rest, "/v1"):
 			gw = v.anthropic
+		case keyedGateway(v.keyed, rest) != nil:
+			gw = keyedGateway(v.keyed, rest)
 		case under(rest, openRouterPrefix+"/v1/responses"):
 			gw = v.openrouterResps
 		case under(rest, openRouterPrefix+"/v1"):
@@ -1256,6 +1344,16 @@ func boundPublic(w http.ResponseWriter, r *http.Request, h http.Handler) {
 	_ = rc.SetWriteDeadline(until)
 	w.Header().Set("Connection", "close")
 	h.ServeHTTP(w, r)
+}
+
+// keyedGateway is the gateway of keyed whose prefix path is under, or nil.
+func keyedGateway(keyed map[string]http.Handler, path string) http.Handler {
+	for p, g := range keyed {
+		if under(path, p) {
+			return g
+		}
+	}
+	return nil
 }
 
 // under reports whether path is prefix or below it, by whole segments, so

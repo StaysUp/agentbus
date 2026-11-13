@@ -132,7 +132,18 @@ func fakeAgent() {
 	// With AGENTBUS_FAKE_AGY_BODY, one model call as agy makes it: to
 	// CLOUD_CODE_URL, with the access token of the sign-in file in its HOME
 	// as the bearer.
-	if b := os.Getenv("AGENTBUS_FAKE_AGY_BODY"); b != "" {
+	// On a Gemini API key it calls GOOGLE_GEMINI_BASE_URL instead, with
+	// GEMINI_API_KEY in X-Goog-Api-Key and no Authorization, as agy 1.5.8
+	// does (harness/agy.go WireAPI).
+	if b := os.Getenv("AGENTBUS_FAKE_AGY_BODY"); b != "" && os.Getenv("GEMINI_API_KEY") != "" {
+		req, _ := http.NewRequest("POST", os.Getenv("GOOGLE_GEMINI_BASE_URL")+"/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent?alt=sse", strings.NewReader(b))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Goog-Api-Key", os.Getenv("GEMINI_API_KEY"))
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+	} else if b != "" {
 		var f struct {
 			Token struct {
 				Access string `json:"access_token"`
@@ -154,6 +165,37 @@ func fakeAgent() {
 	// in its CODEX_HOME, as codex keeps the models its sign-in may use.
 	if c := os.Getenv("AGENTBUS_FAKE_MODELS_CACHE"); c != "" && os.Getenv("CODEX_HOME") != "" {
 		os.WriteFile(filepath.Join(os.Getenv("CODEX_HOME"), "models_cache.json"), []byte(c), 0o600)
+	}
+	// With AGENTBUS_FAKE_OTHER ("METHOD /path"), one call that is no model
+	// call, on the base the agent was given, carrying its credential as that
+	// agent does: a turn trying its API key on another of the vendor's
+	// endpoints.
+	if o := os.Getenv("AGENTBUS_FAKE_OTHER"); o != "" {
+		method, path, _ := strings.Cut(o, " ")
+		var base string
+		hdr := http.Header{}
+		switch {
+		case os.Getenv("GEMINI_API_KEY") != "":
+			base = os.Getenv("GOOGLE_GEMINI_BASE_URL")
+			hdr.Set("X-Goog-Api-Key", os.Getenv("GEMINI_API_KEY"))
+		case os.Getenv("AGENTBUS_OPENAI_TOKEN") != "":
+			for _, a := range os.Args[1:] {
+				if _, v, ok := strings.Cut(a, `.base_url="`); ok && strings.HasPrefix(a, "model_providers.") {
+					base = strings.TrimSuffix(strings.TrimSuffix(v, `"`), "/v1")
+				}
+			}
+			hdr.Set("Authorization", "Bearer "+os.Getenv("AGENTBUS_OPENAI_TOKEN"))
+		default:
+			base = os.Getenv("ANTHROPIC_BASE_URL")
+			hdr.Set("Authorization", "Bearer "+os.Getenv("ANTHROPIC_AUTH_TOKEN"))
+		}
+		req, _ := http.NewRequest(method, base+path, nil)
+		req.Header = hdr
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			fmt.Printf("other=%d\n", resp.StatusCode)
+		}
 	}
 	// With AGENTBUS_FAKE_ASK, a turn whose prompt is "ask someone" asks
 	// another agent through the API, with its own token, as agentbus-api

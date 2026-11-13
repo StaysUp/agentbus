@@ -10,8 +10,10 @@ import (
 
 	"github.com/staysup/agentbus/adapter/anthropic"
 	"github.com/staysup/agentbus/body"
+	"github.com/staysup/agentbus/credentials"
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/gateway"
+	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -65,4 +67,47 @@ func TestExchangeOfRunner(t *testing.T) {
 			t.Errorf("%q: %q, want %q", x, got, want)
 		}
 	}
+}
+
+// A vendor's API key goes to its own harness's calls only, and in the header
+// that vendor reads: the agent's placeholder, in whichever header, goes.
+func TestAPIKeyToItsOwnVendor(t *testing.T) {
+	src := credentials.Plug{credentials.AccessAPI: fixedKey{"claude": {Token: "fake-anth", Header: "X-Api-Key"}, "codex": {Token: "fake-oai"}}}
+	s := &Server{cfg: Config{Credentials: src}}
+	claudeJob := queue.Job{Spec: queue.Spec{Harness: "claude", Access: "api"}}
+	anth := Upstream{Access: credentials.AccessAPI, Harness: "claude"}
+	oai := Upstream{Access: credentials.AccessAPI, Harness: "codex"}
+	set, refused := s.turnCredential(claudeJob, anth)
+	if refused != nil {
+		t.Fatalf("refused: %s", refused.Body)
+	}
+	h := http.Header{"Authorization": {"Bearer abr_placeholder"}, "X-Goog-Api-Key": {"abr_placeholder"}}
+	set(h)
+	if h.Get("X-Api-Key") != "fake-anth" || h.Get("Authorization") != "" || h.Get("X-Goog-Api-Key") != "" {
+		t.Fatalf("headers: %v", h)
+	}
+	if _, refused := s.turnCredential(claudeJob, oai); refused == nil || refused.Status != http.StatusForbidden {
+		t.Fatal("claude's key went to OpenAI's path")
+	}
+	// An API-key agent's call on a subscription's path gets nothing either.
+	if _, refused := s.turnCredential(claudeJob, Upstream{Access: credentials.AccessSubscription, Harness: "claude"}); refused == nil {
+		t.Fatal("an API-key agent got the subscription")
+	}
+	set, _ = s.turnCredential(queue.Job{Spec: queue.Spec{Harness: "codex", Access: "api"}}, oai)
+	h = http.Header{"Authorization": {"Bearer abr_placeholder"}}
+	set(h)
+	if h.Get("Authorization") != "Bearer fake-oai" {
+		t.Fatalf("codex headers: %v", h)
+	}
+}
+
+// fixedKey gives each harness its key.
+type fixedKey map[string]credentials.Cred
+
+func (f fixedKey) Credential(n credentials.Need) (credentials.Cred, error) {
+	c, ok := f[n.Harness]
+	if !ok {
+		return credentials.Cred{}, &credentials.Missing{Why: "none"}
+	}
+	return c, nil
 }

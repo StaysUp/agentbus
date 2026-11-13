@@ -22,10 +22,10 @@ type SavedAgent struct {
 	ID      string    `json:"id" doc:"The agent's id. A turn names it in agent."`
 	Name    string    `json:"name" doc:"What the person calls it, such as Claude Code · sonnet. Unique, ignoring case."`
 	Harness string    `json:"harness" doc:"The program that runs the agent's loop: claude or codex."`
-	Access  string    `json:"access" doc:"How the harness reaches its model: subscription (the person's, connected on control) or openrouter (the key set in Settings, or else one from an environment variable)."`
+	Access  string    `json:"access" doc:"How the harness reaches its model: subscription (the person's, connected on control), openrouter (the key set in Settings, or else one from an environment variable) or api (the vendor's API key set in Settings)."`
 	Model   string    `json:"model,omitempty" doc:"The model, passed as --model. Absent: the harness's own default."`
 	KeyEnv  string    `json:"key_env,omitempty" doc:"For openrouter: the name of the environment variable, where control runs, that holds the key while no key is set in Settings. Never the key."`
-	KeySet  *bool     `json:"key_set,omitempty" doc:"For openrouter: whether a key is there for it: set in Settings, or in key_env in this service's environment. Its value is never sent."`
+	KeySet  *bool     `json:"key_set,omitempty" doc:"For openrouter: whether a key is there for it: set in Settings, or in key_env in this service's environment. For api: whether its vendor's key is set in Settings. Its value is never sent."`
 	Created time.Time `json:"created"`
 	Updated time.Time `json:"updated"`
 }
@@ -43,8 +43,12 @@ const (
 func (a *API) saved(ag agents.Agent) SavedAgent {
 	s := SavedAgent{ID: ag.ID, Name: ag.Name, Harness: ag.Harness, Access: ag.Access, Model: ag.Model,
 		KeyEnv: ag.KeyEnv, Created: ag.Created, Updated: ag.Updated}
-	if ag.Access == agents.OpenRouter {
+	switch ag.Access {
+	case agents.OpenRouter:
 		set := a.keySet(ag.KeyEnv)
+		s.KeySet = &set
+	case agents.API:
+		set := a.apiKeySet(ag.Harness)
 		s.KeySet = &set
 	}
 	return s

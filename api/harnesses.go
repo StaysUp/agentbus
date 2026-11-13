@@ -40,11 +40,12 @@ type Harness struct {
 type AccessOption struct {
 	Kind     string   `json:"kind" doc:"subscription, openrouter or api."`
 	Label    string   `json:"label" doc:"Its name for a screen."`
-	Disabled bool     `json:"disabled,omitempty" doc:"True when an agent cannot use it yet, as for api."`
+	Disabled bool     `json:"disabled,omitempty" doc:"True when an agent cannot use it yet, as openrouter for agy."`
 	Models   []string `json:"models" doc:"Models to offer. A new subscription agent names none, so the harness picks its own; an OpenRouter one starts with the first. An agent may name another one when any_model is true."`
 	AnyModel bool     `json:"any_model,omitempty" doc:"True when any model name is accepted: an OpenRouter model id, or for a subscription any name its account may offer. A model the vendor refuses fails the turn with the vendor's own words."`
 	KeyEnv   string   `json:"key_env,omitempty" doc:"For openrouter: the variable a new agent reads its key from unless it names another."`
-	KeySet   *bool    `json:"key_set,omitempty" doc:"For openrouter: whether a key is there for it: set in Settings, or in key_env in this service's environment. Its value is never sent."`
+	KeySet   *bool    `json:"key_set,omitempty" doc:"For openrouter: whether a key is there for it: set in Settings, or in key_env in this service's environment. For api: whether the vendor's key (key_name) is set in Settings. Its value is never sent."`
+	KeyName  string   `json:"key_name,omitempty" doc:"For api: the key it uses, as Settings names it (PUT /api/v0/subscriptions/{key_name}/key): anthropic, openai or gemini."`
 }
 
 // RunnerHarness is one runner's report of one harness.
@@ -90,8 +91,12 @@ func (a *API) listHarnesses(w http.ResponseWriter, r *http.Request) {
 		// would hide a variable the person just set. The key is the
 		// control plane's: runners hold no secrets.
 		for j := range ag.Access {
-			if ag.Access[j].Kind == agents.OpenRouter {
+			switch {
+			case ag.Access[j].Kind == agents.OpenRouter:
 				set := a.keySet(ag.Access[j].KeyEnv)
+				ag.Access[j].KeySet = &set
+			case ag.Access[j].Kind == agents.API && !ag.Access[j].Disabled:
+				set := a.apiKeySet(info.Name)
 				ag.Access[j].KeySet = &set
 			}
 		}
@@ -149,6 +154,9 @@ func accessOptions(info harness.Info) []AccessOption {
 		out[i] = AccessOption{Kind: ac.Kind, Label: ac.Label, Disabled: ac.Disabled, Models: ac.Models, AnyModel: ac.AnyModel}
 		if ac.Kind == harness.OpenRouter {
 			out[i].KeyEnv = agents.DefaultKeyEnv
+		}
+		if ac.Kind == harness.API && info.APIKey != nil {
+			out[i].KeyName = info.APIKey.Name
 		}
 	}
 	return out

@@ -100,8 +100,7 @@ func TestModelLists(t *testing.T) {
 		t.Fatalf("claude: %d %s", code, raw)
 	}
 	// No such harness, or an access it does not offer.
-	for _, p := range []string{"/api/v0/harnesses/opencode/models?access=subscription", "/api/v0/harnesses/agy/models?access=openrouter",
-		"/api/v0/harnesses/claude/models?access=api"} {
+	for _, p := range []string{"/api/v0/harnesses/opencode/models?access=subscription", "/api/v0/harnesses/agy/models?access=openrouter"} {
 		if code, _, raw := listOf(t, e, p); code != http.StatusNotFound {
 			t.Errorf("%s: %d %s", p, code, raw)
 		}
@@ -182,5 +181,81 @@ func TestCodexModelsFromRunners(t *testing.T) {
 	code, l, raw = listOf(t, e, "/api/v0/harnesses/codex/models?access=subscription")
 	if code != 200 || idsOf(l) != "gpt-6.1-sol,gpt-6-luna" || l.FetchedAt == nil || !l.FetchedAt.Equal(newer.Truncate(0)) && l.FetchedAt.Sub(newer).Abs() > time.Second {
 		t.Fatalf("after reports: %d %s", code, raw)
+	}
+}
+
+// Fake API keys: no one's credentials.
+const (
+	fakeAnthModelsKey   = "sk-ant-api03-fake-models-key-0000111122223333"
+	fakeOAIModelsKey    = "sk-proj-fake-models-key-4444555566667777"
+	fakeGeminiModelsKey = "AIzaFakeModelsKey0000111122223333444"
+)
+
+// On access api, each harness's list is its vendor's own list-models call,
+// made by control with the key set in Settings, in the header that vendor
+// reads; with no key set no call is made. A key replaced drops the list
+// fetched with the old one. No reply holds a key.
+func TestAPIKeyModelLists(t *testing.T) {
+	var calls atomic.Int32
+	vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		switch {
+		case r.URL.Path == "/anthropic/v1/models" && r.Header.Get("X-Api-Key") == fakeAnthModelsKey && r.Header.Get("Anthropic-Version") != "":
+			w.Write([]byte(`{"data":[{"id":"claude-opus-5-5","display_name":"Claude Opus 5.5"}],"has_more":false}`))
+		case r.URL.Path == "/openai/v1/models" && r.Header.Get("Authorization") == "Bearer "+fakeOAIModelsKey:
+			w.Write([]byte(`{"object":"list","data":[{"id":"gpt-6.1"},{"id":"gpt-5.5"}]}`))
+		case r.URL.Path == "/gemini/v1beta/models" && r.Header.Get("X-Goog-Api-Key") == fakeGeminiModelsKey && r.URL.Query().Get("key") == "":
+			w.Write([]byte(`{"models":[{"name":"models/gemini-4-argon","displayName":"Gemini 4 Argon","supportedGenerationMethods":["generateContent","countTokens"]},` +
+				`{"name":"models/text-embedding-9","supportedGenerationMethods":["embedContent"]}]}`))
+		default:
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+	}))
+	t.Cleanup(vendor.Close)
+	e, subs, _ := modelsEnv(t, nil)
+	e.api.cfg.Models.Client = vendor.Client()
+	e.api.cfg.Models.APIBase = map[string]string{"anthropic": vendor.URL + "/anthropic", "openai": vendor.URL + "/openai", "gemini": vendor.URL + "/gemini"}
+	e.api.cfg.Models.APIKey = func(name string) string { k, _ := subs.Key(name); return k }
+
+	for _, h := range []string{"claude", "codex", "agy"} {
+		code, l, raw := listOf(t, e, "/api/v0/harnesses/"+h+"/models?access=api")
+		if code != 200 || len(l.Models) != 0 || l.Source != models.FromAPI || !strings.HasPrefix(l.Error, "set your ") {
+			t.Fatalf("%s, no key: %d %s", h, code, raw)
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatal("a list was fetched with no key set")
+	}
+	for name, k := range map[string]string{"anthropic": fakeAnthModelsKey, "openai": fakeOAIModelsKey, "gemini": fakeGeminiModelsKey} {
+		if err := subs.SetKey(name, k); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for h, want := range map[string]string{"claude": "claude-opus-5-5=Claude Opus 5.5", "codex": "gpt-5.5,gpt-6.1", "agy": "gemini-4-argon=Gemini 4 Argon"} {
+		code, l, raw := listOf(t, e, "/api/v0/harnesses/"+h+"/models?access=api")
+		if code != 200 || l.Source != models.FromAPI || l.FetchedAt == nil || idsOf(l) != want {
+			t.Fatalf("%s: %d %s", h, code, raw)
+		}
+		for _, k := range []string{fakeAnthModelsKey, fakeOAIModelsKey, fakeGeminiModelsKey} {
+			if strings.Contains(raw, k) {
+				t.Fatalf("%s: a reply holds a key", h)
+			}
+		}
+	}
+	// Replaced through Settings: the list fetched with the old key goes.
+	if resp, raw := do(t, e.req(t, "PUT", "/api/v0/subscriptions/anthropic/key", strings.NewReader(`{"key":"sk-ant-api03-fake-other-key-99998888777766665555"}`))); resp.StatusCode != 204 {
+		t.Fatalf("replace: %d %s", resp.StatusCode, raw)
+	}
+	code, l, raw := listOf(t, e, "/api/v0/harnesses/claude/models?access=api")
+	if code != 200 || len(l.Models) != 0 || l.Error != models.ErrRefused.Error() {
+		t.Fatalf("after replace: %d %s", code, raw)
+	}
+	// Removed: no list and no call.
+	if resp, raw := do(t, e.req(t, "DELETE", "/api/v0/subscriptions/openai/key", nil)); resp.StatusCode != 204 {
+		t.Fatalf("remove: %d %s", resp.StatusCode, raw)
+	}
+	n := calls.Load()
+	if code, l, raw := listOf(t, e, "/api/v0/harnesses/codex/models?access=api"); code != 200 || len(l.Models) != 0 || l.Error != "set your OpenAI API key in Settings" || calls.Load() != n {
+		t.Fatalf("after remove: %d %s", code, raw)
 	}
 }

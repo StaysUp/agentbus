@@ -475,8 +475,99 @@ context.added instructions=611 mcp_instructions=272
 session.closed resume_id="sid-1"
 replay_base claude
 === claude access unknown
+--- turn t_1 harness="claude" access="local" model="" read_only=false
+refused 400 access must be subscription, openrouter or api
+=== claude api key, not relayed
 --- turn t_1 harness="claude" access="api" model="" read_only=false
-refused 400 access must be subscription or openrouter
+refused 400 an agent on an API key runs only where control adds its key; run it on agentbus up or a runner, without -gateway local
+log run.refused agent=claude access=api reason=wire
+=== claude api key, relayed, then resume
+--- turn t_1 harness="claude" access="api" model="" read_only=false
+arg "-p"
+arg "--output-format"
+arg "json"
+arg "--append-system-prompt"
+arg "You work through AgentBus, in session s1. A turn is one message to you, your reply and your changes.\nYour folder is usually your session's own copy of the person's folder. Your edits stay in the copy. They reach the person's folder only when a turn is applied.\nUse the tools of the agentbus MCP server for AgentBus: list and ask other agents, review, read and stop turns, search this session. AgentBus agents are saved setups across vendors, not your harness's own agents or subagents.\nThe person applies turns to their folder; you cannot.\nWork you ask for comes back to you as a later turn: do not wait for it."
+arg "--allowedTools"
+arg "Edit(/<folder>/**),Bash(agentbus-api:*),mcp__agentbus"
+arg "--mcp-config"
+arg "{\"mcpServers\":{\"agentbus\":{\"headers\":{\"Authorization\":\"Bearer ${AGENTBUS_TOKEN}\"},\"type\":\"http\",\"url\":\"/api/v0/mcp\"}}}"
+arg "--strict-mcp-config"
+arg "--disallowedTools"
+arg "Edit(/<data>/permissions.toml),Edit(/<data>/instructions.md),Edit(/<data>/agents.json),Task,Agent,Workflow,ListAgents,SendMessage"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL="
+env "ANTHROPIC_API_KEY="
+env "ANTHROPIC_AUTH_TOKEN=abr_test-placeholder"
+env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1/key/claude"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="claude" continuity="" replay_from="" model="" context=""
+context.added instructions=611 mcp_instructions=272
+session.closed resume_id="sid-0"
+--- turn t_2 harness="" access="api" model="" read_only=false
+arg "-p"
+arg "--output-format"
+arg "json"
+arg "--append-system-prompt"
+arg "You work through AgentBus, in session s1. A turn is one message to you, your reply and your changes.\nYour folder is usually your session's own copy of the person's folder. Your edits stay in the copy. They reach the person's folder only when a turn is applied.\nUse the tools of the agentbus MCP server for AgentBus: list and ask other agents, review, read and stop turns, search this session. AgentBus agents are saved setups across vendors, not your harness's own agents or subagents.\nThe person applies turns to their folder; you cannot.\nWork you ask for comes back to you as a later turn: do not wait for it."
+arg "--resume"
+arg "sid-0"
+arg "--allowedTools"
+arg "Edit(/<folder>/**),Bash(agentbus-api:*),mcp__agentbus"
+arg "--mcp-config"
+arg "{\"mcpServers\":{\"agentbus\":{\"headers\":{\"Authorization\":\"Bearer ${AGENTBUS_TOKEN}\"},\"type\":\"http\",\"url\":\"/api/v0/mcp\"}}}"
+arg "--strict-mcp-config"
+arg "--disallowedTools"
+arg "Edit(/<data>/permissions.toml),Edit(/<data>/instructions.md),Edit(/<data>/agents.json),Task,Agent,Workflow,ListAgents,SendMessage"
+arg "--"
+arg "next t_2"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL="
+env "ANTHROPIC_API_KEY="
+env "ANTHROPIC_AUTH_TOKEN=abr_test-placeholder"
+env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_2/key/claude"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="claude" continuity="resume" replay_from="" model="" context=""
+context.added instructions=611 mcp_instructions=272
+session.closed resume_id="sid-1"
+=== claude api key, relayed, with a model
+--- turn t_1 harness="claude" access="api" model="opus" read_only=false
+arg "-p"
+arg "--output-format"
+arg "json"
+arg "--append-system-prompt"
+arg "You work through AgentBus, in session s1. A turn is one message to you, your reply and your changes.\nYour folder is usually your session's own copy of the person's folder. Your edits stay in the copy. They reach the person's folder only when a turn is applied.\nUse the tools of the agentbus MCP server for AgentBus: list and ask other agents, review, read and stop turns, search this session. AgentBus agents are saved setups across vendors, not your harness's own agents or subagents.\nThe person applies turns to their folder; you cannot.\nWork you ask for comes back to you as a later turn: do not wait for it."
+arg "--allowedTools"
+arg "Edit(/<folder>/**),Bash(agentbus-api:*),mcp__agentbus"
+arg "--mcp-config"
+arg "{\"mcpServers\":{\"agentbus\":{\"headers\":{\"Authorization\":\"Bearer ${AGENTBUS_TOKEN}\"},\"type\":\"http\",\"url\":\"/api/v0/mcp\"}}}"
+arg "--strict-mcp-config"
+arg "--disallowedTools"
+arg "Edit(/<data>/permissions.toml),Edit(/<data>/instructions.md),Edit(/<data>/agents.json),Task,Agent,Workflow,ListAgents,SendMessage"
+arg "--model"
+arg "opus"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL="
+env "ANTHROPIC_API_KEY="
+env "ANTHROPIC_AUTH_TOKEN=abr_test-placeholder"
+env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1/key/claude"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="claude" continuity="" replay_from="" model="opus" context=""
+context.added instructions=611 mcp_instructions=272
+session.closed resume_id="sid-0"
 === claude subagents off, then resume
 --- turn t_1 harness="claude" access="" model="" read_only=false
 arg "-p"
@@ -1289,8 +1380,144 @@ turn.started agent="codex" continuity="transcript" replay_from="" model="m/x" co
 context.added instructions=611 mcp_instructions=272
 session.closed resume_id="tid-1"
 === codex access unknown
+--- turn t_1 harness="codex" access="local" model="" read_only=false
+refused 400 access must be subscription, openrouter or api
+=== codex api key, not relayed
 --- turn t_1 harness="codex" access="api" model="" read_only=false
-refused 400 access must be subscription or openrouter
+refused 400 an agent on an API key runs only where control adds its key; run it on agentbus up or a runner, without -gateway local
+log run.refused agent=codex access=api reason=wire
+=== codex api key, relayed, then resume
+--- turn t_1 harness="codex" access="api" model="" read_only=false
+arg "-c"
+arg "model_provider=agentbus_openai"
+arg "-c"
+arg "model_providers.agentbus_openai.name=\"OpenAI\""
+arg "-c"
+arg "model_providers.agentbus_openai.base_url=\"http://127.0.0.1:8787/s/s1/t/t_1/key/codex/v1\""
+arg "-c"
+arg "model_providers.agentbus_openai.env_key=\"AGENTBUS_OPENAI_TOKEN\""
+arg "-c"
+arg "model_providers.agentbus_openai.wire_api=\"responses\""
+arg "-c"
+arg "model_providers.agentbus_openai.supports_websockets=false"
+arg "exec"
+arg "--skip-git-repo-check"
+arg "--json"
+arg "--sandbox"
+arg "workspace-write"
+arg "-c"
+arg "developer_instructions=\"You work through AgentBus, in session s1. A turn is one message to you, your reply and your changes.\\nYour folder is usually your session's own copy of the person's folder. Your edits stay in the copy. They reach the person's folder only when a turn is applied.\\nUse the tools of the agentbus MCP server for AgentBus: list and ask other agents, review, read and stop turns, search this session. AgentBus agents are saved setups across vendors, not your harness's own agents or subagents.\\nThe person applies turns to their folder; you cannot.\\nWork you ask for comes back to you as a later turn: do not wait for it.\""
+arg "-c"
+arg "mcp_servers.agentbus.url=\"/api/v0/mcp\""
+arg "-c"
+arg "mcp_servers.agentbus.bearer_token_env_var=\"AGENTBUS_TOKEN\""
+arg "-c"
+arg "sandbox_workspace_write.network_access=true"
+arg "--disable"
+arg "multi_agent"
+arg "--disable"
+arg "multi_agent_v2"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_OPENAI_TOKEN=abr_test-placeholder"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL="
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="codex" continuity="" replay_from="" model="" context=""
+context.added instructions=611 mcp_instructions=272
+session.closed resume_id="tid-0"
+--- turn t_2 harness="" access="api" model="" read_only=false
+arg "-c"
+arg "model_provider=agentbus_openai"
+arg "-c"
+arg "model_providers.agentbus_openai.name=\"OpenAI\""
+arg "-c"
+arg "model_providers.agentbus_openai.base_url=\"http://127.0.0.1:8787/s/s1/t/t_2/key/codex/v1\""
+arg "-c"
+arg "model_providers.agentbus_openai.env_key=\"AGENTBUS_OPENAI_TOKEN\""
+arg "-c"
+arg "model_providers.agentbus_openai.wire_api=\"responses\""
+arg "-c"
+arg "model_providers.agentbus_openai.supports_websockets=false"
+arg "exec"
+arg "--skip-git-repo-check"
+arg "--sandbox"
+arg "workspace-write"
+arg "-c"
+arg "developer_instructions=\"You work through AgentBus, in session s1. A turn is one message to you, your reply and your changes.\\nYour folder is usually your session's own copy of the person's folder. Your edits stay in the copy. They reach the person's folder only when a turn is applied.\\nUse the tools of the agentbus MCP server for AgentBus: list and ask other agents, review, read and stop turns, search this session. AgentBus agents are saved setups across vendors, not your harness's own agents or subagents.\\nThe person applies turns to their folder; you cannot.\\nWork you ask for comes back to you as a later turn: do not wait for it.\""
+arg "-c"
+arg "mcp_servers.agentbus.url=\"/api/v0/mcp\""
+arg "-c"
+arg "mcp_servers.agentbus.bearer_token_env_var=\"AGENTBUS_TOKEN\""
+arg "-c"
+arg "sandbox_workspace_write.network_access=true"
+arg "--disable"
+arg "multi_agent"
+arg "--disable"
+arg "multi_agent_v2"
+arg "resume"
+arg "--json"
+arg "--"
+arg "tid-0"
+arg "next t_2"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_OPENAI_TOKEN=abr_test-placeholder"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL="
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="codex" continuity="resume" replay_from="" model="" context=""
+context.added instructions=611 mcp_instructions=272
+session.closed resume_id="tid-1"
+=== codex api key, relayed, with a model
+--- turn t_1 harness="codex" access="api" model="opus" read_only=false
+arg "-c"
+arg "model_provider=agentbus_openai"
+arg "-c"
+arg "model_providers.agentbus_openai.name=\"OpenAI\""
+arg "-c"
+arg "model_providers.agentbus_openai.base_url=\"http://127.0.0.1:8787/s/s1/t/t_1/key/codex/v1\""
+arg "-c"
+arg "model_providers.agentbus_openai.env_key=\"AGENTBUS_OPENAI_TOKEN\""
+arg "-c"
+arg "model_providers.agentbus_openai.wire_api=\"responses\""
+arg "-c"
+arg "model_providers.agentbus_openai.supports_websockets=false"
+arg "exec"
+arg "--skip-git-repo-check"
+arg "--json"
+arg "--sandbox"
+arg "workspace-write"
+arg "-c"
+arg "developer_instructions=\"You work through AgentBus, in session s1. A turn is one message to you, your reply and your changes.\\nYour folder is usually your session's own copy of the person's folder. Your edits stay in the copy. They reach the person's folder only when a turn is applied.\\nUse the tools of the agentbus MCP server for AgentBus: list and ask other agents, review, read and stop turns, search this session. AgentBus agents are saved setups across vendors, not your harness's own agents or subagents.\\nThe person applies turns to their folder; you cannot.\\nWork you ask for comes back to you as a later turn: do not wait for it.\""
+arg "-c"
+arg "mcp_servers.agentbus.url=\"/api/v0/mcp\""
+arg "-c"
+arg "mcp_servers.agentbus.bearer_token_env_var=\"AGENTBUS_TOKEN\""
+arg "-c"
+arg "sandbox_workspace_write.network_access=true"
+arg "--disable"
+arg "multi_agent"
+arg "--disable"
+arg "multi_agent_v2"
+arg "--model"
+arg "opus"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_OPENAI_TOKEN=abr_test-placeholder"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL="
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="codex" continuity="" replay_from="" model="opus" context=""
+context.added instructions=611 mcp_instructions=272
+session.closed resume_id="tid-0"
 === codex subagents off, then resume
 --- turn t_1 harness="codex" access="" model="" read_only=false
 arg "-c"
@@ -2104,6 +2331,30 @@ env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="" context=""
+session.closed resume_id="cid-0"
+log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
+=== agy api key, not relayed
+--- turn t_1 harness="agy" access="api" model="" read_only=false
+refused 400 an agent on an API key runs only where control adds its key; run it on agentbus up or a runner, without -gateway local
+log run.refused agent=agy access=api reason=wire
+=== agy api key, relayed, with a model
+--- turn t_1 harness="agy" access="api" model="gemini-3.1-pro-preview" read_only=false
+arg "--output-format"
+arg "json"
+arg "--settings"
+arg "{\"allowNonWorkspaceAccess\":false,\"modelProvider\":\"gemini\",\"permissions\":{\"allow\":[\"write_file(<folder>)\",\"edit_file(<folder>)\",\"command(agentbus-api)\"],\"deny\":[\"write_file(<data>/permissions.toml)\",\"edit_file(<data>/permissions.toml)\",\"write_file(<data>/instructions.md)\",\"edit_file(<data>/instructions.md)\",\"write_file(<data>/agents.json)\",\"edit_file(<data>/agents.json)\"]}}"
+arg "--model"
+arg "gemini-3.1-pro-preview"
+arg "--print=one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL="
+env "GEMINI_API_KEY=abr_test-placeholder"
+env "GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1/key/agy"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="agy" continuity="" replay_from="" model="gemini-3.1-pro-preview" context=""
 session.closed resume_id="cid-0"
 log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
 === switch claude to agy, transcript

@@ -10,21 +10,26 @@ package api
 import (
 	"errors"
 	"net/http"
+	"path"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/staysup/agentbus/credentials"
+	"github.com/staysup/agentbus/harness"
 )
 
 // SubscriptionList is GET /api/v0/subscriptions.
 type SubscriptionList struct {
 	Subscriptions []SubscriptionState   `json:"subscriptions" doc:"One per harness whose subscription can be connected here."`
 	OpenRouterKey credentials.KeyStatus `json:"openrouter_key" doc:"Whether an OpenRouter key is set in Settings (PUT /api/v0/subscriptions/openrouter/key). Never the key."`
+	// APIKeys are the vendors' API keys, by name.
+	APIKeys map[string]credentials.KeyStatus `json:"api_keys" doc:"Whether each vendor's API key is set in Settings (PUT /api/v0/subscriptions/{name}/key), by its name: anthropic (claude), openai (codex) and gemini (agy). Never a key."`
 }
 
-// KeyInput is the body of PUT /api/v0/subscriptions/openrouter/key.
+// KeyInput is the body of PUT /api/v0/subscriptions/<name>/key.
 type KeyInput struct {
-	Key string `json:"key" doc:"The OpenRouter key, as pasted. Spaces and line ends around it are removed. It is kept on control and never shown, logged or recorded."`
+	Key string `json:"key" doc:"The key, as pasted. Spaces and line ends around it are removed. It is kept on control and never shown, logged or recorded."`
 }
 
 // SubscriptionState is one harness's subscription, and its connect if one
@@ -96,25 +101,87 @@ var subscriptionRoutes = []route{
 		doc:     "Forget the harness's token on control. Runners' calls on it are refused until it is connected again. No body is read.",
 		replies: []reply{{status: 204, doc: "Removed.", empty: true}, badRequest, fail(404, noSubscriptions), storeFailed},
 		serve:   (*API).disconnectSubscription},
-	{method: "PUT", path: "/api/v0/subscriptions/openrouter/key", op: "setOpenRouterKey",
-		tag:     "Settings",
-		summary: "Set the OpenRouter key",
-		doc: "Keep the person's OpenRouter key on control, in place of any set before. It is kept beside the subscriptions, in control's data folder, " +
-			"readable by its owner only, and is never shown, logged or put in the record. Control adds it to every OpenRouter agent's model calls; " +
-			"it wins over the variable an agent names (key_env), which is used only while no key is set here. The reply holds no key.",
-		body:    KeyInput{},
-		replies: []reply{{status: 204, doc: "Kept.", empty: true}, badRequest, fail(404, noSubscriptions), storeFailed},
-		serve:   plain((*API).setOpenRouterKey)},
-	{method: "DELETE", path: "/api/v0/subscriptions/openrouter/key", op: "removeOpenRouterKey",
-		tag:     "Settings",
-		summary: "Remove the OpenRouter key",
-		doc: "Forget the OpenRouter key set in Settings. OpenRouter agents then read their key from the variable they name (key_env), " +
-			"where control runs, or are refused. No key set is not an error. No body is read.",
-		replies: []reply{{status: 204, doc: "Removed.", empty: true}, badRequest, fail(404, noSubscriptions), storeFailed},
-		serve:   plain((*API).removeOpenRouterKey)},
 }
 
-func (a *API) setOpenRouterKey(w http.ResponseWriter, r *http.Request) {
+// keyRoutes are PUT and DELETE /api/v0/subscriptions/<name>/key for each key
+// that can be set in Settings: the OpenRouter key, and each vendor's API key
+// (harness.Info.APIKey).
+func keyRoutes() []route {
+	var out []route
+	for _, name := range credentials.KeyNames {
+		label, use := keyLabel(name), keyUse(name)
+		op, p := keyOp(name), path.Join("/api/v0/subscriptions", name, "key")
+		out = append(out, route{method: "PUT", path: p, op: "set" + op + "Key",
+			tag:     "Settings",
+			summary: "Set the " + label,
+			doc: "Keep the person's " + label + " on control, in place of any set before. It is kept beside the subscriptions, in control's data folder, " +
+				"readable by its owner only, and is never shown, logged or put in the record. " + use + " The reply holds no key.",
+			body:    KeyInput{},
+			replies: []reply{{status: 204, doc: "Kept.", empty: true}, badRequest, fail(404, noSubscriptions), storeFailed},
+			serve:   func(a *API, w http.ResponseWriter, r *http.Request, _ string) { a.setKey(w, r, name) }},
+			route{method: "DELETE", path: p, op: "remove" + op + "Key",
+				tag:     "Settings",
+				summary: "Remove the " + label,
+				doc:     "Forget the " + label + " set in Settings. " + keyGone(name) + " No key set is not an error. No body is read.",
+				replies: []reply{{status: 204, doc: "Removed.", empty: true}, badRequest, fail(404, noSubscriptions), storeFailed},
+				serve:   func(a *API, w http.ResponseWriter, r *http.Request, _ string) { a.removeKey(w, r, name) }})
+	}
+	return out
+}
+
+// keyOp is name as it goes in an operationId: OpenRouter, Anthropic.
+func keyOp(name string) string {
+	if name == credentials.AccessOpenRouter {
+		return "OpenRouter"
+	}
+	if name == credentials.KeyOpenAI {
+		return "OpenAI"
+	}
+	return strings.ToUpper(name[:1]) + name[1:]
+}
+
+// keyLabel is the key's name for the person, such as Anthropic API key.
+func keyLabel(name string) string {
+	if name == credentials.AccessOpenRouter {
+		return "OpenRouter key"
+	}
+	for _, h := range harness.All() {
+		if k := h.Info().APIKey; k != nil && k.Name == name {
+			return k.Label
+		}
+	}
+	return name + " key"
+}
+
+// keyHarnesses are the harnesses whose access "api" uses the key name.
+func keyHarnesses(name string) []string {
+	var out []string
+	for _, h := range harness.All() {
+		if k := h.Info().APIKey; k != nil && k.Name == name {
+			out = append(out, h.Info().Name)
+		}
+	}
+	return out
+}
+
+// keyUse says what the key named name is used for.
+func keyUse(name string) string {
+	if name == credentials.AccessOpenRouter {
+		return "Control adds it to every OpenRouter agent's model calls; it wins over the variable an agent names (key_env), which is used only while no key is set here."
+	}
+	return "Control's relay adds it to the model calls of every " + strings.Join(keyHarnesses(name), " and ") +
+		" agent with access api, which never holds it: the agent gets a placeholder, and the key goes in on the way to the vendor."
+}
+
+// keyGone says what happens once the key named name is removed.
+func keyGone(name string) string {
+	if name == credentials.AccessOpenRouter {
+		return "OpenRouter agents then read their key from the variable they name (key_env), where control runs, or are refused."
+	}
+	return "Turns of agents with access api on it are then refused until a key is set again."
+}
+
+func (a *API) setKey(w http.ResponseWriter, r *http.Request, name string) {
 	if a.cfg.Subscriptions == nil {
 		writeError(w, http.StatusNotFound, noSubscriptions)
 		return
@@ -124,8 +191,8 @@ func (a *API) setOpenRouterKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "the body must be one JSON object with key")
 		return
 	}
-	err := a.cfg.Subscriptions.Store.SetKey(credentials.AccessOpenRouter, in.Key)
-	a.forgetOpenRouterModels()
+	err := a.cfg.Subscriptions.Store.SetKey(name, in.Key)
+	a.forgetModels(name)
 	switch {
 	case errors.Is(err, credentials.ErrBadKey):
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -136,7 +203,7 @@ func (a *API) setOpenRouterKey(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *API) removeOpenRouterKey(w http.ResponseWriter, r *http.Request) {
+func (a *API) removeKey(w http.ResponseWriter, r *http.Request, name string) {
 	if !noBody(w, r) {
 		return
 	}
@@ -144,8 +211,8 @@ func (a *API) removeOpenRouterKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, noSubscriptions)
 		return
 	}
-	a.forgetOpenRouterModels()
-	if err := a.cfg.Subscriptions.Store.RemoveKey(credentials.AccessOpenRouter); err != nil {
+	a.forgetModels(name)
+	if err := a.cfg.Subscriptions.Store.RemoveKey(name); err != nil {
 		writeError(w, http.StatusInternalServerError, "the key could not be removed")
 		return
 	}
@@ -153,11 +220,23 @@ func (a *API) removeOpenRouterKey(w http.ResponseWriter, r *http.Request) {
 }
 
 // keptKeySet says an OpenRouter key is set in Settings.
-func (a *API) keptKeySet() bool {
+func (a *API) keptKeySet() bool { return a.keyIsSet(credentials.AccessOpenRouter) }
+
+// apiKeySet says the key of harness's access "api" is set in Settings.
+func (a *API) apiKeySet(name string) bool {
+	h, ok := harness.Get(name)
+	if !ok || h.Info().APIKey == nil {
+		return false
+	}
+	return a.keyIsSet(h.Info().APIKey.Name)
+}
+
+// keyIsSet says the key named name is set in Settings.
+func (a *API) keyIsSet(name string) bool {
 	if a.cfg.Subscriptions == nil || a.cfg.Subscriptions.Store == nil {
 		return false
 	}
-	st, err := a.cfg.Subscriptions.Store.KeyStatus(credentials.AccessOpenRouter)
+	st, err := a.cfg.Subscriptions.Store.KeyStatus(name)
 	return err == nil && st.Set
 }
 
@@ -187,6 +266,12 @@ func (a *API) listSubscriptions(w http.ResponseWriter, r *http.Request) {
 	}
 	// A key file that cannot be read shows as not set: a turn then says why.
 	out.OpenRouterKey, _ = m.Store.KeyStatus(credentials.AccessOpenRouter)
+	out.APIKeys = map[string]credentials.KeyStatus{}
+	for _, name := range credentials.KeyNames {
+		if name != credentials.AccessOpenRouter {
+			out.APIKeys[name], _ = m.Store.KeyStatus(name)
+		}
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 

@@ -30,7 +30,7 @@ func (codex) Info() Info {
 		// use is the account's (gpt-5.5 was refused on one, 2026-11-12). A
 		// new agent names none, so codex picks its own, and a typed name is
 		// tried as it is: a refusal shows the vendor's own words.
-		Access: standardAccess("ChatGPT sign-in", []string{}),
+		Access: standardAccess("ChatGPT sign-in", []string{}, "OpenAI API key"),
 		Replay: FormatOpenAI,
 		// codex on OpenRouter sends its input items without the content
 		// kinds codex puts on them for chatgpt.com, which is how the codex
@@ -65,6 +65,10 @@ func (codex) Info() Info {
 			TokenKey: "tokens.access_token", RefreshKey: "tokens.refresh_token", AccountKey: "tokens.account_id",
 			RenewURL: "https://auth.openai.com/oauth/token", ClientID: "app_EMoamEEZ73f0CkXaXp7hrann",
 			AccountHeader: "ChatGPT-Account-ID"},
+		// OpenAI's API takes a key as "Authorization: Bearer"
+		// (platform.openai.com/docs/api-reference/authentication, read
+		// 2026-11-13).
+		APIKey: &APIKey{Name: "openai", Label: "OpenAI API key", URL: "https://api.openai.com", Format: FormatOpenAI},
 	}
 }
 
@@ -152,6 +156,28 @@ func codexModels(b []byte) []string {
 		}
 	}
 	return out
+}
+
+// apiProvider is the id codex files a turn on the OpenAI API key under.
+const apiProvider = "agentbus_openai"
+
+// codexAPIEnv holds the placeholder of a turn on the OpenAI API key.
+const codexAPIEnv = "AGENTBUS_OPENAI_TOKEN"
+
+// WireAPI: a provider of its own for this run, at the service's path for
+// OpenAI's API, reading the placeholder from codexAPIEnv as its key, which
+// codex sends as the bearer; control's relay swaps the key set in Settings
+// in. Named "OpenAI" and on the Responses API, as WireRelay's provider is.
+func (codex) WireAPI(w APIWire) (env, args []string) {
+	p := "model_providers." + apiProvider + "."
+	return []string{codexAPIEnv + "=" + w.Placeholder}, []string{
+		"-c", "model_provider=" + apiProvider,
+		"-c", p + `name="OpenAI"`,
+		"-c", p + `base_url="` + w.Base + `/v1"`,
+		"-c", p + `env_key="` + codexAPIEnv + `"`,
+		"-c", p + `wire_api="responses"`,
+		"-c", p + "supports_websockets=false",
+	}
 }
 
 // Refuse: every setting of permissions.toml has a flag on codex, or the

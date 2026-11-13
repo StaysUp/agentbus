@@ -28,14 +28,17 @@ import (
 // Access kinds: how a harness reaches its model.
 const (
 	Subscription = "subscription" // the harness's own sign-in
-	OpenRouter   = "openrouter"   // an OpenRouter key, from an environment variable
-	API          = "api"          // the vendor's API key: not available yet
+	OpenRouter   = "openrouter"   // an OpenRouter key, set in Settings or from an environment variable
+	API          = "api"          // the vendor's own API key, set in Settings (Info.APIKey)
 )
 
 // History formats own replay knows (package replay).
 const (
 	FormatAnthropic = "anthropic" // Anthropic Messages, as Claude Code sends them
 	FormatOpenAI    = "openai"    // the Responses API, as codex sends it
+	// FormatGemini is the Gemini API's generateContent, as agy sends it. No
+	// own replay reads it; it names the API format of agy's APIKey.
+	FormatGemini = "gemini"
 )
 
 // Info is what is fixed about a harness.
@@ -99,6 +102,31 @@ type Info struct {
 	// connect it once on control for the runners they own. Nil: its
 	// subscription cannot be used on a runner yet.
 	Login *Login
+	// APIKey is the vendor's API key its access "api" uses: set once in
+	// Settings, kept on control, and added by control's relay to the
+	// agent's calls. Nil: it offers no access "api".
+	APIKey *APIKey
+}
+
+// APIKey is the vendor API a harness's access "api" reaches with a key set in
+// Settings.
+type APIKey struct {
+	// Name is the key's name in Settings and in its API path, such as
+	// anthropic (PUT /api/v0/subscriptions/anthropic/key). One key serves
+	// every harness that names it.
+	Name string
+	// Label is its name for a screen, such as Anthropic API key.
+	Label string
+	// URL is the vendor's API, which control's relay sends the agent's
+	// calls to, such as https://api.anthropic.com.
+	URL string
+	// Header names the header the key goes in, as it is, such as
+	// X-Api-Key. Empty: Authorization, as "Bearer <key>".
+	Header string
+	// Format is the API format of its calls (FormatAnthropic, FormatOpenAI
+	// or FormatGemini): which adapter records them. Control adds the key to
+	// the calls that adapter records, and to no other (jobs.Upstream).
+	Format string
 }
 
 // Login is a harness's own login (credentials.Manager runs it on control):
@@ -190,14 +218,27 @@ func Offers(info Info, kind string) bool {
 // model id is accepted.
 var OpenRouterModels = []string{"deepseek/deepseek-v4.1-flash", "openai/gpt-oss-120b"}
 
-// standardAccess is a subscription, an OpenRouter key, and an API key, which
-// is not available yet.
-func standardAccess(subLabel string, subModels []string) []Access {
+// standardAccess is a subscription, an OpenRouter key, and the vendor's API
+// key (Info.APIKey), labelled apiLabel.
+func standardAccess(subLabel string, subModels []string, apiLabel string) []Access {
 	return []Access{
 		{Kind: Subscription, Label: subLabel, Models: subModels, AnyModel: true},
 		{Kind: OpenRouter, Label: "OpenRouter key", Models: OpenRouterModels, AnyModel: true},
-		{Kind: API, Label: "API key", Disabled: true, Models: []string{}},
+		{Kind: API, Label: apiLabel, Models: []string{}, AnyModel: true},
 	}
+}
+
+// APIWire is what a turn on the vendor's API key (access "api") needs. The
+// child never gets the key: Placeholder is its credential, and control's
+// relay swaps the key set in Settings in on the way out.
+type APIWire struct {
+	// Base is the service's path for the vendor's API under the turn's
+	// base URL.
+	Base string
+	// Placeholder is the child's credential.
+	Placeholder string
+	// Model is the turn's model, or "".
+	Model string
 }
 
 // OpenRouterWire is what an OpenRouter turn's child needs.
@@ -250,6 +291,10 @@ type Turn struct {
 	// Info.OwnSandbox the wall keeps the turn's folder read only when Writes
 	// allows no edit.
 	Walled bool
+	// Access is how the turn's agent reaches its model: "" or
+	// Subscription, OpenRouter or API. A harness whose flags differ by
+	// access reads it (agy's provider).
+	Access string
 	// Prompt is always last, after "--" or joined to its flag with "=", so
 	// it is never read as a flag.
 	Prompt string
@@ -272,6 +317,9 @@ type Harness interface {
 	Wire(baseURL string) (env, args []string)
 	// WireOpenRouter is the same for a turn on an OpenRouter key.
 	WireOpenRouter(w OpenRouterWire) (env, args []string)
+	// WireAPI is the same for a turn on the vendor's API key (Info.APIKey).
+	// Only for a harness with an APIKey.
+	WireAPI(w APIWire) (env, args []string)
 	// WireRelay is the same for a subscription turn on a runner that holds
 	// no secret: the child's sign-in is placeholder, and control's relay
 	// adds the subscription connected there (Login). Only for a harness

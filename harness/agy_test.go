@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -131,8 +132,28 @@ func TestAgyContext(t *testing.T) {
 	if env, args := h.Wire("http://127.0.0.1:8787/s/a/t/b"); len(args) != 0 || !slices.Equal(env, []string{"CLOUD_CODE_URL=http://127.0.0.1:8787/s/a/t/b"}) {
 		t.Errorf("wire %q %q", env, args)
 	}
-	if Offers(h.Info(), OpenRouter) || Offers(h.Info(), API) || !Offers(h.Info(), "") {
+	if Offers(h.Info(), OpenRouter) || !Offers(h.Info(), API) || !Offers(h.Info(), "") {
 		t.Error("access")
+	}
+}
+
+// On a Gemini API key, agy gets the placeholder as GEMINI_API_KEY and the
+// service as GOOGLE_GEMINI_BASE_URL, and its settings for the run name the
+// gemini provider; on any other access they do not.
+func TestAgyAPIKey(t *testing.T) {
+	h := agy{}
+	env, args := h.WireAPI(APIWire{Base: "http://127.0.0.1:9/s/x/t/t_1/key/agy", Placeholder: "abt_placeholder", Model: "m"})
+	if len(args) != 0 || !slices.Equal(env, []string{"GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:9/s/x/t/t_1/key/agy", "GEMINI_API_KEY=abt_placeholder"}) {
+		t.Errorf("wire %q %q", env, args)
+	}
+	for access, want := range map[string]bool{API: true, Subscription: false, "": false} {
+		a := h.Args(Turn{Access: access, Prompt: "hi"})
+		if got := strings.Contains(a[3], `"modelProvider":"gemini"`); a[2] != "--settings" || got != want {
+			t.Errorf("access %q: %q", access, a)
+		}
+	}
+	if k := h.Info().APIKey; k == nil || k.Name != "gemini" || k.Header != "X-Goog-Api-Key" || k.Format != FormatGemini {
+		t.Errorf("APIKey %+v", k)
 	}
 }
 

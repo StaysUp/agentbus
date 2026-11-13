@@ -14,6 +14,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,9 +38,13 @@ type fakeVendor struct {
 	mu       sync.Mutex
 	auths    []string
 	accounts []string // each request's ChatGPT-Account-ID
+	keys     []string // each request's path, X-Api-Key and X-Goog-Api-Key
 	// stream, when set, is the reply instead: written as server-sent events
 	// with no Content-Type, as chatgpt.com answers codex.
 	stream []byte
+	// ctype, when set, is the reply's Content-Type instead, its body the
+	// same: a format the adapter may not read.
+	ctype string
 }
 
 func newFakeVendor(t *testing.T) *fakeVendor {
@@ -49,14 +54,18 @@ func newFakeVendor(t *testing.T) *fakeVendor {
 		v.mu.Lock()
 		v.auths = append(v.auths, r.URL.Path+" "+r.Header.Get("Authorization"))
 		v.accounts = append(v.accounts, r.Header.Get("ChatGPT-Account-ID"))
-		stream := v.stream
+		v.keys = append(v.keys, r.URL.Path+" "+r.Header.Get("X-Api-Key")+"|"+r.Header.Get("X-Goog-Api-Key"))
+		stream, ctype := v.stream, v.ctype
 		v.mu.Unlock()
 		if stream != nil {
 			w.Header()["Content-Type"] = nil // no type at all, not a sniffed one
 			w.Write(stream)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
+		if ctype == "" {
+			ctype = "application/json"
+		}
+		w.Header().Set("Content-Type", ctype)
 		io.WriteString(w, `{"id":"msg_1","type":"message","role":"assistant","model":"m","content":[{"type":"text","text":"hello from the fake"}],`+
 			`"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}`)
 	}))
@@ -71,14 +80,23 @@ func (v *fakeVendor) seen() []string {
 }
 
 type noSecretsSetup struct {
-	server, runner  *service
-	tok             string
-	ref, connector  string
-	serverHome      string
-	runnerHome      string
-	anth, or, chat  *fakeVendor
-	cc              *fakeVendor // agy's Code Assist
+	server, runner *service
+	tok            string
+	ref, connector string
+	serverHome     string
+	runnerHome     string
+	anth, or, chat *fakeVendor
+	cc             *fakeVendor // agy's Code Assist
+	// keyed are the vendor APIs of access api, by harness.
+	keyed           map[string]*fakeVendor
 	report, release string
+}
+
+// keysSeen are each request's path, X-Api-Key and X-Goog-Api-Key.
+func (v *fakeVendor) keysSeen() []string {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	return append([]string(nil), v.keys...)
 }
 
 func startNoSecrets(t *testing.T) *noSecretsSetup {
@@ -92,7 +110,12 @@ func startNoSecrets(t *testing.T) *noSecretsSetup {
 	t.Setenv("ANTHROPIC_BASE_URL", "")
 	t.Setenv("OPENAI_BASE_URL", "")
 	t.Setenv("AB_TEST_OR_KEY", "") // in this process only the server's getenv has it
-	ns := &noSecretsSetup{anth: newFakeVendor(t), or: newFakeVendor(t), chat: newFakeVendor(t), cc: newFakeVendor(t), serverHome: t.TempDir()}
+	ns := &noSecretsSetup{anth: newFakeVendor(t), or: newFakeVendor(t), chat: newFakeVendor(t), cc: newFakeVendor(t), serverHome: t.TempDir(),
+		keyed: map[string]*fakeVendor{"claude": newFakeVendor(t), "codex": newFakeVendor(t), "agy": newFakeVendor(t)}}
+	apiKeys := map[string]*url.URL{}
+	for h, v := range ns.keyed {
+		apiKeys[h] = mustURL(v.URL)
+	}
 	look := func(string) (string, error) { return self, nil }
 	// The server's own environment holds the API key.
 	serverEnv := func(k string) string {
@@ -102,7 +125,7 @@ func startNoSecrets(t *testing.T) *noSecretsSetup {
 		return os.Getenv(k)
 	}
 	ns.server, err = start(config{mode: modeServer, listen: "127.0.0.1:0", home: ns.serverHome, upstream: mustURL(ns.anth.URL),
-		chatgpt: mustURL(ns.chat.URL), openrouter: mustURL(ns.or.URL), cloudCode: mustURL(ns.cc.URL), getenv: serverEnv, logf: t.Logf,
+		chatgpt: mustURL(ns.chat.URL), openrouter: mustURL(ns.or.URL), cloudCode: mustURL(ns.cc.URL), apiKeys: apiKeys, getenv: serverEnv, logf: t.Logf,
 		heartbeat: 100 * time.Millisecond, turnWait: 10 * time.Second})
 	if err != nil {
 		t.Fatal(err)

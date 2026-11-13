@@ -62,7 +62,9 @@ func TestRunnerUsesKeySetInSettings(t *testing.T) {
 	for _, p := range []string{"/api/v0/agents", "/api/v0/harnesses"} {
 		code, raw = getAPI(t, ns.server, ns.tok, p)
 		keep(raw)
-		if code != 200 || !strings.Contains(raw, `"key_set":true`) || strings.Contains(raw, `"key_set":false`) {
+		// The OpenRouter agent's key; access api's key_set is the vendor's.
+		if code != 200 || !strings.Contains(raw, `"key_set":true`) || strings.Contains(raw, `"key_env":"AB_TEST_UNSET_KEY","key_set":false`) ||
+			strings.Contains(raw, `"key_env":"OPENROUTER_API_KEY","key_set":false`) {
 			t.Fatalf("%s: %d %s", p, code, raw)
 		}
 	}

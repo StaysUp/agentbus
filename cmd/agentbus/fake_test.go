@@ -19,6 +19,7 @@ type storedEvent struct {
 	Hold    string `json:"hold"`
 	Error   string `json:"error"`
 	Call    string `json:"call"`
+	Status  int    `json:"status"`
 }
 
 // storedEvents are the store's events of sessions, and its drops. Control's

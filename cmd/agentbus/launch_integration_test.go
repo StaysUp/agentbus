@@ -87,6 +87,9 @@ func TestLaunchGolden(t *testing.T) {
 	with := func(r engine.Request, f func(*engine.Request)) engine.Request { f(&r); return r }
 	asked := &event.Origin{Kind: event.OriginAsked, Session: "s0", Turn: "t_0"}
 	or := func(r *engine.Request) { r.Access, r.KeyEnv = "openrouter", "OPENROUTER_API_KEY" }
+	// access api on a runner that holds no secret: the child's credential
+	// is the placeholder, and control's relay adds the key set in Settings.
+	apiKey := func(r *engine.Request) { r.Access, r.Placeholder, r.Token = "api", true, "abr_test-placeholder" }
 	lists := "read_folders = [\"<readfolder>\"]\nallow = [\"go test\", \"git commit\"]\nforbid = [\"git push\", \"rm -rf\"]\n"
 	var cases []launchCase
 	for _, h := range []string{"claude", "codex"} {
@@ -113,7 +116,10 @@ func TestLaunchGolden(t *testing.T) {
 			launchCase{name: h + " replay", replay: true, turns: []engine.Request{first(h), next("t_2")}},
 			launchCase{name: h + " openrouter replay", replay: true, env: []string{"OPENROUTER_API_KEY=test-key"},
 				turns: []engine.Request{with(first(h), func(r *engine.Request) { or(r); r.Model = "m/x" }), next("t_2")}},
-			launchCase{name: h + " access unknown", turns: []engine.Request{with(first(h), func(r *engine.Request) { r.Access = "api" })}},
+			launchCase{name: h + " access unknown", turns: []engine.Request{with(first(h), func(r *engine.Request) { r.Access = "local" })}},
+			launchCase{name: h + " api key, not relayed", turns: []engine.Request{with(first(h), func(r *engine.Request) { r.Access = "api" })}},
+			launchCase{name: h + " api key, relayed, then resume", turns: []engine.Request{with(first(h), apiKey), with(next("t_2"), apiKey)}},
+			launchCase{name: h + " api key, relayed, with a model", turns: []engine.Request{with(first(h), func(r *engine.Request) { apiKey(r); r.Model = "opus" })}},
 			launchCase{name: h + " subagents off, then resume", perm: "subagents = false\n", turns: []engine.Request{first(h), next("t_2")}},
 			launchCase{name: h + " subagents off, read-only, with lists", perm: lists + "subagents = false\n",
 				turns: []engine.Request{with(first(h), func(r *engine.Request) { r.ReadOnly = true })}},
@@ -162,6 +168,11 @@ func TestLaunchGolden(t *testing.T) {
 		launchCase{name: "agy in a home of its own, then resume", homes: true, turns: []engine.Request{first("agy"), next("t_2")}},
 		launchCase{name: "agy folder with AGENTS.md, asked by another agent", agentsMD: true,
 			turns: []engine.Request{with(first("agy"), func(r *engine.Request) { r.Origin = asked })}},
+		launchCase{name: "agy api key, not relayed", turns: []engine.Request{with(first("agy"), func(r *engine.Request) { r.Access = "api" })}},
+		launchCase{name: "agy api key, relayed, with a model", turns: []engine.Request{with(first("agy"), func(r *engine.Request) {
+			apiKey(r)
+			r.Model = "gemini-3.1-pro-preview"
+		})}},
 		launchCase{name: "switch claude to agy, transcript",
 			turns: []engine.Request{first("claude"), with(next("t_2"), func(r *engine.Request) { r.Harness = "agy" })}},
 		launchCase{name: "switch claude to codex, replay", replay: true,

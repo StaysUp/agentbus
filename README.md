@@ -97,13 +97,22 @@ it to each OpenRouter call. It is never shown again, logged, or sent to a runner
 environment variable where control runs (`key_env`, `OPENROUTER_API_KEY` by default); a key set in
 Settings wins. API: `PUT` and `DELETE /api/v0/subscriptions/openrouter/key`.
 
+An agent can also use the vendor's own API key: access **API key** (`api`). Paste the key once in
+the same place: an Anthropic API key for claude, an OpenAI API key for codex, a Gemini API key for
+agy. Control keeps each like the OpenRouter key and adds it only to the model calls it records for
+that vendor; any other call gets 403. The agent gets a placeholder in its place, so the key never
+reaches a runner, an agent's environment, a log or the record. A turn while no key is set is refused with "set your Anthropic API key in Settings" (and
+the like). agy on a Gemini API key needs no Google sign-in, so it also works with control on a Mac.
+API: `PUT` and `DELETE /api/v0/subscriptions/{anthropic,openai,gemini}/key`.
+
 The agent window offers the models each access can use now, from each source's own data: OpenRouter's
-list of models (fetched by control with your OpenRouter key), claude's aliases `opus`, `sonnet` and
+list of models (fetched by control with your OpenRouter key), each vendor's own list of models on
+an API key (fetched by control with that key), claude's aliases `opus`, `sonnet` and
 `haiku`, `agy models` run unmodified where agy's sign-in is kept on control, and the models codex keeps
 in a session's home, which the runner reports after a codex turn. AgentBus never calls a
 subscription's own endpoint. A list is fetched again at most once an hour, or on demand. You can still
 type any model name, and an empty one uses the tool's own default. API:
-`GET /api/v0/harnesses/{harness}/models?access=subscription|openrouter[&refresh=true]`.
+`GET /api/v0/harnesses/{harness}/models?access=subscription|openrouter|api[&refresh=true]`.
 
 ## Several machines
 

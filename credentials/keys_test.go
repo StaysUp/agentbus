@@ -129,3 +129,46 @@ func TestKeyFirstOverEnv(t *testing.T) {
 		t.Fatalf("%q", why)
 	}
 }
+
+// Each vendor's API key, set in Settings, goes to its own harness's agents,
+// in its vendor's header; one not set says where to set it, and quotes no
+// key.
+func TestAPIKeysByHarness(t *testing.T) {
+	const fakeAnth, fakeOAI = "sk-ant-api03-fake0000111122223333", "sk-proj-fake0000111122223333"
+	s := &Subscriptions{Dir: filepath.Join(t.TempDir(), "subscriptions")}
+	k := APIKeys{Kept: s, Of: map[string]VendorKey{
+		"claude": {Name: KeyAnthropic, Label: "Anthropic API key", Header: "X-Api-Key"},
+		"codex":  {Name: KeyOpenAI, Label: "OpenAI API key"},
+	}}
+	if why := k.Ready(Need{Access: AccessAPI, Harness: "claude"}); why != "set your Anthropic API key in Settings" {
+		t.Fatalf("before: %q", why)
+	}
+	if err := s.SetKey(KeyAnthropic, fakeAnth); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetKey(KeyOpenAI, fakeOAI); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := k.Credential(Need{Access: AccessAPI, Harness: "claude"}); err != nil || c.Token != fakeAnth || c.Header != "X-Api-Key" {
+		t.Fatalf("claude: %v %v", c.Header, err)
+	}
+	if c, err := k.Credential(Need{Access: AccessAPI, Harness: "codex"}); err != nil || c.Token != fakeOAI || c.Header != "" {
+		t.Fatalf("codex: %v %v", c.Header, err)
+	}
+	_, err := k.Credential(Need{Access: AccessAPI, Harness: "agy"})
+	var m *Missing
+	if !errors.As(err, &m) || strings.Contains(m.Why, "sk-") {
+		t.Fatalf("agy: %v", err)
+	}
+	// A file that cannot be read is never taken for no key, nor quoted.
+	p, _ := s.KeyFile(KeyAnthropic)
+	if err := os.WriteFile(p, []byte("not json "+fakeAnth), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if why := k.Ready(Need{Access: AccessAPI, Harness: "claude"}); !strings.Contains(why, "cannot be read") || strings.Contains(why, fakeAnth) {
+		t.Fatalf("unreadable: %q", why)
+	}
+	if _, err := s.KeyFile("claude"); err == nil {
+		t.Fatal("a name that is no key has a file")
+	}
+}

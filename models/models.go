@@ -1,6 +1,8 @@
 // Package models is the list of models an agent's access can use now, from
 // each source's own data: OpenRouter's official list-models call made by
-// control with the OpenRouter key, the output of an unmodified harness run where its sign-in is
+// control with the OpenRouter key, each vendor's official list-models call
+// made by control with that vendor's API key (Anthropic, OpenAI, Gemini),
+// the output of an unmodified harness run where its sign-in is
 // (agy models), what an unmodified harness left in a session's home and a
 // runner reported (codex's models_cache.json slugs), or a fixed list
 // (claude's aliases). No subscription's own endpoint is ever called from
@@ -21,7 +23,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -37,7 +42,7 @@ type Model struct {
 type List struct {
 	Models []Model `json:"models" doc:"The models, in the source's order or sorted by id. Empty when the source has none yet or could not be read."`
 	// Source says where the list came from, for a screen.
-	Source    string     `json:"source" doc:"Where the list comes from: api (OpenRouter's list-models call, made by control with the OpenRouter key), command (the unmodified harness, where its sign-in is), runner (what the harness left in a session's home, reported by a runner), fixed (a list of the harness's own aliases)."`
+	Source    string     `json:"source" doc:"Where the list comes from: api (the official list-models call of OpenRouter or of the vendor, made by control with the key set in Settings), command (the unmodified harness, where its sign-in is), runner (what the harness left in a session's home, reported by a runner), fixed (a list of the harness's own aliases)."`
 	FetchedAt *time.Time `json:"fetched_at,omitempty" doc:"When the list was fetched or reported. Absent for a fixed list and for one never fetched."`
 	Error     string     `json:"error,omitempty" doc:"Why the list is empty or old, in fixed words, such as connect your agy subscription in Settings. The models kept from before, if any, are still listed."`
 }
@@ -153,6 +158,114 @@ func OpenRouter(ctx context.Context, c *http.Client, base, key string) ([]Model,
 	out := make([]Model, 0, len(page.Data))
 	for _, d := range page.Data {
 		out = append(out, Model{ID: d.ID, Label: d.Name})
+	}
+	return keep(out), nil
+}
+
+// maxPages bounds how many pages of one list-models call are read.
+const maxPages = 10
+
+// Anthropic lists the models of Anthropic's API, base such as
+// https://api.anthropic.com: GET /v1/models, 1000 a page, following
+// has_more and last_id, with the key in x-api-key, as Claude Code itself
+// sends an API key (measured, Claude Code 2.1.321), and anthropic-version
+// (platform.claude.com/docs/en/api/models-list, read 2026-11-13).
+func Anthropic(ctx context.Context, c *http.Client, base, key string) ([]Model, error) {
+	var out []Model
+	after := ""
+	for range maxPages {
+		var page struct {
+			Data []struct {
+				ID          string `json:"id"`
+				DisplayName string `json:"display_name"`
+			} `json:"data"`
+			HasMore bool   `json:"has_more"`
+			LastID  string `json:"last_id"`
+		}
+		q := url.Values{"limit": {"1000"}}
+		if after != "" {
+			q.Set("after_id", after)
+		}
+		err := get(ctx, c, strings.TrimSuffix(base, "/")+"/v1/models?"+q.Encode(), func(h http.Header) {
+			h.Set("X-Api-Key", key)
+			h.Set("Anthropic-Version", "2023-06-01")
+		}, &page)
+		if err != nil {
+			return nil, err
+		}
+		for _, d := range page.Data {
+			out = append(out, Model{ID: d.ID, Label: d.DisplayName})
+		}
+		if !page.HasMore || page.LastID == "" || page.LastID == after {
+			break
+		}
+		after = page.LastID
+	}
+	return keep(out), nil
+}
+
+// OpenAI lists the models of OpenAI's API, base such as
+// https://api.openai.com: GET /v1/models, with the key as the bearer, one
+// page (developers.openai.com/api/reference/resources/models/methods/list,
+// read 2026-11-13). Sorted by id: the reply has no order of its own.
+func OpenAI(ctx context.Context, c *http.Client, base, key string) ([]Model, error) {
+	var page struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	err := get(ctx, c, strings.TrimSuffix(base, "/")+"/v1/models", func(h http.Header) {
+		h.Set("Authorization", "Bearer "+key)
+	}, &page)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Model, 0, len(page.Data))
+	for _, d := range page.Data {
+		out = append(out, Model{ID: d.ID})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return keep(out), nil
+}
+
+// Gemini lists the models of the Gemini API, base such as
+// https://generativelanguage.googleapis.com: GET /v1beta/models, 1000 a
+// page, following nextPageToken, with the key in x-goog-api-key, never in
+// the query (aistudio.google.com/api-reference/models/list-models, read
+// 2026-11-13). Only models whose supportedGenerationMethods hold
+// generateContent, the call agy makes; "models/" is taken off each name.
+func Gemini(ctx context.Context, c *http.Client, base, key string) ([]Model, error) {
+	var out []Model
+	token := ""
+	for range maxPages {
+		var page struct {
+			Models []struct {
+				Name        string   `json:"name"`
+				DisplayName string   `json:"displayName"`
+				Methods     []string `json:"supportedGenerationMethods"`
+			} `json:"models"`
+			Next string `json:"nextPageToken"`
+		}
+		q := url.Values{"pageSize": {"1000"}}
+		if token != "" {
+			q.Set("pageToken", token)
+		}
+		err := get(ctx, c, strings.TrimSuffix(base, "/")+"/v1beta/models?"+q.Encode(), func(h http.Header) {
+			h.Set("X-Goog-Api-Key", key)
+		}, &page)
+		if err != nil {
+			return nil, err
+		}
+		for _, m := range page.Models {
+			id, ok := strings.CutPrefix(m.Name, "models/")
+			if ok && slices.Contains(m.Methods, "generateContent") {
+				out = append(out, Model{ID: id, Label: m.DisplayName})
+			}
+		}
+		if page.Next == "" || page.Next == token {
+			break
+		}
+		token = page.Next
 	}
 	return keep(out), nil
 }

@@ -131,3 +131,43 @@ func TestCacheFetchesHourlyOrOnDemand(t *testing.T) {
 		t.Fatalf("a failed first fetch is tried again: %+v", l)
 	}
 }
+
+// Anthropic's and the Gemini API's lists are read page by page, with the
+// key in the header each vendor reads and never in the query; the Gemini
+// list keeps only models that take generateContent, without "models/".
+func TestVendorListsFollowPages(t *testing.T) {
+	var seen []string
+	f := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, r.URL.Path+"?"+r.URL.RawQuery+" x-api-key="+r.Header.Get("X-Api-Key")+" goog="+r.Header.Get("X-Goog-Api-Key"))
+		q := r.URL.Query()
+		switch {
+		case r.URL.Path == "/v1/models" && q.Get("after_id") == "":
+			w.Write([]byte(`{"data":[{"id":"claude-a","display_name":"A"}],"has_more":true,"last_id":"claude-a"}`))
+		case r.URL.Path == "/v1/models" && q.Get("after_id") == "claude-a":
+			w.Write([]byte(`{"data":[{"id":"claude-b"}],"has_more":false,"last_id":"claude-b"}`))
+		case r.URL.Path == "/v1beta/models" && q.Get("pageToken") == "":
+			w.Write([]byte(`{"models":[{"name":"models/gemini-a","supportedGenerationMethods":["generateContent"]}],"nextPageToken":"p2"}`))
+		case r.URL.Path == "/v1beta/models" && q.Get("pageToken") == "p2":
+			w.Write([]byte(`{"models":[{"name":"models/embed-b","supportedGenerationMethods":["embedContent"]},{"name":"models/gemini-c","displayName":"C","supportedGenerationMethods":["generateContent"]}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer f.Close()
+	ms, err := Anthropic(context.Background(), f.Client(), f.URL, fakeKey)
+	if err != nil || len(ms) != 2 || ms[0] != (Model{ID: "claude-a", Label: "A"}) || ms[1].ID != "claude-b" {
+		t.Fatalf("anthropic: %v %v", ms, err)
+	}
+	ms, err = Gemini(context.Background(), f.Client(), f.URL, fakeKey)
+	if err != nil || len(ms) != 2 || ms[0].ID != "gemini-a" || ms[1] != (Model{ID: "gemini-c", Label: "C"}) {
+		t.Fatalf("gemini: %v %v", ms, err)
+	}
+	for _, s := range seen {
+		if strings.Contains(s, "?"+fakeKey) || strings.Contains(s, "key="+fakeKey+"&") || (!strings.Contains(s, "x-api-key="+fakeKey) && !strings.Contains(s, "goog="+fakeKey)) {
+			t.Errorf("call %s", s)
+		}
+	}
+	if len(seen) != 4 {
+		t.Errorf("calls %v", seen)
+	}
+}

@@ -120,7 +120,7 @@ func TestCheckRefuses(t *testing.T) {
 		{Fields{Name: "x", Harness: "opencode", Access: Subscription}, "not available yet"},
 		{Fields{Name: "x", Harness: "gemini", Access: Subscription}, "harness must be"},
 		{Fields{Name: "x", Harness: "agy", Access: OpenRouter, Model: "m"}, "cannot use access openrouter"},
-		{Fields{Name: "x", Harness: Claude, Access: API}, "not available yet"},
+		{Fields{Name: "x", Harness: Claude, Access: API, KeyEnv: "ANTHROPIC_API_KEY"}, "for openrouter agents only"},
 		{Fields{Name: "x", Harness: Claude, Access: "local"}, "access must be"},
 		{Fields{Name: "x", Harness: Claude, Access: Subscription, Model: "--tools"}, "model must match"},
 		{Fields{Name: "x", Harness: Claude, Access: Subscription, KeyEnv: "OPENROUTER_API_KEY"}, "for openrouter agents only"},
@@ -135,6 +135,16 @@ func TestCheckRefuses(t *testing.T) {
 	ok := Fields{Name: "x", Harness: Codex, Access: OpenRouter, Model: "qwen/qwen3-coder:free"}
 	if got := Check(&ok); got != "" || ok.KeyEnv != DefaultKeyEnv {
 		t.Errorf("valid fields refused: %q %+v", got, ok)
+	}
+	// Every harness takes access api, with a model or without; the key is
+	// the one set in Settings, so no variable is filled in.
+	for _, h := range []string{Claude, Codex, "agy"} {
+		for _, m := range []string{"", "some-model"} {
+			f := Fields{Name: "x", Harness: h, Access: API, Model: m}
+			if got := Check(&f); got != "" || f.KeyEnv != "" {
+				t.Errorf("api on %s refused: %q %+v", h, got, f)
+			}
+		}
 	}
 }
 

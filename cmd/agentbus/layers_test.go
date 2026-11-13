@@ -15,6 +15,7 @@ import (
 	"testing"
 
 	"github.com/staysup/agentbus/credentials"
+	"github.com/staysup/agentbus/harness"
 )
 
 const module = "github.com/staysup/agentbus"
@@ -393,12 +394,23 @@ func deps(t *testing.T, pkg string) []string {
 // a subscription's sign-in: both are in the paths every turn is denied.
 func TestSubscriptionsProtectedHoldsTheKey(t *testing.T) {
 	subs := subscriptionStore(t.TempDir())
-	key, err := subs.KeyFile(credentials.AccessOpenRouter)
-	if err != nil {
-		t.Fatal(err)
-	}
 	got := subscriptionsProtected(subs)
-	if !slices.Contains(got, key) || !slices.Contains(got, filepath.Join(subs.Dir, "claude.json")) {
+	for _, name := range credentials.KeyNames {
+		key, err := subs.KeyFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !slices.Contains(got, key) {
+			t.Errorf("%s's key is not protected: %v", name, got)
+		}
+	}
+	if !slices.Contains(got, filepath.Join(subs.Dir, "claude.json")) {
 		t.Fatalf("protected: %v", got)
+	}
+	// Every harness's access api names a key that can be set.
+	for _, h := range harness.All() {
+		if k := h.Info().APIKey; k != nil && !slices.Contains(credentials.KeyNames, k.Name) {
+			t.Errorf("%s names key %s, which cannot be set", h.Info().Name, k.Name)
+		}
 	}
 }

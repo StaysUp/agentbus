@@ -20,7 +20,7 @@ func (claude) Info() Info {
 		// 2026-11-05, run under a sandbox profile that denies the network).
 		StatusArgs:         []string{"auth", "status"},
 		OwnEndpointEnv:     "ANTHROPIC_BASE_URL",
-		Access:             standardAccess("Claude subscription", []string{"sonnet", "opus", "haiku"}),
+		Access:             standardAccess("Claude subscription", []string{"sonnet", "opus", "haiku"}, "Anthropic API key"),
 		Replay:             FormatAnthropic,
 		ReplayOnOpenRouter: true,
 		// Claude Code keeps its settings, memory, plugins, transcripts and
@@ -47,6 +47,9 @@ func (claude) Info() Info {
 		// retry.", and waits: it does not exit.
 		Login: &Login{Args: []string{"setup-token"}, Prefix: "sk-ant-oat", Token: `sk-ant-oat[0-9]{2}-[A-Za-z0-9_-]{20,}`,
 			ValidDays: 365, Refused: `OAuth\s*error`},
+		// Anthropic's API takes a key in x-api-key
+		// (docs.anthropic.com/en/api/overview, read 2026-11-13).
+		APIKey: &APIKey{Name: "anthropic", Label: "Anthropic API key", URL: "https://api.anthropic.com", Header: "X-Api-Key", Format: FormatAnthropic},
 	}
 }
 
@@ -82,6 +85,20 @@ func (claude) WireOpenRouter(w OpenRouterWire) (env, args []string) {
 		}
 	}
 	return env, nil
+}
+
+// WireAPI: ANTHROPIC_BASE_URL at the service, the placeholder in
+// ANTHROPIC_AUTH_TOKEN, which Claude Code sends as "Authorization: Bearer"
+// (as for OpenRouter), and ANTHROPIC_API_KEY empty, so no key of the
+// machine's is sent. Control's relay puts the key set in Settings in
+// x-api-key in its place. Claude Code names Anthropic's own models, so no
+// alias is set: --model is enough.
+func (claude) WireAPI(w APIWire) (env, args []string) {
+	return []string{
+		"ANTHROPIC_BASE_URL=" + w.Base,
+		"ANTHROPIC_AUTH_TOKEN=" + w.Placeholder,
+		"ANTHROPIC_API_KEY=",
+	}, nil
 }
 
 // Edit: Claude Code's rules hold paths; a name that cannot go in one gets no

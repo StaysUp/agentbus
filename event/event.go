@@ -303,7 +303,7 @@ type Event struct {
 	// OpenRouter agent the name of the variable that holds its key. Never
 	// the key itself. A session's next turn reads them back.
 	AgentID string `json:"agent_id,omitempty" doc:"On a run's turn.started and session.opened: the saved agent the run started, as GET /api/v0/agents names it. Absent for a turn started by harness name alone."`
-	Access  string `json:"access,omitempty" doc:"On a run's turn.started and session.opened: how the agent reaches its model: subscription or openrouter. Absent means subscription."`
+	Access  string `json:"access,omitempty" doc:"On a run's turn.started and session.opened: how the agent reaches its model: subscription, openrouter or api. Absent means subscription."`
 	KeyEnv  string `json:"key_env,omitempty" doc:"On a run's turn.started and session.opened of an OpenRouter agent: the name of the environment variable that holds the key. Never the key."`
 	Hold    string `json:"hold,omitempty" doc:"On session.opened and session.closed: names one run's child."`
 	// ExitCode, only on session.closed from a run: the child's exit code, or

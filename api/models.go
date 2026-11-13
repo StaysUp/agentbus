@@ -19,7 +19,7 @@ import (
 // ModelList is the answer to GET /api/v0/harnesses/{id}/models.
 type ModelList struct {
 	Harness string `json:"harness" doc:"The harness."`
-	Access  string `json:"access" doc:"The access: subscription or openrouter."`
+	Access  string `json:"access" doc:"The access: subscription, openrouter or api."`
 	models.List
 }
 
@@ -33,6 +33,11 @@ type ModelSources struct {
 	// OpenRouterKey is the OpenRouter key an agent of control would get: the
 	// one set in Settings, or the default variable's. "" lists without one.
 	OpenRouterKey func() string
+	// APIBase is each vendor API of access "api", by the key's name in
+	// Settings (harness.APIKey.Name), such as https://api.anthropic.com.
+	APIBase map[string]string
+	// APIKey is the key of that name set in Settings, or "" when none is.
+	APIKey func(name string) string
 	// Own runs the unmodified harness in its home on control so it prints
 	// its models (credentials.Subscriptions.OwnModels).
 	Own func(harness string) ([]byte, error)
@@ -48,7 +53,7 @@ var modelsRoute = route{method: "GET", path: "/api/v0/harnesses/{id}/models", op
 		"codex's models_cache.json, which unmodified codex writes in a session's home, its model names reported by the runner after a turn. " +
 		"No subscription's own endpoint is called by AgentBus. A list is kept with the time it was fetched and fetched again at most once an hour, or now with refresh=true. " +
 		"An agent may still name a model the list lacks, and one that names none uses the tool's own default.",
-	query: []param{{name: "access", doc: "subscription or openrouter. Required."},
+	query: []param{{name: "access", doc: "subscription, openrouter or api. Required."},
 		{name: "refresh", doc: "true fetches the list again now, rather than the one kept within the hour."}},
 	replies: []reply{ok(200, ModelList{}, "The models, or none with why."), fail(400, "No access was named."), fail(404, "No such harness, or it offers no such access.")},
 	turn:    anyRead,
@@ -59,7 +64,7 @@ func (a *API) listModels(w http.ResponseWriter, r *http.Request, id string) {
 	q := r.URL.Query()
 	access := q.Get("access")
 	if access == "" {
-		writeError(w, http.StatusBadRequest, "access is required: subscription or openrouter")
+		writeError(w, http.StatusBadRequest, "access is required: subscription, openrouter or api")
 		return
 	}
 	if !ok || !harness.Offers(h.Info(), access) {
@@ -97,6 +102,8 @@ func (a *API) modelList(ctx context.Context, info harness.Info, access string, r
 		return src.Cache.Get("openrouter", models.FromAPI, refresh, func() ([]models.Model, error) {
 			return models.OpenRouter(ctx, client, src.OpenRouterBase, key)
 		})
+	case agents.API:
+		return a.apiKeyModels(ctx, client, info, refresh)
 	}
 	// A subscription: through the unmodified tool only.
 	switch {
@@ -154,10 +161,47 @@ func (a *API) reportedModels(ctx context.Context, name string) ([]string, time.T
 	return ids, at
 }
 
-// forgetOpenRouterModels drops OpenRouter's list fetched with the key: it
-// was replaced or removed.
-func (a *API) forgetOpenRouterModels() {
+// apiKeyModels is the list of info's access "api": its vendor's
+// list-models call with the key set in Settings. With no key set there is
+// no call and no list.
+func (a *API) apiKeyModels(ctx context.Context, client *http.Client, info harness.Info, refresh bool) models.List {
+	k := info.APIKey
+	src := a.cfg.Models
+	none := func(why string) models.List {
+		return models.List{Models: []models.Model{}, Source: models.FromAPI, Error: why}
+	}
+	if k == nil || src.APIBase[k.Name] == "" || src.APIKey == nil {
+		return none("this service lists no models for " + info.Label + " on an API key")
+	}
+	key := src.APIKey(k.Name)
+	if key == "" {
+		return none("set your " + k.Label + " in Settings")
+	}
+	list := models.OpenAI
+	switch k.Format {
+	case harness.FormatAnthropic:
+		list = models.Anthropic
+	case harness.FormatGemini:
+		list = models.Gemini
+	}
+	base := src.APIBase[k.Name]
+	return src.Cache.Get(keyModels(k.Name), models.FromAPI, refresh, func() ([]models.Model, error) {
+		return list(ctx, client, base, key)
+	})
+}
+
+// keyModels is the cache key of the list fetched with the key named name.
+func keyModels(name string) string {
+	if name == credentials.AccessOpenRouter {
+		return "openrouter"
+	}
+	return "key/" + name
+}
+
+// forgetModels drops the list fetched with the key named name: it was
+// replaced or removed.
+func (a *API) forgetModels(name string) {
 	if a.cfg.Models != nil && a.cfg.Models.Cache != nil {
-		a.cfg.Models.Cache.Forget("openrouter")
+		a.cfg.Models.Cache.Forget(keyModels(name))
 	}
 }

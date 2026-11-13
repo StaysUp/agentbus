@@ -23,13 +23,17 @@ func (agy) Info() Info {
 		// elsewhere (Wire).
 		OwnEndpointEnv: "CLOUD_CODE_URL",
 		// Only its own Google sign-in, on this machine or relayed from
-		// control (Login). It speaks the Gemini format only, so
-		// OpenRouter cannot serve it, and a Gemini API key is not wired yet.
+		// control (Login), or a Gemini API key set in Settings (APIKey).
+		// It speaks the Gemini format only, so OpenRouter cannot serve it.
 		Access: []Access{
 			{Kind: Subscription, Label: "Google sign-in", Models: []string{"gemini-3.8-flash-medium", "gemini-4-argon-medium"}, AnyModel: true},
 			{Kind: OpenRouter, Label: "OpenRouter key", Disabled: true, Models: []string{}},
-			{Kind: API, Label: "API key", Disabled: true, Models: []string{}},
+			{Kind: API, Label: "Gemini API key", Models: []string{}, AnyModel: true},
 		},
+		// The Gemini API takes a key in x-goog-api-key
+		// (ai.google.dev/api, read 2026-11-13), and agy sends it there
+		// (WireAPI).
+		APIKey: &APIKey{Name: "gemini", Label: "Gemini API key", URL: "https://generativelanguage.googleapis.com", Header: "X-Goog-Api-Key", Format: FormatGemini},
 		// agy keeps its settings, conversations and sign-in under
 		// $HOME/.gemini; no variable moves that folder. A home of its own
 		// starts signed out (agy then prints a login link and waits).
@@ -77,6 +81,18 @@ const agyTokenFile = ".gemini/antigravity-cli/antigravity-oauth-token"
 // 2026-11-04). The service routes /v1internal: to that host (cmd/agentbus).
 func (agy) Wire(baseURL string) (env, args []string) {
 	return []string{"CLOUD_CODE_URL=" + baseURL}, nil
+}
+
+// WireAPI: the Gemini API at the service, with the placeholder as
+// GEMINI_API_KEY; the turn's --settings names the gemini provider
+// (agySettings). agy 1.5.8 so set, with a scratch HOME and no sign-in, sent
+// POST $GOOGLE_GEMINI_BASE_URL/v1beta/models/<model>:streamGenerateContent?alt=sse
+// with the key in X-Goog-Api-Key and nothing in Authorization, and asked no
+// sign-in (2026-11-13, against a local listener, with a fake key). Control's
+// relay swaps the key set in Settings in for the placeholder, so the child
+// never holds it, and no Keychain or login is involved.
+func (agy) WireAPI(w APIWire) (env, args []string) {
+	return []string{"GOOGLE_GEMINI_BASE_URL=" + w.Base, "GEMINI_API_KEY=" + w.Placeholder}, nil
 }
 
 // WireOpenRouter is never used: agy offers no OpenRouter access (Info).
@@ -229,6 +245,14 @@ func agySettings(t Turn) string {
 	if len(deny) > 0 {
 		perm["deny"] = deny
 	}
-	b, _ := json.Marshal(map[string]any{"allowNonWorkspaceAccess": false, "permissions": perm})
+	v := map[string]any{"allowNonWorkspaceAccess": false, "permissions": perm}
+	if t.Access == API {
+		// The Gemini API, with the key in GEMINI_API_KEY (WireAPI):
+		// "Set modelProvider: \"gemini\" in settings.json, export
+		// GEMINI_API_KEY" (agy's changelog). Set for this run only, so the
+		// person's own settings never change.
+		v["modelProvider"] = "gemini"
+	}
+	b, _ := json.Marshal(v)
 	return string(b)
 }

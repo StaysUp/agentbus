@@ -86,7 +86,7 @@ type Wire func(agent, baseURL string, acc Access) (Launch, error)
 // Access is how a turn's agent reaches its model. The zero value is the
 // harness's own subscription.
 type Access struct {
-	// Kind is "" or "subscription", or "openrouter".
+	// Kind is "" or "subscription", "openrouter" or "api".
 	Kind string
 	// KeyEnv, for openrouter, names the variable that holds the key. The
 	// runner reads it when the turn starts; it is never stored.
@@ -100,6 +100,19 @@ type Access struct {
 	// from the runner's environment or sign-in.
 	Placeholder string
 }
+
+// accessKnown says access is one a turn can run on: "" (the subscription),
+// subscription, openrouter or api.
+func accessKnown(access string) bool {
+	switch access {
+	case "", harness.Subscription, harness.OpenRouter, harness.API:
+		return true
+	}
+	return false
+}
+
+// accessWords refuses an access that is none of accessKnown's.
+const accessWords = "access must be subscription, openrouter or api"
 
 // Refused makes a refusal a Wire can return: status and the person's words.
 func Refused(status int, msg string) error { return refuse(status, msg) }
@@ -399,8 +412,8 @@ func (e *Engine) Start(req Request) (*Turn, error) {
 		return nil, refuse(http.StatusBadRequest, "session must match "+SessionShape.String())
 	}
 	// Before the slot is taken: a refusal here holds nothing.
-	if req.Access != "" && req.Access != "subscription" && req.Access != "openrouter" {
-		return nil, refuse(http.StatusBadRequest, "access must be subscription or openrouter")
+	if !accessKnown(req.Access) {
+		return nil, refuse(http.StatusBadRequest, accessWords)
 	}
 	if code, msg := e.runs.take(id); code != 0 {
 		return nil, refuse(code, msg)
@@ -454,8 +467,8 @@ func (e *Engine) next(req Request) (*Turn, error) {
 	if !KnownHarness(req.Harness) {
 		return fail(refuse(http.StatusBadRequest, unknownHarness()))
 	}
-	if req.Access != "" && req.Access != "subscription" && req.Access != "openrouter" {
-		return fail(refuse(http.StatusBadRequest, "access must be subscription or openrouter"))
+	if !accessKnown(req.Access) {
+		return fail(refuse(http.StatusBadRequest, accessWords))
 	}
 	agent, agentID, access, keyEnv, model := req.Harness, req.AgentID, req.Access, req.KeyEnv, req.Model
 	if model == "" {
@@ -811,6 +824,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		}
 	}()
 	spec := turnSpec(hint, t.resumeID, t.model, w, perm, t.context+t.prompt)
+	spec.Access = t.access
 	if tools {
 		spec.Tools = strings.TrimSuffix(apiURL, "/") + ToolPath
 	}

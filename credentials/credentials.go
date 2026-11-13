@@ -22,6 +22,7 @@ import (
 const (
 	AccessSubscription = "subscription"
 	AccessOpenRouter   = "openrouter"
+	AccessAPI          = "api" // the vendor's own API key, set in Settings (APIKeys)
 )
 
 // Need is what one model call needs a credential for: the access its agent
@@ -37,7 +38,10 @@ type Need struct {
 // other headers the sign-in needs, such as the ChatGPT account of codex's
 // sign-in.
 type Cred struct {
-	Token   string
+	Token string
+	// Header names the header Token goes in, as it is, such as X-Api-Key
+	// for Anthropic's API. Empty: Authorization, as "Bearer <Token>".
+	Header  string
 	Headers map[string]string
 }
 
