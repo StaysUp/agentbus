@@ -37,6 +37,9 @@ type Own struct {
 	// Within: the harness renews its sign-in only when less than this is
 	// left, so control runs it then.
 	Within time.Duration
+	// ModelArgs run the harness so it prints its models (agy models), as
+	// Args are run. Empty: none.
+	ModelArgs []string
 	// Path and Args run the harness so it renews its sign-in, with HOME the
 	// home, the variables of Set and none of Unset. Env is the environment it starts from;
 	// nil: control's own.
@@ -131,6 +134,36 @@ var errRenewFailed = errors.New("credentials: the harness did not renew its sign
 // says it printed o.Refused. Its output is only matched, never kept or
 // shown: it may name the account.
 func (s *Subscriptions) runOwn(o Own) (refused bool, err error) {
+	_, refused, err = s.runOwnArgs(o, o.Args)
+	return refused, err
+}
+
+// OwnModels runs harness's own listing of its models in its home on control
+// (Own.ModelArgs, such as agy models) and returns what it printed, for a
+// reader that keeps only its model lines (models.Lines): the output may name
+// the account, so nothing else of it may be kept. ErrNotConnected when the
+// harness is not connected. Running it may renew the sign-in, as agy models
+// does, which is the harness's own work in its own home.
+func (s *Subscriptions) OwnModels(harness string) ([]byte, error) {
+	o, ok := s.Own[harness]
+	if !ok || len(o.ModelArgs) == 0 {
+		return nil, errors.New("credentials: this harness lists no models of its own")
+	}
+	if _, err := s.read(harness); err != nil {
+		return nil, ErrNotConnected
+	}
+	out, refused, err := s.runOwnArgs(o, o.ModelArgs)
+	switch {
+	case refused:
+		return nil, errors.New("the vendor refused the sign-in kept on control; connect it again in Settings")
+	case err != nil:
+		return nil, errors.New("the harness could not list its models just now")
+	}
+	return out, nil
+}
+
+// runOwnArgs runs the harness in o's home with args, and returns its output.
+func (s *Subscriptions) runOwnArgs(o Own, args []string) (out []byte, refused bool, err error) {
 	wait := o.Wait
 	if wait == 0 {
 		wait = ownWait
@@ -138,29 +171,29 @@ func (s *Subscriptions) runOwn(o Own) (refused bool, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), wait)
 	defer cancel()
 	l := Login{Home: "HOME", Env: o.Env, Unset: o.Unset, Set: o.Set}
-	cmd := exec.CommandContext(ctx, o.Path, o.Args...)
+	cmd := exec.CommandContext(ctx, o.Path, args...)
 	cmd.Env = l.envWith(s.home(o))
 	cmd.Dir = s.home(o)
 	// Its own process group, so a timeout stops whatever it started.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	var out bytes.Buffer
-	w := &capped{b: &out, n: renewOut}
+	var buf bytes.Buffer
+	w := &capped{b: &buf, n: renewOut}
 	cmd.Stdout, cmd.Stderr = w, w
 	s.homes.Lock()
 	err = cmd.Run()
 	s.homes.Unlock()
-	if o.Refused != nil && o.Refused.Match(out.Bytes()) {
-		return true, nil
+	if o.Refused != nil && o.Refused.Match(buf.Bytes()) {
+		return nil, true, nil
 	}
 	if err != nil {
 		var ee *exec.Error
 		if errors.As(err, &ee) {
-			return false, errors.New("credentials: the harness could not be started to renew its sign-in; is it on control's PATH?")
+			return nil, false, errors.New("credentials: the harness could not be started to renew its sign-in; is it on control's PATH?")
 		}
-		return false, errRenewFailed
+		return nil, false, errRenewFailed
 	}
-	return false, nil
+	return buf.Bytes(), false, nil
 }
 
 // capped writes to b up to n bytes and drops the rest.

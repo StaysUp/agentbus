@@ -91,7 +91,10 @@ in the runner's data folder; copies made before 0.4 stay in `worktrees/job_<id>`
 there, and its changes are applied there. A next job of a session goes to the
 session's runner. One exception keeps a session made before 0.5 going: a session whose first turn
 another machine's runner built from a snapshot stays with that runner; its applies still go to the
-folder's machine.
+folder's machine. Each harness of `capabilities.harnesses` may carry
+`models` and `models_at`: the model names the harness's own cache in a session's home held after the
+runner's latest turn of it (codex's `models_cache.json`), the names only. Control offers them in the
+agent window.
 
 A runner takes its jobs in two kinds of places. Turns and reviews take its `capacity`.
 **Folder jobs** (`apply` and `folder`) take one of 4 folder places

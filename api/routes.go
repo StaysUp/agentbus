@@ -519,7 +519,7 @@ var routes = slices.Concat([]route{
 		doc:     "This description. The runner protocol's is at /api/v0/runner/openapi.json.",
 		replies: []reply{ok(200, map[string]any{}, "This document.")},
 		public:  true},
-}, runnerRoutes, settingsRoutes, subscriptionRoutes)
+}, runnerRoutes, settingsRoutes, subscriptionRoutes, []route{modelsRoute})
 
 // match reports whether p is rt's path, the id in it, and the values of its
 // other parameters, by name.

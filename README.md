@@ -84,6 +84,14 @@ it to each OpenRouter call. It is never shown again, logged, or sent to a runner
 environment variable where control runs (`key_env`, `OPENROUTER_API_KEY` by default); a key set in
 Settings wins. API: `PUT` and `DELETE /api/v0/subscriptions/openrouter/key`.
 
+The agent window offers the models each access can use now, from each source's own data: OpenRouter's
+list of models (fetched by control with your OpenRouter key), claude's aliases `opus`, `sonnet` and
+`haiku`, `agy models` run unmodified where agy's sign-in is kept on control, and the models codex keeps
+in a session's home, which the runner reports after a codex turn. AgentBus never calls a
+subscription's own endpoint. A list is fetched again at most once an hour, or on demand. You can still
+type any model name, and an empty one uses the tool's own default. API:
+`GET /api/v0/harnesses/{harness}/models?access=subscription|openrouter[&refresh=true]`.
+
 ## Several machines
 
 AgentBus has two parts:

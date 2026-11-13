@@ -113,6 +113,9 @@ type Config struct {
 	// Subscriptions connects the person's own subscriptions on control, for
 	// their runners (subscriptions.go). Nil: none here.
 	Subscriptions *credentials.Manager
+	// Models are where GET /api/v0/harnesses/{id}/models reads each list.
+	// Nil: it lists none.
+	Models *ModelSources
 
 	// Settings hold the policy and the instructions. The policy's
 	// [agent_api] says what a turn token may call and its [limits] cap the

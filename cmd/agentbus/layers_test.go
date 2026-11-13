@@ -77,6 +77,10 @@ func TestPackageLayers(t *testing.T) {
 		// nothing of the module.
 		{[]string{"credentials"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
 			"cost", "replay", "store", "body", "logfile", "settings", "cmd", "folders", "connector", "blobs"}, jobSide...)},
+		// models, the lists of models control reads, uses nothing of the
+		// module.
+		{[]string{"models"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
+			"cost", "replay", "store", "body", "logfile", "settings", "cmd", "folders", "connector", "blobs", "credentials"}, jobSide...)},
 		// netjail, which closes an agent off from the network, uses
 		// nothing of the module.
 		{[]string{"netjail"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
@@ -107,7 +111,7 @@ func TestPackageLayers(t *testing.T) {
 }
 
 // controlPackages are the control side: they never touch a person's folder.
-var controlPackages = []string{"api", "jobs", "queue", "agents", "store", "gateway", "replay", "settings", "credentials"}
+var controlPackages = []string{"api", "jobs", "queue", "agents", "store", "gateway", "replay", "settings", "credentials", "models"}
 
 // The calls that touch files or start programs. A control package makes
 // none of them, but where an entry of controlAllowed names it: its own data
@@ -158,7 +162,7 @@ var controlAllowed = []string{
 	"credentials/own.go Subscriptions.keepHome os.Remove",
 	"credentials/own.go Subscriptions.keepHome os.RemoveAll",
 	"credentials/own.go Subscriptions.removeOwnHome os.RemoveAll",
-	"credentials/own.go Subscriptions.runOwn exec.CommandContext",
+	"credentials/own.go Subscriptions.runOwnArgs exec.CommandContext",
 	// The upgrade to settings.db: it copies the data folder beside itself
 	// and reads its settings files once.
 	"settings/upgrade.go DB.importFiles os.ReadFile",

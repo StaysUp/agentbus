@@ -369,3 +369,40 @@ func waitFor(t *testing.T, ok func() bool) {
 	}
 	t.Fatal("timed out")
 }
+
+// agy's own listing of its models runs the unmodified harness in its home on
+// control, with the bus and variables a renewal runs with, and returns what
+// it printed; a harness not connected is not run, and a refused sign-in says
+// so in fixed words.
+func TestOwnModelsRunsTheHarnessInItsHome(t *testing.T) {
+	s, runs := ownStore(t, `case "$1" in
+models) printf 'gemini-3.8-flash-medium\tGemini 3.8 Flash\n'; if [ -f "$HOME/refuse" ]; then echo "Please sign in to view available models"; fi;;
+esac
+exit 0
+`)
+	o := s.Own["agy"]
+	o.ModelArgs = []string{"models"}
+	s.Own["agy"] = o
+	if _, err := s.OwnModels("agy"); !errors.Is(err, ErrNotConnected) {
+		t.Fatalf("not connected: %v", err)
+	}
+	if b, _ := os.ReadFile(runs); len(b) != 0 {
+		t.Fatalf("ran while not connected: %s", b)
+	}
+	connectOwn(t, s, "fake-agy-access", time.Now().Add(time.Hour))
+	out, err := s.OwnModels("agy")
+	if err != nil || string(out) != "gemini-3.8-flash-medium\tGemini 3.8 Flash\n" {
+		t.Fatalf("%q %v", out, err)
+	}
+	b, _ := os.ReadFile(runs)
+	if want := filepath.Join(s.Dir, "agy-home") + " disabled: models\n"; string(b) != want {
+		t.Fatalf("ran as %q, want %q", b, want)
+	}
+	os.WriteFile(filepath.Join(s.Dir, "agy-home", "refuse"), nil, 0o600)
+	if _, err := s.OwnModels("agy"); err == nil || !strings.Contains(err.Error(), "refused") {
+		t.Fatalf("refused: %v", err)
+	}
+	if _, err := s.OwnModels("claude"); err == nil {
+		t.Fatal("claude lists models of its own")
+	}
+}

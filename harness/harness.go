@@ -88,6 +88,13 @@ type Info struct {
 	// The harness's Args denies them; control names them in the turn's
 	// tools.listed.
 	ToolsHidden []string
+	// ModelsCache is a file the unmodified harness writes in its config
+	// folder of a session's home (ConfigDir) that lists the models its
+	// sign-in may use, and ReadModelsCache reads only their names from it.
+	// A runner reads it after each turn and reports the names to control
+	// (Report.Models). Empty: none.
+	ModelsCache     string
+	ReadModelsCache func([]byte) []string
 	// Login is its own login for the person's subscription, so they can
 	// connect it once on control for the runners they own. Nil: its
 	// subscription cannot be used on a runner yet.
@@ -128,6 +135,10 @@ type Login struct {
 	// of the access token's expiry, an RFC 3339 time. Control reads only the
 	// access token and that expiry, never the refresh token.
 	Keep, ExpiryKey string
+	// ModelsArgs are the harness's arguments that make it print the models
+	// its sign-in may use, one "id<TAB>label" a line, run unmodified in its
+	// home on control (agy models). Empty: none.
+	ModelsArgs []string
 	// RenewArgs are the harness's arguments that make it renew its own
 	// sign-in in that home without a model turn. It does so only when less
 	// than RenewWithinMinutes are left. RenewRefused matches what it prints

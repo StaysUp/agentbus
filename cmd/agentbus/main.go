@@ -57,6 +57,7 @@ import (
 	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/logfile"
+	"github.com/staysup/agentbus/models"
 	"github.com/staysup/agentbus/netjail"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/replay"
@@ -577,6 +578,9 @@ func start(c config) (*service, error) {
 		BaseURL: baseURL, Origin: c.origin, Hosts: c.hosts, Environ: c.environ, Folders: issuer, Build: build(debug.ReadBuildInfo()),
 		Queue: q, Jobs: runnerJobs, Engine: eng, TurnWait: c.turnWait, Agents: saved, Settings: cfgStore, Subscriptions: logins,
 		Logf: svcLog.Printf}
+	if q != nil {
+		acfg.Models = modelSources(c, subs)
+	}
 	var relayHandler http.Handler
 	if runnerJobs != nil {
 		acfg.RunnerTokens, relayHandler = runnerJobs.TurnGrant, runnerJobs.Relay()
@@ -916,6 +920,26 @@ const (
 	relayOpenRouter = "openrouter"
 )
 
+// modelSources are where control reads the lists of models
+// (api.ModelSources): OpenRouter's list-models call with the OpenRouter key,
+// and agy's own listing, run unmodified in its home on control.
+func modelSources(c config, subs *credentials.Subscriptions) *api.ModelSources {
+	or := c.openrouter
+	if or == nil {
+		or = mustParse(openrouter)
+	}
+	return &api.ModelSources{Cache: &models.Cache{}, Client: &http.Client{Timeout: 20 * time.Second},
+		OpenRouterBase: or.String(), Own: subs.OwnModels,
+		// The key an OpenRouter agent would get: set in Settings, or else
+		// the default variable's, where control runs.
+		OpenRouterKey: func() string {
+			if k, err := subs.Key(credentials.AccessOpenRouter); err == nil {
+				return k
+			}
+			return c.getenvOr()(agents.DefaultKeyEnv)
+		}}
+}
+
 // cloudCodeOr is c.cloudCode, or agy's own Code Assist host.
 func (c config) cloudCodeOr() *url.URL {
 	if c.cloudCode != nil {
@@ -988,7 +1012,7 @@ func subscriptionStore(home string) *credentials.Subscriptions {
 				path = h.Info().Name // the renewal says it could not start
 			}
 			o := credentials.Own{Home: l.Keep, File: l.File, TokenKey: l.TokenKey, ExpiryKey: l.ExpiryKey,
-				Within: time.Duration(l.RenewWithinMinutes) * time.Minute, Path: path, Args: l.RenewArgs, Unset: l.Unset, Set: l.Set}
+				Within: time.Duration(l.RenewWithinMinutes) * time.Minute, Path: path, Args: l.RenewArgs, ModelArgs: l.ModelsArgs, Unset: l.Unset, Set: l.Set}
 			if l.RenewRefused != "" {
 				o.Refused = regexp.MustCompile(l.RenewRefused)
 			}

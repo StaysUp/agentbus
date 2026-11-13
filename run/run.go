@@ -199,6 +199,7 @@ type Engine struct {
 	runs       runs
 	turnTokens turnTokens // the live turns' own tokens (tokens.go)
 	turnRules  turnRules  // the live turns' forbid entries, for the gateway (slots.go)
+	models     seenModels // what each harness's own models cache held (models.go)
 }
 
 // New returns the engine. It closes every turn's hold that the service's
@@ -952,6 +953,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 			// The session reads open until the next start.
 			e.cfg.Logf("run.unclosed session=%s turn=%s hold=%s reason=store", t.session, t.id, holdID)
 		}
+		e.readModels(t.session, t.harness)
 		e.runs.release(cmd, t.session)
 		res.end = Ended{ExitCode: code, Stopped: stopped, Unsettled: unsettled}
 		close(res.done)

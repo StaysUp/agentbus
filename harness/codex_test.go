@@ -114,3 +114,20 @@ func TestCodexWalled(t *testing.T) {
 		}
 	}
 }
+
+// Only the slugs of the models codex's own cache lists are read: a hidden one
+// is left out, and nothing else of the file is kept.
+func TestCodexModelsCache(t *testing.T) {
+	i := codex{}.Info()
+	if i.ModelsCache != "models_cache.json" || i.ReadModelsCache == nil {
+		t.Fatalf("%+v", i.ModelsCache)
+	}
+	b := []byte(`{"fetched_at":"2026-11-13T10:00:00Z","etag":"e","identity":{"account":"someone@example.com"},` +
+		`"models":[{"slug":"gpt-6.1-sol","visibility":"list","display_name":"x"},{"slug":"gpt-reserve","visibility":"hide"},{"slug":"gpt-6-luna"},{"visibility":"list"}]}`)
+	if got := i.ReadModelsCache(b); !slices.Equal(got, []string{"gpt-6.1-sol", "gpt-6-luna"}) {
+		t.Fatalf("%v", got)
+	}
+	if got := i.ReadModelsCache([]byte("not json")); got != nil {
+		t.Fatalf("%v", got)
+	}
+}

@@ -52,7 +52,9 @@ func (agy) Info() Info {
 		Login: &Login{Args: []string{"acp", "--login"},
 			Home: "HOME", File: agyTokenFile, Keep: "agy-home",
 			TokenKey: "token.access_token", ExpiryKey: "token.expiry",
-			RenewArgs: []string{"models"}, RenewWithinMinutes: 4, RenewRefused: `(?i)please sign in`,
+			RenewArgs: []string{"models"}, RenewWithinMinutes: 4,
+			// agy models prints one "id<TAB>label" a line.
+			ModelsArgs: []string{"models"}, RenewRefused: `(?i)please sign in`,
 			// With no address set, agy still found this user's bus at
 			// /run/user/<uid>/bus and asked it for a keyring; "disabled:" is
 			// an address agy cannot use, so it keeps the sign-in in its file

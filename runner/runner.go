@@ -1121,6 +1121,12 @@ wait:
 			return
 		}
 	}
+	// A harness that keeps its own list of models in the session's home
+	// may have just written it: control hears of it now, not at the next
+	// probe (run.Engine.Models).
+	if h, ok := harness.Get(at.job.Spec.Harness); ok && h.Info().ModelsCache != "" {
+		go r.beat(ctx)
+	}
 	end := turn.Ended()
 	res := queue.Result{Session: turn.Session, ExitCode: &end.ExitCode, Stopped: end.Stopped, Unsettled: end.Unsettled, State: "failed"}
 	if end.ExitCode == 0 {

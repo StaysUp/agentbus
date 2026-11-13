@@ -125,6 +125,7 @@ func (a *API) setOpenRouterKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	err := a.cfg.Subscriptions.Store.SetKey(credentials.AccessOpenRouter, in.Key)
+	a.forgetOpenRouterModels()
 	switch {
 	case errors.Is(err, credentials.ErrBadKey):
 		writeError(w, http.StatusBadRequest, err.Error())
@@ -143,6 +144,7 @@ func (a *API) removeOpenRouterKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, noSubscriptions)
 		return
 	}
+	a.forgetOpenRouterModels()
 	if err := a.cfg.Subscriptions.Store.RemoveKey(credentials.AccessOpenRouter); err != nil {
 		writeError(w, http.StatusInternalServerError, "the key could not be removed")
 		return

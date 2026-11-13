@@ -150,6 +150,11 @@ func fakeAgent() {
 			resp.Body.Close()
 		}
 	}
+	// With AGENTBUS_FAKE_MODELS_CACHE, that file as codex's models_cache.json
+	// in its CODEX_HOME, as codex keeps the models its sign-in may use.
+	if c := os.Getenv("AGENTBUS_FAKE_MODELS_CACHE"); c != "" && os.Getenv("CODEX_HOME") != "" {
+		os.WriteFile(filepath.Join(os.Getenv("CODEX_HOME"), "models_cache.json"), []byte(c), 0o600)
+	}
 	// With AGENTBUS_FAKE_ASK, a turn whose prompt is "ask someone" asks
 	// another agent through the API, with its own token, as agentbus-api
 	// does: POST /api/v0/turns with that body.

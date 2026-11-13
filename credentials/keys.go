@@ -114,6 +114,17 @@ func (s *Subscriptions) readKey(access string) (keptKey, error) {
 	return k, nil
 }
 
+// Key is the value of the key named name set in Settings, for control's own
+// call with it (the vendor's list of models), or ErrNotConnected. It is
+// never logged, shown or sent anywhere but that vendor.
+func (s *Subscriptions) Key(name string) (string, error) {
+	k, err := s.readKey(name)
+	if err != nil {
+		return "", err
+	}
+	return k.Key, nil
+}
+
 // KeyStatus says whether access's key is set. A file that cannot be read
 // is an error, never shown as set.
 func (s *Subscriptions) KeyStatus(access string) (KeyStatus, error) {

@@ -27,6 +27,11 @@ type Report struct {
 	Found    bool   `json:"found"`
 	Version  string `json:"version,omitempty"`
 	SignedIn *bool  `json:"signed_in,omitempty"`
+	// Models are the model names the harness's own cache (Info.ModelsCache)
+	// held after the runner's latest turn of it, and ModelsAt when it was
+	// read. None: no turn yet, or no cache.
+	Models   []string   `json:"models,omitempty"`
+	ModelsAt *time.Time `json:"models_at,omitempty"`
 }
 
 // ProbeAll probes every runnable harness, in registry order. lookPath finds a

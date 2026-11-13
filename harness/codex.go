@@ -40,6 +40,13 @@ func (codex) Info() Info {
 		// codex keeps its config.toml, sign-in, sessions and memories
 		// under CODEX_HOME, which must exist.
 		ConfigEnv: "CODEX_HOME", ConfigDir: ".codex",
+		// codex keeps the models its ChatGPT sign-in may use in
+		// $CODEX_HOME/models_cache.json, as {"models":[{"slug", "visibility",
+		// ...}]}, and hides those whose visibility is "hide" (the cache codex-cli
+		// 0.164.0 wrote on this machine, read 2026-11-13, slugs and
+		// visibility only). Only the slugs of
+		// listed models are read; nothing else of the file or the folder.
+		ModelsCache: "models_cache.json", ReadModelsCache: codexModels,
 		ToolServer: true,
 		// codex login --device-auth prints a link and a one-time code
 		// (XXXX-XXXXX), needs no terminal and reads no input, and keeps the
@@ -124,6 +131,27 @@ func (codex) WireRelay(baseURL, placeholder string) (env, args []string) {
 		"-c", p + `wire_api="responses"`,
 		"-c", p + "supports_websockets=false",
 	}
+}
+
+// codexModels are the slugs of the models codex's models_cache.json lists
+// ("visibility": "list"; one hidden there is not offered).
+func codexModels(b []byte) []string {
+	var v struct {
+		Models []struct {
+			Slug       string `json:"slug"`
+			Visibility string `json:"visibility"`
+		} `json:"models"`
+	}
+	if json.Unmarshal(b, &v) != nil {
+		return nil
+	}
+	var out []string
+	for _, m := range v.Models {
+		if m.Slug != "" && m.Visibility != "hide" {
+			out = append(out, m.Slug)
+		}
+	}
+	return out
 }
 
 // Refuse: every setting of permissions.toml has a flag on codex, or the

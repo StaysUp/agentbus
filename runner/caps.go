@@ -9,6 +9,7 @@ import (
 	"context"
 	"net/http"
 	"runtime"
+	"slices"
 	"sync"
 	"time"
 
@@ -20,6 +21,16 @@ import (
 
 // caps is what the runner can report now. harnesses is nil before a probe.
 func (r *Runner) caps(harnesses []harness.Report) *queue.Capabilities {
+	// What each harness's own models cache held after the latest turn.
+	if seen := r.cfg.Engine.Models(); len(seen) > 0 {
+		harnesses = slices.Clone(harnesses)
+		for i, h := range harnesses {
+			if m, ok := seen[h.Name]; ok {
+				at := m.At
+				harnesses[i].Models, harnesses[i].ModelsAt = m.Names, &at
+			}
+		}
+	}
 	c := &queue.Capabilities{OS: runtime.GOOS, Arch: runtime.GOARCH, Isolation: isolation.Available(), Harnesses: harnesses,
 		Sandbox: r.sandbox}
 	if f := r.cfg.Folders; f != nil {
