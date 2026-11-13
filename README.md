@@ -23,11 +23,12 @@ have (Claude Code, codex, Antigravity), signed in as you, and records every step
 - **Your agents work together.** Claude can ask codex, or any agent from any vendor, to answer a
   question, take on a task or check its work, through the same API you use. The answer comes back
   into its conversation.
-- **You see every model call**, and what it cost. Each request and reply is stored on your machine.
-- **The conversation is kept.** Each turn is a fresh agent run. AgentBus keeps the history and
-  continues the conversation from its own record, on any agent or model.
-- **Your folder stays as it is.** Each session works in its own copy. Its changes reach your folder
-  only when you apply a turn.
+- **You see every model call**, and what it cost: exactly what each model was sent, piece by piece,
+  and what it answered. Each request and reply is stored on your machine.
+- **Switch models without losing context.** Each turn is a fresh agent run. AgentBus keeps the
+  history and continues the conversation from its own record, on any agent or model.
+- **Your folder stays as it is.** Each conversation works in its own copy. You review the changes and
+  apply them to your folder. Turn on the sandbox to make the copy a hard wall.
 
 ## Install
 
