@@ -84,13 +84,11 @@ func (g *Gateway) SendExchange() { g.sendExchange = true }
 // gateway did already: no history is put in front (own replay), no tool call
 // is refused (the guard), and no earlier refusal is undone.
 func (g *Gateway) ServeRelayed(w http.ResponseWriter, r *http.Request, rl Relayed) {
-	// The turn is open from the call's arrival: a turn's end stored while
-	// its credential is read or its request body arrives would be stored
-	// before the call.
-	defer g.hold(rl.Session, rl.Turn)()
-	if rl.Prepare != nil {
-		rl.Prepare(&rl)
-	}
+	defer g.holdThenRead(rl.Session, rl.Turn, func() {
+		if rl.Prepare != nil {
+			rl.Prepare(&rl)
+		}
+	})()
 	r.URL.Path, r.URL.RawPath = rl.Path, ""
 	r = r.WithContext(context.WithValue(r.Context(), relayedKey{}, &relayed{Relayed: rl, w: w}))
 	g.serve(w, r, rl.Session, rl.Turn)
@@ -150,6 +148,18 @@ func relayFailed(w http.ResponseWriter, msg, reason string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusBadGateway)
 	_, _ = w.Write(b)
+}
+
+// holdThenRead is the one way a call reads its credential, on every path
+// (ServeRelayed, and serve with SetCredential): it holds the call's turn
+// open first, then runs read, and returns what lets the turn go once the
+// call is done. A turn's end stored while a credential is read, a slow
+// renewal say, would be stored before the call's events.
+func (g *Gateway) holdThenRead(session, turn string, read func()) (release func()) {
+	release = g.hold(session, turn)
+	g.reads.Add(1)
+	read()
+	return release
 }
 
 // Credential is where a gateway's calls get their credential when the

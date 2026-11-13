@@ -65,6 +65,9 @@ type Gateway struct {
 	// credential, when set, is where each call gets its credential
 	// (SetCredential); nil passes the agent's own on.
 	credential Credential
+	// reads counts the credential reads made through holdThenRead, for the
+	// test that every path reads one that way.
+	reads atomic.Int64
 
 	// logf is the service log, for why an upstream call failed; nil unless
 	// SetLog was called.
@@ -427,8 +430,9 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, session, runTurn string) {
 	rl := relayedOf(r.Context())
 	if g.credential != nil && rl == nil {
-		header, refuse := g.credential(r, session, runTurn)
-		r = r.WithContext(context.WithValue(r.Context(), credKey{}, &credCall{header: header, refuse: refuse}))
+		var c credCall
+		defer g.holdThenRead(session, runTurn, func() { c.header, c.refuse = g.credential(r, session, runTurn) })()
+		r = r.WithContext(context.WithValue(r.Context(), credKey{}, &c))
 	}
 	// An agent may first try a WebSocket on its model-call path, as codex-cli
 	// 0.164.0 does with a GET and Upgrade on /backend-api/codex/responses
