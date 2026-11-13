@@ -429,9 +429,20 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // when it is set; r's path is the vendor's.
 func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, session, runTurn string) {
 	rl := relayedOf(r.Context())
-	if g.credential != nil && rl == nil {
+	if g.credential.Read != nil && rl == nil {
+		// The call is the token's turn's, or it is answered here and goes
+		// nowhere: no hold, no event, no rewrite, no vendor.
+		if f := g.credential.Turn(r, session, runTurn); f != nil {
+			_ = r.Body.Close()
+			if f.ContentType != "" {
+				w.Header().Set("Content-Type", f.ContentType)
+			}
+			w.WriteHeader(f.Status)
+			_, _ = w.Write(f.Body)
+			return
+		}
 		var c credCall
-		defer g.holdThenRead(session, runTurn, func() { c.header, c.refuse = g.credential(r, session, runTurn) })()
+		defer g.holdThenRead(session, runTurn, func() { c.header, c.refuse = g.credential.Read(r) })()
 		r = r.WithContext(context.WithValue(r.Context(), credKey{}, &c))
 	}
 	// An agent may first try a WebSocket on its model-call path, as codex-cli

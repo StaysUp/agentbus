@@ -567,8 +567,9 @@ func TestRunTurnCarriesAgentAndFolder(t *testing.T) {
 		t.Fatalf("session %v, want claude, the folder, and not open", s)
 	}
 
-	// The same call pointed at the gateway by hand: no run, so no agent and
-	// no folder, and not open.
+	// The same call pointed at the gateway by hand, with no turn's token:
+	// in agentbus up a call's turn comes from its token, so it is refused
+	// and recorded nowhere (a gateway with -gateway local records it).
 	resp, err := http.Post("http://"+svc.addr+"/s/byhand/v1/messages", "application/json",
 		strings.NewReader(`{"model":"claude-x","messages":[{"role":"user","content":"by hand"}]}`))
 	if err != nil {
@@ -576,20 +577,13 @@ func TestRunTurnCarriesAgentAndFolder(t *testing.T) {
 	}
 	io.ReadAll(resp.Body)
 	resp.Body.Close()
-	waitFor(t, "the hand-pointed turn.started", func() bool {
-		for _, e := range storedEvents(t, svc.store) {
-			if e.Kind == "turn.started" && e.Session == "byhand" {
-				turn = &e
-				return true
-			}
-		}
-		return false
-	})
-	if turn.Agent != "" || turn.Folder != "" {
-		t.Fatalf("a hand-pointed turn.started named %q %q", turn.Agent, turn.Folder)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("a hand-pointed call: %d, want 401", resp.StatusCode)
 	}
-	if s := snapSession(t, svc, tok, "byhand"); s["agent"] != "" || s["folder"] != "" || s["open"] != false {
-		t.Fatalf("hand-pointed session %v, want no agent, no folder, not open", s)
+	for _, e := range storedEvents(t, svc.store) {
+		if e.Session == "byhand" {
+			t.Fatalf("a hand-pointed call was recorded: %+v", e)
+		}
 	}
 }
 

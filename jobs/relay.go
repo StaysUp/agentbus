@@ -188,25 +188,37 @@ func refusal(status int, why string) *gateway.Refusal {
 // Local is the credential for the calls of the relay's upstream name made
 // through a gateway in this process: agentbus up's own runner's agents.
 // It is the relay's own answer (turnCredential) with no hop over HTTP, so
-// the gateway records each call once, as it does every call it carries.
+// the gateway records each call once, as it does every call it carries. A
+// call's session and turn are its token's job's (Turn), never its path's.
 func (s *Server) Local(name string) gateway.Credential {
 	up, ok := s.cfg.Relay[name]
-	return func(r *http.Request, session, turn string) (func(http.Header), *gateway.Refusal) {
-		if !ok || !strings.HasPrefix(strings.TrimPrefix(r.URL.Path, "/"), up.Under) {
-			return nil, refusal(http.StatusNotFound, noRelay)
-		}
-		tok, _ := bearer(r)
-		j, _, found := s.turnJob(tok)
-		if !found {
-			return nil, refusal(http.StatusUnauthorized, noTurn)
-		}
-		// The gateway records the call under the session and turn its path
-		// names: only the token's own, so a call is never recorded, guarded
-		// or priced as another turn's.
-		if session != assignedSession(j) || turn != j.Turn {
-			return nil, refusal(http.StatusForbidden, otherTurn)
-		}
-		return s.turnCredential(j, up)
+	return gateway.Credential{
+		// A call's session and turn are its token's job's: a path that names
+		// another, or no running turn's token, is refused before the
+		// gateway records anything.
+		Turn: func(r *http.Request, session, turn string) *gateway.Refusal {
+			tok, _ := bearer(r)
+			j, _, found := s.turnJob(tok)
+			switch {
+			case !found:
+				return refusal(http.StatusUnauthorized, noTurn)
+			case session != assignedSession(j) || turn != j.Turn:
+				return refusal(http.StatusForbidden, otherTurn)
+			}
+			return nil
+		},
+		Read: func(r *http.Request) (func(http.Header), *gateway.Refusal) {
+			if !ok || !strings.HasPrefix(strings.TrimPrefix(r.URL.Path, "/"), up.Under) {
+				return nil, refusal(http.StatusNotFound, noRelay)
+			}
+			tok, _ := bearer(r)
+			j, _, found := s.turnJob(tok)
+			if !found {
+				// It ended since Turn let the call through.
+				return nil, refusal(http.StatusUnauthorized, noTurn)
+			}
+			return s.turnCredential(j, up)
+		},
 	}
 }
 

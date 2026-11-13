@@ -122,7 +122,8 @@ func TestRunTurnIDOnEveryEvent(t *testing.T) {
 		t.Errorf("%d turn.started over two runs, want 2", n)
 	}
 
-	// Traffic by hand in another session: a turn of its own, filtered out below.
+	// Traffic by hand, with no turn's token, is refused in agentbus up and
+	// recorded nowhere, so it never shows among the turns below.
 	resp, err := http.Post("http://"+svc.addr+"/s/byhand/v1/messages", "application/json",
 		strings.NewReader(`{"model":"claude-x","messages":[{"role":"user","content":"by hand"}]}`))
 	if err != nil {
@@ -130,9 +131,9 @@ func TestRunTurnIDOnEveryEvent(t *testing.T) {
 	}
 	io.ReadAll(resp.Body)
 	resp.Body.Close()
-	waitFor(t, "the hand-pointed reply", func() bool {
-		return count(turnEvents(t, svc.store, "byhand"), "model.responded") == 1
-	})
+	if resp.StatusCode != http.StatusUnauthorized || len(turnEvents(t, svc.store, "byhand")) != 0 {
+		t.Fatalf("a hand-pointed call: %d, %d events", resp.StatusCode, len(turnEvents(t, svc.store, "byhand")))
+	}
 
 	// GET /turns: newest first, with state and cost, filtered by session.
 	var list store.TurnList
@@ -151,8 +152,8 @@ func TestRunTurnIDOnEveryEvent(t *testing.T) {
 		t.Errorf("first turn's cost %v complete %v usage %v, want 0, incomplete, null", b.CostUSD, b.CostComplete, b.Usage)
 	}
 	getJSON(t, svc, tok, turnsPath, &list)
-	if len(list.Turns) != 3 || list.Turns[0].Session != "byhand" {
-		t.Fatalf("GET /turns: %+v, want three, the hand-pointed one first", list.Turns)
+	if len(list.Turns) != 2 || list.Turns[0].Session != session {
+		t.Fatalf("GET /turns: %+v, want the two run turns only", list.Turns)
 	}
 
 	// GET /sessions/{id}/events?turn=: only that turn's events, in order.
@@ -195,10 +196,13 @@ func getJSON(t *testing.T, svc *service, tok, path string, v any) {
 	}
 }
 
-// Traffic pointed at the gateway by hand, with no run, keeps the hash id.
+// Traffic pointed at the gateway by hand, with no run, keeps the hash id:
+// on a gateway that passes the agent's own sign-in on, as a runner with
+// -gateway local does. agentbus up refuses it (a call's turn is its
+// token's).
 func TestHandPointedTrafficKeepsHashTurn(t *testing.T) {
 	home := t.TempDir()
-	svc := runService(t, home, nil, 0)
+	svc := startService(t, home, "http://127.0.0.1:1")
 	for i := 0; i < 2; i++ {
 		resp, err := http.Post("http://"+svc.addr+"/s/byhand/v1/messages", "application/json",
 			strings.NewReader(`{"model":"claude-x","messages":[{"role":"user","content":"by hand"}]}`))

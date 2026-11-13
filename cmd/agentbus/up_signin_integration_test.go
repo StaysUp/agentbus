@@ -338,10 +338,10 @@ func TestUpRemovedDefaultAgentIsRefused(t *testing.T) {
 	}
 }
 
-// In agentbus up a turn's token gets a credential only for its own turn's
-// path: one sent on another session's or turn's path is refused, and the
-// vendor sees nothing, so no call is recorded, guarded or priced as another
-// turn's (review, 2026-11-12).
+// In agentbus up a call's session and turn come from its token's job,
+// never from its path: a token sent on another session's or turn's path is
+// refused before anything is held or recorded, the vendor sees nothing, and
+// no event of it is stored anywhere (review rounds 1 and 3, 2026-11-12).
 func TestUpTokenGetsNoCredentialOnAnotherTurnsPath(t *testing.T) {
 	vendor := newFakeVendor(t)
 	home := t.TempDir()
@@ -369,6 +369,13 @@ func TestUpTokenGetsNoCredentialOnAnotherTurnsPath(t *testing.T) {
 		resp.Body.Close()
 		if resp.StatusCode != http.StatusForbidden || !strings.Contains(string(b), "another turn's") {
 			t.Errorf("%s: %d %s", path, resp.StatusCode, b)
+		}
+	}
+	// Nothing of the refused calls is in the record: not in another session,
+	// not in the default one, not in the token's own.
+	for _, e := range storedEvents(t, svc.store) {
+		if e.Session == "othersession" || e.Session == "default" || e.Session == session && e.Kind == "model.requested" {
+			t.Errorf("a refused call was recorded: %+v", e)
 		}
 	}
 	// Its own turn's path still gets the sign-in.

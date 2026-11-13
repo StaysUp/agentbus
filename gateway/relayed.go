@@ -164,13 +164,22 @@ func (g *Gateway) holdThenRead(session, turn string, read func()) (release func(
 
 // Credential is where a gateway's calls get their credential when the
 // gateway runs in control's own process (agentbus up): the same answer
-// control's relay gives a runner's call, without a hop over HTTP. It reads
-// the call's placeholder (its turn's token) and returns what sets the
-// credential on the request to the vendor, or the refusal answered in the
-// vendor's place. session and turn are the ones the call's path names,
-// which the gateway records it under: a token gets a credential for its
-// own turn's calls only. It never puts a value in an event or a log.
-type Credential func(r *http.Request, session, turn string) (header func(http.Header), refuse *Refusal)
+// control's relay gives a runner's call, without a hop over HTTP. One rule:
+// a call's session and turn come from its token's job, never from its path.
+// Neither func puts a value in an event or a log.
+type Credential struct {
+	// Turn says whether the call's placeholder (its turn's token) is the
+	// token of a running turn, and that turn is the session and turn the
+	// call's path names. When not (no such token, or another turn's), it is
+	// the refusal: the gateway answers it before anything is held, recorded
+	// or rewritten, and the call is recorded nowhere.
+	Turn func(r *http.Request, session, turn string) *Refusal
+	// Read is the credential for a call Turn let through: what sets it on
+	// the request to the vendor, or the refusal answered in the vendor's
+	// place, which is recorded with the call. It may be slow (a renewal),
+	// so it is read with the turn held open (holdThenRead).
+	Read func(r *http.Request) (header func(http.Header), refuse *Refusal)
+}
 
 // SetCredential makes every call get its credential from c: the agent's
 // own header is replaced, never passed on. Call it before serving.

@@ -36,10 +36,12 @@ func TestCallHoldsItsTurnOpenWhileItReadsItsCredential(t *testing.T) {
 	for name, serve := range map[string]func(g *Gateway, read func()) http.Handler{
 		// agentbus up: the gateway's own credential.
 		"credential": func(g *Gateway, read func()) http.Handler {
-			g.SetCredential(func(*http.Request, string, string) (func(http.Header), *Refusal) {
-				read()
-				return func(h http.Header) { h.Set("Authorization", "Bearer fake-for-tests") }, nil
-			})
+			g.SetCredential(Credential{
+				Turn: func(*http.Request, string, string) *Refusal { return nil },
+				Read: func(*http.Request) (func(http.Header), *Refusal) {
+					read()
+					return func(h http.Header) { h.Set("Authorization", "Bearer fake-for-tests") }, nil
+				}})
 			return g
 		},
 		// control's relay: Prepare reads the credential.
@@ -84,5 +86,42 @@ func TestCallHoldsItsTurnOpenWhileItReadsItsCredential(t *testing.T) {
 				t.Fatalf("%d credential reads through holdThenRead, want 1", n)
 			}
 		})
+	}
+}
+
+// A call whose token is not its path's turn (Credential.Turn refuses) is
+// answered before anything is held, recorded or rewritten: no event, no
+// credential read, no vendor (review round 3: a refused call still wrote a
+// turn.started and its call into the path's session).
+func TestRefusedTurnIsRecordedNowhere(t *testing.T) {
+	hits := 0
+	vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hits++ }))
+	t.Cleanup(vendor.Close)
+	u, _ := url.Parse(vendor.URL)
+	mem := &event.Memory{}
+	g := New(u, anthropic.Adapter{}, mem)
+	read := 0
+	g.SetCredential(Credential{
+		Turn: func(*http.Request, string, string) *Refusal {
+			return &Refusal{Status: http.StatusForbidden, ContentType: "application/json", Body: []byte(`{"error":"another turn's"}`)}
+		},
+		Read: func(*http.Request) (func(http.Header), *Refusal) { read++; return nil, nil }})
+	srv := httptest.NewServer(g)
+	t.Cleanup(srv.Close)
+	resp, err := http.Post(srv.URL+"/s/other/t/t_9/v1/messages", "application/json",
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || !strings.Contains(string(b), "another turn's") {
+		t.Fatalf("%d %s", resp.StatusCode, b)
+	}
+	if !g.Settle("other", "t_9", time.Second) {
+		t.Fatal("the refused call held a turn")
+	}
+	if evs := mem.Events(); len(evs) != 0 || read != 0 || hits != 0 || g.reads.Load() != 0 {
+		t.Fatalf("recorded %d events, %d credential reads, %d vendor calls", len(evs), read, hits)
 	}
 }
