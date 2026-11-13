@@ -997,6 +997,9 @@ func size(e event.Event) int {
 	for _, s := range e.Sessions {
 		n += 16 + len(s)
 	}
+	for _, s := range e.Unkept {
+		n += 16 + len(s)
+	}
 	for _, t := range e.ToolsOffered {
 		n += 16 + len(t)
 	}

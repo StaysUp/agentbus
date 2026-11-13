@@ -159,7 +159,7 @@ var routes = slices.Concat([]route{
 		body: TurnRequest{},
 		turn: askTurn,
 		tools: []tool{
-			{name: "ask_agent", effect: effectStarts, need: "start",
+			{name: "ask_agent", effect: effectStarts,
 				// No folder: the new session is always on the asking
 				// session's folder. An agent on a runner cannot know the
 				// person's folder path, and its own copy's path is refused

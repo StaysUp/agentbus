@@ -751,7 +751,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	if why != "" {
 		e.cfg.Logf("run.doc session=%s turn=%s left_out=%s", t.session, t.id, why)
 	}
-	askText := askedLine(asked, perm.AgentAPI, e.cfg.APIDir != "", tools)
+	askText := askedLine(asked, e.cfg.APIDir != "", tools)
 	added := addedContext(doc, hint, askText)
 	hint = joinText(doc, hint, askText)
 	perm = withAPI(perm, e.cfg.APIDir != "", t.readOnly)
@@ -1216,10 +1216,10 @@ func askedBy(o *event.Origin) *event.Origin {
 
 // askedLine tells an asked agent where it was asked from and how to read
 // that session's changes, which its own folder may not hold: a new session
-// gets a copy of the person's folder. "" when its token may not read them
-// ([agent_api] read off, or scope session).
-func askedLine(asked *event.Origin, api settings.AgentAPI, client, tools bool) string {
-	if asked == nil || (api.Read != nil && !*api.Read) || api.Scope == settings.ScopeSession {
+// gets a copy of the person's folder. "" for a turn nobody asked for. Its
+// token may always read its own request tree.
+func askedLine(asked *event.Origin, client, tools bool) string {
+	if asked == nil {
 		return ""
 	}
 	if tools {

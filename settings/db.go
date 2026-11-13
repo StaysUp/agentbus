@@ -368,8 +368,8 @@ func (d *DB) SetPolicy(p Policy, match Version) (Policy, Version, error) {
 // before, when the policy is still at match: PATCH. Each key it sets is kept
 // as the person's own, even when its value is the default, so a later build
 // that changes that default keeps their value. A key it leaves out keeps
-// what it holds. A stored policy that cannot be used is replaced whole
-// (SetPolicy), never changed key by key.
+// what it holds. A stored policy that cannot be used is refused here: it is
+// replaced whole (SetPolicy, PUT), never changed key by key.
 func (d *DB) ChangePolicy(change Policy, match Version) (Policy, Version, error) {
 	if err := change.Check(); err != nil {
 		return Policy{}, "", &Invalid{Why: err.Error()}

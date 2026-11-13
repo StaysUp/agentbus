@@ -87,8 +87,9 @@ var settingsRoutes = []route{
 			"Control keeps the settings in settings.db in its data folder, reached only through this API. The defaults are in the code; " +
 			"the database holds only what the person changed. On its first start, a 0.5 control copies its data folder beside it " +
 			"(its name with the date and before-settings-db), then imports permissions.toml, instructions.md and agents.json once. " +
-			"It never reads those files again. When a build changes a default, its first start writes the old value into the person's policy, " +
-			"unless they set that key, so nothing changes for them. To take the new default, change that key.\n\nETag is the settings version.",
+			"It never reads those files again. When a build changes a default, its first start usually writes the old value into the person's policy, " +
+			"unless they set that key, so nothing changes for them; to take the new default, change that key. " +
+			"A change meant to reach everyone is not kept that way: 0.5.2 turned agent_api.tools on and subagents off for every person who never set them.\n\nETag is the settings version.",
 		replies:   []reply{ok(200, SettingsInfo{}, "The settings' state."), noSettings, fail(http.StatusInternalServerError, "The settings could not be read.")},
 		versioned: true,
 		serve:     plain((*API).getSettings)},
@@ -123,7 +124,7 @@ var settingsRoutes = []route{
 		doc: "Change only the keys the body holds, as nested JSON such as {\"agent_api\":{\"tools\":false}}. A key left out keeps what it holds now. " +
 			"Each key sent is kept as the person's own, even when its value is the default, so a later build that changes that default keeps it. " +
 			"This is how the cockpit's Settings saves: only what the person changed, never a full copy with the defaults filled in. " +
-			"A key cannot be returned to the default here; PUT replaces the policy whole.\n\n" +
+			"A key sent as null is no change: a key cannot be returned to the default here; PUT replaces the policy whole.\n\n" +
 			versionDoc + "The change and its settings.changed event, which names the keys sent whose stored value changed, are saved together. " +
 			"A PATCH that changes nothing makes no event. A stored policy that cannot be used is refused here: replace it with PUT.",
 		body: settings.Policy{},

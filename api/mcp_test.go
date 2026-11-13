@@ -142,8 +142,9 @@ func TestMCPToolListFollowsTheToken(t *testing.T) {
 	}
 }
 
-// Each [agent_api] switch takes its tools out of a turn token's list, as the
-// route refuses them.
+// apply off takes apply_turn out of a turn token's list, as the route
+// refuses it. Every other tool is listed: within its request tree a turn
+// token may always read, list agents, start, review, stop and rename.
 func TestMCPToolListFollowsAgentAPI(t *testing.T) {
 	e := mcpEnv(t)
 	g := &run.Grant{Session: "s1", Root: "s1"}
@@ -168,12 +169,8 @@ func TestMCPToolListFollowsAgentAPI(t *testing.T) {
 		api  settings.AgentAPI
 		gone []string
 	}{
+		{off(func(a *settings.AgentAPI) {}), nil},
 		{off(func(a *settings.AgentAPI) { a.Apply = &no }), []string{"apply_turn"}},
-		{off(func(a *settings.AgentAPI) { a.Start = &no }), []string{"ask_agent"}},
-		{off(func(a *settings.AgentAPI) { a.Review = &no }), []string{"review_turn"}},
-		{off(func(a *settings.AgentAPI) { a.Cancel = &no }), []string{"stop_turn"}},
-		{off(func(a *settings.AgentAPI) { a.ListAgents = &no }), []string{"list_agents"}},
-		{off(func(a *settings.AgentAPI) { a.Read = &no }), []string{"list_turns", "get_turn", "turn_diff", "search_history"}},
 	} {
 		got := names(tc.api)
 		for _, n := range tc.gone {
@@ -326,7 +323,7 @@ func TestMCPRefusesABadID(t *testing.T) {
 
 // With tools = false the tool server refuses a turn token; the main token
 // still reaches it. tools is on by default from 0.5.2.
-func TestMCPOffByDefault(t *testing.T) {
+func TestMCPOff(t *testing.T) {
 	if p := settings.DefaultPolicy(); !*p.AgentAPI.Tools {
 		t.Fatal("tools is off by default")
 	}

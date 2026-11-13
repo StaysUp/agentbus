@@ -120,7 +120,7 @@ func TestSettingsPolicyReadWrite(t *testing.T) {
 		{`{"forbid":"git push"}`, "forbid has the wrong type"},
 		{`{"allow":["go test:*"]}`, `allow entry "go test:*" has a star`},
 		{`{"read_folders":["notes"]}`, `read_folders entry "notes" must be an absolute path`},
-		{`{"agent_api":{"scope":"all"}}`, "scope must be"},
+		{`{"agent_api":{"apply":"yes"}}`, "agent_api.apply has the wrong type"},
 		{`{"allowed":[]}`, `unknown key "allowed"`},
 		{`[]`, "one JSON object"},
 		{`null`, "one JSON object"},

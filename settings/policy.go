@@ -106,18 +106,13 @@ max_jobs_per_tree = 30       # turns and reviews one request tree may ask for in
 max_cost_usd_per_tree = 0.0  # USD one request tree may cost before asking stops; 0 is off
 
 # What a turn's own token (AGENTBUS_TOKEN, used by agentbus-api) may do.
-# No setting here lets it change this file, the instructions, saved agents or
-# tokens: those take the main token, always.
+# Within its own request tree it may always read, list agents, start new
+# sessions, ask for reviews, stop work its tree asked for and rename; the
+# [limits] cap how much it asks for. No setting here lets it change this
+# file, the instructions, saved agents or tokens: those take the main token,
+# always.
 [agent_api]
-scope = "tree"       # whose sessions it reads and reviews:
-                     # "tree" (its request tree) or "session" (its own only)
-read = true          # read sessions, turns and calls in its scope
-list_agents = true   # list saved agents and harnesses
-start = true         # start a new session on a saved agent
-review = true        # ask for a review of a turn in its scope
-cancel = true        # stop turns its tree asked for
-rename = true        # rename sessions in its scope
-apply = false        # apply a turn's changes to the person's folder, for a turn in its scope;
+apply = false        # apply a turn's changes to the person's folder, for a turn in its tree;
                      # off by default: only the main token applies
 tools = true         # true: give each claude and codex turn the agentbus MCP tools (MCP), which
                      # call this API as its token may, and hide claude's own Task, Agent,
@@ -166,12 +161,6 @@ const (
 	IsolationCopy    = "copy"
 	IsolationGit     = "git"
 	IsolationNone    = "none"
-)
-
-// Scope values of [agent_api]: the sessions a turn token reaches.
-const (
-	ScopeTree    = "tree"
-	ScopeSession = "session"
 )
 
 // Contain values of [network]: whether a turn's agent runs closed off from
@@ -227,17 +216,12 @@ type Limits struct {
 }
 
 // AgentAPI says what a turn token may call ([agent_api]). A pointer is a key
-// left out; once read from a store each is set.
+// left out; once read from a store each is set. Within its request tree a
+// turn token may always read, list agents, start, review, stop and rename
+// (0.5.2 retired the switches for those: upgradeSteps).
 type AgentAPI struct {
-	Scope      string `toml:"scope" json:"scope,omitempty" doc:"Whose sessions a turn token reaches: tree (its request tree) or session (its own only). Absent in a PUT: tree."`
-	Read       *bool  `toml:"read" json:"read,omitempty" doc:"Read sessions, turns and calls in its scope. Absent in a PUT: true."`
-	ListAgents *bool  `toml:"list_agents" json:"list_agents,omitempty" doc:"List saved agents and harnesses. Absent in a PUT: true."`
-	Start      *bool  `toml:"start" json:"start,omitempty" doc:"Start a new session on a saved agent. Absent in a PUT: true."`
-	Review     *bool  `toml:"review" json:"review,omitempty" doc:"Ask for a review of a turn in its scope. Absent in a PUT: true."`
-	Cancel     *bool  `toml:"cancel" json:"cancel,omitempty" doc:"Stop turns its tree asked for. Absent in a PUT: true."`
-	Rename     *bool  `toml:"rename" json:"rename,omitempty" doc:"Rename sessions in its scope. Absent in a PUT: true."`
-	Apply      *bool  `toml:"apply" json:"apply,omitempty" doc:"Apply a turn's changes to the person's folder, for a turn of a session in its scope. Off by default: only the main token applies. Absent in a PUT: false."`
-	Tools      *bool  `toml:"tools" json:"tools,omitempty" doc:"Give each turn the agentbus MCP tools over MCP (POST /api/v0/mcp), which call this API as its token may. claude's own Task, Agent, ListAgents and SendMessage tools are hidden then. false: agents call the API with agentbus-api only. Absent in a PUT: true."`
+	Apply *bool `toml:"apply" json:"apply,omitempty" doc:"Apply a turn's changes to the person's folder, for a turn of a session in its request tree. Off by default: only the main token applies. Absent in a PUT: false."`
+	Tools *bool `toml:"tools" json:"tools,omitempty" doc:"Give each turn the agentbus MCP tools over MCP (POST /api/v0/mcp), which call this API as its token may. claude's own Task, Agent, ListAgents and SendMessage tools are hidden then. false: agents call the API with agentbus-api only. Absent in a PUT: true."`
 }
 
 // Network says what a turn's agent may reach ([network]). Read by the
@@ -291,21 +275,11 @@ func (p *Policy) fill() {
 		off := 0.0
 		p.Limits.MaxCostUSDPerTree = &off
 	}
-	if p.AgentAPI.Scope == "" {
-		p.AgentAPI.Scope = ScopeTree
-	}
 	if p.Network.Contain == "" {
 		p.Network.Contain = ContainOff
 	}
 	if p.Sandbox.Mode == "" {
 		p.Sandbox.Mode = SandboxOff
-	}
-	for _, b := range []**bool{&p.AgentAPI.Read, &p.AgentAPI.ListAgents, &p.AgentAPI.Start,
-		&p.AgentAPI.Review, &p.AgentAPI.Cancel, &p.AgentAPI.Rename} {
-		if *b == nil {
-			on := true
-			*b = &on
-		}
 	}
 	// Only the main token applies unless the person says so (defaults
 	// version 2). Version 1 writes its own value out (defaultsV1).
@@ -348,9 +322,6 @@ func (p *Policy) Check() error {
 	}
 	if c := p.Limits.MaxCostUSDPerTree; c != nil && (*c < 0 || *c != *c) {
 		return errors.New("[limits] max_cost_usd_per_tree must be 0 (off) or more")
-	}
-	if s := p.AgentAPI.Scope; s != "" && s != ScopeTree && s != ScopeSession {
-		return fmt.Errorf("[agent_api] scope must be %q or %q", ScopeTree, ScopeSession)
 	}
 	switch p.Network.Contain {
 	case "", ContainOff, ContainOn:
@@ -430,7 +401,7 @@ func parsePolicy(b []byte) (Policy, error) {
 
 // wrongTypeTOML is a permissions.toml's error for a value of the wrong type.
 const wrongTypeTOML = "a value has the wrong type: read_folders, allow, forbid, share_read_only and home_files are lists of strings, such as [\"go test\"]; " +
-	"edit, isolation, scope, contain and mode are strings; [network] allow is a list of strings; subagents is true or false; the [limits] are numbers; the [agent_api] switches are true or false"
+	"edit, isolation, contain and mode are strings; [network] allow is a list of strings; subagents is true or false; the [limits] are numbers; the [agent_api] switches are true or false"
 
 // over is p, read with the keys it leaves out unset, on top of base: each key
 // p leaves out takes base's value, and the result is filled.
@@ -539,7 +510,7 @@ func DecodePolicyChange(b []byte) (Policy, error) {
 		switch {
 		case errors.As(err, &te) && te.Field != "":
 			return Policy{}, fmt.Errorf("%s has the wrong type: read_folders, allow, forbid, share_read_only and home_files are lists of strings; "+
-				"edit, isolation, scope, contain and mode are strings; network.allow is a list of strings; subagents and the agent_api switches are true or false; the limits are numbers", te.Field)
+				"edit, isolation, contain and mode are strings; network.allow is a list of strings; subagents and the agent_api switches are true or false; the limits are numbers", te.Field)
 		case errors.As(err, &se):
 			return Policy{}, errors.New("the body is not valid JSON")
 		case strings.HasPrefix(err.Error(), "json: unknown field "):
@@ -571,9 +542,6 @@ func FormatPolicy(p Policy) []byte {
 		"share_read_only": p.ShareReadOnly, "subagents": *p.Subagents, "home_files": p.HomeFiles,
 		"limits.max_depth": *p.Limits.MaxDepth, "limits.max_jobs_per_turn": *p.Limits.MaxJobsPerTurn,
 		"limits.max_jobs_per_tree": *p.Limits.MaxJobsPerTree, "limits.max_cost_usd_per_tree": *p.Limits.MaxCostUSDPerTree,
-		"agent_api.scope": p.AgentAPI.Scope, "agent_api.read": *p.AgentAPI.Read, "agent_api.list_agents": *p.AgentAPI.ListAgents,
-		"agent_api.start": *p.AgentAPI.Start, "agent_api.review": *p.AgentAPI.Review,
-		"agent_api.cancel": *p.AgentAPI.Cancel, "agent_api.rename": *p.AgentAPI.Rename,
 		"agent_api.apply": *p.AgentAPI.Apply, "agent_api.tools": *p.AgentAPI.Tools,
 		"network.contain": p.Network.Contain, "network.allow": p.Network.Allow,
 		"sandbox.mode": p.Sandbox.Mode,

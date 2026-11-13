@@ -24,11 +24,11 @@ func TestFormatPolicyStarter(t *testing.T) {
 // A policy written by FormatPolicy reads back the same, every value set
 // away from its default.
 func TestFormatPolicyRoundTrip(t *testing.T) {
-	no, two, half := false, 7, 0.5
+	no, yes, two, half := false, true, 7, 0.5
 	p := Policy{ReadFolders: []string{"~/notes", "/tmp/a b"}, Allow: []string{"go test", `say "hi"`}, Forbid: []string{"git push"},
 		Edit: EditNone, Subagents: &no,
 		Limits:   Limits{MaxDepth: &two, MaxJobsPerTurn: &two, MaxJobsPerTree: &two, MaxCostUSDPerTree: &half},
-		AgentAPI: AgentAPI{Scope: ScopeSession, Read: &no, ListAgents: &no, Start: &no, Review: &no, Cancel: &no, Rename: &no}}
+		AgentAPI: AgentAPI{Apply: &yes, Tools: &no}}
 	b := FormatPolicy(p)
 	q, err := ParsePolicy(b)
 	if err != nil {

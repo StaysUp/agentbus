@@ -180,9 +180,10 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 	if msg := turnRefusal(rt.turn, g, perm.AgentAPI); msg != "" {
 		return refuse(msg)
 	}
-	api := perm.AgentAPI
-	// start and continue are told apart by the body: askChecks.
-	inScope := func(session string) (bool, error) { return a.inScope(g, api.Scope, session) }
+	// A turn token reaches its own request tree, always: its own session,
+	// the tree's root and every session work in the tree started. Start and
+	// continue are told apart by the body: askChecks.
+	inScope := func(session string) (bool, error) { return a.inTree(g, session) }
 	switch rt.turn {
 	case treeSessionPath, renameSession:
 		if ok, err := inScope(id); err != nil {
@@ -248,8 +249,7 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 		if err != nil {
 			return failed(err)
 		}
-		if j.Links.Asker == nil || j.Links.Chain == nil || j.Links.Chain.Root != g.Root ||
-			(api.Scope == settings.ScopeSession && j.Links.Asker.Session != g.Session) {
+		if j.Links.Asker == nil || j.Links.Chain == nil || j.Links.Chain.Root != g.Root {
 			return refuse(turnAskedRefused)
 		}
 	case askTurn, anyRead, toolList:
@@ -283,7 +283,9 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 }
 
 // turnRefusal says why a turn token of grant g may not call a route of kind
-// turn at all under [agent_api], or "": the read-only turn and each switch.
+// turn at all under [agent_api], or "": the read-only turn, apply and tools.
+// Reading, listing agents, starting, reviewing, stopping and renaming have no
+// switch: within its request tree a turn token always may (0.5.2).
 // The rest of the check needs the request (allowTurn). The tool list
 // (tools.go) asks it too, so a tool is listed only where its route would
 // take the call.
@@ -297,16 +299,6 @@ func turnRefusal(turn int, g run.Grant, api settings.AgentAPI) string {
 	switch {
 	case turn == mainOnly:
 		return turnWriteRefused
-	case (turn == treeSessionPath || turn == treeSessionQuery || turn == treeTurn) && !*api.Read:
-		return turnSwitchedOff("read sessions, turns or calls", "read")
-	case turn == anyRead && !*api.ListAgents:
-		return turnSwitchedOff("list agents or harnesses", "list_agents")
-	case turn == askReview && !*api.Review:
-		return turnSwitchedOff("ask for reviews", "review")
-	case turn == askedTurn && !*api.Cancel:
-		return turnSwitchedOff("stop turns", "cancel")
-	case turn == renameSession && !*api.Rename:
-		return turnSwitchedOff("rename sessions", "rename")
 	case turn == applyTurnTok && !*api.Apply:
 		return turnSwitchedOff("apply a turn's changes", "apply")
 	case turn == toolList && !*api.Tools:
@@ -328,15 +320,6 @@ func (a *API) queueJob(id string) (queue.Job, error) {
 		return queue.Job{}, queue.ErrNotFound
 	}
 	return a.cfg.Queue.Get(queue.DefaultTeam, id)
-}
-
-// inScope says session is in reach of g under [agent_api] scope: its own
-// session alone for "session", its request tree for "tree".
-func (a *API) inScope(g run.Grant, scope, session string) (bool, error) {
-	if scope == settings.ScopeSession {
-		return session != "" && session == g.Session, nil
-	}
-	return a.inTree(g, session)
 }
 
 // overBudget says why g's request tree may ask for no more work under
@@ -389,14 +372,10 @@ func (a *API) askChecks(w http.ResponseWriter, g run.Grant, perm settings.Policy
 		writeError(w, http.StatusForbidden, msg)
 		return queue.Links{}, false
 	}
-	api := perm.AgentAPI
 	// A turn's token never continues a session (his call, 2026-11-12):
 	// ask_agent starts a new one, and its result comes back on its own.
 	if continues {
 		return refuse(turnContinueRefused)
-	}
-	if !*api.Start {
-		return refuse(turnSwitchedOff("start sessions", "start"))
 	}
 	if msg, err := a.overBudget(g, perm, body.IdempotencyKey); err != nil {
 		a.internal(w)

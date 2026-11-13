@@ -11,13 +11,16 @@ import (
 // The defaults live in code: one set per build. A settings database holds
 // only what the person changed from them (DB).
 //
-// A build that changes a default adds an upgrade step (upgradeSteps): the
-// key and the value it had before. On its first start, control writes that
-// old value into the person's settings, unless they set the key already, so
-// nothing changes for them. To take the new default they change that one
-// setting. A build that retires a key adds a retired step: its first start
-// removes the key from the stored settings. A new data folder has nothing to
-// keep, so it starts on the defaults as they are.
+// A build that changes a default usually adds an upgrade step (upgradeSteps):
+// the key and the value it had before. On its first start, control writes
+// that old value into the person's settings, unless they set the key
+// already, so nothing changes for them. To take the new default they change
+// that one setting. A change meant to reach every install has no step: 0.5.2
+// turned [agent_api] tools on and subagents off that way (his call,
+// 2026-11-13), so a person who never set them takes the new defaults. A
+// build that retires a key adds a retired step: its first start removes the
+// key from the stored settings. A new data folder has nothing to keep, so it
+// starts on the defaults as they are.
 
 // defaultPolicy is the policy of a person who changed nothing, written out
 // in full, so a change of fill() cannot change it.
@@ -36,10 +39,9 @@ func defaultPolicy() Policy {
 		Subagents:     off(),
 		HomeFiles:     []string{},
 		Limits:        Limits{MaxDepth: num(2), MaxJobsPerTurn: num(10), MaxJobsPerTree: num(30), MaxCostUSDPerTree: &cost},
-		AgentAPI: AgentAPI{Scope: ScopeTree, Read: on(), ListAgents: on(), Start: on(),
-			Review: on(), Cancel: on(), Rename: on(), Apply: off(), Tools: on()},
-		Network: Network{Contain: ContainOff, Allow: []string{}},
-		Sandbox: Sandbox{Mode: SandboxOff},
+		AgentAPI:      AgentAPI{Apply: off(), Tools: on()},
+		Network:       Network{Contain: ContainOff, Allow: []string{}},
+		Sandbox:       Sandbox{Mode: SandboxOff},
 	}
 }
 
@@ -79,6 +81,16 @@ var upgradeSteps = []upgradeStep{
 	// 0.5.2: sandbox.read moves to home_files (his call, 2026-11-13): the
 	// files are copied into every session's home, sandbox on or off.
 	{Key: "sandbox.read", Retired: true, MovedTo: "home_files"},
+	// 0.5.2: [agent_api] keeps only apply and tools (his call, 2026-11-13).
+	// A turn token may always read, list agents, start, review, stop and
+	// rename within its own request tree; the limits cap asking.
+	{Key: "agent_api.scope", Retired: true},
+	{Key: "agent_api.read", Retired: true},
+	{Key: "agent_api.list_agents", Retired: true},
+	{Key: "agent_api.start", Retired: true},
+	{Key: "agent_api.review", Retired: true},
+	{Key: "agent_api.cancel", Retired: true},
+	{Key: "agent_api.rename", Retired: true},
 }
 
 // retiredKeys are the policy keys an older build had and this one does not:

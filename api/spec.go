@@ -85,17 +85,16 @@ var turnTokenDoc = map[int]string{
 		"The review's result comes back to the asking session as a later turn. Caps: " + askCaps,
 	askedTurn: "A turn token may stop only a turn its request tree asked for, unless its turn is read-only.",
 	anyRead:   "A turn token may call this too.",
-	applyTurnTok: "A turn token may call this for a turn of a session in its scope only when [agent_api] apply is on (off by default), " +
+	applyTurnTok: "A turn token may call this for a turn of a session in its request tree only when [agent_api] apply is on (off by default), " +
 		"and never from a read-only turn.",
-	renameSession: "A turn token may rename a session in its scope, unless its turn is read-only. It never closes one.",
+	renameSession: "A turn token may rename a session in its request tree, unless its turn is read-only. It never closes one.",
 	toolList: "A turn token may call this: its list holds the tools its turn may call under [agent_api] (none of them when tools is false), " +
 		"and each call is checked by the operation it names.",
 }
 
 // askCaps names the caps on asked work. A request past one gets 403 saying which.
 var askCaps = fmt.Sprintf("[limits] in the settings (PUT /api/v0/settings/permissions): by default at most %d levels below the person's turn, %d jobs asked by one turn, "+
-	"%d in one request tree, and no cost cap (max_cost_usd_per_tree). [agent_api] there can turn each kind of call off, "+
-	"and narrow the scope to the token's own session.", settings.DefaultMaxDepth, settings.DefaultMaxJobsPerTurn, settings.DefaultMaxJobsPerTree)
+	"%d in one request tree, and no cost cap (max_cost_usd_per_tree).", settings.DefaultMaxDepth, settings.DefaultMaxJobsPerTurn, settings.DefaultMaxJobsPerTree)
 
 // spec is the description as served, built on first use. New builds it, so a
 // table or type it cannot describe stops the service from starting.

@@ -195,32 +195,22 @@ func TestTurnEnvAsked(t *testing.T) {
 }
 
 // The line names the asking turn's diff and its session's turns, with
-// agentbus-api or with curl; nothing when the token may not read them, or
-// for a turn nobody asked for.
+// agentbus-api or with curl; nothing for a turn nobody asked for. A turn
+// token may always read its own request tree, so there is no setting that
+// leaves it out.
 func TestAskedLine(t *testing.T) {
 	o := &event.Origin{Kind: event.OriginAsked, Session: "s1", Turn: "t_1"}
-	p := settings.DefaultPolicy()
-	line := askedLine(askedBy(o), p.AgentAPI, true, false)
+	line := askedLine(askedBy(o), true, false)
 	for _, want := range []string{"session s1, turn t_1", `agentbus-api GET "/api/v0/turns/t_1/diff?session=s1"`, `agentbus-api GET "/api/v0/turns?session=s1"`} {
 		if !strings.Contains(line, want) {
 			t.Errorf("line lacks %q: %s", want, line)
 		}
 	}
-	if line := askedLine(askedBy(o), p.AgentAPI, false, false); !strings.Contains(line, `"$AGENTBUS_URL/api/v0/turns/t_1/diff?session=s1"`) {
+	if line := askedLine(askedBy(o), false, false); !strings.Contains(line, `"$AGENTBUS_URL/api/v0/turns/t_1/diff?session=s1"`) {
 		t.Errorf("curl: %s", line)
 	}
-	off := false
-	readOff := p.AgentAPI
-	readOff.Read = &off
-	scoped := p.AgentAPI
-	scoped.Scope = settings.ScopeSession
-	for name, api := range map[string]settings.AgentAPI{"read off": readOff, "scope session": scoped} {
-		if line := askedLine(askedBy(o), api, true, false); line != "" {
-			t.Errorf("%s: %s", name, line)
-		}
-	}
 	for _, o := range []*event.Origin{nil, {Kind: event.OriginResult, Session: "s1", Turn: "t_1"}, {Kind: event.OriginAsked, Session: "s1"}} {
-		if line := askedLine(askedBy(o), p.AgentAPI, true, false); line != "" {
+		if line := askedLine(askedBy(o), true, false); line != "" {
 			t.Errorf("%v: %s", o, line)
 		}
 	}

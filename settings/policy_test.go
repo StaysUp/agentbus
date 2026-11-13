@@ -23,9 +23,8 @@ func samePolicy(p, q Policy) bool {
 	l, m := p.Limits, q.Limits
 	a, b := p.AgentAPI, q.AgentAPI
 	return p.Edit == q.Edit && *p.Subagents == *q.Subagents && *l.MaxDepth == *m.MaxDepth && *l.MaxJobsPerTurn == *m.MaxJobsPerTurn &&
-		*l.MaxJobsPerTree == *m.MaxJobsPerTree && *l.MaxCostUSDPerTree == *m.MaxCostUSDPerTree && a.Scope == b.Scope &&
-		*a.Read == *b.Read && *a.ListAgents == *b.ListAgents && *a.Start == *b.Start &&
-		*a.Review == *b.Review && *a.Cancel == *b.Cancel && *a.Rename == *b.Rename
+		*l.MaxJobsPerTree == *m.MaxJobsPerTree && *l.MaxCostUSDPerTree == *m.MaxCostUSDPerTree &&
+		*a.Apply == *b.Apply && *a.Tools == *b.Tools
 }
 
 func writePerm(t *testing.T, path, s string) {
@@ -48,7 +47,7 @@ func TestReadPolicy(t *testing.T) {
 		t.Fatalf("missing file: %+v %v", p, err)
 	}
 	if def.Edit != EditSession || *def.Limits.MaxDepth != 2 || *def.Limits.MaxJobsPerTurn != 10 || *def.Limits.MaxJobsPerTree != 30 ||
-		*def.Limits.MaxCostUSDPerTree != 0 || def.AgentAPI.Scope != ScopeTree || !*def.AgentAPI.Start || !*def.AgentAPI.Cancel || !*def.AgentAPI.Rename {
+		*def.Limits.MaxCostUSDPerTree != 0 || *def.AgentAPI.Apply {
 		t.Fatalf("defaults: %+v %+v", def.Limits, def.AgentAPI)
 	}
 	if *def.Subagents || !*def.AgentAPI.Tools {
@@ -65,9 +64,10 @@ func TestReadPolicy(t *testing.T) {
 	if p, err := load(path, home); err != nil || !slices.Equal(p.Allow, []string{"go test"}) || !samePolicy(p, def) {
 		t.Fatalf("older file: %+v %v", p, err)
 	}
-	writePerm(t, path, "edit = \"none\"\n[limits]\nmax_depth = 0\nmax_cost_usd_per_tree = 0.25\n[agent_api]\nscope = \"session\"\nstart = false\nrename = false\n")
+	// The [agent_api] switches 0.5.2 retired still read, and are left out.
+	writePerm(t, path, "edit = \"none\"\n[limits]\nmax_depth = 0\nmax_cost_usd_per_tree = 0.25\n[agent_api]\nscope = \"session\"\nstart = false\nrename = false\napply = true\n")
 	if p, err := load(path, home); err != nil || p.Edit != EditNone || *p.Limits.MaxDepth != 0 || *p.Limits.MaxJobsPerTurn != 10 ||
-		*p.Limits.MaxCostUSDPerTree != 0.25 || p.AgentAPI.Scope != ScopeSession || *p.AgentAPI.Start || *p.AgentAPI.Rename {
+		*p.Limits.MaxCostUSDPerTree != 0.25 || !*p.AgentAPI.Apply || !*p.AgentAPI.Tools {
 		t.Fatalf("set values: %+v %v", p, err)
 	}
 	writePerm(t, path, "subagents = false\n")
@@ -122,9 +122,8 @@ func TestReadPolicy(t *testing.T) {
 		{"limit not a number", "[limits]\nmax_jobs_per_turn = \"10\"\n", "wrong type"},
 		{"cost negative", "[limits]\nmax_cost_usd_per_tree = -0.5\n", "max_cost_usd_per_tree must be 0"},
 		{"unknown limit", "[limits]\nmax_rounds = 2\n", `unknown key "limits.max_rounds"`},
-		{"scope unknown", "[agent_api]\nscope = \"all\"\n", `scope must be "tree" or "session"`},
 		{"subagents not a bool", "subagents = \"no\"\n", "subagents is true or false"},
-		{"switch not a bool", "[agent_api]\nstart = \"no\"\n", "wrong type"},
+		{"switch not a bool", "[agent_api]\napply = \"no\"\n", "wrong type"},
 		{"unknown switch", "[agent_api]\nwrite_permissions = true\n", `unknown key "agent_api.write_permissions"`},
 	} {
 		writePerm(t, path, tc.file)

@@ -286,11 +286,12 @@ func TestAskCaps(t *testing.T) {
 }
 
 // permissions.toml decides what a turn token may do, read for each request:
-// a cap changed in the file applies to the next request, each [agent_api]
-// switch refuses its kind of call and says which, scope "session" keeps the
-// token in its own session, a cost cap stops asking once the tree has spent
-// it, and a broken file refuses every turn token's request. No setting opens
-// the routes that change agents or tokens.
+// a cap changed in the file applies to the next request, a cost cap stops
+// asking once the tree has spent it, and a broken file refuses every turn
+// token's request. Within its request tree a turn token always reads, lists
+// agents, starts, reviews, stops and renames: the switches 0.5.2 retired
+// still read, and change nothing. Outside its tree it reaches nothing. No
+// setting opens the routes that change agents or tokens.
 func TestAskPolicyFromPermissions(t *testing.T) {
 	perm := filepath.Join(t.TempDir(), settings.PolicyFile)
 	write := func(s string) {
@@ -315,29 +316,53 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 	ask(t, e, tok, `{"agent":"claude","prompt":"quick"}`)
 
 	child := tokenOf(t, dir, "child")
+	// Another tree: a session the person started on their own.
+	other := startTurn(t, e, `{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"other"}`)
+	// Every retired switch off, scope "session": the file reads, and the
+	// child's token still reads, lists, starts, reviews, stops and renames
+	// within its tree, the person's session included.
+	write("[agent_api]\nscope = \"session\"\nread = false\nlist_agents = false\nstart = false\nreview = false\ncancel = false\nrename = false\n")
 	for _, tc := range []struct {
-		name, file, method, path, body, want string
-		tok                                  string
+		name, method, path, body string
 	}{
-		{"start off", "[agent_api]\nstart = false\n", "POST", "/api/v0/turns", `{"agent":"claude","prompt":"quick"}`, "start is false", tok},
-		{"read off", "[agent_api]\nread = false\n", "GET", "/api/v0/sessions/" + root.Session + "/search?q=x", "", "read is false", tok},
-		{"list_agents off", "[agent_api]\nlist_agents = false\n", "GET", "/api/v0/harnesses", "", "list_agents is false", tok},
-		{"cancel off", "[agent_api]\ncancel = false\n", "POST", "/api/v0/turns/t_x/stop", "", "cancel is false", tok},
-		{"review off", "[agent_api]\nreview = false\n", "POST", "/api/v0/turns/t_x/review", `{}`, "review is false", tok},
-		{"rename off", "[agent_api]\nrename = false\n", "PATCH", "/api/v0/sessions/" + root.Session, `{"title":"x"}`, "rename is false", tok},
-		{"scope session, rename", "[agent_api]\nscope = \"session\"\n", "PATCH", "/api/v0/sessions/" + root.Session, `{"title":"x"}`, "only its own session", child},
-		// scope = "session": the child's token reads its own session only,
-		// not the person's.
-		{"scope session", "[agent_api]\nscope = \"session\"\n", "GET", "/api/v0/sessions/" + root.Session + "/search?q=x", "", "only its own session", child},
-		{"scope session, by query", "[agent_api]\nscope = \"session\"\n", "GET", "/api/v0/turns?session=" + root.Session, "", "only its own session", child},
-		{"scope session, events by query", "[agent_api]\nscope = \"session\"\n", "GET", "/api/v0/sessions/" + root.Session + "/events?turn=" + root.Turn, "", "only its own session", child},
-		{"broken file", "[agent_api]\nscope = all\n", "GET", "/api/v0/harnesses", "", "cannot be used", tok},
+		{"read the person's session", "GET", "/api/v0/sessions/" + root.Session + "/search?q=x", ""},
+		{"read by query", "GET", "/api/v0/turns?session=" + root.Session, ""},
+		{"read events by query", "GET", "/api/v0/sessions/" + root.Session + "/events?turn=" + root.Turn, ""},
+		{"list agents", "GET", "/api/v0/harnesses", ""},
+		{"rename the person's session", "PATCH", "/api/v0/sessions/" + root.Session, `{"title":"Named in the tree"}`},
 	} {
-		write(tc.file)
-		code, out := as(t, e, tc.tok, tc.method, tc.path, tc.body)
-		if (code != 403 && code != 503) || !strings.Contains(out, tc.want) {
-			t.Errorf("%s: %d %s, want a refusal with %q", tc.name, code, out, tc.want)
+		if code, out := as(t, e, child, tc.method, tc.path, tc.body); code != 200 {
+			t.Errorf("%s with the retired switches off: %d %s, want 200", tc.name, code, out)
 		}
+	}
+	started := ask(t, e, child, `{"agent":"claude","prompt":"quick"}`)
+	if code, out := as(t, e, child, "POST", "/api/v0/turns/"+started.Turn+"/stop", ""); code == 403 {
+		t.Errorf("stop a turn its tree asked for: %d %s", code, out)
+	}
+	if code, out := as(t, e, child, "POST", "/api/v0/turns/"+root.Turn+"/review", `{"agent":"claude"}`); code == 403 {
+		t.Errorf("review a turn in its tree: %d %s", code, out)
+	}
+	// Outside its tree, nothing: not to read, rename, review or stop.
+	for _, tc := range []struct {
+		name, method, path, body, want string
+	}{
+		{"read another tree", "GET", "/api/v0/sessions/" + other.Session + "/search?q=x", "", "only its own session"},
+		{"read another tree by query", "GET", "/api/v0/turns?session=" + other.Session, "", "only its own session"},
+		{"rename another tree's session", "PATCH", "/api/v0/sessions/" + other.Session, `{"title":"x"}`, "only its own session"},
+		{"review another tree's turn", "POST", "/api/v0/turns/" + other.Turn + "/review", `{"agent":"claude"}`, "only its own session"},
+		{"stop another tree's turn", "POST", "/api/v0/turns/" + other.Turn + "/stop", "", "request tree asked for"},
+		{"stop its tree's own root", "POST", "/api/v0/turns/" + root.Turn + "/stop", "", "request tree asked for"},
+	} {
+		for _, k := range []string{tok, child} {
+			if code, out := as(t, e, k, tc.method, tc.path, tc.body); code != 403 || !strings.Contains(out, tc.want) {
+				t.Errorf("%s: %d %s, want 403 with %q", tc.name, code, out, tc.want)
+			}
+		}
+	}
+	// A broken file refuses every turn token's request.
+	write("[agent_api]\napply = all\n")
+	if code, out := as(t, e, tok, "GET", "/api/v0/harnesses", ""); code != 503 || !strings.Contains(out, "cannot be used") {
+		t.Errorf("broken file: %d %s", code, out)
 	}
 	// Every switch on, the routes that change agents stay closed to a turn
 	// token: they take the main token, always. rename is on by default, in

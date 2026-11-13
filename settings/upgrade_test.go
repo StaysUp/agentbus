@@ -857,3 +857,87 @@ func TestUpgradeImportsFileWithSandboxRead(t *testing.T) {
 		t.Fatalf("stored %s", s)
 	}
 }
+
+// A settings.db that 0.5.1 wrote, with its five steps done and the [agent_api]
+// switches 0.5.2 retired stored, loses them on the first start of 0.5.2: one
+// change whose settings.changed event names them, apply kept. A second start
+// does nothing.
+func TestUpgradeRemovesRetiredAgentAPISwitches(t *testing.T) {
+	dir := home(t)
+	storedDB(t, dir, `{"agent_api.scope":"session","agent_api.read":false,"agent_api.list_agents":false,"agent_api.start":false,`+
+		`"agent_api.review":false,"agent_api.cancel":false,"agent_api.rename":false,"agent_api.apply":true}`)
+	d, err := openDB(filepath.Join(dir, DBFile), fixedNow, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.db.Exec(`INSERT INTO meta(key, value) VALUES ('upgrades', '5') ON CONFLICT(key) DO UPDATE SET value = excluded.value`); err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+	d, rep, err := upgrade(dir).Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "agent_api.scope,agent_api.read,agent_api.list_agents,agent_api.start,agent_api.review,agent_api.cancel,agent_api.rename"
+	if strings.Join(rep.Removed, ",") != want || len(rep.Kept) != 0 || len(rep.Moved) != 0 {
+		t.Fatalf("removed %v kept %v moved %v", rep.Removed, rep.Kept, rep.Moved)
+	}
+	var got []Change
+	d.SetSink(func(c Change) error { got = append(got, c); return nil }, nil)
+	if s := stored(t, d, SettingPermissions); s != `{"agent_api.apply":true}` {
+		t.Fatalf("stored %s", s)
+	}
+	if len(got) != 1 || strings.Join(got[0].Keys, ",") != want {
+		t.Fatalf("events %+v", got)
+	}
+	if p, _, err := d.Policy(); err != nil || !*p.AgentAPI.Apply || !*p.AgentAPI.Tools {
+		t.Fatalf("policy %+v %v", p.AgentAPI, err)
+	}
+	d.Close()
+
+	d, rep, err = upgrade(dir).Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if len(rep.Removed) != 0 || len(rep.Kept) != 0 {
+		t.Fatalf("second start: removed %v kept %v", rep.Removed, rep.Kept)
+	}
+	if cs, _, _ := d.Changes(); len(cs) != 1 {
+		t.Fatalf("second start: %d changes", len(cs))
+	}
+}
+
+// A 0.4 permissions.toml, or a PUT or PATCH body from an older cockpit, that
+// still sets the retired [agent_api] switches reads as if it did not: the
+// stored policy never holds them.
+func TestRetiredAgentAPISwitchesRead(t *testing.T) {
+	dir := home(t)
+	write(t, filepath.Join(dir, PolicyFile), "[agent_api]\nscope = \"session\"\nstart = false\nread = false\napply = true\n")
+	d, rep, err := upgrade(dir).Run()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	if strings.Join(rep.Imported, ",") != PolicyFile || len(rep.Removed) != 0 {
+		t.Fatalf("imported %v removed %v", rep.Imported, rep.Removed)
+	}
+	if s := stored(t, d, SettingPermissions); strings.Contains(s, "scope") || strings.Contains(s, "start") || !strings.Contains(s, `"agent_api.apply":true`) {
+		t.Fatalf("stored %s", s)
+	}
+	body := []byte(`{"agent_api":{"scope":"session","rename":false,"list_agents":false,"tools":false}}`)
+	p, err := DecodePolicy(body)
+	if err != nil || *p.AgentAPI.Tools {
+		t.Fatalf("PUT body: %+v %v", p.AgentAPI, err)
+	}
+	change, err := DecodePolicyChange(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := d.ChangePolicy(change, Any); err != nil {
+		t.Fatal(err)
+	}
+	if s := stored(t, d, SettingPermissions); strings.Contains(s, "scope") || strings.Contains(s, "rename") || !strings.Contains(s, `"agent_api.tools":false`) {
+		t.Fatalf("stored after PATCH %s", s)
+	}
+}

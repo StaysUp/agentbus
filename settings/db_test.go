@@ -79,7 +79,8 @@ func TestUpgradeSteps(t *testing.T) {
 	if last != nil && string(now[last.Key]) == string(last.Old) {
 		t.Errorf("the last step %s keeps the default it changes", last.Key)
 	}
-	if strings.Join(retiredKeys, ",") != "commands,subscriptions_on_runners,agent_api.continue,sandbox.read" {
+	if strings.Join(retiredKeys, ",") != "commands,subscriptions_on_runners,agent_api.continue,sandbox.read,"+
+		"agent_api.scope,agent_api.read,agent_api.list_agents,agent_api.start,agent_api.review,agent_api.cancel,agent_api.rename" {
 		t.Errorf("retired keys %v", retiredKeys)
 	}
 	for _, m := range movedKeys {
@@ -87,11 +88,11 @@ func TestUpgradeSteps(t *testing.T) {
 			t.Errorf("moved step %s: no key %s", m.From, m.To)
 		}
 	}
-	if p, err := ParsePolicy([]byte("[agent_api]\ncontinue = false\nstart = false\n")); err != nil || *p.AgentAPI.Start {
-		t.Errorf("a file with agent_api.continue: %+v %v", p.AgentAPI, err)
+	if p, err := ParsePolicy([]byte("[agent_api]\ncontinue = false\nstart = false\napply = true\n")); err != nil || !*p.AgentAPI.Apply {
+		t.Errorf("a file with agent_api.continue and start: %+v %v", p.AgentAPI, err)
 	}
-	if p, err := DecodePolicy([]byte(`{"agent_api":{"continue":false,"start":false}}`)); err != nil || *p.AgentAPI.Start {
-		t.Errorf("a body with agent_api.continue: %+v %v", p.AgentAPI, err)
+	if p, err := DecodePolicy([]byte(`{"agent_api":{"continue":false,"start":false,"apply":true}}`)); err != nil || !*p.AgentAPI.Apply {
+		t.Errorf("a body with agent_api.continue and start: %+v %v", p.AgentAPI, err)
 	}
 	if _, err := DecodePolicy([]byte(`{"agent_api":{"bogus":true}}`)); err == nil {
 		t.Error("an unknown key in a table was taken")
@@ -404,5 +405,15 @@ func TestChangePolicyOnlyKeysSent(t *testing.T) {
 	bad := Policy{Edit: "everywhere"}
 	if _, _, err := d.ChangePolicy(bad, Any); err == nil {
 		t.Error("a value out of range was stored")
+	}
+}
+
+// A runner's settings are the server's: a PATCH there is refused at once, as
+// a PUT is, without reading the server.
+func TestChangePolicyOnRunnerRefused(t *testing.T) {
+	r := &Remote{Server: "http://127.0.0.1:1", Local: t.TempDir()}
+	on := true
+	if _, _, err := ChangePolicy(r, Policy{Subagents: &on}, Any); !errors.Is(err, ErrReadOnly) {
+		t.Fatalf("PATCH on a runner: %v, want ErrReadOnly", err)
 	}
 }

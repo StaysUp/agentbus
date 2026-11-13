@@ -112,6 +112,12 @@ func (r *Remote) SetPolicy(Policy, Version) (Policy, Version, error) {
 	return Policy{}, "", ErrReadOnly
 }
 
+// ChangePolicy refuses as SetPolicy does, before reading anything: a PATCH
+// on a runner answers as a PUT does.
+func (r *Remote) ChangePolicy(Policy, Version) (Policy, Version, error) {
+	return Policy{}, "", ErrReadOnly
+}
+
 // SetInstructions is refused: a runner's settings are the server's.
 func (r *Remote) SetInstructions(string, Version) (Version, error) { return "", ErrReadOnly }
 

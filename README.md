@@ -133,7 +133,11 @@ instructions every turn gets. Change them on the cockpit's Settings page, or wit
 - `home_files`: files from your home, such as `~/.aws/config`, copied into each session's own
   home at the start of each turn, sandbox on or off. Before 0.5.2 this was `[sandbox] read`;
   the first start of 0.5.2 moves a stored value here, and the old name still reads.
-- `[limits]` and `[agent_api]`: what agents may ask other agents for.
+- `[limits]`: how much agents may ask other agents for. `[agent_api]` has two keys: `tools` (the
+  API as MCP tools) and `apply` (a turn's own token may apply changes; off by default). Within its
+  own request tree a turn's token may always read, list agents, start, review, stop and rename.
+  The switches for those were retired in 0.5.2: the first start removes stored ones, and an old
+  file or body that holds them still reads.
 - `[network]`: on Linux, close agents off to a list of hosts. Off by default.
 - `[sandbox]`: a wall around each session's agent, on macOS and Linux runners. Off by default.
 

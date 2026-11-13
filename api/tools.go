@@ -6,7 +6,7 @@ package api
 // OpenAPI description (spec.go), so a field added to a request type is in the
 // tool with no other edit. One tool per route is the default; POST
 // /api/v0/turns is two, since starting a session and continuing one are
-// allowed apart ([agent_api] start and continue).
+// told apart: a turn token starts sessions and never continues one.
 //
 // The list is discovery only. A call is sent back through ServeHTTP as the
 // HTTP request it names, with the caller's own token, so the token check,
@@ -58,9 +58,6 @@ type tool struct {
 	fields []string
 	// required are the inputs the tool must be sent, beyond id.
 	required []string
-	// need is the [agent_api] switch the tool needs beyond its route's own
-	// check: "start", for the tool of POST /api/v0/turns.
-	need string
 }
 
 // toolRoute is a tool with its route.
@@ -129,14 +126,7 @@ func listed(tr toolRoute, g *run.Grant, turnsOnly bool, api settings.AgentAPI) b
 	case g == nil:
 		return true
 	}
-	if turnRefusal(tr.rt.turn, *g, api) != "" {
-		return false
-	}
-	switch tr.t.need {
-	case "start":
-		return *api.Start
-	}
-	return true
+	return turnRefusal(tr.rt.turn, *g, api) == ""
 }
 
 // toolSchemas are the input schemas of every tool, by name, built from
