@@ -340,6 +340,24 @@ var routes = slices.Concat([]route{
 			fields: []string{"title"}, required: []string{"title"},
 			doc: "Give an AgentBus session a name, as the person's screen lists it: your own session when session is absent."}},
 		serve: (*API).updateSession},
+	{method: "GET", path: "/api/v0/sessions/{id}/changes", op: "sessionChanges",
+		tag:     "Sessions",
+		summary: "Preview a session's changes",
+		doc: "What applying the session's changes would do to the person's folder now, without writing anything: a preview of POST /api/v0/turns/{id}/apply for the session's latest ended turn with changes, which applies every turn not applied yet.\n\n" +
+			"The preview is made by the apply's own code, on the runner of the folder's machine, and stops before the apply would write. " +
+			"files lists each file the apply would write or remove, with its change (added, modified or deleted) against the folder now, how many lines it adds and removes, and its unified diff for small text files; a file with no diff says diff_left_out. " +
+			"conflicts lists each file the apply would refuse, with why: a file in the folder that is neither as it was at the start of the changes nor already as they leave it. Those files are in files too. " +
+			"unapplied is true when files or conflicts is not empty; turn is the turn to apply. " +
+			"When every change is applied, or the folder already holds them, unapplied is false and files is empty. " +
+			"A session that works in the folder as it is, not in an isolated copy, answers isolated false, with why; so does a closed session, whose copy is gone. " +
+			"Nothing is written in the folder and no event is stored. The reply waits up to 30 seconds for the folder's machine.",
+		replies: []reply{ok(200, SessionChanges{}, "The preview."),
+			noSession,
+			fail(409, "An apply of the session has not ended (ask again once it has), or the preview could not be made: error says why. Nothing was written."),
+			tooMany, fail(503, "The runner of the folder's machine has not been seen for a minute. Nothing was written."),
+			fail(504, "The folder's machine did not answer within 30 seconds. Nothing was written."), storeFailed},
+		turn:  treeSessionPath,
+		serve: (*API).sessionChanges},
 	{method: "GET", path: "/api/v0/sessions/{id}/events", op: "sessionEvents",
 		tag:     "Sessions",
 		summary: "Read a session's events",

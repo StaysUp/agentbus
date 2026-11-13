@@ -33,6 +33,10 @@ type FolderSide interface {
 	// not empty, refused it: nothing was written. partial: not every file
 	// could be put in place, and files are those that were.
 	ApplyJob(ctx context.Context, ref, from, to string) (files []string, conflicts []queue.ApplyConflict, partial bool, err error)
+	// PreviewJob is ApplyJob's dry run, by the same code: what it would
+	// write, each file's diff against the folder now, and the conflicts
+	// that would refuse it. It writes nothing in the folder.
+	PreviewJob(ctx context.Context, ref, from, to string) (queue.PreviewResult, error)
 	// FolderJob checks the folder at path, a folder a person typed, and
 	// registers it: it answers the folder's reference, or why it cannot
 	// be used, in one sentence.
@@ -56,7 +60,7 @@ func applyFinish(status, reason string, res queue.Result) queue.Finish {
 	return queue.Finish{Status: status, Reason: reason, Result: mustJSON(res)}
 }
 
-// folderWork does an apply or a folder job of this machine. It stops
+// folderWork does an apply, its preview, or a folder job of this machine. It stops
 // reading the folder and the store once the job is cancelled, the attempt
 // is no longer current, or the runner stops: an apply stopped so writes
 // nothing, as no file is put in place before every one is staged.
@@ -94,6 +98,14 @@ func (r *Runner) folderWork(ctx context.Context, at *attempt) queue.Finish {
 	}
 	if !blobs.Valid(sp.ApplyTo) || (sp.ApplyFrom != "" && !blobs.Valid(sp.ApplyFrom)) {
 		return refuse("this apply was asked for before this build; ask for it again", nil)
+	}
+	if at.job.Kind == queue.KindPreview {
+		p, err := r.cfg.FolderSide.PreviewJob(ctx, sp.FolderRef, sp.ApplyFrom, sp.ApplyTo)
+		if err != nil {
+			return refuse(err.Error()+"; nothing was written", nil)
+		}
+		p.Fit(jobs.MaxBody - finishMargin - 1024)
+		return queue.Finish{Status: queue.Finished, Result: mustJSON(queue.Result{Preview: &p})}
 	}
 	files, conflicts, partial, err := r.cfg.FolderSide.ApplyJob(ctx, sp.FolderRef, sp.ApplyFrom, sp.ApplyTo)
 	switch {

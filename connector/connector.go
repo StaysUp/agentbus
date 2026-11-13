@@ -15,6 +15,7 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -31,6 +32,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/staysup/agentbus/blobs"
 	"github.com/staysup/agentbus/folders"
@@ -418,35 +420,53 @@ var applyMu sync.Mutex
 // from the store writes nothing either. Only a failure while files are put
 // in place leaves some written; ErrPartial says so, and Applied lists them.
 func (c *Connector) Apply(ctx context.Context, ref, from, to string) (Applied, error) {
+	out, _, err := c.apply(ctx, ref, from, to, false)
+	return out, err
+}
+
+// Preview is Apply's dry run, by the same code up to the point where Apply
+// would write: each file Apply would write or remove, and each file that
+// would refuse it, with its change and its diff against the folder now.
+// Conflicts are in the preview, not an error. It writes nothing in the
+// folder; it may fetch the small files it shows into this machine's store.
+func (c *Connector) Preview(ctx context.Context, ref, from, to string) (queue.PreviewResult, error) {
+	_, p, err := c.apply(ctx, ref, from, to, true)
+	return p, err
+}
+
+// apply is Apply, or with dry its Preview: dry stops after the conflict
+// check, before anything is staged or written.
+func (c *Connector) apply(ctx context.Context, ref, from, to string, dry bool) (Applied, queue.PreviewResult, error) {
+	var none queue.PreviewResult
 	defer lockRef(ref)()
 	applyMu.Lock()
 	defer applyMu.Unlock()
 	dir, err := c.path(ref)
 	if err != nil {
-		return Applied{}, err
+		return Applied{}, none, err
 	}
 	var csFrom *workspace.Changeset
 	if from != "" {
 		if csFrom, err = c.changeset(ctx, from); err != nil {
-			return Applied{}, err
+			return Applied{}, none, err
 		}
 	}
 	csTo, err := c.changeset(ctx, to)
 	if err != nil {
-		return Applied{}, err
+		return Applied{}, none, err
 	}
 	if csTo.Truncated || (csFrom != nil && csFrom.Truncated) {
-		return Applied{}, ErrTruncated
+		return Applied{}, none, ErrTruncated
 	}
 	steps, err := workspace.Between(csFrom, csTo)
 	if err != nil {
-		return Applied{}, ErrChangeset
+		return Applied{}, none, ErrChangeset
 	}
 	// Every write goes through the folder as a root, so no symbolic link in
 	// it can take a write outside it.
 	rt, err := os.OpenRoot(dir)
 	if err != nil {
-		return Applied{}, ErrNotFolder
+		return Applied{}, none, ErrNotFolder
 	}
 	defer rt.Close()
 	type op struct {
@@ -458,7 +478,11 @@ func (c *Connector) Apply(ctx context.Context, ref, from, to string) (Applied, e
 	}
 	var ops []*op
 	var conflict Conflict
+	// shown, for a dry run: each file an op or a conflict names, and the
+	// folder's file at that path as the check found it.
+	var shown []shownFile
 	for _, st := range steps {
+		nops, nconf := len(ops), len(conflict.Files)
 		name := filepath.FromSlash(st.Path)
 		fa, fb := st.From, st.To
 		// A file the base recorded without a hash is as the base saw it,
@@ -466,6 +490,7 @@ func (c *Connector) Apply(ctx context.Context, ref, from, to string) (Applied, e
 		// is as at from, without reading it.
 		if fa != nil && fa.Hash == "" && sameStat(rt, name, *fa) {
 			ops = append(ops, &op{rel: st.Path, to: fb, removeOnly: fb == nil})
+			shown = append(shown, shownFile{rel: st.Path, to: fb, exists: true, mode: fa.Mode})
 			continue
 		}
 		cur, mode, exists, err := hashIn(rt, name)
@@ -491,10 +516,17 @@ func (c *Connector) Apply(ctx context.Context, ref, from, to string) (Applied, e
 		default:
 			conflict.Files = append(conflict.Files, ConflictFile{st.Path, WhyChanged})
 		}
+		if len(ops) > nops || len(conflict.Files) > nconf {
+			shown = append(shown, shownFile{rel: st.Path, to: fb, exists: exists || err != nil, mode: mode, unread: err != nil})
+		}
+	}
+	sort.Slice(conflict.Files, func(i, j int) bool { return conflict.Files[i].Path < conflict.Files[j].Path })
+	if dry {
+		p, err := c.preview(ctx, rt, shown, conflict.Files)
+		return Applied{}, p, err
 	}
 	if len(conflict.Files) > 0 {
-		sort.Slice(conflict.Files, func(i, j int) bool { return conflict.Files[i].Path < conflict.Files[j].Path })
-		return Applied{}, &conflict
+		return Applied{}, none, &conflict
 	}
 	// Stage: every file to write, out of sight under one folder at the top.
 	stage := ".agentbus-apply-" + strconv.FormatInt(time.Now().UnixNano(), 36)
@@ -516,27 +548,27 @@ func (c *Connector) Apply(ctx context.Context, ref, from, to string) (Applied, e
 		}
 		if err := src.Fetch(ctx, hs); err != nil {
 			if err := ctx.Err(); err != nil {
-				return Applied{}, err
+				return Applied{}, none, err
 			}
-			return Applied{}, ErrChangeset
+			return Applied{}, none, ErrChangeset
 		}
 	}
 	for i, o := range ops {
 		if err := ctx.Err(); err != nil {
-			return Applied{}, err
+			return Applied{}, none, err
 		}
 		if o.to == nil || o.chmod {
 			continue
 		}
 		if !staged {
 			if err := rt.Mkdir(stage, 0o700); err != nil {
-				return Applied{}, errors.New("connector: the folder cannot be written")
+				return Applied{}, none, errors.New("connector: the folder cannot be written")
 			}
 			staged = true
 		}
 		o.staged = stage + string(filepath.Separator) + strconv.Itoa(i)
 		if err := c.stageFile(ctx, rt, src, o.staged, *o.to); err != nil {
-			return Applied{}, err
+			return Applied{}, none, err
 		}
 	}
 	// Put in place: every removal first, deepest first, so a file can take
@@ -544,12 +576,12 @@ func (c *Connector) Apply(ctx context.Context, ref, from, to string) (Applied, e
 	// order, so a folder is made before what goes in it. A folder emptied
 	// stays, as before.
 	if err := ctx.Err(); err != nil {
-		return Applied{}, err // stopped before any file is put in place
+		return Applied{}, none, err // stopped before any file is put in place
 	}
 	out := Applied{Files: []string{}}
-	fail := func() (Applied, error) {
+	fail := func() (Applied, queue.PreviewResult, error) {
 		sort.Strings(out.Files)
-		return out, ErrPartial
+		return out, none, ErrPartial
 	}
 	for i := len(ops) - 1; i >= 0; i-- {
 		o := ops[i]
@@ -584,7 +616,117 @@ func (c *Connector) Apply(ctx context.Context, ref, from, to string) (Applied, e
 		out.Files = append(out.Files, o.rel)
 	}
 	sort.Strings(out.Files)
-	return out, nil
+	return out, none, nil
+}
+
+// shownFile is one file of a dry run: the state the apply would leave it in
+// (to; nil: removed), and the folder's file there now.
+type shownFile struct {
+	rel    string
+	to     *workspace.File
+	exists bool        // the folder holds something at rel
+	mode   fs.FileMode // what it holds, when it was read
+	unread bool        // it could not be read: a folder, or unreadable
+}
+
+// preview is a dry run's answer: each shown file's change against the
+// folder now, with a unified diff when both sides are small text, within
+// the 1 MiB of diffs a turn's turn.changed holds.
+func (c *Connector) preview(ctx context.Context, rt *os.Root, shown []shownFile, conflicts []ConflictFile) (queue.PreviewResult, error) {
+	p := queue.PreviewResult{Files: make([]queue.PreviewFile, 0, len(shown)), Count: len(shown)}
+	for _, f := range conflicts {
+		p.Conflicts = append(p.Conflicts, queue.ApplyConflict{Path: f.Path, Why: f.Why})
+	}
+	small := func(f *workspace.File) bool {
+		return f != nil && f.Mode&fs.ModeSymlink == 0 && f.Size <= workspace.MaxFileDiff
+	}
+	src := blobs.Local{Store: c.Store}
+	if c.Remote != nil {
+		src.From = c.Remote
+		// Every file to show, fetched at once, as the apply fetches them.
+		var hs []string
+		for _, f := range shown {
+			if small(f.to) {
+				hs = append(hs, f.to.Hash)
+			}
+		}
+		if err := src.Fetch(ctx, hs); err != nil {
+			if err := ctx.Err(); err != nil {
+				return queue.PreviewResult{}, err
+			}
+			return queue.PreviewResult{}, ErrChangeset
+		}
+	}
+	budget := workspace.MaxFileDiffs
+	for _, f := range shown {
+		if err := ctx.Err(); err != nil {
+			return queue.PreviewResult{}, err
+		}
+		pf := queue.PreviewFile{Path: f.rel, Change: "modified"}
+		switch {
+		case !f.exists:
+			pf.Change = "added"
+		case f.to == nil:
+			pf.Change = "deleted"
+		}
+		// Each side: the folder now, and what the apply would leave.
+		var old, cur []byte
+		ok := !f.unread
+		if ok && f.exists {
+			old, ok = readRegularIn(rt, filepath.FromSlash(f.rel), workspace.MaxFileDiff)
+		}
+		if ok && f.to != nil {
+			if !small(f.to) {
+				ok = false
+			} else if b, err := blobs.ReadAll(ctx, src, f.to.Hash, workspace.MaxFileDiff); err == nil {
+				cur = b
+			} else {
+				ok = false
+			}
+		}
+		if ok && (!isText(old) || !isText(cur)) {
+			ok = false
+		}
+		switch {
+		case !ok, budget == 0:
+			pf.DiffLeftOut, p.DiffsCut = true, p.DiffsCut || ok
+		case bytes.Equal(old, cur):
+			// Only its mode changes.
+		default:
+			d, add, rem := workspace.UnifiedCount(f.rel, old, cur, pf.Change)
+			if len(d) > budget {
+				pf.DiffLeftOut, p.DiffsCut = true, true
+				break
+			}
+			budget -= len(d)
+			pf.Diff, pf.Added, pf.Removed = &d, add, rem
+		}
+		p.Files = append(p.Files, pf)
+	}
+	return p, nil
+}
+
+// readRegularIn reads the regular file name of rt, at most max bytes.
+func readRegularIn(rt *os.Root, name string, max int) ([]byte, bool) {
+	fi, err := rt.Lstat(name)
+	if err != nil || !fi.Mode().IsRegular() || fi.Size() > int64(max) {
+		return nil, false
+	}
+	f, err := rt.Open(name)
+	if err != nil {
+		return nil, false
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, int64(max)+1))
+	if err != nil || len(b) > max {
+		return nil, false
+	}
+	return b, true
+}
+
+// isText: valid UTF-8 with no NUL byte.
+func isText(b []byte) bool {
+	return bytes.IndexByte(b, 0) < 0 && utf8.Valid(b)
 }
 
 // changeset reads the changeset blob h.
@@ -727,6 +869,11 @@ func (j Jobs) FolderJob(ctx context.Context, path string) (string, error) {
 		return "", errors.New("the folder job was stopped")
 	}
 	return j.Folders.Register(path)
+}
+
+// PreviewJob is Preview, for a preview job: Apply's dry run.
+func (j Jobs) PreviewJob(ctx context.Context, ref, from, to string) (queue.PreviewResult, error) {
+	return j.Preview(ctx, ref, from, to)
 }
 
 // ApplyJob is Apply, for an apply job: the files written, or the conflicts

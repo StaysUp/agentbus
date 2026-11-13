@@ -20,8 +20,8 @@ moved under `/api/v0/runner/` in 0.4 (2), in 0.5 the relay records every model c
 machine, with `agentbus connector` retired (4). Register and every take carry `protocol`; a runner of another version is refused (400) at
 either, so a runner already running when control is upgraded stops at its next take.
 
-**Words.** A **job** is the queue's word for work: a turn, a review, an apply or a
-folder check. (A snapshot job, which a runner of 0.4 asked for to build a copy, is retired in
+**Words.** A **job** is the queue's word for work: a turn, a review, an apply, an
+apply's preview or a folder check. (A snapshot job, which a runner of 0.4 asked for to build a copy, is retired in
 0.5.1: one stored before is kept and read, and a runner refuses it as a kind it does not run.) A
 runner takes a job and runs it as an **attempt**. A turn or review job names its turn id when it is
 made (`turn` on the job). The runner starts the turn with that id, whichever attempt runs it, so
@@ -52,7 +52,7 @@ the turn a client asked for keeps its id. The client API never shows jobs or att
 each session the runner holds an attempt of that has not ended or ended in the last 10 minutes,
 and from its own jobs of no session: their snapshots (the trees and every file in them, the times
 blob, `.git`), their changesets and the files those name, and the session's own snapshot. Its
-apply jobs, and snapshot jobs stored before 0.5.1, are its jobs too. Any other blob gets **403** `this runner
+apply and preview jobs, and snapshot jobs stored before 0.5.1, are its jobs too. Any other blob gets **403** `this runner
 holds no job that reads this blob`, whether the store holds it or not. Sending blobs and asking
 which are missing are not limited.
 
@@ -116,7 +116,7 @@ runner's latest turn of it (codex's `models_cache.json`), the names only. Contro
 agent window.
 
 A runner takes its jobs in two kinds of places. Turns and reviews take its `capacity`.
-**Folder jobs** (`apply` and `folder`) take one of 4 folder places
+**Folder jobs** (`apply`, `preview` and `folder`) take one of 4 folder places
 of their own, asked for with `take`'s `folders: true`, so an apply never waits behind running
 turns. A `folder` job names a path a person typed for that machine (`spec.folder`): the runner
 checks that it is a directory it can read, registers it, and answers its reference in
@@ -131,6 +131,13 @@ its reference. File data goes through the server's blob store, by the hash of it
 - An apply job goes to the runner of the folder's machine, which reads both changesets and the
   files from the store (on that machine they are already in its own store), checks the folder and
   writes it.
+- A `preview` job (from 0.5.5) is an apply's dry run, for `GET /api/v0/sessions/{id}/changes`. Its
+  spec is the one the apply would have (`folder_ref`, `apply_from`, `apply_to`). The runner runs the
+  apply's own code and stops before it would write: it answers `result.preview` with each file the
+  apply would write or remove, and each file that would refuse it, with the file's change and
+  unified diff against the folder now, and `conflicts`. It writes nothing in the folder and sends no
+  event. Control keeps it in the job's result; it is not moved to the record. A runner of an older
+  build refuses it as a kind it does not run.
 - A job of a kind the runner does not run ends as a setup failure with a one-sentence `refused`.
   The `command` job of 0.4 (the person's `!`) is retired: a `!` is now a message to the session's
   agent, which runs it with its own shell tool. One that an older control made is refused so.

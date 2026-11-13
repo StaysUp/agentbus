@@ -150,75 +150,166 @@ func (q *Queue) ApplyAs(team, turn string, by *By) (job Job, created bool, err e
 	// two at once must not both start from the same last applied turn.
 	q.applyMu.Lock()
 	defer q.applyMu.Unlock()
-	j, err := q.JobByTurn(team, turn)
+	p, done, has, err := q.planApply(team, turn, by)
 	if err != nil {
 		return Job{}, false, err
 	}
+	if has {
+		return done, false, nil
+	}
+	if ok, err := q.MachineSeen(team, p.spec.Connector); err != nil {
+		return Job{}, false, err
+	} else if !ok {
+		return Job{}, false, ErrMachineOffline
+	}
+	// The key counts the applies of turn that ended without applying, so
+	// requests at once make one job, and one after a refusal makes a new
+	// one. It holds a "/", which no key a caller sends may hold (ResultKey).
+	return q.create(team, KindApply, ApplyKey(turn, p.refused), p.spec, p.links, Limits{}, p.spec.Session)
+}
+
+// applyPlan is the apply job of a turn not applied yet: its spec (the
+// folder, and the two changesets it goes between), its links (the turns it
+// carries), and how many applies of the turn ended without applying.
+type applyPlan struct {
+	spec    Spec
+	links   Links
+	refused int
+}
+
+// planApply reads what an apply of turn's session up to turn would be: done
+// is the apply that already covers turn (has true: being applied, or
+// applied), else plan. Both Apply and its dry run (Preview) read it here, so
+// a preview goes between the same two changesets as the apply after it.
+// The caller holds applyMu.
+func (q *Queue) planApply(team, turn string, by *By) (plan applyPlan, done Job, has bool, err error) {
+	j, err := q.JobByTurn(team, turn)
+	if err != nil {
+		return plan, Job{}, false, err
+	}
 	if j.Kind != KindTurn || j.Ended == nil || j.Attempt == "" {
-		return Job{}, false, ErrNotApplicable
+		return plan, Job{}, false, ErrNotApplicable
 	}
 	r, _ := ReadResult(j.Result)
 	if r.Changeset == "" || j.Workspace == nil || (j.Workspace.Kind != WorkspaceCopy && j.Workspace.Kind != WorkspaceWorktree) {
-		return Job{}, false, ErrNotApplicable
+		return plan, Job{}, false, ErrNotApplicable
 	}
 	if j.Workspace.Closed != nil {
-		return Job{}, false, ErrSessionClosed
+		return plan, Job{}, false, ErrSessionClosed
 	}
 	first, err := q.firstSpec(team, j.Session)
 	if err != nil {
-		return Job{}, false, err
+		return plan, Job{}, false, err
 	}
 	if first.FolderRef == "" || first.Connector == "" {
-		return Job{}, false, ErrNotApplicable
+		return plan, Job{}, false, ErrNotApplicable
 	}
 	turns, err := q.appliableTurns(team, j.Session)
 	if err != nil {
-		return Job{}, false, err
+		return plan, Job{}, false, err
 	}
 	at := indexOf(turns, turn)
 	if at < 0 {
-		return Job{}, false, ErrNotApplicable
+		return plan, Job{}, false, ErrNotApplicable
 	}
 	applies, err := q.sessionApplies(team, j.Session)
 	if err != nil {
-		return Job{}, false, err
+		return plan, Job{}, false, err
 	}
-	mark, refused := -1, 0
+	mark := -1
 	for _, a := range applies {
 		k := indexOf(turns, a.Links.AppliesTurn)
 		switch {
 		case a.Ended == nil && k >= at:
-			return a, false, nil // being applied, by this apply or a later one
+			return plan, a, true, nil // being applied, by this apply or a later one
 		case a.Ended == nil:
-			return Job{}, false, ErrApplyBusy
+			return plan, Job{}, false, ErrApplyBusy
 		case a.State == Finished && k >= at:
-			return a, false, nil // applied already
+			return plan, a, true, nil // applied already
 		case a.State == Finished:
 			mark = max(mark, k)
 		case a.Links.AppliesTurn == turn:
-			refused++
+			plan.refused++
 		}
 	}
 	from := ""
 	if mark >= 0 {
 		from = turns[mark].changeset
 	}
-	// The key counts the applies of turn that ended without applying, so
-	// requests at once make one job, and one after a refusal makes a new
-	// one. It holds a "/", which no key a caller sends may hold (ResultKey).
-	if ok, err := q.MachineSeen(team, first.Connector); err != nil {
-		return Job{}, false, err
-	} else if !ok {
-		return Job{}, false, ErrMachineOffline
-	}
-	key := ApplyKey(turn, refused)
-	spec := Spec{Session: j.Session, FolderRef: first.FolderRef, Connector: first.Connector, ApplyFrom: from, ApplyTo: r.Changeset}
+	plan.spec = Spec{Session: j.Session, FolderRef: first.FolderRef, Connector: first.Connector, ApplyFrom: from, ApplyTo: r.Changeset}
 	carried := make([]string, 0, at-mark)
 	for _, t := range turns[mark+1 : at+1] {
 		carried = append(carried, t.turn)
 	}
-	links := Links{AppliesTurn: turn, AppliesJob: j.ID, AppliesTurns: carried, ApplyBy: by}
-	return q.create(team, KindApply, key, spec, links, Limits{}, j.Session)
+	plan.links = Links{AppliesTurn: turn, AppliesJob: j.ID, AppliesTurns: carried, ApplyBy: by}
+	return plan, Job{}, false, nil
+}
+
+// ErrNotIsolated: the session works in the person's folder as it is, not in
+// an isolated copy, so it has nothing to apply.
+var ErrNotIsolated = errors.New("queue: the session does not run in an isolated copy")
+
+// ErrAllApplied: every change of the session is applied, or it has none.
+var ErrAllApplied = errors.New("queue: the session has no changes that are not applied")
+
+// Preview makes the dry run (KindPreview) of the apply that an Apply of
+// the session's latest turn with changes would make: the same spec, from
+// planApply, on the runner of the folder's machine. turn is that turn. It
+// is ErrNotFound for a session the queue does not hold, ErrAllApplied for
+// one whose first turn has not ended, ErrNotIsolated,
+// ErrSessionClosed, ErrAllApplied (with turn, when the session has one),
+// ErrApplyBusy while an apply of the session has not ended, and
+// ErrMachineOffline. Each preview is a new job: the folder may have changed
+// since the last one.
+func (q *Queue) Preview(team, session string) (job Job, turn string, err error) {
+	q.applyMu.Lock()
+	defer q.applyMu.Unlock()
+	ws, ok, err := q.Workspace(team, session)
+	if err != nil {
+		return Job{}, "", err
+	}
+	switch {
+	case !ok:
+		// The queue writes a session's row when its first turn ends: a
+		// session whose first turn has not ended has nothing to apply yet.
+		var n int
+		if err := q.db.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND session = ? AND kind = 'turn'`,
+			team, session).Scan(&n); err != nil {
+			return Job{}, "", fmt.Errorf("queue: read session: %w", err)
+		}
+		if n > 0 {
+			return Job{}, "", ErrAllApplied
+		}
+		return Job{}, "", ErrNotFound
+	case ws.Kind != WorkspaceCopy && ws.Kind != WorkspaceWorktree:
+		return Job{}, "", ErrNotIsolated
+	case ws.Closed != nil:
+		return Job{}, "", ErrSessionClosed
+	}
+	turns, err := q.appliableTurns(team, session)
+	if err != nil {
+		return Job{}, "", err
+	}
+	if len(turns) == 0 {
+		return Job{}, "", ErrAllApplied
+	}
+	turn = turns[len(turns)-1].turn
+	p, done, has, err := q.planApply(team, turn, nil)
+	switch {
+	case err != nil:
+		return Job{}, turn, err
+	case has && done.Ended == nil:
+		return Job{}, turn, ErrApplyBusy
+	case has:
+		return Job{}, turn, ErrAllApplied
+	}
+	if ok, err := q.MachineSeen(team, p.spec.Connector); err != nil {
+		return Job{}, turn, err
+	} else if !ok {
+		return Job{}, turn, ErrMachineOffline
+	}
+	job, _, err = q.create(team, KindPreview, "", p.spec, p.links, Limits{}, session)
+	return job, turn, err
 }
 
 // firstSpec is the spec of the session's first turn job: the folder it

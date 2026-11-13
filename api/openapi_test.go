@@ -241,9 +241,11 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 	// changes only the keys it is sent, 45 with GET
 	// /api/v0/harnesses/{id}/models, which lists a harness's models, 46
 	// with POST /api/v0/signin, the cockpit's one-time sign-in link, and 52
-	// with PUT and DELETE of the anthropic, openai and gemini API keys.
-	if len(ops) != 52 {
-		t.Errorf("%d endpoints, want 52: %v", len(ops), ops)
+	// with PUT and DELETE of the anthropic, openai and gemini API keys, and
+	// 53 with GET /api/v0/sessions/{id}/changes, an apply's preview, which
+	// writes nothing.
+	if len(ops) != 53 {
+		t.Errorf("%d endpoints, want 53: %v", len(ops), ops)
 	}
 	for _, want := range []string{"POST /api/v0/turns", "GET /api/v0/turns", "GET /api/v0/turns/{id}", "POST /api/v0/turns/{id}/stop",
 		"GET /api/v0/turns/{id}/diff", "POST /api/v0/turns/{id}/apply", "POST /api/v0/turns/{id}/review",

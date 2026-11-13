@@ -55,6 +55,7 @@ those by its id alone.
 | `POST /api/v0/turns/{id}/review` | Ask another agent to review a turn: `{"agent"}`. It starts a review turn. Pick an agent other than the turn's own. |
 | `POST /api/v0/turns/{id}/apply` | Put the turn's changes into the person's folder. A 409 lists each file that changed there, and writes nothing. |
 | `POST /api/v0/turns/{id}/stop` | Stop a queued or running turn. It then reads `stopped`. |
+| `GET /api/v0/sessions/{id}/changes` | What applying the session's changes would do to the person's folder now: files with diffs against it, and conflicts. Writes nothing. |
 | `GET /api/v0/turns/{id}/diff` | What a turn did: changed files with diffs, model calls, tool calls, commands, cost, apply state. |
 | `GET /api/v0/turns/{id}/calls/{call}` | One model call of the turn, piece by piece. |
 | `GET /api/v0/sessions/{id}/events?turn=` | A session's events, oldest first; `turn` keeps one turn's. |

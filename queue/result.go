@@ -35,6 +35,9 @@ type Result struct {
 	Changes *workspace.Changes `json:"changes,omitempty"`
 	// Apply, for an apply job: what it wrote, or the files that refused it.
 	Apply *ApplyResult `json:"apply,omitempty"`
+	// Preview, for a preview job: what an apply would write, or the files
+	// that would refuse it. Nothing was written.
+	Preview *PreviewResult `json:"preview,omitempty"`
 	// Changeset, for a turn in an isolated copy: the blob, in the control
 	// plane's store, of what the copy holds at the turn's end that differs
 	// from its base (workspace.Changeset). An apply reads it.
@@ -115,4 +118,58 @@ func ReadResult(raw json.RawMessage) (Result, error) {
 	}
 	err := json.Unmarshal(raw, &r)
 	return r, err
+}
+
+// PreviewResult is what an apply would do, as its dry run (KindPreview)
+// found it: nothing was written.
+type PreviewResult struct {
+	// Files: each file the apply would write or remove, and each file that
+	// would refuse it, sorted by path. Count is all of them; Files may hold
+	// fewer, with Truncated (Fit).
+	Files     []PreviewFile `json:"files"`
+	Count     int           `json:"count"`
+	Truncated bool          `json:"truncated,omitempty"`
+	// DiffsCut: some files have no diff because all diffs together passed
+	// their budget, or to keep the result small.
+	DiffsCut bool `json:"diffs_cut,omitempty"`
+	// Conflicts: the files that would refuse the apply, each with why, as
+	// the apply itself would name them.
+	Conflicts []ApplyConflict `json:"conflicts,omitempty"`
+}
+
+// PreviewFile is one file of a preview: its change against the person's
+// folder now.
+type PreviewFile struct {
+	Path   string `json:"path"`
+	Change string `json:"change"` // added, modified or deleted
+	// Added and Removed: the diff's lines. 0 when there is no diff.
+	Added   int `json:"added"`
+	Removed int `json:"removed"`
+	// Diff: the unified diff from the folder now to what the apply would
+	// write, for a small text file on both sides.
+	Diff        *string `json:"diff,omitempty"`
+	DiffLeftOut bool    `json:"diff_left_out,omitempty"`
+}
+
+// Fit shrinks p so that its JSON is at most max bytes: first every diff
+// goes, then files, then conflicts, from the end. DiffsCut, DiffLeftOut and
+// Truncated say so. Count stays the whole count.
+func (p *PreviewResult) Fit(max int) {
+	size := func() int { b, _ := json.Marshal(p); return len(b) }
+	if size() <= max {
+		return
+	}
+	for i := range p.Files {
+		if p.Files[i].Diff != nil {
+			p.Files[i].Diff, p.Files[i].DiffLeftOut, p.DiffsCut = nil, true, true
+		}
+	}
+	for size() > max && (len(p.Files) > 0 || len(p.Conflicts) > 0) {
+		if len(p.Files) > 0 {
+			p.Files = p.Files[:len(p.Files)/2]
+		} else {
+			p.Conflicts = p.Conflicts[:len(p.Conflicts)/2]
+		}
+		p.Truncated = true
+	}
 }

@@ -79,6 +79,12 @@ const (
 	// folder, on the runner of the folder's machine (apply.go). It starts no
 	// turn.
 	KindApply = "apply"
+	// KindPreview is an apply's dry run: what an apply of the session up to
+	// its latest turn would write in the person's folder, each file's diff
+	// against the folder now, and the files that would refuse it. The
+	// runner of the folder's machine runs the apply's own code and writes
+	// nothing (apply.go). It starts no turn and records no event.
+	KindPreview = "preview"
 	// A "snapshot" job (a folder's snapshot, for a runner that built a copy
 	// from it before 0.5) is retired in 0.5.1: a session runs on its
 	// folder's machine, so nothing asks for one. One stored before is read
