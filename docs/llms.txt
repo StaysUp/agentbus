@@ -51,7 +51,7 @@ those by its id alone.
 | `GET /api/v0/agents` | The saved agents. Use an agent's `id`. |
 | `GET /api/v0/turns` | Turns, newest first; queued ones first. `?session=` picks a session (yours by default). |
 | `GET /api/v0/turns/{id}` | One turn in any state: `state`, `number`, `cost_usd`, `reply`; for a review `verdict` and `findings`. |
-| `POST /api/v0/turns` | Start a turn: `{"agent","prompt"}` opens a new session on its own copy; add `"session"` to continue one your work started. |
+| `POST /api/v0/turns` | Ask another agent: `{"agent","prompt"}` always opens a new session on its own copy. Your token cannot continue a session: to follow up, ask again. |
 | `POST /api/v0/turns/{id}/review` | Ask another agent to review a turn: `{"agent"}`. It starts a review turn. Pick an agent other than the turn's own. |
 | `POST /api/v0/turns/{id}/apply` | Put the turn's changes into the person's folder. A 409 lists each file that changed there, and writes nothing. |
 | `POST /api/v0/turns/{id}/stop` | Stop a queued or running turn. It then reads `stopped`. |
@@ -71,7 +71,7 @@ work, ask for a review of your turn, then end your turn.
 
 ## Refusals
 
-A 403 says why: a read-only turn asking for anything; a session outside your tree; continuing your
-own session or the person's; a folder outside yours; a call the person switched off in
+A 403 says why: a read-only turn asking for anything; a session outside your tree; sending
+`"session"` to continue one (your token never continues a session); a folder outside yours; a call the person switched off in
 `[agent_api]` of the settings; a limit in `[limits]` (depth 2, 10 asks per turn, 30 per tree
 by default). A 404 means no such turn, session or agent. Errors are JSON: `{"error":"..."}`.
