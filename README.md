@@ -90,8 +90,8 @@ AgentBus has two parts:
 `agentbus up` is both, in one program, for one machine. For several machines, run control once,
 reachable from the others (`agentbus server -listen 0.0.0.0`), and a runner on each machine.
 
-**Every runner must reach control's address.** That works on one network, over a VPN such as
-Tailscale, or with control on a server the machines can reach. There is no hosted relay yet.
+**Every runner must reach control's address.** That works on one network. Hosted relay will come as
+managed service.
 
 To add a machine:
 
