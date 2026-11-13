@@ -70,6 +70,13 @@ installed, and a Claude and a ChatGPT subscription.
    No browser opened, or the link expired? Stop `agentbus up` (Ctrl-C) and start it again for a
    new link.
 
+   Signing in from another tab or browser: the cockpit's sign-in lasts for the tab that opened the
+   link. In a new tab or browser, either start `agentbus up` again for a new link, or paste your
+   token on the connect screen. The token is the file `token` in the data folder
+   (`$AGENTBUS_HOME`, by default `~/.local/share/agentbus`). Copy it without showing it:
+   `pbcopy < ~/.local/share/agentbus/token` on a Mac, or `xclip -sel c < …/token` on Linux.
+   Anyone with the token controls your agents, so keep it to yourself.
+
 2. **Connect your subscriptions.** In the cockpit, open **Settings** (at the foot of the Agents
    column), then **Subscriptions**. Press **Connect** next to claude, and sign in as the tool asks.
    Do the same for codex. You do this once.
@@ -104,15 +111,6 @@ that vendor; any other call gets 403. The agent gets a placeholder in its place,
 reaches a runner, an agent's environment, a log or the record. A turn while no key is set is refused with "set your Anthropic API key in Settings" (and
 the like). agy on a Gemini API key needs no Google sign-in, so it also works with control on a Mac.
 API: `PUT` and `DELETE /api/v0/subscriptions/{anthropic,openai,gemini}/key`.
-
-The agent window offers the models each access can use now, from each source's own data: OpenRouter's
-list of models (fetched by control with your OpenRouter key), each vendor's own list of models on
-an API key (fetched by control with that key), claude's aliases `opus`, `sonnet` and
-`haiku`, `agy models` run unmodified where agy's sign-in is kept on control, and the models codex keeps
-in a session's home, which the runner reports after a codex turn. AgentBus never calls a
-subscription's own endpoint. A list is fetched again at most once an hour, or on demand. You can still
-type any model name, and an empty one uses the tool's own default. API:
-`GET /api/v0/harnesses/{harness}/models?access=subscription|openrouter|api[&refresh=true]`.
 
 ## Several machines
 
