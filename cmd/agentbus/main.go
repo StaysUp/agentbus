@@ -1244,16 +1244,18 @@ var publicWait = 30 * time.Second
 
 // boundPublic serves every reply that needs no token (the cockpit, the docs,
 // the descriptions, the sign-in trade) with a read and a write deadline of
-// publicWait, and clears the write deadline after: the next request on the
-// connection may be a token's stream, which must not inherit it. Net/http
-// resets the read deadline for each request itself.
+// publicWait. Such a reply never shares its connection: it goes out with
+// Connection: close, so net/http closes the connection after it. The write
+// deadline therefore stays set to the end, which bounds the flush net/http
+// makes after the handler returns, and no later request on the connection
+// (a token's stream among them) can inherit it.
 func boundPublic(w http.ResponseWriter, r *http.Request, h http.Handler) {
 	rc := http.NewResponseController(w)
 	until := time.Now().Add(publicWait)
 	_ = rc.SetReadDeadline(until)
 	_ = rc.SetWriteDeadline(until)
+	w.Header().Set("Connection", "close")
 	h.ServeHTTP(w, r)
-	_ = rc.SetWriteDeadline(time.Time{})
 }
 
 // under reports whether path is prefix or below it, by whole segments, so

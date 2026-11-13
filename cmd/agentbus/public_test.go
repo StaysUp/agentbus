@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -29,8 +30,10 @@ func (d *deadlineRecorder) SetWriteDeadline(t time.Time) error {
 }
 
 // Every reply served without a token goes through boundPublic: a read and a
-// write deadline before it, the write deadline cleared after. A token's
-// request, a stream among them, gets neither from the router.
+// write deadline before it, the write deadline left set after the handler
+// returns (net/http still flushes the reply then), and Connection: close, so
+// no later request shares the connection or inherits the deadline. A token's
+// request, a stream among them, gets none of these from the router.
 func TestEveryPublicReplyIsBounded(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
 	if err != nil {
@@ -74,14 +77,26 @@ func TestEveryPublicReplyIsBounded(t *testing.T) {
 				t.Errorf("cockpit %v: %s %s: bounded %v, want %v", withCockpit, tc.method, tc.path, got, tc.bounded)
 				continue
 			}
+			closes := w.Header().Get("Connection") == "close"
 			if !got {
+				// A refusal (localError) closes its connection on its own;
+				// a token's API request must not.
+				if closes && strings.HasPrefix(tc.path, "/api/") {
+					t.Errorf("%s %s: a token's reply was sent with Connection: close", tc.method, tc.path)
+				}
 				continue
 			}
-			if len(w.read) == 0 || w.read[0].IsZero() || w.write[0].IsZero() {
-				t.Errorf("%s %s: deadlines read %v write %v", tc.method, tc.path, w.read, w.write)
+			if len(w.read) == 0 || w.read[0].IsZero() {
+				t.Errorf("%s %s: read deadlines %v", tc.method, tc.path, w.read)
 			}
-			if last := w.write[len(w.write)-1]; !last.IsZero() {
-				t.Errorf("%s %s: the write deadline was left set for the connection's next request", tc.method, tc.path)
+			for _, d := range w.write {
+				if d.IsZero() {
+					t.Errorf("%s %s: the write deadline was cleared (%v); the flush after the handler is unbounded", tc.method, tc.path, w.write)
+					break
+				}
+			}
+			if !closes {
+				t.Errorf("%s %s: Connection %q, want close", tc.method, tc.path, w.Header().Get("Connection"))
 			}
 		}
 	}
