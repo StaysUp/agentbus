@@ -122,12 +122,13 @@ options.
 
 Control keeps the settings in `settings.db`: the permissions every turn runs under and the
 instructions every turn gets. Change them on the cockpit's Settings page, or with
-`PUT /api/v0/settings/permissions` and `PUT /api/v0/settings/instructions`. A change applies to the
-next turn. Runners read control's settings before each turn. The keys and their defaults are in
+`PATCH /api/v0/settings/permissions` (only the keys you send), `PUT /api/v0/settings/permissions`
+(the whole policy) and `PUT /api/v0/settings/instructions`. A change applies to the next turn. Runners read control's settings before each turn. The keys and their defaults are in
 `/docs`, under Settings. In short:
 
 - `read_folders`, `allow`, `forbid`, `edit`, `subagents`: what a turn may read, run and edit
-  without asking. `forbid` reads command text only; it is not a sandbox.
+  without asking. `forbid` reads command text only; it is not a sandbox. `subagents` is off by
+  default: agents ask other agents through AgentBus, where the work is recorded.
 - `isolation`: how a session's copy is made (`auto`, `overlay`, `copy`, `git` or `none`).
 - `home_files`: files from your home, such as `~/.aws/config`, copied into each session's own
   home at the start of each turn, sandbox on or off. Before 0.5.2 this was `[sandbox] read`;
@@ -153,11 +154,12 @@ next turn. Runners read control's settings before each turn. The keys and their 
 - An asked agent works in a fresh copy of your folder. It reads the asking turn's changes through
   the API, but does not have those files.
 - agy runs on its own Google sign-in only, and gets no instructions of AgentBus's. A turn with
-  `forbid` set, or `subagents = false`, is refused on agy. Using agy's sign-in on runners is at your
+  `forbid` set is refused on agy. agy cannot turn its own subagents off, so `subagents = false`
+  does not apply to it: its turn runs, and its `turn.started` says so (`unkept`). Using agy's sign-in on runners is at your
   own risk with Google: its terms (clause 6) forbid third-party tools. A sign-in connected on control
   is used on every approved runner; to keep agy's off your runners, do not connect it.
-- The API as tools (MCP) is off by default: `[agent_api] tools = true` turns it on for claude and
-  codex.
+- The API as tools (MCP) is on by default for claude and codex: `[agent_api] tools = false` turns
+  it off, and agents then call the API with `agentbus-api`.
 
 ## Docs
 

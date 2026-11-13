@@ -3,8 +3,10 @@ package settings
 import (
 	"encoding/json"
 	"errors"
+	"maps"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -324,5 +326,83 @@ func TestDBRetiredCommandsKey(t *testing.T) {
 	}
 	if got := stored(t, d, SettingPermissions); got != row {
 		t.Errorf("stored %s, want %s", got, row)
+	}
+}
+
+// From 0.5.2, tools is on and subagents off by default, with no upgrade
+// step: a key the person never set takes the new default, and a value they
+// set is kept, whichever way it points.
+func TestToolsOnSubagentsOffByDefault(t *testing.T) {
+	d := openTestDB(t, t.TempDir())
+	p, _, err := d.Policy()
+	if err != nil || !*p.AgentAPI.Tools || *p.Subagents {
+		t.Fatalf("untouched: tools %v, subagents %v, %v; want on and off", *p.AgentAPI.Tools, *p.Subagents, err)
+	}
+	for _, step := range upgradeSteps {
+		if step.Key == "agent_api.tools" || step.Key == "subagents" {
+			t.Errorf("an upgrade step for %s: an untouched key must take the new default", step.Key)
+		}
+	}
+	set := DefaultPolicy()
+	on, off := true, false
+	set.Subagents, set.AgentAPI.Tools = &on, &off
+	if _, _, err := d.SetPolicy(set, Any); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := d.writeSteps(); err != nil {
+		t.Fatal(err)
+	}
+	if p, _, err := d.Policy(); err != nil || *p.AgentAPI.Tools || !*p.Subagents {
+		t.Fatalf("set: tools %v, subagents %v, %v; want the person's off and on", *p.AgentAPI.Tools, *p.Subagents, err)
+	}
+}
+
+// ChangePolicy (PATCH) writes only the keys it is sent: every other key keeps
+// what it held, and each key sent is the person's own, even at its default.
+func TestChangePolicyOnlyKeysSent(t *testing.T) {
+	d := openTestDB(t, t.TempDir())
+	p := DefaultPolicy()
+	p.Allow = []string{"go test"}
+	_, v, err := d.SetPolicy(p, Any)
+	if err != nil {
+		t.Fatal(err)
+	}
+	change, err := DecodePolicyChange([]byte(`{"agent_api":{"tools":true},"limits":{"max_depth":3}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := d.ChangePolicy(change, "stale"); !errors.Is(err, ErrChanged) {
+		t.Fatalf("a stale If-Match: %v, want ErrChanged", err)
+	}
+	got, _, err := d.ChangePolicy(change, v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got.Allow, []string{"go test"}) || *got.Limits.MaxDepth != 3 || !*got.AgentAPI.Tools || *got.Subagents {
+		t.Fatalf("after the change: %+v", got)
+	}
+	var o map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(stored(t, d, SettingPermissions)), &o); err != nil {
+		t.Fatal(err)
+	}
+	keys := slices.Sorted(maps.Keys(o))
+	if want := []string{"agent_api.tools", "allow", "limits.max_depth"}; !slices.Equal(keys, want) {
+		t.Errorf("stored keys %v, want %v: tools is kept although it is the default", keys, want)
+	}
+	// Sending the same keys again changes nothing and makes no change row.
+	cs, _, _ := d.Changes()
+	if _, _, err := d.ChangePolicy(change, Any); err != nil {
+		t.Fatal(err)
+	}
+	if again, _, _ := d.Changes(); len(again) != len(cs) {
+		t.Errorf("a change of nothing made %d change rows", len(again)-len(cs))
+	}
+	// A key it cannot read is refused, and stores nothing.
+	if _, err := DecodePolicyChange([]byte(`{"nope":1}`)); err == nil {
+		t.Error("an unknown key was read")
+	}
+	bad := Policy{Edit: "everywhere"}
+	if _, _, err := d.ChangePolicy(bad, Any); err == nil {
+		t.Error("a value out of range was stored")
 	}
 }

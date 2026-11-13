@@ -16,6 +16,7 @@ import (
 	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -55,6 +56,17 @@ func runServiceVendors(t *testing.T, home string, getenv func(string) string, gr
 	}
 	t.Cleanup(svc.stop)
 	return svc
+}
+
+// oldToolDefaults sets, in home's permissions, the two keys whose defaults
+// 0.5.2 changed to what they were before (subagents on, tools off), for a
+// test that pins a child's arguments for something else: the launch golden
+// pins the defaults themselves.
+func oldToolDefaults(t *testing.T, home string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(home, settings.PolicyFile), []byte("subagents = true\n\n[agent_api]\ntools = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 type runEvent struct {
@@ -153,6 +165,7 @@ func envValue(env []string, k string) (string, bool) {
 
 func TestRunSetsBaseURLInChildOnlyAndClosesWithExitCode(t *testing.T) {
 	home := t.TempDir()
+	oldToolDefaults(t, home)
 	svc := runService(t, home, nil, 0)
 	tok := readToken(t, home)
 	report := filepath.Join(t.TempDir(), "report")
@@ -290,6 +303,7 @@ func TestRunHoldsSessionOpenUntilChildExits(t *testing.T) {
 
 func TestRunReadOnlyFlags(t *testing.T) {
 	home := t.TempDir()
+	oldToolDefaults(t, home)
 	svc := runService(t, home, nil, 0)
 	tok := readToken(t, home)
 	t.Setenv("AGENTBUS_FAKE_EXIT", "0")

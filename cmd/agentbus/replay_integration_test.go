@@ -51,6 +51,7 @@ func TestReplayedClaudeTurn(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 	home := t.TempDir()
+	oldToolDefaults(t, home)
 	svc := runServiceWith(t, home, nil, 0, upstream.URL, false)
 	tok := readToken(t, home)
 
@@ -143,6 +144,7 @@ func TestReplayedClaudeTurn(t *testing.T) {
 // resume_id names only its last turn.
 func TestReplayFallsBackToResumeForOldSessions(t *testing.T) {
 	home := t.TempDir()
+	oldToolDefaults(t, home)
 	svc := runServiceWith(t, home, nil, 0, "http://127.0.0.1:1", false)
 	tok := readToken(t, home)
 	id, _ := startRun(t, svc, tok, "claude", claudeResultA)

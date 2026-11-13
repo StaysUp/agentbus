@@ -273,7 +273,7 @@ func TestSettingsTurnsTokenRefused(t *testing.T) {
 	e, db := settingsEnv(t)
 	for _, r := range [][2]string{
 		{"GET", "/api/v0/settings"},
-		{"GET", "/api/v0/settings/permissions"}, {"PUT", "/api/v0/settings/permissions"},
+		{"GET", "/api/v0/settings/permissions"}, {"PUT", "/api/v0/settings/permissions"}, {"PATCH", "/api/v0/settings/permissions"},
 		{"GET", "/api/v0/settings/instructions"}, {"PUT", "/api/v0/settings/instructions"},
 	} {
 		req := e.req(t, r[0], r[1], strings.NewReader(`{"text":"x","forbid":[],"version":1}`))
@@ -286,5 +286,27 @@ func TestSettingsTurnsTokenRefused(t *testing.T) {
 	}
 	if in, _ := db.Info(); in.Version != 0 {
 		t.Errorf("the settings changed: version %d", in.Version)
+	}
+}
+
+// PATCH changes only the keys it is sent: a key the person set before keeps
+// its value, and the reply is the whole policy, filled.
+func TestSettingsPolicyPatch(t *testing.T) {
+	e, _ := settingsEnv(t)
+	if resp, out := send(t, e, "PATCH", "/api/v0/settings/permissions", "", `{"subagents":true}`); resp.StatusCode != 428 {
+		t.Fatalf("PATCH without If-Match: %d %s", resp.StatusCode, out)
+	}
+	resp, _ := send(t, e, "PUT", "/api/v0/settings/permissions", "*", `{"forbid":["git push"]}`)
+	v1 := resp.Header.Get("ETag")
+	if resp, out := send(t, e, "PATCH", "/api/v0/settings/permissions", v1, `{"edit":"everywhere"}`); resp.StatusCode != 400 || !strings.Contains(out, "edit") {
+		t.Fatalf("PATCH out of range: %d %s", resp.StatusCode, out)
+	}
+	resp, out := send(t, e, "PATCH", "/api/v0/settings/permissions", v1, `{"subagents":true,"network":{"allow":["github.com"]}}`)
+	if resp.StatusCode != 200 || !strings.Contains(out, `"forbid":["git push"]`) || !strings.Contains(out, `"subagents":true`) ||
+		!strings.Contains(out, `"allow":["github.com"]`) || !strings.Contains(out, `"contain":"off"`) || !strings.Contains(out, `"max_depth":2`) {
+		t.Fatalf("PATCH: %d %s", resp.StatusCode, out)
+	}
+	if resp, _ := send(t, e, "PATCH", "/api/v0/settings/permissions", v1, `{"subagents":false}`); resp.StatusCode != 412 {
+		t.Fatalf("PATCH with a stale version: %d", resp.StatusCode)
 	}
 }

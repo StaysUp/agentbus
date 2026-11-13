@@ -33,11 +33,11 @@ func defaultPolicy() Policy {
 		Edit:          EditSession,
 		Isolation:     IsolationAuto,
 		ShareReadOnly: []string{},
-		Subagents:     on(),
+		Subagents:     off(),
 		HomeFiles:     []string{},
 		Limits:        Limits{MaxDepth: num(2), MaxJobsPerTurn: num(10), MaxJobsPerTree: num(30), MaxCostUSDPerTree: &cost},
 		AgentAPI: AgentAPI{Scope: ScopeTree, Read: on(), ListAgents: on(), Start: on(),
-			Review: on(), Cancel: on(), Rename: on(), Apply: off(), Tools: off()},
+			Review: on(), Cancel: on(), Rename: on(), Apply: off(), Tools: on()},
 		Network: Network{Contain: ContainOff, Allow: []string{}},
 		Sandbox: Sandbox{Mode: SandboxOff},
 	}

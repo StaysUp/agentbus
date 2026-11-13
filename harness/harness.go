@@ -295,6 +295,21 @@ type Harness interface {
 	Refuse(t Turn) string
 }
 
+// Unkeeper is a harness that runs some turns without keeping a setting it
+// has no way to keep, rather than refusing them. Unkept says which, each in
+// one plain sentence, or none; the turn records them on its turn.started.
+type Unkeeper interface {
+	Unkept(t Turn) []string
+}
+
+// Unkept is what h cannot keep of t's settings (Unkeeper), or none.
+func Unkept(h Harness, t Turn) []string {
+	if u, ok := h.(Unkeeper); ok {
+		return u.Unkept(t)
+	}
+	return nil
+}
+
 // registry is every harness turns can start, in the order they are listed.
 var registry = []Harness{claude{}, codex{}, agy{}}
 

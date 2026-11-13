@@ -41,6 +41,37 @@ type Store interface {
 	Protected() []string
 }
 
+// policyChanger is a store that changes some keys of the policy itself
+// (DB.ChangePolicy).
+type policyChanger interface {
+	ChangePolicy(change Policy, match Version) (Policy, Version, error)
+}
+
+// ChangePolicy writes the keys change sets, each key it leaves out keeping
+// what s holds, when the policy is still at match: s's own ChangePolicy when
+// it has one, else its policy with change on top, written whole. change is
+// read with the keys it leaves out unset (DecodePolicyChange).
+func ChangePolicy(s Store, change Policy, match Version) (Policy, Version, error) {
+	if c, ok := s.(policyChanger); ok {
+		return c.ChangePolicy(change, match)
+	}
+	if err := change.Check(); err != nil {
+		return Policy{}, "", &Invalid{Why: err.Error()}
+	}
+	cur, v, err := s.Policy()
+	if err != nil {
+		return Policy{}, "", err
+	}
+	if match != Any && match != v {
+		return Policy{}, "", ErrChanged
+	}
+	p, err := change.over(cur)
+	if err != nil {
+		return Policy{}, "", &Invalid{Why: err.Error()}
+	}
+	return s.SetPolicy(p, v)
+}
+
 // Snapshot is the settings a turn starts under, read at one moment: the
 // policy, the instructions, and the settings version (Revision), which the
 // turn records on its turn.started.

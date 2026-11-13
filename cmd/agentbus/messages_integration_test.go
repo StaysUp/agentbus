@@ -242,6 +242,7 @@ func TestRunStoresResumeIDAndNothingElseFromStdout(t *testing.T) {
 
 func TestRunWithSessionRunsNextTurnInSameSession(t *testing.T) {
 	home := t.TempDir()
+	oldToolDefaults(t, home)
 	svc := runService(t, home, nil, 0)
 	tok := readToken(t, home)
 	for _, tc := range []struct {

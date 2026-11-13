@@ -83,11 +83,12 @@ isolation = "auto"
 # nothing per session anyway.
 share_read_only = []
 
-# subagents: whether a turn may start the agent's own subagents. false turns
-# them off on the command line: claude is denied its Task, Agent and Workflow
-# tools; codex runs with its multi_agent features disabled. Your own settings
-# files are never changed.
-subagents = true
+# subagents: whether a turn may start the agent's own subagents. Off by
+# default: agents ask other agents through AgentBus, where the work is
+# recorded. false turns them off on the command line: claude is denied its
+# Task, Agent and Workflow tools; codex runs with its multi_agent features
+# disabled. Your own settings files are never changed.
+subagents = false
 
 # home_files: files or folders under your home, such as "~/.aws/config",
 # copied into each session's own home at the start of each turn, at the same
@@ -118,7 +119,7 @@ cancel = true        # stop turns its tree asked for
 rename = true        # rename sessions in its scope
 apply = false        # apply a turn's changes to the person's folder, for a turn in its scope;
                      # off by default: only the main token applies
-tools = false        # true: give each claude and codex turn the agentbus MCP tools (MCP), which
+tools = true         # true: give each claude and codex turn the agentbus MCP tools (MCP), which
                      # call this API as its token may, and hide claude's own Task, Agent,
                      # ListAgents and SendMessage. false: agents call it with agentbus-api
 
@@ -204,7 +205,7 @@ type Policy struct {
 	Edit          string   `toml:"edit" json:"edit,omitempty" doc:"Where a turn may edit files without asking: session (its own session's folder) or none. Absent in a PUT: session."`
 	Isolation     string   `toml:"isolation" json:"isolation,omitempty" doc:"Where a new session's turns run: auto (copy on macOS; overlay on Linux where the runner can mount one, else copy), overlay, copy (a copy of its folder as it is now), git (a git worktree with the folder's uncommitted edits, in a repo) or none (the folder itself). On ext4, copy and the overlay's snapshot copy every byte: use xfs, btrfs, git or none for a big folder. Absent in a PUT: auto."`
 	ShareReadOnly []string `toml:"share_read_only" json:"share_read_only" doc:"Folders at the top of a session's folder, such as node_modules, that a copy links to one shared read-only copy of instead of copying. A turn cannot write there. Absent in a PUT: none."`
-	Subagents     *bool    `toml:"subagents" json:"subagents,omitempty" doc:"Whether a turn may start the agent's own subagents. Absent in a PUT: true."`
+	Subagents     *bool    `toml:"subagents" json:"subagents,omitempty" doc:"Whether a turn may start the agent's own subagents. Off by default: agents ask other agents through AgentBus, where the work is recorded. Absent in a PUT: false."`
 	HomeFiles     []string `toml:"home_files" json:"home_files" doc:"Files or folders under the home folder, each starting with ~/, copied into each session's own home at the same place at the start of each turn, such as ~/.aws/config. Sandbox on or off. A file the session already has is never replaced. Before 0.5.2 this was sandbox.read, which still reads as home_files. Absent in a PUT: none."`
 	Limits        Limits   `toml:"limits" json:"limits" doc:"The limits on work agents ask for."`
 	AgentAPI      AgentAPI `toml:"agent_api" json:"agent_api" doc:"What a turn's own token may call."`
@@ -236,7 +237,7 @@ type AgentAPI struct {
 	Cancel     *bool  `toml:"cancel" json:"cancel,omitempty" doc:"Stop turns its tree asked for. Absent in a PUT: true."`
 	Rename     *bool  `toml:"rename" json:"rename,omitempty" doc:"Rename sessions in its scope. Absent in a PUT: true."`
 	Apply      *bool  `toml:"apply" json:"apply,omitempty" doc:"Apply a turn's changes to the person's folder, for a turn of a session in its scope. Off by default: only the main token applies. Absent in a PUT: false."`
-	Tools      *bool  `toml:"tools" json:"tools,omitempty" doc:"Give each turn the agentbus MCP tools over MCP (POST /api/v0/mcp), which call this API as its token may. claude's own Task, Agent, ListAgents and SendMessage tools are hidden then. false: agents call the API with agentbus-api only. Absent in a PUT: false."`
+	Tools      *bool  `toml:"tools" json:"tools,omitempty" doc:"Give each turn the agentbus MCP tools over MCP (POST /api/v0/mcp), which call this API as its token may. claude's own Task, Agent, ListAgents and SendMessage tools are hidden then. false: agents call the API with agentbus-api only. Absent in a PUT: true."`
 }
 
 // Network says what a turn's agent may reach ([network]). Read by the
@@ -272,9 +273,11 @@ func (p *Policy) fill() {
 	if p.Isolation == "" {
 		p.Isolation = IsolationAuto
 	}
+	// Off from 0.5.2 (his call, 2026-11-13): agents ask other agents through
+	// AgentBus, recorded, not through their own subagents.
 	if p.Subagents == nil {
-		on := true
-		p.Subagents = &on
+		off := false
+		p.Subagents = &off
 	}
 	setInt := func(v **int, d int) {
 		if *v == nil {
@@ -310,11 +313,11 @@ func (p *Policy) fill() {
 		off := false
 		p.AgentAPI.Apply = &off
 	}
-	// Off until it is shown to help: the fresh-agent test of 2026-11-11
-	// found no gain over agentbus-api.
+	// On from 0.5.2 (his call, 2026-11-13), with subagents off: the agents
+	// ask through AgentBus's own tools.
 	if p.AgentAPI.Tools == nil {
-		off := false
-		p.AgentAPI.Tools = &off
+		on := true
+		p.AgentAPI.Tools = &on
 	}
 }
 
@@ -432,13 +435,23 @@ const wrongTypeTOML = "a value has the wrong type: read_folders, allow, forbid, 
 // over is p, read with the keys it leaves out unset, on top of base: each key
 // p leaves out takes base's value, and the result is filled.
 func (p Policy) over(base Policy) (Policy, error) {
-	b, err := json.Marshal(p)
+	set, err := p.setKeys()
 	if err != nil {
 		return Policy{}, err
 	}
+	return applyOverlay(base, set)
+}
+
+// setKeys are the keys p sets, by dotted name, read with the keys it leaves
+// out unset: a key left out is not among them.
+func (p Policy) setKeys() (flat, error) {
+	b, err := json.Marshal(p)
+	if err != nil {
+		return nil, err
+	}
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(b, &top); err != nil {
-		return Policy{}, err
+		return nil, err
 	}
 	set := flat{}
 	for k, v := range top {
@@ -455,7 +468,7 @@ func (p Policy) over(base Policy) (Policy, error) {
 			set[k] = v
 		}
 	}
-	return applyOverlay(base, set)
+	return set, nil
 }
 
 // withoutRetired is the JSON object b with its retiredKeys left out, or b
@@ -500,6 +513,18 @@ func withoutRetired(b []byte) []byte {
 // /api/v0/settings/permissions takes it. A key left out holds its default.
 // The error names the key.
 func DecodePolicy(b []byte) (Policy, error) {
+	p, err := DecodePolicyChange(b)
+	if err != nil {
+		return Policy{}, err
+	}
+	p.fill()
+	return p, nil
+}
+
+// DecodePolicyChange reads a change of the policy sent as JSON, as PATCH
+// /api/v0/settings/permissions takes it: each key it leaves out stays unset,
+// and each key it holds is checked. The error names the key.
+func DecodePolicyChange(b []byte) (Policy, error) {
 	var p Policy
 	// One object: a bare null would decode as every default.
 	if t := bytes.TrimLeft(b, " \t\r\n"); len(t) == 0 || t[0] != '{' {
@@ -529,7 +554,6 @@ func DecodePolicy(b []byte) (Policy, error) {
 	if err := p.Check(); err != nil {
 		return Policy{}, err
 	}
-	p.fill()
 	return p, nil
 }
 

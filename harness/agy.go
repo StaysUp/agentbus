@@ -141,18 +141,28 @@ func (agy) ResumeID(line []byte, current string) string {
 	return current
 }
 
-// Refuse: agy has no switch that turns its subagents off (a deny rule on
-// invoke_subagent did not stop one), and the gateway's guard does not read
-// the Gemini format, so forbid could only be agy's own prefix rule, which a
-// command in another shape passes.
+// Refuse: the gateway's guard does not read the Gemini format, so forbid
+// could only be agy's own prefix rule, which a command in another shape
+// passes.
 func (agy) Refuse(t Turn) string {
-	if t.NoSubagents {
-		return "agy cannot turn its subagents off; set subagents = true in permissions.toml, or use " + "claude or codex"
-	}
 	if len(t.Forbid) > 0 {
 		return "forbid in permissions.toml is not enforced for agy yet; remove it, or use " + "claude or codex"
 	}
 	return ""
+}
+
+// AgySubagentsUnkept is what a turn with subagents off records on agy.
+const AgySubagentsUnkept = "agy cannot turn its own subagents off, so subagents = false does not apply to this turn"
+
+// Unkept: agy has no switch that turns its subagents off (a deny rule on
+// invoke_subagent did not stop one). With subagents off by default (0.5.2),
+// refusing would refuse every agy turn, so the turn runs and records that
+// the setting was not kept (his call, 2026-11-13).
+func (agy) Unkept(t Turn) []string {
+	if t.NoSubagents {
+		return []string{AgySubagentsUnkept}
+	}
+	return nil
 }
 
 func (agy) Args(t Turn) []string {

@@ -336,6 +336,9 @@ type Event struct {
 	// after it anyway. The replayed history ends with a note saying so.
 	RecoveredFrom   string `json:"recovered_from,omitempty" doc:"On a replayed turn's turn.started: the session's previous turn, which did not finish (interrupted, its last model call failed, or it never reached the model). This turn continues after it, and the model is told what happened. Absent when the previous turn finished."`
 	RecoveredReason string `json:"recovered_reason,omitempty" doc:"With recovered_from: one sentence saying how that turn ended, such as its last model request getting status 529. The same words the model is told."`
+	// Unkept, only on a run's turn.started: settings its agent has no way to
+	// keep, which the turn runs without, each one plain sentence.
+	Unkept []string `json:"unkept,omitempty" doc:"On a run's turn.started: the settings this turn's agent has no way to keep, so it ran without them, each in one plain sentence, such as agy's subagents. Show it as a quiet warning. Absent when it kept them all."`
 	// IdempotencyKey and RequestHash, only on the turn.started of a turn
 	// started by POST /api/v0/turns with idempotency_key: the client's key,
 	// and the SHA-256 of the request's fields, so a retry with the same key

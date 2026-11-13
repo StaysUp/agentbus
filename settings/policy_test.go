@@ -51,8 +51,8 @@ func TestReadPolicy(t *testing.T) {
 		*def.Limits.MaxCostUSDPerTree != 0 || def.AgentAPI.Scope != ScopeTree || !*def.AgentAPI.Start || !*def.AgentAPI.Cancel || !*def.AgentAPI.Rename {
 		t.Fatalf("defaults: %+v %+v", def.Limits, def.AgentAPI)
 	}
-	if !*def.Subagents {
-		t.Fatal("subagents are off by default")
+	if *def.Subagents || !*def.AgentAPI.Tools {
+		t.Fatal("subagents are on or tools off by default")
 	}
 	// The starter parses, with empty lists, and writes out every default.
 	writePerm(t, path, PolicyStarter)

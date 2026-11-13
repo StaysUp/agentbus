@@ -324,11 +324,11 @@ func TestMCPRefusesABadID(t *testing.T) {
 	}
 }
 
-// With tools = false, the default, the tool server refuses a turn token; the
-// main token still reaches it.
+// With tools = false the tool server refuses a turn token; the main token
+// still reaches it. tools is on by default from 0.5.2.
 func TestMCPOffByDefault(t *testing.T) {
-	if p := settings.DefaultPolicy(); *p.AgentAPI.Tools {
-		t.Fatal("tools is on by default")
+	if p := settings.DefaultPolicy(); !*p.AgentAPI.Tools {
+		t.Fatal("tools is off by default")
 	}
 	e := mcpEnvTools(t, false)
 	if code, _ := rpc(t, e, mcpWriteTok, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`); code != 403 {

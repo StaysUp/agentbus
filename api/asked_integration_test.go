@@ -460,7 +460,8 @@ func TestAskedAgentReadsTheAskersChanges(t *testing.T) {
 		}
 	}
 	args, _ := os.ReadFile(filepath.Join(dir, "args-child"))
-	if want := "/api/v0/turns/" + root.Turn + "/diff?session=" + root.Session; !strings.Contains(string(args), want) {
+	// With the tools, on by default, the line names the tool and the turn.
+	if want := "call turn_diff with turn " + root.Turn + " and session " + root.Session; !strings.Contains(string(args), want) {
 		t.Errorf("the child's instructions do not name %s: %s", want, args)
 	}
 	if got, _ := os.ReadFile(filepath.Join(pwdOf(t, dir, "child"), "a.txt")); string(got) != "one\n" {

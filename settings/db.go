@@ -15,6 +15,7 @@ package settings
 // the event names keys, never values, so no secret reaches the record.
 
 import (
+	"bytes"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -22,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -355,6 +357,62 @@ func (d *DB) SetPolicy(p Policy, match Version) (Policy, Version, error) {
 			return nil, err
 		}
 		return []Change{{Setting: SettingPermissions, Keys: changedKeys(cur, p)}}, nil
+	})
+	if err != nil {
+		return Policy{}, "", err
+	}
+	return out, v, nil
+}
+
+// ChangePolicy stores the keys change sets, on top of what the person set
+// before, when the policy is still at match: PATCH. Each key it sets is kept
+// as the person's own, even when its value is the default, so a later build
+// that changes that default keeps their value. A key it leaves out keeps
+// what it holds. A stored policy that cannot be used is replaced whole
+// (SetPolicy), never changed key by key.
+func (d *DB) ChangePolicy(change Policy, match Version) (Policy, Version, error) {
+	if err := change.Check(); err != nil {
+		return Policy{}, "", &Invalid{Why: err.Error()}
+	}
+	set, err := change.setKeys()
+	if err != nil {
+		return Policy{}, "", &Invalid{Why: err.Error()}
+	}
+	var out Policy
+	var v Version
+	err = d.change(func(tx *sql.Tx, s state) ([]Change, error) {
+		_, curV, err := s.policyOf()
+		if err != nil {
+			return nil, &Invalid{Why: "the stored policy cannot be used, so it cannot be changed key by key: replace it whole with PUT"}
+		}
+		if match != Any && match != curV {
+			return nil, ErrChanged
+		}
+		o := flat{}
+		for k, val := range s.overlay {
+			o[k] = val
+		}
+		var keys []string
+		for k, val := range set {
+			if old, had := o[k]; !had || !bytes.Equal(old, val) {
+				keys = append(keys, k)
+			}
+			o[k] = val
+		}
+		p, err := applyOverlay(defaultPolicy(), o)
+		if err != nil {
+			return nil, &Invalid{Why: err.Error()}
+		}
+		out, v = p, policyVersion(p)
+		out.where, out.fix = dbPolicyWhere, dbPolicyFix
+		if len(keys) == 0 {
+			return nil, nil // nothing changes
+		}
+		sort.Strings(keys)
+		if err := putSetting(tx, SettingPermissions, o, d.now()); err != nil {
+			return nil, err
+		}
+		return []Change{{Setting: SettingPermissions, Keys: keys}}, nil
 	})
 	if err != nil {
 		return Policy{}, "", err

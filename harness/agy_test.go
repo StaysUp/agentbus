@@ -87,8 +87,24 @@ func TestAgyRefuse(t *testing.T) {
 	if h.Refuse(Turn{}) != "" {
 		t.Error("a plain turn refused")
 	}
-	if h.Refuse(Turn{NoSubagents: true}) == "" || h.Refuse(Turn{Forbid: []string{"git push"}}) == "" {
-		t.Error("a setting agy cannot keep was not refused")
+	if h.Refuse(Turn{Forbid: []string{"git push"}}) == "" {
+		t.Error("forbid, which agy cannot keep, was not refused")
+	}
+	// Subagents off is the default: agy runs, and the turn records that it
+	// was not kept.
+	if h.Refuse(Turn{NoSubagents: true}) != "" {
+		t.Error("subagents off refused an agy turn")
+	}
+	if got := Unkept(h, Turn{NoSubagents: true}); len(got) != 1 || got[0] != AgySubagentsUnkept {
+		t.Errorf("unkept = %q", got)
+	}
+	if got := Unkept(h, Turn{}); len(got) != 0 {
+		t.Errorf("a plain turn unkept = %q", got)
+	}
+	for _, o := range All() {
+		if o.Info().Name != "agy" && len(Unkept(o, Turn{NoSubagents: true})) != 0 {
+			t.Errorf("%s records subagents as unkept", o.Info().Name)
+		}
 	}
 	for _, o := range All() {
 		if o.Info().Name != "agy" && o.Refuse(Turn{NoSubagents: true, Forbid: []string{"git push"}}) != "" {

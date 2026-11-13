@@ -819,6 +819,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		e.cfg.Logf("run.refused agent=%s reason=harness_setting", t.harness)
 		return nil, refuse(http.StatusBadRequest, why)
 	}
+	unkept := harness.Unkept(h, spec)
 	args := h.Args(spec)
 	all := append(append([]string{}, l.Args...), args...)
 	cmd.Args = append([]string{l.Path}, all...)
@@ -862,7 +863,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Text: t.prompt, Harness: t.harness, Folder: t.folder, FolderRef: t.folderRef,
 		ReplayFrom: t.replayFrom, Continuity: t.continuity, RecoveredFrom: t.recoveredFrom,
 		RecoveredReason: t.recoveredWhy, IdempotencyKey: t.key, AgentID: t.agentID, Access: t.access, KeyEnv: t.keyEnv,
-		Context: t.context, Model: t.model, Origin: t.origin, SettingsVersion: snap.Revision}); err != nil {
+		Context: t.context, Model: t.model, Origin: t.origin, SettingsVersion: snap.Revision, Unkept: unkept}); err != nil {
 		closeHold()
 		return nil, storeFailed
 	}

@@ -117,6 +117,21 @@ var settingsRoutes = []route{
 			fail(http.StatusInternalServerError, "The setting could not be written.")},
 		versioned: true,
 		serve:     plain((*API).putPermissions)},
+	{method: "PATCH", path: "/api/v0/settings/permissions", op: "patchPermissions",
+		tag:     "Settings",
+		summary: "Change some policy keys",
+		doc: "Change only the keys the body holds, as nested JSON such as {\"agent_api\":{\"tools\":false}}. A key left out keeps what it holds now. " +
+			"Each key sent is kept as the person's own, even when its value is the default, so a later build that changes that default keeps it. " +
+			"This is how the cockpit's Settings saves: only what the person changed, never a full copy with the defaults filled in. " +
+			"A key cannot be returned to the default here; PUT replaces the policy whole.\n\n" +
+			versionDoc + "The change and its settings.changed event, which names the keys sent whose stored value changed, are saved together. " +
+			"A PATCH that changes nothing makes no event. A stored policy that cannot be used is refused here: replace it with PUT.",
+		body: settings.Policy{},
+		replies: []reply{ok(200, settings.Policy{}, "The policy, as stored, every value filled."),
+			fail(http.StatusBadRequest, "A value is refused; error names the key."), settingsReadOnly, settingsChanged, settingsNoMatch, noSettings,
+			fail(http.StatusInternalServerError, "The setting could not be written.")},
+		versioned: true,
+		serve:     plain((*API).patchPermissions)},
 	{method: "GET", path: "/api/v0/settings/instructions", op: "getInstructions",
 		tag:     "Settings",
 		summary: "Read the instructions",
@@ -235,6 +250,31 @@ func (a *API) putPermissions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p, v, err := a.cfg.Settings.SetPolicy(p, match)
+	if err != nil {
+		a.settingsWrite(w, err)
+		return
+	}
+	setVersion(w, v)
+	writeJSON(w, http.StatusOK, p)
+}
+
+// PATCH /api/v0/settings/permissions
+func (a *API) patchPermissions(w http.ResponseWriter, r *http.Request) {
+	match, ok := a.matched(w, r)
+	if !ok {
+		return
+	}
+	b, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "the body could not be read")
+		return
+	}
+	change, err := settings.DecodePolicyChange(b)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	p, v, err := settings.ChangePolicy(a.cfg.Settings, change, match)
 	if err != nil {
 		a.settingsWrite(w, err)
 		return
