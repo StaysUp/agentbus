@@ -11,9 +11,13 @@ type Adapter interface {
 	// Vendor names the API format, such as "anthropic".
 	Vendor() string
 
-	// Watches reports whether a request is a model call this adapter reads.
-	// Anything else passes through the gateway without events.
-	Watches(method, path string) bool
+	// Calls are the calls this adapter's gateway records (calls.go): its
+	// model calls, which it reads, and any other call its harness needs that
+	// the gateway records by method, path and status. It is the one list of
+	// what a gateway adds a credential to. A gateway passes any other call on
+	// with the agent's own sign-in, unrecorded, and with a credential of
+	// control's refuses it.
+	Calls() []Call
 
 	// RequestEvents reads a model request body.
 	RequestEvents(body []byte) ([]event.Event, error)

@@ -8,6 +8,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
+	"github.com/staysup/agentbus/adapter"
 	"github.com/staysup/agentbus/event"
 )
 
@@ -227,11 +228,11 @@ func TestHTTPError(t *testing.T) {
 
 func TestWatches(t *testing.T) {
 	a := Adapter{}
-	if !a.Watches("POST", "/v1/messages") {
+	if !adapter.Watches(a, "POST", "/v1/messages") {
 		t.Error("should watch model calls")
 	}
 	for _, p := range []string{"/v1/messages/count_tokens", "/v1/models"} {
-		if a.Watches("POST", p) {
+		if adapter.Watches(a, "POST", p) {
 			t.Errorf("should not watch %s", p)
 		}
 	}

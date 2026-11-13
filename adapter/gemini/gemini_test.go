@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/staysup/agentbus/adapter"
 	"github.com/staysup/agentbus/event"
 )
 
@@ -48,7 +49,7 @@ func TestWatches(t *testing.T) {
 		{"POST", "/v1internal:loadCodeAssist", false},
 		{"GET", "/v1internal:streamGenerateContent", false},
 	} {
-		if got := a.Watches(c.method, c.path); got != c.want {
+		if got := adapter.Watches(a, c.method, c.path); got != c.want {
 			t.Errorf("Watches(%s %s) = %v", c.method, c.path, got)
 		}
 	}

@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/staysup/agentbus/adapter"
 	"github.com/staysup/agentbus/event"
 )
 
@@ -66,9 +67,13 @@ func relayedOf(ctx context.Context) *relayed {
 	return rl
 }
 
-// Watches says whether the gateway's adapter reads calls of method on path,
-// so a relay with several gateways for one vendor host can pick one.
-func (g *Gateway) Watches(method, path string) bool { return g.adapter.Watches(method, path) }
+// Records says whether the gateway's adapter records calls of method on
+// path (adapter.Call), so a relay with several gateways for one vendor host
+// can pick one.
+func (g *Gateway) Records(method, path string) bool {
+	_, ok := adapter.Find(g.adapter, method, path)
+	return ok
+}
 
 // Names says whether exchange is an id this gateway gave, so a relay never
 // lets a runner name a call with an id of control's own.
@@ -83,13 +88,25 @@ func (g *Gateway) SendExchange() { g.sendExchange = true }
 // does what ServeHTTP does for a run's turn, except what the runner's own
 // gateway did already: no history is put in front (own replay), no tool call
 // is refused (the guard), and no earlier refusal is undone.
+//
+// Only a call the adapter records gets control's credential (recorded.go):
+// any other is refused, with its credential never read, and recorded. A
+// refused call holds its turn open first too, as every call does.
 func (g *Gateway) ServeRelayed(w http.ResponseWriter, r *http.Request, rl Relayed) {
+	r.URL.Path, r.URL.RawPath = rl.Path, ""
+	var refused string
 	defer g.holdThenRead(rl.Session, rl.Turn, func() {
+		if refused = g.unrecorded(r); refused != "" {
+			return
+		}
 		if rl.Prepare != nil {
 			rl.Prepare(&rl)
 		}
 	})()
-	r.URL.Path, r.URL.RawPath = rl.Path, ""
+	if refused != "" {
+		g.refuseCall(w, r, rl.Session, rl.Turn, true, refused)
+		return
+	}
 	r = r.WithContext(context.WithValue(r.Context(), relayedKey{}, &relayed{Relayed: rl, w: w}))
 	g.serve(w, r, rl.Session, rl.Turn)
 }
@@ -151,8 +168,8 @@ func relayFailed(w http.ResponseWriter, msg, reason string) {
 }
 
 // holdThenRead is the one way a call reads its credential, on every path
-// (ServeRelayed, and serve with SetCredential): it holds the call's turn
-// open first, then runs read, and returns what lets the turn go once the
+// (ServeRelayed, and serve with SetCredential), or is refused one
+// (recorded.go): it holds the call's turn open first, then runs read, and returns what lets the turn go once the
 // call is done. A turn's end stored while a credential is read, a slow
 // renewal say, would be stored before the call's events.
 func (g *Gateway) holdThenRead(session, turn string, read func()) (release func()) {

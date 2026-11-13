@@ -33,13 +33,30 @@ type Adapter struct{}
 
 func (Adapter) Vendor() string { return "gemini" }
 
-// Watches the model calls: a POST to a path that ends in :generateContent or
-// :streamGenerateContent, such as Code Assist's
-// /v1internal:streamGenerateContent or the Gemini API's
-// /v1beta/models/<model>:streamGenerateContent. Everything else agy sends
-// there (loadCodeAssist, fetchUserInfo, quota) passes through unread.
-func (Adapter) Watches(method, path string) bool {
-	return method == "POST" && (strings.HasSuffix(path, ":streamGenerateContent") || strings.HasSuffix(path, ":generateContent"))
+// Calls: the model calls, a POST of :generateContent or
+// :streamGenerateContent, Code Assist's /v1internal:streamGenerateContent or
+// the Gemini API's /v1beta/models/<model>:streamGenerateContent, streamed
+// with alt=sse or as a JSON list without it. A reply in another format, as
+// alt=proto asks for, is not read, so that query is not one of them.
+//
+// And the Code Assist methods agy 1.5.6 calls before its first model call,
+// each a POST with no query and a JSON reply: without loadCodeAssist it stops
+// ("Eligibility check failed"), and it then calls the others (measured
+// 2026-11-13 against a local listener). They are recorded by status
+// (vendor.called), their bodies unread.
+func (Adapter) Calls() []adapter.Call {
+	alt := map[string][]string{"alt": {"sse"}}
+	cs := []adapter.Call{
+		{Method: "POST", Path: "/v1internal:streamGenerateContent", Query: alt, Replies: adapter.JSONOrSSEOrNone},
+		{Method: "POST", Path: "/v1internal:generateContent", Replies: adapter.JSONOrSSEOrNone},
+		{Method: "POST", Path: "/v1beta/models/*:streamGenerateContent", Query: alt, Replies: adapter.JSONOrSSEOrNone},
+		{Method: "POST", Path: "/v1beta/models/*:generateContent", Replies: adapter.JSONOrSSEOrNone},
+	}
+	for _, m := range []string{"loadCodeAssist", "listExperiments", "fetchAdminControls", "fetchAvailableModels",
+		"fetchUserInfo", "retrieveUserQuotaSummary"} {
+		cs = append(cs, adapter.Call{Method: "POST", Path: "/v1internal:" + m, Replies: adapter.JSONOnly, Service: true})
+	}
+	return cs
 }
 
 type part struct {

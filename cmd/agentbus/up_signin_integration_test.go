@@ -397,3 +397,78 @@ func TestUpTokenGetsNoCredentialOnAnotherTurnsPath(t *testing.T) {
 		t.Fatalf("own path: %d; the vendor saw %v", resp.StatusCode, got)
 	}
 }
+
+// The sign-in goes only on the calls the vendor's adapter records, through
+// up's own gateway and through /relay alike: any other path, method or query
+// gets 403, the vendor sees nothing of it, and the record holds a
+// call.refused for it under the token's turn (0.5.3, "sign-ins only on
+// recorded calls").
+func TestUpSignInOnlyOnRecordedCalls(t *testing.T) {
+	vendor := newFakeVendor(t)
+	home := t.TempDir()
+	svc := runServiceWith(t, home, nil, 0, vendor.URL, true)
+	tok := readToken(t, home)
+	report, release := filepath.Join(t.TempDir(), "report"), filepath.Join(t.TempDir(), "release")
+	t.Setenv("AGENTBUS_FAKE_OUT", report)
+	t.Setenv("AGENTBUS_FAKE_WAIT", release)
+	t.Setenv("AGENTBUS_FAKE_EXIT", "0")
+	code, out, raw := postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": t.TempDir(), "prompt": "hi"})
+	if code != http.StatusAccepted {
+		t.Fatalf("turn: %d %s", code, raw)
+	}
+	session, turn := out["session"].(string), out["turn"].(string)
+	waitFor(t, "the running turn's report", func() bool { _, err := os.Stat(report); return err == nil })
+	placeholder := envOf(t, report)["CLAUDE_CODE_OAUTH_TOKEN"]
+	own := "/s/" + session + "/t/" + turn
+	send := func(method, path string) (int, string) {
+		req, _ := http.NewRequest(method, "http://"+svc.addr+path, strings.NewReader(`{"model":"claude-x","messages":[{"role":"user","content":"x"}]}`))
+		req.Header.Set("Authorization", "Bearer "+placeholder)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp.StatusCode, string(b)
+	}
+	refused := map[string]string{
+		own + "/v1/messages/count_tokens":           "POST /v1/messages/count_tokens",
+		own + "/v1/models":                          "GET /v1/models",
+		own + "/v1/messages?beta=true&x=1":          "POST /v1/messages",
+		jobs.RelayPrefix + "anthropic/v1/files":     "POST /v1/files",
+		jobs.RelayPrefix + "anthropic/v1/messages":  "DELETE /v1/messages",
+		jobs.RelayPrefix + "anthropic/v1/responses": "POST /v1/responses",
+	}
+	for path, call := range refused {
+		method, _, _ := strings.Cut(call, " ")
+		if code, b := send(method, path); code != http.StatusForbidden || !strings.Contains(b, "control adds a credential only to the calls") {
+			t.Errorf("%s %s: %d %s", method, path, code, b)
+		}
+	}
+	if code, b := send("POST", own+"/v1/messages?beta=true"); code != http.StatusOK {
+		t.Fatalf("the turn's own model call: %d %s", code, b)
+	}
+	os.WriteFile(release, nil, 0o600)
+	waitClosed(t, svc.store, session)
+	if got := vendor.seen(); len(got) != 1 || got[0] != "/v1/messages Bearer "+fakeSubscription {
+		t.Fatalf("the vendor saw %v", got)
+	}
+	recorded := map[string]int{}
+	for _, e := range storedEvents(t, svc.store) {
+		if e.Kind == "call.refused" {
+			if e.Session != session || e.Error == "" {
+				t.Errorf("call.refused %+v", e)
+			}
+			recorded[e.Call]++
+		}
+	}
+	want := map[string]int{}
+	for _, call := range refused {
+		want[call]++
+	}
+	for call, n := range want {
+		if recorded[call] != n {
+			t.Errorf("%s: %d call.refused, want %d (all: %v)", call, recorded[call], n, recorded)
+		}
+	}
+}

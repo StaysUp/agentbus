@@ -226,6 +226,14 @@ type exchange struct {
 	// relayed: control's relay took the call for a runner's turn
 	// (ServeRelayed).
 	relayed bool
+	// checked: the call gets a credential of control's, so its reply passes
+	// on only in a format call reads (recorded.go). call is the adapter's
+	// Call it is, service when not a model call (vendor.called).
+	checked bool
+	call    adapter.Call
+	// name is the call's method and vendor path, for call.refused and
+	// vendor.called (callName).
+	name string
 
 	// unknowns keeps each schema.unexpected shape once per exchange, and at
 	// most adapter.MaxUnexpected, across the request and the reply.
@@ -441,8 +449,21 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, session, runTurn
 			_, _ = w.Write(f.Body)
 			return
 		}
+		// Only a call the adapter records gets the credential: any other
+		// is refused, with the credential never read. Either way the turn
+		// is held open first.
 		var c credCall
-		defer g.holdThenRead(session, runTurn, func() { c.header, c.refuse = g.credential.Read(r) })()
+		var refused string
+		defer g.holdThenRead(session, runTurn, func() {
+			if refused = g.unrecorded(r); refused != "" {
+				return
+			}
+			c.header, c.refuse = g.credential.Read(r)
+		})()
+		if refused != "" {
+			g.refuseCall(w, r, session, runTurn, false, refused)
+			return
+		}
 		r = r.WithContext(context.WithValue(r.Context(), credKey{}, &c))
 	}
 	// An agent may first try a WebSocket on its model-call path, as codex-cli
@@ -450,11 +471,19 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, session, runTurn
 	// (2026-11-05). The gateway cannot read a WebSocket, so passing it on would
 	// hide every model call. A 426 made codex fall back to a streamed POST,
 	// which the gateway reads. Upgrades on other paths pass through.
-	if r.Header.Get("Upgrade") != "" && g.adapter.Watches(http.MethodPost, r.URL.Path) {
+	if r.Header.Get("Upgrade") != "" && adapter.Watches(g.adapter, http.MethodPost, r.URL.Path) {
 		http.Error(w, "gateway: a WebSocket on the model-call path cannot be read; use a POST", http.StatusUpgradeRequired)
 		return
 	}
-	if !g.adapter.Watches(r.Method, r.URL.Path) {
+	call, _ := adapter.Find(g.adapter, r.Method, r.URL.Path)
+	checked := rl != nil || g.credential.Read != nil
+	if !adapter.Watches(g.adapter, r.Method, r.URL.Path) {
+		// With a credential of control's only a call the adapter names gets
+		// here (unrecorded): a service call, recorded by its status.
+		if checked && call.Service {
+			g.serveService(w, r, session, runTurn, call)
+			return
+		}
 		g.proxy.ServeHTTP(w, r)
 		return
 	}
@@ -482,6 +511,9 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, session, runTurn
 		turn:    runTurn,
 		start:   g.now(),
 		relayed: rl != nil,
+		checked: checked,
+		call:    call,
+		name:    callName(r),
 	}
 	if runTurn != "" {
 		g.track(ex, session, runTurn)
@@ -589,6 +621,15 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 	if !ok {
 		return nil
 	}
+	// A reply to a call with a credential of control's passes on only in a
+	// format the adapter reads; any other is answered by errorHandler.
+	if ex.checked && !readable(ex.call, resp.Header) {
+		return errUnreadable
+	}
+	if ex.call.Service {
+		g.serviceReplied(ex, resp.StatusCode)
+		return nil
+	}
 	status, header := resp.StatusCode, resp.Header.Clone()
 	// The guard reads the reply as the vendor sent it. The vendor is asked
 	// for no encoding (Accept-Encoding is dropped); a reply compressed anyway
@@ -678,9 +719,13 @@ func upstreamFailure(err error) (msg string, status int) {
 }
 
 func (g *Gateway) errorHandler(w http.ResponseWriter, r *http.Request, err error) {
-	msg, status := upstreamFailure(err)
 	ex, ok := r.Context().Value(exchangeKey{}).(*exchange)
 	rl := relayedOf(r.Context())
+	if ok && errors.Is(err, errUnreadable) {
+		g.unreadableReply(w, ex)
+		return
+	}
+	msg, status := upstreamFailure(err)
 	class, reason := causeOf(err)
 	// The cause goes to the service log, so a 502 can be traced; the agent
 	// and the event get the fixed words. A call the agent closed is no
@@ -697,7 +742,11 @@ func (g *Gateway) errorHandler(w http.ResponseWriter, r *http.Request, err error
 			g.adapter.Vendor(), g.prefix, via, session, turn, exchange, after, class, reason)
 	}
 	if ok {
-		g.emit(ex, []event.Event{{Kind: event.ModelResponded, Status: status, Error: msg}})
+		e := event.Event{Kind: event.ModelResponded, Status: status, Error: msg}
+		if ex.call.Service {
+			e.Kind, e.Call = event.VendorCalled, ex.name
+		}
+		g.emit(ex, []event.Event{e})
 		g.flushed(ex.done)
 	}
 	if rl != nil {
@@ -993,7 +1042,7 @@ func size(e event.Event) int {
 		len(e.Turn) + len(e.Model) + len(e.Text) + len(e.StopReason) + len(e.Error) +
 		len(e.ToolID) + len(e.ToolName) + len(e.ToolInput) + len(e.ToolOutput) +
 		len(e.Harness) + len(e.Folder) + len(e.Hold) + len(e.ReplayFrom) + len(e.Continuity) +
-		len(e.RecoveredFrom) + len(e.RecoveredReason) + len(e.Context)
+		len(e.RecoveredFrom) + len(e.RecoveredReason) + len(e.Context) + len(e.Call)
 	for _, s := range e.Sessions {
 		n += 16 + len(s)
 	}

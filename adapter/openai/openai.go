@@ -21,13 +21,19 @@ type Adapter struct{}
 
 func (Adapter) Vendor() string { return "openai" }
 
-// Watches the path codex 0.164.0 posted model calls to with its own sign-in,
+// Calls: the path codex 0.164.0 posted model calls to with its own sign-in,
 // and the Responses API's own path, /v1/responses, which codex posts to with a
 // provider of its own such as OpenRouter (codex-cli 0.167.0, 2026-11-08). On
 // the first codex tries a WebSocket (a GET with Upgrade), and posts only when
-// that fails; the WebSocket is not read here.
-func (Adapter) Watches(method, path string) bool {
-	return method == "POST" && (path == "/backend-api/codex/responses" || path == "/v1/responses")
+// that fails; the WebSocket is not read here. Neither carries a query, and a
+// -p turn makes no other call there (codex-cli 0.164.0, 2026-11-13, against a
+// local listener). chatgpt.com streams the reply with no Content-Type.
+// /responses/compact is not one: its reply is not read.
+func (Adapter) Calls() []adapter.Call {
+	return []adapter.Call{
+		{Method: "POST", Path: "/backend-api/codex/responses", Replies: adapter.JSONOrSSEOrNone},
+		{Method: "POST", Path: "/v1/responses", Replies: adapter.JSONOrSSEOrNone},
+	}
 }
 
 // item is one entry of a request's input or a reply's output.

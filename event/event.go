@@ -71,6 +71,15 @@ const (
 	// refused it. Host is what it asked for; Error says why.
 	NetworkRefused Kind = "network.refused"
 
+	// CallRefused: a gateway with a credential of control's refused a
+	// turn's call to its vendor: not a call the vendor's adapter records
+	// (method, path or query), or a reply in a format it does not read. Call
+	// says which; Error says why. VendorCalled: a call of the harness's own
+	// besides its model calls, which the adapter names (adapter.Call
+	// Service), recorded by Call and Status, its body unread.
+	CallRefused  Kind = "call.refused"
+	VendorCalled Kind = "vendor.called"
+
 	// The person's shell command in a session's copy, with no model call:
 	// the "!" of 0.4 (POST /api/v0/sessions/{id}/commands). Retired in 0.5,
 	// where a "!" is a message to the session's agent, which runs it with its
@@ -131,6 +140,10 @@ var Kinds = []KindInfo{
 	{ToolsListed, "Control served the turn's tool list: its agent's tool server (POST /api/v0/mcp, [agent_api] tools in permissions.toml) answered tools/list for the turn's token. Stored once per turn, at the first tools/list, however often the agent asks. server is the tool server's name, as tool names carry it (claude calls a tool mcp__agentbus__<name>); tools are the names it served, which the turn's token may call; tools_hidden are the harness's own tools the turn does not get, each with why. A turn with no tools.listed got no tool server, or its agent never asked for the list. Names only: never an input, a value or a token.", []string{"server"}},
 	{ContextAdded, "What AgentBus gave the turn besides the person's words, the same for every harness: added, each piece with its kind, bytes and text. Kinds: agents_md (the folder's AGENTS.md, when the harness does not read it by itself), instructions (instructions.md, filled in), asked_by (who asked an asked agent for the work), mcp_instructions (the tool server's own instructions, when the turn has it) and, in records from before 0.5, commands (the shell commands the person ran in the session since its previous turn, with their output). Stored once per turn, after its turn.started, just before its agent starts. Absent when nothing was added. Each text is as the agent got it: AGENTS.md is bounded at 32 KiB and instructions.md at 64 KiB.", []string{"added"}},
 	{NetworkRefused, "A turn's agent runs closed off from the network ([network] of permissions.toml), and asked its runner's proxy for a host the policy does not allow: host (host:port as asked) and error (why). The connection was refused. Each refusal is its own event. Show it as a warning.", []string{"host"}},
+	{CallRefused, "A turn's agent sent its vendor a call that control adds no credential to, because it is not a call the vendor's adapter records: call (method and vendor path), status and error (why). " +
+		"Refused before sending (a path, method or query the adapter does not read): status 403, the vendor got nothing and the credential went nowhere. " +
+		"Refused after (a reply in a format the adapter does not read): the call's model.responded says so too, and the reply was not passed on. Show it as a warning.", []string{"call"}},
+	{VendorCalled, "A call of the harness's own to its vendor besides its model calls, such as agy's loadCodeAssist, which the vendor's adapter names as one the harness needs, and which got the turn's credential: call (method and vendor path), status, latency_ms, and error when it failed. Its body is not read or kept.", []string{"call"}},
 	{CommandQueued, "Retired in 0.5; only in older records. The person asked for a shell command in the session's copy (the ! of 0.4): command holds its id and line. No turn.", []string{"session", "command"}},
 	{CommandStarted, "Retired in 0.5; only in older records. The session's runner started the queued command: command holds its id and line. No turn.", []string{"session", "command"}},
 	{CommandFailed, "Retired in 0.5; only in older records. The command did not run, or its runner stopped answering while it ran: command holds its id and line, error says why. No turn. Show it as an error.", []string{"session", "command", "error"}},
@@ -246,6 +259,8 @@ type Event struct {
 	ToolsHidden []HiddenTool `json:"tools_hidden,omitempty" doc:"On tools.listed: the harness's own tools the turn does not get, each with why. Absent when none are hidden."`
 	// Added, only on context.added: each piece AgentBus gave the turn.
 	Added []Added `json:"added,omitempty" doc:"On context.added: each piece AgentBus gave the turn besides the person's words, in the order the agent got them."`
+	// Call, only on call.refused and vendor.called: method and vendor path.
+	Call string `json:"call,omitempty" doc:"On call.refused and vendor.called: the call's method and vendor path, such as POST /v1internal:loadCodeAssist. Never its query or body."`
 	// Host is what a closed-off agent asked to reach.
 	Host string `json:"host,omitempty" doc:"On network.refused: the host and port the agent asked for, such as example.com:443."`
 	// Command, only on the retired command.* events of records from before

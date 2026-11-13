@@ -77,6 +77,22 @@ the runner sends names the same call. The relay ignores a name of another sessio
 another turn's, or of its own, and names the call itself; the header never reaches a vendor. A
 call with no current attempt's token is refused (401) and recorded nowhere.
 
+**The credential goes only on calls the vendor's adapter records** (0.5.3), on the relay and on a
+gateway of `agentbus up` alike: one list per adapter (`Calls` in `adapter/`), method, path and the
+query keys and values it reads. Today: `POST /v1/messages` with `beta=true` or no query (Anthropic,
+and OpenRouter's Anthropic format); `POST /backend-api/codex/responses` and `POST /v1/responses`
+with no query (ChatGPT, and OpenRouter's Responses format); `POST /v1internal:streamGenerateContent`
+with `alt=sse` or no query, and `POST /v1internal:generateContent` with none (Code Assist). Besides
+those, agy's own Code Assist methods `loadCodeAssist`, `listExperiments`, `fetchAdminControls`,
+`fetchAvailableModels`, `fetchUserInfo` and `retrieveUserQuotaSummary` (POST, no query) get it too,
+because agy stops without them; each is recorded as `vendor.called` with its status, its body
+unread. Any other call (another path, another method, another query) is answered **403** with
+`{"error": "control adds a credential only to the calls the vendor's adapter records, …"}`, gets no
+credential, reaches no vendor, and is recorded as `call.refused` with `call` (method and path,
+never the query) and why. A reply in a format the adapter does not read (a Content-Type it does not
+list, such as `application/x-protobuf`) is not passed on: the agent gets **502**, and the call's
+`model.responded` and a `call.refused` say why.
+
 The runner's own routes carry no runner id: its token names the runner. Every call after take
 names its attempt id and number. A call for an attempt that is not current
 gets 409 with `stale: true`, and the runner stops that turn.

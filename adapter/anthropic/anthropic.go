@@ -17,8 +17,13 @@ type Adapter struct{}
 
 func (Adapter) Vendor() string { return "anthropic" }
 
-func (Adapter) Watches(method, path string) bool {
-	return method == "POST" && path == "/v1/messages"
+// Calls: the Messages API's model call. Claude Code 2.1.323 posts it as
+// /v1/messages?beta=true, through a base URL and on a setup-token alike, and
+// makes no other call there in a -p turn (measured 2026-11-13 against a
+// local listener).
+func (Adapter) Calls() []adapter.Call {
+	return []adapter.Call{{Method: "POST", Path: "/v1/messages", Query: map[string][]string{"beta": {"true"}},
+		Replies: adapter.JSONOrSSE}}
 }
 
 type block struct {

@@ -23,7 +23,9 @@ package jobs
 // vendor it cannot reach, is recorded too, with why. A call that never
 // reached control reached no vendor: it stays in the runner's own record. A
 // call without a running turn's token is refused and recorded nowhere: it
-// names no session.
+// names no session. A credential goes only on a call the vendor's adapter
+// records (gateway/recorded.go): any other is refused and recorded as
+// call.refused.
 
 import (
 	"encoding/json"
@@ -55,16 +57,18 @@ type Upstream struct {
 	// no credential.
 	Under string
 	// Gateways record the calls relayed here, each forwarding to URL: the
-	// first that reads a call's path takes it, and the first takes any
-	// other (one gateway per API format of the host, as OpenRouter's two).
-	// At least one.
+	// first whose adapter records a call takes it, and the first takes any
+	// other, which it refuses with no credential (gateway/recorded.go). One
+	// gateway per API format of the host, as OpenRouter's two. At least
+	// one.
 	Gateways []*gateway.Gateway
 }
 
-// gatewayFor is the gateway of gs that takes a call of method on path.
+// gatewayFor is the gateway of gs that takes a call of method on path: the
+// first whose adapter records it, or the first, which refuses it.
 func gatewayFor(gs []*gateway.Gateway, method, path string) *gateway.Gateway {
 	for _, g := range gs {
-		if g.Watches(method, path) {
+		if g.Records(method, path) {
 			return g
 		}
 	}

@@ -11,7 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/staysup/agentbus/adapter"
 	"github.com/staysup/agentbus/adapter/anthropic"
+	"github.com/staysup/agentbus/adapter/openai"
 	"github.com/staysup/agentbus/event"
 )
 
@@ -20,12 +22,18 @@ import (
 // credential added on the way out.
 func relayFor(t *testing.T, upstream string, refuse *Refusal) (*httptest.Server, *Gateway, *event.Memory, *lines) {
 	t.Helper()
+	return relayWith(t, anthropic.Adapter{}, upstream, refuse)
+}
+
+// relayWith is relayFor with the gateway's adapter a.
+func relayWith(t *testing.T, a adapter.Adapter, upstream string, refuse *Refusal) (*httptest.Server, *Gateway, *event.Memory, *lines) {
+	t.Helper()
 	u, err := url.Parse(upstream)
 	if err != nil {
 		t.Fatal(err)
 	}
 	mem := &event.Memory{}
-	g := New(u, anthropic.Adapter{}, mem)
+	g := New(u, a, mem)
 	logs := &lines{}
 	g.SetLog(logs.printf)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -233,14 +241,21 @@ func TestRelayedCutReplyIsIncomplete(t *testing.T) {
 
 // A vendor reply with no Content-Type reaches the runner with none, not a
 // type Go's server guessed: the runner's gateway reads the stream by it.
+// chatgpt.com streams codex's reply so.
 func TestRelayedReplyKeepsNoContentType(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header()["Content-Type"] = nil
 		io.WriteString(w, "data: {}\n\n")
 	}))
 	defer upstream.Close()
-	srv, _, _, _ := relayFor(t, upstream.URL, nil)
-	resp := relayedPost(t, srv.URL)
+	srv, _, _, _ := relayWith(t, openai.Adapter{}, upstream.URL, nil)
+	resp, err := rawClient().Post(srv.URL+"/relay/anthropic/backend-api/codex/responses", "application/json", strings.NewReader(`{"model":"m","input":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
 	io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if ct, ok := resp.Header["Content-Type"]; ok {

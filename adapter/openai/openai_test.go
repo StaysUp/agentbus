@@ -72,7 +72,7 @@ func TestWatches(t *testing.T) {
 	if a.Vendor() != "openai" {
 		t.Errorf("vendor = %q", a.Vendor())
 	}
-	if !a.Watches("POST", "/backend-api/codex/responses") {
+	if !adapter.Watches(a, "POST", "/backend-api/codex/responses") {
 		t.Error("should watch codex's model calls")
 	}
 	for _, c := range [][2]string{
@@ -80,7 +80,7 @@ func TestWatches(t *testing.T) {
 		{"GET", "/backend-api/codex/models"},
 		{"POST", "/backend-api/codex/responses/compact"},
 	} {
-		if a.Watches(c[0], c[1]) {
+		if adapter.Watches(a, c[0], c[1]) {
 			t.Errorf("should not watch %s %s", c[0], c[1])
 		}
 	}
