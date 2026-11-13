@@ -301,16 +301,7 @@ func start(c config) (*service, error) {
 	// edits them either.
 	subs := subscriptionStore(c.home)
 	if c.hasQueue() {
-		for _, h := range harness.All() {
-			if l := h.Info().Login; l != nil {
-				protect = append(protect, filepath.Join(subs.Dir, h.Info().Name+".json"))
-				if l.Keep != "" {
-					// The harness's own home there, and its sign-in by
-					// its own name, as every harness's rules take a file.
-					protect = append(protect, filepath.Join(subs.Dir, l.Keep), filepath.Join(subs.Dir, l.Keep, l.File))
-				}
-			}
-		}
+		protect = append(protect, subscriptionsProtected(subs)...)
 	}
 	// The enrollment token adds the built-in runner of agentbus up, and no
 	// other: it is made new at each start, kept in memory and never written,
@@ -399,9 +390,10 @@ func start(c config) (*service, error) {
 		}
 		bs.Clean(time.Hour)
 		blobSweep = jobs.NewSweeper(q, bs, nil) // logs once the log is open
-		// Runners' model calls get their credential here: an API key from
-		// this process's environment, by its variable's name, or the
-		// person's own subscription, connected once (credentials).
+		// Runners' model calls get their credential here: an API key set
+		// in Settings, or else from this process's environment by its
+		// variable's name, or the person's own subscription, connected
+		// once (credentials).
 		orUp := c.openrouter
 		if orUp == nil {
 			orUp, _ = url.Parse(openrouter)
@@ -430,7 +422,10 @@ func start(c config) (*service, error) {
 			// go to the openai adapter, any other to the anthropic one.
 			relayOpenRouter: relayed(jobs.Upstream{URL: orUp, Access: credentials.AccessOpenRouter}, openai.Adapter{}, anthropic.Adapter{}),
 		}
-		creds := credentials.Plug{credentials.AccessOpenRouter: credentials.Env{Getenv: c.getenvOr()}, credentials.AccessSubscription: subs}
+		// An OpenRouter key set in Settings, kept with the subscriptions,
+		// wins over the variable an agent names.
+		creds := credentials.Plug{credentials.AccessOpenRouter: credentials.KeyFirst{Kept: subs, Env: credentials.Env{Getenv: c.getenvOr()}},
+			credentials.AccessSubscription: subs}
 		js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollToken, Heartbeat: c.heartbeat, Agents: saved, Settings: cfgStore,
 			Folders: issuer, Blobs: bs, Sweeper: blobSweep, Record: st, Relay: relay, Credentials: creds})
 		if err != nil {
@@ -1003,6 +998,27 @@ func subscriptionStore(home string) *credentials.Subscriptions {
 		}
 	}
 	return s
+}
+
+// subscriptionsProtected are the files of subs that no turn may edit: each
+// harness's sign-in, the home of a harness that keeps its own, and the
+// OpenRouter key set in Settings.
+func subscriptionsProtected(subs *credentials.Subscriptions) []string {
+	var out []string
+	for _, h := range harness.All() {
+		if l := h.Info().Login; l != nil {
+			out = append(out, filepath.Join(subs.Dir, h.Info().Name+".json"))
+			if l.Keep != "" {
+				// The harness's own home there, and its sign-in by
+				// its own name, as every harness's rules take a file.
+				out = append(out, filepath.Join(subs.Dir, l.Keep), filepath.Join(subs.Dir, l.Keep, l.File))
+			}
+		}
+	}
+	if p, err := subs.KeyFile(credentials.AccessOpenRouter); err == nil {
+		out = append(out, p)
+	}
+	return out
 }
 
 // subscriptionLogins are the harnesses' own logins, for connecting a

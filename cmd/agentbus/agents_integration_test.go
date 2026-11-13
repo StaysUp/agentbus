@@ -199,8 +199,8 @@ func TestOpenRouterCodexArgs(t *testing.T) {
 	}
 }
 
-// An OpenRouter agent whose key variable is not set is refused before
-// anything is stored, saying which variable.
+// An OpenRouter agent with no key set in Settings and its key variable not
+// set is refused before anything is stored, saying where to set either.
 func TestOpenRouterAgentWithoutKeyRefused(t *testing.T) {
 	t.Setenv("AB_TEST_OR_KEY", "")
 	home := t.TempDir()
@@ -213,7 +213,7 @@ func TestOpenRouterAgentWithoutKeyRefused(t *testing.T) {
 	}
 	before := svc.store.Last()
 	code, out, raw := postRun(t, svc, tok, map[string]any{"agent": ag["id"], "folder": t.TempDir(), "prompt": "hi"})
-	if code != http.StatusBadRequest || !strings.Contains(out["error"].(string), "AB_TEST_OR_KEY, which is not set") {
+	if code != http.StatusBadRequest || !strings.Contains(out["error"].(string), "set your OpenRouter key in Settings, or set AB_TEST_OR_KEY where control runs") {
 		t.Fatalf("%d %s", code, raw)
 	}
 	if svc.store.Last() != before {

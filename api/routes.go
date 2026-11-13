@@ -386,9 +386,9 @@ var routes = slices.Concat([]route{
 		tag:     "Agents",
 		summary: "Save an agent",
 		doc: "Save a new agent: a harness, how it reaches its model, the model and a name. It gets a new id.\n\n" +
-			"access subscription uses the person's subscription for the harness, connected once on control (GET /api/v0/subscriptions). access openrouter needs a model in OpenRouter's naming and reads its key, " +
-			"when a turn starts, from the environment variable key_env names on the runner's machine (OPENROUTER_API_KEY when absent). " +
-			"The key itself is never sent, stored or logged. access api and harness opencode are refused: not available yet.",
+			"access subscription uses the person's subscription for the harness, connected once on control (GET /api/v0/subscriptions). access openrouter needs a model in OpenRouter's naming. Control adds its key to the agent's model calls: " +
+			"the key set in Settings (PUT /api/v0/subscriptions/openrouter/key), or, while none is set, the one in the environment variable key_env names where control runs (OPENROUTER_API_KEY when absent). " +
+			"The key itself is never sent to a runner or an agent, and never shown or logged. access api and harness opencode are refused: not available yet.",
 		body:    AgentRequest{},
 		replies: []reply{ok(201, SavedAgent{}, "Saved."), badRequest, fail(404, "This service keeps no saved agents."), fail(409, "Too many agents."), storeFailed},
 		serve:   plain((*API).createSaved)},

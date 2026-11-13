@@ -18,7 +18,13 @@ import (
 
 // SubscriptionList is GET /api/v0/subscriptions.
 type SubscriptionList struct {
-	Subscriptions []SubscriptionState `json:"subscriptions" doc:"One per harness whose subscription can be connected here."`
+	Subscriptions []SubscriptionState   `json:"subscriptions" doc:"One per harness whose subscription can be connected here."`
+	OpenRouterKey credentials.KeyStatus `json:"openrouter_key" doc:"Whether an OpenRouter key is set in Settings (PUT /api/v0/subscriptions/openrouter/key). Never the key."`
+}
+
+// KeyInput is the body of PUT /api/v0/subscriptions/openrouter/key.
+type KeyInput struct {
+	Key string `json:"key" doc:"The OpenRouter key, as pasted. Spaces and line ends around it are removed. It is kept on control and never shown, logged or recorded."`
 }
 
 // SubscriptionState is one harness's subscription, and its connect if one
@@ -90,6 +96,67 @@ var subscriptionRoutes = []route{
 		doc:     "Forget the harness's token on control. Runners' calls on it are refused until it is connected again. No body is read.",
 		replies: []reply{{status: 204, doc: "Removed.", empty: true}, badRequest, fail(404, noSubscriptions), storeFailed},
 		serve:   (*API).disconnectSubscription},
+	{method: "PUT", path: "/api/v0/subscriptions/openrouter/key", op: "setOpenRouterKey",
+		tag:     "Settings",
+		summary: "Set the OpenRouter key",
+		doc: "Keep the person's OpenRouter key on control, in place of any set before. It is kept beside the subscriptions, in control's data folder, " +
+			"readable by its owner only, and is never shown, logged or put in the record. Control adds it to every OpenRouter agent's model calls; " +
+			"it wins over the variable an agent names (key_env), which is used only while no key is set here. The reply holds no key.",
+		body:    KeyInput{},
+		replies: []reply{{status: 204, doc: "Kept.", empty: true}, badRequest, fail(404, noSubscriptions), storeFailed},
+		serve:   plain((*API).setOpenRouterKey)},
+	{method: "DELETE", path: "/api/v0/subscriptions/openrouter/key", op: "removeOpenRouterKey",
+		tag:     "Settings",
+		summary: "Remove the OpenRouter key",
+		doc: "Forget the OpenRouter key set in Settings. OpenRouter agents then read their key from the variable they name (key_env), " +
+			"where control runs, or are refused. No key set is not an error. No body is read.",
+		replies: []reply{{status: 204, doc: "Removed.", empty: true}, badRequest, fail(404, noSubscriptions), storeFailed},
+		serve:   plain((*API).removeOpenRouterKey)},
+}
+
+func (a *API) setOpenRouterKey(w http.ResponseWriter, r *http.Request) {
+	if a.cfg.Subscriptions == nil {
+		writeError(w, http.StatusNotFound, noSubscriptions)
+		return
+	}
+	var in KeyInput
+	if !decodeObject(r, &in) {
+		writeError(w, http.StatusBadRequest, "the body must be one JSON object with key")
+		return
+	}
+	err := a.cfg.Subscriptions.Store.SetKey(credentials.AccessOpenRouter, in.Key)
+	switch {
+	case errors.Is(err, credentials.ErrBadKey):
+		writeError(w, http.StatusBadRequest, err.Error())
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, "the key could not be kept")
+	default:
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func (a *API) removeOpenRouterKey(w http.ResponseWriter, r *http.Request) {
+	if !noBody(w, r) {
+		return
+	}
+	if a.cfg.Subscriptions == nil {
+		writeError(w, http.StatusNotFound, noSubscriptions)
+		return
+	}
+	if err := a.cfg.Subscriptions.Store.RemoveKey(credentials.AccessOpenRouter); err != nil {
+		writeError(w, http.StatusInternalServerError, "the key could not be removed")
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// keptKeySet says an OpenRouter key is set in Settings.
+func (a *API) keptKeySet() bool {
+	if a.cfg.Subscriptions == nil || a.cfg.Subscriptions.Store == nil {
+		return false
+	}
+	st, err := a.cfg.Subscriptions.Store.KeyStatus(credentials.AccessOpenRouter)
+	return err == nil && st.Set
 }
 
 func (a *API) listSubscriptions(w http.ResponseWriter, r *http.Request) {
@@ -116,6 +183,8 @@ func (a *API) listSubscriptions(w http.ResponseWriter, r *http.Request) {
 		}
 		out.Subscriptions = append(out.Subscriptions, s)
 	}
+	// A key file that cannot be read shows as not set: a turn then says why.
+	out.OpenRouterKey, _ = m.Store.KeyStatus(credentials.AccessOpenRouter)
 	writeJSON(w, http.StatusOK, out)
 }
 

@@ -148,6 +148,12 @@ func (s *Subscriptions) write(harness string, k kept) error {
 	if err != nil {
 		return err
 	}
+	return s.writeFile(p, b)
+}
+
+// writeFile writes b to p, a file of the folder, whole or not at all: a
+// temporary file, readable by its owner only, renamed over p.
+func (s *Subscriptions) writeFile(p string, b []byte) error {
 	if err := os.MkdirAll(s.Dir, 0o700); err != nil {
 		return errors.New("credentials: the subscriptions folder could not be made")
 	}

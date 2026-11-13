@@ -59,7 +59,8 @@ which are missing are not limited.
 
 **The relay records every call it carries.** A runner that holds no secret sends each model call
 of its agent to the server's relay, `/relay/<anthropic|chatgpt|cloudcode|openrouter>/…`, with the
-attempt's token as its credential. The relay checks the token, adds the real credential, and
+attempt's token as its credential. The relay checks the token, adds the real credential (for
+OpenRouter: the key set in Settings, or else the one in the agent's `key_env` where control runs), and
 records the call in the server's record from its own copy, as a gateway on the agent's machine
 does: `model.requested`, then the reply as it streams (`model.responded` with its usage and cost,
 the tool events, `turn.completed`), and the call's context. Every event has the session and turn of

@@ -233,11 +233,13 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 			}
 		}
 	}
-	// 41 with POST /api/v0/mcp, which starts a turn only as the
-	// POST /api/v0/turns it sends a tool call through, and DELETE
-	// /api/v0/subscriptions/{id}/connect, which stops a login.
-	if len(ops) != 41 {
-		t.Errorf("%d endpoints, want 41: %v", len(ops), ops)
+	// 43 with POST /api/v0/mcp, which starts a turn only as the
+	// POST /api/v0/turns it sends a tool call through, DELETE
+	// /api/v0/subscriptions/{id}/connect, which stops a login, and PUT and
+	// DELETE /api/v0/subscriptions/openrouter/key, which set and remove the
+	// OpenRouter key.
+	if len(ops) != 43 {
+		t.Errorf("%d endpoints, want 43: %v", len(ops), ops)
 	}
 	for _, want := range []string{"POST /api/v0/turns", "GET /api/v0/turns", "GET /api/v0/turns/{id}", "POST /api/v0/turns/{id}/stop",
 		"GET /api/v0/turns/{id}/diff", "POST /api/v0/turns/{id}/apply", "POST /api/v0/turns/{id}/review",

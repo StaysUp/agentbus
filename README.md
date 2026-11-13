@@ -77,6 +77,13 @@ tool's own sign-in on the machine (`~/.claude`, `~/.codex`) is not used, and eac
 home of its own. A turn whose tool is not connected is refused with "connect your claude
 subscription in Settings".
 
+For OpenRouter agents, paste your OpenRouter key once in the same place (Subscriptions,
+OpenRouter key, **Save**). Control keeps it beside the subscriptions, readable by you only, and adds
+it to each OpenRouter call. It is never shown again, logged, or sent to a runner or an agent.
+**Replace** and **Remove** change it. An agent saved before this can still read its key from an
+environment variable where control runs (`key_env`, `OPENROUTER_API_KEY` by default); a key set in
+Settings wins. API: `PUT` and `DELETE /api/v0/subscriptions/openrouter/key`.
+
 ## Several machines
 
 AgentBus has two parts:

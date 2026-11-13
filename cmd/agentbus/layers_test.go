@@ -9,9 +9,12 @@ import (
 	"io/fs"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
+
+	"github.com/staysup/agentbus/credentials"
 )
 
 const module = "github.com/staysup/agentbus"
@@ -135,10 +138,13 @@ var controlAllowed = []string{
 	"credentials/signin.go Login.home os.MkdirAll",
 	"credentials/signin.go Login.home os.MkdirTemp",
 	"credentials/signin.go Login.signin os.ReadFile",
-	"credentials/subscriptions.go Subscriptions.write os.CreateTemp",
-	"credentials/subscriptions.go Subscriptions.write os.MkdirAll",
-	"credentials/subscriptions.go Subscriptions.write os.Remove",
-	"credentials/subscriptions.go Subscriptions.write os.Rename",
+	"credentials/subscriptions.go Subscriptions.writeFile os.CreateTemp",
+	"credentials/subscriptions.go Subscriptions.writeFile os.MkdirAll",
+	"credentials/subscriptions.go Subscriptions.writeFile os.Remove",
+	"credentials/subscriptions.go Subscriptions.writeFile os.Rename",
+	// The OpenRouter key set in Settings, in the same folder.
+	"credentials/keys.go Subscriptions.RemoveKey os.Remove",
+	"credentials/keys.go Subscriptions.readKey os.ReadFile",
 	"credentials/subscriptions.go Subscriptions.Remove os.Remove",
 	"credentials/subscriptions.go Subscriptions.read os.ReadFile",
 	// A harness that renews its own sign-in (agy) keeps it in a home inside
@@ -377,4 +383,18 @@ func deps(t *testing.T, pkg string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// No turn may edit the OpenRouter key set in Settings, as no turn may edit
+// a subscription's sign-in: both are in the paths every turn is denied.
+func TestSubscriptionsProtectedHoldsTheKey(t *testing.T) {
+	subs := subscriptionStore(t.TempDir())
+	key, err := subs.KeyFile(credentials.AccessOpenRouter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := subscriptionsProtected(subs)
+	if !slices.Contains(got, key) || !slices.Contains(got, filepath.Join(subs.Dir, "claude.json")) {
+		t.Fatalf("protected: %v", got)
+	}
 }

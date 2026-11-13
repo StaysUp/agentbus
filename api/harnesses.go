@@ -44,7 +44,7 @@ type AccessOption struct {
 	Models   []string `json:"models" doc:"Models to offer. A new subscription agent names none, so the harness picks its own; an OpenRouter one starts with the first. An agent may name another one when any_model is true."`
 	AnyModel bool     `json:"any_model,omitempty" doc:"True when any model name is accepted: an OpenRouter model id, or for a subscription any name its account may offer. A model the vendor refuses fails the turn with the vendor's own words."`
 	KeyEnv   string   `json:"key_env,omitempty" doc:"For openrouter: the variable a new agent reads its key from unless it names another."`
-	KeySet   *bool    `json:"key_set,omitempty" doc:"For openrouter: whether key_env is set in this service's environment. Its value is never sent."`
+	KeySet   *bool    `json:"key_set,omitempty" doc:"For openrouter: whether a key is there for it: set in Settings, or in key_env in this service's environment. Its value is never sent."`
 }
 
 // RunnerHarness is one runner's report of one harness.
@@ -154,9 +154,13 @@ func accessOptions(info harness.Info) []AccessOption {
 	return out
 }
 
-// keySet says whether name is set, and not empty, in the service's
-// environment. Its value is never kept or sent.
+// keySet says whether an OpenRouter agent reading name has a key: one set
+// in Settings, or name set, and not empty, in the service's environment.
+// Its value is never kept or sent.
 func (a *API) keySet(name string) bool {
+	if a.keptKeySet() {
+		return true
+	}
 	if a.cfg.Environ == nil || name == "" {
 		return false
 	}
