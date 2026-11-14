@@ -221,18 +221,19 @@ func (claude) Args(t Turn) []string {
 			a = append(a, "--allowedTools", strings.Join(allowed, ","))
 		}
 	}
-	// --tools restricts built-in tools only: an MCP server from the
-	// person's settings could still write in a read-only turn.
 	// --strict-mcp-config loads only the --mcp-config servers: the tool
-	// server, or none at all. A turn with the tool server gets no MCP
-	// server of the person's either, so the agentbus MCP tools are the only
-	// MCP tools it sees.
+	// server, or none at all. Every turn gets it. --tools restricts
+	// built-in tools only, so an MCP server from the person's settings
+	// could still write in a read-only turn, and in an edit turn it would
+	// act outside the record. Without --mcp-config it loads no server at
+	// all (read-only turns have run that way since d6d279e).
 	if t.Tools != "" {
 		a = append(a, "--mcp-config", claudeMCPConfig(t.Tools))
 	}
-	if readOnly || t.Tools != "" {
-		a = append(a, "--strict-mcp-config")
-	}
+	// --no-chrome: Claude in Chrome is not an MCP server of the person's
+	// settings, so --strict-mcp-config leaves it on (measured 2026-11-14,
+	// research/2026-11-14-use-my-own-tools-design.md). Off on every turn.
+	a = append(a, "--strict-mcp-config", "--no-chrome")
 	// forbid: never run, even when allow or the person's settings
 	// approve it; a deny wins over an allow (checked live, 2026-11-07).
 	// The gateway's guard refuses them too, in the shapes this rule

@@ -28,6 +28,9 @@ func TestCallsOfEachAdapter(t *testing.T) {
 		{anthropic.Adapter{}, "GET", "/v1/models", "", false, false, false},
 		{anthropic.Adapter{}, "POST", "/v1/messages/", "", false, false, false},
 		{anthropic.Adapter{}, "POST", "//v1/messages", "", false, false, false},
+		{anthropic.Adapter{}, "HEAD", "/api/hello", "", true, true, true},
+		{anthropic.Adapter{}, "GET", "/api/hello", "", false, false, false},
+		{anthropic.Adapter{}, "HEAD", "/api/hello", "x=1", true, false, true},
 
 		{openai.Adapter{}, "POST", "/backend-api/codex/responses", "", true, true, false},
 		{openai.Adapter{}, "POST", "/v1/responses", "", true, true, false},
@@ -116,7 +119,13 @@ func TestCallModelFromPath(t *testing.T) {
 			t.Errorf("%s %s: found %v model %q, want %q", c.method, c.path, ok, call.Model(c.path), c.want)
 		}
 	}
-	if (adapter.Call{Path: "/v1beta/models/*:generateContent"}).Model("/v1/messages") != "" {
-		t.Error("a path that is not the call's named a model")
+	// Not the call's path: a different length, or the same length with a
+	// fixed segment, or the rest of the "*" segment, that differs.
+	c := adapter.Call{Path: "/v1beta/models/*:generateContent"}
+	for _, p := range []string{"/v1/messages", "/v1alpha/models/gemini-4-argon:generateContent",
+		"/v1beta/files/gemini-4-argon:generateContent", "/v1beta/models/gemini-4-argon:countTokens"} {
+		if m := c.Model(p); m != "" {
+			t.Errorf("%s is not the call's path and named model %q", p, m)
+		}
 	}
 }

@@ -152,24 +152,57 @@ type PreviewFile struct {
 }
 
 // Fit shrinks p so that its JSON is at most max bytes: first every diff
-// goes, then files, then conflicts, from the end. DiffsCut, DiffLeftOut and
-// Truncated say so. Count stays the whole count.
+// goes, with its line counts, then the files no conflict names, from the
+// end, then conflicts from the end, each with its file. So every conflict
+// kept has its entry in Files. DiffsCut, DiffLeftOut and Truncated say so.
+// Count stays the whole count.
 func (p *PreviewResult) Fit(max int) {
 	size := func() int { b, _ := json.Marshal(p); return len(b) }
 	if size() <= max {
 		return
 	}
 	for i := range p.Files {
-		if p.Files[i].Diff != nil {
-			p.Files[i].Diff, p.Files[i].DiffLeftOut, p.DiffsCut = nil, true, true
+		if f := &p.Files[i]; f.Diff != nil {
+			f.Diff, f.Added, f.Removed, f.DiffLeftOut, p.DiffsCut = nil, 0, 0, true, true
 		}
 	}
 	for size() > max && (len(p.Files) > 0 || len(p.Conflicts) > 0) {
-		if len(p.Files) > 0 {
-			p.Files = p.Files[:len(p.Files)/2]
-		} else {
-			p.Conflicts = p.Conflicts[:len(p.Conflicts)/2]
-		}
 		p.Truncated = true
+		conflicted := map[string]bool{}
+		for _, c := range p.Conflicts {
+			conflicted[c.Path] = true
+		}
+		var others []int
+		for i, f := range p.Files {
+			if !conflicted[f.Path] {
+				others = append(others, i)
+			}
+		}
+		if len(others) > 0 {
+			// Half of the other files go, the last ones.
+			gone := map[int]bool{}
+			for _, i := range others[len(others)/2:] {
+				gone[i] = true
+			}
+			p.Files = keepFiles(p.Files, func(i int, _ PreviewFile) bool { return !gone[i] })
+			continue
+		}
+		p.Conflicts = p.Conflicts[:len(p.Conflicts)/2]
+		kept := map[string]bool{}
+		for _, c := range p.Conflicts {
+			kept[c.Path] = true
+		}
+		p.Files = keepFiles(p.Files, func(_ int, f PreviewFile) bool { return kept[f.Path] })
 	}
+}
+
+// keepFiles is the files of fs that keep says to keep, in order.
+func keepFiles(fs []PreviewFile, keep func(int, PreviewFile) bool) []PreviewFile {
+	out := fs[:0:0]
+	for i, f := range fs {
+		if keep(i, f) {
+			out = append(out, f)
+		}
+	}
+	return out
 }

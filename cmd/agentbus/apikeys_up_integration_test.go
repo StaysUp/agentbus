@@ -44,6 +44,9 @@ func TestUpAPIKeyOnlyOnRecordedCalls(t *testing.T) {
 		// refused are other calls with the placeholder: method, path and
 		// query, and the call each is recorded as.
 		refused map[string]string
+		// bare is a call that goes to the vendor with no credential at
+		// all, sent with the placeholder, and is recorded as vendor.called.
+		bare string
 	}{
 		{"claude", "anthropic", "ANTHROPIC_AUTH_TOKEN", "Authorization", "POST /v1/messages?beta=true",
 			"/v1/messages |" + keys["anthropic"] + "|",
@@ -53,8 +56,7 @@ func TestUpAPIKeyOnlyOnRecordedCalls(t *testing.T) {
 				"POST /v1/messages?beta=true&x=1": "POST /v1/messages",
 				"DELETE /v1/files/file_1":         "DELETE /v1/files/file_1",
 				"POST /v1/messages/batches":       "POST /v1/messages/batches",
-				"HEAD /api/hello":                 "HEAD /api/hello",
-			}},
+			}, "HEAD /api/hello"},
 		{"codex", "openai", "AGENTBUS_OPENAI_TOKEN", "Authorization", "POST /v1/responses",
 			"/v1/responses Bearer " + keys["openai"] + "||",
 			map[string]string{
@@ -63,7 +65,7 @@ func TestUpAPIKeyOnlyOnRecordedCalls(t *testing.T) {
 				"POST /v1/files":             "POST /v1/files",
 				"GET /v1/responses/resp_1":   "GET /v1/responses/resp_1",
 				"POST /v1/responses?x=1":     "POST /v1/responses",
-			}},
+			}, ""},
 		{"agy", "gemini", "GEMINI_API_KEY", "X-Goog-Api-Key", "POST " + geminiPath + "?alt=sse",
 			geminiPath + " ||" + keys["gemini"],
 			map[string]string{
@@ -74,7 +76,7 @@ func TestUpAPIKeyOnlyOnRecordedCalls(t *testing.T) {
 				"POST /v1beta/cachedContents":                               "POST /v1beta/cachedContents",
 				"POST /v1beta/files":                                        "POST /v1beta/files",
 				"GET /v1beta/models/gemini-3.1-pro-preview:generateContent": "GET /v1beta/models/gemini-3.1-pro-preview:generateContent",
-			}},
+			}, ""},
 	}
 	for _, tc := range tools {
 		t.Run(tc.harness, func(t *testing.T) {
@@ -140,9 +142,13 @@ func TestUpAPIKeyOnlyOnRecordedCalls(t *testing.T) {
 				replies = append(replies, string(b))
 				return resp.StatusCode, string(b)
 			}
+			if tc.bare != "" {
+				if code, b := send(tc.bare); code != http.StatusOK {
+					t.Errorf("%s: %d %s", tc.bare, code, b)
+				}
+			}
 			for call := range tc.refused {
-				// A HEAD reply has no body to say why.
-				if code, b := send(call); code != http.StatusForbidden || !strings.HasPrefix(call, "HEAD ") && !strings.Contains(b, "control adds a credential only to the calls") {
+				if code, b := send(call); code != http.StatusForbidden || !strings.Contains(b, "control adds a credential only to the calls") {
 					t.Errorf("%s: %d %s", call, code, b)
 				}
 			}
@@ -161,10 +167,17 @@ func TestUpAPIKeyOnlyOnRecordedCalls(t *testing.T) {
 			os.WriteFile(release, nil, 0o600)
 			waitClosed(t, svc.store, session)
 
-			// The vendor saw the model call twice, with the key, and
-			// nothing else.
+			// The vendor saw the bare call first, with no credential, then
+			// the model call twice, with the key, and nothing else.
 			got := vendor.keysSeen()
 			auths := vendor.seen()
+			if tc.bare != "" {
+				_, path, _ := strings.Cut(tc.bare, " ")
+				if len(got) == 0 || got[0] != path+" |" || auths[0] != path+" " {
+					t.Fatalf("the bare call: the vendor saw %v %v", got, auths)
+				}
+				got, auths = got[1:], auths[1:]
+			}
 			if len(got) != 2 {
 				t.Fatalf("the vendor saw %v", got)
 			}
@@ -178,9 +191,11 @@ func TestUpAPIKeyOnlyOnRecordedCalls(t *testing.T) {
 			// Recorded: the model call, each refusal, and the reply not
 			// passed on.
 			recorded := map[string]int{}
-			var requested, bad502 int
+			var requested, bad502, bare int
 			for _, e := range storedEvents(t, svc.store) {
 				switch {
+				case e.Kind == "vendor.called" && e.Call == tc.bare && e.Session == session && e.Status == http.StatusOK:
+					bare++
 				case e.Kind == "call.refused" && e.Status == http.StatusBadGateway:
 					bad502++
 				case e.Kind == "call.refused":
@@ -203,6 +218,9 @@ func TestUpAPIKeyOnlyOnRecordedCalls(t *testing.T) {
 			}
 			if requested != 2 || bad502 != 1 {
 				t.Errorf("model.requested %d, want 2; refused replies %d, want 1", requested, bad502)
+			}
+			if tc.bare != "" && bare != 1 {
+				t.Errorf("%s: %d vendor.called, want 1", tc.bare, bare)
 			}
 
 			// No key in a reply, the agent's environment, the record or a

@@ -31,6 +31,10 @@ type Call struct {
 	// calls, such as agy's loadCodeAssist: the gateway records it by method,
 	// path and status (vendor.called) and reads none of its body.
 	Service bool
+	// NoCredential: a service call that goes to the vendor with no
+	// credential at all, such as claude's HEAD /api/hello. Control adds
+	// none, and the gateway takes off any the agent sent.
+	NoCredential bool
 }
 
 // segment is what a "*" of Call.Path stands for.
@@ -67,16 +71,13 @@ func (c Call) matches(method, path string) bool {
 // names no model, or path is not c's. The Gemini API names the model only
 // there, never in the body.
 func (c Call) Model(path string) string {
-	want, got := strings.Split(c.Path, "/"), strings.Split(path, "/")
-	if len(want) != len(got) {
+	if !c.matches(c.Method, path) {
 		return ""
 	}
+	want, got := strings.Split(c.Path, "/"), strings.Split(path, "/")
 	for i, w := range want {
-		rest, wild := strings.CutPrefix(w, "*")
-		if !wild {
-			continue
-		}
-		if name, ok := strings.CutSuffix(got[i], rest); ok && segment.MatchString(name) {
+		if rest, wild := strings.CutPrefix(w, "*"); wild {
+			name, _ := strings.CutSuffix(got[i], rest)
 			return name
 		}
 	}

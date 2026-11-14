@@ -33,7 +33,9 @@ func TestTurnArgsPermissions(t *testing.T) {
 	// person's own settings allow.
 	noEdit := []string{"--disallowedTools", "Bash(git push:*),Bash(git checkout:*),Edit,Write,NotebookEdit"}
 	noEditOnly := []string{"--disallowedTools", "Edit,Write,NotebookEdit"}
-	readOnly := []string{"--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob," + reads, "--strict-mcp-config"}
+	readOnly := []string{"--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob," + reads, "--strict-mcp-config", "--no-chrome"}
+	// Every claude turn loads no MCP server of the person's.
+	strict := []string{"--strict-mcp-config", "--no-chrome"}
 	cat := func(parts ...[]string) []string { return slices.Concat(parts...) }
 	head := []string{"-p", "--output-format", "json"}
 	edit := Writes{Edit: []string{"/w/repo"}, Protect: []string{"/data/permissions.toml", "/data/token"}}
@@ -44,37 +46,37 @@ func TestTurnArgsPermissions(t *testing.T) {
 		perm                       settings.Policy
 		want                       []string
 	}{
-		{"claude, no policy, no edits", "claude", "", "", Writes{}, settings.Policy{}, cat(head, noEditOnly, []string{"--", "hi"})},
-		{"claude", "claude", "", "", Writes{}, perm, cat(head, allow, noEdit, []string{"--", "hi"})},
+		{"claude, no policy, no edits", "claude", "", "", Writes{}, settings.Policy{}, cat(head, strict, noEditOnly, []string{"--", "hi"})},
+		{"claude", "claude", "", "", Writes{}, perm, cat(head, allow, strict, noEdit, []string{"--", "hi"})},
 		// The edit rule: Edit and Write in the session's folder, and a deny
 		// on each protected file, which wins over it and over forbid's
 		// neighbours in the same list.
 		{"claude edits its folder", "claude", "", "", edit, perm, cat(head,
-			[]string{"--allowedTools", reads + ",Edit(//w/repo/**),Bash(go test:*),Bash(make test:*)",
+			[]string{"--allowedTools", reads + ",Edit(//w/repo/**),Bash(go test:*),Bash(make test:*)", "--strict-mcp-config", "--no-chrome",
 				"--disallowedTools", "Bash(git push:*),Bash(git checkout:*),Edit(//data/permissions.toml),Edit(//data/token)", "--", "hi"})},
 		{"claude edits, no other policy", "claude", "", "", edit, settings.Policy{}, cat(head,
-			[]string{"--allowedTools", "Edit(//w/repo/**)", "--disallowedTools", "Edit(//data/permissions.toml),Edit(//data/token)", "--", "hi"})},
+			[]string{"--allowedTools", "Edit(//w/repo/**)", "--strict-mcp-config", "--no-chrome", "--disallowedTools", "Edit(//data/permissions.toml),Edit(//data/token)", "--", "hi"})},
 		// read_folders never becomes --add-dir: that would let a turn write
 		// there under the person's acceptEdits mode.
 		{"claude, folders only", "claude", "", "", Writes{}, settings.Policy{ReadFolders: []string{"/x"}},
-			cat(head, []string{"--allowedTools", "Read(//x/**),Grep(//x/**),Glob(//x/**)"}, noEditOnly, []string{"--", "hi"})},
+			cat(head, []string{"--allowedTools", "Read(//x/**),Grep(//x/**),Glob(//x/**)"}, strict, noEditOnly, []string{"--", "hi"})},
 		{"claude read-only, no policy", "claude", "", "", ro, settings.Policy{},
-			cat(head, []string{"--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob", "--strict-mcp-config", "--", "hi"})},
+			cat(head, []string{"--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob", "--strict-mcp-config", "--no-chrome", "--", "hi"})},
 		{"claude, allow only", "claude", "", "", Writes{}, settings.Policy{Allow: []string{"go test"}},
-			cat(head, []string{"--allowedTools", "Bash(go test:*)"}, noEditOnly, []string{"--", "hi"})},
+			cat(head, []string{"--allowedTools", "Bash(go test:*)"}, strict, noEditOnly, []string{"--", "hi"})},
 		// allow never widens a read-only turn; folders and forbid still apply.
 		{"claude read-only", "claude", "", "", ro, perm, cat(head, readOnly, forbid, []string{"--", "hi"})},
 		{"claude resume and model", "claude", "r-1", "opus", Writes{}, perm,
-			cat(head, []string{"--resume", "r-1"}, allow, noEdit, []string{"--model", "opus", "--", "hi"})},
+			cat(head, []string{"--resume", "r-1"}, allow, strict, noEdit, []string{"--model", "opus", "--", "hi"})},
 		{"claude read-only, resume and model", "claude", "r-1", "opus", ro, perm,
 			cat(head, []string{"--resume", "r-1"}, readOnly, forbid, []string{"--model", "opus", "--", "hi"})},
 		// codex writes, with network, only with the edit rule.
 		{"codex edits", "codex", "", "", edit, perm, []string{"exec", "--skip-git-repo-check", "--json", "--sandbox", "workspace-write",
-			"-c", "sandbox_workspace_write.network_access=true", "--", "hi"}},
-		{"codex, no edit rule", "codex", "", "", Writes{}, perm, []string{"exec", "--skip-git-repo-check", "--json", "--sandbox", "read-only", "--", "hi"}},
-		{"codex read-only", "codex", "", "", ro, perm, []string{"exec", "--skip-git-repo-check", "--json", "--sandbox", "read-only", "--", "hi"}},
+			"-c", "sandbox_workspace_write.network_access=true", "--disable", "apps", "--disable", "plugins", "--", "hi"}},
+		{"codex, no edit rule", "codex", "", "", Writes{}, perm, []string{"exec", "--skip-git-repo-check", "--json", "--sandbox", "read-only", "--disable", "apps", "--disable", "plugins", "--", "hi"}},
+		{"codex read-only", "codex", "", "", ro, perm, []string{"exec", "--skip-git-repo-check", "--json", "--sandbox", "read-only", "--disable", "apps", "--disable", "plugins", "--", "hi"}},
 		{"codex resume and model", "codex", "r-1", "gpt-5", edit, perm, []string{"exec", "--skip-git-repo-check", "--sandbox", "workspace-write",
-			"-c", "sandbox_workspace_write.network_access=true", "resume", "--json", "--model", "gpt-5", "--", "r-1", "hi"}},
+			"-c", "sandbox_workspace_write.network_access=true", "--disable", "apps", "--disable", "plugins", "resume", "--json", "--model", "gpt-5", "--", "r-1", "hi"}},
 	} {
 		got := turnArgs(hn(tc.agent), "", tc.resume, tc.model, tc.w, tc.perm, "hi")
 		if !slices.Equal(got, tc.want) {

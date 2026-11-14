@@ -148,10 +148,12 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request) {
 	rl := gateway.Relayed{Session: session, Turn: j.Turn, Path: "/" + rest}
 	g := gatewayFor(up.Gateways, r.Method, rl.Path)
 	// Read once the call holds its turn open: the record and a renewal can
-	// take a while.
+	// take a while. A call that goes with no credential reads none.
 	rl.Prepare = func(rl *gateway.Relayed) {
 		rl.Exchange = s.exchangeOf(r, session, j.Turn)
-		rl.Header, rl.Refuse = s.turnCredential(j, up)
+		if g.Credentialed(r.Method, rl.Path) {
+			rl.Header, rl.Refuse = s.turnCredential(j, up)
+		}
 	}
 	g.ServeRelayed(w, r, rl)
 }

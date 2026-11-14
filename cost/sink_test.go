@@ -191,3 +191,13 @@ func TestSinkInferenceGeo(t *testing.T) {
 	wantCost(t, priced(t, responded("anthropic", "claude-opus-5-5", geo("us", map[string]int{"web_search_requests": 1}))), 0.0584, true)
 	wantCost(t, priced(t, responded("anthropic", "claude-opus-5-5", geo("eu", nil))), 0.044, false)
 }
+
+// A cost the vendor reported, OpenRouter's usage.cost, is the call's cost:
+// the table is not read, so a model it has no price for is still complete.
+func TestSinkVendorCost(t *testing.T) {
+	usd := 0.0012
+	e := priced(t, responded("anthropic", "anthropic/claude-x", &event.Usage{InputTokens: 10, OutputTokens: 1, CostUSD: &usd}))
+	wantCost(t, e, 0.0012, true)
+	e = priced(t, responded("openai", "openai/gpt-x", &event.Usage{OutputTokens: 1, OutputIncomplete: true, CostUSD: &usd}))
+	wantCost(t, e, 0.0012, false)
+}

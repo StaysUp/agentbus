@@ -65,13 +65,23 @@ func TestClaudeToolServer(t *testing.T) {
 }
 
 // Without the tool server, nothing of it is on the command line, and Claude
-// Code keeps its own agent tools.
+// Code keeps its own agent tools. --strict-mcp-config and --no-chrome are
+// still there, in an edit turn too, so no tool of the person's loads.
 func TestClaudeNoToolServer(t *testing.T) {
-	a := claude{}.Args(Turn{Prompt: "hi"})
-	all := strings.Join(a, " ")
-	for _, s := range []string{"--mcp-config", "--strict-mcp-config", "mcp__agentbus", "ListAgents", "Task"} {
-		if strings.Contains(all, s) {
-			t.Errorf("%s without the tool server: %q", s, a)
+	for _, readOnly := range []bool{false, true} {
+		turn := Turn{Prompt: "hi"}
+		turn.Writes.ReadOnly = readOnly
+		a := claude{}.Args(turn)
+		for _, f := range []string{"--strict-mcp-config", "--no-chrome"} {
+			if c := slices.Index(a, f); c < 0 || c > slices.Index(a, "--") {
+				t.Errorf("read_only %v: no %s before the prompt: %q", readOnly, f, a)
+			}
+		}
+		all := strings.Join(a, " ")
+		for _, s := range []string{"--mcp-config", "mcp__agentbus", "ListAgents", "Task"} {
+			if strings.Contains(all, s) {
+				t.Errorf("read_only %v: %s without the tool server: %q", readOnly, s, a)
+			}
 		}
 	}
 }
@@ -176,5 +186,29 @@ func TestToolsHiddenAreDenied(t *testing.T) {
 	}
 	if got := (codex{}).Info().ToolsHidden; len(got) != 0 {
 		t.Errorf("codex hides %v", got)
+	}
+}
+
+// Every codex turn, read-only or not, with or without the tool server and on
+// resume, runs with the person's ChatGPT apps and plugins off, before resume
+// so the resumed turn gets them too.
+func TestCodexOwnToolsOff(t *testing.T) {
+	for _, tools := range []string{"", toolsURL} {
+		for _, readOnly := range []bool{false, true} {
+			for _, resume := range []string{"", "r-1"} {
+				turn := Turn{Tools: tools, ResumeID: resume, Prompt: "hi"}
+				turn.Writes.ReadOnly = readOnly
+				a := codex{}.Args(turn)
+				all := " " + strings.Join(a, " ") + " "
+				end := strings.Index(all, " -- ")
+				if r := strings.Index(all, " resume "); r >= 0 {
+					end = r
+				}
+				d := strings.Index(all, " --disable apps --disable plugins ")
+				if d < 0 || d > end {
+					t.Errorf("tools %q read_only %v resume %q: %q", tools, readOnly, resume, a)
+				}
+			}
+		}
 	}
 }

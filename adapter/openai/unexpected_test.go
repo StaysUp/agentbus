@@ -229,3 +229,18 @@ func TestHostedToolProgressAndInterruptedKnown(t *testing.T) {
 		`{"type":"response.incomplete","response":{"model":"m","status":"incomplete","incomplete_details":{"reason":"interrupted"},"output":[]}}`))
 	wantUnexpected(t, evs)
 }
+
+// OpenRouter's replies carry its charge, usage.cost, and usage.cost_details
+// (seen 2026-11-13). Both are known, and cost is the call's cost.
+func TestOpenRouterCost(t *testing.T) {
+	const usage = `"usage":{"input_tokens":3,"output_tokens":2,"cost":0.0034,"cost_details":{"upstream_inference_cost":null}}`
+	for name, evs := range map[string][]event.Event{
+		"json":   reply(t, 200, "application/json", []byte(`{"model":"m","status":"completed","output":[],`+usage+`}`)),
+		"stream": reply(t, 200, "text/event-stream", sse(`{"type":"response.completed","response":{"model":"m","status":"completed","output":[],`+usage+`}}`)),
+	} {
+		wantUnexpected(t, evs)
+		if u := evs[0].Usage; u == nil || u.CostUSD == nil || *u.CostUSD != 0.0034 {
+			t.Errorf("%s: usage %+v", name, u)
+		}
+	}
+}

@@ -208,6 +208,9 @@ type Usage struct {
 	// OutputIncomplete means the reply ended before the vendor sent its final
 	// output count, so OutputTokens is a lower bound, not the real number.
 	OutputIncomplete bool `json:"output_incomplete,omitempty" doc:"The reply ended before the final count: output_tokens is a lower bound."`
+	// CostUSD is what the vendor says it charged for the call, in US
+	// dollars: OpenRouter's usage.cost. Nil when it said nothing.
+	CostUSD *float64 `json:"cost_usd,omitempty" doc:"What the vendor says it charged for the call, in US dollars, such as OpenRouter's usage.cost. Absent when it said nothing; then the cost comes from the price table."`
 }
 
 // Event is one step of an agent's work.

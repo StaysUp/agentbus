@@ -408,7 +408,7 @@ const MaxChangeset = 256 << 20
 
 // applyMu keeps one apply at a time in this process, whatever folder it
 // writes: two folders, one inside the other, must not both pass the
-// conflict check and then write over each other.
+// conflict check and then write over each other. A preview does not take it.
 var applyMu sync.Mutex
 
 // Apply makes the folder ref as the changeset to holds it, from as the
@@ -439,8 +439,13 @@ func (c *Connector) Preview(ctx context.Context, ref, from, to string) (queue.Pr
 func (c *Connector) apply(ctx context.Context, ref, from, to string, dry bool) (Applied, queue.PreviewResult, error) {
 	var none queue.PreviewResult
 	defer lockRef(ref)()
-	applyMu.Lock()
-	defer applyMu.Unlock()
+	// A dry run writes nothing, so it keeps no other apply out: one into a
+	// folder inside this one may run meanwhile, and the preview shows the
+	// folder as it read it.
+	if !dry {
+		applyMu.Lock()
+		defer applyMu.Unlock()
+	}
 	dir, err := c.path(ref)
 	if err != nil {
 		return Applied{}, none, err

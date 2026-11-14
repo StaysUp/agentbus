@@ -318,6 +318,10 @@ type usage struct {
 		// public reference. Whether input_tokens include it is unmeasured.
 		CacheWriteTokens int `json:"cache_write_tokens"`
 	} `json:"input_tokens_details"`
+	// Cost is OpenRouter's charge for the call, in US dollars (its credits).
+	// cost_details next to it splits the upstream cost and is not read.
+	// Seen 2026-11-13 on OpenRouter replies (TODO fw 0.5.6).
+	Cost *float64 `json:"cost"`
 	// unknown holds the field names this adapter does not know, for
 	// schema.unexpected.
 	unknown []event.Unexpected
@@ -412,9 +416,9 @@ var (
 	// codex-rs handles (codex-api/src/sse/responses.rs) and turnEnd
 	// leaves as unknown.
 	knownIncomplete = adapter.Names("max_output_tokens", "content_filter", "interrupted")
-	// knownUsage and the details: all seen. attribution and total_tokens are
-	// not read.
-	knownUsage         = adapter.Names("input_tokens", "input_tokens_details", "output_tokens", "output_tokens_details", "total_tokens", "attribution")
+	// knownUsage and the details: all seen. attribution, total_tokens and
+	// OpenRouter's cost_details are not read.
+	knownUsage         = adapter.Names("input_tokens", "input_tokens_details", "output_tokens", "output_tokens_details", "total_tokens", "attribution", "cost", "cost_details")
 	knownInputDetails  = adapter.Names("cached_tokens", "cache_write_tokens")
 	knownOutputDetails = adapter.Names("reasoning_tokens")
 )
@@ -575,6 +579,7 @@ func fromResponse(r response, problem string) []event.Event {
 			CacheWriteTokens: u.InputTokensDetails.CacheWriteTokens,
 			ServiceTier:      r.ServiceTier,
 			ServerToolUse:    hostedCalls(r.Output),
+			CostUSD:          u.Cost,
 		}
 	}
 	evs := []event.Event{resp}

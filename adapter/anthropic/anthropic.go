@@ -17,13 +17,16 @@ type Adapter struct{}
 
 func (Adapter) Vendor() string { return "anthropic" }
 
-// Calls: the Messages API's model call. Claude Code 2.1.323 posts it as
-// /v1/messages?beta=true, through a base URL and on a setup-token alike, and
-// makes no other call there in a -p turn (measured 2026-11-13 against a
-// local listener).
+// Calls: the Messages API's model call, and HEAD /api/hello. Claude Code
+// 2.1.323 posts the model call as /v1/messages?beta=true, through a base URL
+// and on a setup-token alike (measured 2026-11-13 against a local listener).
 func (Adapter) Calls() []adapter.Call {
 	return []adapter.Call{{Method: "POST", Path: "/v1/messages", Query: map[string][]string{"beta": {"true"}},
-		Replies: adapter.JSONOrSSE}}
+		Replies: adapter.JSONOrSSE},
+		// Claude Code 2.1.x sends HEAD /api/hello, with no credential, once
+		// a turn (2026-11-13). Anthropic answers it 200, application/json,
+		// without one (checked 2026-11-14).
+		{Method: "HEAD", Path: "/api/hello", Replies: adapter.JSONOnly, Service: true, NoCredential: true}}
 }
 
 type block struct {
@@ -69,7 +72,11 @@ type usage struct {
 	InferenceGeo string `json:"inference_geo"`
 	// ServerToolUse counts the tools Anthropic ran itself, such as
 	// web_search_requests. Kept whole: new counts appear as new tools do.
-	ServerToolUse    map[string]int `json:"server_tool_use"`
+	ServerToolUse map[string]int `json:"server_tool_use"`
+	// Cost is OpenRouter's charge for the call, in US dollars (its credits).
+	// cost_details next to it splits the upstream cost and is not read.
+	// Seen 2026-11-13 on OpenRouter replies (TODO fw 0.5.6).
+	Cost             *float64 `json:"cost"`
 	outputIncomplete bool
 	// unknown holds the field names this adapter does not know, for
 	// schema.unexpected.
@@ -136,7 +143,7 @@ var (
 	// and not read.
 	knownUsage = adapter.Names("input_tokens", "output_tokens", "cache_creation_input_tokens",
 		"cache_read_input_tokens", "cache_creation", "service_tier", "speed", "inference_geo",
-		"server_tool_use", "iterations", "output_tokens_details")
+		"server_tool_use", "iterations", "output_tokens_details", "cost", "cost_details")
 	knownCacheCreation = adapter.Names("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
 )
 
@@ -570,6 +577,7 @@ func fromReply(r reply, status int, problem string) []event.Event {
 			Speed:            u.Speed,
 			InferenceGeo:     u.InferenceGeo,
 			ServerToolUse:    u.ServerToolUse,
+			CostUSD:          u.Cost,
 		}
 		if cc := u.CacheCreation; cc != nil {
 			resp.Usage.CacheWrite5mTokens = cc.Ephemeral5m
@@ -740,6 +748,9 @@ func readStream(body []byte, u *adapter.Unknowns) (reply, string, error) {
 				// (LiteLLM's stream assembly reads it from there).
 				if u.ServerToolUse != nil {
 					r.Usage.ServerToolUse = u.ServerToolUse
+				}
+				if u.Cost != nil {
+					r.Usage.Cost = u.Cost
 				}
 				// Like the counts above, a zero split here does not replace
 				// message_start's.

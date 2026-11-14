@@ -6,13 +6,14 @@ package api
 // reads them where Apply does), on the runner of the folder's machine, by
 // the apply's own code stopped before it writes (connector.Preview). It
 // writes nothing in the folder and stores no event; the preview is a job in
-// the queue, as an apply is.
+// the queue, as an apply is, removed once read (queue.DropPreview).
 
 import (
 	"errors"
 	"net/http"
 
 	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/settings"
 )
 
 // SessionChanges is the answer to GET /api/v0/sessions/{id}/changes.
@@ -76,6 +77,19 @@ func (a *API) sessionChanges(w http.ResponseWriter, r *http.Request, id string) 
 	case errors.Is(err, queue.ErrAllApplied):
 		writeJSON(w, http.StatusOK, out)
 		return
+	case errors.Is(err, queue.ErrNoCopyYet):
+		// The first turn asked for a copy; isolation none runs it in the
+		// folder as it is.
+		none, err := a.isolationNone()
+		if err != nil {
+			a.internal(w)
+			return
+		}
+		if none {
+			out.Isolated, out.Why = false, changesNotIsolated
+		}
+		writeJSON(w, http.StatusOK, out)
+		return
 	case errors.Is(err, queue.ErrApplyBusy):
 		writeError(w, http.StatusConflict, applyBusy)
 		return
@@ -103,6 +117,8 @@ func (a *API) sessionChanges(w http.ResponseWriter, r *http.Request, id string) 
 		}
 		return
 	}
+	// Read here and nowhere else: the job goes once it is read.
+	defer func() { _ = a.cfg.Queue.DropPreview(queue.DefaultTeam, job.ID) }()
 	res, _ := queue.ReadResult(j.Result)
 	p := res.Preview
 	if j.State != queue.Finished || p == nil {
@@ -123,6 +139,20 @@ func (a *API) sessionChanges(w http.ResponseWriter, r *http.Request, id string) 
 	}
 	out.Unapplied = out.Count > 0 || len(out.Conflicts) > 0
 	writeJSON(w, http.StatusOK, out)
+}
+
+// isolationNone says whether the policy's isolation is none: a session's
+// turns run in the folder as it is, even when its first turn asked for a
+// copy.
+func (a *API) isolationNone() (bool, error) {
+	if a.cfg.Settings == nil {
+		return false, nil
+	}
+	p, _, err := a.cfg.Settings.Policy()
+	if err != nil {
+		return false, err
+	}
+	return p.Isolation == settings.IsolationNone, nil
 }
 
 // changesWithoutQueue answers for a session the queue does not hold: one

@@ -274,6 +274,12 @@ func (codex) Args(t Turn) []string {
 	// lets a turn spawn agents (codex-cli 0.167.0, 2026-11-09, `codex
 	// features list`). Before resume, it reaches the resumed turn as
 	// --sandbox does.
+	// The person's own ChatGPT apps and plugins are off on every turn: a
+	// signed-in turn, read-only too, got 54 app tools (mcp__codex_apps),
+	// remote writes among them, and ~22k more input tokens (codex-cli
+	// 0.167.0, 2026-11-14, research/2026-11-14-use-my-own-tools-design.md).
+	// Both are stable features, on by default (`codex features list`).
+	a = append(a, "--disable", "apps", "--disable", "plugins")
 	if t.NoSubagents {
 		a = append(a, "--disable", "multi_agent", "--disable", "multi_agent_v2")
 	}

@@ -246,3 +246,28 @@ func TestReportsKeptOnStreamParseError(t *testing.T) {
 		t.Errorf("events with the error = %v, want only the report", kinds(evs))
 	}
 }
+
+// OpenRouter's replies carry its charge, usage.cost, and usage.cost_details
+// (seen 2026-11-13). Both are known; cost is the call's cost, in the reply
+// and in the stream, where message_delta's replaces message_start's.
+func TestOpenRouterCost(t *testing.T) {
+	const details = `"cost_details":{"upstream_inference_cost":null,"upstream_inference_prompt_cost":0.001,"upstream_inference_completions_cost":0.0002}`
+	for name, evs := range map[string][]event.Event{
+		"json": respond(t, "application/json", `{"model":"m","content":[],"stop_reason":"end_turn",
+			"usage":{"input_tokens":1,"output_tokens":1,"cost":0.0012,`+details+`}}`),
+		"stream": respond(t, "text/event-stream", stream(
+			`{"type":"message_start","message":{"model":"m","usage":{"input_tokens":1,"output_tokens":1,"cost":0}}}`,
+			`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5,"cost":0.0012,`+details+`}}`,
+			`{"type":"message_stop"}`)),
+	} {
+		wantUnexpected(t, evs)
+		if u := evs[0].Usage; u == nil || u.CostUSD == nil || *u.CostUSD != 0.0012 {
+			t.Errorf("%s: usage %+v", name, u)
+		}
+	}
+	// Anthropic itself sends no cost: none is made up.
+	evs := respond(t, "application/json", `{"model":"m","content":[],"stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`)
+	if evs[0].Usage.CostUSD != nil {
+		t.Errorf("a cost with none sent: %v", *evs[0].Usage.CostUSD)
+	}
+}

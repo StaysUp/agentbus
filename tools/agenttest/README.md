@@ -60,9 +60,9 @@ python3 tools/agenttest/agenttest.py down -dir /tmp/at/data
 `--setting-sources project,local`: no user settings, hooks, skills or user `CLAUDE.md`. It also
 runs with `--strict-mcp-config`: no MCP server but the ones AgentBus names. That keeps out the
 person's own MCP servers and their claude.ai connectors (such as Claude Docs), which
-`--setting-sources` does not cover. AgentBus passes `--strict-mcp-config` itself only on a turn
-with its tools or a read-only turn. Before 2026-11-11 the wrapper did not add it, so every tools-off
-claude turn on a signed-in Mac had the connectors. Claude Code's own built-in skills, plugins and
+`--setting-sources` does not cover. AgentBus passes `--strict-mcp-config` itself on every turn
+since 0.5.6; before that only on a turn with its tools or a read-only turn. Before 2026-11-11 the
+wrapper did not add it, so every tools-off claude turn on a signed-in Mac had the connectors. Claude Code's own built-in skills, plugins and
 agents stay: they come with the program, not from the person. A turn's codex runs
 with `--ignore-user-config --disable hooks` and a fixed reasoning effort (`up -effort`, default
 high). The sign-in is not touched. ⚠️ codex still reads `~/.codex/AGENTS.md`: it has no switch for

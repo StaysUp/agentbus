@@ -95,6 +95,11 @@ const queueLimit = 64 << 20
 // them, so they go on.
 var forwarded = []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto"}
 
+// credentialHeaders are the headers a credential, or an agent's placeholder
+// for one, travels in. A call that goes with no credential
+// (adapter.Call NoCredential) goes without them.
+var credentialHeaders = []string{"Authorization", "X-Api-Key", "X-Goog-Api-Key"}
+
 // New returns a gateway that forwards to upstream, such as https://api.anthropic.com.
 func New(upstream *url.URL, a adapter.Adapter, sink event.Sink) *Gateway {
 	g := &Gateway{adapter: a, run: runID(), now: time.Now, open: map[turnKey]int{},
@@ -140,13 +145,23 @@ func New(upstream *url.URL, a adapter.Adapter, sink event.Sink) *Gateway {
 			// The exchange header is the gateways' own: whatever the agent
 			// sent under it goes nowhere, and a vendor never gets it.
 			r.Out.Header.Del(ExchangeHeader)
-			if rl != nil && rl.Header != nil {
-				rl.Header(r.Out.Header)
+			ex, ok := r.In.Context().Value(exchangeKey{}).(*exchange)
+			switch {
+			case ok && ex.call.NoCredential:
+				// A call that goes with no credential: control adds none,
+				// and the agent's placeholder goes too.
+				for _, h := range credentialHeaders {
+					r.Out.Header.Del(h)
+				}
+			default:
+				if rl != nil && rl.Header != nil {
+					rl.Header(r.Out.Header)
+				}
+				if c := credOf(r.In.Context()); c != nil && c.header != nil {
+					c.header(r.Out.Header)
+				}
 			}
-			if c := credOf(r.In.Context()); c != nil && c.header != nil {
-				c.header(r.Out.Header)
-			}
-			if ex, ok := r.In.Context().Value(exchangeKey{}).(*exchange); ok && g.sendExchange && rl == nil {
+			if ok && g.sendExchange && rl == nil {
 				r.Out.Header.Set(ExchangeHeader, ex.id)
 			}
 		},
@@ -458,7 +473,7 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, session, runTurn
 		var c credCall
 		var refused string
 		defer g.holdThenRead(session, runTurn, func() {
-			if refused = g.unrecorded(r); refused != "" {
+			if refused = g.unrecorded(r); refused != "" || !g.Credentialed(r.Method, r.URL.Path) {
 				return
 			}
 			c.header, c.refuse = g.credential.Read(r)

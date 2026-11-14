@@ -194,6 +194,43 @@ func TestServiceCallIsRecordedByStatus(t *testing.T) {
 	}
 }
 
+// Claude Code's HEAD /api/hello goes to the vendor with no credential:
+// control reads none and adds none, the agent's placeholder is taken off,
+// and the call is recorded as vendor.called by status, never refused.
+func TestNoCredentialCallGoesBare(t *testing.T) {
+	for _, how := range []string{"relayed", "up"} {
+		var mu sync.Mutex
+		var got []string
+		vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			mu.Lock()
+			got = append(got, r.Method+" "+r.URL.Path+" "+r.Header.Get("Authorization")+"|"+r.Header.Get("X-Api-Key"))
+			mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+		}))
+		t.Cleanup(vendor.Close)
+		do, mem, g, reads := ruleGateway(t, how, anthropic.Adapter{}, vendor.URL)
+		status, _ := do("HEAD", "/api/hello", "")
+		if !g.Settle("s1", "t_1", 3*time.Second) {
+			t.Fatalf("%s: the turn did not settle", how)
+		}
+		if status != http.StatusOK {
+			t.Errorf("%s: status %d", how, status)
+		}
+		mu.Lock()
+		if len(got) != 1 || got[0] != "HEAD /api/hello |" {
+			t.Errorf("%s: the vendor got %q", how, got)
+		}
+		mu.Unlock()
+		evs := mem.Events()
+		if len(evs) != 1 || evs[0].Kind != event.VendorCalled || evs[0].Call != "HEAD /api/hello" || evs[0].Status != 200 || evs[0].Turn != "t_1" {
+			t.Errorf("%s: events %+v", how, evs)
+		}
+		if how == "up" && reads.Load() != 0 {
+			t.Errorf("up: the credential was read %d times", reads.Load())
+		}
+	}
+}
+
 // A reply in a format the adapter does not read is not passed on: the
 // agent gets 502, and the call is recorded as refused, with its
 // model.responded (or vendor.called) saying why.

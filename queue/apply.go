@@ -252,11 +252,19 @@ var ErrNotIsolated = errors.New("queue: the session does not run in an isolated 
 // ErrAllApplied: every change of the session is applied, or it has none.
 var ErrAllApplied = errors.New("queue: the session has no changes that are not applied")
 
+// ErrNoCopyYet: the session's first turn asked for an isolated copy and has
+// not ended, or ended without a workspace, so there is nothing to apply. The
+// isolation setting says whether the copy is isolated: none runs it in the
+// folder as it is.
+var ErrNoCopyYet = errors.New("queue: the session has no copy yet")
+
 // Preview makes the dry run (KindPreview) of the apply that an Apply of
 // the session's latest turn with changes would make: the same spec, from
 // planApply, on the runner of the folder's machine. turn is that turn. It
-// is ErrNotFound for a session the queue does not hold, ErrAllApplied for
-// one whose first turn has not ended, ErrNotIsolated,
+// is ErrNotFound for a session the queue does not hold; for one with no
+// workspace yet (its first turn has not ended, or ended without one),
+// ErrNotIsolated when that turn asked for the folder as it is, else
+// ErrNoCopyYet; ErrNotIsolated,
 // ErrSessionClosed, ErrAllApplied (with turn, when the session has one),
 // ErrApplyBusy while an apply of the session has not ended, and
 // ErrMachineOffline. Each preview is a new job: the folder may have changed
@@ -271,16 +279,24 @@ func (q *Queue) Preview(team, session string) (job Job, turn string, err error) 
 	switch {
 	case !ok:
 		// The queue writes a session's row when its first turn ends: a
-		// session whose first turn has not ended has nothing to apply yet.
+		// session whose first turn has not ended has nothing to apply yet,
+		// and is isolated as that turn asked.
 		var n int
 		if err := q.db.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND session = ? AND kind = 'turn'`,
 			team, session).Scan(&n); err != nil {
 			return Job{}, "", fmt.Errorf("queue: read session: %w", err)
 		}
-		if n > 0 {
-			return Job{}, "", ErrAllApplied
+		if n == 0 {
+			return Job{}, "", ErrNotFound
 		}
-		return Job{}, "", ErrNotFound
+		first, err := q.firstSpec(team, session)
+		if err != nil {
+			return Job{}, "", err
+		}
+		if first.Repo == "" && first.RepoRef == "" && !first.Isolate {
+			return Job{}, "", ErrNotIsolated
+		}
+		return Job{}, "", ErrNoCopyYet
 	case ws.Kind != WorkspaceCopy && ws.Kind != WorkspaceWorktree:
 		return Job{}, "", ErrNotIsolated
 	case ws.Closed != nil:
@@ -308,8 +324,39 @@ func (q *Queue) Preview(team, session string) (job Job, turn string, err error) 
 	} else if !ok {
 		return Job{}, turn, ErrMachineOffline
 	}
+	// A preview the API gave up on ended with nobody to read it.
+	if err := q.dropPreviews(team, `session = ? AND cancel = 1`, session); err != nil {
+		return Job{}, turn, err
+	}
 	job, _, err = q.create(team, KindPreview, "", p.spec, p.links, Limits{}, session)
 	return job, turn, err
+}
+
+// DropPreview removes a preview job of team that has ended, with its
+// attempts: its result holds up to 1 MiB of diffs, and only the one GET
+// that made it reads it. The API drops each preview once it has read it,
+// and Preview drops the ones the API gave up on, so the jobs table keeps
+// no finished preview.
+func (q *Queue) DropPreview(team, id string) error {
+	return q.dropPreviews(team, `id = ?`, id)
+}
+
+// dropPreviews removes team's ended preview jobs that match where (on
+// jobs, with one argument), and their attempts and attempt events.
+func (q *Queue) dropPreviews(team, where string, arg any) error {
+	jobs := `SELECT id FROM jobs WHERE team = ? AND kind = '` + KindPreview + `' AND ended IS NOT NULL AND ` + where
+	return q.tx(func(tx *sql.Tx) error {
+		for _, del := range []string{
+			`DELETE FROM attempt_events WHERE attempt IN (SELECT id FROM attempts WHERE job IN (` + jobs + `))`,
+			`DELETE FROM attempts WHERE job IN (` + jobs + `)`,
+			`DELETE FROM jobs WHERE id IN (` + jobs + `)`,
+		} {
+			if _, err := tx.Exec(del, team, arg); err != nil {
+				return fmt.Errorf("queue: drop previews: %w", err)
+			}
+		}
+		return nil
+	})
 }
 
 // firstSpec is the spec of the session's first turn job: the folder it

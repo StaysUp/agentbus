@@ -75,6 +75,14 @@ func (g *Gateway) Records(method, path string) bool {
 	return ok
 }
 
+// Credentialed says whether a call of method on path, one the adapter
+// records, gets a credential of control's: every one but a call that goes
+// with none (adapter.Call NoCredential).
+func (g *Gateway) Credentialed(method, path string) bool {
+	c, ok := adapter.Find(g.adapter, method, path)
+	return ok && !c.NoCredential
+}
+
 // Names says whether exchange is an id this gateway gave, so a relay never
 // lets a runner name a call with an id of control's own.
 func (g *Gateway) Names(exchange string) bool { return strings.HasPrefix(exchange, "x-"+g.run+"-") }

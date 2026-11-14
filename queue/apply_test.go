@@ -40,6 +40,44 @@ func TestApplyResultFit(t *testing.T) {
 	}
 }
 
+// A preview cut to fit drops each diff with its line counts, then the files
+// no conflict names, then conflicts with their files: every conflict kept
+// has its file.
+func TestPreviewResultFit(t *testing.T) {
+	diff := strings.Repeat("+line\n", 200)
+	p := PreviewResult{}
+	for i := range 2000 {
+		path := fmt.Sprintf("folder/with/a/long/name/file-%05d.txt", i)
+		p.Files = append(p.Files, PreviewFile{Path: path, Change: "modified", Added: 200, Removed: 1, Diff: &diff})
+		if i%3 == 0 {
+			p.Conflicts = append(p.Conflicts, ApplyConflict{Path: path, Why: "changed"})
+		}
+	}
+	p.Count = len(p.Files)
+	for _, max := range []int{256 << 10, 64 << 10, 8 << 10} {
+		c := p
+		c.Files = append([]PreviewFile(nil), p.Files...)
+		c.Conflicts = append([]ApplyConflict(nil), p.Conflicts...)
+		c.Fit(max)
+		b, _ := json.Marshal(c)
+		if len(b) > max || !c.Truncated || !c.DiffsCut || c.Count != 2000 || len(c.Conflicts) == 0 {
+			t.Fatalf("max %d: %d bytes, truncated %v, cut %v, count %d, conflicts %d", max, len(b), c.Truncated, c.DiffsCut, c.Count, len(c.Conflicts))
+		}
+		files := map[string]bool{}
+		for _, f := range c.Files {
+			files[f.Path] = true
+			if f.Diff != nil || f.Added != 0 || f.Removed != 0 || !f.DiffLeftOut {
+				t.Fatalf("max %d: a cut diff kept its counts: %+v", max, f)
+			}
+		}
+		for _, x := range c.Conflicts {
+			if !files[x.Path] {
+				t.Fatalf("max %d: conflict %s has no file", max, x.Path)
+			}
+		}
+	}
+}
+
 // run takes the next job on r and finishes it with res: the session's
 // first turn also records its copy.
 func run(t *testing.T, q *Queue, r Runner, res Result) Job {
@@ -434,4 +472,47 @@ func loseLease(t *testing.T, q *Queue, c *clock, rn Runner, first Job) {
 		t.Fatal(err)
 	}
 	c.add(lease + time.Second)
+}
+
+// A preview's job goes once read (DropPreview), never before it ends, and
+// one the API gave up on (cancelled) goes with the session's next preview:
+// the jobs table keeps no finished preview.
+func TestDropPreviews(t *testing.T) {
+	q, _ := open(t)
+	mk := func(session string) Job {
+		t.Helper()
+		j, _, err := q.create(DefaultTeam, KindPreview, "", Spec{Session: session}, Links{}, Limits{}, session)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return j
+	}
+	exists := func(j Job) bool {
+		_, err := q.Get(DefaultTeam, j.ID)
+		return err == nil
+	}
+	open, read, gaveUp, other := mk("s1"), mk("s1"), mk("s1"), mk("s2")
+	for _, j := range []Job{read, gaveUp, other} {
+		if _, err := q.Cancel(DefaultTeam, j.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := q.DropPreview(DefaultTeam, open.ID); err != nil || !exists(open) {
+		t.Fatalf("a preview not ended was dropped: %v", err)
+	}
+	if err := q.DropPreview(DefaultTeam, read.ID); err != nil || exists(read) {
+		t.Fatalf("a read preview stayed: %v", err)
+	}
+	if err := q.dropPreviews(DefaultTeam, `session = ? AND cancel = 1`, "s1"); err != nil {
+		t.Fatal(err)
+	}
+	if exists(gaveUp) || !exists(open) || !exists(other) {
+		t.Fatalf("after s1's next preview: gave up %v, open %v, s2's %v", exists(gaveUp), exists(open), exists(other))
+	}
+	// A turn job is never a preview's to drop.
+	turn := job(t, q, "")
+	q.Cancel(DefaultTeam, turn.ID)
+	if err := q.DropPreview(DefaultTeam, turn.ID); err != nil || !exists(turn) {
+		t.Fatalf("a turn job was dropped: %v", err)
+	}
 }
