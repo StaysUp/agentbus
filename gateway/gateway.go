@@ -234,6 +234,9 @@ type exchange struct {
 	// name is the call's method and vendor path, for call.refused and
 	// vendor.called (callName).
 	name string
+	// model is the model the call's path names (adapter.Call.Model), or
+	// "": the record's model for the call when its path names one.
+	model string
 
 	// unknowns keeps each schema.unexpected shape once per exchange, and at
 	// most adapter.MaxUnexpected, across the request and the reply.
@@ -514,6 +517,7 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, session, runTurn
 		checked: checked,
 		call:    call,
 		name:    callName(r),
+		model:   call.Model(r.URL.Path),
 	}
 	if runTurn != "" {
 		g.track(ex, session, runTurn)
@@ -925,6 +929,17 @@ func (g *Gateway) emit(ex *exchange, evs []event.Event) {
 				continue
 			}
 			e.Unexpected = &x
+		}
+		// One rule for every adapter: a call whose path names its model
+		// (adapter.Call.Model) is recorded with that model, which is the
+		// one the vendor runs. A reply that names its own model version
+		// keeps it.
+		switch {
+		case ex.model == "":
+		case e.Kind == event.ModelRequested:
+			e.Model = ex.model
+		case e.Kind == event.ModelResponded && e.Model == "":
+			e.Model = ex.model
 		}
 		e.ID = fmt.Sprintf("e-%s-%d", g.run, g.seq.Add(1))
 		e.Time = g.now()

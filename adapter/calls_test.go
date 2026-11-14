@@ -95,3 +95,28 @@ func TestCallReads(t *testing.T) {
 		}
 	}
 }
+
+// A call's path names its model only where its Calls entry has a "*"
+// segment: the name that segment matched.
+func TestCallModelFromPath(t *testing.T) {
+	for _, c := range []struct {
+		a      adapter.Adapter
+		method string
+		path   string
+		want   string
+	}{
+		{gemini.Adapter{}, "POST", "/v1beta/models/gemini-3.1-pro-preview:streamGenerateContent", "gemini-3.1-pro-preview"},
+		{gemini.Adapter{}, "POST", "/v1beta/models/gemini-4-argon:generateContent", "gemini-4-argon"},
+		{gemini.Adapter{}, "POST", "/v1internal:streamGenerateContent", ""},
+		{anthropic.Adapter{}, "POST", "/v1/messages", ""},
+		{openai.Adapter{}, "POST", "/v1/responses", ""},
+	} {
+		call, ok := adapter.Find(c.a, c.method, c.path)
+		if !ok || call.Model(c.path) != c.want {
+			t.Errorf("%s %s: found %v model %q, want %q", c.method, c.path, ok, call.Model(c.path), c.want)
+		}
+	}
+	if (adapter.Call{Path: "/v1beta/models/*:generateContent"}).Model("/v1/messages") != "" {
+		t.Error("a path that is not the call's named a model")
+	}
+}

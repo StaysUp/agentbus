@@ -61,6 +61,28 @@ func (c Call) matches(method, path string) bool {
 	return true
 }
 
+// Model is the model a call of c on path names in its path: what the "*"
+// segment of c.Path matched, such as gemini-4-argon in
+// /v1beta/models/gemini-4-argon:streamGenerateContent. "" when c's path
+// names no model, or path is not c's. The Gemini API names the model only
+// there, never in the body.
+func (c Call) Model(path string) string {
+	want, got := strings.Split(c.Path, "/"), strings.Split(path, "/")
+	if len(want) != len(got) {
+		return ""
+	}
+	for i, w := range want {
+		rest, wild := strings.CutPrefix(w, "*")
+		if !wild {
+			continue
+		}
+		if name, ok := strings.CutSuffix(got[i], rest); ok && segment.MatchString(name) {
+			return name
+		}
+	}
+	return ""
+}
+
 // Admits says whether rawQuery is a query c may carry: every key one c
 // lists, every value one it lists for that key. A query that does not
 // parse is not.
