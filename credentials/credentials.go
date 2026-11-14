@@ -15,6 +15,7 @@ package credentials
 import (
 	"errors"
 	"strings"
+	"time"
 )
 
 // Access kinds, as harness names them. Kept as strings here so this package
@@ -43,7 +44,14 @@ type Cred struct {
 	// for Anthropic's API. Empty: Authorization, as "Bearer <Token>".
 	Header  string
 	Headers map[string]string
+	// Connection names the connect a subscription's token came from
+	// (ConnectionOf its connected_at), the same across its renewals and
+	// new with each connect; empty for a key. Never a value of the token.
+	Connection string
 }
+
+// ConnectionOf names a subscription's connect by when it was connected.
+func ConnectionOf(connectedAt time.Time) string { return connectedAt.UTC().Format(time.RFC3339Nano) }
 
 // Source gives the credential for a need. A credential that cannot be given
 // is a *Missing, whose text says what to do and never quotes a value.

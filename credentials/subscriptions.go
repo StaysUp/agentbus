@@ -290,7 +290,7 @@ func (s *Subscriptions) Credential(n Need) (Cred, error) {
 	if !s.now().Before(k.ExpiresAt) {
 		return Cred{}, &Missing{Why: "the " + n.Harness + " subscription's token has expired; connect it again in Settings"}
 	}
-	c := Cred{Token: k.Token}
+	c := Cred{Token: k.Token, Connection: ConnectionOf(k.ConnectedAt)}
 	if h := s.OAuth[n.Harness].AccountHeader; h != "" && k.Account != "" {
 		c.Headers = map[string]string{h: k.Account}
 	}

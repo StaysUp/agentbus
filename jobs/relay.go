@@ -151,7 +151,7 @@ func (s *Server) relay(w http.ResponseWriter, r *http.Request) {
 	// take a while.
 	rl.Prepare = func(rl *gateway.Relayed) {
 		rl.Exchange = s.exchangeOf(r, session, j.Turn)
-		rl.Header, rl.Refuse = s.turnCredential(j, up)
+		rl.Header, rl.Signin, rl.Refuse = s.turnCredential(j, up)
 	}
 	g.ServeRelayed(w, r, rl)
 }
@@ -176,13 +176,20 @@ const (
 )
 
 // turnCredential is the credential for one call of j's turn on up: what
-// sets it on the request to the vendor, or the refusal answered in the
-// vendor's place. The one answer, whether the call came over the relay
-// from a runner or from a gateway of agentbus up in this process (Local).
-func (s *Server) turnCredential(j queue.Job, up Upstream) (func(http.Header), *gateway.Refusal) {
+// sets it on the request to the vendor and, for a subscription, which one
+// and which connect of it (the gateway stores the reply's plan usage under
+// them); or the
+// refusal answered in the vendor's place. The one answer, whether the call
+// came over the relay from a runner or from a gateway of agentbus up in
+// this process (Local).
+func (s *Server) turnCredential(j queue.Job, up Upstream) (func(http.Header), gateway.Signin, *gateway.Refusal) {
 	cred, status, why := s.credential(j, up)
 	if why != "" {
-		return nil, refusal(status, why)
+		return nil, gateway.Signin{}, refusal(status, why)
+	}
+	var signin gateway.Signin
+	if up.Access == credentials.AccessSubscription {
+		signin = gateway.Signin{Subscription: up.Harness, Connection: cred.Connection}
 	}
 	return func(h http.Header) {
 		// The agent's placeholder is in one of these: it goes, whichever
@@ -198,7 +205,7 @@ func (s *Server) turnCredential(j queue.Job, up Upstream) (func(http.Header), *g
 		for k, v := range cred.Headers {
 			h.Set(k, v)
 		}
-	}, nil
+	}, signin, nil
 }
 
 func refusal(status int, why string) *gateway.Refusal {
@@ -227,14 +234,14 @@ func (s *Server) Local(name string) gateway.Credential {
 			}
 			return nil
 		},
-		Read: func(r *http.Request) (func(http.Header), *gateway.Refusal) {
+		Read: func(r *http.Request) (func(http.Header), gateway.Signin, *gateway.Refusal) {
 			if !ok || !strings.HasPrefix(strings.TrimPrefix(r.URL.Path, "/"), up.Under) {
-				return nil, refusal(http.StatusNotFound, noRelay)
+				return nil, gateway.Signin{}, refusal(http.StatusNotFound, noRelay)
 			}
 			j, _, found := s.turnJob(callToken(r))
 			if !found {
 				// It ended since Turn let the call through.
-				return nil, refusal(http.StatusUnauthorized, noTurn)
+				return nil, gateway.Signin{}, refusal(http.StatusUnauthorized, noTurn)
 			}
 			return s.turnCredential(j, up)
 		},

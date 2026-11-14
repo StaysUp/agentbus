@@ -361,7 +361,7 @@ func ruleHandler(how string, g *Gateway, reads *atomic.Int64) http.Handler {
 	}
 	g.SetCredential(Credential{
 		Turn: func(*http.Request, string, string) *Refusal { return nil },
-		Read: func(*http.Request) (func(http.Header), *Refusal) { reads.Add(1); return set, nil },
+		Read: func(*http.Request) (func(http.Header), Signin, *Refusal) { reads.Add(1); return set, Signin{}, nil },
 	})
 	return g
 }

@@ -44,6 +44,9 @@ type Relayed struct {
 	// Header edits the request that goes to the vendor: it adds the
 	// credential. It never reads a value into an event or a log.
 	Header func(http.Header)
+	// Signin is the subscription Header adds, or zero for any other
+	// credential: the reply's plan usage is stored under it (plan.go).
+	Signin Signin
 	// Refuse, when set, is the answer in the vendor's place: nothing goes to
 	// the vendor, and the call is recorded with this as its reply.
 	Refuse *Refusal
@@ -192,10 +195,23 @@ type Credential struct {
 	// or rewritten, and the call is recorded nowhere.
 	Turn func(r *http.Request, session, turn string) *Refusal
 	// Read is the credential for a call Turn let through: what sets it on
-	// the request to the vendor, or the refusal answered in the vendor's
-	// place, which is recorded with the call. It may be slow (a renewal),
-	// so it is read with the turn held open (holdThenRead).
-	Read func(r *http.Request) (header func(http.Header), refuse *Refusal)
+	// the request to the vendor, the subscription that is (zero for any
+	// other credential; plan.go), or the refusal answered in the
+	// vendor's place, which is recorded with the call. It may be slow (a
+	// renewal), so it is read with the turn held open (holdThenRead).
+	Read func(r *http.Request) (header func(http.Header), signin Signin, refuse *Refusal)
+}
+
+// Signin is the subscription of control's a call's credential is, for its
+// reply's plan usage (plan.go). The zero value is no subscription: a key,
+// or no credential of control's.
+type Signin struct {
+	// Subscription is the harness whose subscription it is, such as claude.
+	Subscription string
+	// Connection names the connect the credential came from
+	// (credentials.Cred.Connection): a reading is shown only while that
+	// connect is the subscription's current one.
+	Connection string
 }
 
 // SetCredential makes every call get its credential from c: the agent's
@@ -207,6 +223,7 @@ type credKey struct{}
 // credCall is what a call's Credential gave.
 type credCall struct {
 	header func(http.Header)
+	signin Signin
 	refuse *Refusal
 }
 

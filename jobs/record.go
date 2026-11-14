@@ -212,7 +212,10 @@ func (s *Server) record(w http.ResponseWriter, r *http.Request, rn queue.Runner)
 		}
 		// What a turn changed and what was applied are control's own
 		// record of a job's end (outcome.go), never a runner's.
-		if e.Kind == event.TurnChanged || e.Kind == event.TurnApplied {
+		// Plan usage is control's own gateway's reading of a subscription
+		// control holds, and is shown for that subscription to everyone:
+		// never a runner's (gateway/plan.go).
+		if e.Kind == event.TurnChanged || e.Kind == event.TurnApplied || e.Kind == event.PlanUsage {
 			fail(w, http.StatusBadRequest, string(e.Kind)+" is control's own event, not a runner's")
 			return
 		}
