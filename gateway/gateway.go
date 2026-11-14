@@ -9,9 +9,11 @@
 // model call is read by the vendor's adapter and turned into events, after the
 // reply has been handed on, so events never slow the agent down.
 //
-// No header value reaches an event, an error message or a log, with one
-// exception: the User-Agent's first token, and only when it has the shape
-// name/version, which names the harness. Error messages use fixed wording,
+// No header value reaches an event, an error message or a log, with two
+// exceptions: the User-Agent's first token, and only when it has the shape
+// name/version, which names the harness; and the vendor's plan usage, read
+// from a fixed list of reply headers into numbers, times and one word
+// (plan.go). Error messages use fixed wording,
 // because Go's own error text can quote the header that caused it.
 //
 // net/http also writes some messages to Go's global logger, and those can quote
@@ -58,6 +60,7 @@ type Gateway struct {
 	rewrite Rewriter   // nil unless SetRewriter was called
 	guard   Guard      // nil unless SetGuard was called
 	refused refusals   // which rule refused each call (guard.go)
+	plans   planSeen   // the plan usage last stored (plan.go)
 	prefix  string     // cut from the vendor path before anything reads it (SetPrefix)
 	// sendExchange: each call's exchange goes upstream in ExchangeHeader
 	// (SendExchange).
@@ -252,6 +255,9 @@ type exchange struct {
 	// model is the model the call's path names (adapter.Call.Model), or
 	// "": the record's model for the call when its path names one.
 	model string
+	// signin: the subscription of control's the call carries, or zero
+	// (plan.go).
+	signin Signin
 
 	// unknowns keeps each schema.unexpected shape once per exchange, and at
 	// most adapter.MaxUnexpected, across the request and the reply.
@@ -476,7 +482,7 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, session, runTurn
 			if refused = g.unrecorded(r); refused != "" || !g.Credentialed(r.Method, r.URL.Path) {
 				return
 			}
-			c.header, c.refuse = g.credential.Read(r)
+			c.header, c.signin, c.refuse = g.credential.Read(r)
 		})()
 		if refused != "" {
 			g.refuseCall(w, r, session, runTurn, false, refused)
@@ -533,6 +539,11 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, session, runTurn
 		call:    call,
 		name:    callName(r),
 		model:   call.Model(r.URL.Path),
+	}
+	if rl != nil {
+		ex.signin = rl.Signin
+	} else if c := credOf(r.Context()); c != nil {
+		ex.signin = c.signin
 	}
 	if runTurn != "" {
 		g.track(ex, session, runTurn)
@@ -649,6 +660,7 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 		g.serviceReplied(ex, resp.StatusCode)
 		return nil
 	}
+	g.readPlan(ex, resp.Header)
 	status, header := resp.StatusCode, resp.Header.Clone()
 	// The guard reads the reply as the vendor sent it. The vendor is asked
 	// for no encoding (Accept-Encoding is dropped); a reply compressed anyway
@@ -1081,6 +1093,9 @@ func size(e event.Event) int {
 	}
 	for _, t := range e.ToolsOffered {
 		n += 16 + len(t)
+	}
+	if p := e.Plan; p != nil {
+		n += len(p.Subscription) + len(p.Connection) + len(p.Window) + len(p.Status)
 	}
 	if u := e.Usage; u != nil {
 		n += len(u.ServiceTier) + len(u.Speed) + len(u.InferenceGeo)

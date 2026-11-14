@@ -77,27 +77,46 @@ func TestAPIKeyToItsOwnVendor(t *testing.T) {
 	claudeJob := queue.Job{Spec: queue.Spec{Harness: "claude", Access: "api"}}
 	anth := Upstream{Access: credentials.AccessAPI, Harness: "claude"}
 	oai := Upstream{Access: credentials.AccessAPI, Harness: "codex"}
-	set, refused := s.turnCredential(claudeJob, anth)
+	set, sub, refused := s.turnCredential(claudeJob, anth)
 	if refused != nil {
 		t.Fatalf("refused: %s", refused.Body)
+	}
+	// A key is no subscription: its reply's plan usage is stored nowhere.
+	if sub != (gateway.Signin{}) {
+		t.Fatalf("an API key named subscription %+v", sub)
 	}
 	h := http.Header{"Authorization": {"Bearer abr_placeholder"}, "X-Goog-Api-Key": {"abr_placeholder"}}
 	set(h)
 	if h.Get("X-Api-Key") != "fake-anth" || h.Get("Authorization") != "" || h.Get("X-Goog-Api-Key") != "" {
 		t.Fatalf("headers: %v", h)
 	}
-	if _, refused := s.turnCredential(claudeJob, oai); refused == nil || refused.Status != http.StatusForbidden {
+	if _, _, refused := s.turnCredential(claudeJob, oai); refused == nil || refused.Status != http.StatusForbidden {
 		t.Fatal("claude's key went to OpenAI's path")
 	}
 	// An API-key agent's call on a subscription's path gets nothing either.
-	if _, refused := s.turnCredential(claudeJob, Upstream{Access: credentials.AccessSubscription, Harness: "claude"}); refused == nil {
+	if _, _, refused := s.turnCredential(claudeJob, Upstream{Access: credentials.AccessSubscription, Harness: "claude"}); refused == nil {
 		t.Fatal("an API-key agent got the subscription")
 	}
-	set, _ = s.turnCredential(queue.Job{Spec: queue.Spec{Harness: "codex", Access: "api"}}, oai)
+	set, _, _ = s.turnCredential(queue.Job{Spec: queue.Spec{Harness: "codex", Access: "api"}}, oai)
 	h = http.Header{"Authorization": {"Bearer abr_placeholder"}}
 	set(h)
 	if h.Get("Authorization") != "Bearer fake-oai" {
 		t.Fatalf("codex headers: %v", h)
+	}
+}
+
+// A subscription's credential names its harness and its connect, so the
+// gateway stores the reply's plan usage under that sign-in.
+func TestSubscriptionCredentialNamesItsHarness(t *testing.T) {
+	src := credentials.Plug{credentials.AccessSubscription: fixedKey{"codex": {Token: "fake-chatgpt", Connection: "2026-11-14T09:00:00Z"}}}
+	s := &Server{cfg: Config{Credentials: src}}
+	job := queue.Job{Spec: queue.Spec{Harness: "codex", Access: "subscription"}}
+	_, sub, refused := s.turnCredential(job, Upstream{Access: credentials.AccessSubscription, Harness: "codex"})
+	if refused != nil {
+		t.Fatalf("refused: %s", refused.Body)
+	}
+	if sub != (gateway.Signin{Subscription: "codex", Connection: "2026-11-14T09:00:00Z"}) {
+		t.Fatalf("signin %+v, want codex and its connect", sub)
 	}
 }
 

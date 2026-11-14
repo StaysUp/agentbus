@@ -50,8 +50,10 @@ may hold other projects' Go code. Go's own tools skip folders that start with `_
 ## Rules of the code
 
 - **Headers never reach an event, a log or a file.** They carry the user's sign-in. Adapters get
-  bodies only, and `gateway/gateway_test.go` asserts it. One exception: the User-Agent's first
-  token, when shaped `name/version`, becomes the event's `client`.
+  bodies only, and `gateway/gateway_test.go` asserts it. Two exceptions: the User-Agent's first
+  token, when shaped `name/version`, becomes the event's `client`; and a reply's plan usage, read
+  from the fixed list of header names in `gateway/plan.go` into numbers, times and one word, only
+  on a call that carried a subscription of control's. A new name goes on that list, never a prefix.
 - **Error text is fixed wording.** Never pass Go's own error message on: it can quote a header. A
   binary that embeds the gateway sends Go's global logger nowhere, since net/http writes to it.
 - **The sign-in never leaves the user's machine.** The service listens on loopback by default.

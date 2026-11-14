@@ -108,6 +108,12 @@ const (
 	// ended. Applied says which turns, who asked, how it ended and the files.
 	TurnChanged Kind = "turn.changed"
 	TurnApplied Kind = "turn.applied"
+
+	// PlanUsage: how much of a subscription's plan is used in one of its
+	// windows, as the vendor said in a model reply's headers (gateway/plan.go).
+	// Plan holds the reading. Stored when the reading changes, and again
+	// at most every few minutes while it holds. No session.
+	PlanUsage Kind = "plan.usage"
 )
 
 // KindInfo says what one framework kind means and which fields it always
@@ -156,6 +162,9 @@ var Kinds = []KindInfo{
 	{SettingsChanged, "The settings changed, through the API or by the one-time import of the settings files: setting is permissions, instructions or agents; keys names what changed (a policy key such as limits.max_depth, text for the instructions, an agent id or id.field such as a_1234.model); settings_version is the settings version the change made. On an import, file is the file the setting came from. A build that changed a default writes the old value into the person's policy on its first start: a change of permissions with no file, whose keys are those defaults. Names only: never a value, so never a secret. The change and this event are stored together: the settings database keeps the event until the record has it. No session.", []string{"setting", "settings_version"}},
 	{TurnChanged, "What the turn changed in its session's copy, or in the folder it ran in, from its start to its end. Stored by control once it accepts the turn's end, at most once per turn: changes holds the changed files (path, change, size, sha256 at the end, sha256_before at the start) and, for small text files, each one's unified diff (at most 1 MiB for the whole turn; diffs_cut says some were left out) and content. A binary file has its path, size and hashes only. The file list can be cut: truncated says it is not complete, because files were left out (past 1,000, or when the whole was too large to send; count still counts them) or because the copy held more files than a checkpoint keeps (then count misses some too). GET /api/v0/turns/{id}/diff reads it. Absent for a turn that ran in no folder, and for turns from before 0.5, whose changes are in their job.", []string{"session", "turn", "changes"}},
 	{TurnApplied, "An apply of the session's turns to the person's folder ended (POST /api/v0/turns/{id}/apply): turn is the turn asked for, and applied holds every turn whose changes it carried, who asked (by: the person or an agent, never a token), the result (applied, refused or failed), the files written or removed, and on a refusal the files that refused it, each with why. Stored once per apply. Show a refusal as a warning.", []string{"session", "turn", "applied"}},
+	{PlanUsage, "How much of a subscription's plan is used in one of its windows, as the vendor said in the headers of a model reply that carried control's credential for that subscription: plan holds the subscription (the harness, such as claude), the connect its credential came from, the window, its length in minutes, the percent used, when it resets and the vendor's status word. " +
+		"exchange names the call it was read from. Stored when the reading changes, and again every 10 minutes at most while calls keep it the same. " +
+		"The latest per subscription, connect and window is kept; GET /api/v0/subscriptions shows those of the subscription's current connect. Only control's own gateway stores it: a runner's record is refused it. Read from a fixed list of the vendor's usage headers only; no other header. No session.", []string{"plan"}},
 	{SessionRenamed, "The session was given a name with PATCH /api/v0/sessions/{id}: title is the new name, old_title the one it had before (absent when it had none). The latest names the session in GET /api/v0/sessions; earlier names stay in the record.", []string{"session", "title"}},
 }
 
@@ -327,6 +336,8 @@ type Event struct {
 	Changes *TurnChanges `json:"changes,omitempty" doc:"On turn.changed: every file the turn added, modified or deleted, with diffs."`
 	// Applied, only on turn.applied: what the apply did.
 	Applied *Applied `json:"applied,omitempty" doc:"On turn.applied: the turns applied, who asked, the result and the files."`
+	// Plan, only on plan.usage: the reading.
+	Plan *Plan `json:"plan,omitempty" doc:"On plan.usage: how much of the subscription's plan is used in one window."`
 
 	// ReplayFrom, only on turn.started: the earlier turn of the session whose
 	// history the gateway puts in front of every model request of this turn,
@@ -422,6 +433,20 @@ type ChangedFile struct {
 	Diff         *string `json:"diff,omitempty" doc:"The file's unified diff, from the turn's start to its end, for small text files whose earlier content is kept."`
 	DiffLeftOut  bool    `json:"diff_left_out,omitempty" doc:"The content changed and no diff is here: a binary file, a link, a file over 256 KiB, past the 1 MiB of all diffs, or its earlier content is no longer kept."`
 	Content      *string `json:"content,omitempty" doc:"The whole file at the end, when it is small UTF-8 text."`
+}
+
+// Plan is one reading of a subscription's plan usage in one window, from a
+// model reply's headers.
+type Plan struct {
+	Subscription string `json:"subscription" doc:"The subscription the call used: the harness whose sign-in control added, such as claude or codex."`
+	Connection   string `json:"connection,omitempty" doc:"Names the connect of the subscription the call's credential came from: its connected_at. A reading is shown only while that connect is current, so a reply on an earlier sign-in never shows under a newer one."`
+	Window       string `json:"window" doc:"The vendor's name for the window: 5h or 7d for claude, primary or secondary for codex."`
+	// WindowMinutes is the window's length: fixed for claude's named
+	// windows, as codex says for its own.
+	WindowMinutes int        `json:"window_minutes,omitempty" doc:"The window's length in minutes, such as 300 (5 hours) or 10080 (a week). Absent when the vendor did not say."`
+	UsedPercent   float64    `json:"used_percent" doc:"How much of the window is used, 0 to 100, as the vendor says. It can pass 100 when the plan is over its limit."`
+	ResetsAt      *time.Time `json:"resets_at,omitempty" doc:"When the window resets, as the vendor says. Absent when it did not say."`
+	Status        string     `json:"status,omitempty" doc:"The vendor's own word for the window, such as allowed or rejected (claude). Absent when it sent none."`
 }
 
 // Applied is what one apply did (turn.applied).

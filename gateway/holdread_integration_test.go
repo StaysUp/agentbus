@@ -38,9 +38,9 @@ func TestCallHoldsItsTurnOpenWhileItReadsItsCredential(t *testing.T) {
 		"credential": func(g *Gateway, read func()) http.Handler {
 			g.SetCredential(Credential{
 				Turn: func(*http.Request, string, string) *Refusal { return nil },
-				Read: func(*http.Request) (func(http.Header), *Refusal) {
+				Read: func(*http.Request) (func(http.Header), Signin, *Refusal) {
 					read()
-					return func(h http.Header) { h.Set("Authorization", "Bearer fake-for-tests") }, nil
+					return func(h http.Header) { h.Set("Authorization", "Bearer fake-for-tests") }, Signin{}, nil
 				}})
 			return g
 		},
@@ -105,7 +105,7 @@ func TestRefusedTurnIsRecordedNowhere(t *testing.T) {
 		Turn: func(*http.Request, string, string) *Refusal {
 			return &Refusal{Status: http.StatusForbidden, ContentType: "application/json", Body: []byte(`{"error":"another turn's"}`)}
 		},
-		Read: func(*http.Request) (func(http.Header), *Refusal) { read++; return nil, nil }})
+		Read: func(*http.Request) (func(http.Header), Signin, *Refusal) { read++; return nil, Signin{}, nil }})
 	srv := httptest.NewServer(g)
 	t.Cleanup(srv.Close)
 	resp, err := http.Post(srv.URL+"/s/other/t/t_9/v1/messages", "application/json",

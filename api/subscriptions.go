@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/credentials"
+	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/harness"
 )
 
@@ -43,6 +44,18 @@ type SubscriptionState struct {
 	Expired     bool              `json:"expired" doc:"The sign-in cannot be used: its time is up, or the vendor refused to renew it. Connect again."`
 	Error       string            `json:"error,omitempty" doc:"Why it cannot be used, when it cannot."`
 	Connect     *credentials.View `json:"connect,omitempty" doc:"The latest connect, while control runs. Its links and one-time code are shown only while it runs."`
+	Usage       []PlanReading     `json:"usage,omitempty" doc:"How much of the plan is used, per window, as the vendor said on the latest model reply that carried this subscription's current connect (plan.usage). Shortest window first. Absent until such a reply on this connect: claude and codex say it on each reply; other harnesses do not."`
+}
+
+// PlanReading is one window of a subscription's plan, from its latest
+// plan.usage.
+type PlanReading struct {
+	Window        string     `json:"window" doc:"The vendor's name for the window: 5h or 7d for claude, primary or secondary for codex."`
+	WindowMinutes int        `json:"window_minutes,omitempty" doc:"The window's length in minutes, such as 300 (5 hours) or 10080 (a week). Absent when the vendor did not say."`
+	UsedPercent   float64    `json:"used_percent" doc:"How much of the window is used, 0 to 100. It can pass 100 when the plan is over its limit."`
+	ResetsAt      *time.Time `json:"resets_at,omitempty" doc:"When the window resets, as the vendor says."`
+	Status        string     `json:"status,omitempty" doc:"The vendor's own word for the window, such as allowed or rejected (claude)."`
+	ReadAt        time.Time  `json:"read_at" doc:"When it was read. A reading is stored when it changes, and again every 10 minutes at most while calls keep it the same, so an older one means no call used the subscription since."`
 }
 
 // ConnectInput is the body of POST /api/v0/subscriptions/{id}/connect/input.
@@ -57,7 +70,7 @@ var subscriptionRoutes = []route{
 		tag:     "Settings",
 		summary: "List subscriptions",
 		doc: "The person's own subscriptions that control can add to the model calls of agents on their runners, which hold no sign-in: " +
-			"for each harness, whether it is connected and until when. A connected one is used for every turn, on one machine (agentbus up) as on every approved runner; a turn whose harness is not connected is refused with \"connect your <harness> subscription in Settings\".",
+			"for each harness, whether it is connected and until when, and how much of its plan is used (usage). A connected one is used for every turn, on one machine (agentbus up) as on every approved runner; a turn whose harness is not connected is refused with \"connect your <harness> subscription in Settings\".",
 		replies: []reply{ok(200, SubscriptionList{}, "The subscriptions."), fail(404, noSubscriptions)},
 		serve:   plain((*API).listSubscriptions)},
 	{method: "POST", path: "/api/v0/subscriptions/{id}/connect", op: "connectSubscription",
@@ -252,6 +265,7 @@ func (a *API) listSubscriptions(w http.ResponseWriter, r *http.Request) {
 		names = append(names, h)
 	}
 	sort.Strings(names)
+	plans := a.planUsage()
 	for _, h := range names {
 		st, err := m.Store.Status(h)
 		if err != nil {
@@ -261,6 +275,9 @@ func (a *API) listSubscriptions(w http.ResponseWriter, r *http.Request) {
 			Renews: st.Renews, Expired: st.Expired, Error: st.Error}
 		if v, ok := m.View(h); ok {
 			s.Connect = &v
+		}
+		if st.Connected {
+			s.Usage = usageOf(plans, h, credentials.ConnectionOf(*st.ConnectedAt))
 		}
 		out.Subscriptions = append(out.Subscriptions, s)
 	}
@@ -356,4 +373,41 @@ func (a *API) disconnectSubscription(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// planUsage is the latest plan.usage per vendor, subscription and window.
+// A record that cannot be read shows no usage: the listing still answers.
+func (a *API) planUsage() []event.Event {
+	if a.cfg.Store == nil {
+		return nil
+	}
+	evs, err := a.cfg.Store.PlanUsage()
+	if err != nil {
+		return nil
+	}
+	return evs
+}
+
+// usageOf is harness's readings of its current connect among plans,
+// shortest window first. A reading of an earlier connect is left out, even
+// one stored after the new connect (its call was on the way): it may be
+// another account's.
+func usageOf(plans []event.Event, harness, connection string) []PlanReading {
+	var out []PlanReading
+	for _, e := range plans {
+		p := e.Plan
+		if p.Subscription != harness || p.Connection != connection {
+			continue
+		}
+		out = append(out, PlanReading{Window: p.Window, WindowMinutes: p.WindowMinutes, UsedPercent: p.UsedPercent,
+			ResetsAt: p.ResetsAt, Status: p.Status, ReadAt: e.Time})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		mi, mj := out[i].WindowMinutes, out[j].WindowMinutes
+		if (mi == 0) != (mj == 0) {
+			return mj == 0
+		}
+		return mi < mj
+	})
+	return out
 }
