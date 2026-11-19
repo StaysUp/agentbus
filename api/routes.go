@@ -375,29 +375,29 @@ var routes = slices.Concat([]route{
 			{name: "before", doc: "The previous page's next_before: it names that page's last session, and this page is the sessions after it.", integer: true, min: 1},
 			{name: "limit", doc: "Sessions per page. 100 when absent.", integer: true, min: 1, max: maxTurnLimit},
 			{name: "store", doc: "The first page's store, to pin later pages to the same snapshot. With after."},
-			{name: "after", doc: "The first page's seq, to pin later pages to the same snapshot. With store.", integer: true, min: 0}},
+			{name: "after", doc: "The first page's seq, to pin later pages to the same snapshot. With store.", integer: true, min: 0},
+			{name: "archived", doc: "archived=true also lists archived sessions (hidden by default). Any other value, or absent, leaves them out; nothing is ever removed. A page may then hold fewer than limit, and next_before still steps to the next page."}},
 		replies: []reply{ok(200, Snapshot{}, "A page of sessions."), badRequest, mismatch, storeFailed},
 		serve:   plain((*API).sessions)},
 	{method: "GET", path: "/api/v0/sessions/{id}", op: "getSession",
 		tag:     "Sessions",
 		summary: "Get a session",
 		doc: "One session, as GET /api/v0/sessions lists it, and its copy: the runner that holds the session's isolated copy of its folder, " +
-			"and whether it is closed and removed. A session that runs in the person's folder as it is has no copy.",
+			"and whether it is archived, closed and removed. A session that runs in the person's folder as it is has no copy.",
 		replies: []reply{ok(200, OneSession{}, "The session."), noSession, storeFailed},
 		turn:    treeSessionPath,
 		serve:   (*API).getSession},
 	{method: "PATCH", path: "/api/v0/sessions/{id}", op: "updateSession",
 		tag:     "Sessions",
-		summary: "Rename or close a session",
-		doc: "Give a session a name, or close it. Send title, closed, or both.\n\n" +
+		summary: "Rename or archive a session",
+		doc: "Give a session a name, or archive it. Send title, archived, closed, or a mix.\n\n" +
 			"title stores a session.renamed with the new name and the old one. GET /api/v0/sessions then names the session by its latest rename; without one, by its first message. " +
 			"Earlier names stay in the record, as the session's events. A rename does not change the session's last activity.\n\n" +
-			"closed true closes the session: it takes no more turns, and its runner removes the session's isolated copy and its home. " +
-			"Apply what you want to keep first. The person's folder is never removed. A session with a turn that has not ended is refused with 409. Only the main token closes a session.",
+			"archived true hides the session from the default list (archived=true shows it); false un-hides it. It is only a view, recorded as a session.archived event: the session keeps its copy, its history and its name, and can still take a turn. Nothing is removed; it is reversible. It works on any session the service knows -- through the record or, while its first turn is still queued, through the queue -- and is never refused for a running or queued turn. Only the main token archives a session.\n\n" +
+			"closed is retired: close is gone. closed true now archives the session (hides it, removes nothing), so an old client keeps working; closed false is refused. Send archived instead.",
 		body: SessionUpdate{},
 		replies: []reply{ok(200, Renamed{}, "Done."), badRequest,
-			fail(403, "A turn token's request is refused: error says why."), noSession,
-			fail(409, "A turn of the session has not ended, so it cannot be closed."), storeFailed},
+			fail(403, "A turn token's request is refused: error says why."), noSession, storeFailed},
 		turn:  renameSession,
 		serve: (*API).updateSession},
 	{method: "GET", path: "/api/v0/sessions/{id}/changes", op: "sessionChanges",

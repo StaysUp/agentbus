@@ -1290,16 +1290,11 @@ func (q *Queue) Take(runnerID string, lease time.Duration, folders bool) (job Jo
 		if _, err := tx.Exec(`UPDATE runners SET seen = ? WHERE id = ?`, nanos(now), runnerID); err != nil {
 			return fmt.Errorf("queue: write runner: %w", err)
 		}
-		w, err := scanWorkspace(tx.QueryRow(`SELECT `+workspaceCols+` FROM sessions s WHERE runner = ? AND closed IS NOT NULL AND removed IS NULL
-			AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.session = s.id AND j.state IN ('queued','taken','running'))
-			ORDER BY closed LIMIT 1`, runnerID))
-		if err == nil {
-			cleanup = &w
-			return nil
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("queue: read sessions: %w", err)
-		}
+		// Delete-on-close was retired (B14): closing a session no longer
+		// removes its copy, so no close hands the runner a cleanup here. The
+		// cleanup return and the runner's clean/remove path stay for release,
+		// which will mark a copy for removal under its own guard. Until then a
+		// copy is removed by nothing.
 		// Folder jobs and the rest count against their own places.
 		kinds, places := `j.kind NOT IN `+folderKinds, capacity
 		if folders {
@@ -2088,6 +2083,11 @@ func (q *Queue) Closed(team string) (map[string]time.Time, error) {
 // CloseSession closes a session of team: it takes no more jobs, and its
 // runner removes its workspace on a later take. A session with a job that has
 // not ended gets ErrSessionBusy. Closing it again answers the same.
+//
+// Deprecated (B14): close is retired. The API maps closed:true to Archive and
+// nothing calls this; Take no longer hands a closed session's cleanup to a
+// runner. It is kept for release, which will reuse the runner cleanup path
+// under its own guard, and for the queue tests that cover it.
 func (q *Queue) CloseSession(team, id string) (Workspace, error) {
 	var w Workspace
 	err := q.tx(func(tx *sql.Tx) error {

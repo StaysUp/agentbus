@@ -90,6 +90,52 @@ func TestTurnWaitInvalidQueuesNothing(t *testing.T) {
 	}
 }
 
+// Archiving a session whose first turn is still queued (no runner has started
+// it, so it is not in the record and has no workspace row) SUCCEEDS and hides
+// it: archive is only a view, found through the queue as well as the store, and
+// never refused for busy work (his call, 2026-11-19). The turn runs on.
+func TestArchiveQueuedFirstTurnSucceeds(t *testing.T) {
+	e := newJobsEnv(t)
+	ref, conn := e.folderRef(t, "/tmp")
+	body := `{"agent":"claude","folder_ref":"` + ref + `","connector":"` + conn + `","prompt":"hi"}`
+	resp, raw := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(body)))
+	var st Started
+	if resp.StatusCode != http.StatusAccepted || json.Unmarshal([]byte(raw), &st) != nil || st.Session == "" {
+		t.Fatalf("POST /turns: %d %s", resp.StatusCode, raw)
+	}
+	// No runner is enrolled, so the turn stays queued: the session is known to
+	// the queue (it has work) but has no record row yet.
+	code, out := renameReq(t, e, st.Session, `{"archived":true}`)
+	if code != 200 || !strings.Contains(out, `"archived":true`) {
+		t.Fatalf("archive of a queued first turn: %d %s, want 200 archived", code, out)
+	}
+	// It is hidden by default and shown with archived=true; the queued turn is
+	// untouched and still waits.
+	var def, all Snapshot
+	if code := getJSON(t, e, "/api/v0/sessions", &def); code != 200 || len(def.Sessions) != 0 {
+		t.Fatalf("default list hides the archived session: %d %+v", code, def.Sessions)
+	}
+	if code := getJSON(t, e, "/api/v0/sessions?archived=true", &all); code != 200 ||
+		len(all.Sessions) != 1 || all.Sessions[0].ID != st.Session || all.Sessions[0].Archived == nil {
+		t.Fatalf("archived=true shows the session: %d %+v", code, all.Sessions)
+	}
+	var turns TurnList
+	if code := getJSON(t, e, "/api/v0/turns?session="+st.Session, &turns); code != 200 || len(turns.Turns) != 1 || turns.Turns[0].State != "queued" {
+		t.Fatalf("the turn still waits: %d %+v", code, turns.Turns)
+	}
+	// Un-archive is the same event with archived:false; it returns to the list.
+	if code, out := renameReq(t, e, st.Session, `{"archived":false}`); code != 200 || strings.Contains(out, `"archived":true`) {
+		t.Fatalf("un-archive: %d %s", code, out)
+	}
+	if code := getJSON(t, e, "/api/v0/sessions", &def); code != 200 || len(def.Sessions) != 1 || def.Sessions[0].Archived != nil {
+		t.Fatalf("un-archived session back in the list: %d %+v", code, def.Sessions)
+	}
+	// A truly unknown session (not in the store, no queued work) is 404.
+	if code, out := renameReq(t, e, "nope", `{"archived":true}`); code != 404 {
+		t.Fatalf("archive of an unknown session: %d %s, want 404", code, out)
+	}
+}
+
 // A wait=false retry of a turn stopped before it started reports the stop, not
 // a stale "queued" (found in review 2026-11-19): the async reply reads the
 // turn's real state.

@@ -810,9 +810,12 @@ func TestRunnerHomePerSession(t *testing.T) {
 		t.Fatalf("the runner user's home holds %v", left)
 	}
 	if code := callAPI(t, ns.server, ns.tok, "PATCH", "/api/v0/sessions/"+a.Session, map[string]any{"closed": true}, nil); code != 200 {
-		t.Fatalf("close A: %d", code)
+		t.Fatalf("archive A: %d", code)
 	}
-	waitFor(t, "session A's home removed", func() bool { _, err := os.Stat(homeA); return os.IsNotExist(err) })
+	// Close is retired (B14): archiving A removes nothing, so both homes stay.
+	if _, err := os.Stat(homeA); err != nil {
+		t.Fatalf("session A's home was removed by archive: %v", err)
+	}
 	if _, err := os.Stat(homeOf(repB)); err != nil {
 		t.Fatalf("session B's home: %v", err)
 	}

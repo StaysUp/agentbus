@@ -440,9 +440,10 @@ func TestEventsAfterLeaseNotCurrent(t *testing.T) {
 }
 
 // A session's first job ties the session to its runner. Its later jobs go to
-// that runner only, with the workspace. Close refuses while a job of it is
-// open, then takes no more jobs, and hands the runner a cleanup; removed ends
-// it.
+// that runner only, with the workspace. CloseSession refuses while a job of it
+// is open, then marks it closed so it takes no more jobs. Close is retired
+// (B14): it no longer hands the runner a cleanup, so a session closed before
+// the upgrade keeps its copy -- removal is reached only through release later.
 func TestSessionAffinityAndClose(t *testing.T) {
 	q, _ := open(t)
 	a, b := runner(t, q, 2), runner(t, q, 2)
@@ -489,28 +490,18 @@ func TestSessionAffinityAndClose(t *testing.T) {
 	if _, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: s1, Prompt: "three"}, Links{}); !errors.Is(err, ErrSessionClosed) {
 		t.Fatalf("a job for a closed session: %v", err)
 	}
-	if _, _, _, c, _ := q.Take(b.ID, lease, false); c != nil {
-		t.Fatal("another runner got the cleanup")
+	// Delete-on-close is retired: Take hands no cleanup, to this runner or any
+	// other, so the closed session's copy is kept, not removed.
+	if _, _, _, c, err := q.Take(b.ID, lease, false); err != nil || c != nil {
+		t.Fatalf("another runner got a cleanup: %+v %v", c, err)
 	}
-	_, _, _, c, err := q.Take(a.ID, lease, false)
-	if err != nil || c == nil || c.Session != s1 || c.Folder != "/w/job_1" {
-		t.Fatalf("cleanup: %+v %v", c, err)
+	if _, _, _, c, err := q.Take(a.ID, lease, false); err != nil || c != nil {
+		t.Fatalf("the session's runner got a cleanup: %+v %v", c, err)
 	}
-	if err := q.Removed(b.ID, s1, ""); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("removed by another runner: %v", err)
-	}
-	if err := q.Removed(a.ID, s1, "busy"); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.Removed(a.ID, s1, ""); err != nil {
-		t.Fatalf("removed again: %v", err)
-	}
-	if _, _, _, c, _ := q.Take(a.ID, lease, false); c != nil {
-		t.Fatal("a cleanup after removed")
-	}
+	// The row stays closed with its copy present: nothing was removed.
 	list, _ := q.Sessions(DefaultTeam, 10)
-	if len(list) != 1 || list[0].Removed == nil || list[0].RemovalError != "busy" {
-		t.Fatalf("sessions: %+v", list)
+	if len(list) != 1 || list[0].Closed == nil || list[0].Removed != nil {
+		t.Fatalf("the closed session keeps its copy: %+v", list)
 	}
 	if _, err := q.CloseSession("team_other", s1); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("another team's close: %v", err)

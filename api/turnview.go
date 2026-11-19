@@ -411,6 +411,8 @@ func (a *API) getSession(w http.ResponseWriter, _ *http.Request, id string) {
 		writeError(w, http.StatusNotFound, "no such session")
 		return
 	}
+	// Archived comes from rec (the store snapshot's session.archived); closed
+	// is annotated from the queue.
 	out.Session = a.withClosed(rec, closed)
 	out.Session.Copy = cp
 	writeJSON(w, http.StatusOK, out)

@@ -65,9 +65,10 @@ var runnerRoutes = []route{
 	{method: "POST", path: "/api/v0/runner/take", op: "takeWork",
 		tag:     "Runners",
 		summary: "Take work",
-		doc: "Long poll, up to 30 seconds, for a job (with its new attempt and lease) or a cleanup (a closed session's workspace to remove). " +
+		doc: "Long poll, up to 30 seconds, for a job (with its new attempt and lease) or a cleanup (a copy to remove). " +
 			"A job of a session goes to the runner that holds its workspace, and a job that names a machine (spec.machine) to that machine's runner only. " +
-			"With folders true it is a folder job of the runner's own machine (an apply, a typed folder's check), in one of its 4 folder places; without it a turn or a review.",
+			"With folders true it is a folder job of the runner's own machine (an apply, a typed folder's check), in one of its 4 folder places; without it a turn or a review.\n\n" +
+			"Close no longer hands out a cleanup (B14): archiving a session keeps its copy, so nothing removes one today. The cleanup stays for release, which will mark a copy for removal under its own guard.",
 		body:    jobs.TakeRequest{Protocol: jobs.ProtocolVersion},
 		replies: []reply{ok(200, jobs.TakenWork{}, "A job, or a cleanup."), {status: 204, doc: "Nothing to do.", empty: true}, badRequest, noAttempt, storeFailed},
 		self:    true, serve: jobsRoute},
@@ -90,7 +91,7 @@ var runnerRoutes = []route{
 	{method: "POST", path: "/api/v0/runner/removed", op: "runnerRemoved",
 		tag:     "Runners",
 		summary: "Report a workspace removed",
-		doc:     "Report a closed session's workspace removed, or with error why it could not be.",
+		doc:     "Report a copy the runner removed for a cleanup, or with error why it could not be. No cleanup is handed out today (close is retired, B14); the endpoint stays for release.",
 		body:    jobs.RemovedReport{},
 		replies: []reply{{status: 204, doc: "Recorded.", empty: true}, badRequest, noAttempt, storeFailed},
 		self:    true, serve: jobsRoute},

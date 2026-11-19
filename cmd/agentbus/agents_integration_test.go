@@ -318,10 +318,11 @@ func TestNewSessionIsolated(t *testing.T) {
 }
 
 // A copied session keeps its copy, named after the session, across turns;
-// the job's result names the checkpoints each turn ran between; closing the
-// session removes the copy and its record; the person's folder is never
+// the job's result names the checkpoints each turn ran between; archiving the
+// session (closed:true, now retired to archive) removes nothing -- the copy
+// and its unapplied change survive -- and the person's folder is never
 // changed.
-func TestCopiedSessionKeptAcrossTurnsAndRemovedOnClose(t *testing.T) {
+func TestCopiedSessionKeptAcrossTurnsAndArchive(t *testing.T) {
 	home := t.TempDir()
 	svc := runService(t, home, nil, 0)
 	tok := readToken(t, home)
@@ -360,13 +361,38 @@ func TestCopiedSessionKeptAcrossTurnsAndRemovedOnClose(t *testing.T) {
 		t.Fatal("the turn changed the person's folder")
 	}
 	if code := callAPI(t, svc, tok, "PATCH", "/api/v0/sessions/"+j.Session, map[string]any{"closed": true}, nil); code/100 != 2 {
-		t.Fatalf("close: %d", code)
+		t.Fatalf("archive: %d", code)
 	}
-	waitFor(t, "the copy removed", func() bool {
-		_, err1 := os.Stat(want)
-		_, err2 := os.Stat(filepath.Join(home, "sessions", ".isolation", j.Session))
-		return os.IsNotExist(err1) && os.IsNotExist(err2)
-	})
+	// Close is retired (B14): closed:true archives and removes nothing. The
+	// copy, its isolation record, and the second turn's unapplied change all
+	// survive.
+	if fi, err := os.Stat(want); err != nil || !fi.IsDir() {
+		t.Fatalf("the copy was removed by archive: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "sessions", ".isolation", j.Session)); err != nil {
+		t.Fatalf("the isolation record was removed by archive: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(want, "made.txt")); err != nil {
+		t.Fatalf("the unapplied change was removed by archive: %v", err)
+	}
+	// It is archived: hidden from the default list, present with archived=true.
+	type sessRow struct {
+		ID       string  `json:"id"`
+		Archived *string `json:"archived"`
+	}
+	var hidden struct {
+		Sessions []sessRow `json:"sessions"`
+	}
+	if code := callAPI(t, svc, tok, "GET", "/api/v0/sessions", nil, &hidden); code != 200 || len(hidden.Sessions) != 0 {
+		t.Fatalf("default list hides the archived session: %d %+v", code, hidden.Sessions)
+	}
+	var shown struct {
+		Sessions []sessRow `json:"sessions"`
+	}
+	if code := callAPI(t, svc, tok, "GET", "/api/v0/sessions?archived=true", nil, &shown); code != 200 ||
+		len(shown.Sessions) != 1 || shown.Sessions[0].ID != j.Session || shown.Sessions[0].Archived == nil {
+		t.Fatalf("archived=true shows the session: %d %+v", code, shown.Sessions)
+	}
 }
 
 // A data folder from before new folders started blank keeps its default
@@ -473,12 +499,13 @@ func TestIsolatedSubfolderKeptAcrossTurnsAndReview(t *testing.T) {
 	// a normal turn. The subfolder-across-turns behaviour is what this test
 	// covers, and the session still closes and its worktree is removed.
 	if code := callAPI(t, svc, tok, "PATCH", "/api/v0/sessions/"+j.Session, map[string]any{"closed": true}, nil); code/100 != 2 {
-		t.Fatalf("close: %d", code)
+		t.Fatalf("archive: %d", code)
 	}
-	waitFor(t, "the worktree removed", func() bool {
-		_, err := os.Stat(filepath.Join(home, "sessions", j.Session))
-		return os.IsNotExist(err)
-	})
+	// Close is retired (B14): closed:true archives and removes nothing, so the
+	// worktree survives.
+	if _, err := os.Stat(filepath.Join(home, "sessions", j.Session)); err != nil {
+		t.Fatalf("the worktree was removed by archive: %v", err)
+	}
 }
 
 // A retry with the same idempotency key gets the first job even after the

@@ -570,16 +570,22 @@ type Snapshot struct {
 // single GET /api/v0/sessions/{id} -- where its turns run.
 type Session struct {
 	store.Session
-	Closed *time.Time `json:"closed,omitempty" doc:"When the session was closed with PATCH /api/v0/sessions/{id}. It takes no more turns, and resumable is false."`
+	Closed *time.Time `json:"closed,omitempty" doc:"When the session was closed, before close was retired. It took no more turns, and resumable is false. New sessions are never closed; closing now archives. The default list hides a closed session, like an archived one."`
+	// Archived (when the session was archived) comes from the embedded
+	// store.Session: it is a session.archived event in the record, so it is set
+	// here with no help from the queue.
 	// Copy is where the session's turns run, filled only by the single
 	// GET /api/v0/sessions/{id}; the list leaves it absent, as a turn's prompt
 	// and reply are absent on the turn list.
 	Copy *SessionCopy `json:"copy,omitempty" doc:"Only on GET /api/v0/sessions/{id}: where the session's turns run, on its runner. Absent on the sessions list, and absent until the session's first turn on this service has ended."`
 }
 
-// snapshot is every session, each with closed set from the queue. A closed
-// session is never resumable: it takes no more turns.
-func (a *API) snapshot(at, before int64, limit int) (Snapshot, error) {
+// snapshot is a page of sessions, each with closed and archived set from the
+// queue. A closed session is never resumable. Archived sessions are left out
+// unless showArchived, which only changes what the page shows: nothing is
+// removed. A page may hold fewer than limit once archived sessions are left
+// out; NextBefore still steps to the next page.
+func (a *API) snapshot(at, before int64, limit int, showArchived bool) (Snapshot, error) {
 	snap, err := a.cfg.Store.Sessions(at, before, limit)
 	if err != nil {
 		return Snapshot{}, err
@@ -590,14 +596,22 @@ func (a *API) snapshot(at, before int64, limit int) (Snapshot, error) {
 			return Snapshot{}, err
 		}
 	}
-	out := Snapshot{Store: snap.Store, Seq: snap.Seq, Sessions: make([]Session, len(snap.Sessions)), NextBefore: snap.NextBefore}
-	for i, s := range snap.Sessions {
-		out.Sessions[i] = a.withClosed(s, closed)
+	out := Snapshot{Store: snap.Store, Seq: snap.Seq, Sessions: make([]Session, 0, len(snap.Sessions)), NextBefore: snap.NextBefore}
+	for _, s := range snap.Sessions {
+		v := a.withClosed(s, closed)
+		// The default list hides a session set aside: archived (a
+		// session.archived event in the record) or closed (the retired close,
+		// kept for old rows). archived=true shows them.
+		if (v.Archived != nil || v.Closed != nil) && !showArchived {
+			continue
+		}
+		out.Sessions = append(out.Sessions, v)
 	}
 	return out, nil
 }
 
-// withClosed is s with when it was closed, from closed.
+// withClosed is s with when it was closed, from the closed map. Archived is
+// already on s, from the store's session.archived.
 func (a *API) withClosed(s store.Session, closed map[string]time.Time) Session {
 	v := Session{Session: s}
 	if c, ok := closed[s.ID]; ok {
@@ -629,7 +643,8 @@ func (a *API) sessions(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "after is beyond the store's latest seq")
 		return
 	}
-	snap, err := a.snapshot(at, before, limit)
+	showArchived := r.URL.Query().Get("archived") == "true"
+	snap, err := a.snapshot(at, before, limit, showArchived)
 	if err != nil {
 		a.internal(w)
 		return
