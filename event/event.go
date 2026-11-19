@@ -130,6 +130,17 @@ const (
 	TurnChanged Kind = "turn.changed"
 	TurnApplied Kind = "turn.applied"
 
+	// TurnEnded: control's record that a turn job ended, written for every
+	// ended turn job whatever its outcome (finished, failed, stopped,
+	// cancelled or its runner lost), once per turn job. It is the signal a
+	// reactor reads to learn a turn ended -- from the record, not from the
+	// scheduler's job table (C0). state is how it ended; error says why.
+	// It is keyed on the turn and carries NO session: a reactor trigger, not
+	// part of a session's event stream, so a turn refused before it ran cannot
+	// conjure a phantom session or shift a real one's snapshot.
+	// The changes and the reply are elsewhere (turn.changed, the job result).
+	TurnEnded Kind = "turn.ended"
+
 	// ChangesPreviewed: what applying the session's changes to the person's
 	// folder would do now, the dry run's result, stored so GET /sessions/{id}/
 	// changes serves it from the record (one source) and pages it. Previewed
@@ -191,6 +202,7 @@ var Kinds = []KindInfo{
 	{SettingsChanged, "The settings changed, through the API or by the one-time import of the settings files: setting is permissions, instructions or agents; keys names what changed (a policy key such as limits.max_depth, text for the instructions, an agent id or id.field such as a_1234.model); settings_version is the settings version the change made. On an import, file is the file the setting came from. A build that changed a default writes the old value into the person's policy on its first start: a change of permissions with no file, whose keys are those defaults. Names only: never a value, so never a secret. The change and this event are stored together: the settings database keeps the event until the record has it. No session.", []string{"setting", "settings_version"}},
 	{TurnChanged, "What the turn changed in its session's copy, or in the folder it ran in, from its start to its end. Stored by control once it accepts the turn's end, at most once per turn: changes holds the changed files (path, change, size, sha256 at the end, sha256_before at the start) and, for small text files, each one's unified diff (at most 1 MiB for the whole turn; diffs_cut says some were left out) and content. A binary file has its path, size and hashes only. The file list can be cut: truncated says it is not complete, because files were left out (past 1,000, or when the whole was too large to send; count still counts them) or because the copy held more files than a checkpoint keeps (then count misses some too). GET /api/v0/turns/{id}/changes lists it, and /diff summarises it. Absent for a turn that ran in no folder, and for turns from before 0.5, whose changes are in their job.", []string{"session", "turn", "changes"}},
 	{TurnApplied, "An apply of the session's turns to the person's folder ended (POST /api/v0/turns/{id}/apply): turn is the turn asked for, and applied holds every turn whose changes it carried, who asked (by: the person or an agent, never a token), the result (applied, refused or failed), the files written or removed, and on a refusal the files that refused it, each with why. Stored once per apply. Show a refusal as a warning.", []string{"session", "turn", "applied"}},
+	{TurnEnded, "A turn job ended, whatever its outcome: control writes it once per turn job for every ended turn (finished, failed, stopped, cancelled or its runner lost), so a reactor (a delivery) learns a turn ended from the record, not from the scheduler's job table. It is keyed on the turn and carries no session -- a reactor trigger, not part of a session's event stream. state is how it ended and error says why. The changes and the reply are not here: those are turn.changed and the job's result.", []string{"turn", "state"}},
 	{ChangesPreviewed, "What applying the session's changes to the person's folder would do now, the dry run of POST /api/v0/turns/{id}/apply computed on the folder's machine, nothing written: previewed holds the files it would write or remove (with diffs), the conflicts it would refuse, the turn it would apply up to and the turns it would carry. Stored so GET /api/v0/sessions/{id}/changes serves and pages it from the record, as of this event's time; a new one is stored when a preview runs again (the session changed, or a fresh one was asked for). The file list can be cut (truncated) when too many to send; count still counts them all.", []string{"session", "previewed"}},
 	{PlanUsage, "How much of a subscription's plan is used in one of its windows, as the vendor said in the headers of a model reply that carried control's credential for that subscription: plan holds the subscription (the harness, such as claude), the connect its credential came from, the window, its length in minutes, the percent used, when it resets and the vendor's status word. " +
 		"exchange names the call it was read from. Stored when the reading changes, and again every 10 minutes at most while calls keep it the same. " +

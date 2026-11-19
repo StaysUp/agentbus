@@ -154,7 +154,19 @@ func endAccepted(rec Recorder, q *queue.Queue, a queue.AcceptedFinish) (queue.Jo
 	}
 	fin := a.Finish
 	fin.Kept = kept
-	return q.End(a.Runner, a.Attempt, a.Number, fin)
+	j, err := q.End(a.Runner, a.Attempt, a.Number, fin)
+	if err != nil {
+		return j, err
+	}
+	// Record the turn's end AFTER End commits the job's final state, so a
+	// reactor that sees turn.ended (FireOns) always reads the job in its final
+	// state, never mid-End (review P1, 2026-11-19). Best-effort: a failure here
+	// must NOT undo the ended job, and the sweep's reconciler backfills any
+	// turn.ended the finisher missed, idempotent by job id (his must #1).
+	// turn.changed above is the job's outcome and still blocks End; turn.ended
+	// is only the reactor trigger.
+	_, _ = recordTurnEnded(rec, a.Job, queue.TurnState(a.Finish.Status), a.Finish.Reason, time.Now().UTC())
+	return j, nil
 }
 
 // RunFinisher runs control's one finisher until stop closes (finisher.go).

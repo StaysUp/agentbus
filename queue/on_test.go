@@ -10,6 +10,23 @@ import (
 	"time"
 )
 
+// jobEnded reports a turn's end from the queue's own jobs. It stands in for the
+// record's store.TurnEnded (which FireOns reads in production) in queue-level
+// tests that have no store, so what these tests assert is unchanged: an on
+// fires once its subject's job has ended.
+func jobEnded(q *Queue) func(string) (bool, error) {
+	return func(turn string) (bool, error) {
+		j, err := q.JobByTurn(DefaultTeam, turn)
+		if errors.Is(err, ErrNotFound) {
+			return false, nil
+		}
+		if err != nil {
+			return false, err
+		}
+		return j.Ended != nil, nil
+	}
+}
+
 // deliveriesOf returns the result-carrying turns queued in session.
 func deliveriesOf(t *testing.T, q *Queue, session string) []Job {
 	t.Helper()
@@ -57,7 +74,7 @@ func TestOnDelivers(t *testing.T) {
 	if _, _, err := q.Start(r.ID, ca.ID, ca.Number, lease); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := q.FireOns(DefaultTeam, nil, nil); err != nil || n != 0 {
+	if n, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil || n != 0 {
 		t.Fatalf("before the subject turn ends: %d %v", n, err)
 	}
 	res := `{"session":"` + child.Session + `","state":"finished","folder":"/w/1",` +
@@ -66,7 +83,7 @@ func TestOnDelivers(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if _, err := q.FireOns(DefaultTeam, nil, nil); err != nil {
+		if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -138,7 +155,7 @@ func TestTwoOnsSamePairBothDeliver(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 3 {
-		if _, err := q.FireOns(DefaultTeam, nil, nil); err != nil {
+		if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -198,7 +215,7 @@ func TestCreateTurnLinkedRecordsOnAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if _, err := q.FireOns(DefaultTeam, nil, nil); err != nil {
+		if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -302,7 +319,7 @@ func TestOnRemoved(t *testing.T) {
 		Result: json.RawMessage(`{"session":"` + child.Session + `","state":"finished"}`)}); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := q.FireOns(DefaultTeam, nil, nil); err != nil || n != 0 {
+	if n, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil || n != 0 {
 		t.Fatalf("a removed on delivered: %d %v", n, err)
 	}
 	if ds := deliveriesOf(t, q, parent.Session); len(ds) != 0 {
@@ -351,7 +368,7 @@ func TestOnMainTokenDelivers(t *testing.T) {
 		Result: json.RawMessage(`{"session":"` + child.Session + `","state":"finished"}`)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := q.FireOns(DefaultTeam, nil, nil); err != nil {
+	if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	ds := deliveriesOf(t, q, parent.Session)
@@ -407,7 +424,7 @@ func TestOnSurvivesRestart(t *testing.T) {
 	defer q2.Close()
 	total := 0
 	for range 3 {
-		n, err := q2.FireOns(DefaultTeam, nil, nil)
+		n, err := q2.FireOns(DefaultTeam, jobEnded(q2), nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -529,7 +546,7 @@ func TestDeliveryDoesNotPullUnrelatedSessionIntoTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if _, err := q.FireOns(DefaultTeam, nil, nil); err != nil {
+		if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -579,7 +596,7 @@ func TestTwoSubscriptionsBothDeliver(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 3 {
-		if _, err := q.FireOns(DefaultTeam, nil, nil); err != nil {
+		if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -668,7 +685,7 @@ func TestDeliveryKeepsRecipientTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 3 {
-		if _, err := q.FireOns(DefaultTeam, nil, nil); err != nil {
+		if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}

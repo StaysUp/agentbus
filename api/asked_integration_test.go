@@ -16,6 +16,7 @@ import (
 
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/folders"
+	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/settings"
@@ -126,7 +127,12 @@ func waitAskedTurn(t *testing.T, e *env, session string) store.Turn {
 func deliverUntil(t *testing.T, e *env, session string, want int) []store.Turn {
 	t.Helper()
 	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
-		if _, err := e.q.FireOns(queue.DefaultTeam, nil, nil); err != nil {
+		// Mirror the sweep: record each ended turn's end, then fire the ons
+		// that read it from the record (C0).
+		if _, _, err := jobs.RecordTurnEnds(e.q, e.store, nil, time.Now().Add(time.Hour), 200); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := e.q.FireOns(queue.DefaultTeam, e.store.TurnEnded, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		list, err := e.store.Turns(store.TurnQuery{Session: session, Limit: 100})
