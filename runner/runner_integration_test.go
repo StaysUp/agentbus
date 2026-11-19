@@ -417,12 +417,16 @@ func TestWorktreeSession(t *testing.T) {
 	if _, err := w.q.CloseSession(queue.DefaultTeam, first.Session); err != nil {
 		t.Fatal(err)
 	}
-	waitFor(t, "removed", func() bool {
-		list, _ := w.q.Sessions(queue.DefaultTeam, 10)
-		return len(list) == 1 && list[0].Removed != nil
-	})
-	if _, err := os.Stat(wantDir); !os.IsNotExist(err) {
-		t.Fatalf("the worktree is still there: %v", err)
+	// Close is retired (B14): it marks the session closed and wakes the runner,
+	// but hands it no cleanup, so the worktree is kept. Give the runner poll
+	// cycles to act (it must not), then confirm nothing was removed.
+	time.Sleep(500 * time.Millisecond)
+	list, _ := w.q.Sessions(queue.DefaultTeam, 10)
+	if len(list) != 1 || list[0].Closed == nil || list[0].Removed != nil {
+		t.Fatalf("session after close: %+v", list)
+	}
+	if _, err := os.Stat(wantDir); err != nil {
+		t.Fatalf("the worktree was removed by close: %v", err)
 	}
 }
 

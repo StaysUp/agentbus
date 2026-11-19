@@ -88,45 +88,65 @@ func TestSearchLeavesOutTheSearchingTurn(t *testing.T) {
 // in asked_integration_test.go; a review turn shows as an ordinary turn with no
 // verdict or findings field on it.
 
-// PATCH /sessions/{id} closed true closes a session once no turn of it runs:
-// GET /sessions/{id} shows its copy closed, the copy is named after the
-// session, and the session takes no more turns.
+// PATCH /sessions/{id} closed true is the retired close: it now archives the
+// session (B14) by recording a session.archived event. Nothing is removed --
+// the copy survives, named after the session -- the session stays resumable
+// and can still take a turn, archiving is never refused for a running turn,
+// and the default list hides it while archived=true still shows it.
 func TestCloseSession(t *testing.T) {
 	e, dir := askEnv(t)
 	s := startTurn(t, e, `{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"hold"}`)
 	tokenOf(t, dir, "hold")
-	if code, out := as(t, e, token, "PATCH", "/api/v0/sessions/"+s.Session, `{"closed":true}`); code != 409 {
-		t.Errorf("close while a turn runs: %d %s", code, out)
+	// Archive while the turn is still running: it is only a view, so it is
+	// never refused for busy work. closed:true maps to archive; the response
+	// says archived, not closed, and adds the title.
+	if code, out := as(t, e, token, "PATCH", "/api/v0/sessions/"+s.Session, `{"closed":true,"title":"Done"}`); code != 200 ||
+		!strings.Contains(out, `"archived":true`) || strings.Contains(out, `"closed":true`) || !strings.Contains(out, `"title":"Done"`) {
+		t.Fatalf("archive while a turn runs: %d %s", code, out)
 	}
 	if !strings.HasSuffix(pwdOf(t, dir, "hold"), filepath.Join("sessions", s.Session)) {
 		t.Errorf("the copy is at %s, want it named after the session", pwdOf(t, dir, "hold"))
 	}
+	// The turn runs on and finishes normally: archiving did not stop it.
 	release(dir, "hold")
 	waitEnded(t, e, s.Turn)
+	// It is archived, not closed: the copy is intact and it stays resumable.
 	var one OneSession
 	if code := getJSON(t, e, "/api/v0/sessions/"+s.Session, &one); code != 200 || one.Session.ID != s.Session || one.Session.Copy == nil ||
-		one.Session.Copy.Kind != queue.WorkspaceCopy || one.Session.Copy.Name != s.Session || one.Session.Copy.Closed != nil ||
-		one.Session.Closed != nil || !one.Session.Resumable {
-		t.Fatalf("GET the open session: %d %+v %+v", code, one.Session, one.Session.Copy)
+		one.Session.Copy.Kind != queue.WorkspaceCopy || one.Session.Copy.Name != s.Session || one.Session.Copy.Removed != nil ||
+		one.Session.Archived == nil || one.Session.Closed != nil || !one.Session.Resumable {
+		t.Fatalf("GET the archived session: %d %+v %+v", code, one.Session, one.Session.Copy)
 	}
-	if code, out := as(t, e, token, "PATCH", "/api/v0/sessions/"+s.Session, `{"closed":true,"title":"Done"}`); code != 200 ||
-		!strings.Contains(out, `"closed":true`) || !strings.Contains(out, `"title":"Done"`) {
-		t.Fatalf("close: %d %s", code, out)
+	// The default list hides it; archived=true shows it, still with its copy.
+	// Each list read uses a fresh Snapshot: a reused one keeps a field the next
+	// response omits (archived is omitempty), which would hide a real change.
+	var hidden Snapshot
+	if code := getJSON(t, e, "/api/v0/sessions", &hidden); code != 200 || len(hidden.Sessions) != 0 {
+		t.Fatalf("default list hides the archived session: %d %+v", code, hidden.Sessions)
 	}
-	// A closed session says so, in the list too, and is not resumable.
-	if code := getJSON(t, e, "/api/v0/sessions/"+s.Session, &one); code != 200 || one.Session.Copy == nil || one.Session.Copy.Closed == nil ||
-		one.Session.Closed == nil || !one.Session.Closed.Equal(*one.Session.Copy.Closed) || one.Session.Resumable {
-		t.Fatalf("GET the closed session: %d %+v %+v", code, one.Session, one.Session.Copy)
+	var shown Snapshot
+	if code := getJSON(t, e, "/api/v0/sessions?archived=true", &shown); code != 200 || len(shown.Sessions) != 1 ||
+		shown.Sessions[0].ID != s.Session || shown.Sessions[0].Archived == nil || !shown.Sessions[0].Resumable {
+		t.Fatalf("archived=true shows it: %d %+v", code, shown.Sessions)
 	}
-	var snap Snapshot
-	if code := getJSON(t, e, "/api/v0/sessions", &snap); code != 200 || len(snap.Sessions) != 1 || snap.Sessions[0].ID != s.Session ||
-		snap.Sessions[0].Closed == nil || snap.Sessions[0].Resumable {
-		t.Fatalf("GET /sessions: %d %+v", code, snap.Sessions)
+	// Un-archive is reversible: it puts the session back in the default list.
+	if code, out := as(t, e, token, "PATCH", "/api/v0/sessions/"+s.Session, `{"archived":false}`); code != 200 || strings.Contains(out, `"archived":true`) {
+		t.Fatalf("un-archive: %d %s", code, out)
 	}
-	if code, out := as(t, e, token, "POST", "/api/v0/turns", `{"agent":"claude","session":"`+s.Session+`","prompt":"more"}`); code != 409 {
-		t.Errorf("a turn of a closed session: %d %s", code, out)
+	var back Snapshot
+	if code := getJSON(t, e, "/api/v0/sessions", &back); code != 200 || len(back.Sessions) != 1 ||
+		back.Sessions[0].ID != s.Session || back.Sessions[0].Archived != nil {
+		t.Fatalf("default list shows the un-archived session: %d %+v", code, back.Sessions)
+	}
+	// An archived session still takes a turn (archive is only a view). Done
+	// last, as a new turn leaves the session open.
+	if code, out := as(t, e, token, "PATCH", "/api/v0/sessions/"+s.Session, `{"archived":true}`); code != 200 {
+		t.Fatalf("re-archive: %d %s", code, out)
+	}
+	if code, out := as(t, e, token, "POST", "/api/v0/turns", `{"agent":"claude","session":"`+s.Session+`","prompt":"more"}`); code/100 != 2 {
+		t.Errorf("a turn of an archived session: %d %s", code, out)
 	}
 	if code, out := as(t, e, token, "PATCH", "/api/v0/sessions/nobody", `{"closed":true}`); code != 404 {
-		t.Errorf("close of no session: %d %s", code, out)
+		t.Errorf("archive of no session: %d %s", code, out)
 	}
 }

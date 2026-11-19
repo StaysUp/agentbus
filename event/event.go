@@ -67,6 +67,14 @@ const (
 	// name and OldTitle the one it replaced. The latest names the session.
 	SessionRenamed Kind = "session.renamed"
 
+	// SessionArchived: the session was archived or un-archived (PATCH
+	// /api/v0/sessions/{id}). Archived is true to hide it from the default
+	// list, false to un-hide it. The latest decides. Only a view: nothing is
+	// removed and the session still takes turns. Stored like a rename, so it
+	// works on a session that has no workspace row yet (its first turn still
+	// queued).
+	SessionArchived Kind = "session.archived"
+
 	// ToolsListed: control served a turn's tool list (the tool server's
 	// tools/list, [agent_api] tools), once per turn. Server names the tool
 	// server, Tools the tools it served, and ToolsHidden the harness's own
@@ -188,6 +196,7 @@ var Kinds = []KindInfo{
 		"exchange names the call it was read from. Stored when the reading changes, and again every 10 minutes at most while calls keep it the same. " +
 		"The latest per subscription, connect and window is kept; GET /api/v0/subscriptions shows those of the subscription's current connect. Only control's own gateway stores it: a runner's record is refused it. Read from a fixed list of the vendor's usage headers only; no other header. No session.", []string{"plan"}},
 	{SessionRenamed, "The session was given a name with PATCH /api/v0/sessions/{id}: title is the new name, old_title the one it had before (absent when it had none). The latest names the session in GET /api/v0/sessions; earlier names stay in the record.", []string{"session", "title"}},
+	{SessionArchived, "The session was archived or un-archived with PATCH /api/v0/sessions/{id}: archived true hid it from the default list, false (absent) un-hid it. The latest decides. Only a view: nothing is removed and the session still takes turns.", []string{"session", "archived"}},
 }
 
 // Unexpected names one unknown shape: where on the wire, and the unknown value
@@ -324,6 +333,10 @@ type Event struct {
 	// it replaced.
 	Title    string `json:"title,omitempty" doc:"On session.renamed: the session's new name."`
 	OldTitle string `json:"old_title,omitempty" doc:"On session.renamed: the name the session had before, absent when it had none."`
+	// Archived, only on session.archived: true archived the session, false
+	// un-archived it. The latest session.archived decides. Absent (false) is
+	// an un-archive.
+	Archived bool `json:"archived,omitempty" doc:"On session.archived: true hid the session from the default list, false un-hid it. The latest one decides."`
 
 	Dropped  int      `json:"dropped,omitempty" doc:"On events.dropped: how many events were lost. Never 0."`
 	Sessions []string `json:"sessions,omitempty" doc:"On events.dropped: every session that lost events."`

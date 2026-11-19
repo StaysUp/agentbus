@@ -59,6 +59,11 @@ type Session struct {
 	// text of its first turn.started that has text, the person's own words,
 	// cut to TitleRunes. Absent with neither.
 	Title string `json:"title,omitempty" doc:"The name from the session's latest session.renamed; without one, the person's words from the first turn.started with text, cut to 120 characters."`
+	// Archived is when the session's latest session.archived set it archived,
+	// nil when it is not archived (never archived, or the latest un-archived
+	// it). Archive is only a view: it hides the session from the default list
+	// and removes nothing.
+	Archived *time.Time `json:"archived,omitempty" doc:"When the session was archived (PATCH archived:true); absent when not archived. Only a view: the list hides archived sessions unless archived=true, and the session still takes a turn."`
 
 	// LastSeq is the seq of the session's latest activity (the same events that
 	// set last, so not a rename or a stored preview). Sessions are ordered by
@@ -88,9 +93,9 @@ func (s *Store) snapshotAt(hi int64) (Snapshot, error) {
 	// A rename or a stored preview is not activity: each leaves started and
 	// last as they were.
 	rows, err := s.r.Query(`SELECT session,
-			COALESCE(MIN(CASE WHEN kind NOT IN ('session.renamed', 'changes.previewed') THEN time END), MIN(time)),
-			COALESCE(MAX(CASE WHEN kind NOT IN ('session.renamed', 'changes.previewed') THEN time END), MAX(time)),
-			COALESCE(MAX(CASE WHEN kind NOT IN ('session.renamed', 'changes.previewed') THEN seq END), MAX(seq)),
+			COALESCE(MIN(CASE WHEN kind NOT IN ('session.renamed', 'changes.previewed', 'session.archived') THEN time END), MIN(time)),
+			COALESCE(MAX(CASE WHEN kind NOT IN ('session.renamed', 'changes.previewed', 'session.archived') THEN time END), MAX(time)),
+			COALESCE(MAX(CASE WHEN kind NOT IN ('session.renamed', 'changes.previewed', 'session.archived') THEN seq END), MAX(seq)),
 			SUM(kind = 'turn.started'),
 			SUM(kind = 'model.responded' AND COALESCE(json_type(data, '$.usage'), 'null') = 'object'),
 			SUM(kind = 'model.responded' AND COALESCE(json_type(data, '$.usage'), 'null') <> 'object'),
@@ -257,6 +262,31 @@ func (s *Store) snapshotAt(hi int64) (Snapshot, error) {
 		rows.Close()
 	}
 
+	// The latest session.archived decides whether a session is archived, and
+	// when. archived 0 (the un-archive) leaves it not archived.
+	rows, err = s.r.Query(latestArchived+` AND seq <= ? GROUP BY session`, hi)
+	if err != nil {
+		return snap, fmt.Errorf("store: snapshot: %w", err)
+	}
+	for rows.Next() {
+		var id string
+		var archived int
+		var at, seq int64
+		if err := rows.Scan(&id, &archived, &at, &seq); err != nil {
+			rows.Close()
+			return snap, fmt.Errorf("store: snapshot: %w", err)
+		}
+		if x := byID[id]; x != nil && archived != 0 {
+			t := time.Unix(0, at).UTC()
+			x.Archived = &t
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return snap, fmt.Errorf("store: snapshot: %w", err)
+	}
+	rows.Close()
+
 	// A session with a resume_id can be continued.
 	rows, err = s.r.Query(`SELECT DISTINCT session FROM events
 		WHERE seq <= ? AND kind = 'session.closed' AND json_extract(data, '$.resume_id') IS NOT NULL`, hi)
@@ -369,6 +399,11 @@ const (
 			AND COALESCE(json_extract(data, '$.text'), '') <> ''`
 	latestRename = `SELECT session, COALESCE(json_extract(data, '$.title'), ''), MAX(seq) FROM events
 		WHERE kind = 'session.renamed'`
+	// The session's latest session.archived: its archived flag and time, from
+	// the row MAX(seq) picks. archived 1 means archived at that time, 0 (the
+	// un-archive, which omits the field) means not.
+	latestArchived = `SELECT session, COALESCE(json_extract(data, '$.archived'), 0), time, MAX(seq) FROM events
+		WHERE kind = 'session.archived'`
 )
 
 // Rename stores e, a session.renamed, with OldTitle set to the session's title
@@ -398,6 +433,32 @@ func (s *Store) Rename(e event.Event) (event.Event, error) {
 	e.OldTitle = old
 	out, _, err := s.appendLocked(e)
 	return out, err
+}
+
+// SetArchived records e, a session.archived with e.Archived set, unless the
+// session is already in that state: then it is a no-op (changed false) and the
+// first archive time is kept, as CloseSession keeps the first closed time. The
+// current state is read and e written under one lock, so the latest event
+// wins. It does not check the session exists; the caller does. Like Rename, it
+// works on a session that has no workspace row yet.
+func (s *Store) SetArchived(e event.Event) (out event.Event, changed bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return e, false, ErrClosed
+	}
+	var cur int
+	err = s.r.QueryRow(`SELECT COALESCE(json_extract(data, '$.archived'), 0) FROM events
+		WHERE kind = 'session.archived' AND session = ? ORDER BY seq DESC LIMIT 1`, e.Session).Scan(&cur)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return e, false, fmt.Errorf("store: read archived: %w", err)
+	}
+	if (cur != 0) == e.Archived {
+		return e, false, nil // already in that state: keep the first time
+	}
+	e.Kind = event.SessionArchived
+	out, _, err = s.appendLocked(e)
+	return out, err == nil, err
 }
 
 // titleOf is the title text gives: a rename's as it is, a first message's
