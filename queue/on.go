@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 )
 
 // OnTurnCompleted is B13's only event: the subject turn has ended.
@@ -131,6 +132,38 @@ func (q *Queue) RegisterOn(team, event, subject, session, key string, maker Make
 	return existing, nil
 }
 
+// EndedTurns lists turn jobs that ended at or before atOrBefore, oldest end
+// first, from after (nil to start at the first), up to limit. The sweep's
+// reconciler (jobs.RecordTurnEnds) walks them to record each turn's end in the
+// record. atOrBefore is how the reconciler gives the finisher a head start: a
+// turn just ended is left to the finisher's own prompt turn.ended, and the
+// reconciler only backfills ends older than that window (and the ones the
+// finisher never writes: a lost runner, a cancel). The (ended, id) cursor is
+// stable because ended is set once, to a monotonic time, when a job ends.
+func (q *Queue) EndedTurns(after *Job, atOrBefore time.Time, limit int) ([]Job, error) {
+	var ended int64
+	var id string
+	if after != nil && after.Ended != nil {
+		ended, id = nanos(*after.Ended), after.ID
+	}
+	rows, err := q.db.Query(`SELECT `+jobCols+` FROM jobs
+		WHERE kind = ? AND ended IS NOT NULL AND ended <= ? AND (ended > ? OR (ended = ? AND id > ?))
+		ORDER BY ended, id LIMIT ?`, KindTurn, nanos(atOrBefore), ended, ended, id, limit)
+	if err != nil {
+		return nil, fmt.Errorf("queue: list ended turns: %w", err)
+	}
+	defer rows.Close()
+	var out []Job
+	for rows.Next() {
+		j, err := scanJob(rows)
+		if err != nil {
+			return nil, fmt.Errorf("queue: list ended turns: %w", err)
+		}
+		out = append(out, j)
+	}
+	return out, rows.Err()
+}
+
 // onByKey reads the on registered with idempotency key, or ErrNotFound.
 func (q *Queue) onByKey(team, key string) (On, error) {
 	o := On{Team: team}
@@ -220,18 +253,36 @@ func (q *Queue) ListOns(team string) ([]On, error) {
 }
 
 // FireOns is the control loop's check for ons that have matured: for each live
-// turn.completed on whose subject turn has ended and that has not fired, it
+// turn.completed on that has not fired and whose subject turn has ended, it
 // queues the delivery turn (exactly as Deliver did), records the fire once,
 // and sets the one-shot off. It says how many delivery turns it queued. name
 // and agent are as Deliver's: name gives a saved agent's name for the prompt,
 // agent the agent a delivered result runs on. A full queue stops the sweep
 // with no error, to try again later.
-func (q *Queue) FireOns(team string, name func(id string) string, agent AgentOf) (int, error) {
+//
+// Whether the subject ended is read from the RECORD, through ended, not from
+// the scheduler's jobs table (C0, DESIGN_C0 §1: the one real boundary break).
+// ended reports whether the record holds a turn.ended for the subject turn;
+// control writes one for every ended turn job (the finisher and the sweep's
+// reconciler, jobs/ended.go). The scan stays over live unfired ons rather than
+// a cursor over turn.ended events, so an on registered AFTER its subject ended
+// still fires -- a cursor past that event would not, and that would change
+// deliveries. on_fires remains the idempotency key: a replay or a second tick
+// fires each (on, subject) once. Reading the subject's job for its reply
+// (deliverResult) stays: that is the delivered content, not the ended trigger.
+func (q *Queue) FireOns(team string, ended func(turn string) (bool, error), name func(id string) string, agent AgentOf) (int, error) {
+	if ended == nil {
+		return 0, nil // nothing can be known to have ended
+	}
+	// All live unfired ons, not a capped page: the ended test is per on, in the
+	// record, so a LIMIT here could fill with ons whose subject is still running
+	// and starve a newer on whose subject has ended (review P2, 2026-11-19). The
+	// set is small — a delivery on goes off as soon as it fires — and each ended
+	// check is an indexed lookup.
 	rows, err := q.db.Query(`SELECT o.id, o.subject, o.session, o.maker FROM ons o
-		JOIN jobs j ON j.team = o.team AND j.turn = o.subject
-		WHERE o.team = ? AND o.event = ? AND o.off IS NULL AND j.ended IS NOT NULL
+		WHERE o.team = ? AND o.event = ? AND o.off IS NULL
 		AND NOT EXISTS (SELECT 1 FROM on_fires f WHERE f.on_id = o.id AND f.key = o.subject)
-		ORDER BY j.ended, o.id LIMIT 20`, team, OnTurnCompleted)
+		ORDER BY o.created, o.id`, team, OnTurnCompleted)
 	if err != nil {
 		return 0, fmt.Errorf("queue: list ons: %w", err)
 	}
@@ -265,6 +316,14 @@ func (q *Queue) FireOns(team string, name func(id string) string, agent AgentOf)
 			return n, fmt.Errorf("queue: read on: %w", err)
 		}
 		if off.Valid {
+			continue
+		}
+		// The subject must have ended, read from the record (not jobs.db). An
+		// on whose subject has not ended yet is left for a later tick.
+		switch done, err := ended(p.subject); {
+		case err != nil:
+			return n, err
+		case !done:
 			continue
 		}
 		j, err := q.JobByTurn(team, p.subject)

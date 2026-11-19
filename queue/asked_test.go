@@ -136,7 +136,7 @@ func TestDeliver(t *testing.T) {
 	if _, _, err := q.Start(r.ID, ca.ID, ca.Number, lease); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := q.FireOns(DefaultTeam, nil, nil); err != nil || n != 0 {
+	if n, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil || n != 0 {
 		t.Fatalf("before the child ends: %d %v", n, err)
 	}
 	res := `{"session":"` + child.Session + `","state":"finished","folder":"/w/1",` +
@@ -145,7 +145,7 @@ func TestDeliver(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if _, err := q.FireOns(DefaultTeam, nil, nil); err != nil {
+		if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -192,7 +192,7 @@ func TestDeliver(t *testing.T) {
 		t.Fatalf("took %s, want the delivery", got.ID)
 	}
 	// The person's own job ended too, and is never delivered.
-	if n, err := q.FireOns(DefaultTeam, nil, nil); err != nil || n != 0 {
+	if n, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil || n != 0 {
 		t.Fatalf("after: %d %v", n, err)
 	}
 	_ = pj
@@ -245,7 +245,7 @@ func TestDeliverNamesTheAskingTurnsAgent(t *testing.T) {
 			return Spec{Harness: "codex", AgentID: "a_1", Access: "subscription", AgentModel: "m"}, ""
 		}
 		for range 2 {
-			if _, err := q.FireOns(DefaultTeam, nil, agent); err != nil {
+			if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, agent); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -300,7 +300,7 @@ func TestDeliverKeyIsOurs(t *testing.T) {
 	if _, err := q.Cancel(DefaultTeam, child.ID); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := q.FireOns(DefaultTeam, nil, nil); err != nil || n != 1 {
+	if n, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil || n != 1 {
 		t.Fatalf("deliver: %d %v", n, err)
 	}
 }
@@ -381,7 +381,7 @@ func TestDeliverToALostSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if n, err := q.FireOns(DefaultTeam, nil, nil); err != nil || n != 0 {
+		if n, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil || n != 0 {
 			t.Fatalf("deliver: %d %v", n, err)
 		}
 	}

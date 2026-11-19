@@ -972,6 +972,7 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 		t := time.NewTicker(time.Second)
 		defer t.Stop()
 		var presence jobs.Presence
+		var endedCursor *queue.Job // walks ended turn jobs for RecordTurnEnds
 		tick := 0
 		for {
 			select {
@@ -1013,6 +1014,20 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 						svcLog.Printf("runner.back id=%s name=%q", r.ID, r.Name)
 					}
 				}
+				// Record that each ended turn job ended, AFTER the steps above
+				// that end jobs (Sweep expires leases; CloseLost writes a lost
+				// turn's session.closed) and BEFORE FireOns, so a turn ended
+				// this tick has its turn.ended in the record — after its
+				// session.closed — and is delivered this tick. Idempotent by
+				// job id; the finisher also writes it on its own path.
+				if n, last, err := jobs.RecordTurnEnds(s.queue, s.store, endedCursor, time.Now().Add(-jobs.TurnEndedGrace), 200); err != nil {
+					svcLog.Printf("record.turn_ends_failed")
+				} else {
+					endedCursor = last
+					if n > 0 {
+						svcLog.Printf("record.turn_ends n=%d", n)
+					}
+				}
 				// An on that matured: asked work that ended delivers its
 				// result as the asking session's next turn (queue/on.go,
 				// FireOns), the generalisation of the old Deliver.
@@ -1026,7 +1041,7 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 				// for each undelivered asked job, and backfill chain.by/by_session
 				// from asker) would close both; for this dev milestone the store
 				// is drained before upgrade instead.
-				if n, err := s.queue.FireOns(queue.DefaultTeam, name, s.deliveredAgent); err != nil {
+				if n, err := s.queue.FireOns(queue.DefaultTeam, s.store.TurnEnded, name, s.deliveredAgent); err != nil {
 					svcLog.Printf("queue.fire_ons_failed")
 				} else if n > 0 {
 					svcLog.Printf("queue.results_delivered n=%d", n)

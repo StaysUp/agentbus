@@ -39,7 +39,9 @@ func postRun(t *testing.T, svc *service, tok string, body map[string]any) (int, 
 
 // An agent whose program is not on the service's PATH is refused with 400, a
 // reply that names the agent and how to install it, a line in service.log,
-// and nothing stored. Neither the reply nor the log quotes PATH.
+// and nothing stored in the session's record (turn.ended is control's
+// reactor trigger, keyed on the turn and session-less, so it is not a session
+// event). Neither the reply nor the log quotes PATH.
 func TestRunMissingAgentIsRefused(t *testing.T) {
 	const mark = "/Users/PATH-MARK/bin"
 	t.Setenv("PATH", mark+":"+os.Getenv("PATH"))

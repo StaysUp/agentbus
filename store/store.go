@@ -161,6 +161,9 @@ func (s *Store) init() error {
 	if _, err := tx.Exec(callsSchema); err != nil {
 		return fmt.Errorf("store: create tables: %w", err)
 	}
+	if _, err := tx.Exec(consumerSchema); err != nil {
+		return fmt.Errorf("store: create tables: %w", err)
+	}
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
 		return fmt.Errorf("store: make id: %w", err)
@@ -540,6 +543,22 @@ func (s *Store) TurnByKey(key string) (t KeyedTurn, found bool, err error) {
 	}
 	t.RequestHash = hash.String
 	return t, true, nil
+}
+
+// TurnEnded reports whether the record holds a turn.ended for turn: control's
+// record that the turn's job ended, whatever its outcome. A reactor reads this
+// to learn a turn ended, in place of the scheduler's job table (C0).
+func (s *Store) TurnEnded(turn string) (bool, error) {
+	if turn == "" {
+		return false, nil
+	}
+	var n int
+	err := s.r.QueryRow(`SELECT EXISTS(SELECT 1 FROM events WHERE turn = ? AND kind = ?)`,
+		turn, string(event.TurnEnded)).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("store: read turn ended: %w", err)
+	}
+	return n > 0, nil
 }
 
 // Known reports whether the store has any event of the session: a session

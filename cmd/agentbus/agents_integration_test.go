@@ -216,8 +216,16 @@ func TestOpenRouterAgentWithoutKeyRefused(t *testing.T) {
 	if code != http.StatusBadRequest || !strings.Contains(out["error"].(string), "set your OpenRouter key in Settings, or set AB_TEST_OR_KEY where control runs") {
 		t.Fatalf("%d %s", code, raw)
 	}
-	if svc.store.Last() != before {
-		t.Fatal("a refused turn stored events")
+	// The turn job's end is recorded (turn.ended), as for every ended turn job;
+	// nothing else runs or is stored (C0).
+	if evs, err := svc.store.After(before, store.Filter{}, 10); err != nil {
+		t.Fatal(err)
+	} else {
+		for _, e := range evs {
+			if e.Kind != "turn.ended" {
+				t.Fatalf("a refused turn stored %s", e.Kind)
+			}
+		}
 	}
 }
 

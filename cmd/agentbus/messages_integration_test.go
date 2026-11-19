@@ -348,8 +348,15 @@ func TestRunWithSessionRefusals(t *testing.T) {
 		out["error"] != "this session cannot be continued from here" {
 		t.Errorf("hand-pointed session: %d %s, want 409 cannot be continued", code, raw)
 	}
-	if svc.store.Last() != before {
-		t.Error("a refused turn stored events")
+	if evs, err := svc.store.After(before, store.Filter{}, 10); err != nil {
+		t.Fatal(err)
+	} else {
+		// The turn job's end may be recorded (turn.ended); nothing else runs.
+		for _, e := range evs {
+			if e.Kind != "turn.ended" {
+				t.Errorf("a refused turn stored %s", e.Kind)
+			}
+		}
 	}
 	// A run whose output named no session.
 	noID, _ := startRun(t, svc, tok, "claude", "plain text\n")
@@ -379,8 +386,14 @@ func TestRunWithSessionRefusals(t *testing.T) {
 		out["state"] != "queued" || out["ahead"] != float64(1) || out["turn"] == "" || out["base_url"] != nil {
 		t.Errorf("while running: %d %s, want 202 queued with ahead 1", code, raw)
 	}
-	if svc.store.Last() != before {
-		t.Error("a queued turn stored events before its turn started")
+	if evs, err := svc.store.After(before, store.Filter{}, 10); err != nil {
+		t.Fatal(err)
+	} else {
+		for _, e := range evs {
+			if e.Kind != "turn.ended" { // control's session-less reactor trigger
+				t.Error("a queued turn stored events before its turn started")
+			}
+		}
 	}
 	os.WriteFile(release, nil, 0o600)
 	waitClosedN(t, svc, id, 3)
@@ -439,8 +452,14 @@ func TestRunWithSessionRefusals(t *testing.T) {
 		if code != http.StatusBadRequest || out["error"] != tc.want {
 			t.Errorf("%s: %d %.200s, want 400 %q", tc.name, code, raw, tc.want)
 		}
-		if svc.store.Last() != before {
-			t.Errorf("%s: stored events", tc.name)
+		if evs, err := svc.store.After(before, store.Filter{}, 10); err != nil {
+			t.Fatal(err)
+		} else {
+			for _, e := range evs {
+				if e.Kind != "turn.ended" {
+					t.Errorf("%s: stored events", tc.name)
+				}
+			}
 		}
 	}
 	for _, tc := range []struct{ name, body string }{
@@ -460,8 +479,14 @@ func TestRunWithSessionRefusals(t *testing.T) {
 			out["error"] != "session must match ^[A-Za-z0-9_-]{1,64}$" {
 			t.Errorf("session %s: %d %s, want 400", sess, code, raw)
 		}
-		if svc.store.Last() != before {
-			t.Errorf("session %s: stored events", sess)
+		if evs, err := svc.store.After(before, store.Filter{}, 10); err != nil {
+			t.Fatal(err)
+		} else {
+			for _, e := range evs {
+				if e.Kind != "turn.ended" {
+					t.Errorf("session %s: stored events", sess)
+				}
+			}
 		}
 	}
 	// A session id of the wrong shape is refused before the store is read.

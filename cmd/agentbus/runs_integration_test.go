@@ -434,8 +434,14 @@ func TestRunRefusals(t *testing.T) {
 		if code != http.StatusBadRequest || out["error"] != tc.want {
 			t.Errorf("%s: %d %.200s, want 400 %q", tc.name, code, raw, tc.want)
 		}
-		if svc.store.Last() != before {
-			t.Errorf("%s: a refused run stored events", tc.name)
+		if evs, err := svc.store.After(before, store.Filter{}, 10); err != nil {
+			t.Fatal(err)
+		} else {
+			for _, e := range evs {
+				if e.Kind != "turn.ended" { // control's session-less reactor trigger
+					t.Errorf("%s: a refused run stored events", tc.name)
+				}
+			}
 		}
 	}
 	// The prompt shaped as a flag is accepted and stays the prompt (the first
@@ -494,8 +500,14 @@ func TestRunConcurrencyBound(t *testing.T) {
 		one["turn"].(map[string]any)["state"] != "queued" {
 		t.Fatalf("the queued turn: %d %v", code, one)
 	}
-	if svc.store.Last() != before {
-		t.Fatal("the queued fifth run stored events")
+	if evs, err := svc.store.After(before, store.Filter{}, 10); err != nil {
+		t.Fatal(err)
+	} else {
+		for _, e := range evs {
+			if e.Kind != "turn.ended" { // control's session-less reactor trigger
+				t.Fatal("the queued fifth run stored events")
+			}
+		}
 	}
 	os.WriteFile(release, nil, 0o600)
 	for _, id := range ids {
