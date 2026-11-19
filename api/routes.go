@@ -393,13 +393,11 @@ var routes = slices.Concat([]route{
 		doc: "Give a session a name, or archive it. Send title, archived, closed, or a mix.\n\n" +
 			"title stores a session.renamed with the new name and the old one. GET /api/v0/sessions then names the session by its latest rename; without one, by its first message. " +
 			"Earlier names stay in the record, as the session's events. A rename does not change the session's last activity.\n\n" +
-			"archived true hides the session from the default list; false un-hides it. It is only a view: the session keeps its copy, its history and its name, and can still take a turn. Nothing is removed; it is reversible. Only the main token archives a session.\n\n" +
-			"closed is retired: close is gone. closed true now archives the session (hides it, removes nothing), so an old client keeps working; closed false is refused. Send archived instead. " +
-			"A session that has not finished a turn on this service yet has no record to carry the flag and is refused with 409.",
+			"archived true hides the session from the default list (archived=true shows it); false un-hides it. It is only a view, recorded as a session.archived event: the session keeps its copy, its history and its name, and can still take a turn. Nothing is removed; it is reversible. It works on any session the service knows -- through the record or, while its first turn is still queued, through the queue -- and is never refused for a running or queued turn. Only the main token archives a session.\n\n" +
+			"closed is retired: close is gone. closed true now archives the session (hides it, removes nothing), so an old client keeps working; closed false is refused. Send archived instead.",
 		body: SessionUpdate{},
 		replies: []reply{ok(200, Renamed{}, "Done."), badRequest,
-			fail(403, "A turn token's request is refused: error says why."), noSession,
-			fail(409, "The session has not finished a turn on this service yet, so it cannot be archived."), storeFailed},
+			fail(403, "A turn token's request is refused: error says why."), noSession, storeFailed},
 		turn:  renameSession,
 		serve: (*API).updateSession},
 	{method: "GET", path: "/api/v0/sessions/{id}/changes", op: "sessionChanges",
