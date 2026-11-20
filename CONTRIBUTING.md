@@ -51,6 +51,16 @@ test with `-race`, and the build. Tests that start a child process or wait on re
 - Read the code rules in [AGENTS.md](AGENTS.md) before a change that touches the gateway, a runner,
   or an adapter.
 
+## Adding a harness or an adapter
+
+Two extension points have their own package docs, and they are the place to start:
+
+- **A harness** is a coding agent that AgentBus runs. The "To add a harness" paragraph in
+  [`harness/harness.go`](harness/harness.go) lists the steps: a type that implements `Harness`, an entry in the
+  registry, and its cases in the launch test.
+- **An adapter** knows one vendor's API format and turns its requests and replies into events. The contract is
+  stated in [`adapter/adapter.go`](adapter/adapter.go).
+
 ## Pick a task
 
 Issues marked `good first issue` are small and self-contained, with a starting point in the code.
