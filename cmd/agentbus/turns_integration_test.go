@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -133,6 +135,25 @@ func TestRunTurnIDOnEveryEvent(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized || len(turnEvents(t, svc.store, "byhand")) != 0 {
 		t.Fatalf("a hand-pointed call: %d, %d events", resp.StatusCode, len(turnEvents(t, svc.store, "byhand")))
+	}
+
+	// A turn's job ends before its turn.ended reaches the record: the finisher
+	// appends turn.ended AFTER it ends the job, so a reactor reads the job in
+	// its final state, and a slow one is backfilled by the sweep's reconciler
+	// within its grace (jobs/ended.go, C0). turn.ended carries no session, so it
+	// is not among the session's events above, but it moves the store seq. Wait
+	// for both turns' turn.ended, or the seq read below races the one that is
+	// still being appended.
+	for deadline := time.Now().Add(jobs.TurnEndedGrace + 10*time.Second); ; {
+		a, _ := svc.store.TurnEnded(turn)
+		b, _ := svc.store.TurnEnded(second)
+		if a && b {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("timed out waiting for both turns' turn.ended in the record")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	// GET /turns: newest first, with state and cost, filtered by session.
