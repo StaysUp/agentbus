@@ -13,7 +13,9 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/gateway"
@@ -108,6 +110,58 @@ type ToolCall struct {
 	RefusedRule string          `json:"refused_rule,omitempty" doc:"The forbid entry the gateway refused the call by."`
 }
 
+// CommandRecord is one shell command a turn ran, as its agent's tool call
+// reported it: the machine half of GET /api/v0/turns/{id}/record, derived from
+// the turn's tool.requested (the command line) and tool.completed (the output).
+// It is what the agent asked its shell tool to run and what the tool returned,
+// not an independent reading of the machine.
+type CommandRecord struct {
+	ID          string `json:"id" doc:"The shell tool call's id (tool.requested / tool.completed), so a command can be found in the turn's tool calls at GET /api/v0/turns/{id}/tools."`
+	Line        string `json:"line" doc:"The command line the agent asked its shell tool to run."`
+	Running     bool   `json:"running,omitempty" doc:"The tool call has no result yet: the command has not ended, or the turn did not record its end."`
+	Error       *bool  `json:"error,omitempty" doc:"From the tool call's result: the shell tool reported the command as an error. Absent until the result came, or when the vendor did not say."`
+	Output      string `json:"output,omitempty" doc:"The output the agent's shell tool returned, as the model received it, inline up to the cap. When truncated, the start is here and the whole output is on the tool call's tool.completed at GET /api/v0/sessions/{id}/events?turn={turn}."`
+	OutputBytes int64  `json:"output_bytes,omitempty" doc:"The returned output's size in bytes."`
+	Truncated   bool   `json:"truncated,omitempty" doc:"The inline output was cut to the cap; output_bytes is the whole size."`
+}
+
+// recordOutputCap bounds a command's inline output in the record, cut on a
+// rune boundary. The whole output is on the turn's tool.completed. (Keeping it
+// as its own rooted, readable blob is a follow-up: framework/TODO.md.)
+const recordOutputCap = 16 << 10
+
+// NetworkRefusal is one host a closed-off turn was refused, from a
+// network.refused.
+type NetworkRefusal struct {
+	Host  string `json:"host" doc:"The host and port the turn asked for, such as example.com:443."`
+	Error string `json:"error,omitempty" doc:"Why the policy refused it."`
+}
+
+// TurnRecord is the answer to GET /api/v0/turns/{id}/record: a turn's two
+// halves in one read. The machine half leads, in review order — the files it
+// changed, then the commands it ran, then the network it was refused — and the
+// agent half follows: its model calls and their cost. Unlike the diff summary,
+// the lists are embedded: the files are the changeset without per-file diffs
+// (those page at /changes), and each command's output is kept to a cap (the
+// whole output is on the tool call's tool.completed in the turn's events). The
+// commands are what the agent asked its shell tool to run, not an independent
+// reading of the machine.
+type TurnRecord struct {
+	Store   string `json:"store" doc:"The store these came from, for streaming more from GET /api/v0/events."`
+	Seq     int64  `json:"seq" doc:"The store's last seq when this was read."`
+	Turn    string `json:"turn"`
+	Session string `json:"session"`
+	Agent   string `json:"agent" doc:"The harness that ran the turn."`
+	State   string `json:"state" doc:"running, finished, failed or stopped."`
+	// The machine half, files first.
+	Files          []FileChange     `json:"files" doc:"The files the turn changed, the changeset without per-file diffs. Empty for a turn with no checkpoint (a direct-mode turn, which records commands only), or while it runs."`
+	FilesTruncated bool             `json:"files_truncated,omitempty" doc:"The file list was cut; the whole list pages at GET /api/v0/turns/{id}/changes."`
+	Commands       []CommandRecord  `json:"commands" doc:"Each shell command the turn ran, oldest first, with its output, as the agent's tool calls reported them. A tool call the gateway refused is left out: it never ran."`
+	Network        []NetworkRefusal `json:"network" doc:"Each host the turn was refused when closed off from the network, oldest first."`
+	// The agent half.
+	ModelCalls CallsSummary `json:"model_calls" doc:"The turn's model calls, in summary with their cost; the list pages at GET /api/v0/turns/{id}/calls."`
+}
+
 // ApplyState is an apply of a turn: the answer to POST /api/v0/turns/{id}/apply,
 // and apply in GET /api/v0/turns/{id}/diff.
 type ApplyState struct {
@@ -188,6 +242,76 @@ func (a *API) turnDiff(w http.ResponseWriter, r *http.Request, id string) {
 	writeJSON(w, http.StatusOK, d)
 }
 
+// GET /api/v0/turns/{id}/record: a turn's two halves in one read, read from
+// the one log. The machine half leads — the files it changed (a sandbox
+// checkpoint; a direct-mode turn has none), then the commands it ran with
+// their output, then the network it was refused — and the agent half follows.
+func (a *API) turnRecord(w http.ResponseWriter, r *http.Request, id string) {
+	// The reads below settle state, files and the seq cursor. Take them in an
+	// order that cannot tear: sample seq first, so the cursor a client streams
+	// from never skips an event left out of the state here; then read the job
+	// before the turn, so once the job has ended (and its session.closed is
+	// stored) the turn read reflects it — the record can never read running
+	// with files already filled.
+	seq := a.cfg.Store.Last()
+	var j queue.Job
+	haveJob := false
+	if a.cfg.Queue != nil {
+		jj, err := a.cfg.Queue.JobByTurn(queue.DefaultTeam, id)
+		switch {
+		case err == nil:
+			j, haveJob = jj, true
+		case !errors.Is(err, queue.ErrNotFound):
+			a.internal(w)
+			return
+		}
+	}
+	t, ok := a.turnByID(w, r, id)
+	if !ok {
+		return
+	}
+	rec := TurnRecord{Store: a.cfg.Store.ID(), Seq: seq,
+		Turn: t.ID, Session: t.Session, Agent: t.Harness, State: t.State,
+		Files: []FileChange{}, Commands: []CommandRecord{}, Network: []NetworkRefusal{},
+		ModelCalls: CallsSummary{Count: t.ModelCalls, Usage: t.Usage, CostUSD: t.CostUSD,
+			CostComplete: t.CostComplete, Models: []ModelCount{}}}
+	// Running until the job has ended, unless it was stopped, as
+	// GET /api/v0/turns/{id} and /diff say. Files are the turn's changeset, but
+	// only an isolated one: a sandbox checkpoint. A direct-mode turn records
+	// commands only, so its (non-isolated) changeset is not shown as files.
+	if haveJob {
+		res, _ := queue.ReadResult(j.Result)
+		if j.Session == t.Session || res.Session == t.Session {
+			if j.Ended == nil {
+				if rec.State != queue.TurnStopped {
+					rec.State = queue.TurnRunning
+				}
+			} else if c, err := jobs.Changes(a.cfg.Store, j); err != nil {
+				a.internal(w)
+				return
+			} else if c != nil && c.Isolated {
+				changes, truncated, _, _, _ := fileChanges(c)
+				// The per-file diffs and content page at /changes; the record
+				// lists the changeset itself, so it stays bounded.
+				for i := range changes {
+					changes[i].Diff, changes[i].Content = nil, nil
+				}
+				if changes != nil {
+					rec.Files = changes
+				}
+				rec.FilesTruncated = truncated
+			}
+		}
+	}
+	act, err := a.buildActivity(t.ID, t.Session)
+	if err != nil {
+		a.internal(w)
+		return
+	}
+	rec.Commands, rec.Network, rec.ModelCalls.Models = act.Commands, act.Network, act.Models
+	writeJSON(w, http.StatusOK, rec)
+}
+
 // filesSummary is a turn's file changes in summary, for the diff. nil for nil.
 func filesSummary(c *event.TurnChanges) *FilesSummary {
 	if c == nil {
@@ -215,9 +339,32 @@ func fileChanges(c *event.TurnChanges) ([]FileChange, bool, bool, bool, string) 
 // counts them. Models is an aggregate; Calls and Tools are the full lists,
 // oldest first (each tool call carries its own commands).
 type activity struct {
-	Models []ModelCount
-	Calls  []ModelCall
-	Tools  []ToolCall
+	Models   []ModelCount
+	Calls    []ModelCall
+	Tools    []ToolCall
+	Commands []CommandRecord  // the machine half: each shell command the turn ran
+	Network  []NetworkRefusal // hosts a closed-off turn was refused
+}
+
+// noCmdSlot is the FIFO slot a non-shell tool call reserves: it pairs its
+// result but has no command record.
+const noCmdSlot = -1
+
+// cmdDone is a tool call's result, already cut to the inline cap, waiting in
+// buildActivity to pair with the tool.requested of the same tool id. It holds
+// only the capped prefix, so a result stored before its request never pins a
+// large output.
+type cmdDone struct {
+	output    string // the inline prefix, cut on a rune boundary
+	bytes     int64  // the whole result's size
+	truncated bool
+	err       *bool
+}
+
+// doneOf caps a result's output for the inline record.
+func doneOf(output string, err *bool) cmdDone {
+	cut, truncated := capRunes(output, recordOutputCap)
+	return cmdDone{output: cut, bytes: int64(len(output)), truncated: truncated, err: err}
 }
 
 // buildActivity reads a turn's model calls, tool calls and commands from its
@@ -225,10 +372,29 @@ type activity struct {
 // events is counted and listed, never dropped by a page cap.
 func (a *API) buildActivity(turn, session string) (*activity, error) {
 	f := store.Filter{Turn: turn, TurnSession: session}
-	out := &activity{Models: []ModelCount{}, Calls: []ModelCall{}, Tools: []ToolCall{}}
+	out := &activity{Models: []ModelCount{}, Calls: []ModelCall{}, Tools: []ToolCall{},
+		Commands: []CommandRecord{}, Network: []NetworkRefusal{}}
 	callIdx := map[string]int{} // exchange -> index in Calls
 	models := map[string]int{}
 	toolIdx := map[string]int{} // tool id -> index in Tools
+	// A tool call's tool.requested (its line) and tool.completed (its result)
+	// can be stored in either order, and a tool id can repeat (plain Gemini
+	// parallel run_command calls share the name as their id). So EVERY tool
+	// call reserves a slot in a per-id FIFO, and request and result pair
+	// one-to-one, oldest to oldest, whatever the order: a shell call's slot is
+	// its command's index, any other call's slot is noCmdSlot. cmdWaiting holds
+	// reserved slots awaiting a result; doneWaiting holds results awaiting their
+	// call. A result is capped before it waits, so an out-of-order one never
+	// pins a large output.
+	cmdWaiting := map[string][]int{}
+	doneWaiting := map[string][]cmdDone{}
+	applyDone := func(slot int, d cmdDone) {
+		if slot == noCmdSlot {
+			return // a non-shell call: its result is not a command
+		}
+		c := &out.Commands[slot]
+		c.Running, c.Error, c.Output, c.OutputBytes, c.Truncated = false, d.err, d.output, d.bytes, d.truncated
+	}
 	// The gateway stores a call's tool.refused before its tool.requested,
 	// so a refusal waits here for its call.
 	refused := map[string]string{}
@@ -241,7 +407,8 @@ func (a *API) buildActivity(turn, session string) (*activity, error) {
 		for _, rec := range recs {
 			after = rec.Seq
 			switch rec.Kind {
-			case event.ModelRequested, event.ModelResponded, event.ToolRequested, event.ToolCompleted, event.ToolRefused:
+			case event.ModelRequested, event.ModelResponded, event.ToolRequested, event.ToolCompleted,
+				event.ToolRefused, event.NetworkRefused:
 			default:
 				continue
 			}
@@ -274,23 +441,78 @@ func (a *API) buildActivity(turn, session string) (*activity, error) {
 				}
 				toolIdx[e.ToolID] = len(out.Tools)
 				out.Tools = append(out.Tools, tc)
+				// Every tool call reserves a FIFO slot so request and result pair
+				// one-to-one. A shell call's slot is its command record (running
+				// until its result comes; dropped at the end if it was refused —
+				// it never ran); any other call's slot is noCmdSlot.
+				slot := noCmdSlot
+				if len(cmds) > 0 {
+					slot = len(out.Commands)
+					out.Commands = append(out.Commands, CommandRecord{
+						ID: e.ToolID, Line: strings.Join(cmds, "\n"), Running: true})
+				}
+				if q := doneWaiting[e.ToolID]; len(q) > 0 {
+					applyDone(slot, q[0]) // its result came first
+					doneWaiting[e.ToolID] = q[1:]
+				} else {
+					cmdWaiting[e.ToolID] = append(cmdWaiting[e.ToolID], slot)
+				}
 			case event.ToolCompleted:
 				if i, ok := toolIdx[e.ToolID]; ok && e.ToolError != nil {
 					out.Tools[i].Error = e.ToolError
 				}
+				if q := cmdWaiting[e.ToolID]; len(q) > 0 {
+					applyDone(q[0], doneOf(e.ToolOutput, e.ToolError))
+					cmdWaiting[e.ToolID] = q[1:]
+				} else {
+					// Its tool.requested is not in yet (a result stored first);
+					// hold the capped result until it arrives.
+					doneWaiting[e.ToolID] = append(doneWaiting[e.ToolID], doneOf(e.ToolOutput, e.ToolError))
+				}
 			case event.ToolRefused:
 				if i, ok := toolIdx[e.ToolID]; ok {
 					out.Tools[i].RefusedRule = e.Rule
-				} else {
+				}
+				// Mark it refused whichever order it arrives in; the command it
+				// would be is dropped at the end. A refusal with no id (a refused
+				// MCP tool) names no call, so it marks none.
+				if e.ToolID != "" {
 					refused[e.ToolID] = e.Rule
 				}
+			case event.NetworkRefused:
+				out.Network = append(out.Network, NetworkRefusal{Host: e.Host, Error: e.Error})
 			}
 		}
 		if !more {
 			break
 		}
 	}
+	// Drop the commands of refused tool calls: the gateway stopped them, so
+	// they never ran. A refusal can arrive before or after its tool.requested,
+	// so this filters once at the end.
+	if len(refused) > 0 {
+		kept := out.Commands[:0]
+		for _, c := range out.Commands {
+			if _, no := refused[c.ID]; !no {
+				kept = append(kept, c)
+			}
+		}
+		out.Commands = kept
+	}
 	return out, nil
+}
+
+// capRunes returns s cut to at most max bytes on a rune boundary, and whether
+// it was cut, so the inline output is never invalid UTF-8.
+func capRunes(s string, max int) (string, bool) {
+	if len(s) <= max {
+		return s, false
+	}
+	cut := max
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut], true
 }
 
 // Refusals of an apply. Fixed wording.
