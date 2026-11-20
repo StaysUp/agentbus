@@ -109,6 +109,13 @@ Claude Code, OpenAI for Codex, Gemini for Antigravity). AgentBus keeps it, adds 
 vendor's model calls, and never shows it again or gives it to an agent. **Replace** and **Remove**
 change it.
 
+An agent reaches its model in one of three ways, its **access**:
+
+- `subscription`: the subscription connected in Settings. The model is optional.
+- `openrouter`: an OpenRouter key. The model is required and is written in OpenRouter's naming.
+- `api`: the vendor's own API key set in Settings (Anthropic for Claude Code, OpenAI for Codex, Gemini
+  for Antigravity). The model is optional.
+
 ## Settings
 
 Settings apply to every session, from the next turn. Change them on the cockpit's Settings page, or
