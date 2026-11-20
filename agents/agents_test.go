@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/settings"
 )
 
@@ -117,7 +118,9 @@ func TestCheckRefuses(t *testing.T) {
 		{Fields{Harness: Claude, Access: Subscription}, "name must be"},
 		{Fields{Name: "a\nb", Harness: Claude, Access: Subscription}, "name must be"},
 		{Fields{Name: strings.Repeat("a", 101), Harness: Claude, Access: Subscription}, "name must be"},
+		// The refusal names what is planned, from the list, not by hand.
 		{Fields{Name: "x", Harness: "opencode", Access: Subscription}, "not available yet"},
+		{Fields{Name: "x", Harness: "opencode", Access: Subscription}, "(planned: " + harness.PlannedList() + ")"},
 		{Fields{Name: "x", Harness: "gemini", Access: Subscription}, "harness must be"},
 		{Fields{Name: "x", Harness: "agy", Access: OpenRouter, Model: "m"}, "cannot use access openrouter"},
 		{Fields{Name: "x", Harness: Claude, Access: API, KeyEnv: "ANTHROPIC_API_KEY"}, "for openrouter agents only"},

@@ -27,6 +27,7 @@ import (
 	"github.com/getkin/kin-openapi/routers/gorillamux"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 )
@@ -89,6 +90,15 @@ func TestOpenAPISpecValid(t *testing.T) {
 // Every operation has a short summary that names its action, the heading
 // and the menu entry on /docs, and a description whose first line says what
 // it does. Each is in one listed tag, and Turns comes first.
+// The route doc for saving an agent names the planned harnesses from the
+// registry's list, so it stays right when one is added.
+func TestOpenAPICreateAgentNamesPlannedHarnesses(t *testing.T) {
+	op := loadSpec(t).Paths.Find("/api/v0/agents").Post
+	if want := "(" + harness.PlannedList() + ") is refused: not available yet"; !strings.Contains(op.Description, want) {
+		t.Errorf("createAgent description lacks %q:\n%s", want, op.Description)
+	}
+}
+
 func TestOpenAPIOperationsNamedAndTagged(t *testing.T) {
 	doc := loadSpec(t)
 	var names []string

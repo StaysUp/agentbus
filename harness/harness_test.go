@@ -47,6 +47,9 @@ func TestRegistry(t *testing.T) {
 	if p := Planned(); len(p) != 1 || p[0].Name != "opencode" || p[0].Label != "OpenCode" {
 		t.Errorf("Planned = %+v", p)
 	}
+	if got := PlannedList(); got != "opencode" {
+		t.Errorf("PlannedList = %q", got)
+	}
 	if got := NameList(); got != "claude, codex or agy" {
 		t.Errorf("NameList = %q", got)
 	}
