@@ -1,0 +1,5 @@
+{
+ "model": "qwen2.5-0.5b-instruct", "stream": true, "stream_options": {"include_usage": true},
+ "max_tokens": 4,
+ "messages": [{"role": "user", "content": "Write a long poem about the sea."}]
+}
