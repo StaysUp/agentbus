@@ -23,9 +23,9 @@ const HarnessReportWait = 15 * time.Second
 
 // Harness is one harness in GET /api/v0/harnesses.
 type Harness struct {
-	Name     string `json:"name" doc:"The harness, as an agent names it: claude, codex or opencode."`
+	Name     string `json:"name" doc:"The harness, as an agent names it, such as claude or codex. Planned harnesses are listed too, with disabled set."`
 	Label    string `json:"label" doc:"Its name for a screen, such as Claude Code."`
-	Disabled bool   `json:"disabled,omitempty" doc:"True when no agent can be saved on it yet, as for opencode. It is not probed."`
+	Disabled bool   `json:"disabled,omitempty" doc:"True when no agent can be saved on it yet, as for a planned harness. It is not probed."`
 	Found    bool   `json:"found" doc:"The binary is on the PATH of a runner seen in the last minute."`
 	Version  string `json:"version,omitempty" doc:"From <bin> --version, on the first runner that found it (the newest seen). Absent when not found or not shaped like a version."`
 	SignedIn *bool  `json:"signed_in,omitempty" doc:"From the harness's own offline status command, on the same runner. Absent when it gave no clear answer."`

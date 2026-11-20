@@ -61,7 +61,7 @@ type Agent struct {
 // Fields are what a person sets on an agent: everything but its id and times.
 type Fields struct {
 	Name    string `json:"name" doc:"1 to 100 bytes, unique among the agents, ignoring case."`
-	Harness string `json:"harness" doc:"claude or codex. opencode is not available yet."`
+	Harness string `json:"harness" doc:"claude, codex or agy. A harness that is only planned is refused as not available yet."`
 	Access  string `json:"access" doc:"subscription, openrouter or api. api uses the vendor's API key set in Settings (claude: Anthropic, codex: OpenAI, agy: Gemini)."`
 	Model   string `json:"model,omitempty" doc:"Optional for subscription and api. Required for openrouter."`
 	KeyEnv  string `json:"key_env,omitempty" doc:"For openrouter only: a variable name ending in _KEY, such as OPENROUTER_API_KEY, which is used when this is absent."`
@@ -96,7 +96,7 @@ func Check(f *Fields) string {
 	case f.Name == "" || len(f.Name) > MaxName || !utf8.ValidString(f.Name) || strings.ContainsAny(f.Name, "\x00\r\n"):
 		return "name must be 1 to 100 bytes of text on one line"
 	case planned(f.Harness):
-		return "harness " + f.Harness + " is not available yet; use " + harness.NameList()
+		return "harness " + f.Harness + " is not available yet (planned: " + harness.PlannedList() + "); use " + harness.NameList()
 	case !known(f.Harness):
 		return "harness must be " + harness.NameList()
 	case f.Access != Subscription && f.Access != OpenRouter && f.Access != API:

@@ -474,6 +474,16 @@ func joinNames(n []string) string {
 // Planned are the harnesses listed as coming, which no agent can use yet.
 func Planned() []Info { return planned }
 
+// PlannedList is Planned's names for a sentence, as NameList does for the
+// registry: "opencode", or "opencode or gemini" once a second is planned.
+func PlannedList() string {
+	n := make([]string, len(planned))
+	for i, p := range planned {
+		n[i] = p.Name
+	}
+	return joinNames(n)
+}
+
 // resumeIDShape is the shape of a vendor's resume id: it is only ever an
 // argument after "--" or of --resume, and never starts with a dash.
 var resumeIDShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,63}$`)
