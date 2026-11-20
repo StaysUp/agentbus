@@ -152,3 +152,32 @@ func TestTablesDoNotShareRates(t *testing.T) {
 		}
 	}
 }
+
+// TestBuiltinStandardRatesPinned pins the standard-tier input and output rate
+// of two built-in models, so a digit changed by hand in builtin fails here.
+func TestBuiltinStandardRatesPinned(t *testing.T) {
+	cases := []struct {
+		vendor        Vendor
+		model         string
+		input, output float64
+	}{
+		{OpenAI, "gpt-6-astra", 10, 50},
+		{OpenAI, "gpt-6-luna", 0.10, 0.50},
+	}
+	table := Default()
+	for _, tc := range cases {
+		t.Run(tc.model, func(t *testing.T) {
+			p, ok := table.Lookup(tc.vendor, tc.model)
+			if !ok {
+				t.Fatalf("%s/%s is not in the built-in table", tc.vendor, tc.model)
+			}
+			rates := p.Tiers[Standard]
+			if rates[Input] != tc.input {
+				t.Errorf("standard input rate = %v, want %v", rates[Input], tc.input)
+			}
+			if rates[Output] != tc.output {
+				t.Errorf("standard output rate = %v, want %v", rates[Output], tc.output)
+			}
+		})
+	}
+}
