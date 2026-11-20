@@ -66,7 +66,7 @@ installed, and a Claude and a ChatGPT subscription.
    ```
 
    It prints a sign-in link, `http://127.0.0.1:8787/?t=…`, and with `-open` opens it in your
-   browser. Without `-open` (on a server, say) it only prints the link. The cockpit comes with
+   browser. Without `-open` it only prints the link. The cockpit comes with
    `agentbus up`: nothing else to install. The link works once, for 10 minutes. The link expired?
    Stop `agentbus up` (Ctrl-C) and start it again for a new one.
 
