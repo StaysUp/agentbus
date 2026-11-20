@@ -26,6 +26,7 @@ import (
 	"github.com/getkin/kin-openapi/openapi3filter"
 	"github.com/getkin/kin-openapi/routers/gorillamux"
 
+	"github.com/staysup/agentbus/agents"
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/run"
@@ -116,6 +117,25 @@ func TestOpenAPICreateAgentNamesPlannedHarnesses(t *testing.T) {
 	}
 	if want := "(" + harness.PlannedList() + ") is refused: not available yet"; !strings.Contains(op.Description, want) {
 		t.Errorf("createAgent description lacks %q:\n%s", want, op.Description)
+	}
+}
+
+// The access values an agent can be saved with come from the agents package's
+// constants, so the spec's enum on AgentRequest.access must list exactly those.
+// The spec must also accept each one, and the code must save an agent with api.
+func TestOpenAPIAgentAccessMatchesCode(t *testing.T) {
+	access := loadSpec(t).Components.Schemas["AgentRequest"].Value.Properties["access"].Value
+	want := []any{agents.Subscription, agents.OpenRouter, agents.API}
+	if !slices.Equal(access.Enum, want) {
+		t.Errorf("AgentRequest.access enum = %v, want %v", access.Enum, want)
+	}
+	for _, v := range want {
+		if err := access.VisitJSON(v); err != nil {
+			t.Errorf("the spec refuses access %v: %v", v, err)
+		}
+	}
+	if why := agents.Check(&agents.Fields{Name: "x", Harness: "agy", Access: agents.API}); why != "" {
+		t.Errorf("the code refuses access api for agy: %s", why)
 	}
 }
 
