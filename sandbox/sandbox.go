@@ -16,7 +16,12 @@
 //
 // A proof of concept, not a hardened wall. It leaves open: file metadata
 // on macOS (a session can learn a file exists), the copy's .git (writable),
-// renames of the walled folders, Landlock on Linux, and the browser bridge. Every error is fixed wording,
+// renames of the walled folders, Landlock on Linux, and the browser bridge.
+// It hides the person's secret folders (secretPaths) and any .env outside
+// the copy even inside a Read grant on macOS; on Linux an ungranted secret
+// is invisible (nothing binds it in), but one that a Read grant DOES bind in
+// is not yet hidden there -- a known gap, left to a later step (TODO.md).
+// Every error is fixed wording,
 // safe to show, and New fails before anything starts: a session that asks
 // for the wall never runs without it.
 package sandbox
@@ -66,6 +71,7 @@ type Box struct {
 	copy, home, tmp string
 	readOnly        bool
 	read            []path
+	secret          []string // paths the wall hides even from a Read grant (secretPaths)
 	jail            *netjail.Jail
 	plat            platform
 }
@@ -105,6 +111,11 @@ func New(s Spec) (*Box, error) {
 		}
 		b.read = append(b.read, p)
 	}
+	// The person's keys and sign-ins, hidden from the agent even inside a
+	// Read grant (on macOS; see the package doc for the Linux limit). The
+	// default allow-list is added a layer up, in run.wallNet, where an
+	// offline turn can be told apart; the git defaults are in Env.
+	b.secret = secretPaths()
 	if err := b.build(s.Net); err != nil {
 		return nil, err
 	}
@@ -112,10 +123,12 @@ func New(s Spec) (*Box, error) {
 }
 
 // Env is what the agent's environment needs: its tmp folder in its home,
-// and the proxy.
+// the proxy, and the git defaults -- ssh remotes rewritten to HTTPS, ssh
+// itself ruled out -- so a fetch goes through the proxy instead of ssh.
 func (b *Box) Env() []string {
 	env := []string{"TMPDIR=" + b.tmp, "CLAUDE_CODE_TMPDIR=" + b.tmp}
-	return append(env, b.jail.Env()...)
+	env = append(env, b.jail.Env()...)
+	return append(env, gitDefaultsEnv()...)
 }
 
 // Close ends the wall's proxy and what still uses it.

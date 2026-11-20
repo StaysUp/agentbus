@@ -51,6 +51,21 @@ type Spec struct {
 	Refused func(target, why string)
 }
 
+// DefaultAllow are the hosts a sandbox turn's wall lets through by default,
+// on any port: the package registries a build fetches from, and git over
+// HTTPS from the two public hosts. It is added to Spec.Allow a layer up, in
+// run.wallNet, which alone can tell a sandbox turn from an offline or
+// autoWall one; the model relay is reached through Forward and Pass, not
+// here. Kept tight on purpose: a host not here is refused and, from a later
+// step, becomes an Ask card, so the list grows from use, not up front.
+var DefaultAllow = []string{
+	"registry.npmjs.org", "registry.yarnpkg.com", // npm, yarn
+	"pypi.org", "files.pythonhosted.org", // PyPI
+	"proxy.golang.org", "sum.golang.org", // Go modules
+	"crates.io", "static.crates.io", "index.crates.io", // crates
+	"github.com", "gitlab.com", // git fetch over HTTPS
+}
+
 // Error is why an agent could not be closed off. Its text is fixed
 // wording, safe to show.
 type Error struct{ Why string }

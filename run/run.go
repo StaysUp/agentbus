@@ -1055,6 +1055,14 @@ func wallNet(p settings.Policy, offline bool, net netjail.Spec) netjail.Spec {
 		net.Allow, net.Open = nil, false
 		return net
 	}
+	// The sandbox's default allow-list (package registries, git over HTTPS)
+	// so a build's usual fetches work without the person naming each host.
+	// Only for a real sandbox turn with contain on: an autoWall turn (contain
+	// on, sandbox off) keeps exactly the hosts [network] allow names, and
+	// with contain off the proxy already reaches every public host.
+	if p.Sandbox.Mode == settings.SandboxOn && p.Network.Contain == settings.ContainOn {
+		net.Allow = append(append([]string(nil), netjail.DefaultAllow...), net.Allow...)
+	}
 	net.Open = p.Network.Contain != settings.ContainOn
 	return net
 }

@@ -161,6 +161,11 @@ their defaults are in `/docs`, under Settings).
 - Antigravity cannot start with the sandbox on, on macOS: it opens a local port, and the macOS sandbox cannot
   limit a port to this machine, so AgentBus does not allow it. Turn the sandbox off to use Antigravity on a Mac.
   Linux runners are not affected. A fix that keeps the sandbox is planned.
+- The sandbox hides your secret folders (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`,
+  `~/.docker/config.json`, `~/.npmrc`, `~/.netrc`, the Keychains) and any `.env` outside the copy,
+  even from a folder you grant for reading. On macOS this is enforced in full. On Linux the agent
+  sees only what the wall binds in, so an ungranted secret is invisible, but a secret that sits
+  inside a folder you grant is not yet hidden there. Grant narrowly on Linux until that lands.
 - Claude's browser (Chrome) cannot run in AgentBus sessions: it needs the tool's own sign-in.
 - Antigravity: use it with a Gemini API key (Settings, Subscriptions). Its Google sign-in does not
   work through AgentBus yet: before any work it checks your account with Google directly, outside
