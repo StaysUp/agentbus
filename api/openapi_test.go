@@ -281,9 +281,12 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 	// POST /api/v0/ons and DELETE /api/v0/ons/{id}, the on primitive: register
 	// a standing instruction (a turn completes -> deliver its reply) and remove
 	// it (B13). 72 with POST /api/v0/files/read, POST /api/v0/files/list and
-	// POST /api/v0/files/write, folder access through tools (B8).
-	if len(ops) != 71 {
-		t.Errorf("%d endpoints, want 71: %v", len(ops), ops)
+	// POST /api/v0/files/write, folder access through tools (B8). Plus GET
+	// /api/v0/turns/{id}/record, a turn's two halves (the machine half it ran
+	// and the agent half it called) in one read, which reads the record and
+	// starts no turn (machine-record step 1).
+	if len(ops) != 72 {
+		t.Errorf("%d endpoints, want 72: %v", len(ops), ops)
 	}
 	for _, want := range []string{"POST /api/v0/turns", "GET /api/v0/turns", "GET /api/v0/turns/{id}", "POST /api/v0/turns/{id}/stop",
 		"GET /api/v0/turns/{id}/diff", "POST /api/v0/turns/{id}/apply",

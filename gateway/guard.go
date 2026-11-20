@@ -219,11 +219,11 @@ func commandsOf(vendor string, item map[string]any) []string {
 		}
 	case "function_call":
 		// A function tool with a cmd or command argument, such as codex's
-		// exec_command or shell.
+		// exec_command or shell, or CommandLine, agy's run_command (gemini).
 		s, _ := item["arguments"].(string)
 		var args map[string]any
 		if decodeJSON([]byte(s), &args) == nil {
-			for _, k := range []string{"cmd", "command"} {
+			for _, k := range []string{"cmd", "command", "CommandLine"} {
 				if c := commandValue(args[k]); c != "" {
 					return []string{c}
 				}

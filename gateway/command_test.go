@@ -1,6 +1,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"slices"
 	"testing"
 )
@@ -166,6 +167,26 @@ func TestExecCommands(t *testing.T) {
 	} {
 		if got := execCommands(c.script); !slices.Equal(got, c.want) {
 			t.Errorf("execCommands(%q) = %q, want %q", c.script, got, c.want)
+		}
+	}
+}
+
+// ToolCommands reads a shell command from each vendor's shell tool, including
+// agy's run_command (gemini), whose argument is CommandLine.
+func TestToolCommandsByVendor(t *testing.T) {
+	for _, c := range []struct {
+		vendor, name string
+		input        string
+		want         []string
+	}{
+		{"anthropic", "Bash", `{"command":"echo hi"}`, []string{"echo hi"}},
+		{"gemini", "run_command", `{"CommandLine":"cat notes.txt"}`, []string{"cat notes.txt"}},
+		{"openai", "shell", `{"command":"ls -la"}`, []string{"ls -la"}},
+		{"gemini", "read_file", `{"path":"x"}`, nil},
+	} {
+		got := ToolCommands(c.vendor, c.name, json.RawMessage(c.input))
+		if !slices.Equal(got, c.want) {
+			t.Errorf("ToolCommands(%q, %q, %s) = %q, want %q", c.vendor, c.name, c.input, got, c.want)
 		}
 	}
 }
