@@ -61,7 +61,7 @@ func (b *Box) build(net netjail.Spec) error {
 		return &Error{Why: "an address it should reach is not on this machine's loopback"}
 	}
 	b.jail = jail
-	b.plat = profile(b.copy, b.readOnly, b.home, b.read, ports)
+	b.plat = profile(b.copy, b.readOnly, b.home, b.read, b.secret, ports)
 	check := exec.Command(sandboxExec, b.args("/usr/bin/true")...)
 	check.Dir = b.copy
 	if !runCheck(check) {
@@ -71,8 +71,9 @@ func (b *Box) build(net netjail.Spec) error {
 	return nil
 }
 
-// profile is the Seatbelt profile and its parameters.
-func profile(copy string, readOnly bool, home string, read []path, ports []int) platform {
+// profile is the Seatbelt profile and its parameters. secret are paths
+// hidden from the agent even inside a Read grant (secretPaths).
+func profile(copy string, readOnly bool, home string, read []path, secret []string, ports []int) platform {
 	var p platform
 	param := func(v string) string {
 		k := "P" + strconv.Itoa(len(p.params)/2)
@@ -96,11 +97,12 @@ func profile(copy string, readOnly bool, home string, read []path, ports []int) 
 	s.WriteString(")\n")
 	s.WriteString(`(allow file-write-data file-ioctl (literal "/dev/null") (literal "/dev/zero") (literal "/dev/dtracehelper")` +
 		` (regex #"^/dev/tty") (regex #"^/dev/fd/"))` + "\n")
+	copyTok, homeTok := param(copy), param(home)
 	if readOnly {
-		s.WriteString("(allow file-read* (subpath " + param(copy) + "))\n")
-		s.WriteString("(allow file-read* file-write* (subpath " + param(home) + "))\n")
+		s.WriteString("(allow file-read* (subpath " + copyTok + "))\n")
+		s.WriteString("(allow file-read* file-write* (subpath " + homeTok + "))\n")
 	} else {
-		s.WriteString("(allow file-read* file-write* (subpath " + param(copy) + ") (subpath " + param(home) + "))\n")
+		s.WriteString("(allow file-read* file-write* (subpath " + copyTok + ") (subpath " + homeTok + "))\n")
 	}
 	if len(read) > 0 {
 		s.WriteString("(allow file-read*")
@@ -128,6 +130,20 @@ func profile(copy string, readOnly bool, home string, read []path, ports []int) 
 		s.WriteString(` (remote ip "localhost:` + strconv.Itoa(port) + `")`)
 	}
 	s.WriteString(")\n")
+	// Hidden even inside a Read grant: the person's keys and sign-ins, and
+	// any .env outside the copy and the session's home. Last among the
+	// file-read rules, so a deny wins over an allow above (Seatbelt takes
+	// the last matching rule). file-read* covers metadata, so a hidden path
+	// cannot be stat'd either.
+	if len(secret) > 0 {
+		s.WriteString("(deny file-read*")
+		for _, d := range secret {
+			s.WriteString(" (subpath " + param(d) + ")")
+		}
+		s.WriteString(")\n")
+	}
+	s.WriteString(`(deny file-read* (require-all (regex #"/\.env(\.[^/]*)?$")` +
+		` (require-not (subpath ` + copyTok + `)) (require-not (subpath ` + homeTok + `))))` + "\n")
 	p.profile = s.String()
 	return p
 }

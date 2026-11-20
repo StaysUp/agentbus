@@ -168,6 +168,35 @@ func TestWallNet(t *testing.T) {
 			t.Errorf("offline, contain %s: %+v", p.Network.Contain, got)
 		}
 	}
+	// Sandbox mode adds the default allow-list (registries, git hosts) on top
+	// of [network] allow; offline still keeps it shut, and autoWall (contain
+	// on, sandbox off) does not get it.
+	sb, err := settings.ParsePolicy([]byte("[sandbox]\nmode = \"on\"\n[network]\ncontain = \"on\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := wallNet(sb, false, in)
+	if got.Open || len(got.Allow) != len(netjail.DefaultAllow)+1 {
+		t.Errorf("sandbox on: want the default allow-list plus the one listed host, got %+v", got.Allow)
+	}
+	if !netjail.Allowed(got.Allow, "registry.npmjs.org") || !netjail.Allowed(got.Allow, "github.com") {
+		t.Errorf("sandbox on: default allow-list not added: %+v", got.Allow)
+	}
+	if got := wallNet(sb, true, in); len(got.Allow) != 0 {
+		t.Errorf("sandbox on but offline: the allow-list must stay shut, got %+v", got.Allow)
+	}
+	if got := wallNet(on, false, in); len(got.Allow) != 1 {
+		t.Errorf("autoWall (sandbox off) must keep only [network] allow: %+v", got.Allow)
+	}
+	// Sandbox on with contain off: the proxy is open to every public host,
+	// so the default allow-list adds nothing and is left out.
+	sbOpen, err := settings.ParsePolicy([]byte("[sandbox]\nmode = \"on\"\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := wallNet(sbOpen, false, in); !got.Open || len(got.Allow) != 1 {
+		t.Errorf("sandbox on, contain off: want open proxy and only the listed host, got %+v", got)
+	}
 }
 
 // agentbus-api is readable in the wall as one file: never the folder that

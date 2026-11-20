@@ -373,11 +373,11 @@ func wroteHere(p string) bool {
 	return err == nil && string(b) == "probe"
 }
 
-// TestAgentsStart runs claude --version and codex --version in a wall, as
-// the runner would start them: by the path on PATH, with only their own
-// program readable. An agent not installed here is skipped.
+// TestAgentsStart runs each agent's --version in a wall, as the runner
+// would start it: by the path on PATH, with only its own program readable.
+// An agent not installed here is skipped.
 func TestAgentsStart(t *testing.T) {
-	for _, name := range []string{"claude", "codex"} {
+	for _, name := range []string{"claude", "codex", "agy"} {
 		t.Run(name, func(t *testing.T) {
 			path, err := exec.LookPath(name)
 			if err != nil {
