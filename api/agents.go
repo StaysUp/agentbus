@@ -22,8 +22,8 @@ type AgentList struct {
 type SavedAgent struct {
 	ID      string    `json:"id" doc:"The agent's id. A turn names it in agent."`
 	Name    string    `json:"name" doc:"What the person calls it, such as Claude Code · sonnet. Unique, ignoring case."`
-	Harness string    `json:"harness" doc:"The program that runs the agent's loop: claude or codex."`
-	Access  string    `json:"access" doc:"How the harness reaches its model: subscription (the person's, connected on control), openrouter (the key set in Settings, or else one from an environment variable) api (the vendor's API key set in Settings), or a provider: xai (the xAI API key set in Settings)."`
+	Harness string    `json:"harness" doc:"The program that runs the agent's loop."`
+	Access  string    `json:"access" doc:"How the harness reaches its model: subscription (the person's, connected on control), openrouter (the key set in Settings, or else one from an environment variable), api (the vendor's API key set in Settings), or a provider such as xai (the xAI API key set in Settings)."`
 	Model   string    `json:"model,omitempty" doc:"The model, passed as --model. Absent: the harness's own default."`
 	KeyEnv  string    `json:"key_env,omitempty" doc:"For openrouter: the name of the environment variable, where control runs, that holds the key while no key is set in Settings. GET /api/v0/subscriptions env_keys says whether it is set. Never the key."`
 	Created time.Time `json:"created"`

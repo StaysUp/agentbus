@@ -120,12 +120,22 @@ func TestOpenAPICreateAgentNamesPlannedHarnesses(t *testing.T) {
 	}
 }
 
+func TestOpenAPISavedAgentHarnessDescriptionIsGeneric(t *testing.T) {
+	property := loadSpec(t).Components.Schemas["SavedAgent"].Value.Properties["harness"].Value
+	if want := "The program that runs the agent's loop."; property.Description != want {
+		t.Errorf("SavedAgent.harness description = %q, want %q", property.Description, want)
+	}
+}
+
 // The access values an agent can be saved with come from the agents package's
 // constants, so the spec's enum on AgentRequest.access must list exactly those.
 // The spec must also accept each one, and the code must save an agent with api.
 func TestOpenAPIAgentAccessMatchesCode(t *testing.T) {
 	access := loadSpec(t).Components.Schemas["AgentRequest"].Value.Properties["access"].Value
 	want := []any{agents.Subscription, agents.OpenRouter, agents.API}
+	for _, provider := range harness.Providers {
+		want = append(want, provider.Name)
+	}
 	if !slices.Equal(access.Enum, want) {
 		t.Errorf("AgentRequest.access enum = %v, want %v", access.Enum, want)
 	}
