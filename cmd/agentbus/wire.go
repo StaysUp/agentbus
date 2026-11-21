@@ -26,7 +26,11 @@ func runWire(getenv func(string) string, environ func() []string, lookPath func(
 		// A harness runs only on the access it offers: agy has no
 		// OpenRouter way, and its Wire would send it to its own sign-in.
 		if !harness.Offers(h.Info(), acc.Kind) {
-			return engine.Launch{}, engine.Refused(http.StatusBadRequest, h.Info().Label+" cannot run on access "+acc.Kind)
+			kind := acc.Kind
+			if kind == "" {
+				kind = harness.Subscription
+			}
+			return engine.Launch{}, engine.Refused(http.StatusBadRequest, h.Info().Label+" cannot run on access "+kind)
 		}
 		var env, pre []string
 		var files map[string][]byte
@@ -84,11 +88,13 @@ func runWire(getenv func(string) string, environ func() []string, lookPath func(
 
 // openRouterPrefix is the path under a turn's base URL that the service
 // forwards to OpenRouter, https://openrouter.ai/api: /openrouter/v1/messages
-// for Claude Code, /openrouter/v1/responses for codex. The key travels in the
+// for Claude Code, /openrouter/v1/responses for codex,
+// /openrouter/v1/chat/completions for opencode. The key travels in the
 // agent's own Authorization header, as a sign-in does, and is never stored.
-// No format is translated: OpenRouter takes Anthropic Messages and the
-// Responses API (research note 2026-11-08, harnesses on other models). Each
-// harness says how its child is pointed there (harness.Harness.WireOpenRouter).
+// No format is translated: OpenRouter takes Anthropic Messages, the Responses
+// API and Chat Completions (research note 2026-11-08, harnesses on other
+// models). Each harness says how its child is pointed there
+// (harness.Harness.WireOpenRouter).
 const openRouterPrefix = "/openrouter"
 
 // childEnv is the parent's environment with each of set replacing any entry

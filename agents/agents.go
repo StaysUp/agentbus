@@ -61,8 +61,8 @@ type Agent struct {
 // Fields are what a person sets on an agent: everything but its id and times.
 type Fields struct {
 	Name    string `json:"name" doc:"1 to 100 bytes, unique among the agents, ignoring case."`
-	Harness string `json:"harness" doc:"claude, codex or agy. A harness that is only planned is refused as not available yet."`
-	Access  string `json:"access" doc:"subscription, openrouter or api. api uses the vendor's API key set in Settings (claude: Anthropic, codex: OpenAI, agy: Gemini)."`
+	Harness string `json:"harness" doc:"claude, codex, agy or opencode. A harness that is only planned is refused as not available yet."`
+	Access  string `json:"access" doc:"subscription, openrouter or api. api uses the vendor's API key set in Settings (claude: Anthropic, codex: OpenAI, agy: Gemini). opencode runs on openrouter only."`
 	Model   string `json:"model,omitempty" doc:"Optional for subscription and api. Required for openrouter."`
 	KeyEnv  string `json:"key_env,omitempty" doc:"For openrouter only: a variable name ending in _KEY, such as OPENROUTER_API_KEY, which is used when this is absent."`
 }
@@ -158,14 +158,17 @@ type file struct {
 }
 
 // Defaults are the agents a control has unless the person changed or removed
-// them, or its data folder started without them (Starters): one per harness,
-// on its own subscription. Their ids are the
-// harness names, so a turn that names claude or codex finds them. A default
-// agent grants nothing a turn naming its harness does not already get.
+// them, or its data folder started without them (Starters): one per harness
+// that offers its own subscription, on it (opencode offers none). Their ids
+// are the harness names, so a turn that names claude or codex finds them. A
+// default agent grants nothing a turn naming its harness does not already get.
 func Defaults(now time.Time) []Agent {
 	var out []Agent
 	for _, h := range harness.All() {
 		i := h.Info()
+		if !harness.Offers(i, Subscription) {
+			continue
+		}
 		out = append(out, Agent{ID: i.Name, Name: i.Label, Harness: i.Name, Access: Subscription, Created: now, Updated: now})
 	}
 	return out
@@ -407,7 +410,8 @@ func (s *Store) Remove(id string) error {
 // ErrRemoved: each turn reads the agent it names, so a harness name gives
 // no way past the saved agents (his rule, 2026-11-12). The harness name of
 // a default the person never had, as a data folder that started without it
-// (Starters), is that harness on its own subscription.
+// (Starters), is that harness on its own subscription; a harness that offers
+// none (opencode) has no default, and its name finds no agent.
 func (s *Store) Resolve(id string) (Agent, error) {
 	a, err := s.Get(id)
 	if err == nil {
@@ -419,7 +423,7 @@ func (s *Store) Resolve(id string) (Agent, error) {
 	if gone {
 		return Agent{}, ErrRemoved
 	}
-	if known(id) {
+	if offers(id, Subscription) {
 		return Agent{Harness: id, Access: Subscription}, nil
 	}
 	return Agent{}, err

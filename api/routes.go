@@ -492,7 +492,7 @@ var routes = slices.Concat([]route{
 			"the key set in Settings (PUT /api/v0/subscriptions/openrouter/key), or, while none is set, the one in the environment variable key_env names where control runs (OPENROUTER_API_KEY when absent). " +
 			"The key itself is never sent to a runner or an agent, and never shown or logged. " +
 			"access api uses the vendor's own API key, set once in Settings (PUT /api/v0/subscriptions/{name}/key: anthropic for claude, openai for codex, gemini for agy); control's relay adds it to the agent's calls, which carry only a placeholder, and a turn while none is set is refused with where to set it. " +
-			"A harness that is only planned (" + harness.PlannedList() + ") is refused: not available yet.",
+			"opencode runs on access openrouter only." + plannedRefused(),
 		body:    AgentRequest{},
 		replies: []reply{ok(201, SavedAgent{}, "Saved."), badRequest, fail(404, "This service keeps no saved agents."), fail(409, "Too many agents."), storeFailed},
 		serve:   plain((*API).createSaved)},
@@ -856,4 +856,13 @@ func Methods() []string {
 		}
 	}
 	return out
+}
+
+// plannedRefused is the sentence of createAgent's doc that names the planned
+// harnesses, from the registry's list, or "" while none is planned.
+func plannedRefused() string {
+	if harness.PlannedList() == "" {
+		return ""
+	}
+	return " A harness that is only planned (" + harness.PlannedList() + ") is refused: not available yet."
 }

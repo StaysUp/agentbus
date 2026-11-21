@@ -77,13 +77,15 @@ func TestRouteOpenRouter(t *testing.T) {
 	}
 	keyed := map[string]http.Handler{apiKeyPrefix("claude"): gw("key-claude"), apiKeyPrefix("codex"): gw("key-codex"), apiKeyPrefix("agy"): gw("key-agy")}
 	h := route(nil, vendors{anthropic: gw("anthropic"), openai: gw("openai"), openrouterAnth: gw("or-anthropic"), openrouterResps: gw("or-responses"),
-		gemini: gw("gemini"), keyed: keyed}, false)
+		openrouterChat: gw("or-chat"), gemini: gw("gemini"), keyed: keyed}, false)
 	for path, want := range map[string]string{
 		"/s/abc/t/t_1/v1/messages":                         "anthropic",
 		"/s/abc/t/t_1/backend-api/codex/responses":         "openai",
 		"/s/abc/t/t_1/openrouter/v1/messages":              "or-anthropic",
 		"/s/abc/t/t_1/openrouter/v1/messages/count_tokens": "or-anthropic",
 		"/s/abc/t/t_1/openrouter/v1/responses":             "or-responses",
+		"/s/abc/t/t_1/openrouter/v1/chat/completions":      "or-chat",
+		"/s/abc/t/t_1/openrouter/v1/chat/completionsx":     "or-anthropic",
 		"/s/abc/t/t_1/openrouter/v1/models":                "or-anthropic",
 		"/s/abc/t/t_1/v1internal:streamGenerateContent":    "gemini",
 		"/v1internal:loadCodeAssist":                       "gemini",

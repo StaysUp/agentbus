@@ -131,7 +131,7 @@ differs per harness lives in `harness/`, one file each, and the rest of the code
    its replay format), its `Wire` and `WireOpenRouter`, `Edit`, `OwnInstructions`, `Args` and
    `ResumeID`. Note the version and date each flag was checked on, next to the code.
 2. Add it to `registry` in `harness/harness.go`. A harness listed as coming but not runnable goes
-   in `planned` instead, as opencode does.
+   in `planned` instead, as opencode did before it could run.
 3. Add its cases to `cmd/agentbus/launch_integration_test.go`, run it with `-update-launch`, and
    read the diff of `testdata/launch.golden` line by line. Existing lines must not change.
 4. Own replay needs a history format in `replay/`. Without one, leave `Info.Replay` empty: its

@@ -46,6 +46,7 @@ import (
 
 	"github.com/staysup/agentbus/adapter"
 	"github.com/staysup/agentbus/adapter/anthropic"
+	"github.com/staysup/agentbus/adapter/chatcompletions"
 	"github.com/staysup/agentbus/adapter/gemini"
 	"github.com/staysup/agentbus/adapter/openai"
 	"github.com/staysup/agentbus/api"
@@ -513,9 +514,11 @@ func start(c config) (*service, error) {
 			// nothing else of that host.
 			relayCloudCode: relayed(jobs.Upstream{URL: c.cloudCodeOr(), Access: credentials.AccessSubscription, Harness: "agy", Under: "v1internal:"},
 				gemini.Adapter{}),
-			// OpenRouter takes both API formats: the Responses one's calls
-			// go to the openai adapter, any other to the anthropic one.
-			relayOpenRouter: relayed(jobs.Upstream{URL: orUp, Access: credentials.AccessOpenRouter}, openai.Adapter{}, anthropic.Adapter{}),
+			// OpenRouter takes three API formats: each call goes to the
+			// adapter that records it (jobs.gatewayFor), the Responses API's
+			// to openai, Chat Completions' to chatcompletions (opencode), the
+			// Messages API's to anthropic.
+			relayOpenRouter: relayed(jobs.Upstream{URL: orUp, Access: credentials.AccessOpenRouter}, openai.Adapter{}, chatcompletions.Adapter{}, anthropic.Adapter{}),
 		}
 		// Each vendor's API, for agents on its API key set in Settings
 		// (harness.Info.APIKey): their calls go to that vendor only.
@@ -759,12 +762,14 @@ func start(c config) (*service, error) {
 	gem := gateway.New(ccURL, gemini.Adapter{}, gwSink)
 	gws := []*gateway.Gateway{anth, oai, gem}
 	// An OpenRouter agent's calls, under /openrouter of its base URL: one
-	// gateway per API format, both to OpenRouter.
+	// gateway per API format, all to OpenRouter.
 	orAnth := gateway.New(orURL, anthropic.Adapter{}, gwSink)
 	orOAI := gateway.New(orURL, openai.Adapter{}, gwSink)
+	orChat := gateway.New(orURL, chatcompletions.Adapter{}, gwSink)
 	orAnth.SetPrefix(openRouterPrefix)
 	orOAI.SetPrefix(openRouterPrefix)
-	gws = append(gws, orAnth, orOAI)
+	orChat.SetPrefix(openRouterPrefix)
+	gws = append(gws, orAnth, orOAI, orChat)
 	// An agent on its vendor's API key, under /key/<harness> of its base
 	// URL: to the vendor's API, or, on a runner that holds no secret, to
 	// control's relay, which adds the key set in Settings.
@@ -873,7 +878,7 @@ func start(c config) (*service, error) {
 	if q != nil {
 		s.subs = subs
 	}
-	routed := vendors{anthropic: anth, openai: oai, openrouterAnth: orAnth, openrouterResps: orOAI, gemini: handler(gem), keyed: keyed, relay: relayHandler}
+	routed := vendors{anthropic: anth, openai: oai, openrouterAnth: orAnth, openrouterResps: orOAI, openrouterChat: orChat, gemini: handler(gem), keyed: keyed, relay: relayHandler}
 	if q != nil {
 		// up and server: the cockpit at /. A runner's own service is for
 		// its agents only.
@@ -1402,6 +1407,9 @@ type site interface {
 type vendors struct {
 	anthropic, openai               http.Handler // the vendors' own, for a subscription
 	openrouterAnth, openrouterResps http.Handler // OpenRouter's, under /openrouter
+	// openrouterChat is OpenRouter's Chat Completions gateway (opencode),
+	// under /openrouter.
+	openrouterChat http.Handler
 	// relay takes runners' model calls and adds their credential, under
 	// jobs.RelayPrefix; nil without a queue. A running turn's stand-in guards
 	// it, so it answers callers on other machines.
@@ -1456,6 +1464,8 @@ func route(a *api.API, v vendors, open bool) http.Handler {
 			gw = keyedGateway(v.keyed, rest)
 		case under(rest, openRouterPrefix+"/v1/responses"):
 			gw = v.openrouterResps
+		case under(rest, openRouterPrefix+"/v1/chat/completions"):
+			gw = v.openrouterChat
 		case under(rest, openRouterPrefix+"/v1"):
 			gw = v.openrouterAnth
 		default:
