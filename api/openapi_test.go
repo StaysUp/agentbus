@@ -87,6 +87,20 @@ func TestOpenAPISpecValid(t *testing.T) {
 	}
 }
 
+// GET /api/v0/approvals reads the record through the store, so the 500 its
+// handler writes is a reply the description must list.
+func TestOpenAPIApprovalsListDescribesStoreFailure(t *testing.T) {
+	op := loadSpec(t).Paths.Find("/api/v0/approvals").Get
+	resp := op.Responses.Status(http.StatusInternalServerError)
+	if resp == nil || resp.Value == nil {
+		t.Fatal("GET /api/v0/approvals: no 500 for a store failure")
+	}
+	want := "The store could not be read or written."
+	if resp.Value.Description == nil || *resp.Value.Description != want {
+		t.Errorf("500 description = %v, want %q", resp.Value.Description, want)
+	}
+}
+
 // Every operation has a short summary that names its action, the heading
 // and the menu entry on /docs, and a description whose first line says what
 // it does. Each is in one listed tag, and Turns comes first.
