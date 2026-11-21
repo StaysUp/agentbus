@@ -39,18 +39,19 @@ func TestRegistry(t *testing.T) {
 			t.Errorf("%q: args %q do not end in -- and the prompt", i.Name, a)
 		}
 	}
-	if _, ok := Get("opencode"); ok {
-		t.Error("a planned harness can start turns")
+	for _, p := range Planned() {
+		if _, ok := Get(p.Name); ok {
+			t.Errorf("planned harness %q can start turns", p.Name)
+		}
 	}
-	// A planned harness is shown by its product's own name, as the others
-	// are (Claude Code, Codex, Antigravity).
-	if p := Planned(); len(p) != 1 || p[0].Name != "opencode" || p[0].Label != "OpenCode" {
+	// opencode, once planned, is registered; nothing is planned now.
+	if p := Planned(); len(p) != 0 {
 		t.Errorf("Planned = %+v", p)
 	}
-	if got := PlannedList(); got != "opencode" {
+	if got := PlannedList(); got != "" {
 		t.Errorf("PlannedList = %q", got)
 	}
-	if got := NameList(); got != "claude, codex or agy" {
+	if got := NameList(); got != "claude, codex, agy or opencode" {
 		t.Errorf("NameList = %q", got)
 	}
 }

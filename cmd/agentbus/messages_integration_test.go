@@ -191,7 +191,10 @@ func TestHarnessesListsFoundVersionsAndSignIn(t *testing.T) {
 	if cx.Name != "codex" || cx.Found || cx.Version != "" || cx.SignedIn != nil {
 		t.Errorf("codex: %+v", cx)
 	}
-	if oc.Name != "opencode" || !oc.Disabled || oc.Found || !strings.HasSuffix(strings.TrimSpace(raw), `"access":[]}]}`) {
+	// opencode runs on an OpenRouter key only: its own sign-in is listed,
+	// disabled.
+	if oc.Name != "opencode" || oc.Disabled || oc.Found || oc.SignedIn != nil || len(oc.Access) != 2 ||
+		oc.Access[0].Kind != "subscription" || !oc.Access[0].Disabled || oc.Access[1].Kind != "openrouter" || oc.Access[1].Disabled {
 		t.Errorf("opencode: %+v", oc)
 	}
 	if len(cl.Access) != 3 || cl.Access[0].Kind != "subscription" || cl.Access[1].Kind != "openrouter" ||

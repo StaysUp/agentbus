@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/settings"
 )
 
@@ -118,9 +117,9 @@ func TestCheckRefuses(t *testing.T) {
 		{Fields{Harness: Claude, Access: Subscription}, "name must be"},
 		{Fields{Name: "a\nb", Harness: Claude, Access: Subscription}, "name must be"},
 		{Fields{Name: strings.Repeat("a", 101), Harness: Claude, Access: Subscription}, "name must be"},
-		// The refusal names what is planned, from the list, not by hand.
-		{Fields{Name: "x", Harness: "opencode", Access: Subscription}, "not available yet"},
-		{Fields{Name: "x", Harness: "opencode", Access: Subscription}, "(planned: " + harness.PlannedList() + ")"},
+		// opencode runs on an OpenRouter key only.
+		{Fields{Name: "x", Harness: "opencode", Access: Subscription}, "cannot use access subscription"},
+		{Fields{Name: "x", Harness: "opencode", Access: API}, "cannot use access api"},
 		{Fields{Name: "x", Harness: "gemini", Access: Subscription}, "harness must be"},
 		{Fields{Name: "x", Harness: "agy", Access: OpenRouter, Model: "m"}, "cannot use access openrouter"},
 		{Fields{Name: "x", Harness: Claude, Access: API, KeyEnv: "ANTHROPIC_API_KEY"}, "for openrouter agents only"},
@@ -134,6 +133,10 @@ func TestCheckRefuses(t *testing.T) {
 		if got := Check(&tc.f); !strings.Contains(got, tc.want) {
 			t.Errorf("%+v: %q, want %q", tc.f, got, tc.want)
 		}
+	}
+	oc := Fields{Name: "x", Harness: "opencode", Access: OpenRouter, Model: "z-ai/glm-5.3-flash"}
+	if got := Check(&oc); got != "" {
+		t.Errorf("an opencode agent on OpenRouter refused: %q", got)
 	}
 	ok := Fields{Name: "x", Harness: Codex, Access: OpenRouter, Model: "qwen/qwen3-coder:free"}
 	if got := Check(&ok); got != "" || ok.KeyEnv != DefaultKeyEnv {
@@ -202,6 +205,10 @@ func TestStarters(t *testing.T) {
 		if a, err := s.Resolve(h); err != nil || a.Harness != h || a.Access != Subscription {
 			t.Fatalf("a turn naming %s: %+v %v", h, a, err)
 		}
+	}
+	// opencode offers no subscription, so it has no default to fall back on.
+	if a, err := s.Resolve("opencode"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("a turn naming opencode: %+v %v", a, err)
 	}
 }
 

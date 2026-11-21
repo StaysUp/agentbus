@@ -168,6 +168,105 @@ func TestOpenRouterAgentTurnGoesThroughTheGateway(t *testing.T) {
 	}
 }
 
+// An opencode agent's turn reaches OpenRouter's Chat Completions through the
+// gateway: the call opencode's provider makes goes to /api/v1/chat/completions
+// with the key from the named variable of control's environment, the child
+// holding only the placeholder, and it is recorded by the Chat Completions
+// adapter: the request, the reply, its usage and the turn's end.
+func TestOpenRouterOpencodeTurnIsRecorded(t *testing.T) {
+	const keyValue = "test-key-value-7c2e"
+	t.Setenv("AB_TEST_OR_KEY", keyValue)
+	var mu sync.Mutex
+	var gotPath, gotAuth, gotBody string
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		gotPath, gotAuth, gotBody = r.URL.Path, r.Header.Get("Authorization"), string(b)
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, c := range []string{
+			`{"id":"gen-1","object":"chat.completion.chunk","model":"z-ai/glm-5.3-flash","choices":[{"index":0,"delta":{"role":"assistant","content":"4"},"finish_reason":null}]}`,
+			`{"id":"gen-1","object":"chat.completion.chunk","model":"z-ai/glm-5.3-flash","choices":[{"index":0,"delta":{"content":"2"},"finish_reason":"stop"}]}`,
+			`{"id":"gen-1","object":"chat.completion.chunk","model":"z-ai/glm-5.3-flash","choices":[],"usage":{"prompt_tokens":12,"completion_tokens":2,"total_tokens":14,"prompt_tokens_details":{"cached_tokens":4}}}`,
+		} {
+			io.WriteString(w, "data: "+c+"\n\n")
+		}
+		io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer up.Close()
+	home := t.TempDir()
+	svc := openRouterService(t, home, up.URL+"/api")
+	tok := readToken(t, home)
+
+	code, ag := sendAPI(t, svc, tok, "POST", "/api/v0/agents", map[string]any{"name": "GLM", "harness": "opencode",
+		"access": "openrouter", "model": "z-ai/glm-5.3-flash", "key_env": "AB_TEST_OR_KEY"})
+	if code != http.StatusCreated {
+		t.Fatalf("create: %d %v", code, ag)
+	}
+	report := filepath.Join(t.TempDir(), "report")
+	t.Setenv("AGENTBUS_FAKE_OUT", report)
+	t.Setenv("AGENTBUS_FAKE_OPENCODE_BODY", `{"model":"z-ai/glm-5.3-flash","messages":[{"role":"system","content":"You are opencode."},`+
+		`{"role":"user","content":"what is 6 times 7?"}],"tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],`+
+		`"stream":true,"stream_options":{"include_usage":true}}`)
+	code, out, raw := postRun(t, svc, tok, map[string]any{"agent": ag["id"], "folder": t.TempDir(), "prompt": "what is 6 times 7?"})
+	if code != http.StatusAccepted {
+		t.Fatalf("turn: %d %s", code, raw)
+	}
+	session := out["session"].(string)
+	waitClosed(t, svc.store, session)
+
+	r := readReport(t, report)
+	if v, _ := envValue(r.Env, "AB_TEST_OR_KEY"); !strings.HasPrefix(v, jobs.StandInPrefix) {
+		t.Error("the child's key variable is not the placeholder")
+	}
+	if strings.Contains(strings.Join(r.Env, "\n")+strings.Join(r.Args, " "), keyValue) {
+		t.Error("the child holds the key")
+	}
+	waitFor(t, "the forwarded call", func() bool { mu.Lock(); defer mu.Unlock(); return gotPath != "" })
+	mu.Lock()
+	if gotPath != "/api/v1/chat/completions" || gotAuth != "Bearer "+keyValue || !strings.Contains(gotBody, "6 times 7") {
+		t.Errorf("OpenRouter got %s %q %s", gotPath, gotAuth, gotBody)
+	}
+	mu.Unlock()
+
+	var responded map[string]any
+	waitFor(t, "model.responded", func() bool {
+		recs, _ := svc.store.After(0, store.Filter{Session: session, Only: true}, 1000)
+		for _, rec := range recs {
+			var e map[string]any
+			json.Unmarshal(rec.Data, &e)
+			if e["kind"] == "model.responded" {
+				responded = e
+			}
+		}
+		return responded != nil
+	})
+	recs, err := svc.store.After(0, store.Filter{Session: session, Only: true}, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := map[string]bool{}
+	for _, rec := range recs {
+		if strings.Contains(string(rec.Data), keyValue) {
+			t.Errorf("an event holds the key: %s", rec.Data)
+		}
+		var e map[string]any
+		json.Unmarshal(rec.Data, &e)
+		kinds[e["kind"].(string)] = true
+		if e["kind"] == "model.requested" && e["vendor"] != "chatcompletions" {
+			t.Errorf("model.requested by %v, want the chatcompletions adapter: %s", e["vendor"], rec.Data)
+		}
+	}
+	if responded["vendor"] != "chatcompletions" || responded["status"] != float64(200) || responded["usage"] == nil {
+		t.Errorf("model.responded %v", responded)
+	}
+	for _, k := range []string{"model.requested", "model.responded", "turn.completed"} {
+		if !kinds[k] {
+			t.Errorf("no %s recorded; kinds %v", k, kinds)
+		}
+	}
+}
+
 // codex on OpenRouter gets a provider of its own through -c flags, reading
 // the key from the named variable itself, and no ChatGPT base URL.
 func TestOpenRouterCodexArgs(t *testing.T) {

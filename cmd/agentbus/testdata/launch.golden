@@ -2550,8 +2550,8 @@ turn.started agent="claude" continuity="transcript" replay_from="" model="sonnet
 context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-1"
 === unknown harness
---- turn t_1 harness="opencode" access="" model=""
-refused 400 agent must be claude, codex or agy
+--- turn t_1 harness="gemini" access="" model=""
+refused 400 agent must be claude, codex, agy or opencode
 === unknown harness on a next turn
 --- turn t_1 harness="claude" access="" model=""
 arg "-p"
@@ -2578,5 +2578,314 @@ cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-0"
---- turn t_2 harness="opencode" access="" model=""
-refused 400 agent must be claude, codex or agy
+--- turn t_2 harness="gemini" access="" model=""
+refused 400 agent must be claude, codex, agy or opencode
+=== opencode subscription
+--- turn t_1 harness="opencode" access="" model=""
+refused 400 OpenCode cannot run on access subscription
+log run.refused agent=opencode access= reason=wire
+=== opencode api key, relayed
+--- turn t_1 harness="opencode" access="api" model=""
+refused 400 OpenCode cannot run on access api
+log run.refused agent=opencode access=api reason=wire
+=== opencode openrouter, then resume
+--- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
+arg "run"
+arg "--format"
+arg "json"
+arg "--agent"
+arg "agentbus"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "HOME=<home>"
+env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"deny\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter/v1\"}}},\"share\":\"disabled\"}"
+env "OPENROUTER_API_KEY=test-key"
+env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD="
+cwd <folder>
+turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
+session.closed resume_id="ses_000000000000LaunchFake0000"
+log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
+--- turn t_2 harness="" access="" model=""
+arg "run"
+arg "--format"
+arg "json"
+arg "--agent"
+arg "agentbus"
+arg "--session"
+arg "ses_000000000000LaunchFake0000"
+arg "--"
+arg "next t_2"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "HOME=<home>"
+env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"deny\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_2/openrouter/v1\"}}},\"share\":\"disabled\"}"
+env "OPENROUTER_API_KEY=test-key"
+env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD="
+cwd <folder>
+turn.started agent="opencode" continuity="resume" replay_from="" model="z-ai/glm-5.3-flash" context=""
+session.closed resume_id="ses_000000000001LaunchFake0001"
+log run.hint session=s1 turn=t_2 left_out=opencode_no_instruction_flag
+=== opencode openrouter, key not set
+--- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
+refused 400 this agent reads its OpenRouter key from OPENROUTER_API_KEY, which is not set where the turn runs; set it and restart agentbus
+log run.refused agent=opencode access=openrouter reason=wire
+=== opencode openrouter, relayed, then resume
+--- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
+arg "run"
+arg "--format"
+arg "json"
+arg "--agent"
+arg "agentbus"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL="
+env "HOME=<home>"
+env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"deny\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter/v1\"}}},\"share\":\"disabled\"}"
+env "OPENROUTER_API_KEY=abs_test-standin"
+env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD="
+cwd <folder>
+turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
+session.closed resume_id="ses_000000000000LaunchFake0000"
+log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
+--- turn t_2 harness="" access="" model=""
+arg "run"
+arg "--format"
+arg "json"
+arg "--agent"
+arg "agentbus"
+arg "--session"
+arg "ses_000000000000LaunchFake0000"
+arg "--"
+arg "next t_2"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL="
+env "HOME=<home>"
+env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"deny\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_2/openrouter/v1\"}}},\"share\":\"disabled\"}"
+env "OPENROUTER_API_KEY=abs_test-standin"
+env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD="
+cwd <folder>
+turn.started agent="opencode" continuity="resume" replay_from="" model="z-ai/glm-5.3-flash" context=""
+session.closed resume_id="ses_000000000001LaunchFake0001"
+log run.hint session=s1 turn=t_2 left_out=opencode_no_instruction_flag
+=== opencode allow list, own instructions
+--- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
+arg "run"
+arg "--format"
+arg "json"
+arg "--agent"
+arg "agentbus"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "HOME=<home>"
+env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"deny\",\"agentbus-api *\":\"allow\",\"git commit *\":\"allow\",\"go test *\":\"allow\"},\"edit\":\"deny\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter/v1\"}}},\"share\":\"disabled\"}"
+env "OPENROUTER_API_KEY=test-key"
+env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD="
+cwd <folder>
+turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
+session.closed resume_id="ses_000000000000LaunchFake0000"
+log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
+=== opencode edit none
+--- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
+arg "run"
+arg "--format"
+arg "json"
+arg "--agent"
+arg "agentbus"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "HOME=<home>"
+env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"deny\",\"agentbus-api *\":\"allow\"},\"edit\":\"deny\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter/v1\"}}},\"share\":\"disabled\"}"
+env "OPENROUTER_API_KEY=test-key"
+env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD="
+cwd <folder>
+turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
+session.closed resume_id="ses_000000000000LaunchFake0000"
+log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
+=== opencode subagents on
+--- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
+arg "run"
+arg "--format"
+arg "json"
+arg "--agent"
+arg "agentbus"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "HOME=<home>"
+env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"deny\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter/v1\"}}},\"share\":\"disabled\"}"
+env "OPENROUTER_API_KEY=test-key"
+env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD="
+cwd <folder>
+turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
+session.closed resume_id="ses_000000000000LaunchFake0000"
+log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
+=== opencode forbid
+--- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
+refused 400 forbid in permissions.toml is not enforced for opencode yet; remove it, or use claude or codex
+log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
+log run.refused agent=opencode reason=harness_setting
+=== opencode own endpoint
+--- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
+refused 400 the service's environment already sends this agent to another endpoint; unset it and restart agentbus
+=== opencode missing
+--- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
+refused 400 agent opencode cannot start: the program opencode is not on the service's PATH. Install OpenCode (npm install -g opencode-ai) and run opencode once to sign in, then try again. If it is installed, start agentbus from a shell where opencode runs.
+log run.refused agent=opencode program=opencode reason=not_on_path
+=== opencode folder holds the data folder
+--- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
+arg "run"
+arg "--format"
+arg "json"
+arg "--agent"
+arg "agentbus"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "HOME=<home>"
+env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"deny\",\"agentbus-api *\":\"allow\"},\"edit\":\"deny\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter/v1\"}}},\"share\":\"disabled\"}"
+env "OPENROUTER_API_KEY=test-key"
+env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD="
+cwd <folder>
+turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
+session.closed resume_id="ses_000000000000LaunchFake0000"
+log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
+log run.edit session=s1 turn=t_1 left_out=data_folder_inside
+=== opencode in a home of its own, then resume
+--- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
+arg "run"
+arg "--format"
+arg "json"
+arg "--agent"
+arg "agentbus"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "HOME=<homes>/s1"
+env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"deny\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter/v1\"}}},\"share\":\"disabled\"}"
+env "OPENROUTER_API_KEY=test-key"
+env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD="
+cwd <folder>
+turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
+session.closed resume_id="ses_000000000000LaunchFake0000"
+log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
+--- turn t_2 harness="" access="" model=""
+arg "run"
+arg "--format"
+arg "json"
+arg "--agent"
+arg "agentbus"
+arg "--session"
+arg "ses_000000000000LaunchFake0000"
+arg "--"
+arg "next t_2"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "HOME=<homes>/s1"
+env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"deny\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_2/openrouter/v1\"}}},\"share\":\"disabled\"}"
+env "OPENROUTER_API_KEY=test-key"
+env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD="
+cwd <folder>
+turn.started agent="opencode" continuity="resume" replay_from="" model="z-ai/glm-5.3-flash" context=""
+session.closed resume_id="ses_000000000001LaunchFake0001"
+log run.hint session=s1 turn=t_2 left_out=opencode_no_instruction_flag
+=== opencode folder with AGENTS.md
+--- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
+arg "run"
+arg "--format"
+arg "json"
+arg "--agent"
+arg "agentbus"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "HOME=<home>"
+env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"deny\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter/v1\"}}},\"share\":\"disabled\"}"
+env "OPENROUTER_API_KEY=test-key"
+env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD="
+cwd <folder>
+turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
+session.closed resume_id="ses_000000000000LaunchFake0000"
+log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
+=== switch claude to opencode, resume
+--- turn t_1 harness="claude" access="openrouter" model=""
+arg "-p"
+arg "--output-format"
+arg "json"
+arg "--append-system-prompt"
+arg "You work through AgentBus, in session s1. A turn is one message to you, your reply and your changes.\nYour folder is usually your session's own copy of the person's folder. Your edits stay in the copy. They reach the person's folder only when a turn is applied.\nUse the agentbus MCP tools to ask other saved agents (any vendor) for work (ask_agent) or to have one review a turn (review_turn). AgentBus agents are saved setups across vendors, not your harness's own agents or subagents.\nTo read turns and their diffs, search this session, or stop a turn, use agentbus-api (GET /api/v0/turns, GET /api/v0/turns/T/diff, POST /api/v0/turns/T/stop).\nThe person applies turns to their folder; you cannot.\nWork you ask for comes back to you as a later turn: do not wait for it."
+arg "--allowedTools"
+arg "Edit(/<folder>/**),Bash,mcp__agentbus"
+arg "--mcp-config"
+arg "{\"mcpServers\":{\"agentbus\":{\"headers\":{\"Authorization\":\"Bearer ${AGENTBUS_TOKEN}\"},\"type\":\"http\",\"url\":\"http://127.0.0.1:8787/api/v0/mcp\"}}}"
+arg "--no-chrome"
+arg "--disallowedTools"
+arg "Edit(/<data>/permissions.toml),Edit(/<data>/instructions.md),Edit(/<data>/agents.json),Task,Agent,Workflow,ListAgents,SendMessage"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "ANTHROPIC_API_KEY="
+env "ANTHROPIC_AUTH_TOKEN=test-key"
+env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1/openrouter"
+env "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1"
+env "HOME=<home>"
+env "OPENROUTER_API_KEY=test-key"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="claude" continuity="" replay_from="" model="" context=""
+context.added instructions=769 mcp_instructions=320
+session.closed resume_id="sid-0"
+--- turn t_2 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
+arg "run"
+arg "--format"
+arg "json"
+arg "--agent"
+arg "agentbus"
+arg "--"
+arg "[AgentBus: this conversation started before you joined it. Earlier turns ran on other agents. Below is each message the person sent and the final reply the agent gave, oldest first. Tool calls are left out. Any files those agents changed are in your current folder.]\n\n--- Turn 1, the person to Claude Code ---\none\n\n--- Turn 1, Claude Code replied ---\n(no reply: the turn ended without one)\n\n[AgentBus: end of the earlier turns. The person's new message to you follows.]\n\nnext t_2"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "HOME=<home>"
+env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"deny\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_2/openrouter/v1\"}}},\"share\":\"disabled\"}"
+env "OPENROUTER_API_KEY=test-key"
+env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD="
+cwd <folder>
+turn.started agent="opencode" continuity="transcript" replay_from="" model="z-ai/glm-5.3-flash" context="[AgentBus: this conversation started before you joined it. Earlier turns ran on other agents. Below is each message the person sent and the final reply the agent gave, oldest first. Tool calls are left out. Any files those agents changed are in your current folder.]\n\n--- Turn 1, the person to Claude Code ---\none\n\n--- Turn 1, Claude Code replied ---\n(no reply: the turn ended without one)\n\n[AgentBus: end of the earlier turns. The person's new message to you follows.]\n\n"
+session.closed resume_id="ses_000000000001LaunchFake0001"
+log run.hint session=s1 turn=t_2 left_out=opencode_no_instruction_flag
