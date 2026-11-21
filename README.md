@@ -116,6 +116,25 @@ An agent reaches its model in one of three ways, its **access**:
 - `api`: the vendor's own API key set in Settings (Anthropic for Claude Code, OpenAI for Codex, Gemini
   for Antigravity). The model is optional.
 
+### Use any model
+
+Claude Code can run on any model OpenRouter offers: the agent still runs Claude Code, but the model
+behind it changes. From an empty AgentBus:
+
+1. **Add an OpenRouter key.** Open **Settings**, **Subscriptions**, and paste your OpenRouter key
+   once. AgentBus keeps it and adds it only to OpenRouter model calls.
+2. **Add a Claude Code agent.** Press **+ Agent**, pick Claude Code, name it, set access to
+   `openrouter` and model to an id in OpenRouter's naming, such as `openai/gpt-oss-120b` (GPT) or
+   `deepseek/deepseek-v4.1-flash` (DeepSeek), then press **Create agent**. `openrouter` needs a model.
+3. **Start a session.** Press **+ Session**, pick the agent, type your project folder, write a first
+   message such as "what does this project do?", and press **Start**.
+4. **Have another model check it.** Add a second Claude Code agent the same way with a different
+   model id. In the same session, switch the agent beside Send to it and send "check the work
+   above". Its reply comes back into the session, as Codex's does in the Quickstart.
+
+Claude Code's tools are tuned for Claude, so other models may behave differently; give clear steps
+and read what they reply.
+
 ## Settings
 
 Settings apply to every session, from the next turn. Change them on the cockpit's Settings page, or
