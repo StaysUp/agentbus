@@ -64,6 +64,13 @@ type Session struct {
 	// it). Archive is only a view: it hides the session from the default list
 	// and removes nothing.
 	Archived *time.Time `json:"archived,omitempty" doc:"When the session was archived (PATCH archived:true); absent when not archived. Only a view: the list hides archived sessions unless archived=true, and the session still takes a turn."`
+	// Workspace is where the session's turns run, and Sandbox is that
+	// workspace's mode, folded in so a list need not read each workspace. The
+	// workspace is the one the session's turn.started events name, or the
+	// session's own id for a session migrated from before workspaces. The
+	// mode comes from the workspace's workspace.created.
+	Workspace string `json:"workspace,omitempty" doc:"The session's workspace, where its turns run (ws_ and 16 hex digits, or the session's own id for a migrated session)."`
+	Sandbox   bool   `json:"sandbox" doc:"The session's workspace mode: true for a copy behind a wall, false for the person's real folder."`
 
 	// LastSeq is the seq of the session's latest activity (the same events that
 	// set last, so not a rename or a stored preview). Sessions are ordered by
@@ -313,10 +320,61 @@ func (s *Store) snapshotAt(hi int64) (Snapshot, error) {
 		return snap, err
 	}
 
+	// Each session's workspace: the latest workspace its turn.started events
+	// name, or (none named) the session's own id, which is a migrated session's
+	// workspace id. The mode is that workspace's workspace.created sandbox.
+	wsBySession := map[string]string{}
+	rows, err = s.r.Query(`SELECT session, json_extract(data, '$.workspace'), MAX(seq) FROM events
+		WHERE seq <= ? AND kind = 'turn.started' AND COALESCE(json_extract(data, '$.workspace'), '') <> ''
+		GROUP BY session`, hi)
+	if err != nil {
+		return snap, fmt.Errorf("store: snapshot: %w", err)
+	}
+	for rows.Next() {
+		var id, ws string
+		var seq int64
+		if err := rows.Scan(&id, &ws, &seq); err != nil {
+			rows.Close()
+			return snap, fmt.Errorf("store: snapshot: %w", err)
+		}
+		wsBySession[id] = ws
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return snap, fmt.Errorf("store: snapshot: %w", err)
+	}
+	rows.Close()
+
+	sandboxByWS := map[string]bool{}
+	rows, err = s.r.Query(`SELECT json_extract(data, '$.workspace'), COALESCE(json_extract(data, '$.sandbox'), 0) FROM events
+		WHERE seq <= ? AND kind = 'workspace.created'`, hi)
+	if err != nil {
+		return snap, fmt.Errorf("store: snapshot: %w", err)
+	}
+	for rows.Next() {
+		var ws string
+		var sandbox int
+		if err := rows.Scan(&ws, &sandbox); err != nil {
+			rows.Close()
+			return snap, fmt.Errorf("store: snapshot: %w", err)
+		}
+		sandboxByWS[ws] = sandbox != 0
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return snap, fmt.Errorf("store: snapshot: %w", err)
+	}
+	rows.Close()
+
 	for id, x := range byID {
 		x.Open = held[id]
 		x.Resumable = withResume[id] && !x.Open
 		x.EventsDropped = all || named[id]
+		ws := wsBySession[id]
+		if ws == "" {
+			ws = id // a migrated session's workspace is its own id
+		}
+		x.Workspace, x.Sandbox = ws, sandboxByWS[ws]
 		// A call without a complete cost covers no usage, an incomplete
 		// output count and a model without a price: the cost step marks
 		// each of those incomplete.

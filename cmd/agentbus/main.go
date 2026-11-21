@@ -483,6 +483,52 @@ func start(c config) (*service, error) {
 				return nil, err
 			}
 		}
+		// Every existing session gets a workspace.created, so a workspace's
+		// folder, machine and sandbox mode have one source from the first
+		// start of this build. The session's own id becomes its workspace id,
+		// so its on-disk copy and checkpoints keep resolving without a rename.
+		// The queue's sessions give the sandbox mode (a copy or worktree is a
+		// sandbox); a session with no queue row -- hook or gateway traffic --
+		// is a direct workspace. Idempotent: a migrated session is skipped.
+		if sessions, err := q.Sessions(queue.DefaultTeam, 1<<30); err != nil {
+			closeQ()
+			st.Close()
+			return nil, err
+		} else {
+			seeds := make([]store.WorkspaceSeed, 0, len(sessions))
+			for _, w := range sessions {
+				// The queue holds the authoritative folder reference and
+				// machine of the session (the same SessionFolder askChecks
+				// reads); the folder registry resolves the reference to the
+				// person's real folder when this machine owns it. The
+				// session's own events are not used: for an isolated session
+				// they name the runner's scratch copy path, not the folder.
+				ref, machine, _, err := q.SessionFolder(queue.DefaultTeam, w.Session)
+				if err != nil {
+					closeQ()
+					st.Close()
+					return nil, err
+				}
+				folder := ""
+				if fr != nil {
+					if p, ok := fr.Path(ref); ok {
+						folder = p
+					}
+				}
+				seeds = append(seeds, store.WorkspaceSeed{
+					Session:   w.Session,
+					Sandbox:   w.Kind == queue.WorkspaceCopy || w.Kind == queue.WorkspaceWorktree,
+					Machine:   machine,
+					FolderRef: ref,
+					Folder:    folder,
+				})
+			}
+			if _, err := st.MigrateWorkspaces(seeds); err != nil {
+				closeQ()
+				st.Close()
+				return nil, err
+			}
+		}
 		// Every file of a snapshot or of a turn's changes goes through the
 		// control plane's blob store.
 		if bs, err = blobs.Open(filepath.Join(c.home, "blobs")); err != nil {
