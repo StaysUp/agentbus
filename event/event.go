@@ -62,6 +62,13 @@ const (
 	// Text says how it ended and who answered.
 	ApprovalDecided Kind = "approval.decided"
 
+	// SessionCreated: a session was created in a workspace (POST
+	// /api/v0/sessions), before any turn of it. Session is its id, Workspace
+	// the workspace its turns run in, and Title its name when one was given. A
+	// session groups turns; it owns only a title and its archived view, never a
+	// folder or a mode -- those are the workspace's. A session may have no turn
+	// yet: created and then left, which is harmless.
+	SessionCreated Kind = "session.created"
 	// SessionRenamed: the person, or a turn of the session's request tree,
 	// gave the session a name (PATCH /api/v0/sessions/{id}). Title is the new
 	// name and OldTitle the one it replaced. The latest names the session.
@@ -239,6 +246,7 @@ var Kinds = []KindInfo{
 	{PlanUsage, "How much of a subscription's plan is used in one of its windows, as the vendor said in the headers of a model reply that carried control's credential for that subscription: plan holds the subscription (the harness, such as claude), the connect its credential came from, the window, its length in minutes, the percent used, when it resets and the vendor's status word. " +
 		"exchange names the call it was read from. Stored when the reading changes, and again every 10 minutes at most while calls keep it the same. " +
 		"The latest per subscription, connect and window is kept; GET /api/v0/subscriptions shows those of the subscription's current connect. Only control's own gateway stores it: a runner's record is refused it. Read from a fixed list of the vendor's usage headers only; no other header. No session.", []string{"plan"}},
+	{SessionCreated, "A session was created in a workspace with POST /api/v0/sessions, before any turn of it: session is its id, workspace the workspace its turns run in, and title its name when one was given. A session groups turns and owns only its title and archived view; its folder and mode are its workspace's. Stored once per session, keyed on the event id sc_<session>. A session may be created and left with no turn, which is harmless.", []string{"session", "workspace"}},
 	{SessionRenamed, "The session was given a name with PATCH /api/v0/sessions/{id}: title is the new name, old_title the one it had before (absent when it had none). The latest names the session in GET /api/v0/sessions; earlier names stay in the record.", []string{"session", "title"}},
 	{SessionArchived, "The session was archived or un-archived with PATCH /api/v0/sessions/{id}: archived true hid it from the default list, false (absent) un-hid it. The latest decides. Only a view: nothing is removed and the session still takes turns.", []string{"session", "archived"}},
 }

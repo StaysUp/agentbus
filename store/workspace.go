@@ -159,6 +159,44 @@ func (s *Store) Workspaces() ([]Workspace, error) {
 	return out, nil
 }
 
+// CreatedByKey reads the id (at idPath) and request_hash of the noun an
+// idempotency key first created: the first event of kind whose idempotency_key
+// is key. It is the key-first check a store-backed POST runs before any side
+// effect, so a retry does no work. found is false for an empty key or a key no
+// event of that kind carries.
+func (s *Store) CreatedByKey(kind event.Kind, idPath, key string) (id, hash string, found bool, err error) {
+	if key == "" {
+		return "", "", false, nil
+	}
+	var gotID, gotHash sql.NullString
+	err = s.r.QueryRow(`SELECT json_extract(data, '`+idPath+`'), json_extract(data, '$.request_hash')
+		FROM events WHERE kind = ? AND json_extract(data, '$.idempotency_key') = ? ORDER BY seq LIMIT 1`,
+		string(kind), key).Scan(&gotID, &gotHash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, fmt.Errorf("store: created by key: %w", err)
+	}
+	return gotID.String, gotHash.String, true, nil
+}
+
+// SessionWorkspace reads the workspace a session.created bound a session to,
+// and its title. found is false when the session has no session.created (a
+// session the record knows only through its turns, or an unknown one).
+func (s *Store) SessionWorkspace(session string) (workspace, title string, found bool, err error) {
+	var ws, t sql.NullString
+	err = s.r.QueryRow(`SELECT json_extract(data, '$.workspace'), json_extract(data, '$.title') FROM events
+		WHERE kind = ? AND session = ? ORDER BY seq LIMIT 1`, string(event.SessionCreated), session).Scan(&ws, &t)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, fmt.Errorf("store: read session workspace: %w", err)
+	}
+	return ws.String, t.String, true, nil
+}
+
 // WorkspaceSeed is one existing session's facts for the workspace migration,
 // read from the job queue's sessions table by the caller (so the store does not
 // import the queue). Folder and FolderRef are left for the migration to read
@@ -225,15 +263,16 @@ func (s *Store) MigrateWorkspaces(seeds []WorkspaceSeed) (int, error) {
 	rows.Close()
 
 	// Sessions that already name a workspace of their own (a session created
-	// explicitly, whose turn.started carries a non-empty workspace): the
-	// migration is only for pre-workspace sessions, so it leaves these alone.
+	// explicitly, whose session.created or turn.started carries a non-empty
+	// workspace): the migration is only for pre-workspace sessions, so it
+	// leaves these alone.
 	// Without this guard, such a session -- whose workspace.created is keyed on
 	// its own ws_ id, not wc_<session> -- would get a second, phantom
 	// workspace.created (workspace = the session's id) on the next start, and
 	// the append-only log would keep it.
 	explicit := map[string]bool{}
 	rows, err = s.r.Query(`SELECT DISTINCT session FROM events
-		WHERE kind = 'turn.started' AND COALESCE(json_extract(data, '$.workspace'), '') <> ''`)
+		WHERE kind IN ('session.created', 'turn.started') AND COALESCE(json_extract(data, '$.workspace'), '') <> ''`)
 	if err != nil {
 		return 0, fmt.Errorf("store: migrate workspaces: %w", err)
 	}

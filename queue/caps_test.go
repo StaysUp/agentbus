@@ -361,6 +361,29 @@ func TestHeartbeatReplacesLabels(t *testing.T) {
 
 func (f fakeIssuer) WithinDir(p, d string) bool { return p == d || strings.HasPrefix(p, d+"/") }
 
+// DisplayFolder keeps a folder's path only when the folder is on this machine
+// (machine empty or this one), never a folder on another machine, and never
+// panics on a nil issuer.
+func TestDisplayFolder(t *testing.T) {
+	f := fakeIssuer{"fld_x": "/src/app"} // Machine() is conA
+	cases := []struct {
+		ref, machine, want string
+	}{
+		{"fld_x", "", "/src/app"},   // own machine, unspecified
+		{"fld_x", conA, "/src/app"}, // own machine, named
+		{"fld_x", conB, ""},         // another machine: no path
+		{"fld_unknown", "", ""},     // unknown reference
+	}
+	for _, c := range cases {
+		if got := DisplayFolder(f, c.ref, c.machine); got != c.want {
+			t.Errorf("DisplayFolder(%q, %q) = %q, want %q", c.ref, c.machine, got, c.want)
+		}
+	}
+	if got := DisplayFolder(nil, "fld_x", ""); got != "" {
+		t.Errorf("nil issuer: %q, want empty", got)
+	}
+}
+
 // compat 0.6: drop connector. Routing reads the machine id under either key
 // on both the job's spec and the runner's caps, so a 0.6 control and a job
 // stored by a build before 0.6 both route. A 0.6 spec names the id under both

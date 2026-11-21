@@ -309,8 +309,14 @@ type Spec struct {
 	// Labels: a runner takes the job only if it has every one.
 	Labels  []string `json:"labels,omitempty"`
 	Session string   `json:"session,omitempty"`
-	Prompt  string   `json:"prompt"`
-	Model   string   `json:"model,omitempty"`
+	// Workspace is where the turn runs: the runner opens or loads its copy at
+	// <workdir>/<workspace>. It is the session's workspace, filled by the
+	// control plane from the record, never by the caller, so it is stripped
+	// for the idempotency hash (asked). An asked turn runs in the asker's
+	// workspace, so its workspace is not its own session's id.
+	Workspace string `json:"workspace,omitempty"`
+	Prompt    string `json:"prompt"`
+	Model     string `json:"model,omitempty"`
 	// ModelFromAgent: Model came from the saved agent, not the request. It
 	// is never stored; it only keeps the request's hash what was asked.
 	ModelFromAgent bool `json:"-"`
@@ -398,6 +404,9 @@ func (spec Spec) asked() Spec {
 		a.Harness = a.AgentID
 	}
 	a.AgentID, a.Access, a.KeyEnv, a.AgentModel = "", "", "", ""
+	// Workspace is derived from the session by the control plane, so it is not
+	// part of what the caller asked: a retry matches whatever the workspace is.
+	a.Workspace = ""
 	if a.Typed != "" {
 		a.Folder, a.FolderRef, a.Machine = a.Typed, "", a.TypedMachine
 	}

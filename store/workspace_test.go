@@ -225,6 +225,49 @@ func TestMigrateSkipsSessionWithExplicitWorkspace(t *testing.T) {
 	}
 }
 
+// A session created by POST /api/v0/sessions (a session.created naming a
+// workspace) is left alone by the migration even before its first turn, so a
+// restart writes no phantom workspace keyed on the session's id.
+func TestMigrateSkipsSessionCreatedBeforeFirstTurn(t *testing.T) {
+	s := newStore(t)
+	base := time.Date(2026, 11, 21, 18, 30, 0, 0, time.UTC)
+	ok, err := s.AppendOnce(event.Event{ID: "wc_ws_exp2", Kind: event.WorkspaceCreated, Workspace: "ws_exp2",
+		FolderRef: "fld_7777777777777777", Sandbox: ptrBool(true), Time: base})
+	if err != nil || !ok {
+		t.Fatalf("workspace.created: %v %v", ok, err)
+	}
+	// A session created in it, with no turn yet.
+	ok, err = s.AppendOnce(event.Event{ID: "sc_s_exp2", Kind: event.SessionCreated, Session: "s_exp2",
+		Workspace: "ws_exp2", Title: "Fix it", Time: base.Add(time.Minute)})
+	if err != nil || !ok {
+		t.Fatalf("session.created: %v %v", ok, err)
+	}
+	if n, err := s.MigrateWorkspaces(nil); err != nil || n != 0 {
+		t.Fatalf("migrate: n=%d err=%v, want 0 (the session already has a workspace)", n, err)
+	}
+	if _, found, _ := s.Workspace("s_exp2"); found {
+		t.Fatal("a phantom workspace keyed on the session id was created")
+	}
+}
+
+// Renaming a session that was created with a title records that title as the
+// old one, not an empty string or the first message.
+func TestRenameKeepsCreatedTitleAsOld(t *testing.T) {
+	s := newStore(t)
+	base := time.Date(2026, 11, 21, 19, 0, 0, 0, time.UTC)
+	if _, err := s.AppendOnce(event.Event{ID: "sc_s_t", Kind: event.SessionCreated, Session: "s_t",
+		Workspace: "ws_t", Title: "First name", Time: base}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := s.Rename(event.Event{ID: "r1", Session: "s_t", Title: "Second name", Time: base.Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.OldTitle != "First name" {
+		t.Fatalf("old_title %q, want the session.created title", out.OldTitle)
+	}
+}
+
 // The migration records the authoritative folder, reference and machine from
 // the seed (the queue and the folder registry), never the session's event
 // folder -- which for an isolated session is the runner's scratch copy path,

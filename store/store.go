@@ -248,6 +248,35 @@ func (s *Store) AppendFirst(e event.Event) (stored bool, err error) {
 	return stored, err
 }
 
+// AppendForKey appends e unless an event of e's kind already carries e's
+// idempotency_key; then nothing is written. idPath names where the created
+// noun's id sits in the event data ($.workspace or $.session), so a retry gets
+// the id and request_hash the key first made, and the caller can refuse a
+// reused key that carries other fields. The check and the write are one step
+// under the store's lock, so two concurrent retries with the same key write one
+// event. With an empty key it is a plain append (stored true).
+func (s *Store) AppendForKey(e event.Event, idPath string) (existingID, existingHash string, stored bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return "", "", false, ErrClosed
+	}
+	if e.IdempotencyKey != "" {
+		var id, hash sql.NullString
+		err = s.w.QueryRow(`SELECT json_extract(data, '`+idPath+`'), json_extract(data, '$.request_hash')
+			FROM events WHERE kind = ? AND json_extract(data, '$.idempotency_key') = ? ORDER BY seq LIMIT 1`,
+			string(e.Kind), e.IdempotencyKey).Scan(&id, &hash)
+		if err == nil {
+			return id.String, hash.String, false, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", "", false, fmt.Errorf("store: append for key: %w", err)
+		}
+	}
+	_, stored, err = s.appendLocked(e)
+	return "", "", stored, err
+}
+
 // appendLocked is Append with s.mu held.
 func (s *Store) appendLocked(e event.Event) (out event.Event, stored bool, err error) {
 	if s.closed {

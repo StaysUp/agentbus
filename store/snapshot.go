@@ -246,7 +246,9 @@ func (s *Store) snapshotAt(hi int64) (Snapshot, error) {
 	// check, marked probe: true) never does. SQLite takes the bare column
 	// from the row MAX(seq) or MIN(seq) picked. The first query runs first,
 	// so a rename wins.
-	for i, q := range []string{firstText + ` AND seq <= ? GROUP BY session`, latestRename + ` AND seq <= ? GROUP BY session`} {
+	for i, q := range []string{firstText + ` AND seq <= ? GROUP BY session`,
+		createdTitle + ` AND seq <= ? GROUP BY session`,
+		latestRename + ` AND seq <= ? GROUP BY session`} {
 		rows, err = s.r.Query(q, hi)
 		if err != nil {
 			return snap, fmt.Errorf("store: snapshot: %w", err)
@@ -320,12 +322,14 @@ func (s *Store) snapshotAt(hi int64) (Snapshot, error) {
 		return snap, err
 	}
 
-	// Each session's workspace: the latest workspace its turn.started events
-	// name, or (none named) the session's own id, which is a migrated session's
-	// workspace id. The mode is that workspace's workspace.created sandbox.
+	// Each session's workspace: the latest workspace its session.created or
+	// turn.started events name, or (none named) the session's own id, which is
+	// a migrated session's workspace id. session.created carries it for a
+	// session with no turn yet. The mode is that workspace's workspace.created
+	// sandbox.
 	wsBySession := map[string]string{}
 	rows, err = s.r.Query(`SELECT session, json_extract(data, '$.workspace'), MAX(seq) FROM events
-		WHERE seq <= ? AND kind = 'turn.started' AND COALESCE(json_extract(data, '$.workspace'), '') <> ''
+		WHERE seq <= ? AND kind IN ('session.created', 'turn.started') AND COALESCE(json_extract(data, '$.workspace'), '') <> ''
 		GROUP BY session`, hi)
 	if err != nil {
 		return snap, fmt.Errorf("store: snapshot: %w", err)
@@ -457,6 +461,11 @@ const (
 			AND COALESCE(json_extract(data, '$.text'), '') <> ''`
 	latestRename = `SELECT session, COALESCE(json_extract(data, '$.title'), ''), MAX(seq) FROM events
 		WHERE kind = 'session.renamed'`
+	// A session created with a title (POST /api/v0/sessions) keeps it until a
+	// rename: it wins over the first message (the person named the session) and
+	// loses to a later rename.
+	createdTitle = `SELECT session, COALESCE(json_extract(data, '$.title'), ''), MAX(seq) FROM events
+		WHERE kind = 'session.created' AND COALESCE(json_extract(data, '$.title'), '') <> ''`
 	// The session's latest session.archived: its archived flag and time, from
 	// the row MAX(seq) picks. archived 1 means archived at that time, 0 (the
 	// un-archive, which omits the field) means not.
@@ -475,7 +484,7 @@ func (s *Store) Rename(e event.Event) (event.Event, error) {
 		return e, ErrClosed
 	}
 	old := ""
-	for i, q := range []string{firstText, latestRename} {
+	for i, q := range []string{firstText, createdTitle, latestRename} {
 		var id, text string
 		var seq int64
 		err := s.r.QueryRow(q+` AND session = ? GROUP BY session`, e.Session).Scan(&id, &text, &seq)

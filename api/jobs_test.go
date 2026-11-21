@@ -166,7 +166,7 @@ func TestRunnerProtocolOnTheOneAPI(t *testing.T) {
 		t.Fatalf("POST /api/v0/turns with no runner: %d %s, want queued with its turn", resp.StatusCode, raw)
 	}
 	noToken(t, resp, raw)
-	for _, p := range []string{"/api/v0/jobs", "/api/v0/workspaces", "/api/v0/attempts/t_1/events"} {
+	for _, p := range []string{"/api/v0/jobs", "/api/v0/attempts/t_1/events"} {
 		if resp, raw := do(t, e.req(t, "GET", p, nil)); resp.StatusCode != http.StatusNotFound {
 			t.Errorf("GET %s: %d %s, want 404: no such route", p, resp.StatusCode, raw)
 		}

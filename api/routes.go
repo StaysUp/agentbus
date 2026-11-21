@@ -109,7 +109,20 @@ var (
 	badRequest  = fail(http.StatusBadRequest, "The request is refused; error says why.")
 	noSession   = fail(http.StatusNotFound, "No such session.")
 	mismatch    = ok(http.StatusConflict, StoreMismatch{}, "The cursor belongs to another store. Start over from the snapshot.")
+
+	// idempotentConflictReply is the 409 every store-backed create POST can
+	// give when an idempotency_key is reused with other fields.
+	idempotentConflictReply = fail(http.StatusConflict, "idempotency_key already made this with other fields; send a new key.")
 )
+
+// createReplies are the responses every store-backed create POST can give: its
+// success, plus the ones the shared idempotency guard returns (400, 409, 500).
+// A route that resolves a typed folder adds its own (404, 429, 503) as extra.
+// Deriving them from one place keeps a returnable status from going
+// undocumented (his rule, 2026-11-21: one shared pipeline, not per-handler).
+func createReplies(success reply, extra ...reply) []reply {
+	return slices.Concat([]reply{success, badRequest, idempotentConflictReply, storeFailed}, extra)
+}
 
 // startTurn's 400 and 500, saying what each means for a turn.
 var (
@@ -136,7 +149,8 @@ var tags = []struct {
 	runner    bool
 }{
 	{name: "Turns", doc: "A turn is one message to an agent, its reply and its changes. Every action is on a turn: start it, stop it, read its diff, apply its changes to the person's folder, ask another agent to review it, and read its model calls."},
-	{name: "Sessions", doc: "A session is a conversation: its turns, in order. Read its history, search it, name it or close it."},
+	{name: "Sessions", doc: "A session is a conversation: its turns, in order. Read its history, search it, name it or close it. Create one in a workspace, then run its turns."},
+	{name: "Workspaces", doc: "A workspace is where turns run: it owns the folder, the machine and the sandbox mode (a copy behind a wall, or the folder as it is). Create one, then create a session in it, then run the session's turns. The folder and the mode are the workspace's; a session carries neither."},
 	{name: "Agents", doc: "Saved agents: a harness, how it reaches its model, the model and a name. A turn names one. And the harnesses, runners and folders a turn can use."},
 	{name: "Tools", doc: "The tools control serves to agents: the built-in ones and the person's own, in one stored format. List, add and remove them. The main token only."},
 	{name: "Files", doc: "Access to files and folders outside the session copy, gated on control."},
@@ -383,6 +397,35 @@ var routes = slices.Concat([]route{
 		turn:  treeTurn,
 		serve: callOfTurn((*API).callPiece)},
 
+	{method: "POST", path: "/api/v0/workspaces", op: "createWorkspace",
+		tag:     "Workspaces",
+		summary: "Create a workspace",
+		doc: "Create a workspace: where turns run. Send folder (an absolute path) or folder_ref, optionally machine, and sandbox (true by default: turns run in a copy of the folder behind a wall; false: in the folder as it is). The reply names the workspace; create a session in it (POST /api/v0/sessions), then run the session's turns.\n\n" +
+			"A typed folder's machine checks and registers it, and the workspace keeps only its reference. With idempotency_key a retry returns the same workspace and makes nothing new.",
+		body:    WorkspaceRequest{},
+		replies: createReplies(ok(201, store.Workspace{}, "The workspace."), fail(404, "This service keeps no queue, or no such machine."), tooMany, stopping),
+		serve:   plain((*API).createWorkspace)},
+	{method: "GET", path: "/api/v0/workspaces", op: "listWorkspaces",
+		tag:     "Workspaces",
+		summary: "List workspaces",
+		doc:     "Every workspace, newest first, each with its folder, machine, sandbox mode and apply state.",
+		replies: []reply{ok(200, WorkspacesPage{}, "The workspaces."), storeFailed},
+		serve:   plain((*API).listWorkspaces)},
+	{method: "GET", path: "/api/v0/workspaces/{id}", op: "getWorkspace",
+		tag:     "Workspaces",
+		summary: "Get a workspace",
+		idDoc:   "A workspace id (ws_ and 16 hex digits), as POST /api/v0/workspaces named it. Another shape gets 404.",
+		doc:     "One workspace: its folder, folder reference, machine, sandbox mode, when it was created, its head turn (the latest with a changeset), the turn its latest apply went up to, and when its latest action was a discard.",
+		replies: []reply{ok(200, store.Workspace{}, "The workspace."), fail(404, "No such workspace."), storeFailed},
+		serve:   (*API).getWorkspace},
+	{method: "POST", path: "/api/v0/sessions", op: "createSession",
+		tag:     "Sessions",
+		summary: "Create a session",
+		doc: "Create a session in a workspace: a conversation whose turns run there. Send workspace (from POST /api/v0/workspaces) and optionally title. The reply names the session; run its turns with POST /api/v0/turns.\n\n" +
+			"A session owns only its title and its archived view; its folder and mode are its workspace's. With idempotency_key a retry returns the same session and makes nothing new.",
+		body:    SessionRequest{},
+		replies: createReplies(ok(201, SessionCreated{}, "The session."), fail(404, "No such workspace.")),
+		serve:   plain((*API).createSession)},
 	{method: "GET", path: "/api/v0/sessions", op: "listSessions",
 		tag:     "Sessions",
 		summary: "List sessions",

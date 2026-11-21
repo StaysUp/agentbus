@@ -351,6 +351,21 @@ type FolderIssuer interface {
 	WithinDir(path, dir string) bool
 }
 
+// DisplayFolder is the person's folder path to keep on a workspace, or "" when
+// the folder is on another machine or unknown here. The control plane holds no
+// path of a session on another machine, so only a folder this machine owns
+// (machine empty, or this machine's) gets its path. POST /api/v0/workspaces and
+// the startup workspace migration both use it, so they record a folder one way.
+func DisplayFolder(f FolderIssuer, ref, machine string) string {
+	if f == nil || (machine != "" && machine != f.Machine()) {
+		return ""
+	}
+	if p, ok := f.Path(ref); ok {
+		return p
+	}
+	return ""
+}
+
 // ResolveFolders turns the paths spec names into references issued by f, and
 // clears the paths, so only references are kept. A spec that names
 // references keeps them. It answers what is wrong, or "".

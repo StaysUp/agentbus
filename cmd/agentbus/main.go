@@ -509,12 +509,7 @@ func start(c config) (*service, error) {
 					st.Close()
 					return nil, err
 				}
-				folder := ""
-				if fr != nil {
-					if p, ok := fr.Path(ref); ok {
-						folder = p
-					}
-				}
+				folder := queue.DisplayFolder(issuer, ref, machine)
 				seeds = append(seeds, store.WorkspaceSeed{
 					Session:   w.Session,
 					Sandbox:   w.Kind == queue.WorkspaceCopy || w.Kind == queue.WorkspaceWorktree,

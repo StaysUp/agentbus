@@ -200,8 +200,12 @@ func TestTurnToken(t *testing.T) {
 		{"POST", "/api/v0/agents", `{"harness":"claude","access":"subscription","name":"x"}`, 403},
 		// Only the person closes a session.
 		{"PATCH", "/api/v0/sessions/" + own, `{"closed":true}`, 403},
+		// Workspaces and new sessions are the main token's: a turn token asks
+		// for work in its own session's workspace, it does not create one.
+		{"GET", "/api/v0/workspaces", "", 403},
+		{"POST", "/api/v0/workspaces", `{"folder":"/tmp"}`, 403},
+		{"POST", "/api/v0/sessions", `{"workspace":"ws_0123456789abcdef"}`, 403},
 		// Gone from the API.
-		{"GET", "/api/v0/workspaces", "", 404},
 		{"GET", "/api/v0/jobs", "", 404},
 		// Reads that hold no session's data.
 		{"GET", "/api/v0/agents", "", 200},

@@ -81,8 +81,8 @@ func (a *API) updateSession(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	var t string
 	if body.Title != nil {
-		t = strings.TrimSpace(*body.Title)
-		if msg := checkTitle(t); msg != "" {
+		var msg string
+		if t, msg = normalizeTitle(*body.Title); msg != "" {
 			writeError(w, http.StatusBadRequest, msg)
 			return
 		}
@@ -137,6 +137,16 @@ func (a *API) updateSession(w http.ResponseWriter, r *http.Request, id string) {
 	}
 	out.Seq, out.Title, out.OldTitle = ev.Seq, ev.Title, ev.OldTitle
 	writeJSON(w, http.StatusOK, out)
+}
+
+// normalizeTitle trims a session title and says what is wrong with it, or ""
+// and the trimmed title. POST /api/v0/sessions and PATCH /api/v0/sessions/{id}
+// both use it, so a title is validated and stored one way: a whitespace-only
+// title is refused, and leading or trailing spaces are dropped (his rule,
+// 2026-11-21: share one implementation, do not re-check titles per handler).
+func normalizeTitle(raw string) (title, msg string) {
+	title = strings.TrimSpace(raw)
+	return title, checkTitle(title)
 }
 
 // checkTitle says what is wrong with a session's new name, or "".
