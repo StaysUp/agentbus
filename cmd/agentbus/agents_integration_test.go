@@ -265,6 +265,15 @@ func TestOpenRouterOpencodeTurnIsRecorded(t *testing.T) {
 			t.Errorf("no %s recorded; kinds %v", k, kinds)
 		}
 	}
+
+	// The turn's context view reports opencode's own compaction point,
+	// labelled as read from its source (#21).
+	code, ctx := sendAPI(t, svc, tok, "GET", "/api/v0/turns/"+out["turn"].(string)+"/context", nil)
+	w, _ := ctx["window"].(map[string]any)
+	if code != http.StatusOK || w["harness"] != "opencode" || w["compaction_point"] != 0.85 || w["compaction_source"] != "vendor" ||
+		w["used_tokens"] != float64(12) {
+		t.Errorf("context %d %v", code, ctx)
+	}
 }
 
 // codex on OpenRouter gets a provider of its own through -c flags, reading
