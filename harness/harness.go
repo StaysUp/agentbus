@@ -106,6 +106,27 @@ type Info struct {
 	// Settings, kept on control, and added by control's relay to the
 	// agent's calls. Nil: it offers no access "api".
 	APIKey *APIKey
+	// Failures are the failures of this harness whose cause is known and
+	// that its own error line does not explain (Plain).
+	Failures []Failure
+}
+
+// Failure is one known failure of a harness: an error line that holds Match
+// is shown as Say, plain words that say what to do.
+type Failure struct {
+	Match, Say string
+}
+
+// Plain is line, the error line of a failed turn of this harness, in plain
+// words when it is one of Failures, else as it is. The agent's own line
+// stays in the turn's error_tail.
+func (i Info) Plain(line string) string {
+	for _, f := range i.Failures {
+		if strings.Contains(line, f.Match) {
+			return f.Say
+		}
+	}
+	return line
 }
 
 // APIKey is the vendor API a harness's access "api" reaches with a key set in

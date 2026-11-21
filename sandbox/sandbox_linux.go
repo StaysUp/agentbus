@@ -40,13 +40,19 @@ var etcRead = []string{
 	"/etc/localtime", "/etc/alternatives", "/etc/gitconfig",
 }
 
+// cannotRun is Error.Say where this machine refuses the namespaces the wall
+// is made of. In a container without user namespaces netjail's check is the
+// one that fails, before bubblewrap is tried (Docker 29, golang:1.27 image,
+// uid 1000, 2026-11-21).
+const cannotRun = "This machine can't run the sandbox. Turn Sandbox off for this session, or run AgentBus on a machine that allows it."
+
 // build makes bwrap's arguments for b and readies the network namespace.
 func (b *Box) build(spec netjail.Spec) error {
 	if info, err := os.Stat(bwrap); err != nil || info.IsDir() {
 		return &Error{Why: bwrap + " is not on this runner; install bubblewrap (apt install bubblewrap)"}
 	}
 	if err := netjail.Check(); err != nil {
-		return &Error{Why: err.Error()}
+		return &Error{Why: err.Error(), Say: cannotRun}
 	}
 	if os.Geteuid() == 0 {
 		groups, _ := os.Getgroups()
@@ -59,7 +65,8 @@ func (b *Box) build(spec netjail.Spec) error {
 	// The check makes its own network namespace: it runs outside netjail.
 	check := exec.Command(bwrap, append(append(append([]string{}, b.plat.args...), "--unshare-net"), "--", "/usr/bin/true")...)
 	if !runCheck(check) {
-		return &Error{Why: "bubblewrap could not start a program in it: a path it shows the session is missing, or its user namespace was refused"}
+		return &Error{Why: "bubblewrap could not start a program in it: a path it shows the session is missing, or its user namespace was refused",
+			Say: cannotRun}
 	}
 	b.jail = netjail.New(spec)
 	return nil

@@ -60,8 +60,9 @@ type Spec struct {
 }
 
 // Error is why a wall could not be built. Its text is fixed wording, safe
-// to show.
-type Error struct{ Why string }
+// to show. Say, when set, is the same in plain words that say what to do,
+// for a failure the person cannot fix on this machine.
+type Error struct{ Why, Say string }
 
 func (e *Error) Error() string { return "the session's sandbox could not be built: " + e.Why }
 

@@ -70,6 +70,15 @@ func (agy) Info() Info {
 				"XDG_STATE_HOME", "XDG_CACHE_HOME", "DISPLAY", "WAYLAND_DISPLAY", "CLOUD_CODE_URL"},
 			OnlyOn: "linux", OnlyOnWhy: "agy keeps its sign-in in a file only on Linux with no D-Bus bus to reach; " +
 				"on macOS its docs say it uses the Keychain, which control never reads. Run control on Linux to connect agy"},
+		// With a Google sign-in on a runner every turn ends with this
+		// line: agy calls Google's account service itself, outside
+		// AgentBus (issue #40, 2026-11-21). The whole line, not its lead:
+		// without loadCodeAssist agy stops with "Eligibility check failed"
+		// too (adapter/gemini).
+		Failures: []Failure{{
+			Match: "Eligibility check failed: failed to fetch user info: 401",
+			Say:   "Antigravity's Google sign-in can't run sessions yet. Add a Gemini API key in Settings, Subscriptions.",
+		}},
 	}
 }
 
