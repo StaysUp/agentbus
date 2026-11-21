@@ -681,7 +681,7 @@ var routes = slices.Concat([]route{
 			"The gateway holds a call whose command matches ask, or is on none of the lists under the ask default, and records it here; the turn ends, nothing is held. GET it here, then POST your answer. " +
 			"Once answered a command leaves this list; its approval.decided event says how it ended. No token or header value is in the answer. Takes the main token only. No body is read.",
 		query:   []param{{name: "state", doc: `Only "pending" is kept here; decided commands are in the events. Absent or "pending" lists them.`}},
-		replies: []reply{ok(200, HeldCalls{}, "The commands to approve, oldest first."), badRequest},
+		replies: []reply{ok(200, HeldCalls{}, "The commands to approve, oldest first."), badRequest, storeFailed},
 		serve:   plain((*API).listApprovals)},
 	{method: "POST", path: "/api/v0/approvals/{id}", op: "decideApproval",
 		idDoc:   "A command's id, from GET /api/v0/approvals. Another shape gets 404.",
