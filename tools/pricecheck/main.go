@@ -7,7 +7,8 @@
 //
 // It prints one line per rate that differs and nothing when every shared
 // rate matches. It exits 0 when nothing differs, 1 when something does and 2
-// when the file cannot be read. See tools/pricecheck/README.md.
+// when the file cannot be read or the command line is wrong. See
+// tools/pricecheck/README.md.
 package main
 
 import (
@@ -40,6 +41,12 @@ func run(args []string, stdout, stderr io.Writer) int {
 	url := fs.String("url", liteLLMURL, "fetch the LiteLLM price file from this URL")
 	missing := fs.Bool("missing", false, "also list built-in models the file has no entry for")
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	// A path given without -file would otherwise be ignored, and the live
+	// file checked in its place.
+	if fs.NArg() != 0 {
+		fmt.Fprintf(stderr, "pricecheck: unexpected argument %q; to read a price file, use -file %s\n", fs.Arg(0), fs.Arg(0))
 		return 2
 	}
 

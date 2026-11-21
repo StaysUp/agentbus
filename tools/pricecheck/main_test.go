@@ -146,6 +146,20 @@ func TestUnreadableFile(t *testing.T) {
 	}
 }
 
+// A path given without -file is refused, not ignored in favour of the live file.
+func TestPositionalArgumentIsRefused(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("fetched %s; want no fetch", r.URL)
+	}))
+	defer srv.Close()
+
+	path := priceFile(t, nil)
+	code, out, errOut := check(t, "-url", srv.URL, path)
+	if code != 2 || out != "" || !strings.Contains(errOut, "-file") || !strings.Contains(errOut, path) {
+		t.Errorf("code %d, stdout %q, stderr %q; want 2, no output and a hint to use -file", code, out, errOut)
+	}
+}
+
 func TestNum(t *testing.T) {
 	// A per-token price scaled back to per million prints as written.
 	if got := num(3e-06 * 1e6); got != "3" {

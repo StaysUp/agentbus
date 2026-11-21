@@ -25,7 +25,8 @@ anthropic/claude-opus-5-5  standard output  20        25
 ```
 
 Rates are USD per million tokens. Exit status: 0 when nothing differs, 1 when something does, 2
-when the file can't be fetched or read.
+when the file can't be fetched or read, or the command line is wrong (a path given without
+`-file` is refused rather than ignored).
 
 ## What is compared
 
