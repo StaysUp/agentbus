@@ -146,7 +146,13 @@ differs per harness lives in `harness/`, one file each, and the rest of the code
   new problems in the same area, and some come from the last fix, stop patching. Ask what single
   rule would make every one of those cases impossible, build that, and add a test for each earlier
   finding. (Step 4 of 0.3: six rounds of case fixes to record ownership ended in one round once
-  "control assigns the session to the job" replaced them.)
+  "control assigns the session to the job" replaced them.) Before proposing the replacement, read how
+  established projects solve the same problem (Temporal, Buildkite, opencode and the like; maintainers keep
+  clones in `_references/`) and say in one line what they do, even if it changes nothing. Findings of the
+  same shape count as the same area even when they land in different files. Prefer a rule the compiler or the
+  schema enforces (distinct types, one owner per fact) over one people must remember. (Workspaces, 2026-11-21:
+  four rounds of "one more place still uses the session" ended with distinct workspace and session id types,
+  turns that never own a copy, and one record for where a turn runs.)
 - New dependencies need a reason in the commit message. Third-party code shipped in the binary is
   listed in `THIRD_PARTY.md`.
 
