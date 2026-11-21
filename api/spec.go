@@ -122,7 +122,7 @@ var constraints = map[string]func(*openapi3.Schema){
 	"AgentRequest":         closed,
 	"AgentRequest.name":    func(s *openapi3.Schema) { minLength(1)(s); maxLength(agents.MaxName)(s) },
 	"AgentRequest.harness": func(s *openapi3.Schema) { s.Enum = harnessEnum() },
-	"AgentRequest.access":  func(s *openapi3.Schema) { s.Enum = []any{agents.Subscription, agents.OpenRouter} },
+	"AgentRequest.access":  func(s *openapi3.Schema) { s.Enum = []any{agents.Subscription, agents.OpenRouter, agents.API} },
 	"AgentRequest.model":   pattern(runModel.String()),
 	"AgentRequest.key_env": pattern(agents.KeyEnvShape()),
 
