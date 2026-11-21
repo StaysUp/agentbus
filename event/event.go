@@ -304,8 +304,9 @@ type Event struct {
 	ToolInput  json.RawMessage `json:"tool_input,omitempty" doc:"On tool.requested: the tool's input, as the model sent it."`
 	ToolError  *bool           `json:"tool_error,omitempty"`
 	ToolOutput string          `json:"tool_output,omitempty"`
-	// Rule, only on tool.refused: the forbid entry that matched.
-	Rule string `json:"rule,omitempty" doc:"On tool.refused: the forbid entry of permissions.toml that matched, such as git push."`
+	// Rule: on tool.refused, the forbid entry that matched; on approval.requested
+	// and approval.decided, the first ask entry that matched.
+	Rule string `json:"rule,omitempty" doc:"On tool.refused: the forbid entry of permissions.toml that matched, such as git push. On approval.requested and approval.decided: the first ask entry that matched."`
 	// Approval, Commands and Rules, on approval.requested and approval.decided:
 	// the held reply a person answers. Approval is its id, the same on the
 	// request and its decision, and the id in POST /api/v0/approvals/{id};
