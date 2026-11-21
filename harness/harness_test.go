@@ -100,3 +100,21 @@ func TestOffers(t *testing.T) {
 		}
 	}
 }
+
+func TestOpenRouterModels(t *testing.T) {
+	// The first id is the example the agent form and API docs name.
+	if len(OpenRouterModels) == 0 || OpenRouterModels[0] != "deepseek/deepseek-v4.1-flash" {
+		t.Fatalf("OpenRouterModels = %v, want deepseek/deepseek-v4.1-flash first", OpenRouterModels)
+	}
+	seen := map[string]bool{}
+	for _, id := range OpenRouterModels {
+		vendor, model, ok := strings.Cut(id, "/")
+		if !ok || vendor == "" || model == "" || strings.ContainsAny(id, " :") {
+			t.Errorf("%q is not an OpenRouter id of the form vendor/model with no variant", id)
+		}
+		if seen[id] {
+			t.Errorf("%q is listed twice", id)
+		}
+		seen[id] = true
+	}
+}

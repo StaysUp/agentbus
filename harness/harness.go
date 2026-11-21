@@ -240,8 +240,19 @@ func Offers(info Info, kind string) bool {
 }
 
 // OpenRouterModels are offered first for an OpenRouter agent; any OpenRouter
-// model id is accepted.
-var OpenRouterModels = []string{"deepseek/deepseek-v4.1-flash", "openai/gpt-oss-120b"}
+// model id is accepted. Each one is listed on OpenRouter's /api/v1/models with
+// "tools" among its supported parameters, since every harness calls tools.
+// GLM 5.3 Flash, MiniMax M3.1 Flash, MiMo V2.6 Flash and Kimi K3.1 Pro are in
+// the top ten of openrouter.ai/rankings by tokens in the week through
+// 2026-11-20.
+var OpenRouterModels = []string{
+	"deepseek/deepseek-v4.1-flash",
+	"openai/gpt-oss-120b",
+	"z-ai/glm-5.3-flash",
+	"minimax/minimax-m3.1-flash",
+	"xiaomi/mimo-v2.6-flash",
+	"moonshotai/kimi-k3.1-pro",
+}
 
 // standardAccess is a subscription, an OpenRouter key, and the vendor's API
 // key (Info.APIKey), labelled apiLabel.
