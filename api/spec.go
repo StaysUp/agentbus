@@ -101,6 +101,26 @@ var (
 	runnerSpec = sync.OnceValues(func() ([]byte, error) { return buildSpec(true) })
 )
 
+// The tokens of a doc tag that name what the code has. A tag is fixed text, so
+// it cannot call harness.NameList(); expandDoc fills them in, and the contract
+// names the registry's harnesses and the access kinds without a list kept by
+// hand that a new one would miss.
+const (
+	harnessesToken = "{harnesses}"
+	accessesToken  = "{accesses}"
+	plannedToken   = "{planned}"
+)
+
+// docTokens is each token and what the code says it is.
+var docTokens = strings.NewReplacer(
+	harnessesToken, harness.NameList(),
+	accessesToken, harness.AccessList(),
+	plannedToken, harness.PlannedList(),
+)
+
+// expandDoc is a doc tag with its tokens filled in from the code.
+func expandDoc(doc string) string { return docTokens.Replace(doc) }
+
 // constraints hold what a Go type cannot say, keyed by "Type" for the schema
 // of a type and "Type.field" for one of its fields.
 var constraints = map[string]func(*openapi3.Schema){
@@ -122,7 +142,7 @@ var constraints = map[string]func(*openapi3.Schema){
 	"AgentRequest":         closed,
 	"AgentRequest.name":    func(s *openapi3.Schema) { minLength(1)(s); maxLength(agents.MaxName)(s) },
 	"AgentRequest.harness": func(s *openapi3.Schema) { s.Enum = harnessEnum() },
-	"AgentRequest.access":  func(s *openapi3.Schema) { s.Enum = []any{agents.Subscription, agents.OpenRouter} },
+	"AgentRequest.access":  func(s *openapi3.Schema) { s.Enum = anys(harness.Accesses()) },
 	"AgentRequest.model":   pattern(runModel.String()),
 	"AgentRequest.key_env": pattern(agents.KeyEnvShape()),
 
@@ -202,7 +222,7 @@ func customize(_ string, t reflect.Type, tag reflect.StructTag, s *openapi3.Sche
 		}
 		return nil
 	}
-	s.Description = tag.Get("doc")
+	s.Description = expandDoc(tag.Get("doc"))
 	if s.Nullable {
 		// openapi3gen marks a pointer nullable, the OpenAPI 3.0 way. In 3.1
 		// null is a type, and a pointer with omitempty is never sent as null.
@@ -301,7 +321,7 @@ func (c *components) finish() error {
 			if p.Ref != "" {
 				// A field of a component type: openapi3gen gives a bare $ref,
 				// which can carry neither a description nor null.
-				doc := f.Tag.Get("doc")
+				doc := expandDoc(f.Tag.Get("doc"))
 				switch {
 				case f.Type.Kind() == reflect.Pointer && !omitempty(f.Tag):
 					p = &openapi3.SchemaRef{Value: &openapi3.Schema{Description: doc,

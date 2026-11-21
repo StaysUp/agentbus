@@ -102,18 +102,14 @@ type Access struct {
 	Placeholder string
 }
 
-// accessKnown says access is one a turn can run on: "" (the subscription),
-// subscription, openrouter or api.
+// accessKnown says access is one a turn can run on: "" (the subscription), or
+// one of harness.Accesses().
 func accessKnown(access string) bool {
-	switch access {
-	case "", harness.Subscription, harness.OpenRouter, harness.API:
-		return true
-	}
-	return false
+	return access == "" || slices.Contains(harness.Accesses(), access)
 }
 
 // accessWords refuses an access that is none of accessKnown's.
-const accessWords = "access must be subscription, openrouter or api"
+var accessWords = "access must be " + harness.AccessList()
 
 // Refused makes a refusal a Wire can return: status and the person's words.
 func Refused(status int, msg string) error { return refuse(status, msg) }

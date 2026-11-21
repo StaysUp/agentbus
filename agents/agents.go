@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -50,7 +51,7 @@ const MaxAgents = 200
 type Agent struct {
 	ID      string    `json:"id" doc:"The agent's id. A turn names it in agent."`
 	Name    string    `json:"name" doc:"What the person calls it, such as Claude Code · sonnet. Unique, ignoring case."`
-	Harness string    `json:"harness" doc:"The program that runs the agent's loop: claude or codex."`
+	Harness string    `json:"harness" doc:"The program that runs the agent's loop, such as claude."`
 	Access  string    `json:"access" doc:"How the harness reaches its model: subscription (the person's, connected on control), openrouter (the key set in Settings, or else one from an environment variable) or api (the vendor's API key set in Settings)."`
 	Model   string    `json:"model,omitempty" doc:"The model, passed as --model. Absent: the harness's own default. Required for openrouter, in OpenRouter's naming, such as deepseek/deepseek-v4.1-flash."`
 	KeyEnv  string    `json:"key_env,omitempty" doc:"For openrouter: the name of the environment variable, where control runs, that holds the key while no key is set in Settings. Never the key."`
@@ -61,8 +62,8 @@ type Agent struct {
 // Fields are what a person sets on an agent: everything but its id and times.
 type Fields struct {
 	Name    string `json:"name" doc:"1 to 100 bytes, unique among the agents, ignoring case."`
-	Harness string `json:"harness" doc:"claude, codex or agy. A harness that is only planned is refused as not available yet."`
-	Access  string `json:"access" doc:"subscription, openrouter or api. api uses the vendor's API key set in Settings (claude: Anthropic, codex: OpenAI, agy: Gemini)."`
+	Harness string `json:"harness" doc:"The program that runs the agent's loop: {harnesses}. A harness that is only planned is refused as not available yet."`
+	Access  string `json:"access" doc:"{accesses}. api uses the vendor's API key set in Settings (claude: Anthropic, codex: OpenAI, agy: Gemini)."`
 	Model   string `json:"model,omitempty" doc:"Optional for subscription and api. Required for openrouter."`
 	KeyEnv  string `json:"key_env,omitempty" doc:"For openrouter only: a variable name ending in _KEY, such as OPENROUTER_API_KEY, which is used when this is absent."`
 }
@@ -99,8 +100,8 @@ func Check(f *Fields) string {
 		return "harness " + f.Harness + " is not available yet (planned: " + harness.PlannedList() + "); use " + harness.NameList()
 	case !known(f.Harness):
 		return "harness must be " + harness.NameList()
-	case f.Access != Subscription && f.Access != OpenRouter && f.Access != API:
-		return "access must be subscription, openrouter or api"
+	case !slices.Contains(harness.Accesses(), f.Access):
+		return "access must be " + harness.AccessList()
 	case !offers(f.Harness, f.Access):
 		return "harness " + f.Harness + " cannot use access " + f.Access + " yet"
 	case f.Model != "" && !run.ModelShape.MatchString(f.Model):
