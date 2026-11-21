@@ -23,7 +23,7 @@ const HarnessReportWait = 15 * time.Second
 
 // Harness is one harness in GET /api/v0/harnesses.
 type Harness struct {
-	Name     string `json:"name" doc:"The harness, as an agent names it, such as claude or codex. Planned harnesses are listed too, with disabled set."`
+	Name     string `json:"name" doc:"The harness, as an agent names it: {harnesses}. A planned one, {planned}, is listed too, with disabled set."`
 	Label    string `json:"label" doc:"Its name for a screen, such as Claude Code."`
 	Disabled bool   `json:"disabled,omitempty" doc:"True when no agent can be saved on it yet, as for a planned harness. It is not probed."`
 	Found    bool   `json:"found" doc:"The binary is on the PATH of a runner seen in the last minute."`
@@ -37,7 +37,7 @@ type Harness struct {
 
 // AccessOption is one way a harness reaches a model.
 type AccessOption struct {
-	Kind     string   `json:"kind" doc:"subscription, openrouter or api."`
+	Kind     string   `json:"kind" doc:"{accesses}."`
 	Label    string   `json:"label" doc:"Its name for a screen."`
 	Disabled bool     `json:"disabled,omitempty" doc:"True when an agent cannot use it yet, as openrouter for agy."`
 	Models   []string `json:"models" doc:"Models to offer. A new subscription agent names none, so the harness picks its own; an OpenRouter one starts with the first. An agent may name another one when any_model is true."`

@@ -19,7 +19,7 @@ import (
 // ModelList is the answer to GET /api/v0/harnesses/{id}/models.
 type ModelList struct {
 	Harness string `json:"harness" doc:"The harness."`
-	Access  string `json:"access" doc:"The access: subscription, openrouter or api."`
+	Access  string `json:"access" doc:"The access: {accesses}."`
 	models.List
 }
 
@@ -65,7 +65,7 @@ var modelsRoute = route{method: "GET", path: "/api/v0/harnesses/{id}/models", op
 		"agy's own agy models instead, run unmodified on control in a clean home of its own with the Gemini provider and a placeholder key, which makes no call. " +
 		"No subscription's own endpoint is called by AgentBus. A list is kept with the time it was fetched and fetched again at most once an hour, or now with refresh=true. " +
 		"An agent may still name a model the list lacks, and one that names none uses the tool's own default.",
-	query: []param{{name: "access", doc: "subscription, openrouter or api. Required."},
+	query: []param{{name: "access", doc: harness.AccessList() + ". Required."},
 		{name: "refresh", doc: "true fetches the list again now, rather than the one kept within the hour."}},
 	replies: []reply{ok(200, ModelList{}, "The models, or none with why."), fail(400, "No access was named."), fail(404, "No such harness, or it offers no such access.")},
 	turn:    anyRead,
@@ -76,7 +76,7 @@ func (a *API) listModels(w http.ResponseWriter, r *http.Request, id string) {
 	q := r.URL.Query()
 	access := q.Get("access")
 	if access == "" {
-		writeError(w, http.StatusBadRequest, "access is required: subscription, openrouter or api")
+		writeError(w, http.StatusBadRequest, "access is required: "+harness.AccessList())
 		return
 	}
 	if !ok || !harness.Offers(h.Info(), access) {

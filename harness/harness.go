@@ -32,6 +32,13 @@ const (
 	API          = "api"          // the vendor's own API key, set in Settings (Info.APIKey)
 )
 
+// Accesses are the access kinds, in the order a form shows them: the API's
+// enum lists them from here, so a new kind is described without that edit.
+func Accesses() []string { return []string{Subscription, OpenRouter, API} }
+
+// AccessList is Accesses for a sentence: "subscription, openrouter or api".
+func AccessList() string { return joinNames(Accesses()) }
+
 // History formats own replay knows (package replay).
 const (
 	FormatAnthropic = "anthropic" // Anthropic Messages, as Claude Code sends them

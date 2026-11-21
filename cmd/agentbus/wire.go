@@ -72,7 +72,7 @@ func runWire(getenv func(string) string, environ func() []string, lookPath func(
 			env, pre = h.WireOpenRouter(harness.OpenRouterWire{Base: baseURL + openRouterPrefix,
 				KeyEnv: acc.KeyEnv, Key: getenv(acc.KeyEnv), Model: acc.Model})
 		default:
-			return engine.Launch{}, engine.Refused(http.StatusBadRequest, "access must be subscription, openrouter or api")
+			return engine.Launch{}, engine.Refused(http.StatusBadRequest, "access must be "+harness.AccessList())
 		}
 		bin, err := lookPath(agent)
 		if err != nil {
