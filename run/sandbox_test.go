@@ -207,3 +207,21 @@ func TestSandboxAPIProgramIsOneFile(t *testing.T) {
 		t.Errorf("apiProgram = %v, want the link alone", got)
 	}
 }
+
+// A machine that cannot run the wall is refused in plain words, with the
+// sandbox's own reason kept after them. Any other reason, and a wall that
+// Network contain asked for, read as before.
+func TestSandboxRefusalWords(t *testing.T) {
+	const why = "the session's sandbox could not be built: bubblewrap could not start a program in it"
+	const say = "This machine can't run the sandbox. Turn Sandbox off for this session, or run AgentBus on a machine that allows it."
+	if got, want := sandboxRefusal(why, say, false), say+" Detail: "+why+"."; got != want {
+		t.Errorf("refusal %q, want %q", got, want)
+	}
+	if got := sandboxRefusal(why, "", false); !strings.HasPrefix(got, why+", so the turn did not start") || !strings.Contains(got, "turn Sandbox off in the cockpit's Settings (Isolation)") {
+		t.Errorf("refusal %q of a reason with no plain words changed", got)
+	}
+	// Sandbox is not the switch that asked for this wall.
+	if got := sandboxRefusal(why, say, true); strings.Contains(got, "Turn Sandbox off") || !strings.Contains(got, "turn Network contain off") {
+		t.Errorf("refusal %q of a wall Network contain asked for names the wrong switch", got)
+	}
+}
