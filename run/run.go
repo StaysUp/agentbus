@@ -862,6 +862,9 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	}
 	unkept := harness.Unkept(h, spec)
 	args := h.Args(spec)
+	// The settings the harness takes in its environment rather than its
+	// command line (harness.TurnEnver).
+	cmd.Env = setEnv(cmd.Env, harness.TurnEnv(h, spec, cmd.Env))
 	all := append(append([]string{}, l.Args...), args...)
 	cmd.Args = append([]string{l.Path}, all...)
 	cmd.Dir = t.folder

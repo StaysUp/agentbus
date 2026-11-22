@@ -18,7 +18,7 @@
 [![AgentBus 0.5.9: Codex reviews Claude Code's change and finds a P1; every model call with its cost. Click to watch the 2-minute demo.](docs/assets/cockpit-059.png)](https://github.com/StaysUp/agentbus/releases/tag/v0.5.9)
 
 AgentBus sits between your coding agents and every model vendor. It runs the agents you already
-have (Claude Code, Codex, Antigravity or any OpenRouter model) and tracks every step.
+have (Claude Code, Codex, Antigravity, OpenCode or any OpenRouter model) and tracks every step.
 
 - **Your agents work together.** Claude can ask Codex, or any agent from any vendor, to answer a
   question, take on a task or check its work. The answer comes back into the same session.
@@ -31,7 +31,7 @@ have (Claude Code, Codex, Antigravity or any OpenRouter model) and tracks every 
 
 ## Install
 
-You need macOS or Linux, and `claude`, `codex` or `agy` installed. Use **one** of these:
+You need macOS or Linux, and `claude`, `codex`, `agy` or `opencode` installed. Use **one** of these:
 
 **Install script** (puts the binary in `~/.local/bin`):
 
@@ -116,6 +116,8 @@ An agent reaches its model in one of three ways, its **access**:
 - `api`: the vendor's own API key set in Settings (Anthropic for Claude Code, OpenAI for Codex, Gemini
   for Antigravity). The model is optional.
 
+OpenCode (`npm install -g opencode-ai`) runs on `openrouter` only.
+
 ### Use any model
 
 Claude Code can run on any model OpenRouter offers: the agent still runs Claude Code, but the model
@@ -190,6 +192,11 @@ their defaults are in `/docs`, under Settings).
   work through AgentBus yet: before any work it checks your account with Google directly, outside
   AgentBus, and that check fails. It gets no instructions from AgentBus, a turn with forbidden
   commands set is refused on it, and it cannot turn off its own subagents.
+- OpenCode runs on an OpenRouter key only; its own provider sign-ins are not used yet. It gets no
+  instructions and no AgentBus tools from AgentBus (it reaches the API through `agentbus-api`), and
+  its sessions continue by its own resume. A turn with forbidden or asked commands set is refused on
+  it, and a command on none of the lists is refused rather than held for you. In a folder below the
+  root of a git repository it runs without edits, since OpenCode would edit the whole repository.
 
 ## Docs
 

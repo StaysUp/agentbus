@@ -108,6 +108,12 @@ func TestOpenAPIApprovalsListDescribesStoreFailure(t *testing.T) {
 // registry's list, so it stays right when one is added.
 func TestOpenAPICreateAgentNamesPlannedHarnesses(t *testing.T) {
 	op := loadSpec(t).Paths.Find("/api/v0/agents").Post
+	if harness.PlannedList() == "" {
+		if strings.Contains(op.Description, "only planned") {
+			t.Errorf("createAgent description names planned harnesses while none is planned:\n%s", op.Description)
+		}
+		return
+	}
 	if want := "(" + harness.PlannedList() + ") is refused: not available yet"; !strings.Contains(op.Description, want) {
 		t.Errorf("createAgent description lacks %q:\n%s", want, op.Description)
 	}

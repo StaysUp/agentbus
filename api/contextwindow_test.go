@@ -64,7 +64,8 @@ func TestContextWindow(t *testing.T) {
 		t.Errorf("compaction = %v/%d/%s/default=%v, want 0.8/80/default/true", w.CompactionPoint, w.CompactionPct, w.CompactionSource, w.CompactionIsDefault)
 	}
 
-	// opencode's point is the vendor's own number.
+	// opencode's point is read from its own source (settings/context.go),
+	// labelled vendor.
 	w = a.contextWindow("claude-opus-5-5", "opencode", 10000)
 	if w.CompactionPoint != 0.85 || w.CompactionSource != "vendor" {
 		t.Errorf("opencode compaction = %v/%s, want 0.85/vendor", w.CompactionPoint, w.CompactionSource)

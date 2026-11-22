@@ -433,6 +433,24 @@ func Unkept(h Harness, t Turn) []string {
 	return nil
 }
 
+// TurnEnver is a harness that takes some of a turn's settings in its child's
+// environment, where no flag of its own can carry them (opencode's run config).
+// TurnEnv is given the turn and the child's environment so far, the wire's
+// among it, and returns the variables to set, each NAME=value, which replace
+// any of the same name.
+type TurnEnver interface {
+	TurnEnv(t Turn, env []string) []string
+}
+
+// TurnEnv is what h sets in the child's environment for t (TurnEnver), or
+// none.
+func TurnEnv(h Harness, t Turn, env []string) []string {
+	if e, ok := h.(TurnEnver); ok {
+		return e.TurnEnv(t, env)
+	}
+	return nil
+}
+
 // ServerLister is a harness that reads the person's own MCP servers from the
 // home its child runs in, env being the child's environment.
 type ServerLister interface {
@@ -464,10 +482,11 @@ func envValue(env []string, key string) string {
 }
 
 // registry is every harness turns can start, in the order they are listed.
-var registry = []Harness{claude{}, codex{}, agy{}}
+var registry = []Harness{claude{}, codex{}, agy{}, opencode{}}
 
-// planned are harnesses listed as coming, which no agent can use yet.
-var planned = []Info{{Name: "opencode", Label: "OpenCode"}}
+// planned are harnesses listed as coming, which no agent can use yet. None
+// is listed now: opencode, the one that was, can run.
+var planned = []Info{}
 
 // Get returns the harness turns can start under name.
 func Get(name string) (Harness, bool) {
@@ -507,7 +526,8 @@ func joinNames(n []string) string {
 func Planned() []Info { return planned }
 
 // PlannedList is Planned's names for a sentence, as NameList does for the
-// registry: "opencode", or "opencode or gemini" once a second is planned.
+// registry: "gemini", or "gemini or goose" once a second is planned; "" while
+// none is.
 func PlannedList() string {
 	n := make([]string, len(planned))
 	for i, p := range planned {

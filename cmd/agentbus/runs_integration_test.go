@@ -463,6 +463,16 @@ func TestRunRefusesWhenServiceSendsAgentElsewhere(t *testing.T) {
 		env := map[string]string{v: "https://gateway.example"}
 		svc := runService(t, home, func(k string) string { return env[k] }, 0)
 		tok := readToken(t, home)
+		// A harness with no subscription of its own (opencode) has no
+		// default agent: its turn runs as a saved OpenRouter agent.
+		if !harness.Offers(h.Info(), harness.Subscription) {
+			code, ag := sendAPI(t, svc, tok, "POST", "/api/v0/agents", map[string]any{"name": agent, "harness": agent,
+				"access": "openrouter", "model": "z-ai/glm-5.3-flash"})
+			if code != http.StatusCreated {
+				t.Fatalf("%s: create: %d %v", agent, code, ag)
+			}
+			agent = ag["id"].(string)
+		}
 		code, out, raw := postRun(t, svc, tok, map[string]any{"agent": agent, "folder": t.TempDir(), "prompt": "hi"})
 		if code != http.StatusBadRequest || !strings.Contains(out["error"].(string), "another endpoint") {
 			t.Fatalf("%s with %s set: %d %s, want 400", agent, v, code, raw)

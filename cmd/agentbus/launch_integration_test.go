@@ -52,6 +52,7 @@ func fakeLaunch(dir string) {
 	fmt.Printf(`{"type":"thread.started","thread_id":"tid-%d"}`+"\n", n)
 	fmt.Printf(`{"type":"result","session_id":"sid-%d"}`+"\n", n)
 	fmt.Printf(`{"conversation_id":"cid-%d","status":"SUCCESS"}`+"\n", n)
+	fmt.Printf(`{"type":"step_start","sessionID":"ses_%012xLaunchFake%04d"}`+"\n", n, n)
 	os.Exit(0)
 }
 
@@ -177,9 +178,39 @@ func TestLaunchGolden(t *testing.T) {
 			turns: []engine.Request{first("claude"), with(next("t_2"), func(r *engine.Request) { r.Harness = "codex" })}},
 		launchCase{name: "switch codex to claude, resume",
 			turns: []engine.Request{first("codex"), with(next("t_2"), func(r *engine.Request) { r.Harness = "claude"; r.AgentModel = "sonnet" })}},
-		launchCase{name: "unknown harness", turns: []engine.Request{first("opencode")}},
+		launchCase{name: "unknown harness", turns: []engine.Request{first("gemini")}},
 		launchCase{name: "unknown harness on a next turn", turns: []engine.Request{first("claude"),
-			with(next("t_2"), func(r *engine.Request) { r.Harness = "opencode" })}},
+			with(next("t_2"), func(r *engine.Request) { r.Harness = "gemini" })}},
+	)
+	// opencode runs on an OpenRouter key only.
+	ocOR := func(r *engine.Request) { or(r); r.Model = "z-ai/glm-5.3-flash" }
+	orKey := []string{"OPENROUTER_API_KEY=test-key"}
+	cases = append(cases,
+		launchCase{name: "opencode subscription", turns: []engine.Request{first("opencode")}},
+		launchCase{name: "opencode api key, relayed", turns: []engine.Request{with(first("opencode"), apiKey)}},
+		launchCase{name: "opencode openrouter, then resume", env: orKey,
+			turns: []engine.Request{with(first("opencode"), ocOR), next("t_2")}},
+		launchCase{name: "opencode openrouter, key not set", turns: []engine.Request{with(first("opencode"), ocOR)}},
+		launchCase{name: "opencode openrouter, relayed, then resume", turns: []engine.Request{
+			with(first("opencode"), func(r *engine.Request) { relayed(r); ocOR(r) }), with(next("t_2"), relayed)}},
+		launchCase{name: "opencode allow list, own instructions", perm: allowOnly, instr: strp("Be brief in {session}.\n"),
+			env: orKey, turns: []engine.Request{with(first("opencode"), ocOR)}},
+		launchCase{name: "opencode edit none", perm: "edit = \"none\"\n", env: orKey,
+			turns: []engine.Request{with(first("opencode"), ocOR)}},
+		launchCase{name: "opencode subagents on", perm: "subagents = true\n", env: orKey,
+			turns: []engine.Request{with(first("opencode"), ocOR)}},
+		launchCase{name: "opencode forbid", perm: lists, env: orKey, turns: []engine.Request{with(first("opencode"), ocOR)}},
+		launchCase{name: "opencode own endpoint", env: append([]string{`OPENCODE_CONFIG_CONTENT={"model":"x/y"}`}, orKey...),
+			turns: []engine.Request{with(first("opencode"), ocOR)}},
+		launchCase{name: "opencode missing", missing: true, env: orKey, turns: []engine.Request{with(first("opencode"), ocOR)}},
+		launchCase{name: "opencode folder holds the data folder", dataInside: true, env: orKey,
+			turns: []engine.Request{with(first("opencode"), ocOR)}},
+		launchCase{name: "opencode in a home of its own, then resume", homes: true, env: orKey,
+			turns: []engine.Request{with(first("opencode"), ocOR), next("t_2")}},
+		launchCase{name: "opencode folder with AGENTS.md", agentsMD: true, env: orKey,
+			turns: []engine.Request{with(first("opencode"), ocOR)}},
+		launchCase{name: "switch claude to opencode, resume", env: orKey,
+			turns: []engine.Request{with(first("claude"), or), with(next("t_2"), func(r *engine.Request) { r.Harness = "opencode"; ocOR(r) })}},
 	)
 
 	var out strings.Builder

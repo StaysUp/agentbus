@@ -105,8 +105,9 @@ func TestAgyRefuse(t *testing.T) {
 			t.Errorf("%s records subagents as unkept", o.Info().Name)
 		}
 	}
+	// opencode refuses forbid too, for the same reason (TestOpencodeRefuse).
 	for _, o := range All() {
-		if o.Info().Name != "agy" && o.Refuse(Turn{NoSubagents: true, Forbid: []string{"git push"}}) != "" {
+		if n := o.Info().Name; n != "agy" && n != "opencode" && o.Refuse(Turn{NoSubagents: true, Forbid: []string{"git push"}}) != "" {
 			t.Errorf("%s refused", o.Info().Name)
 		}
 	}

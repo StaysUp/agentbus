@@ -139,6 +139,33 @@ func fakeAgent() {
 			}
 		}
 	}
+	// With AGENTBUS_FAKE_OPENCODE_BODY, one model call as opencode makes it
+	// through an @ai-sdk/openai-compatible provider: to <baseURL>/chat/completions
+	// of the one provider OPENCODE_CONFIG_CONTENT sets, with the key its
+	// "{env:NAME}" names as the bearer, as opencode reads it.
+	if b := os.Getenv("AGENTBUS_FAKE_OPENCODE_BODY"); b != "" {
+		var cfg struct {
+			Provider map[string]struct {
+				Options struct {
+					BaseURL string `json:"baseURL"`
+					APIKey  string `json:"apiKey"`
+				} `json:"options"`
+			} `json:"provider"`
+		}
+		json.Unmarshal([]byte(os.Getenv("OPENCODE_CONFIG_CONTENT")), &cfg)
+		for _, p := range cfg.Provider {
+			req, _ := http.NewRequest("POST", p.Options.BaseURL+"/chat/completions", strings.NewReader(b))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("User-Agent", "opencode/1.19.6 ai-sdk/provider-utils/4.0.23 runtime/bun/1.4.4")
+			if name, ok := strings.CutPrefix(p.Options.APIKey, "{env:"); ok {
+				req.Header.Set("Authorization", "Bearer "+os.Getenv(strings.TrimSuffix(name, "}")))
+			}
+			if resp, err := http.DefaultClient.Do(req); err == nil {
+				io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+			}
+		}
+	}
 	// With AGENTBUS_FAKE_AGY_BODY, one model call as agy makes it: to
 	// CLOUD_CODE_URL, with the access token of the sign-in file in its HOME
 	// as the bearer.
