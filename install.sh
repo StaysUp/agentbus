@@ -32,6 +32,31 @@ dir="${AGENTBUS_INSTALL_DIR:-$HOME/.local/bin}"
 say() { printf '%s\n' "$*"; }
 fail() { printf 'agentbus install: %s\n' "$*" >&2; exit 1; }
 
+# path_hint prints the line to add for this user's shell. It only prints:
+# install.sh never edits a profile file.
+path_hint() {
+  case "$(basename "${SHELL:-}")" in
+    zsh)
+      say "  echo 'export PATH=\"$1:\$PATH\"' >> ~/.zshrc"
+      say "  Then open a new terminal, or run: source ~/.zshrc"
+      ;;
+    bash)
+      # Keep the tilde literal in the printed line. An expanded absolute path
+      # is correct but harder to recognise and copy on another machine.
+      profile='~/.bashrc'
+      if [ "$(uname -s)" = Darwin ]; then profile='~/.bash_profile'; fi
+      say "  echo 'export PATH=\"$1:\$PATH\"' >> $profile"
+      say "  Then open a new terminal, or run: source $profile"
+      ;;
+    fish)
+      say "  fish_add_path $1"
+      ;;
+    *)
+      say "  Add $1 to your shell's PATH."
+      ;;
+  esac
+}
+
 # needs_apparmor: this system lets a program make an unprivileged user
 # namespace only under an AppArmor profile that allows it.
 needs_apparmor() {
@@ -234,7 +259,10 @@ if [ "$os" = linux ] && needs_apparmor; then
 fi
 case ":$PATH:" in
   *":$dir:"*) ;;
-  *) say "Note: $dir is not on your PATH. Add it, or run $dir/agentbus directly." ;;
+  *)
+    say "Note: $dir is not on your PATH. Add the line below, or run $dir/agentbus directly."
+    path_hint "$dir"
+    ;;
 esac
 say ""
 if [ -n "$profiled" ]; then
