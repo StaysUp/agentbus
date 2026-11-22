@@ -819,6 +819,12 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	refused := r.prepare(ctx, at)
 	defer at.unwatch()
 	if refused != nil {
+		// prepare may have loaded the copy (at.space/at.ws) before a later step
+		// refused -- loadSpace succeeds, then checkpointStart fails (an overlay
+		// remount after a restart, unreadable checkpoints). A refused setup starts
+		// no turn, so clear them: addChanges must record nothing for a turn that
+		// never started, no turn.changed for a copy it did not touch.
+		at.space, at.ws = nil, nil
 		at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup, Result: mustJSON(refused)})
 		return
 	}
@@ -938,6 +944,16 @@ func (r *Runner) prepare(ctx context.Context, at *attempt) *queue.Result {
 		b, _ := isolation.Get(isolation.Git)
 		return r.isolate(at, b, isolation.Request{Repo: repo, Base: sp.Base, Ref: sp.RepoRef})
 	case sp.Folder != "" || sp.FolderRef != "":
+		// A continuation whose workspace already has a copy loads it here, before
+		// the source folder is resolved or checked (os.Stat below), so a
+		// continuation whose source folder was removed or moved still runs and
+		// records its changeset (P2 #1). A first turn has no copy yet and falls
+		// through to make one from the folder.
+		if w := at.job.Workspace; w != nil && (w.Kind == queue.WorkspaceCopy || w.Kind == queue.WorkspaceWorktree) {
+			if res, reused := r.loadCopy(at, *w); reused {
+				return res
+			}
+		}
 		// A session runs on the machine that holds its folder: this one.
 		folder, ok := r.folderPath(sp.Folder, sp.FolderRef, sp.Machine)
 		if !ok {
@@ -1062,6 +1078,48 @@ func (r *Runner) policy() (settings.Policy, error) {
 	return p, err
 }
 
+// loadCopy loads the workspace's copy w on this runner, if it is there, and
+// names where the turn's diff starts. reused reports whether a copy was loaded;
+// when it was, res is the checkpoint-start result (nil on success, else why the
+// turn cannot run). A turn whose workspace already has a copy loads it rather
+// than making a second (one workspace, one copy), and a copy is self-contained:
+// it needs no source folder, so a continuation whose source folder was removed
+// or moved still runs and records its changeset (P2 #1). The copy is loaded by
+// its space id (w.Space); a folder-kind record has none and the caller does not
+// pass one here.
+func (r *Runner) loadCopy(at *attempt, w queue.Workspace) (res *queue.Result, reused bool) {
+	s, err := r.loadSpace(w)
+	if err != nil {
+		return nil, false
+	}
+	// Name the folder reference the session's first turn records (folder_ref on
+	// session.opened and turn.started), without touching the source folder: an
+	// asked or second session's first turn reuses an existing copy here and still
+	// needs its workspace's folder_ref, or that event -- and every continuation
+	// after it -- loses the folder (a remote runner's record keeps only the ref).
+	// The spec carries it (control stamps it from the record); a job with none
+	// falls back to the copy's saved ref. A caller that already set at.ref (the
+	// folder/repo cases, before isolate) keeps it.
+	if at.ref == "" {
+		at.ref = at.job.Spec.FolderRef
+		if at.ref == "" {
+			at.ref = s.Ref
+		}
+	}
+	kind := queue.WorkspaceCopy
+	if s.Backend == isolation.Git {
+		kind = queue.WorkspaceWorktree
+	}
+	at.space, at.folder = s, s.Dir
+	at.ws = &queue.Workspace{Kind: kind, Space: s.ID, Repo: s.Repo, Base: s.Base}
+	if b, ok := isolation.Get(s.Backend); ok {
+		if base, err := b.Checkpoint(s, isolation.Base); err == nil {
+			at.ws.Snapshot = base.Root
+		}
+	}
+	return r.checkpointStart(at), true
+}
+
 // isolate opens a session's first job's copy with b, and its turn starts
 // from the copy's first checkpoint.
 func (r *Runner) isolate(at *attempt, b isolation.Backend, req isolation.Request) *queue.Result {
@@ -1091,19 +1149,8 @@ func (r *Runner) isolate(at *attempt, b isolation.Backend, req isolation.Request
 	// than making a second, so one workspace is one copy: an asked turn edits the
 	// asker's copy, and a retake after a restart finds the same one (his
 	// decision, 2026-11-21). The copy is keyed by the workspace id (req.ID).
-	if s, err := r.loadSpace(queue.Workspace{Space: req.ID}); err == nil {
-		kind := queue.WorkspaceCopy
-		if s.Backend == isolation.Git {
-			kind = queue.WorkspaceWorktree
-		}
-		at.space, at.folder = s, s.Dir
-		at.ws = &queue.Workspace{Kind: kind, Space: s.ID, Repo: s.Repo, Base: s.Base}
-		if b, ok := isolation.Get(s.Backend); ok {
-			if base, err := b.Checkpoint(s, isolation.Base); err == nil {
-				at.ws.Snapshot = base.Root
-			}
-		}
-		return r.checkpointStart(at)
+	if res, reused := r.loadCopy(at, queue.Workspace{Space: req.ID}); reused {
+		return res
 	}
 	s, err := b.Open(req)
 	var rf *isolation.Refusal

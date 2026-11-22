@@ -1564,13 +1564,18 @@ var ErrSessionEnded = errors.New("queue: the session ended with its first turn")
 // SessionEnded is why a turn of an ended session is refused or ended.
 const SessionEnded = "this session's first turn ended before the session was set up (it was stopped, its runner stopped, or it did not start), so the session is ended; start a new session"
 
-// sessionEnded is the rule, as SQL over a session id named by sess (a
-// column or a "?" bound twice, once per use).
+// sessionEnded is the rule, as SQL over a session id named by sess (a column or
+// a bound "?1", used once). The session's first turn -- the one that opened it,
+// so its spec names no session -- ended, and its WORKSPACE holds no copy: the
+// copy row is keyed by the workspace (CopyKey), so a session whose workspace id
+// is not its own id (an explicit ws_ workspace) still resolves, not only a
+// migrated one whose workspace is its session id.
 func sessionEnded(sess string) string {
-	return `(NOT EXISTS (SELECT 1 FROM copies s WHERE s.id = ` + sess + `)
-		AND EXISTS (SELECT 1 FROM jobs f WHERE f.session = ` + sess + ` AND f.kind = 'turn' AND f.ended IS NOT NULL
-			AND COALESCE(json_extract(f.spec, '$.session'), '') = ''
-			AND f.rowid = (SELECT MIN(g.rowid) FROM jobs g WHERE g.session = f.session)))`
+	return `EXISTS (SELECT 1 FROM jobs f WHERE f.session = ` + sess + ` AND f.kind = 'turn' AND f.ended IS NOT NULL
+		AND COALESCE(json_extract(f.spec, '$.session'), '') = ''
+		AND f.rowid = (SELECT MIN(g.rowid) FROM jobs g WHERE g.session = f.session)
+		AND NOT EXISTS (SELECT 1 FROM copies s WHERE s.team = f.team
+			AND s.id = COALESCE(NULLIF(json_extract(f.spec, '$.workspace'), ''), f.session)))`
 }
 
 // endSessionsTx ends every queued turn of an ended session, with why.
