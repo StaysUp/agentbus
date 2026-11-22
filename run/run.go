@@ -821,14 +821,11 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		if autoWall {
 			lead = "Network contain is on in Settings, which on this machine needs the session's sandbox"
 		}
-		box, why := e.sandbox(perm, lead, t.session, t.folder, readOnly, readOnly && h.Info().OwnSandbox,
+		box, why, say := e.sandbox(perm, lead, t.session, t.folder, readOnly, readOnly && h.Info().OwnSandbox,
 			append(sandbox.Program(l.Path), e.apiProgram()...), netSpec)
 		if why != "" {
 			e.cfg.Logf("run.refused agent=%s reason=sandbox auto=%t", t.harness, autoWall)
-			if autoWall {
-				return nil, refuse(http.StatusBadRequest, why+", so the turn did not start. Fix it on this runner, or turn Network contain off in the cockpit's Settings (Isolation, Network).")
-			}
-			return nil, refuse(http.StatusBadRequest, why+", so the turn did not start. Fix it on this runner, or turn Sandbox off in the cockpit's Settings (Isolation).")
+			return nil, refuse(http.StatusBadRequest, sandboxRefusal(why, say, autoWall))
 		}
 		jail = box
 		cmd.Env = setEnv(cmd.Env, box.Env())
@@ -998,7 +995,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 			b, cut := errs.Lines()
 			hide := append(secretValues(cmd.Env), tok, childTok)
 			tail = errorTail(b, cut, hide...)
-			why = errorReason(b, cut, code, hide...)
+			why = h.Info().Plain(errorReason(b, cut, code, hide...))
 		}
 		if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.SessionClosed,
 			Time: ended.UTC(), Session: t.session, Turn: t.id, Hold: holdID, ExitCode: &code, ResumeID: ids.ID(),
@@ -1023,26 +1020,45 @@ type wall interface {
 
 // sandbox builds the wall around one of session's turns in
 // folder (read only when readOnly; with no network beyond its gateway and
-// the API when offline, see wallNet), with read readable too, or says why it cannot (fixed wording).
+// the API when offline, see wallNet), with read readable too, or says why it cannot (fixed wording),
+// and in plain words too when the sandbox has them (sandbox.Error.Say).
 // lead says why the wall is built, and starts a refusal.
 // It needs the session's own home, which holds the home_files already
 // (copyHomeFiles), so they are readable inside the wall.
 // The network goes through the proxy: the hosts in [network] allow when
 // contain is on, every host when it is off.
-func (e *Engine) sandbox(p settings.Policy, lead, session, folder string, readOnly, offline bool, read []string, net netjail.Spec) (*sandbox.Box, string) {
+func (e *Engine) sandbox(p settings.Policy, lead, session, folder string, readOnly, offline bool, read []string, net netjail.Spec) (box *sandbox.Box, why, say string) {
 	if e.cfg.Homes == "" || !SessionShape.MatchString(session) {
-		return nil, lead + ", and " + NoHomes
+		return nil, lead + ", and " + NoHomes, ""
 	}
 	home := filepath.Join(e.cfg.Homes, session)
 	if info, err := os.Lstat(home); err != nil || !info.IsDir() {
-		return nil, lead + ", and this session has no home of its own: it began before homes"
+		return nil, lead + ", and this session has no home of its own: it began before homes", ""
 	}
 	net = wallNet(p, offline, net)
 	box, err := sandbox.New(sandbox.Spec{Copy: folder, ReadOnly: readOnly, Home: home, Read: read, Net: net})
 	if err != nil {
-		return nil, err.Error()
+		var se *sandbox.Error
+		if errors.As(err, &se) {
+			say = se.Say
+		}
+		return nil, err.Error(), say
 	}
-	return box, ""
+	return box, "", ""
+}
+
+// sandboxRefusal is the refusal of a turn whose wall could not be built for
+// why. With say, the sandbox's plain words for a machine that cannot run
+// it, they come first and why stays as the detail. Not for a wall Network
+// contain asked for (autoWall): Sandbox is not the switch to turn off there.
+func sandboxRefusal(why, say string, autoWall bool) string {
+	switch {
+	case autoWall:
+		return why + ", so the turn did not start. Fix it on this runner, or turn Network contain off in the cockpit's Settings (Isolation, Network)."
+	case say != "":
+		return say + " Detail: " + why + "."
+	}
+	return why + ", so the turn did not start. Fix it on this runner, or turn Sandbox off in the cockpit's Settings (Isolation)."
 }
 
 // wallNet is what the proxy of a walled turn lets through: the
