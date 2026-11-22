@@ -41,8 +41,10 @@ path_hint() {
       say "  Then open a new terminal, or run: source ~/.zshrc"
       ;;
     bash)
-      profile=~/.bashrc
-      if [ "$(uname -s)" = Darwin ]; then profile=~/.bash_profile; fi
+      # Keep the tilde literal in the printed line. An expanded absolute path
+      # is correct but harder to recognise and copy on another machine.
+      profile='~/.bashrc'
+      if [ "$(uname -s)" = Darwin ]; then profile='~/.bash_profile'; fi
       say "  echo 'export PATH=\"$1:\$PATH\"' >> $profile"
       say "  Then open a new terminal, or run: source $profile"
       ;;
