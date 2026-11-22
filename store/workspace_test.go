@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/ids"
 )
 
 func ptrBool(b bool) *bool { return &b }
@@ -66,7 +67,7 @@ func TestMigrateWorkspacesModeFolderAndIdempotent(t *testing.T) {
 		{"s_hook", false, "/src/web", "fld_3333333333333333"},
 	}
 	for _, w := range want {
-		got, found, err := s.Workspace(w.id)
+		got, found, err := s.Workspace(ids.WorkspaceID(w.id))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -101,6 +102,49 @@ func TestMigrateWorkspacesModeFolderAndIdempotent(t *testing.T) {
 	}
 	if len(ws) != 3 {
 		t.Fatalf("Workspaces() returned %d, want 3", len(ws))
+	}
+}
+
+// EnsureDirectWorkspace creates a session's direct workspace carrying the
+// folder's machine, so a turn's place (folder AND machine) is the one
+// workspace record's -- a multi-runner apply of a gateway or hook session's
+// direct workspace routes to the runner that holds it, not an empty machine
+// (his rule, 2026-11-21, finishing rule 3). It is idempotent on wc_<session>,
+// so the first machine wins and a later turn changes nothing.
+func TestEnsureDirectWorkspaceCarriesMachine(t *testing.T) {
+	s := newStore(t)
+	if err := s.EnsureDirectWorkspace("s_gw", "/src/app", "fld_1111111111111111", "con_2222222222222222"); err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := s.Workspace(ids.WorkspaceID("s_gw"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found {
+		t.Fatal("no workspace after EnsureDirectWorkspace")
+	}
+	if got.Machine != "con_2222222222222222" {
+		t.Fatalf("machine %q, want the folder's machine", got.Machine)
+	}
+	if got.Sandbox || got.Folder != "/src/app" || got.FolderRef != "fld_1111111111111111" {
+		t.Fatalf("direct workspace folder %q ref %q sandbox %v, want /src/app fld_1111111111111111 false",
+			got.Folder, got.FolderRef, got.Sandbox)
+	}
+	// A later turn of the same session keeps the first machine (idempotent): an
+	// empty machine does not erase it.
+	if err := s.EnsureDirectWorkspace("s_gw", "/src/app", "fld_1111111111111111", ""); err != nil {
+		t.Fatal(err)
+	}
+	got, _, err = s.Workspace(ids.WorkspaceID("s_gw"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Machine != "con_2222222222222222" {
+		t.Fatalf("after re-run machine %q, want the first machine kept", got.Machine)
+	}
+	// An empty session is a no-op, not an error.
+	if err := s.EnsureDirectWorkspace("", "/x", "", ""); err != nil {
+		t.Fatalf("empty session: %v", err)
 	}
 }
 
@@ -222,6 +266,38 @@ func TestMigrateSkipsSessionWithExplicitWorkspace(t *testing.T) {
 	}
 	if len(ws) != 1 || ws[0].ID != "ws_exp" {
 		t.Fatalf("workspaces %+v, want just ws_exp", ws)
+	}
+}
+
+// WorkspaceOf resolves a session's workspace: the one its session.created or
+// turn.started names, or the session's own id for a migrated session, and not
+// found for an unknown session.
+func TestWorkspaceOf(t *testing.T) {
+	s := newStore(t)
+	base := time.Date(2026, 11, 21, 20, 0, 0, 0, time.UTC)
+	// A session created in an explicit workspace.
+	if _, err := s.AppendOnce(event.Event{ID: "sc_s_a", Kind: event.SessionCreated, Session: "s_a",
+		Workspace: "ws_a", Time: base}); err != nil {
+		t.Fatal(err)
+	}
+	// A migrated session: a turn with no workspace field.
+	wsStarted(t, s, "s_b", "t_b", "/src/app", "fld_8888888888888888", base.Add(time.Minute))
+
+	for _, c := range []struct {
+		session, want string
+		found         bool
+	}{
+		{"s_a", "ws_a", true},    // from session.created
+		{"s_b", "s_b", true},     // migrated: its own id
+		{"s_unknown", "", false}, // not in the record
+	} {
+		got, found, err := s.WorkspaceOf(ids.SessionID(c.session))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if found != c.found || string(got) != c.want {
+			t.Errorf("WorkspaceOf(%q) = %q,%v, want %q,%v", c.session, got, found, c.want, c.found)
+		}
 	}
 }
 

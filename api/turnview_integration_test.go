@@ -19,11 +19,13 @@ import (
 // ?session= is gone. A turn outside the tree is refused, by id or by query.
 func TestTurnTokenReadsTreeTurnsByID(t *testing.T) {
 	e, dir := askEnv(t)
-	p := startTurn(t, e, `{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"parent"}`)
+	psess := e.newSession(t, t.TempDir(), true)
+	p := startTurn(t, e, `{"session":"`+psess+`","agent":"claude","prompt":"parent"}`)
 	ptok := tokenOf(t, dir, "parent")
 	c := ask(t, e, ptok, `{"agent":"claude","prompt":"child"}`)
 	ctok := tokenOf(t, dir, "child")
-	q := startTurn(t, e, `{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"outside"}`)
+	qsess := e.newSession(t, t.TempDir(), true)
+	q := startTurn(t, e, `{"session":"`+qsess+`","agent":"claude","prompt":"outside"}`)
 	tokenOf(t, dir, "outside")
 	for _, tc := range []struct {
 		tok, path string
@@ -58,7 +60,8 @@ func TestTurnTokenReadsTreeTurnsByID(t *testing.T) {
 // never a hit. The main token's search finds every turn.
 func TestSearchLeavesOutTheSearchingTurn(t *testing.T) {
 	e, dir := childEnv(t)
-	s := startTurn(t, e, `{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"the first needle"}`)
+	sess := e.newSession(t, t.TempDir(), true)
+	s := startTurn(t, e, `{"session":"`+sess+`","agent":"claude","prompt":"the first needle"}`)
 	tok := childVars(t, dir, 0)["AGENTBUS_TOKEN"]
 	appendAll(t, e.store, event.Event{ID: "prev", Kind: event.TurnStarted, Time: time.Now().UTC(), Session: s.Session, Turn: "t_prev", Text: "an older needle"})
 	turns := func(tok string) []string {
@@ -90,12 +93,15 @@ func TestSearchLeavesOutTheSearchingTurn(t *testing.T) {
 
 // PATCH /sessions/{id} closed true is the retired close: it now archives the
 // session (B14) by recording a session.archived event. Nothing is removed --
-// the copy survives, named after the session -- the session stays resumable
+// the copy survives, named after the workspace -- the session stays resumable
 // and can still take a turn, archiving is never refused for a running turn,
 // and the default list hides it while archived=true still shows it.
 func TestCloseSession(t *testing.T) {
 	e, dir := askEnv(t)
-	s := startTurn(t, e, `{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"hold"}`)
+	ref, machine := e.folderRef(t, t.TempDir())
+	ws := e.makeWorkspace(t, ref, machine, true)
+	sess := e.makeSession(t, ws)
+	s := startTurn(t, e, `{"session":"`+sess+`","agent":"claude","prompt":"hold"}`)
 	tokenOf(t, dir, "hold")
 	// Archive while the turn is still running: it is only a view, so it is
 	// never refused for busy work. closed:true maps to archive; the response
@@ -104,8 +110,8 @@ func TestCloseSession(t *testing.T) {
 		!strings.Contains(out, `"archived":true`) || strings.Contains(out, `"closed":true`) || !strings.Contains(out, `"title":"Done"`) {
 		t.Fatalf("archive while a turn runs: %d %s", code, out)
 	}
-	if !strings.HasSuffix(pwdOf(t, dir, "hold"), filepath.Join("sessions", s.Session)) {
-		t.Errorf("the copy is at %s, want it named after the session", pwdOf(t, dir, "hold"))
+	if !strings.HasSuffix(pwdOf(t, dir, "hold"), filepath.Join("sessions", ws)) {
+		t.Errorf("the copy is at %s, want it named after the workspace %s", pwdOf(t, dir, "hold"), ws)
 	}
 	// The turn runs on and finishes normally: archiving did not stop it.
 	release(dir, "hold")
@@ -113,7 +119,7 @@ func TestCloseSession(t *testing.T) {
 	// It is archived, not closed: the copy is intact and it stays resumable.
 	var one OneSession
 	if code := getJSON(t, e, "/api/v0/sessions/"+s.Session, &one); code != 200 || one.Session.ID != s.Session || one.Session.Copy == nil ||
-		one.Session.Copy.Kind != queue.WorkspaceCopy || one.Session.Copy.Name != s.Session || one.Session.Copy.Removed != nil ||
+		one.Session.Copy.Kind != queue.WorkspaceCopy || one.Session.Copy.Name != ws || one.Session.Copy.Removed != nil ||
 		one.Session.Archived == nil || one.Session.Closed != nil || !one.Session.Resumable {
 		t.Fatalf("GET the archived session: %d %+v %+v", code, one.Session, one.Session.Copy)
 	}

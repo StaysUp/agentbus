@@ -155,13 +155,13 @@ func TestFailedTurnStillDelivers(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Before the end is recorded, FireOns reads no end and delivers nothing.
-	if n, err := q.FireOns(queue.DefaultTeam, st.TurnEnded, nil, nil); err != nil || n != 0 {
+	if n, err := q.FireOns(queue.DefaultTeam, st.TurnEnded, nil, nil, nil); err != nil || n != 0 {
 		t.Fatalf("before reconcile: n=%d err=%v; want 0", n, err)
 	}
 	if _, _, err := RecordTurnEnds(q, st, nil, time.Now().Add(time.Hour), 50); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := q.FireOns(queue.DefaultTeam, st.TurnEnded, nil, nil); err != nil || n != 1 {
+	if n, err := q.FireOns(queue.DefaultTeam, st.TurnEnded, nil, nil, nil); err != nil || n != 1 {
 		t.Fatalf("after reconcile: n=%d err=%v; want 1 (the failed turn delivers)", n, err)
 	}
 	list, err := q.List(queue.DefaultTeam, queue.Filter{Session: "s_target"}, 10)

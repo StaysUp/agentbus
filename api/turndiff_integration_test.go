@@ -132,7 +132,7 @@ func TestTurnDiffAndApply(t *testing.T) {
 		return string(b)
 	}
 
-	first := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"edit1"}`)
+	first := startTurn(t, e, `{"session":"`+e.newSession(t, folder, true)+`","agent":"claude","prompt":"edit1"}`)
 	waitEnded(t, e, first.Turn)
 	if read("a.txt") != "one\ntwo\n" || read("b.txt") != "<missing>" {
 		t.Fatal("the turn's edits reached the person's folder before an apply")
@@ -254,7 +254,7 @@ func TestTurnDiffAndApply(t *testing.T) {
 		applied = applied[:0]
 		for _, r := range recs {
 			var ev event.Event
-			if r.Kind == event.TurnApplied && json.Unmarshal(r.Data, &ev) == nil && ev.Applied != nil {
+			if r.Kind == event.WorkspaceApplied && json.Unmarshal(r.Data, &ev) == nil && ev.Applied != nil {
 				applied = append(applied, *ev.Applied)
 			}
 		}
@@ -313,7 +313,11 @@ func TestTurnChangesAreTheCheckpointDiff(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			first := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"edit1"}`)
+			// The sandbox is the switch for copy-or-folder; the isolation
+			// setting only picks the backend, so "none" is tested as a direct
+			// (sandbox false) workspace, not a sandbox one that ignores it.
+			sandbox := setting != settings.IsolationNone
+			first := startTurn(t, e, `{"session":"`+e.newSession(t, folder, sandbox)+`","agent":"claude","prompt":"edit1"}`)
 			waitEnded(t, e, first.Turn)
 			second := startTurn(t, e, `{"agent":"claude","session":"`+first.Session+`","prompt":"edit2"}`)
 			waitEnded(t, e, second.Turn)

@@ -33,8 +33,74 @@ func postAPI(t *testing.T, svc *service, tok, path string, body []byte) (int, ma
 
 func postRun(t *testing.T, svc *service, tok string, body map[string]any) (int, map[string]any, string) {
 	t.Helper()
-	b, _ := json.Marshal(body)
+	b, _ := json.Marshal(firstTurnBody(t, svc, tok, body))
 	return postAPI(t, svc, tok, "/api/v0/turns", b)
+}
+
+// firstTurnBody turns a one-call turn body (a folder, no session) into a turn
+// body naming a fresh session, running the 3-call flow (POST /workspaces, POST
+// /sessions) first. The folder and the sandbox mode (from isolate, default
+// true) become the workspace's; the retired read_only is dropped. A body that
+// already names a session is a continuation and is left unchanged.
+func firstTurnBody(t *testing.T, svc *service, tok string, body map[string]any) map[string]any {
+	t.Helper()
+	folder, hasFolder := body["folder"].(string)
+	if _, hasSession := body["session"]; hasSession || !hasFolder {
+		return body
+	}
+	sandbox := true
+	if v, ok := body["isolate"].(bool); ok {
+		sandbox = v
+	}
+	sess := newWorkspaceSession(t, svc, tok, folder, sandbox)
+	nb := map[string]any{"session": sess}
+	for k, v := range body {
+		switch k {
+		case "folder", "folder_ref", "machine", "connector", "isolate", "read_only":
+			// Workspace fields, or retired turn fields: not a turn's.
+		default:
+			nb[k] = v
+		}
+	}
+	return nb
+}
+
+// newWorkspaceSession creates a workspace in folder (sandbox or direct) and a
+// session in it, returning the session id. A first turn now names a session;
+// its folder and mode are the workspace's, set by the 3-call flow (POST
+// /api/v0/workspaces, POST /api/v0/sessions, then POST /api/v0/turns). A test
+// that runs several turns reuses the one session id for each.
+func newWorkspaceSession(t *testing.T, svc *service, tok, folder string, sandbox bool) string {
+	t.Helper()
+	return newSessionOf(t, svc, tok, map[string]any{"folder": folder, "sandbox": sandbox})
+}
+
+// newWorkspaceOf creates a workspace from wsBody (folder, or folder_ref +
+// connector, plus sandbox) and returns its id, for a test whose workspace is
+// not a plain local folder.
+func newWorkspaceOf(t *testing.T, svc *service, tok string, wsBody map[string]any) string {
+	t.Helper()
+	b, _ := json.Marshal(wsBody)
+	code, out, raw := postAPI(t, svc, tok, "/api/v0/workspaces", b)
+	ws, _ := out["workspace"].(string)
+	if code != http.StatusCreated || ws == "" {
+		t.Fatalf("POST /api/v0/workspaces %v: %d %s", wsBody, code, raw)
+	}
+	return ws
+}
+
+// newSessionOf creates a workspace from wsBody and a session in it, returning
+// the session id.
+func newSessionOf(t *testing.T, svc *service, tok string, wsBody map[string]any) string {
+	t.Helper()
+	ws := newWorkspaceOf(t, svc, tok, wsBody)
+	b, _ := json.Marshal(map[string]any{"workspace": ws})
+	code, out, raw := postAPI(t, svc, tok, "/api/v0/sessions", b)
+	sess, _ := out["session"].(string)
+	if code != http.StatusCreated || sess == "" {
+		t.Fatalf("POST /api/v0/sessions in %s: %d %s", ws, code, raw)
+	}
+	return sess
 }
 
 // An agent whose program is not on the service's PATH is refused with 400, a
@@ -61,15 +127,19 @@ func TestRunMissingAgentIsRefused(t *testing.T) {
 				t.Fatal(err)
 			}
 			t.Cleanup(svc.stop)
-			code, out, raw := postRun(t, svc, readToken(t, home), map[string]any{"agent": tc.agent, "folder": t.TempDir(), "prompt": "hi"})
+			tok := readToken(t, home)
+			sess := newWorkspaceSession(t, svc, tok, t.TempDir(), true)
+			code, out, raw := postRun(t, svc, tok, map[string]any{"session": sess, "agent": tc.agent, "prompt": "hi"})
 			msg, _ := out["error"].(string)
 			if code != http.StatusBadRequest ||
 				!strings.HasPrefix(msg, "agent "+tc.agent+" cannot start: the program "+tc.agent+" is not on the service's PATH.") ||
 				!strings.Contains(msg, tc.product) || strings.Contains(raw, "PATH-MARK") {
 				t.Fatalf("%d %s, want 400 naming the agent, its program and how to install it", code, raw)
 			}
-			if evs := storedEvents(t, svc.store); len(evs) != 0 {
-				t.Fatalf("events %+v, want none stored", evs)
+			// The refused turn stores nothing in its session's record; only the
+			// session.created of the session it names remains.
+			if evs := storedEvents(t, svc.store); len(evs) != 1 || evs[0].Kind != "session.created" {
+				t.Fatalf("events %+v, want only the session.created", evs)
 			}
 			log := waitLog(t, home, "run.refused agent="+tc.agent+" program="+tc.agent+" reason=not_on_path")
 			if strings.Contains(log, "PATH-MARK") {
@@ -100,14 +170,15 @@ func TestRunThatCannotStartIsClosed(t *testing.T) {
 	}
 	t.Cleanup(svc.stop)
 	tok := readToken(t, home)
-	code, _, _ := postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": t.TempDir(), "prompt": "hi"})
+	sess := newWorkspaceSession(t, svc, tok, t.TempDir(), true)
+	code, _, _ := postRun(t, svc, tok, map[string]any{"session": sess, "agent": "claude", "prompt": "hi"})
 	if code < 500 {
 		t.Fatalf("status %d, want a server error for a child that cannot start", code)
 	}
 	evs := storedEvents(t, svc.store)
-	if len(evs) != 4 || evs[0].Kind != "session.opened" || evs[1].Kind != "turn.started" || evs[2].Kind != "context.added" ||
-		evs[3].Kind != "session.closed" || evs[0].Hold == "" || evs[3].Hold != evs[0].Hold || evs[3].Error == "" {
-		t.Fatalf("events %+v, want session.opened, turn.started, context.added, then its session.closed with the reason", evs)
+	if len(evs) != 5 || evs[0].Kind != "session.created" || evs[1].Kind != "session.opened" || evs[2].Kind != "turn.started" || evs[3].Kind != "context.added" ||
+		evs[4].Kind != "session.closed" || evs[1].Hold == "" || evs[4].Hold != evs[1].Hold || evs[4].Error == "" {
+		t.Fatalf("events %+v, want session.created, session.opened, turn.started, context.added, then its session.closed with the reason", evs)
 	}
 	if snap, err := svc.store.Snapshot(); err != nil || len(snap.Sessions) != 1 || snap.Sessions[0].Open {
 		t.Fatalf("snapshot %+v, %v; want one closed session", snap.Sessions, err)

@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -282,9 +281,8 @@ func TestRunWithSessionRunsNextTurnInSameSession(t *testing.T) {
 		}
 		t.Setenv("AGENTBUS_FAKE_EXIT", "4")
 		body := map[string]any{"prompt": "--next"}
-		if tc.readOnly != nil {
-			body["read_only"] = tc.readOnly
-		}
+		// read_only was retired (B12): the turn body no longer carries it, so tc.readOnly
+		// only labels the case; every case gets the same normal args.
 		if tc.model != "" {
 			body["model"] = tc.model
 		}
@@ -320,7 +318,7 @@ func TestRunWithSessionRunsNextTurnInSameSession(t *testing.T) {
 		for _, e := range runEvents(t, svc.store, id) {
 			kinds = append(kinds, e.Kind)
 		}
-		if got := strings.Join(kinds, " "); got != "session.opened turn.started context.added session.closed turn.changed "+
+		if got := strings.Join(kinds, " "); got != "session.created session.opened turn.started context.added session.closed turn.changed "+
 			"session.opened turn.started context.added session.closed turn.changed" {
 			t.Fatalf("%s: events %s", name, got)
 		}
@@ -342,8 +340,18 @@ func TestRunWithSessionRefusals(t *testing.T) {
 	// A session seen only through the gateway (pointed at it by hand) has no
 	// agent and no resume_id.
 	const byHand = "byhand"
+	byHandFolder := t.TempDir()
+	sb := false
+	if _, _, err := svc.store.Append(event.Event{ID: "wc_byhand", Kind: event.WorkspaceCreated, Time: time.Now(),
+		Workspace: byHand, Folder: byHandFolder, Sandbox: &sb}); err != nil {
+		t.Fatal(err)
+	}
+	// A prior gateway turn with no agent and no resume_id: the session RAN (its
+	// turn.started is the continuation signal), so a next turn continues it and
+	// is refused because it cannot be resumed -- not misread as a new session for
+	// having no agent.
 	if _, _, err := svc.store.Append(event.Event{ID: "evt_byhand", Kind: event.TurnStarted, Time: time.Now(),
-		Session: byHand, Turn: "turn_1", Text: "hi"}); err != nil {
+		Session: byHand, Turn: "turn_1", Text: "hi", Folder: byHandFolder}); err != nil {
 		t.Fatal(err)
 	}
 	before := svc.store.Last()
@@ -354,7 +362,8 @@ func TestRunWithSessionRefusals(t *testing.T) {
 	if evs, err := svc.store.After(before, store.Filter{}, 10); err != nil {
 		t.Fatal(err)
 	} else {
-		// The turn job's end may be recorded (turn.ended); nothing else runs.
+		// The turn job's end may be recorded (turn.ended); nothing else. A turn
+		// that cannot start touches no copy, so it records no turn.changed.
 		for _, e := range evs {
 			if e.Kind != "turn.ended" {
 				t.Errorf("a refused turn stored %s", e.Kind)
@@ -425,15 +434,14 @@ func TestRunWithSessionRefusals(t *testing.T) {
 
 	// Body refusals, as runs.
 	const badPrompt = "prompt must be from 1 byte to 256 KiB, with no NUL byte"
-	const badBody = "the body must be one JSON object with prompt, agent and folder (or session, and optionally agent), and optionally model, isolate and idempotency_key, at most 2 MiB"
-	folder := closedFolder(t, svc, id)
+	const badBody = "the body must be one JSON object with session, agent and prompt, and optionally model, delivery and idempotency_key, at most 2 MiB"
 	for _, tc := range []struct {
 		name string
 		body string
 		want string
 	}{
 		{"empty prompt", `{"prompt":""}`, badPrompt},
-		{"no prompt", `{"read_only":true}`, badPrompt},
+		{"no prompt", `{"model":"haiku"}`, badPrompt},
 		{"NUL", `{"prompt":"a\u0000b"}`, badPrompt},
 		{"over 256 KiB", `{"prompt":"` + strings.Repeat("a", 256<<10+1) + `"}`, badPrompt},
 		{"model as flag", `{"prompt":"a","model":"--x"}`, "model must match ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"},
@@ -441,10 +449,11 @@ func TestRunWithSessionRefusals(t *testing.T) {
 		{"no agent", `{"prompt":"a"}`, engine.NoAgent},
 		{"an agent not saved", `{"prompt":"a","agent":"nobody"}`,
 			`agent "nobody" is not a saved agent; GET /api/v0/agents lists them`},
-		{"another folder", `{"prompt":"a","folder":"/"}`,
-			"folder is not this session's folder " + strconv.Quote(folder) + "; leave folder out to use the session's"},
-		{"another agent, another folder", `{"prompt":"a","agent":"codex","folder":"/"}`,
-			"folder is not this session's folder " + strconv.Quote(folder) + "; leave folder out to use the session's"},
+		// A turn carries no folder now (the folder is its session's workspace's),
+		// so a folder on a turn is an unknown field.
+		{"a folder", `{"prompt":"a","folder":"/"}`, badBody},
+		{"an agent and a folder", `{"prompt":"a","agent":"codex","folder":"/"}`, badBody},
+		{"read_only retired", `{"prompt":"a","read_only":true}`, badBody},
 	} {
 		before := svc.store.Last()
 		body := tc.body
@@ -473,13 +482,12 @@ func TestRunWithSessionRefusals(t *testing.T) {
 			t.Errorf("%s: %d %.200s, want 400 %q", tc.name, code, raw, badBody)
 		}
 	}
-	// A session sent empty or null is refused, even with agent, folder and
-	// prompt that would start a new session: only an absent session does.
+	// A session sent empty or null is refused: every turn names a session.
 	for _, sess := range []string{`""`, `null`} {
 		before := svc.store.Last()
-		b := `{"session":` + sess + `,"agent":"claude","folder":` + jsonOf(t.TempDir()) + `,"prompt":"a"}`
+		b := `{"session":` + sess + `,"agent":"claude","prompt":"a"}`
 		if code, out, raw := postAPI(t, svc, tok, "/api/v0/turns", []byte(b)); code != http.StatusBadRequest ||
-			out["error"] != "session must match ^[A-Za-z0-9_-]{1,64}$" {
+			out["error"] != "session is required and must match ^[A-Za-z0-9_-]{1,64}$" {
 			t.Errorf("session %s: %d %s, want 400", sess, code, raw)
 		}
 		if evs, err := svc.store.After(before, store.Filter{}, 10); err != nil {
@@ -494,29 +502,16 @@ func TestRunWithSessionRefusals(t *testing.T) {
 	}
 	// A session id of the wrong shape is refused before the store is read.
 	if code, out, raw := postMessage(t, svc, tok, "a/b", map[string]any{"prompt": "a"}); code != http.StatusBadRequest ||
-		out["error"] != "session must match ^[A-Za-z0-9_-]{1,64}$" {
+		out["error"] != "session is required and must match ^[A-Za-z0-9_-]{1,64}$" {
 		t.Errorf("bad session shape: %d %s, want 400", code, raw)
 	}
 
-	// The session's own agent and folder, sent again, are accepted.
+	// The session's own agent, sent again, is accepted (a turn carries no folder).
 	t.Setenv("AGENTBUS_FAKE_STDOUT", claudeResultB)
-	if code, _, raw := postMessage(t, svc, tok, id, map[string]any{"prompt": "same", "agent": "claude",
-		"folder": folder + "/"}); code != http.StatusAccepted {
-		t.Fatalf("own agent and folder sent: %d %s, want 202", code, raw)
+	if code, _, raw := postMessage(t, svc, tok, id, map[string]any{"prompt": "same", "agent": "claude"}); code != http.StatusAccepted {
+		t.Fatalf("own agent sent again: %d %s, want 202", code, raw)
 	}
 	waitClosedN(t, svc, id, 4)
-}
-
-// closedFolder is the folder of session's first session.opened.
-func closedFolder(t *testing.T, svc *service, session string) string {
-	t.Helper()
-	for _, e := range runEvents(t, svc.store, session) {
-		if e.Kind == "session.opened" && e.Folder != "" {
-			return e.Folder
-		}
-	}
-	t.Fatalf("no session.opened with a folder in %s", session)
-	return ""
 }
 
 // Two next turns sent at once: one starts, the other is queued behind it,

@@ -470,7 +470,13 @@ func (s *Store) Page(after int64, f Filter, limit, maxBytes int) (recs []Record,
 // latest session.closed that carries one, and whether a run's child for it is
 // still running.
 type Continuation struct {
-	Known   bool   // the store has events of the session
+	Known bool // the store has events of the session (session.created included)
+	// Ran is true when the session has a prior run (a turn.started or
+	// session.opened), so a next turn continues it. A session with only a
+	// session.created and no run has not run: its next turn is its first. It
+	// tells a continuation from a first turn without reading the agent, which a
+	// gateway session leaves empty.
+	Ran     bool
 	Harness string // the harness, such as claude
 	Folder  string
 	// FolderRef: the reference of the person's folder, from the same
@@ -501,6 +507,7 @@ func (s *Store) Continuation(id string) (Continuation, error) {
 				WHERE session = ?1 AND `+agentFrom+` ORDER BY seq DESC LIMIT 1)
 		SELECT
 			EXISTS(SELECT 1 FROM events WHERE session = ?1),
+			EXISTS(SELECT 1 FROM events WHERE session = ?1 AND kind IN ('turn.started', 'session.opened')),
 			(SELECT json_extract(data, '$.agent') FROM latest),
 			(SELECT json_extract(data, '$.folder') FROM latest),
 			(SELECT json_extract(data, '$.folder_ref') FROM latest),
@@ -515,7 +522,7 @@ func (s *Store) Continuation(id string) (Continuation, error) {
 				AND json_extract(t.data, '$.continuity') = 'transcript'
 				AND t.seq > (SELECT seq FROM events WHERE session = ?1 AND kind = 'session.closed'
 					AND json_extract(data, '$.resume_id') IS NOT NULL ORDER BY seq DESC LIMIT 1))`,
-		id).Scan(&c.Known, &agent, &folder, &folderRef, &agentID, &access, &keyEnv, &model, &resume, &c.ResumeStale)
+		id).Scan(&c.Known, &c.Ran, &agent, &folder, &folderRef, &agentID, &access, &keyEnv, &model, &resume, &c.ResumeStale)
 	if err != nil {
 		return c, fmt.Errorf("store: read session: %w", err)
 	}

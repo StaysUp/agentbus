@@ -3,6 +3,7 @@ package queue
 import (
 	"encoding/json"
 	"errors"
+	"github.com/staysup/agentbus/ids"
 	"strings"
 	"testing"
 	"time"
@@ -136,7 +137,7 @@ func TestDeliver(t *testing.T) {
 	if _, _, err := q.Start(r.ID, ca.ID, ca.Number, lease); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil || n != 0 {
+	if n, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil, nil); err != nil || n != 0 {
 		t.Fatalf("before the child ends: %d %v", n, err)
 	}
 	res := `{"session":"` + child.Session + `","state":"finished","folder":"/w/1",` +
@@ -145,7 +146,7 @@ func TestDeliver(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil {
+		if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -169,7 +170,7 @@ func TestDeliver(t *testing.T) {
 	// request tree of its own, so the delivery is a root-level turn with no
 	// Chain — his rule: a delivered turn joins the RECEIVING session's tree, and
 	// a root session has none.
-	if d.State != Queued || d.Spec.Session != parent.Session || d.Spec.Harness != "claude" || d.Links.ResultOf.Job != child.ID ||
+	if d.State != Queued || string(d.Spec.Session) != parent.Session || d.Spec.Harness != "claude" || d.Links.ResultOf.Job != child.ID ||
 		d.Links.ResultOf.Session != child.Session || d.Links.ResultOf.Turn != child.Turn || d.Links.ResultOf.Agent != "claude" ||
 		d.Links.Chain != nil {
 		t.Fatalf("delivery: %+v %+v", d, d.Links)
@@ -192,7 +193,7 @@ func TestDeliver(t *testing.T) {
 		t.Fatalf("took %s, want the delivery", got.ID)
 	}
 	// The person's own job ended too, and is never delivered.
-	if n, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil || n != 0 {
+	if n, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil, nil); err != nil || n != 0 {
 		t.Fatalf("after: %d %v", n, err)
 	}
 	_ = pj
@@ -245,7 +246,7 @@ func TestDeliverNamesTheAskingTurnsAgent(t *testing.T) {
 			return Spec{Harness: "codex", AgentID: "a_1", Access: "subscription", AgentModel: "m"}, ""
 		}
 		for range 2 {
-			if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, agent); err != nil {
+			if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil, agent); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -293,14 +294,14 @@ func TestDeliverKeyIsOurs(t *testing.T) {
 		t.Fatalf("%s is a key a caller may send", ResultKey("on_1", child.ID, "s_x"))
 	}
 	for _, k := range []string{"result_" + child.ID, "result:" + child.ID} {
-		if _, _, err := q.Create(DefaultTeam, KindTurn, k, Spec{Session: parent.Session, Harness: "claude", Prompt: "squat"}, Links{}); err != nil {
+		if _, _, err := q.Create(DefaultTeam, KindTurn, k, Spec{Session: ids.SessionID(parent.Session), Harness: "claude", Prompt: "squat"}, Links{}); err != nil {
 			t.Fatal(err)
 		}
 	}
 	if _, err := q.Cancel(DefaultTeam, child.ID); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil || n != 1 {
+	if n, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil, nil); err != nil || n != 1 {
 		t.Fatalf("deliver: %d %v", n, err)
 	}
 }
@@ -381,7 +382,7 @@ func TestDeliverToALostSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if n, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil || n != 0 {
+		if n, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil, nil); err != nil || n != 0 {
 			t.Fatalf("deliver: %d %v", n, err)
 		}
 	}

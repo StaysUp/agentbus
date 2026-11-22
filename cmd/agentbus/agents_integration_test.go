@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/folders"
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/store"
@@ -324,13 +325,16 @@ func TestOpenRouterAgentWithoutKeyRefused(t *testing.T) {
 	if code != http.StatusBadRequest || !strings.Contains(out["error"].(string), "set your OpenRouter key in Settings, or set AB_TEST_OR_KEY where control runs") {
 		t.Fatalf("%d %s", code, raw)
 	}
-	// The turn job's end is recorded (turn.ended), as for every ended turn job;
-	// nothing else runs or is stored (C0).
+	// The session and its workspace were created before the turn (the 3-call
+	// flow); the turn job's end is recorded (turn.ended), as for every ended turn
+	// job; nothing else runs or is stored (C0).
 	if evs, err := svc.store.After(before, store.Filter{}, 10); err != nil {
 		t.Fatal(err)
 	} else {
 		for _, e := range evs {
-			if e.Kind != "turn.ended" {
+			switch e.Kind {
+			case "turn.ended", "workspace.created", "session.created":
+			default:
 				t.Fatalf("a refused turn stored %s", e.Kind)
 			}
 		}
@@ -382,16 +386,15 @@ func TestNewSessionIsolated(t *testing.T) {
 		}
 		svc := runService(t, home, nil, 0)
 		tok := readToken(t, home)
-		// A copy is named after its session.
-		copied := func(session string) string { return filepath.Join(home, "sessions", session) }
+		// A copy is named after its workspace.
+		copied := func(ws string) string { return filepath.Join(home, "sessions", ws) }
 		inRepo := copied
 		if setting == "git" {
-			inRepo = func(session string) string { return filepath.Join(home, "sessions", session, "sub") }
+			inRepo = func(ws string) string { return filepath.Join(home, "sessions", ws, "sub") }
 		}
+		// isolation="none" is only the backend; it never turns off the sandbox
+		// wall, so a sandbox workspace still runs in a copy under every setting.
 		mine := func(f string) func(string) string { return func(string) string { return f } }
-		if setting == "none" {
-			copied, inRepo = mine(plain), mine(filepath.Join(repo, "sub"))
-		}
 		for _, tc := range []struct {
 			name    string
 			folder  string
@@ -413,10 +416,12 @@ func TestNewSessionIsolated(t *testing.T) {
 			if code != http.StatusAccepted {
 				t.Fatalf("%s: %d %s", name, code, raw)
 			}
-			waitClosed(t, svc.store, out["session"].(string))
+			session := out["session"].(string)
+			waitClosed(t, svc.store, session)
+			ws, _, _ := svc.store.WorkspaceOf(ids.SessionID(session))
 			r := readReport(t, report)
-			if real(r.Cwd) != real(tc.want(out["session"].(string))) {
-				t.Errorf("%s: ran in %s, want %s", name, r.Cwd, tc.want(out["session"].(string)))
+			if real(r.Cwd) != real(tc.want(string(ws))) {
+				t.Errorf("%s: ran in %s, want %s", name, r.Cwd, tc.want(string(ws)))
 			}
 			if b, err := os.ReadFile(filepath.Join(r.Cwd, "a.txt")); err != nil || string(b) != "uncommitted" {
 				t.Errorf("%s: the session does not start from the folder as it is: %q %v", name, b, err)
@@ -424,11 +429,12 @@ func TestNewSessionIsolated(t *testing.T) {
 		}
 		svc.stop()
 	}
-	// isolate with session is refused: a session keeps its workspace.
+	// A turn carries no isolate or sandbox: the mode is its session's workspace's,
+	// so isolate on a turn is an unknown field, refused.
 	home := t.TempDir()
 	svc := runService(t, home, nil, 0)
-	code, out, _ := postRun(t, svc, readToken(t, home), map[string]any{"session": "abc", "prompt": "hi", "isolate": true})
-	if code != http.StatusBadRequest || !strings.Contains(out["error"].(string), "isolate is for a new session") {
+	code, out, _ := postRun(t, svc, readToken(t, home), map[string]any{"session": "abc", "agent": "claude", "prompt": "hi", "isolate": true})
+	if code != http.StatusBadRequest || !strings.Contains(out["error"].(string), "the body must be one JSON object with session") {
 		t.Errorf("isolate with session: %d %v", code, out)
 	}
 }
@@ -450,11 +456,13 @@ func TestCopiedSessionKeptAcrossTurnsAndArchive(t *testing.T) {
 		t.Fatalf("start: %d", code)
 	}
 	j = waitJob(t, svc, tok, j.ID)
-	want := filepath.Join(home, "sessions", j.Session)
+	// The copy is named after its workspace, not its session.
+	ws := string(j.Spec.Workspace)
+	want := filepath.Join(home, "sessions", ws)
 	// The control plane knows the copy by its space, never by a path.
-	if j.State != queue.Finished || j.Workspace == nil || j.Workspace.Kind != queue.WorkspaceCopy || j.Workspace.Space != j.Session ||
+	if j.State != queue.Finished || j.Workspace == nil || j.Workspace.Kind != queue.WorkspaceCopy || j.Workspace.Space != ws ||
 		j.Workspace.Folder != "" {
-		t.Fatalf("first job %s, workspace %+v, want a copy %s at %s", j.State, j.Workspace, j.Session, want)
+		t.Fatalf("first job %s, workspace %+v, want a copy %s at %s", j.State, j.Workspace, ws, want)
 	}
 	if fi, err := os.Stat(want); err != nil || !fi.IsDir() {
 		t.Fatalf("no copy at %s: %v", want, err)
@@ -485,7 +493,7 @@ func TestCopiedSessionKeptAcrossTurnsAndArchive(t *testing.T) {
 	if fi, err := os.Stat(want); err != nil || !fi.IsDir() {
 		t.Fatalf("the copy was removed by archive: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(home, "sessions", ".isolation", j.Session)); err != nil {
+	if _, err := os.Stat(filepath.Join(home, "sessions", ".isolation", ws)); err != nil {
 		t.Fatalf("the isolation record was removed by archive: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(want, "made.txt")); err != nil {
@@ -584,9 +592,11 @@ func TestIsolatedSubfolderKeptAcrossTurnsAndReview(t *testing.T) {
 		t.Fatalf("start: %d", code)
 	}
 	j = waitJob(t, svc, tok, j.ID)
-	want := filepath.Join(home, "sessions", j.Session, "sub")
-	if j.State != queue.Finished || j.Workspace == nil || j.Workspace.Space != j.Session || j.Workspace.Folder != "" {
-		t.Fatalf("first job %s, workspace %+v, want space %s", j.State, j.Workspace, j.Session)
+	// The worktree is named after its workspace, not its session.
+	ws := string(j.Spec.Workspace)
+	want := filepath.Join(home, "sessions", ws, "sub")
+	if j.State != queue.Finished || j.Workspace == nil || j.Workspace.Space != ws || j.Workspace.Folder != "" {
+		t.Fatalf("first job %s, workspace %+v, want space %s", j.State, j.Workspace, ws)
 	}
 	if fi, err := os.Stat(want); err != nil || !fi.IsDir() {
 		t.Fatalf("no worktree folder at %s: %v", want, err)
@@ -619,7 +629,7 @@ func TestIsolatedSubfolderKeptAcrossTurnsAndReview(t *testing.T) {
 	}
 	// Close is retired (B14): closed:true archives and removes nothing, so the
 	// worktree survives.
-	if _, err := os.Stat(filepath.Join(home, "sessions", j.Session)); err != nil {
+	if _, err := os.Stat(filepath.Join(home, "sessions", ws)); err != nil {
 		t.Fatalf("the worktree was removed by archive: %v", err)
 	}
 }
@@ -637,7 +647,10 @@ func TestRetryAfterAgentEditGetsTheSameTurn(t *testing.T) {
 		t.Fatalf("create: %d %v", code, ag)
 	}
 	id := ag["id"].(string)
-	body := map[string]any{"agent": id, "folder": t.TempDir(), "prompt": "hi", "idempotency_key": "k-1"}
+	// One session; the turn (with its idempotency key) is retried against it, so
+	// a retry resolves to the same turn.
+	sess := newWorkspaceSession(t, svc, tok, t.TempDir(), true)
+	body := map[string]any{"session": sess, "agent": id, "prompt": "hi", "idempotency_key": "k-1"}
 	code, first, raw := postRun(t, svc, tok, body)
 	if code != http.StatusAccepted {
 		t.Fatalf("first: %d %s", code, raw)

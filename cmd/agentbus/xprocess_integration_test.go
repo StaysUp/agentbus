@@ -328,10 +328,49 @@ type turnStart struct {
 	State   string `json:"state"`
 }
 
-// startTurnX sends POST /api/v0/turns and returns its status and answer. The
-// turn runs on whichever runner owns its folder.
+// startTurnX starts a turn. A first turn (a folder or folder_ref, no session)
+// runs the 3-call flow first: create the workspace (its folder and sandbox
+// mode) and a session in it, then post the turn naming the session. A body that
+// already names a session is posted as-is. The turn runs on whichever runner
+// owns its folder.
 func (x *xproc) startTurnX(body map[string]any) (int, turnStart) {
 	x.t.Helper()
+	if body["session"] == nil && (body["folder_ref"] != nil || body["folder"] != nil) {
+		wsBody := map[string]any{"sandbox": true}
+		if v, ok := body["isolate"].(bool); ok {
+			wsBody["sandbox"] = v
+		}
+		for from, to := range map[string]string{"folder": "folder", "folder_ref": "folder_ref", "machine": "machine", "connector": "machine"} {
+			if v, ok := body[from]; ok {
+				wsBody[to] = v
+			}
+		}
+		code, wb := x.post("/api/v0/workspaces", wsBody)
+		if code/100 != 2 {
+			return code, turnStart{}
+		}
+		var ws struct {
+			Workspace string `json:"workspace"`
+		}
+		json.Unmarshal(wb, &ws)
+		code, sb := x.post("/api/v0/sessions", map[string]any{"workspace": ws.Workspace})
+		if code/100 != 2 {
+			return code, turnStart{}
+		}
+		var sc struct {
+			Session string `json:"session"`
+		}
+		json.Unmarshal(sb, &sc)
+		nb := map[string]any{"session": sc.Session}
+		for k, v := range body {
+			switch k {
+			case "folder", "folder_ref", "machine", "connector", "isolate", "read_only":
+			default:
+				nb[k] = v
+			}
+		}
+		body = nb
+	}
 	code, b := x.post("/api/v0/turns", body)
 	var st turnStart
 	_ = json.Unmarshal(b, &st)

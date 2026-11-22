@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/workspace"
 )
 
@@ -112,7 +113,7 @@ func turnsOrReviews(n int) string {
 // arranging its reply are one atomic write under one authorization. A nil
 // deliver registers no on; POST /api/v0/ons registers one separately.
 func (q *Queue) CreateTurnLinked(team, key string, spec Spec, links Links, lim Limits, deliver *Delivery) (Job, bool, error) {
-	return q.create(team, KindTurn, key, spec, links, lim, spec.Session, deliver)
+	return q.create(team, KindTurn, key, spec, links, lim, string(spec.Session), deliver)
 }
 
 // SessionRoot is the root of the request tree a session was started in: the
@@ -174,7 +175,11 @@ func (q *Queue) TreeSessions(team, root string) ([]string, error) {
 // for a worktree (repo true): its reference and its machine, or "" when
 // it named none, or a path, as a job stored before references did.
 func (q *Queue) SessionFolder(team, session string) (ref, machine string, repo bool, err error) {
-	sp, err := q.firstSpec(team, session)
+	ws, err := q.workspaceID(team, ids.SessionID(session))
+	if err != nil {
+		return "", "", false, err
+	}
+	sp, err := q.firstSpec(team, ws)
 	if err != nil {
 		return "", "", false, err
 	}
@@ -199,7 +204,7 @@ func (q *Queue) SessionFolder(team, session string) (ref, machine string, repo b
 // agent, and control names this one. name gives a saved agent's name for the
 // prompt; nil names it by id. agent nil runs it on the asking turn's agent as
 // that turn was asked.
-func (q *Queue) deliverResult(team, onID, toSession, askingTurn string, j Job, name func(id string) string, agent AgentOf) (string, string, error) {
+func (q *Queue) deliverResult(team, onID, toSession, askingTurn string, j Job, to func(session string) (DeliverTo, bool, error), name func(id string) string, agent AgentOf) (string, string, error) {
 	c, err := q.changesOf(j)
 	if err != nil {
 		return "", "", err
@@ -208,7 +213,40 @@ func (q *Queue) deliverResult(team, onID, toSession, askingTurn string, j Job, n
 	if err != nil {
 		return "", "", err
 	}
-	spec := Spec{Session: toSession, Prompt: ResultPrompt(j, c, reply, name)}
+	// The delivery is a turn in toSession, so it runs in toSession's workspace,
+	// with the same folder, machine and mode as any of its turns -- resolved
+	// from the record (to), or, for a queue-only caller or an unknown session,
+	// from the session's first turn job. The workspace spec lets the runner
+	// find or make the one copy the workspace shares, rather than running in the
+	// folder as it is with no changeset.
+	var dt DeliverTo
+	if to != nil {
+		ok, terr := false, error(nil)
+		if dt, ok, terr = to(toSession); terr != nil {
+			return "", "", terr
+		} else if !ok {
+			dt = DeliverTo{}
+		}
+	}
+	if dt.Workspace == "" {
+		wsID, werr := q.workspaceID(team, ids.SessionID(toSession))
+		if werr != nil {
+			return "", "", werr
+		}
+		first, ferr := q.firstSpec(team, wsID)
+		if ferr != nil {
+			return "", "", ferr
+		}
+		dt = DeliverTo{Workspace: string(first.Workspace), FolderRef: first.FolderRef, Machine: first.Machine, Isolate: first.Isolate}
+		if dt.Workspace == "" {
+			// The delivery session's first turn named no workspace, so the session
+			// is its own workspace: take that from the resolver (workspaceID), never
+			// a raw cast of the session id.
+			dt.Workspace = string(wsID)
+		}
+	}
+	spec := Spec{Session: ids.SessionID(toSession), Workspace: ids.WorkspaceID(dt.Workspace), FolderRef: dt.FolderRef, Machine: dt.Machine,
+		Isolate: dt.Isolate, Prompt: ResultPrompt(j, c, reply, name)}
 	// The reply runs on the asking turn's agent. An on registered by the main
 	// token names no asking turn (askingTurn ""); then it runs on the agent
 	// that did the work (the subject's own), so the delivery still has one.
@@ -250,7 +288,7 @@ func (q *Queue) deliverResult(team, onID, toSession, askingTurn string, j Job, n
 	} else if root != "" {
 		links.Chain = &Chain{Root: root, Depth: depth}
 	}
-	d, _, err := q.create(team, KindTurn, ResultKey(onID, j.ID, toSession), spec, links, Limits{}, spec.Session, nil)
+	d, _, err := q.create(team, KindTurn, ResultKey(onID, j.ID, toSession), spec, links, Limits{}, string(spec.Session), nil)
 	var removed *RunnerRemovedError
 	switch {
 	case errors.As(err, &removed):

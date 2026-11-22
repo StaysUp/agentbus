@@ -45,7 +45,8 @@ func children(t *testing.T, dir string) int {
 // of them name that turn. GET /api/v0/turns/{id} follows it to its end.
 func TestIdempotentStartStartsOneChild(t *testing.T) {
 	e, dir := heldEnv(t, 4)
-	body := `{"agent":"claude","folder":"` + t.TempDir() + `","prompt":"hello","idempotency_key":"job-1"}`
+	sess := e.newSession(t, t.TempDir(), true)
+	body := `{"session":"` + sess + `","agent":"claude","prompt":"hello","idempotency_key":"job-1"}`
 	const n = 6
 	var wg sync.WaitGroup
 	got := make([]Started, n)
@@ -116,8 +117,8 @@ func TestIdempotencyKey(t *testing.T) {
 		wired.Add(1)
 		return run.Launch{Path: "/bin/sh", Args: []string{"-c", "exit 0", "sh"}}, nil
 	})
-	dir := t.TempDir()
-	body := `{"agent":"claude","folder":"` + dir + `","prompt":"hello","idempotency_key":"job-7:a1"}`
+	sess := e.newSession(t, t.TempDir(), true)
+	body := `{"session":"` + sess + `","agent":"claude","prompt":"hello","idempotency_key":"job-7:a1"}`
 	resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(body)))
 	var first Started
 	_ = json.Unmarshal([]byte(out), &first)
@@ -139,31 +140,25 @@ func TestIdempotencyKey(t *testing.T) {
 	if n := wired.Load(); n != 1 {
 		t.Fatalf("the agent was wired %d times, want 1", n)
 	}
-	// Read-only turns retired (B12): read_only is accepted and dropped, so it is
-	// not part of a request's identity — a retry that adds it matches the first,
-	// never a 409.
-	roBody := `{"agent":"claude","folder":"` + dir + `","prompt":"hello","read_only":true,"idempotency_key":"job-7:a1"}`
-	if resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(roBody))); resp.StatusCode != 202 || !strings.Contains(out, `"existing":true`) {
-		t.Errorf("retry with read_only: %d %s, want 202 existing", resp.StatusCode, out)
-	}
+	// The same key with other fields gets 409: another prompt, another model, or
+	// another session. Each is a different request under a key the first took.
+	sess2 := e.newSession(t, t.TempDir(), true)
 	for name, b := range map[string]string{
-		"another prompt": `{"agent":"claude","folder":"` + dir + `","prompt":"other","idempotency_key":"job-7:a1"}`,
-		"another model":  `{"agent":"claude","folder":"` + dir + `","prompt":"hello","model":"haiku","idempotency_key":"job-7:a1"}`,
-		"with a session": `{"agent":"claude","session":"` + first.Session + `","prompt":"hello","idempotency_key":"job-7:a1"}`,
+		"another prompt":  `{"session":"` + sess + `","agent":"claude","prompt":"other","idempotency_key":"job-7:a1"}`,
+		"another model":   `{"session":"` + sess + `","agent":"claude","prompt":"hello","model":"haiku","idempotency_key":"job-7:a1"}`,
+		"another session": `{"session":"` + sess2 + `","agent":"claude","prompt":"hello","idempotency_key":"job-7:a1"}`,
 	} {
 		if resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(b))); resp.StatusCode != 409 {
 			t.Errorf("%s: %d %s, want 409", name, resp.StatusCode, out)
 		}
 	}
 	for _, k := range []string{`"a b"`, `"` + strings.Repeat("k", 129) + `"`, `"é"`} {
-		b := `{"agent":"claude","folder":"` + dir + `","prompt":"hello","idempotency_key":` + k + `}`
+		b := `{"session":"` + sess + `","agent":"claude","prompt":"hello","idempotency_key":` + k + `}`
 		if resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(b))); resp.StatusCode != 400 {
 			t.Errorf("key %s: %d %s, want 400", k, resp.StatusCode, out)
 		}
 	}
-	// One turn job: the idempotent request is answered from the first. The
-	// first's valid typed folder also queued a KindFolder job its runner took
-	// (audit #10), so count turn jobs alone.
+	// One turn job: the idempotent request is answered from the first.
 	if jobs, _ := e.q.List(queue.DefaultTeam, queue.Filter{Kind: queue.KindTurn}, 10); len(jobs) != 1 {
 		t.Errorf("%d turn jobs, want the one", len(jobs))
 	}
@@ -176,13 +171,14 @@ func TestIdempotencyKey(t *testing.T) {
 func TestMaxRunsQueuesAndStopWithTurnsToken(t *testing.T) {
 	e, dir := heldEnv(t, 1)
 	folder := t.TempDir()
-	code, out := asTok(t, e, turnsTok, "POST", "/api/v0/turns", `{"agent":"claude","folder":"`+folder+`","prompt":"one"}`)
+	sess1 := e.newSession(t, folder, true)
+	code, out := asTok(t, e, turnsTok, "POST", "/api/v0/turns", `{"session":"`+sess1+`","agent":"claude","prompt":"one"}`)
 	if code != 202 {
 		t.Fatalf("first: %d %s", code, out)
 	}
 	var first Started
 	_ = json.Unmarshal([]byte(out), &first)
-	second := `{"agent":"claude","folder":"` + folder + `","prompt":"two","idempotency_key":"k2"}`
+	second := `{"session":"` + e.newSession(t, folder, true) + `","agent":"claude","prompt":"two","idempotency_key":"k2"}`
 	code, out = asTok(t, e, turnsTok, "POST", "/api/v0/turns", second)
 	var queued Started
 	_ = json.Unmarshal([]byte(out), &queued)

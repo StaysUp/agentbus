@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/queue"
-	"github.com/staysup/agentbus/settings"
 )
 
 // SessionChangesPage is the answer to GET /api/v0/sessions/{id}/changes: a
@@ -66,6 +66,18 @@ func (a *API) sessionChanges(w http.ResponseWriter, r *http.Request, id string) 
 	if !ok {
 		return
 	}
+	// The one door: resolve the session to its workspace and answer 404 for an id
+	// the record knows no session by, so a workspace id cannot masquerade as a
+	// session and probe its own copy.
+	ws, found, err := a.workspaceOf(id)
+	if err != nil {
+		a.internal(w)
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "no such session")
+		return
+	}
 	q := r.URL.Query()
 	// Paging a preview already served: read the pinned event and page it, so
 	// every page is of the same snapshot even if the folder changes meanwhile.
@@ -82,7 +94,7 @@ func (a *API) sessionChanges(w http.ResponseWriter, r *http.Request, id string) 
 		// A pinned page carries the same stale status as the first: if the
 		// session has moved off this preview's cursor (or was closed), every
 		// page of it is out of date, not only the first.
-		stale, err := a.previewStale(id, e.Previewed)
+		stale, err := a.previewStale(ws, e.Previewed)
 		if err != nil {
 			a.internal(w)
 			return
@@ -92,7 +104,7 @@ func (a *API) sessionChanges(w http.ResponseWriter, r *http.Request, id string) 
 	}
 	// Fast path: reuse the session's latest preview, without taking the gate,
 	// when it is already current.
-	if a.servedCurrent(w, r, id, before, limit) {
+	if a.servedCurrent(w, r, id, ws, before, limit) {
 		return
 	}
 	// Otherwise take the session's preview gate, so GETs that arrive together
@@ -118,10 +130,10 @@ func (a *API) sessionChanges(w http.ResponseWriter, r *http.Request, id string) 
 	}
 	defer leave()
 	r = r.WithContext(ctx)
-	if a.servedCurrent(w, r, id, before, limit) {
+	if a.servedCurrent(w, r, id, ws, before, limit) {
 		return
 	}
-	a.runPreview(w, r, id, before, limit)
+	a.runPreview(w, r, id, ws, before, limit)
 }
 
 // servedCurrent serves the session's latest stored preview when it may be
@@ -129,7 +141,7 @@ func (a *API) sessionChanges(w http.ResponseWriter, r *http.Request, id string) 
 // (the appliable cursor still equals the one it recorded, and the session is
 // not closed) -- and returns true. It returns false when a preview must be run;
 // on an internal error it writes the error and returns true, the request done.
-func (a *API) servedCurrent(w http.ResponseWriter, r *http.Request, id string, before int64, limit int) bool {
+func (a *API) servedCurrent(w http.ResponseWriter, r *http.Request, id string, ws ids.WorkspaceID, before int64, limit int) bool {
 	if r.URL.Query().Get("fresh") == "true" {
 		return false
 	}
@@ -141,7 +153,7 @@ func (a *API) servedCurrent(w http.ResponseWriter, r *http.Request, id string, b
 	if !found || e.Previewed == nil {
 		return false
 	}
-	stale, err := a.previewStale(id, e.Previewed)
+	stale, err := a.previewStale(ws, e.Previewed)
 	if err != nil {
 		a.internal(w)
 		return true
@@ -158,41 +170,50 @@ func (a *API) servedCurrent(w http.ResponseWriter, r *http.Request, id string, b
 // the preview recorded (a new appliable turn, or any apply). It is what the
 // reuse check tests, read here so a pinned page reports the same stale status
 // the first page did.
-func (a *API) previewStale(session string, p *event.Previewed) (bool, error) {
-	if a.sessionClosed(session) {
+func (a *API) previewStale(ws ids.WorkspaceID, p *event.Previewed) (bool, error) {
+	if a.sessionClosed(ws) {
 		return true, nil
 	}
 	if a.cfg.Queue == nil {
 		return false, nil
 	}
-	turn, applies, ok, err := a.cfg.Queue.AppliableCursor(queue.DefaultTeam, session)
+	// The cursor and the closed state are the WORKSPACE's (the preview is of its
+	// changes): a second session of a workspace reads the same cursor as the
+	// first and its fresh preview is not marked stale for having no turn of its
+	// own. The caller resolved the workspace (workspaceOf) and already answered
+	// 404 for an unknown session.
+	turn, applies, ok, err := a.cfg.Queue.AppliableCursor(queue.DefaultTeam, ws)
 	if err != nil {
 		return false, err
 	}
 	return !ok || turn != p.Turn || applies != p.Applies, nil
 }
 
-// sessionClosed says the session's copy is gone, so any stored preview of it
-// is stale. A close writes no store event, so it is read from the queue.
-func (a *API) sessionClosed(session string) bool {
+// sessionClosed says the session's workspace copy is gone, so any stored preview
+// of it is stale. A close writes no store event, so it is read from the queue,
+// keyed by the workspace the copy belongs to.
+func (a *API) sessionClosed(ws ids.WorkspaceID) bool {
 	if a.cfg.Queue == nil {
 		return false
 	}
-	ws, ok, err := a.cfg.Queue.Workspace(queue.DefaultTeam, session)
-	return err == nil && ok && ws.Closed != nil
+	w, ok, err := a.cfg.Queue.Workspace(queue.DefaultTeam, ws)
+	return err == nil && ok && w.Closed != nil
 }
 
 // runPreview runs a fresh dry run, stores it as a changes.previewed event,
 // and pages it. A session with nothing to apply answers without an event;
 // only a real preview is stored.
-func (a *API) runPreview(w http.ResponseWriter, r *http.Request, id string, before int64, limit int) {
+func (a *API) runPreview(w http.ResponseWriter, r *http.Request, id string, ws ids.WorkspaceID, before int64, limit int) {
 	out := SessionChangesPage{Session: id, Isolated: true, Store: a.cfg.Store.ID(),
 		Files: []PreviewFile{}, Conflicts: []event.RefusedFile{}}
 	if a.cfg.Queue == nil {
 		a.changesWithoutQueue(w, id)
 		return
 	}
-	job, turn, applies, err := a.cfg.Queue.Preview(queue.DefaultTeam, id)
+	// Preview the WORKSPACE's changes (shared by every session of it), so a
+	// second session with no turn of its own still sees the workspace's unapplied
+	// changes. The stored preview stays keyed by the session route.
+	job, turn, applies, err := a.cfg.Queue.Preview(queue.DefaultTeam, ws)
 	out.Turn = turn
 	switch {
 	case errors.Is(err, queue.ErrNotFound):
@@ -214,14 +235,16 @@ func (a *API) runPreview(w http.ResponseWriter, r *http.Request, id string, befo
 		writeJSON(w, http.StatusOK, out)
 		return
 	case errors.Is(err, queue.ErrNoCopyYet):
-		// The first turn asked for a copy; isolation none runs it in the
-		// folder as it is.
-		none, err := a.isolationNone()
+		// The first turn has not recorded its copy yet. The workspace's sandbox
+		// is the one switch: a sandbox workspace is isolated while its first turn
+		// runs (the copy is coming), a direct one is not. The isolation setting
+		// is only the backend and never turns the wall off (his rule, 2026-11-21).
+		sandbox, found, err := a.sessionSandbox(id)
 		if err != nil {
 			a.internal(w)
 			return
 		}
-		if none {
+		if found && !sandbox {
 			out.Isolated, out.Why = false, changesNotIsolated
 		}
 		writeJSON(w, http.StatusOK, out)
@@ -235,7 +258,7 @@ func (a *API) runPreview(w http.ResponseWriter, r *http.Request, id string, befo
 		// session has moved off it (otherwise it is still current); only when
 		// there is none to serve is this a 503.
 		if se, _, found, serr := a.cfg.Store.LatestPreview(id); serr == nil && found && se.Previewed != nil {
-			stale, serr := a.previewStale(id, se.Previewed)
+			stale, serr := a.previewStale(ws, se.Previewed)
 			if serr != nil {
 				a.internal(w)
 				return
@@ -291,7 +314,7 @@ func (a *API) runPreview(w http.ResponseWriter, r *http.Request, id string, befo
 	}
 	// Running the preview took time; if the session moved off its cursor while
 	// it ran, it is already out of date, so it is served with that said.
-	stale, err := a.previewStale(id, e.Previewed)
+	stale, err := a.previewStale(ws, e.Previewed)
 	if err != nil {
 		a.internal(w)
 		return
@@ -337,35 +360,60 @@ func (a *API) writePreviewPage(w http.ResponseWriter, session string, e event.Ev
 		Files: files, Conflicts: conflicts, NextBefore: next, Stale: stale, Why: why})
 }
 
-// isolationNone says whether the policy's isolation is none: a session's
-// turns run in the folder as it is, even when its first turn asked for a
-// copy.
-func (a *API) isolationNone() (bool, error) {
-	if a.cfg.Settings == nil {
-		return false, nil
+// workspaceOf is the workspace a session's turns run in, and whether the record
+// knows the id as a session at all. It is the ONE door from a session id to a
+// workspace id: store.WorkspaceOf (which gives a migrated session its own id as
+// its workspace), then, for a session the store does not yet know but whose
+// turn the queue holds, queue.SessionWorkspace. found is false only for an id
+// neither knows as a session -- a workspace id among them -- and the caller
+// answers 404, never a raw cast that would let a workspace id masquerade as a
+// session and probe its own copy row.
+func (a *API) workspaceOf(session string) (ids.WorkspaceID, bool, error) {
+	ws, found, err := a.cfg.Store.WorkspaceOf(ids.SessionID(session))
+	if err != nil || found {
+		return ws, found, err
 	}
-	p, _, err := a.cfg.Settings.Policy()
-	if err != nil {
-		return false, err
+	if a.cfg.Queue == nil {
+		return "", false, nil
 	}
-	return p.Isolation == settings.IsolationNone, nil
+	return a.cfg.Queue.SessionWorkspace(queue.DefaultTeam, ids.SessionID(session))
 }
 
-// changesWithoutQueue answers for a session the queue does not hold: one
-// the record holds worked in a folder as it is (its turns came through the
-// hooks or the gateway), else there is no such session.
+// sessionSandbox is whether a session's workspace is a sandbox (a copy behind a
+// wall), the one switch for whether its changes must be applied. found is false
+// for a session the record does not place in a workspace.
+func (a *API) sessionSandbox(session string) (sandbox, found bool, err error) {
+	ws, ok, err := a.cfg.Store.WorkspaceOf(ids.SessionID(session))
+	if err != nil || !ok {
+		return false, false, err
+	}
+	wsp, ok, err := a.cfg.Store.Workspace(ws)
+	if err != nil || !ok {
+		return false, false, err
+	}
+	return wsp.Sandbox, true, nil
+}
+
+// changesWithoutQueue answers for a session the queue holds no copy row for yet:
+// before its first turn ends, or one that works in the folder as it is (a hook
+// or gateway session). The workspace's sandbox is the one switch -- a sandbox
+// session is isolated with nothing unapplied yet, a direct one is not -- so the
+// route reads ws.Sandbox, never the isolation setting (his rule, 2026-11-21). A
+// session the record does not place in a workspace is 404.
 func (a *API) changesWithoutQueue(w http.ResponseWriter, session string) {
-	snap, err := a.cfg.Store.Snapshot()
+	sandbox, found, err := a.sessionSandbox(session)
 	if err != nil {
 		a.internal(w)
 		return
 	}
-	for _, s := range snap.Sessions {
-		if s.ID == session {
-			writeJSON(w, http.StatusOK, SessionChangesPage{Session: session, Isolated: false, Why: changesNotIsolated,
-				Store: a.cfg.Store.ID(), Files: []PreviewFile{}, Conflicts: []event.RefusedFile{}})
-			return
-		}
+	if !found {
+		writeError(w, http.StatusNotFound, "no such session")
+		return
 	}
-	writeError(w, http.StatusNotFound, "no such session")
+	out := SessionChangesPage{Session: session, Isolated: sandbox, Store: a.cfg.Store.ID(),
+		Files: []PreviewFile{}, Conflicts: []event.RefusedFile{}}
+	if !sandbox {
+		out.Why = changesNotIsolated
+	}
+	writeJSON(w, http.StatusOK, out)
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/harness"
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/workspace"
 )
 
@@ -124,7 +125,7 @@ func TestApplyUpToATurn(t *testing.T) {
 	var turns []Job
 	turns = append(turns, t1)
 	for _, c := range []byte{'2', '3'} {
-		makeJob(t, q, Spec{Session: first.Session})
+		makeJob(t, q, Spec{Session: ids.SessionID(first.Session)})
 		turns = append(turns, run(t, q, rn, Result{Changeset: hexOf(c)}))
 	}
 	a2, created, err := q.Apply(DefaultTeam, turns[1].Turn)
@@ -183,7 +184,7 @@ func TestTakeRoutesByMachine(t *testing.T) {
 		t.Fatalf("the folder's machine took %q, want %s", got, turn.ID)
 	}
 	// A next turn of the session stays on the session's runner.
-	makeJob(t, q, Spec{Session: turn.Session})
+	makeJob(t, q, Spec{Session: ids.SessionID(turn.Session)})
 	if got := takes(t, q, onB); got != "" {
 		t.Fatalf("another machine took the next turn %s", got)
 	}
@@ -217,7 +218,7 @@ func TestSessionFromBeforeKeepsItsRunner(t *testing.T) {
 		Workspace: &Workspace{Kind: WorkspaceCopy, Space: j.ID}}); err != nil {
 		t.Fatal(err)
 	}
-	next := makeJob(t, q, Spec{Session: first.Session})
+	next := makeJob(t, q, Spec{Session: ids.SessionID(first.Session)})
 	if got := takes(t, q, home); got != "" {
 		t.Fatalf("the folder's machine took the next turn of a session another runner holds: %s", got)
 	}
@@ -281,7 +282,7 @@ func TestApplyAtOnce(t *testing.T) {
 	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
 	turns := []Job{run(t, q, rn, Result{Changeset: hexOf('1')})}
 	for _, c := range []byte{'2', '3'} {
-		makeJob(t, q, Spec{Session: first.Session})
+		makeJob(t, q, Spec{Session: ids.SessionID(first.Session)})
 		turns = append(turns, run(t, q, rn, Result{Changeset: hexOf(c)}))
 	}
 	type answer struct {
@@ -304,7 +305,7 @@ func TestApplyAtOnce(t *testing.T) {
 			t.Fatal(a.err)
 		}
 	}
-	applies, _ := q.sessionApplies(DefaultTeam, first.Session)
+	applies, _ := q.sessionApplies(DefaultTeam, ids.WorkspaceID(first.Session))
 	if made != 1 || len(applies) != 1 {
 		t.Fatalf("%d made, %d applies", made, len(applies))
 	}
@@ -350,7 +351,7 @@ func TestApplyNeedsItsMachine(t *testing.T) {
 	if _, _, err := q.Apply(DefaultTeam, j.Turn); !errors.Is(err, ErrMachineOffline) {
 		t.Fatalf("apply with its machine offline: %v", err)
 	}
-	if applies, _ := q.sessionApplies(DefaultTeam, j.Session); len(applies) != 0 {
+	if applies, _ := q.sessionApplies(DefaultTeam, ids.WorkspaceID(j.Session)); len(applies) != 0 {
 		t.Fatalf("%d applies made", len(applies))
 	}
 	if _, err := q.RunnerBeat(rn.ID, 1, nil, nil); err != nil {
@@ -373,7 +374,7 @@ func TestDiffFromIsTheLastTurnControlHolds(t *testing.T) {
 	if t1.ID != first.ID {
 		t.Fatalf("ran %s", t1.ID)
 	}
-	makeJob(t, q, Spec{Session: first.Session})
+	makeJob(t, q, Spec{Session: ids.SessionID(first.Session)})
 	_, a := take(t, q, rn)
 	if _, _, err := q.Start(rn.ID, a.ID, a.Number, lease); err != nil {
 		t.Fatal(err)
@@ -386,7 +387,7 @@ func TestDiffFromIsTheLastTurnControlHolds(t *testing.T) {
 	if _, err := q.End(rn.ID, a.ID, a.Number, Finish{Status: Finished, Result: b}); err == nil {
 		t.Fatal("the finish after the lease ran out was taken")
 	}
-	makeJob(t, q, Spec{Session: first.Session})
+	makeJob(t, q, Spec{Session: ids.SessionID(first.Session)})
 	j, _ := take(t, q, rn)
 	if j.Workspace == nil || j.Workspace.DiffFrom != "t_end1" {
 		t.Fatalf("workspace %+v", j.Workspace)
@@ -430,7 +431,7 @@ func TestSessionEndsWithItsFirstTurn(t *testing.T) {
 				t.Fatal(err)
 			}
 			clk.add(time.Millisecond) // made after the first, as on a real clock
-			next, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: first.Session, Prompt: "next"}, Links{})
+			next, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: ids.SessionID(first.Session), Prompt: "next"}, Links{})
 			if err != nil {
 				t.Fatalf("behind the first turn: %v", err)
 			}
@@ -443,7 +444,7 @@ func TestSessionEndsWithItsFirstTurn(t *testing.T) {
 			if got.State != Failed || got.Reason != ReasonSetup || r.Refused != SessionEnded {
 				t.Fatalf("the queued next turn: %s %s %q", got.State, got.Reason, r.Refused)
 			}
-			if _, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: first.Session, Prompt: "again"}, Links{}); !errors.Is(err, ErrSessionEnded) {
+			if _, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: ids.SessionID(first.Session), Prompt: "again"}, Links{}); !errors.Is(err, ErrSessionEnded) {
 				t.Fatalf("a new turn: %v", err)
 			}
 		})
@@ -456,7 +457,7 @@ func TestSessionGoesOnAfterItsFirstFinish(t *testing.T) {
 	rn := capsRunner(t, q, nil, nil)
 	first := makeJob(t, q, Spec{Harness: "claude", Folder: "/x"})
 	run(t, q, rn, Result{})
-	if _, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: first.Session, Prompt: "next"}, Links{}); err != nil {
+	if _, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: ids.SessionID(first.Session), Prompt: "next"}, Links{}); err != nil {
 		t.Fatal(err)
 	}
 	if j, _ := take(t, q, rn); j.Workspace == nil {
@@ -481,7 +482,7 @@ func TestDropPreviews(t *testing.T) {
 	q, _ := open(t)
 	mk := func(session string) Job {
 		t.Helper()
-		j, _, err := q.create(DefaultTeam, KindPreview, "", Spec{Session: session}, Links{}, Limits{}, session, nil)
+		j, _, err := q.create(DefaultTeam, KindPreview, "", Spec{Session: ids.SessionID(session)}, Links{}, Limits{}, session, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -530,19 +531,19 @@ func TestAppliableCursor(t *testing.T) {
 	}
 	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
 	t1 := run(t, q, rn, Result{Changeset: hexOf('1')})
-	turn, applied, ok, err := q.AppliableCursor(DefaultTeam, first.Session)
+	turn, applied, ok, err := q.AppliableCursor(DefaultTeam, ids.WorkspaceID(first.Session))
 	if err != nil || !ok || turn != t1.Turn || applied != 0 {
 		t.Fatalf("after t1: turn %q applied %d ok %v err %v", turn, applied, ok, err)
 	}
 	// A second turn that has not ended is not appliable: cursor unchanged (R2).
-	makeJob(t, q, Spec{Session: first.Session})
-	if turn2, applied2, _, _ := q.AppliableCursor(DefaultTeam, first.Session); turn2 != t1.Turn || applied2 != 0 {
+	makeJob(t, q, Spec{Session: ids.SessionID(first.Session)})
+	if turn2, applied2, _, _ := q.AppliableCursor(DefaultTeam, ids.WorkspaceID(first.Session)); turn2 != t1.Turn || applied2 != 0 {
 		t.Fatalf("a not-ended turn moved the cursor: turn %q applied %d", turn2, applied2)
 	}
 	// End that turn with no changeset -- a failed upload: still not appliable,
 	// cursor unchanged (R4).
 	run(t, q, rn, Result{})
-	if turn3, applied3, _, _ := q.AppliableCursor(DefaultTeam, first.Session); turn3 != t1.Turn || applied3 != 0 {
+	if turn3, applied3, _, _ := q.AppliableCursor(DefaultTeam, ids.WorkspaceID(first.Session)); turn3 != t1.Turn || applied3 != 0 {
 		t.Fatalf("a no-changeset turn moved the cursor: turn %q applied %d", turn3, applied3)
 	}
 }
@@ -574,7 +575,7 @@ func TestAppliableCursorCountsApplies(t *testing.T) {
 		return q, rn, first.Session, t1.Turn
 	}
 	count := func(t *testing.T, q *Queue, session string) int {
-		_, n, ok, err := q.AppliableCursor(DefaultTeam, session)
+		_, n, ok, err := q.AppliableCursor(DefaultTeam, ids.WorkspaceID(session))
 		if err != nil || !ok {
 			t.Fatalf("cursor: ok %v err %v", ok, err)
 		}

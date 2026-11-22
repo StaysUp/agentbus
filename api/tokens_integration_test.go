@@ -135,7 +135,8 @@ func waitSessionClosed(t *testing.T, st *store.Store, session string) {
 func TestTurnToken(t *testing.T) {
 	e, dir := childEnv(t)
 	folder := t.TempDir()
-	s := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"the first needle"}`)
+	sess := e.newSession(t, folder, true)
+	s := startTurn(t, e, `{"session":"`+sess+`","agent":"claude","prompt":"the first needle"}`)
 	vars := childVars(t, dir, 0)
 	tok := vars["AGENTBUS_TOKEN"]
 	if vars["AGENTBUS_URL"] != e.srv.URL || !strings.HasPrefix(tok, "abt_") || len(tok) != len("abt_")+64 {
@@ -190,7 +191,6 @@ func TestTurnToken(t *testing.T) {
 		// tree. Asking other agents is tested in asked_integration_test.go.
 		{"POST", "/api/v0/turns", `{"agent":"claude","session":"` + own + `","prompt":"again"}`, 403},
 		{"POST", "/api/v0/turns", `{"agent":"claude","session":"` + other + `","prompt":"again"}`, 403},
-		{"POST", "/api/v0/turns", `{"agent":"claude","folder":"` + t.TempDir() + `","prompt":"new"}`, 403},
 		{"POST", "/api/v0/events", `{"kind":"x.a.b","session":"` + own + `","text":"hi"}`, 403},
 		// Not even its own turn: it stops only work its tree asked for.
 		{"POST", "/api/v0/turns/" + s.Turn + "/stop", "", 403},
@@ -200,11 +200,13 @@ func TestTurnToken(t *testing.T) {
 		{"POST", "/api/v0/agents", `{"harness":"claude","access":"subscription","name":"x"}`, 403},
 		// Only the person closes a session.
 		{"PATCH", "/api/v0/sessions/" + own, `{"closed":true}`, 403},
-		// Workspaces and new sessions are the main token's: a turn token asks
-		// for work in its own session's workspace, it does not create one.
+		// Workspaces are the main token's: a turn token cannot create one or read
+		// the list. It may open a session, but only in its own workspace (the ask
+		// opens one there), so POST /sessions is allowed and its workspace is the
+		// token's own, whatever the body names.
 		{"GET", "/api/v0/workspaces", "", 403},
 		{"POST", "/api/v0/workspaces", `{"folder":"/tmp"}`, 403},
-		{"POST", "/api/v0/sessions", `{"workspace":"ws_0123456789abcdef"}`, 403},
+		{"POST", "/api/v0/sessions", `{"workspace":"ws_0123456789abcdef"}`, 201},
 		// Gone from the API.
 		{"GET", "/api/v0/jobs", "", 404},
 		// Reads that hold no session's data.
@@ -247,7 +249,8 @@ func TestTurnToken(t *testing.T) {
 		t.Errorf("%d live tokens after the turn", n)
 	}
 	os.Remove(filepath.Join(dir, "release"))
-	s2 := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"second"}`)
+	sess2 := e.newSession(t, folder, true)
+	s2 := startTurn(t, e, `{"session":"`+sess2+`","agent":"claude","prompt":"second"}`)
 	tok2 := childVars(t, dir, 1)["AGENTBUS_TOKEN"]
 	if tok2 == "" || tok2 == tok {
 		t.Fatal("the second turn did not get a new token")
@@ -272,7 +275,8 @@ func TestTurnTokenRevokedAtProcessExitNotPipeClose(t *testing.T) {
 	e := resumableEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) {
 		return run.Launch{Path: "/bin/sh", Args: []string{"-c", script, "sh"}, Env: []string{"PATH=/usr/bin:/bin", "D=" + dir}}, nil
 	})
-	s := startTurn(t, e, `{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"x"}`)
+	sess := e.newSession(t, t.TempDir(), true)
+	s := startTurn(t, e, `{"session":"`+sess+`","agent":"claude","prompt":"x"}`)
 	tok := childVars(t, dir, 0)["AGENTBUS_TOKEN"]
 	revoked := false
 	for deadline := time.Now().Add(1500 * time.Millisecond); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {

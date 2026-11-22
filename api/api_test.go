@@ -51,6 +51,84 @@ func (e *env) folderRef(t *testing.T, path string) (ref, connector string) {
 	return ref, e.fr.Machine()
 }
 
+// makeWorkspace, makeSession and startFlow run the three calls a turn needs now
+// (POST /workspaces, POST /sessions, POST /turns), the shape the cockpit and
+// agentbus-api make. A test that used one-call POST /turns with a folder calls
+// startFlow instead.
+func (e *env) makeWorkspace(t *testing.T, ref, machine string, sandbox bool) string {
+	t.Helper()
+	body := fmt.Sprintf(`{"folder_ref":%q,"machine":%q,"sandbox":%v}`, ref, machine, sandbox)
+	resp, raw := do(t, e.req(t, "POST", "/api/v0/workspaces", strings.NewReader(body)))
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create workspace: %d %s", resp.StatusCode, raw)
+	}
+	var w store.Workspace
+	if json.Unmarshal([]byte(raw), &w) != nil || w.ID == "" {
+		t.Fatalf("workspace: %s", raw)
+	}
+	return w.ID
+}
+
+func (e *env) makeSession(t *testing.T, workspace string) string {
+	t.Helper()
+	resp, raw := do(t, e.req(t, "POST", "/api/v0/sessions", strings.NewReader(fmt.Sprintf(`{"workspace":%q}`, workspace))))
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create session: %d %s", resp.StatusCode, raw)
+	}
+	var sc SessionCreated
+	if json.Unmarshal([]byte(raw), &sc) != nil || sc.Session == "" {
+		t.Fatalf("session: %s", raw)
+	}
+	return sc.Session
+}
+
+// newSession creates a workspace in folder (sandbox or not) and a session in
+// it, returning the session id, for a test that posts its own POST /turns body
+// (a specific idempotency_key, query, or model). A first turn of that session
+// names it as session.
+func (e *env) newSession(t *testing.T, folder string, sandbox bool) string {
+	t.Helper()
+	ref, machine := e.folderRef(t, folder)
+	return e.makeSession(t, e.makeWorkspace(t, ref, machine, sandbox))
+}
+
+// startFlow creates a sandbox workspace in folder, a session in it, and starts
+// a turn, returning the POST /turns response and its body. extra adds query
+// parameters (such as "wait=false") to the turn call.
+func (e *env) startFlow(t *testing.T, folder, agent, prompt string) (*http.Response, string) {
+	t.Helper()
+	ref, machine := e.folderRef(t, folder)
+	ws := e.makeWorkspace(t, ref, machine, true)
+	sess := e.makeSession(t, ws)
+	return do(t, e.req(t, "POST", "/api/v0/turns",
+		strings.NewReader(fmt.Sprintf(`{"session":%q,"agent":%q,"prompt":%q}`, sess, agent, prompt))))
+}
+
+// seedWorkspace records a workspace.created (and a session.created binding the
+// session to it) for a session whose events a test injected directly, using the
+// session's own id as its workspace id, the way the startup migration does for a
+// pre-workspace session. A continuation turn of that session then resolves its
+// workspace (WorkspaceOf -> the session's workspace, Workspace -> the event)
+// instead of a 500 (no workspace) or a 404 (no such session). Pass folderRef
+// and machine when a turn's routing depends on them; folder is the display path.
+func seedWorkspace(t *testing.T, st *store.Store, session, folder string, sandbox bool) {
+	t.Helper()
+	seedWorkspaceOn(t, st, session, folder, "", "", sandbox)
+}
+
+func seedWorkspaceOn(t *testing.T, st *store.Store, session, folder, folderRef, machine string, sandbox bool) {
+	t.Helper()
+	sb := sandbox
+	if _, _, err := st.Append(event.Event{ID: "wc_" + session, Kind: event.WorkspaceCreated,
+		Time: time.Now().UTC(), Workspace: session, Folder: folder, FolderRef: folderRef, Machine: machine, Sandbox: &sb}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := st.Append(event.Event{ID: "sc_" + session, Kind: event.SessionCreated,
+		Time: time.Now().UTC(), Session: session, Workspace: session}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newEnvAt(t *testing.T, dbPath string) *env {
 	t.Helper()
 	return newEnvOrigin(t, dbPath, origin)

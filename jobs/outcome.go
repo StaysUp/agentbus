@@ -85,7 +85,12 @@ func keepOutcomes(rec Recorder, j queue.Job, f queue.Finish) (kept json.RawMessa
 		if res.AppliedEvent != "" || j.Links.AppliesTurn == "" {
 			break
 		}
-		e := event.Event{ID: appliedID(j), Kind: event.TurnApplied, Time: now, Session: j.Session,
+		// workspace.applied names the workspace the apply ran in, so a
+		// workspace's applied turn resolves by workspace id even when its applying
+		// session is not its own id (an asked session's apply). A job with no
+		// workspace (a pre-workspace apply) keys it by its session, its workspace.
+		ws := queue.CopyKey(j.Spec.Workspace, j.Session)
+		e := event.Event{ID: appliedID(j), Kind: event.WorkspaceApplied, Time: now, Workspace: string(ws), Session: j.Session,
 			Turn: j.Links.AppliesTurn, Applied: AppliedOf(j, res)}
 		if _, err := rec.AppendOnce(e); err != nil {
 			return nil, err
@@ -207,7 +212,7 @@ func Applied(rd Finder, j queue.Job) (*event.Applied, error) {
 	switch {
 	case err != nil:
 		return nil, err
-	case !ok || e.Kind != event.TurnApplied || e.Applied == nil:
+	case !ok || (e.Kind != event.WorkspaceApplied && e.Kind != event.TurnApplied) || e.Applied == nil:
 		return nil, ErrOutcomeMissing
 	}
 	return e.Applied, nil

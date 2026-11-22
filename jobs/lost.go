@@ -33,7 +33,8 @@ func CloseLostApplies(q *queue.Queue, rec Appender) (int, error) {
 		}
 		for _, j := range due {
 			res, _ := queue.ReadResult(j.Result)
-			e := event.Event{ID: appliedID(j), Kind: event.TurnApplied, Time: endedAt(j), Session: j.Session,
+			ws := queue.CopyKey(j.Spec.Workspace, j.Session)
+			e := event.Event{ID: appliedID(j), Kind: event.WorkspaceApplied, Time: endedAt(j), Workspace: string(ws), Session: j.Session,
 				Turn: j.Links.AppliesTurn, Applied: AppliedOf(j, res)}
 			_, err := rec.AppendOnce(e)
 			if err == nil {

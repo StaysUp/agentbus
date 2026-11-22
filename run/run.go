@@ -293,7 +293,11 @@ type Request struct {
 	Harness, Folder string
 	// FolderRef is the reference of the person's folder a new session is
 	// started in, for the record; "" when no connector owns it.
-	FolderRef      string
+	FolderRef string
+	// Workspace is the workspace the turn runs in (ws_...); stored on
+	// turn.started so the record resolves a session's workspace, its head turn
+	// and its changes by workspace, not by session id.
+	Workspace      string
 	Prompt, Model  string
 	IdempotencyKey string // stored on turn.started, as the caller's key
 	// AgentID, Access and KeyEnv: the saved agent and how it reaches its
@@ -425,8 +429,14 @@ func (e *Engine) Start(req Request) (*Turn, error) {
 	if code, msg := e.runs.take(id); code != 0 {
 		return nil, refuse(code, msg)
 	}
-	return e.start(turn{harness: req.Harness, folder: req.Folder, folderRef: req.FolderRef, session: id, id: req.Turn,
-		model: req.Model, prompt: req.Prompt, key: req.IdempotencyKey,
+	// With no model of its own, the turn takes the agent's (the same fallback
+	// next applies to a continuation turn).
+	model := req.Model
+	if model == "" {
+		model = req.AgentModel
+	}
+	return e.start(turn{harness: req.Harness, folder: req.Folder, folderRef: req.FolderRef, workspace: req.Workspace, session: id, id: req.Turn,
+		model: model, prompt: req.Prompt, key: req.IdempotencyKey,
 		agentID: req.AgentID, access: req.Access, keyEnv: req.KeyEnv, origin: req.Origin, root: req.Root, depth: req.Depth,
 		token: req.Token, apiURL: req.APIURL, standIn: req.StandIn, signin: req.Signin, allowOnce: req.AllowOnce})
 }
@@ -556,7 +566,7 @@ func (e *Engine) next(req Request) (*Turn, error) {
 		return fail(refuse(http.StatusBadRequest, "folder is not this session's folder "+strconv.Quote(c.Folder)+
 			"; leave folder out to use the session's"))
 	}
-	t := turn{harness: agent, folder: c.Folder, folderRef: c.FolderRef, session: session, id: req.Turn, resumeID: c.ResumeID, replayFrom: from,
+	t := turn{harness: agent, folder: c.Folder, folderRef: c.FolderRef, workspace: req.Workspace, session: session, id: req.Turn, resumeID: c.ResumeID, replayFrom: from,
 		recoveredFrom: recovered, recoveredWhy: recoveredWhy, continuity: continuity, model: model,
 		prompt: req.Prompt, context: context, key: req.IdempotencyKey,
 		agentID: agentID, access: access, keyEnv: keyEnv, origin: req.Origin, root: req.Root, depth: req.Depth,
@@ -618,6 +628,7 @@ const replayOnly = "this session cannot be continued from here: it was continued
 // turn is one start of an agent: a new session's first, or a session's next.
 type turn struct {
 	harness, folder, session string
+	workspace                string // the workspace the turn runs in; stored on turn.started
 	folderRef                string // the person's folder, by its reference
 	id                       string // the turn id
 	resumeID                 string // a next turn by resume: the conversation it continues; empty for a first
@@ -904,7 +915,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	// turn.started the gateway reads from the child's first model call is the
 	// same (session, turn), so the store keeps this one only.
 	if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.TurnStarted,
-		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Text: t.prompt, Harness: t.harness, Folder: t.folder, FolderRef: t.folderRef,
+		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Text: t.prompt, Harness: t.harness, Folder: t.folder, FolderRef: t.folderRef, Workspace: t.workspace,
 		ReplayFrom: t.replayFrom, Continuity: t.continuity, RecoveredFrom: t.recoveredFrom,
 		RecoveredReason: t.recoveredWhy, IdempotencyKey: t.key, AgentID: t.agentID, Access: t.access, KeyEnv: t.keyEnv,
 		Context: t.context, Model: t.model, Origin: t.origin, SettingsVersion: snap.Revision, Unkept: unkept}); err != nil {
@@ -1512,12 +1523,26 @@ func ExitCode(ps *os.ProcessState, err error) int {
 func (e *Engine) TurnSink(next event.Sink) event.Sink { return TurnSink(e.cfg.Store, next) }
 
 // TurnSink is the engine's TurnSink for a service that runs no turns itself,
-// such as a server: the record's sessions are named the same way.
-func TurnSink(st *store.Store, next event.Sink) event.Sink { return turnSink{st, next} }
+// such as a server: the record's sessions are named the same way. Its direct
+// workspaces carry no machine (this service's own), which is right for a server
+// that owns no folders.
+func TurnSink(st *store.Store, next event.Sink) event.Sink { return turnSink{st: st, next: next} }
+
+// TurnSinkMachine is TurnSink that also names the machine a gateway or hook
+// session's direct workspace is created on: the connector that owns this
+// service's folders. machine is read lazily at the turn, because the folder
+// registry opens after the sink is built; nil, or a "" result, means this
+// service's own machine, as on every workspace.created. On a runner or up the
+// gateway's folders are local, so its own machine is the right one for a direct
+// workspace, and a multi-runner apply of it routes to the runner that holds it.
+func TurnSinkMachine(st *store.Store, next event.Sink, machine func() string) event.Sink {
+	return turnSink{st: st, next: next, machine: machine}
+}
 
 type turnSink struct {
-	st   *store.Store
-	next event.Sink
+	st      *store.Store
+	next    event.Sink
+	machine func() string
 }
 
 // Emit implements event.Sink.
@@ -1526,6 +1551,30 @@ func (s turnSink) Emit(ev event.Event) {
 		// A failed read leaves them empty: the sink cannot return an error,
 		// and the turn itself must still be stored.
 		ev.Harness, ev.Folder, _ = s.st.RunOf(ev.Session)
+		// A gateway or hook session (one the gateway records, not one POST
+		// /api/v0/sessions opened) carries no workspace on its turn. It is born
+		// here, so its workspace is created here, direct (sandbox false), before
+		// its turn is stored -- the same explicit creation an API session gets,
+		// so the workspace reader never has a missing case. It carries the
+		// folder's machine, the one source for where its turns run.
+		//
+		// But only for a session with no workspace of its own: an API or asked
+		// session already has one (POST /api/v0/sessions wrote its session.created
+		// naming it), and its agent's model calls reach this sink through the
+		// local gateway carrying no workspace (ev.Workspace == "") -- which must
+		// NOT mint a second, phantom direct workspace keyed on the session id,
+		// pointing at the runner's copy path. session.created, which only an
+		// explicitly created session has, is that one discriminator; a hook or
+		// migrated session has none, so it still gets its direct workspace.
+		if ev.Workspace == "" {
+			if _, _, placed, err := s.st.SessionWorkspace(ev.Session); err == nil && !placed {
+				machine := ""
+				if s.machine != nil {
+					machine = s.machine()
+				}
+				_ = s.st.EnsureDirectWorkspace(ev.Session, ev.Folder, ev.FolderRef, machine)
+			}
+		}
 	}
 	s.next.Emit(ev)
 }

@@ -237,7 +237,7 @@ func TestMigrateFoldersAndColumns(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The columns as an earlier build made them: none.
-	for _, s := range []string{`ALTER TABLE runners DROP COLUMN caps`, `ALTER TABLE sessions DROP COLUMN snapshot`} {
+	for _, s := range []string{`ALTER TABLE runners DROP COLUMN caps`, `ALTER TABLE copies DROP COLUMN snapshot`} {
 		if _, err := q.db.Exec(s); err != nil {
 			t.Fatal(err)
 		}
@@ -247,7 +247,7 @@ func TestMigrateFoldersAndColumns(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { q.Close() })
-	for _, c := range []struct{ table, col string }{{"runners", "caps"}, {"sessions", "snapshot"}} {
+	for _, c := range []struct{ table, col string }{{"runners", "caps"}, {"copies", "snapshot"}} {
 		var n int
 		if err := q.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, c.table, c.col).Scan(&n); err != nil || n != 1 {
 			t.Fatalf("%s.%s: %d %v", c.table, c.col, n, err)

@@ -201,11 +201,11 @@ func TestRunSetsBaseURLInChildOnlyAndClosesWithExitCode(t *testing.T) {
 	for i, e := range evs {
 		kinds[i] = e.Kind
 	}
-	if got := strings.Join(kinds, " "); got != "session.opened turn.started context.added session.closed turn.changed" || evs[0].Hold != c.Hold {
+	if got := strings.Join(kinds, " "); got != "session.created session.opened turn.started context.added session.closed turn.changed" || evs[1].Hold != c.Hold {
 		t.Fatalf("events %s: %+v", got, evs)
 	}
-	if evs[0].Agent != "claude" || evs[0].Folder != folder {
-		t.Fatalf("session.opened %+v, want agent claude and the folder", evs[0])
+	if evs[1].Agent != "claude" || evs[1].Folder != folder {
+		t.Fatalf("session.opened %+v, want agent claude and the folder", evs[1])
 	}
 
 	r := readReport(t, report)
@@ -386,8 +386,37 @@ func TestRunRefusals(t *testing.T) {
 	folder := t.TempDir()
 	file := filepath.Join(folder, "f")
 	os.WriteFile(file, nil, 0o600)
-	ok := func(m map[string]any) []byte {
-		b := map[string]any{"agent": "claude", "folder": folder, "prompt": "hi"}
+
+	// The folder is the workspace's, so folder refusals belong to POST
+	// /api/v0/workspaces, before any turn, and store nothing.
+	const (
+		badFolder    = "folder must be an absolute path to an existing directory, at most 4096 bytes"
+		badWorkspace = "the body must be one JSON object with folder (an absolute path) or folder_ref, and optionally machine, sandbox and idempotency_key"
+	)
+	for _, tc := range []struct{ name, body, want string }{
+		{"relative folder", `{"folder":"x/y"}`, badFolder},
+		{"missing folder", `{"folder":` + jsonStr(filepath.Join(folder, "nope")) + `}`, "the folder does not exist on the chosen machine"},
+		{"folder is a file", `{"folder":` + jsonStr(file) + `}`, "the folder is a file, not a directory"},
+		{"neither folder nor folder_ref", `{}`, "send folder or folder_ref, not both and not neither"},
+		{"not an object", `["x"]`, badWorkspace},
+		{"unknown field", `{"folder":` + jsonStr(folder) + `,"bogus":1}`, badWorkspace},
+	} {
+		before := svc.store.Last()
+		code, out, raw := postAPI(t, svc, tok, "/api/v0/workspaces", []byte(tc.body))
+		if code != http.StatusBadRequest || out["error"] != tc.want {
+			t.Errorf("workspace %s: %d %.200s, want 400 %q", tc.name, code, raw, tc.want)
+		}
+		if evs, err := svc.store.After(before, store.Filter{}, 10); err != nil {
+			t.Fatal(err)
+		} else if len(evs) != 0 {
+			t.Errorf("workspace %s: a refused workspace stored events", tc.name)
+		}
+	}
+
+	// Turn refusals need a session; its workspace holds the (valid) folder.
+	sess := newWorkspaceSession(t, svc, tok, folder, true)
+	turn := func(m map[string]any) []byte {
+		b := map[string]any{"session": sess, "agent": "claude", "prompt": "hi"}
 		for k, v := range m {
 			if v == nil {
 				delete(b, k)
@@ -400,46 +429,42 @@ func TestRunRefusals(t *testing.T) {
 	}
 	const (
 		badAgent  = "agent \"opencode\" is not a saved agent; GET /api/v0/agents lists them"
-		noAgent   = "agent must be a saved agent's id; GET /api/v0/agents lists them"
-		badFolder = "folder must be an absolute path to an existing directory, at most 4096 bytes"
+		noAgent   = "agent is required: name the saved agent this turn runs on (GET /api/v0/agents lists them)"
 		badPrompt = "prompt must be from 1 byte to 256 KiB, with no NUL byte"
 		badModel  = "model must match ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
-		badBody   = "the body must be one JSON object with prompt, agent and folder (or session, and optionally agent), and optionally model, isolate and idempotency_key, at most 2 MiB"
+		badBody   = "the body must be one JSON object with session, agent and prompt, and optionally model, delivery and idempotency_key, at most 2 MiB"
 	)
 	for _, tc := range []struct {
 		name string
 		body []byte
 		want string
 	}{
-		{"unknown agent", ok(map[string]any{"agent": "opencode"}), badAgent},
-		{"no agent", ok(map[string]any{"agent": nil}), noAgent},
-		{"relative folder", ok(map[string]any{"folder": "x/y"}), badFolder},
-		{"missing folder", ok(map[string]any{"folder": filepath.Join(folder, "nope")}), "the folder does not exist on the chosen machine"},
-		{"folder is a file", ok(map[string]any{"folder": file}), "the folder is a file, not a directory"},
-		{"no folder", ok(map[string]any{"folder": nil}), badFolder},
-		{"empty prompt", ok(map[string]any{"prompt": ""}), badPrompt},
-		{"prompt over 256 KiB", ok(map[string]any{"prompt": strings.Repeat("a", 256<<10+1)}), badPrompt},
-		{"prompt with NUL", ok(map[string]any{"prompt": "a\x00b"}), badPrompt},
-		{"model as a flag", ok(map[string]any{"model": "--dangerously-skip-permissions"}), badModel},
-		{"model with a space", ok(map[string]any{"model": "haiku --tools Bash"}), badModel},
-		{"model with =", ok(map[string]any{"model": "a=b"}), badModel},
-		{"unknown field", []byte(`{"agent":"claude","folder":"` + folder + `","prompt":"hi","readonly":false}`), badBody},
+		{"unknown agent", turn(map[string]any{"agent": "opencode"}), badAgent},
+		{"no agent", turn(map[string]any{"agent": nil}), noAgent},
+		{"empty prompt", turn(map[string]any{"prompt": ""}), badPrompt},
+		{"prompt over 256 KiB", turn(map[string]any{"prompt": strings.Repeat("a", 256<<10+1)}), badPrompt},
+		{"prompt with NUL", turn(map[string]any{"prompt": "a\x00b"}), badPrompt},
+		{"model as a flag", turn(map[string]any{"model": "--dangerously-skip-permissions"}), badModel},
+		{"model with a space", turn(map[string]any{"model": "haiku --tools Bash"}), badModel},
+		{"model with =", turn(map[string]any{"model": "a=b"}), badModel},
+		// A turn carries no folder; it is an unknown field.
+		{"a folder", turn(map[string]any{"folder": folder}), badBody},
+		{"unknown field", []byte(`{"session":"` + sess + `","agent":"claude","prompt":"hi","readonly":false}`), badBody},
 		{"not an object", []byte(`["claude"]`), badBody},
-		{"trailing data", append(ok(nil), []byte(`{}`)...), badBody},
-		{"read_only not a bool", ok(map[string]any{"read_only": "no"}), badBody},
-		{"over 2 MiB", []byte(`{"agent":"claude","folder":"` + folder + `","prompt":"` + strings.Repeat("a", 2<<20) + `"}`), badBody},
+		{"trailing data", append(turn(nil), []byte(`{}`)...), badBody},
+		{"over 2 MiB", []byte(`{"session":"` + sess + `","agent":"claude","prompt":"` + strings.Repeat("a", 2<<20) + `"}`), badBody},
 	} {
 		before := svc.store.Last()
 		code, out, raw := postAPI(t, svc, tok, "/api/v0/turns", tc.body)
 		if code != http.StatusBadRequest || out["error"] != tc.want {
-			t.Errorf("%s: %d %.200s, want 400 %q", tc.name, code, raw, tc.want)
+			t.Errorf("turn %s: %d %.200s, want 400 %q", tc.name, code, raw, tc.want)
 		}
 		if evs, err := svc.store.After(before, store.Filter{}, 10); err != nil {
 			t.Fatal(err)
 		} else {
 			for _, e := range evs {
 				if e.Kind != "turn.ended" { // control's session-less reactor trigger
-					t.Errorf("%s: a refused run stored events", tc.name)
+					t.Errorf("%s: a refused turn stored events", tc.name)
 				}
 			}
 		}
@@ -447,12 +472,15 @@ func TestRunRefusals(t *testing.T) {
 	// The prompt shaped as a flag is accepted and stays the prompt (the first
 	// test checks where it lands); here only that it is not refused.
 	t.Setenv("AGENTBUS_FAKE_EXIT", "0")
-	if code, out, raw := postAPI(t, svc, tok, "/api/v0/turns", ok(map[string]any{"prompt": "-x"})); code != http.StatusAccepted {
+	if code, out, raw := postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": t.TempDir(), "prompt": "-x"}); code != http.StatusAccepted {
 		t.Fatalf("a prompt starting with - was refused: %d %s", code, raw)
 	} else {
 		waitClosed(t, svc.store, out["session"].(string))
 	}
 }
+
+// jsonStr quotes s as a JSON string (with its surrounding quotes).
+func jsonStr(s string) string { b, _ := json.Marshal(s); return string(b) }
 
 // A person who already points an agent at their own gateway would have that
 // gateway's credentials sent to the vendor. A run refuses, storing nothing.
@@ -477,7 +505,9 @@ func TestRunRefusesWhenServiceSendsAgentElsewhere(t *testing.T) {
 		if code != http.StatusBadRequest || !strings.Contains(out["error"].(string), "another endpoint") {
 			t.Fatalf("%s with %s set: %d %s, want 400", agent, v, code, raw)
 		}
-		if evs := storedEvents(t, svc.store); len(evs) != 0 {
+		// The refused turn stores nothing in its session's record; only the
+		// session.created of the session it names remains.
+		if evs := storedEvents(t, svc.store); len(evs) != 1 || evs[0].Kind != "session.created" {
 			t.Fatalf("%s: a refused run stored events: %+v", agent, evs)
 		}
 	}
@@ -500,9 +530,11 @@ func TestRunConcurrencyBound(t *testing.T) {
 		ids = append(ids, out["session"].(string))
 	}
 	// A fifth waits in the queue: 202 queued, with its session and its
-	// turn's id, and nothing stored for it yet. The turn reads queued.
+	// turn's id, and nothing stored for it yet. The turn reads queued. Its
+	// workspace and session are made first, so only the turn is measured.
+	fifth := newWorkspaceSession(t, svc, tok, t.TempDir(), true)
 	before := svc.store.Last()
-	code, out, raw := postRun(t, svc, tok, body)
+	code, out, raw := postRun(t, svc, tok, map[string]any{"session": fifth, "agent": "claude", "prompt": "hi"})
 	if code != http.StatusAccepted || out["state"] != "queued" || out["turn"] == "" || out["session"] == "" {
 		t.Fatalf("fifth run: %d %s, want 202 queued", code, raw)
 	}

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+
+	"github.com/staysup/agentbus/ids"
 )
 
 // ErrNotApplicable: the turn's changes cannot be applied. Its job has not
@@ -25,9 +27,10 @@ func (q *Queue) Applies(team, turn string) ([]Job, error) {
 	return q.appliesWhere(team, `json_extract(links, '$.applies_turn') = ?`, turn)
 }
 
-// sessionApplies are the apply jobs of session, newest first.
-func (q *Queue) sessionApplies(team, session string) ([]Job, error) {
-	return q.appliesWhere(team, `session = ?`, session)
+// sessionApplies are the apply jobs of the workspace ws, newest first. The
+// caller resolves a session to its workspace first.
+func (q *Queue) sessionApplies(team string, ws ids.WorkspaceID) ([]Job, error) {
+	return q.appliesWhere(team, jobWorkspace+` = ?`, string(ws))
 }
 
 func (q *Queue) appliesWhere(team, where string, arg any) ([]Job, error) {
@@ -69,10 +72,16 @@ type sessionTurn struct {
 // appliableTurns are the session's turns with a changeset, in the order
 // they ran: a session's turn jobs run one at a time, so the order they
 // ended in, which labels can make differ from the order they were made in.
-func (q *Queue) appliableTurns(team, session string) ([]sessionTurn, error) {
+// jobWorkspace is the workspace a turn job runs in, for scoping a copy's turns
+// and applies: its spec workspace, or its session (its own workspace). Every
+// session of one workspace shares the one copy, so apply and preview order all
+// their turns together by this key, not by session.
+const jobWorkspace = `COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), session)`
+
+func (q *Queue) appliableTurns(team string, ws ids.WorkspaceID) ([]sessionTurn, error) {
 	rows, err := q.db.Query(`SELECT turn, COALESCE(json_extract(result, '$.changeset'), '') FROM jobs
-		WHERE team = ? AND session = ? AND kind = 'turn' AND ended IS NOT NULL AND attempt IS NOT NULL
-		ORDER BY ended, rowid`, team, session)
+		WHERE team = ? AND `+jobWorkspace+` = ? AND kind = 'turn' AND ended IS NOT NULL AND attempt IS NOT NULL
+		ORDER BY ended, rowid`, team, string(ws))
 	if err != nil {
 		return nil, fmt.Errorf("queue: list turns: %w", err)
 	}
@@ -108,12 +117,16 @@ func (q *Queue) AppliedBy(team, turn string) (job Job, ok bool, err error) {
 	if err != nil {
 		return Job{}, false, err
 	}
-	turns, err := q.appliableTurns(team, j.Session)
+	ws, err := q.workspaceID(team, ids.SessionID(j.Session))
+	if err != nil {
+		return Job{}, false, err
+	}
+	turns, err := q.appliableTurns(team, ws)
 	if err != nil {
 		return Job{}, false, err
 	}
 	at := indexOf(turns, turn)
-	applies, err := q.sessionApplies(team, j.Session)
+	applies, err := q.sessionApplies(team, ws)
 	if err != nil {
 		return Job{}, false, err
 	}
@@ -165,7 +178,7 @@ func (q *Queue) ApplyAs(team, turn string, by *By) (job Job, created bool, err e
 	// The key counts the applies of turn that ended without applying, so
 	// requests at once make one job, and one after a refusal makes a new
 	// one. It holds a "/", which no key a caller sends may hold (ResultKey).
-	return q.create(team, KindApply, ApplyKey(turn, p.refused), p.spec, p.links, Limits{}, p.spec.Session, nil)
+	return q.create(team, KindApply, ApplyKey(turn, p.refused), p.spec, p.links, Limits{}, string(p.spec.Session), nil)
 }
 
 // applyPlan is the apply job of a turn not applied yet: its spec (the
@@ -197,14 +210,18 @@ func (q *Queue) planApply(team, turn string, by *By) (plan applyPlan, done Job, 
 	if j.Workspace.Closed != nil {
 		return plan, Job{}, false, ErrSessionClosed
 	}
-	first, err := q.firstSpec(team, j.Session)
+	ws, err := q.workspaceID(team, ids.SessionID(j.Session))
+	if err != nil {
+		return plan, Job{}, false, err
+	}
+	first, err := q.firstSpec(team, ws)
 	if err != nil {
 		return plan, Job{}, false, err
 	}
 	if first.FolderRef == "" || first.Machine == "" {
 		return plan, Job{}, false, ErrNotApplicable
 	}
-	turns, err := q.appliableTurns(team, j.Session)
+	turns, err := q.appliableTurns(team, ws)
 	if err != nil {
 		return plan, Job{}, false, err
 	}
@@ -212,7 +229,7 @@ func (q *Queue) planApply(team, turn string, by *By) (plan applyPlan, done Job, 
 	if at < 0 {
 		return plan, Job{}, false, ErrNotApplicable
 	}
-	applies, err := q.sessionApplies(team, j.Session)
+	applies, err := q.sessionApplies(team, ws)
 	if err != nil {
 		return plan, Job{}, false, err
 	}
@@ -236,7 +253,7 @@ func (q *Queue) planApply(team, turn string, by *By) (plan applyPlan, done Job, 
 	if mark >= 0 {
 		from = turns[mark].changeset
 	}
-	plan.spec = Spec{Session: j.Session, FolderRef: first.FolderRef, Machine: first.Machine, ApplyFrom: from, ApplyTo: r.Changeset}
+	plan.spec = Spec{Session: ids.SessionID(j.Session), Workspace: j.Spec.Workspace, FolderRef: first.FolderRef, Machine: first.Machine, ApplyFrom: from, ApplyTo: r.Changeset}
 	carried := make([]string, 0, at-mark)
 	for _, t := range turns[mark+1 : at+1] {
 		carried = append(carried, t.turn)
@@ -269,27 +286,27 @@ var ErrNoCopyYet = errors.New("queue: the session has no copy yet")
 // ErrApplyBusy while an apply of the session has not ended, and
 // ErrMachineOffline. Each preview is a new job: the folder may have changed
 // since the last one.
-func (q *Queue) Preview(team, session string) (job Job, turn string, applies int, err error) {
+func (q *Queue) Preview(team string, wsID ids.WorkspaceID) (job Job, turn string, applies int, err error) {
 	q.applyMu.Lock()
 	defer q.applyMu.Unlock()
-	ws, ok, err := q.Workspace(team, session)
+	ws, ok, err := q.Workspace(team, wsID)
 	if err != nil {
 		return Job{}, "", 0, err
 	}
 	switch {
 	case !ok:
-		// The queue writes a session's row when its first turn ends: a
-		// session whose first turn has not ended has nothing to apply yet,
+		// The queue writes a workspace's copy row when its first turn ends: a
+		// workspace whose first turn has not ended has nothing to apply yet,
 		// and is isolated as that turn asked.
 		var n int
-		if err := q.db.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND session = ? AND kind = 'turn'`,
-			team, session).Scan(&n); err != nil {
-			return Job{}, "", 0, fmt.Errorf("queue: read session: %w", err)
+		if err := q.db.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND `+jobWorkspace+` = ? AND kind = 'turn'`,
+			team, string(wsID)).Scan(&n); err != nil {
+			return Job{}, "", 0, fmt.Errorf("queue: read workspace: %w", err)
 		}
 		if n == 0 {
 			return Job{}, "", 0, ErrNotFound
 		}
-		first, err := q.firstSpec(team, session)
+		first, err := q.firstSpec(team, wsID)
 		if err != nil {
 			return Job{}, "", 0, err
 		}
@@ -302,11 +319,11 @@ func (q *Queue) Preview(team, session string) (job Job, turn string, applies int
 	case ws.Closed != nil:
 		return Job{}, "", 0, ErrSessionClosed
 	}
-	// turn and applies are the session's appliable cursor, captured here under
+	// turn and applies are the workspace's appliable cursor, captured here under
 	// applyMu so the preview this plans and the cursor the API records against
 	// it are of the same moment: a turn or apply that lands after cannot slip
 	// between them.
-	turn, applies, has, err := q.appliableCursor(team, session)
+	turn, applies, has, err := q.appliableCursor(team, wsID)
 	if err != nil {
 		return Job{}, "", 0, err
 	}
@@ -327,11 +344,12 @@ func (q *Queue) Preview(team, session string) (job Job, turn string, applies int
 	} else if !ok {
 		return Job{}, turn, applies, ErrMachineOffline
 	}
-	// A preview the API gave up on ended with nobody to read it.
-	if err := q.dropPreviews(team, `session = ? AND cancel = 1`, session); err != nil {
+	// A preview the API gave up on ended with nobody to read it. Preview jobs
+	// are keyed by the workspace (every session of it shares the one copy).
+	if err := q.dropPreviews(team, `session = ? AND cancel = 1`, string(wsID)); err != nil {
 		return Job{}, turn, applies, err
 	}
-	job, _, err = q.create(team, KindPreview, "", p.spec, p.links, Limits{}, session, nil)
+	job, _, err = q.create(team, KindPreview, "", p.spec, p.links, Limits{}, string(wsID), nil)
 	return job, turn, applies, err
 }
 
@@ -348,16 +366,16 @@ func (q *Queue) Preview(team, session string) (job Job, turn string, applies int
 // changeset -- not ended, or its upload failed -- is not appliable and moves
 // neither number. ok is false when nothing is appliable. The caller holds
 // applyMu.
-func (q *Queue) appliableCursor(team, session string) (turn string, applies int, ok bool, err error) {
-	turns, err := q.appliableTurns(team, session)
+func (q *Queue) appliableCursor(team string, ws ids.WorkspaceID) (turn string, applies int, ok bool, err error) {
+	turns, err := q.appliableTurns(team, ws)
 	if err != nil {
 		return "", 0, false, err
 	}
 	if len(turns) == 0 {
 		return "", 0, false, nil
 	}
-	if err := q.db.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND session = ? AND kind = 'apply'`,
-		team, session).Scan(&applies); err != nil {
+	if err := q.db.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND `+jobWorkspace+` = ? AND kind = 'apply'`,
+		team, string(ws)).Scan(&applies); err != nil {
 		return "", 0, false, fmt.Errorf("queue: count applies: %w", err)
 	}
 	return turns[len(turns)-1].turn, applies, true, nil
@@ -367,10 +385,10 @@ func (q *Queue) appliableCursor(team, session string) (turn string, applies int,
 // and the count of the session's apply jobs), read without planning or running
 // a preview: the API reuses a stored preview only while this still equals the
 // cursor it recorded.
-func (q *Queue) AppliableCursor(team, session string) (turn string, applies int, ok bool, err error) {
+func (q *Queue) AppliableCursor(team string, ws ids.WorkspaceID) (turn string, applies int, ok bool, err error) {
 	q.applyMu.Lock()
 	defer q.applyMu.Unlock()
-	return q.appliableCursor(team, session)
+	return q.appliableCursor(team, ws)
 }
 
 // DropPreview removes a preview job of team that has ended, with its
@@ -408,10 +426,10 @@ func (q *Queue) dropJobs(team, kind, where string, arg any) error {
 
 // firstSpec is the spec of the session's first turn job: the folder it
 // names.
-func (q *Queue) firstSpec(team, session string) (Spec, error) {
+func (q *Queue) firstSpec(team string, ws ids.WorkspaceID) (Spec, error) {
 	var raw string
-	err := q.db.QueryRow(`SELECT spec FROM jobs WHERE team = ? AND session = ? AND kind = 'turn' ORDER BY created, rowid LIMIT 1`,
-		team, session).Scan(&raw)
+	err := q.db.QueryRow(`SELECT spec FROM jobs WHERE team = ? AND `+jobWorkspace+` = ? AND kind = 'turn' ORDER BY created, rowid LIMIT 1`,
+		team, string(ws)).Scan(&raw)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Spec{}, nil
 	}

@@ -3,9 +3,7 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,15 +72,7 @@ exit 0`, outsideFile, outsideFile)
 	})
 
 	folder := t.TempDir()
-	resp, body := do(t, e.req(t, "POST", "/api/v0/turns",
-		strings.NewReader(fmt.Sprintf(`{"agent":"claude","folder":%q,"prompt":"hi"}`, folder))))
-	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("POST /api/v0/turns: %d %s", resp.StatusCode, body)
-	}
-	var started Started
-	if err := json.Unmarshal([]byte(body), &started); err != nil {
-		t.Fatal(err)
-	}
+	started := e.firstTurn(t, folder, "claude", "hi", true)
 
 	// Mid-turn hold: the tool call is held at the gate waiting for approval.
 	id := waitForApproval(t, e)
@@ -165,15 +155,7 @@ exit 0`, outsideFile, outsideFile)
 	})
 
 	folder := t.TempDir()
-	resp, body := do(t, e.req(t, "POST", "/api/v0/turns",
-		strings.NewReader(fmt.Sprintf(`{"agent":"claude","folder":%q,"prompt":"hi"}`, folder))))
-	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("POST /api/v0/turns: %d %s", resp.StatusCode, body)
-	}
-	var started Started
-	if err := json.Unmarshal([]byte(body), &started); err != nil {
-		t.Fatal(err)
-	}
+	started := e.firstTurn(t, folder, "claude", "hi", true)
 
 	// Mid-turn hold: tool call is held.
 	id := waitForApproval(t, e)

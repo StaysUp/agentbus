@@ -25,9 +25,10 @@ func TestRunRefusedWhenStoreCannotWrite(t *testing.T) {
 	e := resumableEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) {
 		return run.Launch{Path: "/bin/sh", Args: []string{"-c", `touch "$0"`, mark}}, nil
 	})
+	sess := e.newSession(t, t.TempDir(), true)
 	e.store.Close() // every Append now fails
 	resp, body := do(t, e.req(t, "POST", "/api/v0/turns",
-		strings.NewReader(`{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"hi"}`)))
+		strings.NewReader(`{"session":"`+sess+`","agent":"claude","prompt":"hi"}`)))
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("%d %s, want 500", resp.StatusCode, body)
 	}
@@ -47,8 +48,9 @@ func TestTurnSinkNamesTurnsAfterChildExits(t *testing.T) {
 	folder := t.TempDir()
 	var ids []string
 	for i := 0; i < 3; i++ {
+		sess := e.newSession(t, folder, false)
 		resp, body := do(t, e.req(t, "POST", "/api/v0/turns",
-			strings.NewReader(`{"agent":"codex","folder":"`+folder+`","isolate":false,"prompt":"hi"}`)))
+			strings.NewReader(`{"session":"`+sess+`","agent":"codex","prompt":"hi"}`)))
 		if resp.StatusCode != http.StatusAccepted {
 			t.Fatalf("%d %s", resp.StatusCode, body)
 		}

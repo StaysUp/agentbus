@@ -253,12 +253,30 @@ func fakeAgent() {
 	}
 	// With AGENTBUS_FAKE_ASK, a turn whose prompt is "ask someone" asks
 	// another agent through the API, with its own token, as the ask_agent app
-	// does (B15): POST /api/v0/turns to start the turn, then POST /api/v0/ons to
-	// register the on that delivers its reply to this session.
+	// does (B15): create a session in this turn's own workspace (POST
+	// /api/v0/sessions; the turn token derives the workspace), start the asked
+	// turn in it (POST /api/v0/turns), then register the on that delivers its
+	// reply to this session (POST /api/v0/ons).
 	if b := os.Getenv("AGENTBUS_FAKE_ASK"); b != "" && len(os.Args) > 1 && os.Args[len(os.Args)-1] == "ask someone" {
-		req, _ := http.NewRequest("POST", os.Getenv("AGENTBUS_URL")+"/api/v0/turns", strings.NewReader(b))
+		url, tok := os.Getenv("AGENTBUS_URL"), os.Getenv("AGENTBUS_TOKEN")
+		sreq, _ := http.NewRequest("POST", url+"/api/v0/sessions", strings.NewReader("{}"))
+		sreq.Header.Set("Content-Type", "application/json")
+		sreq.Header.Set("Authorization", "Bearer "+tok)
+		var sess struct {
+			Session string `json:"session"`
+		}
+		if sresp, err := http.DefaultClient.Do(sreq); err == nil {
+			sout, _ := io.ReadAll(sresp.Body)
+			sresp.Body.Close()
+			json.Unmarshal(sout, &sess)
+		}
+		var ask map[string]any
+		json.Unmarshal([]byte(b), &ask)
+		ask["session"] = sess.Session
+		bb, _ := json.Marshal(ask)
+		req, _ := http.NewRequest("POST", url+"/api/v0/turns", strings.NewReader(string(bb)))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+os.Getenv("AGENTBUS_TOKEN"))
+		req.Header.Set("Authorization", "Bearer "+tok)
 		if resp, err := http.DefaultClient.Do(req); err == nil {
 			out, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()

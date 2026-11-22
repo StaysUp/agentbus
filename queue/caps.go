@@ -155,7 +155,7 @@ const RunnerFresh = time.Minute
 // reported yet, any runner may take it, and its engine refuses it with how
 // to install the program, as on one machine. A job of a known session goes
 // to the session's runner whatever it reports.
-const harnessTake = `(j.session IS NOT NULL AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team))
+const harnessTake = `(j.session IS NOT NULL AND EXISTS (SELECT 1 FROM copies s WHERE s.id = COALESCE(NULLIF(json_extract(j.spec, '$.workspace'), ''), j.session) AND s.team = j.team))
 	OR COALESCE(json_extract(j.spec, '$.agent'), '') = ''
 	OR json_extract(r.caps, '$.harnesses') IS NULL
 	OR EXISTS (SELECT 1 FROM json_each(r.caps, '$.harnesses') h
@@ -175,7 +175,7 @@ const harnessTake = `(j.session IS NOT NULL AND EXISTS (SELECT 1 FROM sessions s
 // the machine under the old key, so each side reads machine then connector.
 const machineTake = `COALESCE(json_extract(j.spec, '$.machine'), json_extract(j.spec, '$.connector'), '') = ''
 	OR COALESCE(json_extract(j.spec, '$.machine'), json_extract(j.spec, '$.connector')) = COALESCE(json_extract(r.caps, '$.machine'), json_extract(r.caps, '$.connector'))
-	OR (j.kind NOT IN ` + folderKinds + ` AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team AND s.runner = r.id))`
+	OR (j.kind NOT IN ` + folderKinds + ` AND EXISTS (SELECT 1 FROM copies s WHERE s.id = COALESCE(NULLIF(json_extract(j.spec, '$.workspace'), ''), j.session) AND s.team = j.team AND s.runner = r.id))`
 
 // folderKinds are the jobs a runner does to its machine's folders, not in a
 // session's copy: they take a runner's folder places (Take), not its turn
@@ -282,7 +282,7 @@ func addColumns(db *sql.DB) error {
 	for _, c := range []struct{ table, column, decl string }{
 		{"runners", "caps", "TEXT"},
 		{"runners", "removed", "INTEGER"},
-		{"sessions", "snapshot", "TEXT NOT NULL DEFAULT ''"},
+		{"copies", "snapshot", "TEXT NOT NULL DEFAULT ''"},
 		{"jobs", "turn", "TEXT"},
 		{"ons", "idem_key", "TEXT NOT NULL DEFAULT ''"},
 	} {

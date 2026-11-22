@@ -17,6 +17,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
@@ -64,7 +65,7 @@ func TestSessionChangesPreview(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	first := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"edit1"}`)
+	first := e.firstTurn(t, folder, "claude", "edit1", true)
 	waitEnded(t, e, first.Turn)
 
 	before := snapshotOf(t, folder)
@@ -141,16 +142,52 @@ func TestSessionChangesClosedSkipsCache(t *testing.T) {
 	e, _ := diffEnv(t, filepath.Join(t.TempDir(), settings.PolicyFile))
 	folder := t.TempDir()
 	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\ntwo\n"), 0o644)
-	first := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"edit1"}`)
+	first := e.firstTurn(t, folder, "claude", "edit1", true)
 	waitEnded(t, e, first.Turn)
 	if c := changesOf(t, e, first.Session); !c.Isolated || !c.Unapplied || c.Count == 0 {
 		t.Fatalf("preview before close: %+v", c)
 	}
-	if _, err := e.q.CloseSession(queue.DefaultTeam, first.Session); err != nil {
+	ws, _, err := e.store.WorkspaceOf(ids.SessionID(first.Session))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.q.CloseSession(queue.DefaultTeam, ws); err != nil {
 		t.Fatal(err)
 	}
 	if c := changesOf(t, e, first.Session); c.Isolated || c.Unapplied || c.Why != applySessionClosed || len(c.Files) != 0 {
 		t.Fatalf("changes after close reused the cache: %+v", c)
+	}
+}
+
+// A workspace id is not a session: GET /sessions/{ws} and its /changes answer
+// 404 and write nothing, so a workspace id cannot masquerade as a session and
+// mint a phantom session in the record (his rule, 2026-11-22). workspaceOf is
+// the one door, and it reports a workspace id as no session.
+func TestWorkspaceIDIsNotASession(t *testing.T) {
+	e, _ := diffEnv(t, filepath.Join(t.TempDir(), settings.PolicyFile))
+	folder := t.TempDir()
+	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\ntwo\n"), 0o644)
+	first := e.firstTurn(t, folder, "claude", "edit1", true)
+	waitEnded(t, e, first.Turn)
+	ws, found, err := e.store.WorkspaceOf(ids.SessionID(first.Session))
+	if err != nil || !found {
+		t.Fatalf("resolve workspace: found=%v err=%v", found, err)
+	}
+	if string(ws) == first.Session {
+		t.Fatalf("workspace id equals the session id, so the test cannot tell them apart: %s", ws)
+	}
+	// Its copy row exists (so a raw cast would have matched it), but the id is
+	// not a session: both routes are 404, never a synthesized 200.
+	if code, out := as(t, e, token, "GET", "/api/v0/sessions/"+string(ws), ""); code != 404 {
+		t.Fatalf("GET /sessions/{workspace id}: %d %s, want 404", code, out)
+	}
+	if code, out := as(t, e, token, "GET", "/api/v0/sessions/"+string(ws)+"/changes", ""); code != 404 {
+		t.Fatalf("GET /sessions/{workspace id}/changes: %d %s, want 404", code, out)
+	}
+	// No preview ran, so no changes.previewed was appended under the workspace
+	// id -- the record gained no phantom session.
+	if _, _, found, err := e.store.LatestPreview(string(ws)); err != nil || found {
+		t.Fatalf("a changes.previewed was written under the workspace id: found=%v err=%v", found, err)
 	}
 }
 
@@ -169,7 +206,7 @@ func TestSessionChangesRerunsAfterRefusedApply(t *testing.T) {
 	e, _ := diffEnv(t, filepath.Join(t.TempDir(), settings.PolicyFile))
 	folder := t.TempDir()
 	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\ntwo\n"), 0o644)
-	first := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"edit1"}`)
+	first := e.firstTurn(t, folder, "claude", "edit1", true)
 	waitEnded(t, e, first.Turn)
 	// Cache a preview before any apply: its cursor has no applies yet.
 	changesOf(t, e, first.Session)
@@ -192,14 +229,11 @@ func TestSessionChangesRerunsAfterRefusedApply(t *testing.T) {
 // A session in the person's folder as it is has nothing to apply, and says
 // so.
 func TestSessionChangesNotIsolated(t *testing.T) {
-	perm := filepath.Join(t.TempDir(), settings.PolicyFile)
-	if err := os.WriteFile(perm, []byte("isolation = \""+settings.IsolationNone+"\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	e, _ := diffEnv(t, perm)
+	e, _ := diffEnv(t, "")
 	folder := t.TempDir()
 	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\ntwo\n"), 0o644)
-	first := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"edit1"}`)
+	// A direct workspace (sandbox false) works in the folder as it is.
+	first := e.firstTurn(t, folder, "claude", "edit1", false)
 	waitEnded(t, e, first.Turn)
 	c := changesOf(t, e, first.Session)
 	if c.Isolated || c.Unapplied || c.Why != changesNotIsolated || len(c.Files) != 0 {
@@ -208,16 +242,17 @@ func TestSessionChangesNotIsolated(t *testing.T) {
 }
 
 // A session whose first turn has not ended has nothing to apply yet, and is
-// isolated as that turn asked: a copy, unless the isolation setting is none
-// or the turn asked for the folder as it is (isolate false).
+// isolated as its workspace's sandbox says: a copy when sandbox is true, the
+// folder as it is when false. The isolation setting only chooses the backend,
+// so "none" does not turn a sandbox workspace's wall off (his rule, 2026-11-21).
 func TestSessionChangesFirstTurnRunning(t *testing.T) {
 	for _, tc := range []struct {
-		name, policy, isolate string
-		isolated              bool
+		name, policy      string
+		sandbox, isolated bool
 	}{
-		{"a copy", "", "", true},
-		{"isolation none", "isolation = \"" + settings.IsolationNone + "\"\n", "", false},
-		{"isolate false", "", `"isolate":false,`, false},
+		{"a copy", "", true, true},
+		{"the folder as it is", "", false, false},
+		{"sandbox ignores isolation none", "isolation = \"" + settings.IsolationNone + "\"\n", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			perm := filepath.Join(t.TempDir(), settings.PolicyFile)
@@ -229,7 +264,7 @@ func TestSessionChangesFirstTurnRunning(t *testing.T) {
 			e, dir := diffEnv(t, perm)
 			folder := t.TempDir()
 			os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\n"), 0o644)
-			first := startTurn(t, e, `{"agent":"claude",`+tc.isolate+`"folder":"`+folder+`","prompt":"hold"}`)
+			first := e.firstTurn(t, folder, "claude", "hold", tc.sandbox)
 			tokenOf(t, dir, "hold") // the turn is running
 			c := changesOf(t, e, first.Session)
 			why := ""
@@ -445,7 +480,7 @@ func TestSessionChangesPinnedPageReportsStale(t *testing.T) {
 	e, _ := diffEnv(t, filepath.Join(t.TempDir(), settings.PolicyFile))
 	folder := t.TempDir()
 	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\ntwo\n"), 0o644)
-	first := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"edit1"}`)
+	first := e.firstTurn(t, folder, "claude", "edit1", true)
 	waitEnded(t, e, first.Turn)
 	c := changesOf(t, e, first.Session)
 	if c.Event == "" {

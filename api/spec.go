@@ -114,7 +114,6 @@ var constraints = map[string]func(*openapi3.Schema){
 
 	"TurnRequest":         closed,
 	"TurnRequest.agent":   pattern(sessionID.String()),
-	"TurnRequest.folder":  maxLength(MaxFolder),
 	"TurnRequest.prompt":  minLength(1),
 	"TurnRequest.model":   pattern(runModel.String()),
 	"TurnRequest.session": pattern(sessionID.String()),

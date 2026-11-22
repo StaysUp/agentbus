@@ -15,6 +15,7 @@ import (
 	"strings"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/store"
 )
@@ -162,6 +163,20 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
 					writeError(w, status, msg)
 					return event.Event{}, false
 				}
+			} else if conn == "" {
+				// A folder_ref with no machine runs on this service's own
+				// machine, which the folder registry names. A service that runs
+				// turns (a queue) but owns no folders -- a server -- cannot name
+				// the machine, so it refuses here rather than storing an empty
+				// machine that fails apply and changes later; send machine. A
+				// bare service with no queue (a test) runs no turns and keeps the
+				// empty machine.
+				if own := a.cfg.Folders; own != nil {
+					conn = own.Machine()
+				} else if a.cfg.Queue != nil {
+					writeError(w, http.StatusBadRequest, "a folder_ref needs machine, from GET /api/v0/folders")
+					return event.Event{}, false
+				}
 			}
 			sb := sandbox
 			// The folder path is kept only when this machine owns the folder
@@ -171,7 +186,7 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
 				FolderRef: ref, Machine: conn, Sandbox: &sb}, true
 		},
 		func(wsID string) {
-			out, ok, err := a.cfg.Store.Workspace(wsID)
+			out, ok, err := a.cfg.Store.Workspace(ids.WorkspaceID(wsID))
 			if err != nil || !ok {
 				a.internal(w)
 				return
@@ -182,7 +197,7 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
 
 // getWorkspace serves GET /api/v0/workspaces/{id}.
 func (a *API) getWorkspace(w http.ResponseWriter, _ *http.Request, id string) {
-	ws, found, err := a.cfg.Store.Workspace(id)
+	ws, found, err := a.cfg.Store.Workspace(ids.WorkspaceID(id))
 	if err != nil {
 		a.internal(w)
 		return
@@ -220,7 +235,25 @@ func (a *API) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, msg)
 		return
 	}
-	if !sessionID.MatchString(body.Workspace) {
+	// A turn token creates a session only in its own workspace (the ask opens
+	// one beside the asker, in the same copy); the main token names it. The
+	// asker is recorded on the session so only the token that opened a session
+	// may start its turn (askChecks), now that asks share one workspace.
+	wsID := ids.WorkspaceID(body.Workspace)
+	var asker *event.Origin
+	if g := grantOf(r); g != nil {
+		ws, found, err := a.cfg.Store.WorkspaceOf(ids.SessionID(g.Session))
+		if err != nil {
+			a.internal(w)
+			return
+		}
+		if !found {
+			writeError(w, http.StatusForbidden, "a turn token has no workspace to create a session in")
+			return
+		}
+		wsID = ws
+		asker = &event.Origin{Kind: event.OriginAsked, Session: g.Session, Turn: g.Turn}
+	} else if !sessionID.MatchString(body.Workspace) {
 		writeError(w, http.StatusBadRequest, "workspace must be "+sessionID.String())
 		return
 	}
@@ -232,11 +265,19 @@ func (a *API) createSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	hash := requestHash(body.Workspace, title)
+	// The asker is part of the request: two turn tokens (or a turn token and the
+	// main token) reusing one idempotency_key and title in the same workspace are
+	// different asks, so the hash separates them (a shared key would otherwise
+	// hand the second caller the first's session, with the wrong asker).
+	askerSession := ""
+	if asker != nil {
+		askerSession = asker.Session
+	}
+	hash := requestHash(string(wsID), title, askerSession)
 	id := queue.NewID("")
 	a.idempotentCreate(w, event.SessionCreated, "$.session", body.IdempotencyKey, hash, sessionConflict, id,
 		func() (event.Event, bool) {
-			ws, ok, err := a.cfg.Store.Workspace(body.Workspace)
+			ws, ok, err := a.cfg.Store.Workspace(wsID)
 			if err != nil {
 				a.internal(w)
 				return event.Event{}, false
@@ -246,7 +287,7 @@ func (a *API) createSession(w http.ResponseWriter, r *http.Request) {
 				return event.Event{}, false
 			}
 			return event.Event{ID: "sc_" + id, Kind: event.SessionCreated, Time: a.cfg.Now().UTC(),
-				Session: id, Workspace: ws.ID, Title: title}, true
+				Session: id, Workspace: ws.ID, Title: title, Origin: asker}, true
 		},
 		func(sID string) {
 			sWS, sTitle, ok, err := a.cfg.Store.SessionWorkspace(sID)

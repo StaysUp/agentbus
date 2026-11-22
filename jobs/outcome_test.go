@@ -165,7 +165,7 @@ func TestTurnAppliedKept(t *testing.T) {
 		t.Fatalf("read back %+v, %v", got, err)
 	}
 	ev, ok, err := e.st.EventByID("s_1", "t_2", appliedID(j))
-	if err != nil || !ok || ev.Kind != event.TurnApplied {
+	if err != nil || !ok || ev.Kind != event.WorkspaceApplied {
 		t.Fatalf("turn.applied: %+v %v %v", ev, ok, err)
 	}
 	// One that applied names its files; one from before 0.5 is read from
@@ -386,7 +386,7 @@ func TestOutcomeBeforeFinish(t *testing.T) {
 						if a, err := Applied(e.st, j); err != nil || a == nil || a.Result != "applied" {
 							t.Fatalf("applied %+v %v", a, err)
 						}
-						if k := e.kinds(t, "s_1"); k[event.TurnApplied] != 1 {
+						if k := e.kinds(t, "s_1"); k[event.WorkspaceApplied] != 1 {
 							t.Fatalf("the record holds %v", k)
 						}
 					}

@@ -30,7 +30,8 @@ func TestTurnRecordsSettingsVersion(t *testing.T) {
 		return run.Launch{Path: "/bin/sh", Args: []string{"-c", "exit 0", "sh"}}, nil
 	}
 	e := stackEnv(t, stack{wire: wire, settings: db})
-	code, out := asTok(t, e, token, "POST", "/api/v0/turns", `{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"hello"}`)
+	sess := e.newSession(t, t.TempDir(), true)
+	code, out := asTok(t, e, token, "POST", "/api/v0/turns", `{"session":"`+sess+`","agent":"claude","prompt":"hello"}`)
 	var started Started
 	if code != 202 || json.Unmarshal([]byte(out), &started) != nil {
 		t.Fatalf("start: %d %s", code, out)

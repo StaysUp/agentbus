@@ -182,10 +182,50 @@ type started struct {
 	Session, Turn string
 }
 
+// newWorkspaceSession creates a workspace from body's folder/folder_ref/machine
+// and sandbox mode (isolate), and a session in it, returning the session id:
+// the first two of the three calls a turn now needs.
+func (c *client) newWorkspaceSession(body map[string]any) string {
+	c.t.Helper()
+	wsBody := map[string]any{"sandbox": true}
+	if v, ok := body["isolate"].(bool); ok {
+		wsBody["sandbox"] = v
+	}
+	for from, to := range map[string]string{"folder": "folder", "folder_ref": "folder_ref", "machine": "machine", "connector": "machine"} {
+		if v, ok := body[from]; ok {
+			wsBody[to] = v
+		}
+	}
+	var ws struct {
+		Workspace string `json:"workspace"`
+	}
+	if code, out := c.call("POST", "/api/v0/workspaces", wsBody, &ws); code/100 != 2 || ws.Workspace == "" {
+		c.t.Fatalf("POST /api/v0/workspaces %v: %d %s", wsBody, code, out)
+	}
+	var sc struct {
+		Session string `json:"session"`
+	}
+	if code, out := c.call("POST", "/api/v0/sessions", map[string]any{"workspace": ws.Workspace}, &sc); code/100 != 2 || sc.Session == "" {
+		c.t.Fatalf("POST /api/v0/sessions: %d %s", code, out)
+	}
+	return sc.Session
+}
+
 // turn starts a turn and waits for it to end, finished, with its changes
-// recorded.
+// recorded. A first turn (a folder, no session) runs the 3-call flow first.
 func (c *client) turn(body map[string]any) started {
 	c.t.Helper()
+	if body["session"] == nil && (body["folder"] != nil || body["folder_ref"] != nil) {
+		nb := map[string]any{"session": c.newWorkspaceSession(body)}
+		for k, v := range body {
+			switch k {
+			case "folder", "folder_ref", "machine", "connector", "isolate", "read_only":
+			default:
+				nb[k] = v
+			}
+		}
+		body = nb
+	}
 	var s started
 	if code, out := c.call("POST", "/api/v0/turns", body, &s); code/100 != 2 || s.Turn == "" {
 		c.t.Fatalf("POST /api/v0/turns %v: %d %s", body, code, out)

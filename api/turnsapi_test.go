@@ -48,6 +48,33 @@ func asTok(t *testing.T, e *env, tok, method, path, body string) (int, string) {
 	return resp.StatusCode, out
 }
 
+// A turns token may open a session in an existing workspace (then run its
+// turns), the same as an ask, but it may not create a workspace: choosing a
+// folder and the Sandbox switch stays with the main token (his ruling,
+// 2026-11-22).
+func TestTurnsTokenCreatesSessionNotWorkspace(t *testing.T) {
+	e := turnsEnv(t, nil)
+	ref, machine := e.folderRef(t, t.TempDir())
+	ws := e.makeWorkspace(t, ref, machine, true) // the main token chose the folder and sandbox
+
+	code, out := asTok(t, e, turnsTok, "POST", "/api/v0/sessions", `{"workspace":"`+ws+`"}`)
+	if code != http.StatusCreated {
+		t.Fatalf("turns token create session in an existing workspace: %d %s", code, out)
+	}
+	var sc SessionCreated
+	if json.Unmarshal([]byte(out), &sc) != nil || sc.Session == "" || sc.Workspace != ws {
+		t.Fatalf("session: %s", out)
+	}
+	// Only an EXISTING workspace: an unknown one is 404, never created.
+	if code, out := asTok(t, e, turnsTok, "POST", "/api/v0/sessions", `{"workspace":"ws_0000000000000000"}`); code != http.StatusNotFound {
+		t.Fatalf("turns token session in an unknown workspace: %d %s, want 404", code, out)
+	}
+	// It cannot create a workspace: that route is the main token's.
+	if code, out := asTok(t, e, turnsTok, "POST", "/api/v0/workspaces", `{"folder_ref":"`+ref+`","machine":"`+machine+`"}`); code != http.StatusForbidden {
+		t.Fatalf("turns token create workspace: %d %s, want 403", code, out)
+	}
+}
+
 // GET /api/v0/turns/{id} answers one turn with its end: exit code, stopped,
 // unsettled, error and timings. 404 for a turn id with no turn.started.
 func TestGetTurn(t *testing.T) {
@@ -159,24 +186,34 @@ func TestTurnsTokenOff(t *testing.T) {
 // job failed with reason setup. A request the API refuses is never queued.
 func TestTurnRefusalsComeFromTheJob(t *testing.T) {
 	e := turnsEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) { return run.Launch{}, run.ErrNotFound })
-	resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"x"}`)))
+	// A valid turn the engine refuses: the runner's setup fails with ErrNotFound,
+	// and the POST answers with the engine's own words and reason setup.
+	s1 := e.newSession(t, t.TempDir(), true)
+	resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"session":"`+s1+`","agent":"claude","prompt":"x"}`)))
 	if resp.StatusCode != 400 || !strings.Contains(out, "is not on the service's PATH") {
-		t.Fatalf("missing agent: %d %s", resp.StatusCode, out)
+		t.Fatalf("engine refusal: %d %s", resp.StatusCode, out)
 	}
-	resp, out = do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"agent":"claude","session":"nosuch","prompt":"x"}`)))
-	if resp.StatusCode != 404 || !strings.Contains(out, "no such session") {
-		t.Fatalf("unknown session: %d %s", resp.StatusCode, out)
+	// A second valid turn (another session) refuses the same way: two turn jobs,
+	// each failed at setup.
+	s2 := e.newSession(t, t.TempDir(), true)
+	if resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"session":"`+s2+`","agent":"claude","prompt":"x"}`))); resp.StatusCode != 400 {
+		t.Fatalf("second engine refusal: %d %s", resp.StatusCode, out)
 	}
-	// Two turn jobs, each failed at setup. A valid typed folder also queues a
-	// KindFolder job its runner takes (audit #10), so count turn jobs alone.
 	jobs, _ := e.q.List(queue.DefaultTeam, queue.Filter{Kind: queue.KindTurn}, 10)
 	if len(jobs) != 2 || jobs[0].Reason != queue.ReasonSetup {
 		t.Fatalf("jobs %+v", jobs)
 	}
-	for _, b := range []string{`{"agent":"x","folder":"/","prompt":"x"}`, `{"agent":"claude","folder":"rel","prompt":"x"}`,
-		`{"agent":"claude","folder":"/","prompt":""}`, `{"agent":"claude","session":"a b","prompt":"x"}`, `{"session":null,"prompt":"x"}`} {
-		if resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(b))); resp.StatusCode != 400 {
-			t.Errorf("%s: %d %s, want 400", b, resp.StatusCode, out)
+	// An unknown session is refused with 404 and no job.
+	if resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"session":"nosuch","agent":"claude","prompt":"x"}`))); resp.StatusCode != 404 || !strings.Contains(out, "no such session") {
+		t.Fatalf("unknown session: %d %s", resp.StatusCode, out)
+	}
+	// A request the API refuses (a bad session shape, a missing agent, a missing
+	// prompt, a null session) is refused with 4xx and never queued.
+	for _, b := range []string{`{"session":"a b","agent":"claude","prompt":"x"}`,
+		`{"session":"` + s1 + `","prompt":"x"}`, `{"session":"` + s1 + `","agent":"claude","prompt":""}`,
+		`{"session":null,"agent":"claude","prompt":"x"}`} {
+		if resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(b))); resp.StatusCode < 400 || resp.StatusCode > 404 {
+			t.Errorf("%s: %d %s, want 4xx", b, resp.StatusCode, out)
 		}
 	}
 	if jobs, _ := e.q.List(queue.DefaultTeam, queue.Filter{Kind: queue.KindTurn}, 10); len(jobs) != 2 {

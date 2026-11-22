@@ -131,7 +131,11 @@ type Runner struct {
 	lease     time.Duration
 	cleanMu   sync.Mutex      // one workspace removal at a time
 	cleaned   map[string]bool // sessions this process already cleaned, under cleanMu
-	down      retry           // the take loops' wait while control does not answer
+	// openMu holds one *sync.Mutex per workspace id, so two first turns of one
+	// workspace (two sessions a caller started at once) do not open the same
+	// copy on disk concurrently: the first makes it, the rest load it.
+	openMu sync.Map
+	down   retry // the take loops' wait while control does not answer
 	// probed is the last probe's harnesses, under probeMu: every report
 	// sends it (caps.go).
 	probeMu sync.Mutex
@@ -825,13 +829,15 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 		if errors.As(err, &rf) {
 			res.Refused, res.Status = rf.Msg, rf.Status
 		}
-		// No turn started, so no session owns a copy made for it.
-		if at.ws != nil && at.space != nil {
-			if err := isolation.Close(at.space); err == nil {
-				at.event("workspace.removed", map[string]any{"space": at.ws.Space})
-			}
-			at.space = nil
-		}
+		// No turn started, so it touches no copy: it records no changeset and no
+		// turn.changed (AGENTS.md: a turn that cannot start stores nothing). A
+		// turn never removes the copy -- the copy belongs to the workspace, not
+		// the turn, and another session may be running in it or hold unapplied
+		// edits (his rule, 2026-11-21; removal is a workspace event, not a turn's
+		// teardown). The attempt only lets go of the copy and its folder watch
+		// before finishing, so addChanges sees nothing to record.
+		at.space = nil
+		at.unwatch()
 		at.event("turn.refused", map[string]any{"status": res.Status})
 		at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup, Result: mustJSON(res)})
 		return
@@ -852,7 +858,7 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 // one of its own, in the reviewed job's folder, as a normal turn (B12).
 func (r *Runner) request(at *attempt) run.Request {
 	sp := at.job.Spec
-	req := run.Request{Turn: at.job.Turn, Prompt: sp.Prompt, Model: sp.Model,
+	req := run.Request{Turn: at.job.Turn, Prompt: sp.Prompt, Model: sp.Model, Workspace: string(sp.Workspace),
 		IdempotencyKey: at.job.IdempotencyKey, AllowOnce: sp.AllowOnce}
 	// The agent's token for the API is control's: a runner of a server's
 	// always, and in up too. Its model calls carry the stand-in, not the token.
@@ -870,17 +876,30 @@ func (r *Runner) request(at *attempt) run.Request {
 			req.Signin = "control sent this turn no stand-in credential for its agent; update agentbus on control to this runner's version"
 		}
 	}
+	// First turn vs continuation: the session is created before its first turn
+	// (POST /api/v0/sessions), so sp.Session is always set. A session that has
+	// not run a turn yet (only session.created) opens a fresh child in its
+	// workspace; one with a prior run continues the conversation, on the agent
+	// it names. It is told by whether the session RAN, not by its agent, which a
+	// gateway session leaves empty.
+	ran := false
+	if sp.Session != "" {
+		if c, err := r.cfg.Store.Continuation(string(sp.Session)); err == nil {
+			ran = c.Ran
+		}
+	}
 	switch {
-	case sp.Session != "":
-		// A next turn may name another agent: it runs on that one.
-		req.Session = sp.Session
+	case sp.Session != "" && ran:
+		req.Session = string(sp.Session)
 		req.Harness, req.AgentID, req.Access, req.KeyEnv, req.AgentModel = sp.Harness, sp.AgentID, sp.Access, sp.KeyEnv, sp.AgentModel
 	default:
 		req.Harness, req.Folder, req.FolderRef = sp.Harness, at.folder, at.ref
-		req.AgentID, req.Access, req.KeyEnv = sp.AgentID, sp.Access, sp.KeyEnv
-		// B15: a turn job opens the session the queue named for it. (A review is
-		// a normal turn now, with no session of its own.)
-		req.NewSession = at.job.Session
+		req.AgentID, req.Access, req.KeyEnv, req.AgentModel = sp.AgentID, sp.Access, sp.KeyEnv, sp.AgentModel
+		// The first turn opens the session the caller created for it.
+		req.NewSession = string(sp.Session)
+		if req.NewSession == "" {
+			req.NewSession = at.job.Session
+		}
 	}
 	// Work an agent asked for, and a delivered result, say so on their
 	// turn.started, and place the turn's token in its request tree.
@@ -940,7 +959,16 @@ func (r *Runner) prepare(ctx context.Context, at *attempt) *queue.Result {
 			if err != nil {
 				return &queue.Result{Refused: "the permissions cannot be read, so the turn did not start; fix them and send the turn again"}
 			}
-			if b, ok := isolation.For(p.Isolation, folder); ok {
+			// The workspace's sandbox is the one switch for copy-or-folder; the
+			// isolation setting only chooses the backend. "none" is not a backend
+			// but the old way to turn the wall off, which sandbox:false now does,
+			// so a sandbox turn ignores it and isolates the default way (his rule,
+			// 2026-11-21; parked review finding P2.5).
+			setting := p.Isolation
+			if setting == settings.IsolationNone {
+				setting = settings.IsolationAuto
+			}
+			if b, ok := isolation.For(setting, folder); ok {
 				return r.isolate(at, b, isolation.Request{Folder: folder, Ref: at.ref})
 			}
 		}
@@ -958,10 +986,26 @@ func (r *Runner) prepare(ctx context.Context, at *attempt) *queue.Result {
 			}
 		}
 	default:
-		// A session the queue holds no workspace for: the record knows its
-		// folder.
-		if c, err := r.cfg.Store.Continuation(sp.Session); err == nil && c.Known {
-			at.folder = c.Folder
+		// A turn's place -- its folder -- comes from its WORKSPACE, the one
+		// source (his rule, 2026-11-21), not from a session continuation, which
+		// is empty for a new or asked session that has not run a turn yet. A
+		// direct (sandbox false) workspace runs here: its folder is on its
+		// workspace.created. A session the record places in no workspace, or one
+		// whose workspace names no folder, has nowhere to run and is refused.
+		if sp.Workspace != "" {
+			if w, ok, err := r.cfg.Store.Workspace(sp.Workspace); err == nil && ok {
+				at.folder = w.Folder
+			}
+		}
+		if at.folder == "" && sp.Session != "" {
+			// A legacy session with no workspace record of its own: its folder is
+			// on its own run events.
+			if c, err := r.cfg.Store.Continuation(string(sp.Session)); err == nil && c.Known {
+				at.folder = c.Folder
+			}
+		}
+		if at.folder == "" && sp.Session != "" {
+			return &queue.Result{Refused: "no such session", Status: http.StatusNotFound}
 		}
 	}
 	return r.watchFolder(at)
@@ -1024,14 +1068,43 @@ func (r *Runner) isolate(at *attempt, b isolation.Backend, req isolation.Request
 	if r.cfg.Workdir == "" {
 		return &queue.Result{Refused: "this runner has no workdir for isolated copies"}
 	}
-	// The copy is named after its session, so the folder name an agent
-	// sees is the session the cockpit shows. A review names its own session
-	// (req.ID set by the caller), not the reviewed one, so its copy does not
-	// collide with the author's workspace.
+	// The copy is named after its workspace, so every session of a workspace
+	// (the person's, and any agent it asks) shares one copy, and an asked turn
+	// edits the asker's copy. Falls back to the session for a job with no
+	// workspace (hook or legacy traffic).
 	if req.ID == "" {
-		req.ID = at.job.Session
+		req.ID = string(at.job.Spec.Workspace)
+		if req.ID == "" {
+			req.ID = at.job.Session
+		}
 	}
 	req.Workdir = r.cfg.Workdir
+	// One copy per workspace, made once: two first turns of one workspace (a
+	// caller started two of its sessions at once) would otherwise both find no
+	// copy and both open <workdir>/<req.ID>, racing in the copy backend. The
+	// per-workspace lock lets the first make it and the rest load it.
+	mu, _ := r.openMu.LoadOrStore(req.ID, &sync.Mutex{})
+	lk := mu.(*sync.Mutex)
+	lk.Lock()
+	defer lk.Unlock()
+	// A turn whose workspace already has a copy on this runner loads it rather
+	// than making a second, so one workspace is one copy: an asked turn edits the
+	// asker's copy, and a retake after a restart finds the same one (his
+	// decision, 2026-11-21). The copy is keyed by the workspace id (req.ID).
+	if s, err := r.loadSpace(queue.Workspace{Space: req.ID}); err == nil {
+		kind := queue.WorkspaceCopy
+		if s.Backend == isolation.Git {
+			kind = queue.WorkspaceWorktree
+		}
+		at.space, at.folder = s, s.Dir
+		at.ws = &queue.Workspace{Kind: kind, Space: s.ID, Repo: s.Repo, Base: s.Base}
+		if b, ok := isolation.Get(s.Backend); ok {
+			if base, err := b.Checkpoint(s, isolation.Base); err == nil {
+				at.ws.Snapshot = base.Root
+			}
+		}
+		return r.checkpointStart(at)
+	}
 	s, err := b.Open(req)
 	var rf *isolation.Refusal
 	switch {
@@ -1062,10 +1135,9 @@ func (r *Runner) isolate(at *attempt, b isolation.Backend, req isolation.Request
 		at.ws.Snapshot = base.Root
 	}
 	if res := r.checkpointStart(at); res != nil {
-		// Nothing records the copy yet, so nothing else would remove it.
-		if err := isolation.Close(s); err != nil {
-			r.cfg.Logf("the %s for job %s could not be removed after a refused setup", b.Name(), at.job.ID)
-		}
+		// A turn never removes the copy, even one it just made: the copy belongs
+		// to the workspace and removal is a workspace event, not a turn's
+		// teardown (his rule, 2026-11-21). The attempt only lets go of it.
 		at.space, at.ws = nil, nil
 		return res
 	}

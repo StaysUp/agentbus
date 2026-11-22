@@ -68,13 +68,18 @@ func reviewTurnApp() toolreg.Tool {
 		Where: toolreg.WhereControl,
 		Run: toolreg.Run{Kind: toolreg.RunApp, App: &toolreg.App{
 			Steps: []toolreg.Step{
-				// ONE step (his call (a), 2026-11-19): startTurn records the delivery
-				// on in the same write (delivery=$caller.session), so start and deliver
-				// are atomic under one authorization — no separate registerOn step to
-				// lose. wait=false returns once the turn is recorded.
+				// Two calls in sequence (his API rules, 2026-11-21): a session in
+				// the reviewer's workspace (the asker's, by the grant), then a turn
+				// in it. The reviewer reads the reviewed turn and its diff through
+				// agentbus-api, not a copy of that turn. startTurn records the
+				// delivery on in the same write. wait=false returns once recorded.
+				{StepID: "session", OperationID: "createSession",
+					RequestBody: map[string]any{},
+					Outputs:     map[string]string{"session": "$response.body#/session"}},
 				{StepID: "start", OperationID: "startTurn",
 					Parameters: map[string]any{"wait": "false"},
 					RequestBody: map[string]any{
+						"session":  "$steps.session.outputs.session",
 						"agent":    "$inputs.agent",
 						"delivery": "$caller.session",
 						"prompt": "Review a change another agent made in turn {$inputs.turn}. Read the turn at " +
@@ -96,7 +101,7 @@ func askAgentApp() toolreg.Tool {
 	return toolreg.Tool{
 		Name: "ask_agent",
 		Description: "Ask a saved AgentBus agent (from GET /api/v0/agents, any vendor) to do work. " +
-			"It starts a new session on that agent, in its own copy of your folder. " +
+			"It starts a new session on that agent, in your workspace's copy of your folder (the same copy your turn runs in). " +
 			"The reply names the new turn and session at once; its result comes back to your session as a later turn: do not wait or poll for it. " +
 			"This is not your harness's own subagent: it is recorded, and can be another vendor. " +
 			"Each ask is a new session: to follow up, ask again with what the result said.",
@@ -112,14 +117,20 @@ func askAgentApp() toolreg.Tool {
 		Where: toolreg.WhereControl,
 		Run: toolreg.Run{Kind: toolreg.RunApp, App: &toolreg.App{
 			Steps: []toolreg.Step{
-				// ONE step (his call (a), 2026-11-19): startTurn records the delivery
-				// on in the same write (delivery=$caller.session), so start and deliver
-				// are atomic under one authorization — no separate registerOn step to
-				// lose. wait=false returns once the turn is recorded.
+				// Two calls in sequence (his API rules, 2026-11-21): create a
+				// session in the asker's workspace, then run a turn in it. A turn
+				// token's createSession takes the workspace from the grant, so the
+				// asked session shares the asker's copy. startTurn records the
+				// delivery on in the same write (delivery=$caller.session), so
+				// start and deliver stay atomic. wait=false returns once recorded.
+				{StepID: "session", OperationID: "createSession",
+					RequestBody: map[string]any{},
+					Outputs:     map[string]string{"session": "$response.body#/session"}},
 				{StepID: "start", OperationID: "startTurn",
-					Parameters:  map[string]any{"wait": "false"},
-					RequestBody: map[string]any{"agent": "$inputs.agent", "prompt": "$inputs.prompt", "delivery": "$caller.session"},
-					Outputs:     map[string]string{"turn": "$response.body#/turn", "session": "$response.body#/session"}},
+					Parameters: map[string]any{"wait": "false"},
+					RequestBody: map[string]any{"session": "$steps.session.outputs.session",
+						"agent": "$inputs.agent", "prompt": "$inputs.prompt", "delivery": "$caller.session"},
+					Outputs: map[string]string{"turn": "$response.body#/turn", "session": "$response.body#/session"}},
 			},
 			Outputs: map[string]string{"turn": "$steps.start.outputs.turn", "session": "$steps.start.outputs.session"},
 		}},

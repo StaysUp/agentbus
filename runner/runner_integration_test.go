@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/staysup/agentbus/blobs"
 	"github.com/staysup/agentbus/connector"
+	"github.com/staysup/agentbus/ids"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -315,7 +316,7 @@ func TestUnknownKindIsRefused(t *testing.T) {
 	first := w.create(t, queue.Spec{Harness: "claude", Prompt: "hi"})
 	waitFor(t, "the first turn", func() bool { return w.job(t, first.ID).Ended != nil })
 	runs := len(w.runs())
-	j, _, err := w.q.Create(queue.DefaultTeam, "command", "", queue.Spec{Session: first.Session}, queue.Links{})
+	j, _, err := w.q.Create(queue.DefaultTeam, "command", "", queue.Spec{Session: ids.SessionID(first.Session)}, queue.Links{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +375,7 @@ func TestWorktreeSession(t *testing.T) {
 	first := w.create(t, queue.Spec{Harness: "claude", Repo: repo, Base: "main", Prompt: "write app.txt v2\nwrite test.log ran\nhold"})
 	waitFor(t, "a turn", func() bool { return len(w.runs()) == 1 })
 	// The next job of the session is queued now, and waits for the first.
-	next := w.create(t, queue.Spec{Session: first.Session, Harness: "claude", Prompt: "write second.txt two"})
+	next := w.create(t, queue.Spec{Session: ids.SessionID(first.Session), Harness: "claude", Prompt: "write second.txt two"})
 	time.Sleep(300 * time.Millisecond)
 	if got := w.job(t, next.ID); got.State != queue.Queued || len(w.runs()) != 1 {
 		t.Fatalf("the next job did not wait: %s, %d turns", got.State, len(w.runs()))
@@ -414,7 +415,7 @@ func TestWorktreeSession(t *testing.T) {
 		t.Fatalf("second: %s, ran in %q, changes %+v", n.State, w.runs()[1].Cwd, res2.Changes)
 	}
 
-	if _, err := w.q.CloseSession(queue.DefaultTeam, first.Session); err != nil {
+	if _, err := w.q.CloseSession(queue.DefaultTeam, ids.WorkspaceID(first.Session)); err != nil {
 		t.Fatal(err)
 	}
 	// Close is retired (B14): it marks the session closed and wakes the runner,
@@ -495,7 +496,7 @@ func TestCopyWrittenBetweenTurnsIsInTheNextDiff(t *testing.T) {
 		t.Fatalf("first: %s %s", f.State, f.Reason)
 	}
 	write(t, filepath.Join(w.r.cfg.Workdir, first.Session, "stray.txt"), "left behind\n")
-	next := w.create(t, queue.Spec{Session: first.Session, Harness: "claude", Prompt: "write second.txt two"})
+	next := w.create(t, queue.Spec{Session: ids.SessionID(first.Session), Harness: "claude", Prompt: "write second.txt two"})
 	waitFor(t, "finished", func() bool { return w.job(t, next.ID).Ended != nil })
 	var res struct {
 		Changes workspace.Changes `json:"changes"`

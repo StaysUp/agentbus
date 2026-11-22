@@ -44,7 +44,7 @@ func folderKind(kind string) bool {
 // its session to the runner after the removal) ends too.
 func endRemovedTx(tx *sql.Tx, now time.Time) error {
 	rows, err := tx.Query(`SELECT DISTINCT r.id, r.name FROM jobs j
-		JOIN sessions s ON s.id = j.session AND s.team = j.team
+		JOIN copies s ON s.id = COALESCE(NULLIF(json_extract(j.spec, '$.workspace'), ''), j.session) AND s.team = j.team
 		JOIN runners r ON r.id = s.runner
 		WHERE j.state = 'queued' AND j.kind NOT IN ` + folderKinds + ` AND r.removed IS NOT NULL`)
 	if err != nil {
@@ -68,7 +68,7 @@ func endRemovedTx(tx *sql.Tx, now time.Time) error {
 		res, _ := json.Marshal(Result{Refused: RunnerRemovedWhy(g.name), Status: 409}) // 409 Conflict, as the API answers it
 		if _, err := tx.Exec(`UPDATE jobs SET state = ?, reason = ?, result = ?, updated = ?, ended = ?
 			WHERE state = 'queued' AND kind NOT IN `+folderKinds+`
-			AND EXISTS (SELECT 1 FROM sessions s WHERE s.id = jobs.session AND s.team = jobs.team AND s.runner = ?)`,
+			AND EXISTS (SELECT 1 FROM copies s WHERE s.id = COALESCE(NULLIF(json_extract(jobs.spec, '$.workspace'), ''), jobs.session) AND s.team = jobs.team AND s.runner = ?)`,
 			Failed, ReasonSetup, string(res), nanos(now), nanos(now), g.id); err != nil {
 			return fmt.Errorf("queue: write job: %w", err)
 		}

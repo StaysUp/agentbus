@@ -2,6 +2,7 @@ package queue
 
 import (
 	"errors"
+	"github.com/staysup/agentbus/ids"
 	"strings"
 	"testing"
 )
@@ -29,7 +30,7 @@ func TestRemovedRunnerEndsItsSessionsWork(t *testing.T) {
 		Workspace: &Workspace{Kind: WorkspaceCopy, Space: j.ID}}); err != nil {
 		t.Fatal(err)
 	}
-	next := makeJob(t, q, Spec{Session: first.Session})
+	next := makeJob(t, q, Spec{Session: ids.SessionID(first.Session)})
 	ap, _, err := q.Apply(DefaultTeam, j.Turn)
 	if err != nil {
 		t.Fatalf("apply: %v", err)
@@ -56,7 +57,7 @@ func TestRemovedRunnerEndsItsSessionsWork(t *testing.T) {
 		t.Fatalf("the apply is %s, want it left queued", got.State)
 	}
 	var removed *RunnerRemovedError
-	if _, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: first.Session, Prompt: "again"}, Links{}); !errors.As(err, &removed) || err.Error() != why {
+	if _, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: ids.SessionID(first.Session), Prompt: "again"}, Links{}); !errors.As(err, &removed) || err.Error() != why {
 		t.Fatalf("a new turn: %v, want the reason", err)
 	}
 }
@@ -102,7 +103,7 @@ func TestRemovedRunnerEndsWorkQueuedLater(t *testing.T) {
 		if _, err := q.End(r.ID, a.ID, 1, fin(j)); err != nil {
 			t.Fatal(err)
 		}
-		next := makeJob(t, q, Spec{Session: j.Session})
+		next := makeJob(t, q, Spec{Session: ids.SessionID(j.Session)})
 		if got, _, ok, _, err := q.Take(r.ID, lease, false); err != nil || !ok || got.ID != next.ID {
 			t.Fatalf("take next: %v %v", ok, err)
 		}
@@ -120,7 +121,7 @@ func TestRemovedRunnerEndsWorkQueuedLater(t *testing.T) {
 		if _, _, err := q.Accept(r.ID, a.ID, 1, fin(j)); err != nil {
 			t.Fatal(err)
 		}
-		next := makeJob(t, q, Spec{Session: j.Session})
+		next := makeJob(t, q, Spec{Session: ids.SessionID(j.Session)})
 		c.add(2 * RunnerFresh)
 		if err := q.RemoveRunner(DefaultTeam, r.ID); err != nil {
 			t.Fatal(err)

@@ -423,9 +423,16 @@ var routes = slices.Concat([]route{
 		summary: "Create a session",
 		doc: "Create a session in a workspace: a conversation whose turns run there. Send workspace (from POST /api/v0/workspaces) and optionally title. The reply names the session; run its turns with POST /api/v0/turns.\n\n" +
 			"A session owns only its title and its archived view; its folder and mode are its workspace's. With idempotency_key a retry returns the same session and makes nothing new.",
-		body:    SessionRequest{},
-		replies: createReplies(ok(201, SessionCreated{}, "The session."), fail(404, "No such workspace.")),
-		serve:   plain((*API).createSession)},
+		body: SessionRequest{},
+		replies: createReplies(ok(201, SessionCreated{}, "The session."), fail(404, "No such workspace."),
+			fail(403, "A turn token with no workspace to create a session in.")),
+		// A turns token may open a session in an EXISTING workspace (then run its
+		// turns), the same as an ask: choosing a folder and the Sandbox switch --
+		// POST /api/v0/workspaces -- stays with the main token (his ruling,
+		// 2026-11-22). The handler checks the named workspace exists (404).
+		turn:  createSessionTok,
+		turns: true,
+		serve: plain((*API).createSession)},
 	{method: "GET", path: "/api/v0/sessions", op: "listSessions",
 		tag:     "Sessions",
 		summary: "List sessions",

@@ -232,6 +232,35 @@ func (s *Store) snapshotAt(hi int64) (Snapshot, error) {
 	}
 	rows.Close()
 
+	// An asked session (POST /api/v0/sessions by a turn token) carries the
+	// asker's origin on session.created, so it names who asked even before its
+	// turn starts. A turn.started origin above wins where it exists.
+	rows, err = s.r.Query(`SELECT session, json_extract(data, '$.origin') FROM events
+		WHERE seq <= ? AND kind = 'session.created' AND COALESCE(json_extract(data, '$.origin'), '') <> ''`, hi)
+	if err != nil {
+		return snap, fmt.Errorf("store: snapshot: %w", err)
+	}
+	for rows.Next() {
+		var id, origin string
+		if err := rows.Scan(&id, &origin); err != nil {
+			rows.Close()
+			return snap, fmt.Errorf("store: snapshot: %w", err)
+		}
+		x := byID[id]
+		if x == nil || x.Origin != nil {
+			continue
+		}
+		var o event.Origin
+		if json.Unmarshal([]byte(origin), &o) == nil {
+			x.Origin = &o
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return snap, fmt.Errorf("store: snapshot: %w", err)
+	}
+	rows.Close()
+
 	holds, err := s.OpenHolds(hi)
 	if err != nil {
 		return snap, err

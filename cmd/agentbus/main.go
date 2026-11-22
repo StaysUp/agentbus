@@ -59,6 +59,7 @@ import (
 	"github.com/staysup/agentbus/folders"
 	"github.com/staysup/agentbus/gateway"
 	"github.com/staysup/agentbus/harness"
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/logfile"
 	"github.com/staysup/agentbus/models"
@@ -446,7 +447,15 @@ func start(c config) (*service, error) {
 	var blobSweep *jobs.Sweeper   // and what cleans it
 	// Every model.responded is priced, and every turn.started of a run's
 	// session gets the run's agent and folder, before it is stored.
-	sink := cost.Sink{Table: cost.Default(), Next: engine.TurnSink(st, st)}
+	// A gateway or hook session's direct workspace is born in the TurnSink; it
+	// carries this service's own machine (the folder registry's), read lazily
+	// because fr opens below. "" on a server with no folders, which is right.
+	sink := cost.Sink{Table: cost.Default(), Next: engine.TurnSinkMachine(st, st, func() string {
+		if fr != nil {
+			return fr.Machine()
+		}
+		return ""
+	})}
 	// The relay's gateways, which record the runners' calls it carries.
 	var relayGws []*gateway.Gateway
 	if c.hasEngine() {
@@ -1092,7 +1101,18 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 				// for each undelivered asked job, and backfill chain.by/by_session
 				// from asker) would close both; for this dev milestone the store
 				// is drained before upgrade instead.
-				if n, err := s.queue.FireOns(queue.DefaultTeam, s.store.TurnEnded, name, s.deliveredAgent); err != nil {
+				deliverTo := func(session string) (queue.DeliverTo, bool, error) {
+					ws, found, err := s.store.WorkspaceOf(ids.SessionID(session))
+					if err != nil || !found {
+						return queue.DeliverTo{}, false, err
+					}
+					w, ok, err := s.store.Workspace(ws)
+					if err != nil || !ok {
+						return queue.DeliverTo{}, false, err
+					}
+					return queue.DeliverTo{Workspace: w.ID, FolderRef: w.FolderRef, Machine: w.Machine, Isolate: w.Sandbox}, true, nil
+				}
+				if n, err := s.queue.FireOns(queue.DefaultTeam, s.store.TurnEnded, deliverTo, name, s.deliveredAgent); err != nil {
 					svcLog.Printf("queue.fire_ons_failed")
 				} else if n > 0 {
 					svcLog.Printf("queue.results_delivered n=%d", n)

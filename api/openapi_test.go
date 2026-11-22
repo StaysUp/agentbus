@@ -337,8 +337,8 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 		t.Error("POST /api/v0/turns is not startTurn, or does not describe the 404 and 409 of a session's next turn")
 	}
 	req := doc.Components.Schemas["TurnRequest"].Value
-	if !slices.Equal(req.Required, []string{"prompt"}) {
-		t.Errorf("TurnRequest requires %v, want only prompt: agent and folder come from the session when it is sent", req.Required)
+	if !slices.Equal(req.Required, []string{"session", "agent", "prompt"}) {
+		t.Errorf("TurnRequest requires %v, want session, agent and prompt: the folder and the mode come from the session's workspace", req.Required)
 	}
 	e := newEnv(t)
 	if resp, body := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"prompt":"x"}`))); resp.StatusCode != http.StatusNotFound {

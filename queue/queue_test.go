@@ -3,6 +3,7 @@ package queue
 import (
 	"encoding/json"
 	"errors"
+	"github.com/staysup/agentbus/ids"
 	"path/filepath"
 	"slices"
 	"sync"
@@ -464,7 +465,7 @@ func TestSessionAffinityAndClose(t *testing.T) {
 	if err != nil || done.Workspace == nil || done.Workspace.Runner != a.ID || done.Workspace.Folder != "/w/job_1" {
 		t.Fatalf("first: %+v %v", done.Workspace, err)
 	}
-	next, _, _ := q.Create(DefaultTeam, KindTurn, "", Spec{Session: s1, Prompt: "two"}, Links{})
+	next, _, _ := q.Create(DefaultTeam, KindTurn, "", Spec{Session: ids.SessionID(s1), Prompt: "two"}, Links{})
 	if _, _, ok, _, _ := q.Take(b.ID, lease, false); ok {
 		t.Fatal("another runner took the session's job")
 	}
@@ -472,7 +473,7 @@ func TestSessionAffinityAndClose(t *testing.T) {
 	if err != nil || !ok || j.ID != next.ID || j.Workspace == nil || j.Workspace.Folder != "/w/job_1" {
 		t.Fatalf("the session's runner: %+v %v %v", j.Workspace, ok, err)
 	}
-	if _, err := q.CloseSession(DefaultTeam, s1); !errors.Is(err, ErrSessionBusy) {
+	if _, err := q.CloseSession(DefaultTeam, ids.WorkspaceID(s1)); !errors.Is(err, ErrSessionBusy) {
 		t.Fatalf("close while a job is open: %v", err)
 	}
 	if _, _, err := q.Start(a.ID, att2.ID, 1, lease); err != nil {
@@ -483,11 +484,11 @@ func TestSessionAffinityAndClose(t *testing.T) {
 		Workspace: &Workspace{Kind: WorkspaceFolder, Folder: "/elsewhere"}}); err != nil {
 		t.Fatal(err)
 	}
-	w, err := q.CloseSession(DefaultTeam, s1)
+	w, err := q.CloseSession(DefaultTeam, ids.WorkspaceID(s1))
 	if err != nil || w.Closed == nil || w.Folder != "/w/job_1" {
 		t.Fatalf("close: %+v %v", w, err)
 	}
-	if _, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: s1, Prompt: "three"}, Links{}); !errors.Is(err, ErrSessionClosed) {
+	if _, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: ids.SessionID(s1), Prompt: "three"}, Links{}); !errors.Is(err, ErrSessionClosed) {
 		t.Fatalf("a job for a closed session: %v", err)
 	}
 	// Delete-on-close is retired: Take hands no cleanup, to this runner or any
@@ -503,7 +504,7 @@ func TestSessionAffinityAndClose(t *testing.T) {
 	if len(list) != 1 || list[0].Closed == nil || list[0].Removed != nil {
 		t.Fatalf("the closed session keeps its copy: %+v", list)
 	}
-	if _, err := q.CloseSession("team_other", s1); !errors.Is(err, ErrNotFound) {
+	if _, err := q.CloseSession("team_other", ids.WorkspaceID(s1)); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("another team's close: %v", err)
 	}
 }
@@ -592,7 +593,7 @@ func TestTurnsAhead(t *testing.T) {
 	first := job(t, q, "")
 	mk := func() Job {
 		c.add(time.Millisecond)
-		j, _, err := q.CreateTurnLinked(DefaultTeam, "", Spec{Session: first.Session, Prompt: "next"}, Links{}, Limits{}, nil)
+		j, _, err := q.CreateTurnLinked(DefaultTeam, "", Spec{Session: ids.SessionID(first.Session), Prompt: "next"}, Links{}, Limits{}, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

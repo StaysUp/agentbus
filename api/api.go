@@ -24,6 +24,7 @@ import (
 	"github.com/staysup/agentbus/blobs"
 	"github.com/staysup/agentbus/credentials"
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/ids"
 	"io"
 	"net/http"
 	"regexp"
@@ -590,7 +591,7 @@ func (a *API) snapshot(at, before int64, limit int, showArchived bool) (Snapshot
 	if err != nil {
 		return Snapshot{}, err
 	}
-	closed := map[string]time.Time{}
+	closed := map[ids.WorkspaceID]time.Time{}
 	if a.cfg.Queue != nil {
 		if closed, err = a.cfg.Queue.Closed(queue.DefaultTeam); err != nil {
 			return Snapshot{}, err
@@ -612,9 +613,14 @@ func (a *API) snapshot(at, before int64, limit int, showArchived bool) (Snapshot
 
 // withClosed is s with when it was closed, from the closed map. Archived is
 // already on s, from the store's session.archived.
-func (a *API) withClosed(s store.Session, closed map[string]time.Time) Session {
+func (a *API) withClosed(s store.Session, closed map[ids.WorkspaceID]time.Time) Session {
 	v := Session{Session: s}
-	if c, ok := closed[s.ID]; ok {
+	// closed is keyed by workspace id (the copy's), and s.Workspace is the
+	// session's workspace as the snapshot resolved it (a migrated session's is its
+	// own id), so one lookup reads the workspace's closed state. s.Workspace is
+	// the session id already turned into its workspace, not a cast here.
+	c, ok := closed[ids.WorkspaceID(s.Workspace)]
+	if ok {
 		v.Closed = &c
 		v.Resumable = false
 	}

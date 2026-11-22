@@ -7,12 +7,14 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/ids"
 )
 
 // Workspace is a workspace as its events describe it. A workspace is where
 // turns run: it owns the folder, the machine, the sandbox mode (a copy behind a
 // wall, or the person's real folder), its checkpoints, Apply and Discard. One
-// workspace backs one session.
+// workspace backs the sessions that run in it: the person's and any it asks,
+// which share its one copy.
 //
 // The core facts (folder, folder_ref, machine, sandbox, created) come from the
 // single workspace.created. The apply and discard history comes from the
@@ -52,15 +54,15 @@ const resolvedWorkspace = `COALESCE(NULLIF(json_extract(ts.data, '$.workspace'),
 
 // Workspace reads one workspace by id. found is false, with no error, when no
 // workspace.created names it.
-func (s *Store) Workspace(id string) (w Workspace, found bool, err error) {
-	w.ID = id
+func (s *Store) Workspace(id ids.WorkspaceID) (w Workspace, found bool, err error) {
+	w.ID = string(id)
 	var folder, ref, machine sql.NullString
 	var sandbox int
 	var created int64
 	err = s.r.QueryRow(`SELECT json_extract(data, '$.folder'), json_extract(data, '$.folder_ref'),
 			json_extract(data, '$.machine'), COALESCE(json_extract(data, '$.sandbox'), 0), time
 		FROM events WHERE kind = ? AND json_extract(data, '$.workspace') = ? ORDER BY seq LIMIT 1`,
-		string(event.WorkspaceCreated), id).Scan(&folder, &ref, &machine, &sandbox, &created)
+		string(event.WorkspaceCreated), string(id)).Scan(&folder, &ref, &machine, &sandbox, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return w, false, nil
 	}
@@ -130,7 +132,7 @@ func (s *Store) Workspaces() ([]Workspace, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: list workspaces: %w", err)
 	}
-	var ids []string
+	var wsIDs []ids.WorkspaceID
 	for rows.Next() {
 		var id sql.NullString
 		if err := rows.Scan(&id); err != nil {
@@ -138,7 +140,7 @@ func (s *Store) Workspaces() ([]Workspace, error) {
 			return nil, fmt.Errorf("store: list workspaces: %w", err)
 		}
 		if id.String != "" {
-			ids = append(ids, id.String)
+			wsIDs = append(wsIDs, ids.WorkspaceID(id.String))
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -146,8 +148,8 @@ func (s *Store) Workspaces() ([]Workspace, error) {
 		return nil, fmt.Errorf("store: list workspaces: %w", err)
 	}
 	rows.Close()
-	out := make([]Workspace, 0, len(ids))
-	for _, id := range ids {
+	out := make([]Workspace, 0, len(wsIDs))
+	for _, id := range wsIDs {
 		w, found, err := s.Workspace(id)
 		if err != nil {
 			return nil, err
@@ -181,6 +183,36 @@ func (s *Store) CreatedByKey(kind event.Kind, idPath, key string) (id, hash stri
 	return gotID.String, gotHash.String, true, nil
 }
 
+// WorkspaceOf resolves the workspace a session's turns run in: the workspace
+// its session.created or turn.started names, or, for a session migrated from
+// before workspaces (no workspace field on its events), the session's own id,
+// which the migration records as its workspace. found is false for a session
+// the record does not know. It is the single resolver a turn uses to find where
+// it runs, so the API and the runner agree with the snapshot's fold.
+func (s *Store) WorkspaceOf(session ids.SessionID) (workspace ids.WorkspaceID, found bool, err error) {
+	var ws sql.NullString
+	err = s.r.QueryRow(`SELECT json_extract(data, '$.workspace') FROM events
+		WHERE session = ? AND kind IN ('session.created', 'turn.started')
+			AND COALESCE(json_extract(data, '$.workspace'), '') <> '' ORDER BY seq DESC LIMIT 1`, string(session)).Scan(&ws)
+	if err == nil {
+		return ids.WorkspaceID(ws.String), true, nil
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return "", false, fmt.Errorf("store: workspace of: %w", err)
+	}
+	// A session with no workspace field is a migrated one: its workspace is its
+	// own id. It is the session only when the record knows the session. This is
+	// the one place a session becomes its own workspace id by conversion.
+	known, err := s.Known(string(session))
+	if err != nil {
+		return "", false, err
+	}
+	if known {
+		return ids.WorkspaceID(session), true, nil
+	}
+	return "", false, nil
+}
+
 // SessionWorkspace reads the workspace a session.created bound a session to,
 // and its title. found is false when the session has no session.created (a
 // session the record knows only through its turns, or an unknown one).
@@ -195,6 +227,25 @@ func (s *Store) SessionWorkspace(session string) (workspace, title string, found
 		return "", "", false, fmt.Errorf("store: read session workspace: %w", err)
 	}
 	return ws.String, t.String, true, nil
+}
+
+// SessionAsker reads the session that opened session (its session.created
+// origin), set when a turn token created the session so only that token's tree
+// may start the session's turn. found is false (asker "") when the session has
+// no session.created or it was opened by the main token (no asker). It is the
+// one source askChecks uses to tell an asked session from any other session in
+// the same workspace.
+func (s *Store) SessionAsker(session string) (asker string, found bool, err error) {
+	var a sql.NullString
+	err = s.r.QueryRow(`SELECT json_extract(data, '$.origin.session') FROM events
+		WHERE kind = ? AND session = ? ORDER BY seq LIMIT 1`, string(event.SessionCreated), session).Scan(&a)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("store: read session asker: %w", err)
+	}
+	return a.String, a.String != "", nil
 }
 
 // WorkspaceSeed is one existing session's facts for the workspace migration,
@@ -330,6 +381,29 @@ func (s *Store) MigrateWorkspaces(seeds []WorkspaceSeed) (int, error) {
 		}
 	}
 	return n, nil
+}
+
+// EnsureDirectWorkspace creates a direct (sandbox false) workspace for a
+// session that has none, using the session's own id as its workspace id, the
+// way the startup migration does. It is how a gateway or hook session gets its
+// workspace at birth: whatever records such a session's first turn creates its
+// workspace explicitly, so the one workspace reader never has a missing case
+// (his rule, 2026-11-21). Idempotent (AppendOnce under wc_<session>), so a
+// later turn of the same session changes nothing.
+//
+// machine is the connector that owns the folder, so the one workspace record
+// carries where a turn runs (folder and machine), the way POST /workspaces
+// does, and a multi-runner apply or preview of a direct workspace routes to the
+// runner that holds it instead of misrouting on an empty machine. Empty means
+// this service's own machine, as it does on every workspace.created.
+func (s *Store) EnsureDirectWorkspace(session, folder, folderRef, machine string) error {
+	if session == "" {
+		return nil
+	}
+	sb := false
+	_, err := s.AppendOnce(event.Event{ID: "wc_" + session, Kind: event.WorkspaceCreated,
+		Time: time.Now().UTC(), Workspace: session, Folder: folder, FolderRef: folderRef, Machine: machine, Sandbox: &sb})
+	return err
 }
 
 // sessionFolder reads a session's folder and folder reference from its latest
