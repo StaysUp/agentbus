@@ -83,13 +83,13 @@ func (h heldReply) heldCall(agent string) HeldCall {
 }
 
 // pending reads the record and returns the approvals not yet decided, oldest
-// first. decided holds the ids already answered, for the existence check.
-func (a *API) pendingApprovals() (replies []heldReply, decided map[string]bool, err error) {
+// first.
+func (a *API) pendingApprovals() (replies []heldReply, err error) {
 	evs, err := a.cfg.Store.ApprovalEvents()
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
-	decided = map[string]bool{}
+	decided := map[string]bool{}
 	for _, e := range evs {
 		if e.Kind == event.ApprovalDecided {
 			decided[e.Approval] = true
@@ -101,7 +101,7 @@ func (a *API) pendingApprovals() (replies []heldReply, decided map[string]bool, 
 		}
 		replies = append(replies, heldReplyOf(e))
 	}
-	return replies, decided, nil
+	return replies, nil
 }
 
 // GET /api/v0/approvals
@@ -113,7 +113,7 @@ func (a *API) listApprovals(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, `state must be "pending" or left out; decided commands are in the events`)
 		return
 	}
-	replies, _, err := a.pendingApprovals()
+	replies, err := a.pendingApprovals()
 	if err != nil {
 		a.internal(w)
 		return
