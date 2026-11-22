@@ -743,3 +743,52 @@ func TestCodexOwnInstructionsLeaveOutTheHint(t *testing.T) {
 		waitClosed(t, svc.store, out["session"].(string))
 	}
 }
+
+// In agentbus up the session's folder is on control's own machine, so the file
+// tools still run there: list_folder over MCP answers the folder's entries.
+// TestXProcFileToolsRefusedOnRemoteRunner is the other machine's case.
+func TestUpFileToolsRunOnOwnMachine(t *testing.T) {
+	home := t.TempDir()
+	svc := runService(t, home, nil, 0)
+	tok := readToken(t, home)
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "here"), []byte("here"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "mcp")
+	t.Setenv("AGENTBUS_FAKE_MCP", `{"name":"list_folder","arguments":{"path":"`+outside+`"}}`)
+	t.Setenv("AGENTBUS_FAKE_MCP_OUT", out)
+	code, started, raw := postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": t.TempDir(), "isolate": false, "prompt": "list a folder"})
+	if code/100 != 2 {
+		t.Fatalf("run %d %s", code, raw)
+	}
+	session, _ := started["session"].(string)
+
+	// The gate holds the call for a person; answered once, it runs.
+	answered := map[string]bool{}
+	waitFor(t, "the agent's list_folder answer", func() bool {
+		var page struct {
+			Approvals []struct {
+				ID      string `json:"id"`
+				Session string `json:"session"`
+			} `json:"approvals"`
+		}
+		_, b := getAPI(t, svc, tok, "/api/v0/approvals")
+		_ = json.Unmarshal([]byte(b), &page)
+		for _, a := range page.Approvals {
+			if a.Session == session && !answered[a.ID] {
+				answered[a.ID] = true
+				postAPI(t, svc, tok, "/api/v0/approvals/"+a.ID, []byte(`{"decision":"once"}`))
+			}
+		}
+		_, err := os.Stat(out)
+		return err == nil
+	})
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(b); strings.Contains(got, `"isError":true`) || !strings.Contains(got, `\"name\":\"here\"`) {
+		t.Fatalf("list_folder in agentbus up: want the folder's entries, got %s", got)
+	}
+}

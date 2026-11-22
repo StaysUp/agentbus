@@ -115,9 +115,16 @@ type xproc struct {
 // agents' calls.
 func startServer(t *testing.T, harnesses ...string) *xproc {
 	t.Helper()
+	return startServerEnv(t, nil, harnesses...)
+}
+
+// startServerEnv is startServer with more variables in control's environment,
+// such as a HOME of its own, so control and a runner stand for two machines.
+func startServerEnv(t *testing.T, extra []string, harnesses ...string) *xproc {
+	t.Helper()
 	x := &xproc{t: t, bin: agentbusBinary(t), serverHome: t.TempDir()}
 	connectFake(t, x.serverHome, harnesses...)
-	env := append(os.Environ(), "AGENTBUS_HOME="+x.serverHome)
+	env := append(append(os.Environ(), "AGENTBUS_HOME="+x.serverHome), extra...)
 	addr := x.spawn(t, "server", []string{"server", "-listen", "127.0.0.1:0"}, env, reListening)
 	x.base = "http://" + addr
 	x.tok = readToken(t, x.serverHome)
@@ -466,6 +473,80 @@ func TestXProcRunnerAgentAsksAnother(t *testing.T) {
 	waitFor(t, "both sessions in control's record", func() bool {
 		return len(x.sessionIDs()) >= 2
 	})
+}
+
+// The file tools (read_file, list_folder, write_file) open files in the
+// process that serves the API, which is control. For a session on another
+// machine's runner they would read and write control's disk, not that
+// machine's, so control refuses them, before the gate, so no approval card is
+// shown. The route called directly, as agentbus-api calls it, answers 409.
+// Two processes with two HOMEs stand for two machines: ~/abprobe holds a
+// different file in each.
+func TestXProcFileToolsRefusedOnRemoteRunner(t *testing.T) {
+	controlHome, runnerHome := t.TempDir(), t.TempDir()
+	for home, name := range map[string]string{controlHome: "on-control", runnerHome: "on-runner"} {
+		if err := os.Mkdir(filepath.Join(home, "abprobe"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(home, "abprobe", name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	out, direct := filepath.Join(t.TempDir(), "mcp"), filepath.Join(t.TempDir(), "direct")
+	x := startServerEnv(t, []string{"HOME=" + controlHome}, "claude")
+	x.setAgentEnv("HOME="+runnerHome,
+		`AGENTBUS_FAKE_MCP={"name":"list_folder","arguments":{"path":"~/abprobe"}}`,
+		"AGENTBUS_FAKE_MCP_OUT="+out,
+		`AGENTBUS_FAKE_POST=/api/v0/files/list {"path":"~/abprobe"}`,
+		"AGENTBUS_FAKE_POST_OUT="+direct)
+	x.addRunner("far", t.TempDir())
+	fs := x.folders()
+
+	code, st := x.startTurnX(map[string]any{"agent": "claude", "folder_ref": fs[0].Ref,
+		"machine": fs[0].Machine, "prompt": "list a folder", "isolate": false})
+	if code/100 != 2 || st.Session == "" {
+		t.Fatalf("POST /api/v0/turns: %d %+v", code, st)
+	}
+
+	// A call the gate holds is answered once, so a call that is not refused
+	// runs, and its answer shows whose disk it listed.
+	answered := map[string]bool{}
+	waitFor(t, "the agent's two list_folder answers", func() bool {
+		if _, b := x.get("/api/v0/approvals"); len(b) > 0 {
+			var page struct {
+				Approvals []struct {
+					ID      string `json:"id"`
+					Session string `json:"session"`
+				} `json:"approvals"`
+			}
+			_ = json.Unmarshal(b, &page)
+			for _, a := range page.Approvals {
+				if a.Session == st.Session && !answered[a.ID] {
+					answered[a.ID] = true
+					x.post("/api/v0/approvals/"+a.ID, map[string]any{"decision": "once"})
+				}
+			}
+		}
+		_, err := os.Stat(out)
+		_, err2 := os.Stat(direct)
+		return err == nil && err2 == nil
+	})
+	b, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(b); !strings.Contains(got, `"isError":true`) || !strings.Contains(got, "control's own machine") {
+		t.Fatalf("list_folder in a session on another machine: want the refusal, got %s", got)
+	}
+	if hasKind(x.recordKinds(st.Session), "approval.requested") {
+		t.Fatal("the refused call was held for a person: an approval card was shown")
+	}
+	if b, err = os.ReadFile(direct); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(b); !strings.HasPrefix(got, "409 ") || !strings.Contains(got, "work only for a session whose folder is on control's own machine") {
+		t.Fatalf("POST /api/v0/files/list in a session on another machine: want 409 and the refusal, got %s", got)
+	}
 }
 
 // An ask rule refused on a separate runner process reaches control's record,

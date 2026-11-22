@@ -45,6 +45,23 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// fakePost sends body to $AGENTBUS_URL+path with the agent's own token and
+// writes "<status> <body>" to out, when out is set.
+func fakePost(path, body, out string) {
+	req, _ := http.NewRequest("POST", os.Getenv("AGENTBUS_URL")+path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+os.Getenv("AGENTBUS_TOKEN"))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if out != "" {
+		os.WriteFile(out, []byte(fmt.Sprintf("%d %s", resp.StatusCode, b)), 0o600)
+	}
+}
+
 func fakeAgent() {
 	if a := os.Args[1:]; len(a) == 1 && a[0] == "--version" {
 		fmt.Println(os.Getenv("AGENTBUS_FAKE_VERSION"))
@@ -260,6 +277,19 @@ func fakeAgent() {
 				os.WriteFile(p, []byte(fmt.Sprintf("%d %s", resp.StatusCode, out)), 0o600)
 			}
 		}
+	}
+	// With AGENTBUS_FAKE_MCP, one tools/call to control's tool server
+	// ($AGENTBUS_URL/api/v0/mcp) with its own token, as Claude Code calls an
+	// AgentBus tool: the value is the call's params. "<status> <body>" goes to
+	// AGENTBUS_FAKE_MCP_OUT.
+	if p := os.Getenv("AGENTBUS_FAKE_MCP"); p != "" {
+		fakePost("/api/v0/mcp", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":`+p+`}`, os.Getenv("AGENTBUS_FAKE_MCP_OUT"))
+	}
+	// With AGENTBUS_FAKE_POST ("<path> <JSON body>"), one POST to control's
+	// API with its own token, as agentbus-api sends it. "<status> <body>"
+	// goes to AGENTBUS_FAKE_POST_OUT.
+	if p, b, ok := strings.Cut(os.Getenv("AGENTBUS_FAKE_POST"), " "); ok {
+		fakePost(p, b, os.Getenv("AGENTBUS_FAKE_POST_OUT"))
 	}
 	// AGENTBUS_FAKE_STDERR goes to stderr, AGENTBUS_FAKE_STDERR_REPEAT times
 	// (once when unset), as an agent reports a failure.
