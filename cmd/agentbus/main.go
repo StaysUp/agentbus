@@ -170,6 +170,8 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		}
 		c.holdMS = n
 	}
+	// Before start, which makes the folder.
+	fresh := freshFolder(home)
 	svc, err := start(c)
 	if err != nil {
 		own.Print(err)
@@ -184,6 +186,9 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		own.Printf("listening on http://%s, data folder %s", svc.addr, home)
 	default:
 		own.Printf("listening on http://%s, data folder %s; reachable from the network; the token guards the API; no HTTPS", svc.shown, home)
+	}
+	if c.mode == modeUp {
+		fmt.Fprintf(stdout, "\n%s\n", svc.dataFolderLine(home, fresh))
 	}
 	switch {
 	case c.mode == modeRunner:
@@ -1590,6 +1595,45 @@ func (s *service) shutdown() {
 	_ = s.store.Close()
 	s.log.Printf("service.stop")
 	_ = s.log.Close()
+}
+
+// freshFolder says home, the data folder, is new: missing, or holding
+// nothing yet.
+func freshFolder(home string) bool {
+	entries, err := os.ReadDir(home)
+	return len(entries) == 0 && (err == nil || errors.Is(err, fs.ErrNotExist))
+}
+
+// dataFolderLine is what agentbus up says about its data folder when it
+// starts: which one, and whether it is new or what an earlier run left in
+// it. up reuses an existing folder, so its old agents and sessions show in
+// the cockpit: this line says so before the person looks.
+func (s *service) dataFolderLine(home string, fresh bool) string {
+	line := "Data folder: " + tildePath(home)
+	if fresh {
+		return line + " (new)"
+	}
+	snap, err := s.store.Snapshot()
+	if err != nil {
+		return line + " (existing)"
+	}
+	return line + " (existing: " + counted(len(s.saved.List()), "agent") + ", " + counted(len(snap.Sessions), "session") + ")"
+}
+
+// tildePath is p as a person writes it: from ~ when it is under their home.
+func tildePath(p string) string {
+	if h, err := os.UserHomeDir(); err == nil && h != "" && strings.HasPrefix(p, h+string(filepath.Separator)) {
+		return "~" + p[len(h):]
+	}
+	return p
+}
+
+// counted is n things: "1 agent", "3 agents".
+func counted(n int, thing string) string {
+	if n == 1 {
+		return "1 " + thing
+	}
+	return strconv.Itoa(n) + " " + thing + "s"
 }
 
 // dataFolder is $AGENTBUS_HOME, else $XDG_DATA_HOME/agentbus, else
