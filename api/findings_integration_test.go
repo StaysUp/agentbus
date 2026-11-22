@@ -101,6 +101,9 @@ func TestAskFromALaterTurnStaysInTheSandbox(t *testing.T) {
 	startTurn(t, e, `{"session":"`+sess+`","agent":"claude","prompt":"two"}`)
 	tok2 := tokenOf(t, dir, "two")
 	ask(t, e, tok2, `{"agent":"claude","prompt":"child"}`)
+	// The asked turn runs in the asker's copy after the asker's turn ends (the
+	// workspace lane), so release "two"; the copy outlives the turn.
+	release(dir, "two")
 	// The asked turn ran in the asker's copy, not the person's folder, and the
 	// folder is untouched.
 	if got := pwdOf(t, dir, "child"); got == folder || !strings.HasSuffix(got, filepath.Join("sessions", ws)) {
@@ -109,9 +112,7 @@ func TestAskFromALaterTurnStaysInTheSandbox(t *testing.T) {
 	if b, err := os.ReadFile(filepath.Join(folder, "a.txt")); err != nil || string(b) != "orig\n" {
 		t.Errorf("the person's folder changed to %q, want it untouched by the sandboxed ask", b)
 	}
-	for _, p := range []string{"two", "child"} {
-		release(dir, p)
-	}
+	release(dir, "child")
 }
 
 // #6: a session whose first turn is still running reports sandbox: true. (Parked

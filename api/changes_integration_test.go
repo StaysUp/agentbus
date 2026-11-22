@@ -189,6 +189,15 @@ func TestWorkspaceIDIsNotASession(t *testing.T) {
 	if _, _, found, err := e.store.LatestPreview(string(ws)); err != nil || found {
 		t.Fatalf("a changes.previewed was written under the workspace id: found=%v err=%v", found, err)
 	}
+	// Archiving a workspace id as a session is 404 too, and writes no
+	// session.archived -- SessionHasWork is session-scoped, so the workspace's
+	// open jobs do not make its id pass as a session.
+	if code, out := as(t, e, token, "PATCH", "/api/v0/sessions/"+string(ws), `{"archived":true}`); code != 404 {
+		t.Fatalf("PATCH /sessions/{workspace id} archived: %d %s, want 404", code, out)
+	}
+	if known, err := e.store.Known(string(ws)); err != nil || known {
+		t.Fatalf("the workspace id became a known session after archive: known=%v err=%v", known, err)
+	}
 }
 
 // A preview whose session has a stored turn.applied -- here a refused apply,

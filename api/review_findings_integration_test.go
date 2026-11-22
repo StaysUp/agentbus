@@ -263,14 +263,22 @@ func TestFailedAskedTurnKeepsTheAskersCopy(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &sc); err != nil {
 		t.Fatal(err)
 	}
-	if code, out := as(t, e, tok, "POST", "/api/v0/turns", `{"session":"`+sc.Session+`","agent":"claude","prompt":"child"}`); code != http.StatusInternalServerError {
-		t.Fatalf("asked turn: %d %s, want it to fail to start", code, out)
+	code, out = as(t, e, tok, "POST", "/api/v0/turns?wait=false", `{"session":"`+sc.Session+`","agent":"claude","prompt":"child"}`)
+	if code != http.StatusAccepted {
+		t.Fatalf("asked turn: %d %s, want it recorded", code, out)
 	}
+	var asked Started
+	if err := json.Unmarshal([]byte(out), &asked); err != nil {
+		t.Fatal(err)
+	}
+	// The asked turn runs after the asker's turn ends (the workspace lane), then
+	// fails to start (a missing binary). Release the asker and wait for it.
+	release(dir, "hold")
+	waitEnded(t, e, asked.Turn)
 	// The asker's copy and its marker survive the asked turn's failure.
 	if b, err := os.ReadFile(filepath.Join(copyDir, "marker.txt")); err != nil || string(b) != "held" {
 		t.Errorf("the asker's copy marker is %q (%v), want it intact after the asked turn failed", b, err)
 	}
-	release(dir, "hold")
 }
 
 // R2: an ask is one turn. A turn token opens an asked session and starts its one
@@ -291,12 +299,12 @@ func TestAskTokenCannotContinueTheAskedSession(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &sc); err != nil {
 		t.Fatal(err)
 	}
-	if code, out := as(t, e, tok, "POST", "/api/v0/turns", `{"session":"`+sc.Session+`","agent":"claude","prompt":"one"}`); code != http.StatusAccepted {
+	if code, out := as(t, e, tok, "POST", "/api/v0/turns?wait=false", `{"session":"`+sc.Session+`","agent":"claude","prompt":"one"}`); code != http.StatusAccepted {
 		t.Fatalf("the asked turn: %d %s", code, out)
 	}
 	// A second turn to the same asked session is refused: a turn token does not
 	// continue a conversation.
-	if code, out := as(t, e, tok, "POST", "/api/v0/turns", `{"session":"`+sc.Session+`","agent":"claude","prompt":"two"}`); code != http.StatusForbidden || !strings.Contains(out, "does not continue") {
+	if code, out := as(t, e, tok, "POST", "/api/v0/turns?wait=false", `{"session":"`+sc.Session+`","agent":"claude","prompt":"two"}`); code != http.StatusForbidden || !strings.Contains(out, "does not continue") {
 		t.Errorf("second turn to the asked session: %d %s, want 403 continuation refused", code, out)
 	}
 	release(dir, "hold")
@@ -317,11 +325,13 @@ func TestAskedTurnDiffsFromTheWorkspaceHead(t *testing.T) {
 	startTurn(t, e, `{"session":"`+sess+`","agent":"claude","prompt":"hold"}`)
 	tok := tokenOf(t, dir, "hold")
 	asked := ask(t, e, tok, `{"agent":"claude","prompt":"b"}`)
+	// The asked turn runs after the asker's turn ends (the workspace lane), so
+	// release "hold" and let the asked turn run to its end.
+	release(dir, "hold")
 	waitEnded(t, e, asked.Turn)
-	// The asked turn diffs from the workspace head (turn 1's end checkpoint), so
+	// The asked turn diffs from the workspace head (the last end checkpoint), so
 	// its own b.txt is a change and turn 1's ended a.txt is NOT re-attributed to
-	// it. (marker.txt, the asker turn's concurrent uncommitted write in the same
-	// copy, may appear -- that is the shared copy, not a mis-attribution.)
+	// it.
 	p := turnChangesOf(t, e, asked.Turn)
 	paths := map[string]bool{}
 	for _, f := range p.Changes {
@@ -330,7 +340,6 @@ func TestAskedTurnDiffsFromTheWorkspaceHead(t *testing.T) {
 	if paths["a.txt"] || !paths["b.txt"] {
 		t.Errorf("the asked turn's changes are %+v, want b.txt and NOT turn 1's ended a.txt", p.Changes)
 	}
-	release(dir, "hold")
 }
 
 // R4: a workspace's head_turn is its latest turn that recorded a changeset,
@@ -379,6 +388,9 @@ func TestArchivingAnAskedSessionKeepsTheAskersCopy(t *testing.T) {
 	tok := tokenOf(t, dir, "hold")
 	copyDir := pwdOf(t, dir, "hold")
 	asked := ask(t, e, tok, `{"agent":"claude","prompt":"child"}`)
+	// The asked turn runs in the asker's copy after the asker's turn ends (the
+	// workspace lane), so release "hold" and let the asked turn run to its end.
+	release(dir, "hold")
 	waitEnded(t, e, asked.Turn)
 	// Archive the asked session.
 	if resp, out := do(t, e.req(t, "PATCH", "/api/v0/sessions/"+asked.Session, strings.NewReader(`{"archived":true}`))); resp.StatusCode != 200 || !strings.Contains(out, `"archived":true`) {
@@ -396,7 +408,6 @@ func TestArchivingAnAskedSessionKeepsTheAskersCopy(t *testing.T) {
 	if code := getJSON(t, e, "/api/v0/workspaces/"+ws, &wsp); code != 200 || wsp.HeadTurn != asked.Turn {
 		t.Errorf("GET /workspaces/%s after archive: head_turn %q, want the asked turn %q kept", ws, wsp.HeadTurn, asked.Turn)
 	}
-	release(dir, "hold")
 }
 
 // R6: an asked session opened via POST /api/v0/sessions names its asker (origin

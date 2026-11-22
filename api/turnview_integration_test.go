@@ -23,37 +23,42 @@ func TestTurnTokenReadsTreeTurnsByID(t *testing.T) {
 	p := startTurn(t, e, `{"session":"`+psess+`","agent":"claude","prompt":"parent"}`)
 	ptok := tokenOf(t, dir, "parent")
 	c := ask(t, e, ptok, `{"agent":"claude","prompt":"child"}`)
-	ctok := tokenOf(t, dir, "child")
+	// A separate tree: a turn the person started in its own workspace, so it runs
+	// beside the child.
 	qsess := e.newSession(t, t.TempDir(), true)
 	q := startTurn(t, e, `{"session":"`+qsess+`","agent":"claude","prompt":"outside"}`)
 	tokenOf(t, dir, "outside")
+	// The asked child runs after the asker's turn ends (the workspace lane). Its
+	// own token reads the turns of its tree (the parent's) by id, reaches nothing
+	// outside it, and gets 404 for an unknown id.
+	release(dir, "parent")
+	ctok := tokenOf(t, dir, "child")
 	for _, tc := range []struct {
-		tok, path string
-		want      int
+		path string
+		want int
 	}{
-		{ptok, "/api/v0/turns/" + c.Turn, 200},
-		{ptok, "/api/v0/turns/" + c.Turn + "/diff", 200},
-		{ctok, "/api/v0/turns/" + p.Turn, 200},
-		{ctok, "/api/v0/turns/" + p.Turn + "/diff", 200},
-		{ptok, "/api/v0/turns/" + q.Turn, 403},
-		{ptok, "/api/v0/turns/" + q.Turn + "/diff", 403},
-		{ptok, "/api/v0/turns/" + c.Turn + "?session=" + q.Session, 403},
-		{ptok, "/api/v0/turns/t_0000000000000000", 404},
+		{"/api/v0/turns/" + p.Turn, 200},
+		{"/api/v0/turns/" + p.Turn + "/diff", 200},
+		{"/api/v0/turns/" + q.Turn, 403},
+		{"/api/v0/turns/" + q.Turn + "/diff", 403},
+		{"/api/v0/turns/" + p.Turn + "?session=" + q.Session, 403},
+		{"/api/v0/turns/t_0000000000000000", 404},
 	} {
-		code, out := as(t, e, tc.tok, "GET", tc.path, "")
-		if code != tc.want {
-			t.Errorf("%s GET %s: %d %s, want %d", tc.tok[:8], tc.path, code, out, tc.want)
-		}
-		if code == 200 && strings.HasSuffix(tc.path, c.Turn) {
-			var one OneTurn
-			if json.Unmarshal([]byte(out), &one) != nil || one.Turn.Session != c.Session || one.Turn.Origin == nil || one.Turn.Origin.Turn != p.Turn {
-				t.Errorf("the child's turn read by the parent: %s", out)
-			}
+		if code, out := as(t, e, ctok, "GET", tc.path, ""); code != tc.want {
+			t.Errorf("child GET %s: %d %s, want %d", tc.path, code, out, tc.want)
 		}
 	}
-	for _, n := range []string{"parent", "child", "outside"} {
-		release(dir, n)
+	// The child's own turn, read by id from the record, names who asked it.
+	if code, out := as(t, e, ctok, "GET", "/api/v0/turns/"+c.Turn, ""); code != 200 {
+		t.Errorf("the child reads its own turn: %d %s", code, out)
+	} else {
+		var one OneTurn
+		if json.Unmarshal([]byte(out), &one) != nil || one.Turn.Session != c.Session || one.Turn.Origin == nil || one.Turn.Origin.Turn != p.Turn {
+			t.Errorf("the child's own turn: %s", out)
+		}
 	}
+	release(dir, "child")
+	release(dir, "outside")
 }
 
 // A turn token's search leaves out its own turn, so the search call itself is

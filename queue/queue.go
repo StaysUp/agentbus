@@ -897,18 +897,35 @@ func (q *Queue) HasKey(team, key string) (bool, error) {
 	return n > 0, nil
 }
 
-// laneTake is Take's one rule of a session's lane, for a job j and another
-// job o: j waits for o. A session's turns are one lane, first in, first out:
-// each waits for one that runs, and for an older one still queued.
-// Apply and folder jobs use no copy and never wait. (B15: the review lane
-// clause retired with the review kind — a review is a turn in its own session.)
-const laneTake = `(o.state IN ('taken','running') AND
-		j.kind = 'turn' AND o.session = j.session AND o.kind = 'turn')
-	OR (o.state = 'queued' AND j.kind = 'turn' AND o.session = j.session AND o.kind = 'turn'
-		AND (o.created < j.created OR (o.created = j.created AND o.id < j.id)))`
+// laneKinds are the job kinds that share a workspace's one ordered lane: the
+// jobs that CHANGE the one copy -- a turn (runs in it) and a discard (resets it
+// to the last applied point). They run one at a time on the runner that holds
+// the copy, so a discard never resets a copy a turn is editing. apply and
+// preview are NOT here: they read finished checkpoints (published changesets)
+// and the person's folder, never the live copy, so they leave the lane and
+// never wait on a running turn (his call, 2026-11-22). folder and home touch no
+// workspace copy. (B15: a review is a turn in its own session, so no review
+// clause.)
+const laneKinds = `('turn','discard')`
 
-// SessionHasWork says the session has a job that has not ended: a turn job
-// of it, or a review whose turn runs in it.
+// laneTake is Take's one rule of a WORKSPACE's lane, for a job j and another job
+// o: j waits for o. A workspace's copy-changing jobs (turns and discards) are
+// one line, first in, first out -- an asked session's turns share the asker's
+// line, since both name the one workspace -- so each waits for one that runs,
+// and for an older one still queued. The lane key is the workspace, or the
+// session for a job with no workspace (its own workspace), as CopyKey keys the
+// copy row.
+const laneTake = `j.kind IN ` + laneKinds + ` AND o.kind IN ` + laneKinds + `
+	AND COALESCE(NULLIF(json_extract(o.spec, '$.workspace'), ''), o.session) = COALESCE(NULLIF(json_extract(j.spec, '$.workspace'), ''), j.session)
+	AND (o.state IN ('taken','running')
+		OR (o.state = 'queued' AND (o.created < j.created OR (o.created = j.created AND o.id < j.id))))`
+
+// SessionHasWork says the SESSION has a turn job that has not ended. It is kept
+// session-scoped (not the workspace lane): its callers ask about this one
+// session -- archive, and the open-turn conflict check -- so a workspace id that
+// names no turn's session answers false, never masquerading as a session, and a
+// job of another session in the same workspace does not count. A workspace-lane
+// predicate, if one is ever needed, is a distinct WorkspaceHasWork.
 func (q *Queue) SessionHasWork(team, session string) (bool, error) {
 	var n int
 	err := q.db.QueryRow(`SELECT COUNT(*) FROM jobs o, (SELECT ? AS session) j WHERE o.team = ? AND o.ended IS NULL
@@ -919,14 +936,16 @@ func (q *Queue) SessionHasWork(team, session string) (bool, error) {
 	return n > 0, nil
 }
 
-// TurnsAhead are the jobs the turn job waits behind, oldest
-// first: its session's turn jobs that have not ended and were
-// made before it, and a review whose turn runs in its session. None for a
-// job of no session.
+// TurnsAhead are the jobs the job waits behind in its workspace's lane, oldest
+// first: the lane jobs (turn, apply, preview, discard) of its workspace that
+// have not ended and were made before it. An asked session's turn waits behind
+// the asker's, since both name the one workspace. None for a job of no lane.
 func (q *Queue) TurnsAhead(team, id string) ([]Job, error) {
 	rows, err := q.db.Query(`SELECT o.id FROM jobs o JOIN jobs j ON j.id = ? AND j.team = ?
-		WHERE o.team = j.team AND o.ended IS NULL AND o.id != j.id AND j.session IS NOT NULL
-		AND o.kind = 'turn' AND o.session = j.session AND (o.created < j.created OR (o.created = j.created AND o.id < j.id))
+		WHERE o.team = j.team AND o.ended IS NULL AND o.id != j.id
+		AND j.kind IN `+laneKinds+` AND o.kind IN `+laneKinds+`
+		AND COALESCE(NULLIF(json_extract(o.spec, '$.workspace'), ''), o.session) = COALESCE(NULLIF(json_extract(j.spec, '$.workspace'), ''), j.session)
+		AND (o.created < j.created OR (o.created = j.created AND o.id < j.id))
 		ORDER BY o.created, o.id`, id, team)
 	if err != nil {
 		return nil, fmt.Errorf("queue: list turns ahead: %w", err)
@@ -1366,7 +1385,7 @@ func (q *Queue) Take(runnerID string, lease time.Duration, folders bool) (job Jo
 			AND `+kinds+` AND COALESCE(json_extract(r.caps, '$.role'), '') = ''
 			AND (j.kind IN `+folderKinds+` OR j.session IS NULL OR NOT EXISTS (SELECT 1 FROM copies s WHERE s.id = COALESCE(NULLIF(json_extract(j.spec, '$.workspace'), ''), j.session) AND s.team = j.team)
 				OR EXISTS (SELECT 1 FROM copies s WHERE s.id = COALESCE(NULLIF(json_extract(j.spec, '$.workspace'), ''), j.session) AND s.team = j.team AND s.runner = r.id AND s.closed IS NULL))
-			AND (j.session IS NULL OR NOT EXISTS (SELECT 1 FROM jobs o WHERE o.team = j.team AND o.id != j.id AND (`+laneTake+`)))
+			AND (j.kind NOT IN `+laneKinds+` OR NOT EXISTS (SELECT 1 FROM jobs o WHERE o.team = j.team AND o.id != j.id AND (`+laneTake+`)))
 			AND (`+machineTake+`) AND (`+labelsTake+`) AND (`+harnessTake+`)
 			ORDER BY j.created, j.id LIMIT 1`, runnerID, team, nanos(now.Add(-RunnerFresh))).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {

@@ -124,6 +124,15 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 	// session is one it created in its own workspace, and name the asking turn.
 	var links queue.Links
 	if g := grantOf(r); g != nil {
+		// The asked turn runs in the asker's workspace, which holds one ordered
+		// lane, so it waits for the asker's (running) turn to end. A wait here
+		// would stall the asker's turn behind a turn that cannot start until the
+		// asker's turn is over. An ask is async: the answer comes back as a later
+		// turn (mail), so a turn token cannot wait for a turn it starts.
+		if !noWait {
+			writeError(w, http.StatusBadRequest, "a turn token cannot wait for a turn it starts: the turn runs in your workspace after your own turn ends, and its answer comes back to your session as a later turn; send it with wait=false")
+			return
+		}
 		var ok bool
 		if links, ok = a.askChecks(w, *g, policyOf(r), &body); !ok {
 			return

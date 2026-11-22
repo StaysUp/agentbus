@@ -237,6 +237,36 @@ func TestSessionFromBeforeKeepsItsRunner(t *testing.T) {
 	}
 }
 
+// W3: apply is NOT in the workspace lane -- it reads finished checkpoints and
+// the folder, never the live copy -- so an apply of an ended turn is taken at
+// once while a later turn of the same workspace is still running (his call,
+// 2026-11-22). Only turns and discards (which change the copy) share the lane.
+func TestApplyDoesNotWaitForRunningTurn(t *testing.T) {
+	q, _ := open(t)
+	rn := capsRunner(t, q, nil, &Capabilities{Connector: conA})
+	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
+	t1 := run(t, q, rn, Result{Changeset: hexOf('1')})
+	if t1.ID != first.ID {
+		t.Fatalf("ran %s", t1.ID)
+	}
+	// A second turn of the same workspace is running (taken and started).
+	next := makeJob(t, q, Spec{Session: ids.SessionID(first.Session)})
+	nj, na := take(t, q, rn)
+	if nj.ID != next.ID {
+		t.Fatalf("took %s, want the next turn %s", nj.ID, next.ID)
+	}
+	if _, _, err := q.Start(rn.ID, na.ID, na.Number, lease); err != nil {
+		t.Fatal(err)
+	}
+	ap, created, err := q.Apply(DefaultTeam, t1.Turn)
+	if err != nil || !created {
+		t.Fatalf("apply: %v %v", created, err)
+	}
+	if got := takesFolder(t, q, rn); got != ap.ID {
+		t.Fatalf("the apply waited behind a running turn: took %q, want the apply %s", got, ap.ID)
+	}
+}
+
 // Folder jobs have places of their own: an apply is taken while every turn
 // place is busy, and at most FolderCapacity folder jobs run at once.
 func TestFolderPlacesBesideTurns(t *testing.T) {

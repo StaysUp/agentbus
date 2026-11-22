@@ -235,6 +235,9 @@ func TestTurnDiffAndApply(t *testing.T) {
 		t.Fatalf("apply by default: %d %s", code, out)
 	}
 	os.WriteFile(perm, []byte("[agent_api]\napply = true\n"), 0o600)
+	// apply is not in the workspace lane (it reads finished checkpoints and the
+	// folder, never the live copy), so a turn token applies an earlier turn's
+	// changes while its own turn runs, at once.
 	code, st = applyAs(t, e, tok, second.Turn)
 	if code != 200 || st.State != "applied" || !slices.Equal(st.Files, []string{"a.txt"}) || read("a.txt") != "one\nthree\n" {
 		t.Fatalf("apply by a turn token: %d %+v, a.txt %q", code, st, read("a.txt"))
