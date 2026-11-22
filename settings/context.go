@@ -5,7 +5,7 @@ package settings
 // as "compacts at ~Y%". It is a setting, not a fixed number, because the
 // vendors disagree and move: opencode and Gemini CLI publish a real rule in
 // their own open source (opencode keeps a token reserve free, ~85% of a 200k
-// window; Gemini CLI a share); Claude Code and Codex publish none, so
+// window; Gemini CLI half the window); Claude Code and Codex publish none, so
 // their point here is a stated default the person can change, never a hidden
 // invented number. A person reads it at GET /api/v0/settings/compaction and
 // changes it at PUT. Nothing here decides or runs compaction: that is 0.7.
@@ -22,7 +22,7 @@ type Compaction struct {
 	Claude   *float64 `toml:"claude" json:"claude,omitempty" doc:"The share (0 to 1) of the model's window at which Claude Code compacts. Claude Code publishes no number, so this is a stated default you can change, not a value read from the vendor. Absent in a PUT: 0.8."`
 	Codex    *float64 `toml:"codex" json:"codex,omitempty" doc:"The share (0 to 1) of the model's window at which Codex CLI compacts. Codex publishes no fixed number, so this is a stated default you can change. Absent in a PUT: 0.8."`
 	Opencode *float64 `toml:"opencode" json:"opencode,omitempty" doc:"The share (0 to 1) of the model's window at which opencode compacts. opencode's own open source compacts when a turn's tokens reach the window less a reserve of up to 32k tokens for its reply: 0.84 of a 200k window, more of a larger one. Absent in a PUT: 0.85."`
-	Gemini   *float64 `toml:"gemini" json:"gemini,omitempty" doc:"The share (0 to 1) of the model's window at which Gemini CLI compacts. Gemini CLI's config default is 0.7. Absent in a PUT: 0.7."`
+	Gemini   *float64 `toml:"gemini" json:"gemini,omitempty" doc:"The share (0 to 1) of the model's window at which Gemini CLI compacts. Gemini CLI's own open source compresses its history once a turn's tokens reach half the model's window, its compressionThreshold default. Absent in a PUT: 0.5."`
 }
 
 // The built-in defaults. opencode and Gemini are read from their own open
@@ -40,7 +40,12 @@ const (
 	// a 200k window and a 32k reply that is 0.84, which 0.85 stands for; a
 	// larger window compacts later (about 0.97 of 1M).
 	defaultOpencodePoint = 0.85
-	defaultGeminiPoint   = 0.70
+	// Gemini CLI compresses its history when a turn's tokens reach
+	// threshold * tokenLimit(model), the threshold defaulting to 0.5
+	// (Gemini CLI v0.70.0: packages/core/src/context/chatCompressionService.ts,
+	// DEFAULT_COMPRESSION_TOKEN_THRESHOLD; packages/cli/src/config/
+	// settingsSchema.ts, model.compressionThreshold).
+	defaultGeminiPoint = 0.50
 )
 
 // Where a compaction point's number comes from, so the view never shows a
