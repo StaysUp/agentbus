@@ -94,9 +94,19 @@ type Backend interface {
 	Checkpoints(s *Space) ([]Checkpoint, error)
 	// Diff is what changed from one checkpoint to a later one.
 	Diff(s *Space, from, to string) (workspace.Changes, error)
+	// RestoreTo resets the space's working files to checkpoint name (Base for
+	// the copy as it was first made): a file changed since name goes back to
+	// it, a file added since is removed, a file removed since returns. It is
+	// the copy side of Discard. A backend that cannot do it yet returns
+	// ErrNoRestore, and the person's real folder is never touched.
+	RestoreTo(s *Space, name string) error
 	// Close removes the copy and everything the space kept.
 	Close(s *Space) error
 }
+
+// ErrNoRestore: this backend cannot reset a copy to a checkpoint yet, so a
+// Discard of a workspace on it is refused with a plain message for the person.
+var ErrNoRestore = errors.New("Discard is not available for this workspace yet")
 
 // Request is the copy a session asks for.
 type Request struct {
@@ -289,6 +299,7 @@ func (f fallback) Checkpoint(s *Space, name string) (Checkpoint, error) {
 	return f.own(s).Checkpoint(s, name)
 }
 func (f fallback) Checkpoints(s *Space) ([]Checkpoint, error) { return f.own(s).Checkpoints(s) }
+func (f fallback) RestoreTo(s *Space, name string) error      { return f.own(s).RestoreTo(s, name) }
 func (f fallback) Diff(s *Space, from, to string) (workspace.Changes, error) {
 	return f.own(s).Diff(s, from, to)
 }

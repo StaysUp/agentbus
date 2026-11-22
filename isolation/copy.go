@@ -105,6 +105,12 @@ func (copyBackend) Diff(s *Space, from, to string) (workspace.Changes, error) {
 	return diff(s, from, to)
 }
 
+// RestoreTo is not built for the copy backend: the private git checkpoints
+// (W3 AREA 2) replace the homemade restore, which could half-wipe the copy if a
+// later file failed to restore. Until that lands, a copy workspace's Discard is
+// refused with a plain message, as the other backends are.
+func (copyBackend) RestoreTo(s *Space, name string) error { return ErrNoRestore }
+
 func (copyBackend) Close(s *Space) error {
 	if s.Root != filepath.Join(s.Workdir, s.ID) {
 		return ErrOutside

@@ -9,6 +9,7 @@ package api
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -207,6 +208,104 @@ func (a *API) getWorkspace(w http.ResponseWriter, _ *http.Request, id string) {
 		return
 	}
 	writeJSON(w, http.StatusOK, ws)
+}
+
+// DiscardState is the state of a workspace discard (POST
+// /api/v0/workspaces/{id}/discard): the copy's unapplied changes dropped.
+type DiscardState struct {
+	State        string   `json:"state,omitempty" doc:"queued, running, discarded, or failed (error says why)."`
+	Already      bool     `json:"already,omitempty" doc:"Nothing was unapplied, so nothing was dropped."`
+	DroppedTurns []string `json:"dropped_turns,omitempty" doc:"The turns whose file changes the discard dropped, oldest first. Their conversation stays."`
+	Error        string   `json:"error,omitempty" doc:"Why the discard failed."`
+}
+
+// discardStateOf reads a discard job's state and the HTTP status that reports
+// it: 200 discarded, 202 while it waits behind a running turn, and the runner's
+// own status for a failure (400 when the workspace's backend has no discard yet,
+// else 500).
+func (a *API) discardStateOf(j queue.Job) (DiscardState, int) {
+	switch {
+	case j.State == queue.Queued:
+		return DiscardState{State: "queued"}, http.StatusAccepted
+	case j.Ended == nil:
+		return DiscardState{State: "running"}, http.StatusAccepted
+	case j.State == queue.Finished:
+		return DiscardState{State: "discarded", DroppedTurns: j.Links.AppliesTurns}, http.StatusOK
+	default:
+		st := DiscardState{State: "failed", Error: "the discard did not finish"}
+		status := http.StatusInternalServerError
+		if r, _ := queue.ReadResult(j.Result); r.Refused != "" {
+			st.Error = r.Refused
+			if r.Status != 0 {
+				status = r.Status
+			}
+		}
+		return st, status
+	}
+}
+
+// discardWorkspace serves POST /api/v0/workspaces/{id}/discard: drop the
+// workspace's unapplied changes, resetting its sandbox copy to the last applied
+// state (or base). The person's folder is never touched. Main token only.
+func (a *API) discardWorkspace(w http.ResponseWriter, r *http.Request, id string) {
+	if a.cfg.Queue == nil {
+		writeError(w, http.StatusNotFound, noTurns)
+		return
+	}
+	wsID := ids.WorkspaceID(id)
+	ws, found, err := a.cfg.Store.Workspace(wsID)
+	if err != nil {
+		a.internal(w)
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "no such workspace")
+		return
+	}
+	if !ws.Sandbox {
+		writeError(w, http.StatusBadRequest, "this session works directly in your folder; only a sandbox copy can be discarded")
+		return
+	}
+	j, created, err := a.cfg.Queue.Discard(queue.DefaultTeam, wsID, ws.Machine, askedBy(r))
+	var removed *queue.RunnerRemovedError
+	switch {
+	case errors.Is(err, queue.ErrAllApplied):
+		writeJSON(w, http.StatusOK, DiscardState{Already: true})
+		return
+	case errors.Is(err, queue.ErrApplyBusy):
+		writeJSON(w, http.StatusConflict, DiscardState{State: "failed", Error: "an apply or discard of this workspace is still running or waiting; wait for it to end before discarding"})
+		return
+	case errors.Is(err, queue.ErrSessionClosed):
+		writeError(w, http.StatusBadRequest, "this workspace is closed, so its copy cannot be discarded")
+		return
+	case errors.Is(err, queue.ErrNotApplicable):
+		writeError(w, http.StatusBadRequest, "this workspace's copy cannot be reset to its last applied state")
+		return
+	case errors.As(err, &removed):
+		writeError(w, http.StatusServiceUnavailable, "the runner holding this workspace's copy was removed; nothing was discarded")
+		return
+	case errors.Is(err, queue.ErrMachineOffline):
+		writeError(w, http.StatusServiceUnavailable, "the runner holding this workspace's copy has not been seen for a minute; nothing was discarded")
+		return
+	case errors.Is(err, queue.ErrFull):
+		writeError(w, http.StatusTooManyRequests, "too many turns and applies are waiting; retry later")
+		return
+	case err != nil:
+		a.internal(w)
+		return
+	}
+	_ = created
+	// The discard waits behind a running turn in the workspace lane; await it.
+	if j.Ended == nil {
+		if j, err = a.awaitEnd(r.Context(), j); err != nil {
+			if r.Context().Err() == nil {
+				a.internal(w)
+			}
+			return
+		}
+	}
+	st, status := a.discardStateOf(j)
+	writeJSON(w, status, st)
 }
 
 // WorkspacesPage is a page of workspaces.

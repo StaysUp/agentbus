@@ -592,9 +592,10 @@ type RefusedFile struct {
 
 // Discarded is what one discard dropped (workspace.discarded).
 type Discarded struct {
-	// ResetTo is the changeset the workspace's copy was reset to: the last
-	// applied one, or "base" when the workspace was never applied.
-	ResetTo string `json:"reset_to,omitempty" doc:"The changeset the workspace was reset to: the last applied one, or base when never applied."`
+	// ResetTo is the checkpoint the workspace's copy was reset to: the last
+	// applied turn's end checkpoint, or "base" when the workspace was never
+	// applied.
+	ResetTo string `json:"reset_to,omitempty" doc:"The checkpoint the workspace's copy was reset to: the last applied turn's, or base when never applied."`
 	// DroppedTurns are the unapplied turns whose file changes were dropped,
 	// oldest first. Their conversation stays in the record.
 	DroppedTurns []string `json:"dropped_turns,omitempty" doc:"The unapplied turns whose file changes the discard dropped, oldest first. The conversation stays."`

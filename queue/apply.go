@@ -79,9 +79,15 @@ type sessionTurn struct {
 const jobWorkspace = `COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), session)`
 
 func (q *Queue) appliableTurns(team string, ws ids.WorkspaceID) ([]sessionTurn, error) {
+	// A turn a finished discard dropped is gone from the copy, so it is not
+	// appliable, previewable or droppable again: exclude every turn a finished
+	// discard of this workspace named in its dropped turns (links.applies_turns).
 	rows, err := q.db.Query(`SELECT turn, COALESCE(json_extract(result, '$.changeset'), '') FROM jobs
 		WHERE team = ? AND `+jobWorkspace+` = ? AND kind = 'turn' AND ended IS NOT NULL AND attempt IS NOT NULL
-		ORDER BY ended, rowid`, team, string(ws))
+		AND turn NOT IN (
+			SELECT je.value FROM jobs d, json_each(COALESCE(json_extract(d.links, '$.applies_turns'), '[]')) je
+			WHERE d.team = ? AND COALESCE(NULLIF(json_extract(d.spec, '$.workspace'), ''), d.session) = ? AND d.kind = 'discard' AND d.state = 'finished')
+		ORDER BY ended, rowid`, team, string(ws), team, string(ws))
 	if err != nil {
 		return nil, fmt.Errorf("queue: list turns: %w", err)
 	}
@@ -213,6 +219,14 @@ func (q *Queue) planApply(team, turn string, by *By) (plan applyPlan, done Job, 
 	ws, err := q.workspaceID(team, ids.SessionID(j.Session))
 	if err != nil {
 		return plan, Job{}, false, err
+	}
+	// Apply and discard both move the applied point, so one runs per workspace:
+	// an apply while a discard is in flight is refused (ErrApplyBusy -> 409), the
+	// same way a discard is refused while an apply runs (his call, 2026-11-22).
+	if busy, err := q.jobsInFlight(team, ws, `'discard'`); err != nil {
+		return plan, Job{}, false, err
+	} else if busy {
+		return plan, Job{}, false, ErrApplyBusy
 	}
 	first, err := q.firstSpec(team, ws)
 	if err != nil {
@@ -379,6 +393,189 @@ func (q *Queue) appliableCursor(team string, ws ids.WorkspaceID) (turn string, a
 		return "", 0, false, fmt.Errorf("queue: count applies: %w", err)
 	}
 	return turns[len(turns)-1].turn, applies, true, nil
+}
+
+// Discard queues a KindDiscard job that resets the workspace's copy to its
+// Restore point -- the last applied turn's end checkpoint, or the copy's base
+// when nothing was applied (Restore empty) -- on the runner holding the copy,
+// dropping the unapplied turns. One apply-or-discard runs per workspace: a
+// second apply or discard is refused at queue time with ErrApplyBusy (a plain
+// 409), so no copy reset happens without a record. A running TURN is NOT refused
+// -- the discard waits behind it in the lane, and WHAT it drops is computed when
+// it runs (DroppedTurns, at the finish), so a turn that ran while it waited is
+// dropped and marked too (his call, 2026-11-22). ErrAllApplied when nothing is
+// unapplied, ErrMachineOffline when the machine is not seen. The applied point
+// is stable while the discard is queued (no apply runs beside it), so Restore is
+// read here. The caller (the API) checked the workspace is a sandbox.
+func (q *Queue) Discard(team string, ws ids.WorkspaceID, machine string, by *By) (job Job, created bool, err error) {
+	q.applyMu.Lock()
+	defer q.applyMu.Unlock()
+	busy, err := q.jobsInFlight(team, ws, `'apply', 'discard'`)
+	if err != nil {
+		return Job{}, false, err
+	}
+	if busy {
+		return Job{}, false, ErrApplyBusy
+	}
+	turns, mark, err := q.appliedMark(team, ws)
+	if err != nil {
+		return Job{}, false, err
+	}
+	if mark == len(turns)-1 {
+		// No ended unapplied turn. But a turn in flight will leave unapplied
+		// changes in the copy, so the discard is not "nothing to do": it queues,
+		// waits for the turn in the lane, and drops it at the finish. Only with no
+		// turn in flight either is there truly nothing to discard.
+		if inflight, err := q.jobsInFlight(team, ws, `'turn'`); err != nil {
+			return Job{}, false, err
+		} else if !inflight {
+			return Job{}, false, ErrAllApplied
+		}
+	}
+	restore := ""
+	if mark >= 0 {
+		if restore, err = q.turnCheckpoint(team, turns[mark].turn); err != nil {
+			return Job{}, false, err
+		}
+		if restore == "" {
+			// The applied turn has no end checkpoint to reset to. Refuse rather
+			// than let an empty Restore reset the copy all the way to base and drop
+			// changes that were applied.
+			return Job{}, false, ErrNotApplicable
+		}
+	}
+	// The discard runs on the runner holding the copy (copy affinity routes it),
+	// so its state -- not the folder machine's -- decides the discard, with the
+	// right reason: a closed workspace, a removed runner, or one offline. Fall
+	// back to the folder machine only when no copy row exists yet.
+	if closed, removed, fresh, hasCopy, name, err := q.copyRunner(team, ws); err != nil {
+		return Job{}, false, err
+	} else if hasCopy {
+		switch {
+		case closed:
+			return Job{}, false, ErrSessionClosed
+		case removed:
+			return Job{}, false, &RunnerRemovedError{Machine: name}
+		case !fresh:
+			return Job{}, false, ErrMachineOffline
+		}
+	} else if ok, err := q.MachineSeen(team, machine); err != nil {
+		return Job{}, false, err
+	} else if !ok {
+		return Job{}, false, ErrMachineOffline
+	}
+	spec := Spec{Workspace: ws, Machine: machine, Restore: restore}
+	// The job carries no session (a discard is a workspace op, not a session's),
+	// so events it produces name only the workspace. Its copy affinity keys by
+	// the workspace (CopyKey), so create still routes it to the copy's runner.
+	// AppliesTurns (the dropped turns) is filled at the finish, not here.
+	return q.create(team, KindDiscard, "", spec, Links{ApplyBy: by}, Limits{}, "", nil)
+}
+
+// appliedMark is the workspace's appliable turns (every ended turn with a
+// changeset not dropped by a finished discard) and the index of the last one a
+// finished apply covered (-1 when none was applied). The caller holds applyMu.
+func (q *Queue) appliedMark(team string, ws ids.WorkspaceID) (turns []sessionTurn, mark int, err error) {
+	turns, err = q.appliableTurns(team, ws)
+	if err != nil {
+		return nil, -1, err
+	}
+	applies, err := q.sessionApplies(team, ws)
+	if err != nil {
+		return nil, -1, err
+	}
+	mark = -1
+	for _, a := range applies {
+		if a.State == Finished {
+			if k := indexOf(turns, a.Links.AppliesTurn); k > mark {
+				mark = k
+			}
+		}
+	}
+	return turns, mark, nil
+}
+
+// DroppedTurns are the unapplied turns a discard running now drops: the
+// workspace's appliable turns after its last applied one. Read when the discard
+// RUNS, not when it is queued, so a turn that ran while the discard waited in
+// the lane is included.
+func (q *Queue) DroppedTurns(team string, ws ids.WorkspaceID) ([]string, error) {
+	q.applyMu.Lock()
+	defer q.applyMu.Unlock()
+	turns, mark, err := q.appliedMark(team, ws)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(turns)-mark-1)
+	for _, t := range turns[mark+1:] {
+		out = append(out, t.turn)
+	}
+	return out, nil
+}
+
+// MarkDiscarded records on the discard job the turns it dropped, so they stop
+// being appliable, previewable or droppable again (appliableTurns excludes a
+// finished discard's dropped turns). Called at the finish, once the dropped
+// turns are known -- a turn that ran while the discard waited is among them.
+func (q *Queue) MarkDiscarded(team, jobID string, dropped []string) error {
+	b, err := json.Marshal(dropped)
+	if err != nil {
+		return fmt.Errorf("queue: mark discarded: %w", err)
+	}
+	if _, err := q.db.Exec(`UPDATE jobs SET links = json_set(COALESCE(links, '{}'), '$.applies_turns', json(?)), updated = ?
+		WHERE team = ? AND id = ? AND kind = 'discard'`, string(b), nanos(q.now()), team, jobID); err != nil {
+		return fmt.Errorf("queue: mark discarded: %w", err)
+	}
+	return nil
+}
+
+// turnCheckpoint is turn's end checkpoint (Result.Checkpoint, or in a result
+// from before 0.5 its changes' to), or empty for a turn with none or one the
+// queue does not hold.
+func (q *Queue) turnCheckpoint(team, turn string) (string, error) {
+	var cp string
+	err := q.db.QueryRow(`SELECT COALESCE(json_extract(result, '$.checkpoint'), json_extract(result, '$.changes.to'), '')
+		FROM jobs WHERE team = ? AND turn = ? AND kind = 'turn'`, team, turn).Scan(&cp)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("queue: read turn checkpoint: %w", err)
+	}
+	return cp, nil
+}
+
+// copyRunner is the state of the runner holding the workspace's copy, in ONE
+// query with no filtering, so closed, removed and offline are distinguished (not
+// conflated into one "seen" flag): the discard runs on that runner, so its state
+// -- not the folder machine's -- decides the discard's fate, with the RIGHT
+// reason. hasCopy is false (and the rest zero) when no copy row exists yet.
+func (q *Queue) copyRunner(team string, ws ids.WorkspaceID) (closed, removed, fresh, hasCopy bool, name string, err error) {
+	var cl, rm, seen sql.NullInt64
+	var nm sql.NullString
+	err = q.db.QueryRow(`SELECT s.closed, r.removed, r.seen, r.name FROM copies s JOIN runners r ON r.id = s.runner
+		WHERE s.id = ? AND s.team = ?`, string(ws), team).Scan(&cl, &rm, &seen, &nm)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, false, false, false, "", nil
+	}
+	if err != nil {
+		return false, false, false, false, "", fmt.Errorf("queue: read copy runner: %w", err)
+	}
+	fresh = seen.Valid && seen.Int64 >= nanos(q.now().Add(-RunnerFresh))
+	return cl.Valid, rm.Valid, fresh, true, nm.String, nil
+}
+
+// jobsInFlight reports whether a job of one of kinds (an SQL list of quoted kind
+// names) is queued, taken or running (not ended) in the workspace. Apply and
+// discard both move the applied point, so at most one runs per workspace.
+func (q *Queue) jobsInFlight(team string, ws ids.WorkspaceID, kinds string) (bool, error) {
+	var n int
+	err := q.db.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND `+jobWorkspace+` = ?
+		AND kind IN (`+kinds+`) AND ended IS NULL`, team, string(ws)).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("queue: jobs in flight: %w", err)
+	}
+	return n > 0, nil
 }
 
 // AppliableCursor is the session's appliable cursor (the latest appliable turn

@@ -228,6 +228,10 @@ func (overlayBackend) Diff(s *Space, from, to string) (workspace.Changes, error)
 	return diff(s, from, to)
 }
 
+// RestoreTo is not built for the overlay backend yet (W3.4 follow-up: reset the
+// upper layer to the checkpoint's snapshot, then remount).
+func (overlayBackend) RestoreTo(s *Space, name string) error { return ErrNoRestore }
+
 func (overlayBackend) Close(s *Space) error {
 	if s.Root != filepath.Join(s.Workdir, s.ID) {
 		return ErrOutside

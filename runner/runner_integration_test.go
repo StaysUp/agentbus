@@ -490,6 +490,70 @@ func TestContinuationWhoseSourceFolderIsGone(t *testing.T) {
 	}
 }
 
+// A discard whose workspace never made a copy (a lost or stopped first turn) is
+// refused, not finished: so control records no workspace.discarded for a discard
+// that reset nothing.
+func TestDiscardWithNoCopyIsRefused(t *testing.T) {
+	w := newWorld(t, 1)
+	ws := ids.WorkspaceID("ws_0000000000000001")
+	dj, _, err := w.q.Create(queue.DefaultTeam, queue.KindDiscard, "",
+		queue.Spec{Workspace: ws, Session: ids.SessionID(ws)}, queue.Links{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the discard ended", func() bool { return w.job(t, dj.ID).Ended != nil })
+	if d := w.job(t, dj.ID); d.State == queue.Finished {
+		t.Fatalf("a discard with no copy finished (it would record a spurious workspace.discarded): %s", d.Result)
+	}
+}
+
+// Until the private git checkpoints land (W3 AREA 2), a copy workspace's discard
+// is refused with a plain "not yet" and touches nothing: the copy keeps the
+// turn's edits and the person's folder is untouched.
+func TestDiscardNotYetLeavesCopyAndFolderUntouched(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "a.txt"), "a1")
+	w := newWorld(t, 2)
+	p := settings.DefaultPolicy()
+	p.Isolation = settings.IsolationCopy
+	if _, _, err := w.settings.SetPolicy(p, settings.Any); err != nil {
+		t.Fatal(err)
+	}
+	first := w.create(t, queue.Spec{Harness: "claude", Folder: src, Isolate: true, Prompt: "write a.txt a2\nwrite b.txt b1\nhold"})
+	waitFor(t, "a turn", func() bool { return len(w.runs()) == 1 })
+	w.release()
+	waitFor(t, "the turn finished", func() bool { return w.job(t, first.ID).Ended != nil })
+
+	dj, _, err := w.q.Create(queue.DefaultTeam, queue.KindDiscard, "",
+		queue.Spec{Session: ids.SessionID(first.Session), Workspace: ids.WorkspaceID(first.Session)},
+		queue.Links{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the discard finished", func() bool { return w.job(t, dj.ID).Ended != nil })
+	// The copy backend has no restore yet, so the discard is refused, not applied.
+	if d := w.job(t, dj.ID); d.State == queue.Finished {
+		t.Fatalf("discard unexpectedly succeeded before the private git lands: %s", d.Result)
+	}
+
+	rd := func(p string) string {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return "<missing>"
+		}
+		return string(b)
+	}
+	// The copy still holds the turn's edits (nothing was reset), and the person's
+	// folder is untouched.
+	copyDir := filepath.Join(w.r.cfg.Workdir, first.Session)
+	if a, b := rd(filepath.Join(copyDir, "a.txt")), rd(filepath.Join(copyDir, "b.txt")); a != "a2" || b != "b1" {
+		t.Fatalf("the refused discard changed the copy: a=%q b=%q", a, b)
+	}
+	if a, b := rd(filepath.Join(src, "a.txt")), rd(filepath.Join(src, "b.txt")); a != "a1" || b != "<missing>" {
+		t.Fatalf("the refused discard touched the person's folder: a=%q b=%q", a, b)
+	}
+}
+
 // A base that does not exist fails the job as setup, before any turn.
 func TestBadBaseIsSetup(t *testing.T) {
 	repo := t.TempDir()

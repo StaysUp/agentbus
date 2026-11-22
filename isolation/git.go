@@ -123,6 +123,10 @@ func (gitBackend) Diff(s *Space, from, to string) (workspace.Changes, error) {
 	return diff(s, from, to)
 }
 
+// RestoreTo is not built for the git worktree backend yet (W3.4 follow-up:
+// git reset --hard + clean to the worktree commit of the checkpoint).
+func (gitBackend) RestoreTo(s *Space, name string) error { return ErrNoRestore }
+
 func (gitBackend) Close(s *Space) error {
 	if s.Root != filepath.Join(s.Workdir, s.ID) {
 		return ErrOutside

@@ -311,9 +311,10 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 	// which create, list and read a workspace (where turns run: a folder and a
 	// sandbox mode), and POST /api/v0/sessions, which creates a session in a
 	// workspace. All four start no turn: a workspace, then a session in it,
-	// then the session's turns.
-	if len(ops) != 76 {
-		t.Errorf("%d endpoints, want 76: %v", len(ops), ops)
+	// then the session's turns. 77 with POST /api/v0/workspaces/{id}/discard,
+	// which drops a sandbox workspace's unapplied changes by resetting its copy.
+	if len(ops) != 77 {
+		t.Errorf("%d endpoints, want 77: %v", len(ops), ops)
 	}
 	for _, want := range []string{"POST /api/v0/turns", "GET /api/v0/turns", "GET /api/v0/turns/{id}", "POST /api/v0/turns/{id}/stop",
 		"GET /api/v0/turns/{id}/diff", "POST /api/v0/turns/{id}/apply",

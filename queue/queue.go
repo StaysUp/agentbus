@@ -87,6 +87,12 @@ const (
 	// runner of the folder's machine runs the apply's own code and writes
 	// nothing (apply.go). It starts no turn and records no event.
 	KindPreview = "preview"
+	// KindDiscard drops a sandbox workspace's unapplied changes: the runner
+	// holding the copy resets it to the last applied checkpoint, or to base when
+	// nothing was applied, and control records workspace.discarded. It changes
+	// the copy, so it waits in the workspace lane behind a running turn
+	// (laneKinds). It starts no turn.
+	KindDiscard = "discard"
 	// A "snapshot" job (a folder's snapshot, for a runner that built a copy
 	// from it before 0.5) is retired in 0.5.1: a session runs on its
 	// folder's machine, so nothing asks for one. One stored before is read
@@ -334,6 +340,10 @@ type Spec struct {
 	// of it was applied before.
 	ApplyFrom string `json:"apply_from,omitempty"`
 	ApplyTo   string `json:"apply_to,omitempty"`
+	// Restore, for a discard job: the checkpoint the runner resets the copy to
+	// (the last applied turn's end checkpoint). Empty means the copy's base --
+	// the folder as it was first copied, when no turn was applied.
+	Restore string `json:"restore,omitempty"`
 	// Typed and TypedMachine: a new session's folder as the request typed
 	// it, and the machine it named. They are never stored; they only keep
 	// the request's hash what was asked, so a retry with the same key gets
@@ -908,6 +918,16 @@ func (q *Queue) HasKey(team, key string) (bool, error) {
 // clause.)
 const laneKinds = `('turn','discard')`
 
+// jobCopyKey is a job's workspace copy key in SQL, qualified by alias a (e.g.
+// "j"): its workspace, or its session when it names none, exactly as CopyKey
+// keys the copies row. It is the ONE expression wherever a job's copy is keyed,
+// so no `session IS NULL` / `session != ”` proxy can diverge from it -- a
+// session-less job (a discard) is keyed by its workspace, never treated as
+// needing no copy or no affinity.
+func jobCopyKey(a string) string {
+	return `COALESCE(NULLIF(json_extract(` + a + `.spec, '$.workspace'), ''), ` + a + `.session)`
+}
+
 // laneTake is Take's one rule of a WORKSPACE's lane, for a job j and another job
 // o: j waits for o. A workspace's copy-changing jobs (turns and discards) are
 // one line, first in, first out -- an asked session's turns share the asker's
@@ -1012,14 +1032,17 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, lim Limit
 				return fmt.Errorf("queue: read job: %w", err)
 			}
 		}
-		if session != "" {
+		// A job runs on the runner that holds its workspace's copy, so its
+		// affinity is the workspace's, not the session's: an asked session goes to
+		// the runner holding the asker's copy, and a discard -- which names no
+		// session -- to the runner holding its workspace's copy. Keyed by the
+		// copy key (CopyKey), so a job with a workspace but no session still finds
+		// it (not `session != ""`, which would skip a discard).
+		if copyID := CopyKey(spec.Workspace, session); copyID != "" {
 			var closed, removed sql.NullInt64
 			var machine string
-			// A job runs on the runner that holds its workspace's copy, so its
-			// affinity is the workspace's, not the session's: an asked session
-			// goes to the runner holding the asker's copy.
 			err := tx.QueryRow(`SELECT s.closed, r.removed, r.name FROM copies s JOIN runners r ON r.id = s.runner
-				WHERE s.id = ? AND s.team = ?`, CopyKey(spec.Workspace, session), team).Scan(&closed, &removed, &machine)
+				WHERE s.id = ? AND s.team = ?`, string(copyID), team).Scan(&closed, &removed, &machine)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return fmt.Errorf("queue: read session: %w", err)
 			}
@@ -1309,15 +1332,21 @@ func workspaceOf(db querier, j Job) (*Workspace, error) {
 	if err != nil {
 		return nil, fmt.Errorf("queue: read workspace: %w", err)
 	}
-	// The workspace's latest turn that ended with a changeset, across every
-	// session that runs in it (the person's and any it asked), so a turn in an
-	// asked session diffs from the copy as it is, not from base: its end
-	// checkpoint is Result.Checkpoint, or in a result from before 0.5 its
-	// changes' to.
-	err = db.QueryRow(`SELECT COALESCE(json_extract(result, '$.checkpoint'), json_extract(result, '$.changes.to'), '') FROM jobs
-		WHERE team = ? AND kind = 'turn' AND COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), session) = ?
-		AND ended IS NOT NULL AND attempt IS NOT NULL AND COALESCE(json_extract(result, '$.changeset'), '') != ''
-		ORDER BY ended DESC, rowid DESC LIMIT 1`, j.Team, key).Scan(&w.DiffFrom)
+	// The checkpoint the copy is at now, so the workspace's next turn diffs from
+	// the copy as it is, not from base: the latest of the workspace's turns that
+	// ended with a changeset (its end checkpoint is Result.Checkpoint, or in a
+	// result from before 0.5 its changes' to) and its finished discards (which
+	// reset the copy to Restore -- empty means base). A discard after the latest
+	// turn moves the copy back, so the dropped turns are not diffed from again.
+	err = db.QueryRow(`SELECT checkpoint FROM (
+		SELECT ended, rowid, COALESCE(json_extract(result, '$.checkpoint'), json_extract(result, '$.changes.to'), '') AS checkpoint
+			FROM jobs WHERE team = ? AND kind = 'turn' AND COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), session) = ?
+			AND ended IS NOT NULL AND attempt IS NOT NULL AND COALESCE(json_extract(result, '$.changeset'), '') != ''
+		UNION ALL
+		SELECT ended, rowid, COALESCE(json_extract(spec, '$.restore'), '') AS checkpoint
+			FROM jobs WHERE team = ? AND kind = 'discard' AND COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), session) = ?
+			AND ended IS NOT NULL AND state = 'finished')
+		ORDER BY ended DESC, rowid DESC LIMIT 1`, j.Team, key, j.Team, key).Scan(&w.DiffFrom)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("queue: read workspace head: %w", err)
 	}
@@ -1383,8 +1412,8 @@ func (q *Queue) Take(runnerID string, lease time.Duration, folders bool) (job Jo
 		var id string
 		err = tx.QueryRow(`SELECT j.id FROM jobs j, runners r WHERE r.id = ? AND j.team = ? AND j.state = 'queued'
 			AND `+kinds+` AND COALESCE(json_extract(r.caps, '$.role'), '') = ''
-			AND (j.kind IN `+folderKinds+` OR j.session IS NULL OR NOT EXISTS (SELECT 1 FROM copies s WHERE s.id = COALESCE(NULLIF(json_extract(j.spec, '$.workspace'), ''), j.session) AND s.team = j.team)
-				OR EXISTS (SELECT 1 FROM copies s WHERE s.id = COALESCE(NULLIF(json_extract(j.spec, '$.workspace'), ''), j.session) AND s.team = j.team AND s.runner = r.id AND s.closed IS NULL))
+			AND (j.kind IN `+folderKinds+` OR `+jobCopyKey("j")+` IS NULL OR NOT EXISTS (SELECT 1 FROM copies s WHERE s.id = `+jobCopyKey("j")+` AND s.team = j.team)
+				OR EXISTS (SELECT 1 FROM copies s WHERE s.id = `+jobCopyKey("j")+` AND s.team = j.team AND s.runner = r.id AND s.closed IS NULL))
 			AND (j.kind NOT IN `+laneKinds+` OR NOT EXISTS (SELECT 1 FROM jobs o WHERE o.team = j.team AND o.id != j.id AND (`+laneTake+`)))
 			AND (`+machineTake+`) AND (`+labelsTake+`) AND (`+harnessTake+`)
 			ORDER BY j.created, j.id LIMIT 1`, runnerID, team, nanos(now.Add(-RunnerFresh))).Scan(&id)

@@ -33,6 +33,21 @@ var ErrOutcomeMissing = errors.New("jobs: the job's outcome is not in the record
 // again stores each once.
 func changedID(j queue.Job) string { return "evt_tc_" + j.ID }
 func appliedID(j queue.Job) string { return "evt_ta_" + j.ID }
+func discardID(j queue.Job) string { return "evt_wd_" + j.ID }
+
+// DiscardedOf is what a discard job dropped, from the job alone: the checkpoint
+// its copy was reset to (the job's Restore, or "base" when none was applied),
+// the unapplied turns it dropped (its AppliesTurns), and who asked (ApplyBy).
+func DiscardedOf(j queue.Job) *event.Discarded {
+	d := &event.Discarded{ResetTo: j.Spec.Restore, DroppedTurns: j.Links.AppliesTurns}
+	if d.ResetTo == "" {
+		d.ResetTo = "base"
+	}
+	if b := j.Links.ApplyBy; b != nil {
+		d.By = &event.By{Kind: b.Kind, Session: b.Session, Turn: b.Turn}
+	}
+	return d
+}
 
 // errOutcome: the job's outcome could not be written to the record. Its
 // finish is saved (queue.Accept), so it is ended later.
@@ -96,6 +111,20 @@ func keepOutcomes(rec Recorder, j queue.Job, f queue.Finish) (kept json.RawMessa
 			return nil, err
 		}
 		res.Apply, res.Refused, res.AppliedEvent, moved = nil, "", e.ID, true
+	case queue.KindDiscard:
+		if res.DiscardedEvent != "" || j.State != queue.Finished {
+			break
+		}
+		// workspace.discarded names the workspace whose copy was reset, keyed by
+		// the workspace id, so a workspace's discard resolves by it even when the
+		// discarding job has no session of its own.
+		ws := queue.CopyKey(j.Spec.Workspace, j.Session)
+		e := event.Event{ID: discardID(j), Kind: event.WorkspaceDiscarded, Time: now, Workspace: string(ws), Session: j.Session,
+			Discarded: DiscardedOf(j)}
+		if _, err := rec.AppendOnce(e); err != nil {
+			return nil, err
+		}
+		res.Refused, res.DiscardedEvent, moved = "", e.ID, true
 	}
 	if !moved {
 		return nil, nil

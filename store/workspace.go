@@ -81,11 +81,16 @@ func (s *Store) Workspace(id ids.WorkspaceID) (w Workspace, found bool, err erro
 // workspaceState fills HeadTurn, AppliedTurn and DiscardedAt from the
 // workspace's turn.changed and its apply/discard history.
 func (s *Store) workspaceState(w *Workspace) error {
-	// The workspace's latest turn that recorded a changeset.
+	// The workspace's latest turn that recorded a changeset, other than one a
+	// discard dropped (its changes are gone from the copy, so an apply would not
+	// go up to it).
 	var head sql.NullString
 	err := s.r.QueryRow(`SELECT tc.turn FROM events tc
 		JOIN events ts ON ts.kind = 'turn.started' AND ts.session = tc.session AND ts.turn = tc.turn
-		WHERE tc.kind = 'turn.changed' AND `+resolvedWorkspace+` = ?
+		WHERE tc.kind = 'turn.changed' AND `+resolvedWorkspace+` = ?1
+		AND tc.turn NOT IN (
+			SELECT je.value FROM events d, json_each(COALESCE(json_extract(d.data, '$.discarded.dropped_turns'), '[]')) je
+			WHERE d.kind = 'workspace.discarded' AND json_extract(d.data, '$.workspace') = ?1)
 		ORDER BY tc.seq DESC LIMIT 1`, w.ID).Scan(&head)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("store: read workspace head: %w", err)

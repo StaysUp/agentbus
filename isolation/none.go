@@ -77,6 +77,10 @@ func (noneBackend) Diff(s *Space, from, to string) (workspace.Changes, error) {
 }
 
 // Close removes the record only. The folder is the person's own.
+// RestoreTo: the none backend runs in the person's folder as it is, so there is
+// no copy to reset; Discard is refused for it (direct mode already is).
+func (noneBackend) RestoreTo(s *Space, name string) error { return ErrNoRestore }
+
 func (noneBackend) Close(s *Space) error {
 	if s.Backend != None {
 		return errors.New("isolation: not a folder used as it is")

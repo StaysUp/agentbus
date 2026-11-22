@@ -806,6 +806,9 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	case job.Kind == queue.KindApply || job.Kind == queue.KindPreview || job.Kind == queue.KindFolder:
 		at.finish(ctx, r.folderWork(ctx, at))
 		return
+	case job.Kind == queue.KindDiscard:
+		at.finish(ctx, r.discardWork(at))
+		return
 	case job.Kind == queue.KindHome:
 		at.finish(ctx, r.homeWork(at))
 		return
@@ -1118,6 +1121,54 @@ func (r *Runner) loadCopy(at *attempt, w queue.Workspace) (res *queue.Result, re
 		}
 	}
 	return r.checkpointStart(at), true
+}
+
+// discardWork resets the workspace's copy to the checkpoint the discard names
+// (its Restore, or the copy's base when empty), on the runner holding the copy.
+// It drops the unapplied turns' file changes from the copy and never touches the
+// person's folder. Control records workspace.discarded from the job.
+func (r *Runner) discardWork(at *attempt) queue.Finish {
+	refuse := func(msg string, status int) queue.Finish {
+		return queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup,
+			Result: mustJSON(queue.Result{Refused: msg, Status: status})}
+	}
+	// Find the copy to reset: the workspace's copy row, or -- when the first turn
+	// was lost or stopped before control recorded one -- a copy it left on disk
+	// under the workspace id. A folder-kind record (direct mode) has no copy.
+	var s *isolation.Space
+	if w := at.job.Workspace; w != nil && (w.Kind == queue.WorkspaceCopy || w.Kind == queue.WorkspaceWorktree) {
+		if sp, err := r.loadSpace(*w); err == nil {
+			s = sp
+		}
+	} else if ws := at.job.Spec.Workspace; ws != "" {
+		if sp, err := r.loadSpace(queue.Workspace{Space: string(ws)}); err == nil {
+			s = sp
+		}
+	}
+	if s == nil {
+		// No copy anywhere to reset. Refuse, so a discard that reset nothing does
+		// NOT record a workspace.discarded or answer "discarded".
+		return refuse("there is no sandbox copy to discard", http.StatusBadRequest)
+	}
+	b, ok := isolation.Get(s.Backend)
+	if !ok {
+		return refuse("the copy could not be read, so nothing was discarded", http.StatusInternalServerError)
+	}
+	// A copy left unmounted after a restart is mounted again before the reset.
+	if err := isolation.Remount(s); err != nil {
+		return refuse("the copy could not be read, so nothing was discarded", http.StatusInternalServerError)
+	}
+	target := at.job.Spec.Restore
+	if target == "" {
+		target = isolation.Base
+	}
+	if err := b.RestoreTo(s, target); err != nil {
+		if errors.Is(err, isolation.ErrNoRestore) {
+			return refuse(err.Error(), http.StatusBadRequest)
+		}
+		return refuse("the copy could not be reset to the last applied state, so nothing was discarded", http.StatusInternalServerError)
+	}
+	return queue.Finish{Status: queue.Finished}
 }
 
 // isolate opens a session's first job's copy with b, and its turn starts
