@@ -73,7 +73,8 @@ type Launch struct {
 	Env  []string
 	Args []string
 	// HomeFiles are files the child needs in the session's own home, by
-	// path in it, such as agy's placeholder sign-in (harness.HomeFiles).
+	// path in it, such as agy's placeholder sign-in (harness.HomeFiles) or
+	// the Gemini CLI's setting that selects its API key (harness.KeyHome).
 	// They are written before every turn, and a turn with them that has no
 	// home of its own does not start: they would land in this user's home.
 	HomeFiles map[string][]byte

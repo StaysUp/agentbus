@@ -28,7 +28,7 @@ code; **design first** means: post a short plan in the issue before writing code
 
 - **More model routes:** local OpenAI-compatible endpoints (Ollama, LM Studio), more OpenRouter models, the OpenAI
   Chat Completions format.
-- **More harnesses:** the Gemini CLI.
+- **More harnesses:** the Gemini CLI on its Google sign-in.
 - **The first-run path:** clearer messages, the install script, the README.
 - **Prices that stay current:** where the built-in price table drifts from a public source.
 

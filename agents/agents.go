@@ -61,8 +61,8 @@ type Agent struct {
 // Fields are what a person sets on an agent: everything but its id and times.
 type Fields struct {
 	Name    string `json:"name" doc:"1 to 100 bytes, unique among the agents, ignoring case."`
-	Harness string `json:"harness" doc:"claude, codex, agy or opencode. A harness that is only planned is refused as not available yet."`
-	Access  string `json:"access" doc:"subscription, openrouter or api. api uses the vendor's API key set in Settings (claude: Anthropic, codex: OpenAI, agy: Gemini). opencode runs on openrouter only."`
+	Harness string `json:"harness" doc:"claude, codex, agy, opencode or gemini. A harness that is only planned is refused as not available yet."`
+	Access  string `json:"access" doc:"subscription, openrouter or api. api uses the vendor's API key set in Settings (claude: Anthropic, codex: OpenAI, agy and gemini: Gemini). opencode runs on openrouter only, gemini on api only."`
 	Model   string `json:"model,omitempty" doc:"Optional for subscription and api. Required for openrouter."`
 	KeyEnv  string `json:"key_env,omitempty" doc:"For openrouter only: a variable name ending in _KEY, such as OPENROUTER_API_KEY, which is used when this is absent."`
 }
@@ -159,9 +159,10 @@ type file struct {
 
 // Defaults are the agents a control has unless the person changed or removed
 // them, or its data folder started without them (Starters): one per harness
-// that offers its own subscription, on it (opencode offers none). Their ids
-// are the harness names, so a turn that names claude or codex finds them. A
-// default agent grants nothing a turn naming its harness does not already get.
+// that offers its own subscription, on it (opencode and gemini offer none).
+// Their ids are the harness names, so a turn that names claude or codex finds
+// them. A default agent grants nothing a turn naming its harness does not
+// already get.
 func Defaults(now time.Time) []Agent {
 	var out []Agent
 	for _, h := range harness.All() {
@@ -411,7 +412,7 @@ func (s *Store) Remove(id string) error {
 // no way past the saved agents (his rule, 2026-11-12). The harness name of
 // a default the person never had, as a data folder that started without it
 // (Starters), is that harness on its own subscription; a harness that offers
-// none (opencode) has no default, and its name finds no agent.
+// none (opencode, gemini) has no default, and its name finds no agent.
 func (s *Store) Resolve(id string) (Agent, error) {
 	a, err := s.Get(id)
 	if err == nil {

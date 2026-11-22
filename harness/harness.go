@@ -212,6 +212,15 @@ type HomeFiles interface {
 	RelayHome(placeholder string) map[string][]byte
 }
 
+// KeyHome is a harness that, on the vendor's API key (access "api"), needs
+// files in the turn's own home to start: a setting that selects the key as
+// its sign-in, for one. Paths are relative to the home. The engine writes
+// them before every turn, and only into a home of the session's own, as it
+// does HomeFiles'.
+type KeyHome interface {
+	APIHome() map[string][]byte
+}
+
 // ModelServer is a harness that lists the models its sign-in may use when
 // run as a model server, JSON-RPC on its standard input and output (codex
 // app-server; models.AppServer reads it). Control runs it unmodified, in a
@@ -482,7 +491,7 @@ func envValue(env []string, key string) string {
 }
 
 // registry is every harness turns can start, in the order they are listed.
-var registry = []Harness{claude{}, codex{}, agy{}, opencode{}}
+var registry = []Harness{claude{}, codex{}, agy{}, opencode{}, gemini{}}
 
 // planned are harnesses listed as coming, which no agent can use yet. None
 // is listed now: opencode, the one that was, can run.
@@ -526,7 +535,7 @@ func joinNames(n []string) string {
 func Planned() []Info { return planned }
 
 // PlannedList is Planned's names for a sentence, as NameList does for the
-// registry: "gemini", or "gemini or goose" once a second is planned; "" while
+// registry: "goose", or "goose or aider" once a second is planned; "" while
 // none is.
 func PlannedList() string {
 	n := make([]string, len(planned))

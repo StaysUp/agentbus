@@ -53,6 +53,7 @@ func fakeLaunch(dir string) {
 	fmt.Printf(`{"type":"result","session_id":"sid-%d"}`+"\n", n)
 	fmt.Printf(`{"conversation_id":"cid-%d","status":"SUCCESS"}`+"\n", n)
 	fmt.Printf(`{"type":"step_start","sessionID":"ses_%012xLaunchFake%04d"}`+"\n", n, n)
+	fmt.Printf(`{"type":"init","session_id":"00000000-0000-4000-8000-%012d","model":"m"}`+"\n", n)
 	os.Exit(0)
 }
 
@@ -178,9 +179,9 @@ func TestLaunchGolden(t *testing.T) {
 			turns: []engine.Request{first("claude"), with(next("t_2"), func(r *engine.Request) { r.Harness = "codex" })}},
 		launchCase{name: "switch codex to claude, resume",
 			turns: []engine.Request{first("codex"), with(next("t_2"), func(r *engine.Request) { r.Harness = "claude"; r.AgentModel = "sonnet" })}},
-		launchCase{name: "unknown harness", turns: []engine.Request{first("gemini")}},
+		launchCase{name: "unknown harness", turns: []engine.Request{first("goose")}},
 		launchCase{name: "unknown harness on a next turn", turns: []engine.Request{first("claude"),
-			with(next("t_2"), func(r *engine.Request) { r.Harness = "gemini" })}},
+			with(next("t_2"), func(r *engine.Request) { r.Harness = "goose" })}},
 	)
 	// opencode runs on an OpenRouter key only.
 	ocOR := func(r *engine.Request) { or(r); r.Model = "z-ai/glm-5.3-flash" }
@@ -211,6 +212,33 @@ func TestLaunchGolden(t *testing.T) {
 			turns: []engine.Request{with(first("opencode"), ocOR)}},
 		launchCase{name: "switch claude to opencode, resume", env: orKey,
 			turns: []engine.Request{with(first("claude"), or), with(next("t_2"), func(r *engine.Request) { r.Harness = "opencode"; ocOR(r) })}},
+	)
+	// gemini runs on a Gemini API key only, which needs a home of its own
+	// for the setting that selects it.
+	gmAPI := func(r *engine.Request) { apiKey(r); r.Model = "gemini-2.5-flash" }
+	cases = append(cases,
+		launchCase{name: "gemini subscription", turns: []engine.Request{first("gemini")}},
+		launchCase{name: "gemini subscription, relayed", homes: true, turns: []engine.Request{with(first("gemini"), relayed)}},
+		launchCase{name: "gemini openrouter", env: orKey, turns: []engine.Request{with(first("gemini"), ocOR)}},
+		launchCase{name: "gemini api key, not relayed", turns: []engine.Request{with(first("gemini"), func(r *engine.Request) { r.Access = "api" })}},
+		launchCase{name: "gemini api key, relayed, no home of its own", turns: []engine.Request{with(first("gemini"), gmAPI)}},
+		launchCase{name: "gemini api key, in a home of its own, then resume", homes: true,
+			turns: []engine.Request{with(first("gemini"), gmAPI), with(next("t_2"), apiKey)}},
+		launchCase{name: "gemini api key without a model", homes: true, turns: []engine.Request{with(first("gemini"), apiKey)}},
+		launchCase{name: "gemini allow list, own instructions", homes: true, perm: allowOnly, instr: strp("Be brief in {session}.\n"),
+			turns: []engine.Request{with(first("gemini"), gmAPI)}},
+		launchCase{name: "gemini edit none", homes: true, perm: "edit = \"none\"\n", turns: []engine.Request{with(first("gemini"), gmAPI)}},
+		launchCase{name: "gemini subagents off", homes: true, perm: "subagents = false\n", turns: []engine.Request{with(first("gemini"), gmAPI)}},
+		launchCase{name: "gemini forbid", homes: true, perm: lists, turns: []engine.Request{with(first("gemini"), gmAPI)}},
+		launchCase{name: "gemini tools on", homes: true, perm: toolsOn, turns: []engine.Request{with(first("gemini"), gmAPI)}},
+		launchCase{name: "gemini own endpoint", homes: true, env: []string{"GOOGLE_GEMINI_BASE_URL=http://elsewhere"},
+			turns: []engine.Request{with(first("gemini"), gmAPI)}},
+		launchCase{name: "gemini missing", homes: true, missing: true, turns: []engine.Request{with(first("gemini"), gmAPI)}},
+		launchCase{name: "gemini folder holds the data folder", homes: true, dataInside: true, turns: []engine.Request{with(first("gemini"), gmAPI)}},
+		launchCase{name: "gemini folder with AGENTS.md, asked by another agent", homes: true, agentsMD: true,
+			turns: []engine.Request{with(first("gemini"), func(r *engine.Request) { gmAPI(r); r.Origin = asked })}},
+		launchCase{name: "switch claude to gemini, transcript", homes: true,
+			turns: []engine.Request{with(first("claude"), relayed), with(next("t_2"), func(r *engine.Request) { r.Harness = "gemini"; gmAPI(r) })}},
 	)
 
 	var out strings.Builder

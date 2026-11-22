@@ -51,7 +51,7 @@ func TestRegistry(t *testing.T) {
 	if got := PlannedList(); got != "" {
 		t.Errorf("PlannedList = %q", got)
 	}
-	if got := NameList(); got != "claude, codex, agy or opencode" {
+	if got := NameList(); got != "claude, codex, agy, opencode or gemini" {
 		t.Errorf("NameList = %q", got)
 	}
 }

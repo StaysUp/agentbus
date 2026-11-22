@@ -40,7 +40,7 @@ func TestRunnerUsesAPIKeysSetInSettings(t *testing.T) {
 	}
 	// One agent per harness on its vendor's API key.
 	ids := map[string]string{}
-	for _, h := range []string{"claude", "codex", "agy"} {
+	for _, h := range []string{"claude", "codex", "agy", "gemini"} {
 		code, ag := sendAPI(t, ns.server, ns.tok, "POST", "/api/v0/agents", map[string]any{"name": h + " on its key", "harness": h, "access": "api"})
 		if code != http.StatusCreated {
 			t.Fatalf("create %s: %d %v", h, code, ag)
@@ -163,6 +163,31 @@ func TestRunnerUsesAPIKeysSetInSettings(t *testing.T) {
 	}
 	t.Setenv("AGENTBUS_FAKE_AGY_BODY", "")
 	t.Setenv("AGENTBUS_FAKE_OTHER", "")
+	os.Remove(ns.report)
+
+	// gemini: the same key, the same call as agy's (the fake makes it as the
+	// Gemini CLI 0.70.0 does), under its own path, and its home's settings
+	// select the key as its sign-in.
+	t.Setenv("AGENTBUS_FAKE_STDOUT", `{"type":"init","session_id":"4bd2e7a1-0c94-4f18-b670-820084213439","model":"gemini-2.5-flash"}`+"\n")
+	t.Setenv("AGENTBUS_FAKE_AGY_BODY", `{"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`)
+	if jj := runOne("gemini"); jj.State != queue.Finished {
+		t.Fatalf("gemini: %s %s %s", jj.State, jj.Reason, jj.Result)
+	}
+	if got := ns.keyed["gemini"].keysSeen(); len(got) != 1 || got[0] != geminiPath+" |"+keys["gemini"] {
+		t.Fatalf("the Gemini API saw keys %v for gemini", got)
+	}
+	if got := ns.keyed["agy"].seen(); len(got) != 1 {
+		t.Fatalf("agy's path saw gemini's call: %v", got)
+	}
+	env = envOf(t, ns.report)
+	if tok := env["GEMINI_API_KEY"]; !strings.HasPrefix(tok, jobs.StandInPrefix) || !strings.HasSuffix(env["GOOGLE_GEMINI_BASE_URL"], "/key/gemini") {
+		t.Fatalf("gemini's environment: %q %q", tok, env["GOOGLE_GEMINI_BASE_URL"])
+	}
+	if b, err := os.ReadFile(filepath.Join(env["HOME"], ".gemini", "settings.json")); err != nil ||
+		!strings.Contains(string(b), `"selectedType":"gemini-api-key"`) {
+		t.Fatalf("gemini's home settings: %s %v", b, err)
+	}
+	t.Setenv("AGENTBUS_FAKE_AGY_BODY", "")
 
 	// Each try of another endpoint was refused at control's relay and
 	// recorded there as call.refused.
