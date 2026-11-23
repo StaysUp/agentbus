@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -24,6 +27,49 @@ func TestNotPackedLine(t *testing.T) {
 	}
 	if strings.Contains(got, "\n") {
 		t.Errorf("want one line, got %q", got)
+	}
+}
+
+func TestListenErrorInUse(t *testing.T) {
+	got := listenError("127.0.0.1:8787", syscall.EADDRINUSE).Error()
+	for _, want := range []string{"-listen 127.0.0.1:8787", "is in use", "pick another port"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in %q", want, got)
+		}
+	}
+	if strings.Contains(got, "bind:") || strings.Contains(got, "address already") {
+		t.Errorf("leaked Go's message: %q", got)
+	}
+}
+
+func TestListenErrorOther(t *testing.T) {
+	got := listenError("127.0.0.1:8787", errors.New("permission denied")).Error()
+	if !strings.Contains(got, "could not be bound") {
+		t.Errorf("got %q", got)
+	}
+	if strings.Contains(got, "permission denied") {
+		t.Errorf("leaked Go's message: %q", got)
+	}
+}
+
+func TestStartRefusesAPortInUse(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	home := t.TempDir()
+	up, _ := url.Parse("http://127.0.0.1:1")
+	_, err = start(config{listen: ln.Addr().String(), home: home, upstream: up, chatgpt: mustURL("http://127.0.0.1:1"), logf: t.Logf})
+	if err == nil {
+		t.Fatal("started on a port already in use")
+	}
+	got := err.Error()
+	if !strings.Contains(got, "is in use") {
+		t.Fatalf("%q", got)
+	}
+	if strings.Contains(got, "bind:") || strings.Contains(got, "address already") {
+		t.Fatalf("leaked Go's message: %q", got)
 	}
 }
 
