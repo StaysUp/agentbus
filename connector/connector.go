@@ -808,11 +808,11 @@ func (c *Connector) stageFile(ctx context.Context, rt *os.Root, src blobs.Local,
 }
 
 // placeStaged puts the staged file at name, by rename, so a reader never
-// sees half a file. An empty folder in the way goes first: the changes
-// emptied it.
+// sees half a file. A folder in the way that holds no file goes first: the
+// changes emptied it.
 func placeStaged(rt *os.Root, staged, name string) error {
 	if fi, err := rt.Lstat(name); err == nil && fi.IsDir() {
-		if err := rt.Remove(name); err != nil {
+		if err := removeEmptied(rt, name); err != nil {
 			return err
 		}
 	}

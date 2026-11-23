@@ -3,6 +3,7 @@ package isolation
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -213,6 +214,50 @@ func TestApplyReplacesALink(t *testing.T) {
 		t.Fatal(err)
 	}
 	same(map[string]string{"cur/a": "a2", "cur/b": "b", "v1/a": "a", "v1/b": "b"})
+}
+
+// A copy that git checkpoints leaves git-ignored files out of its changesets,
+// so the changes remove none: a folder that holds one does not make way for a
+// file, and an ignored file does not make way for a folder.
+func TestApplyKeepsIgnoredFiles(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		ignore       string
+		src, replace map[string]string // the folder, and what the turn puts for "conf"
+		want         string            // the conflict
+	}{
+		{"in a folder a file replaces", "*.env\n", map[string]string{"conf/a": "a", "conf/sub/my.env": "secret"},
+			map[string]string{"conf": "n"}, "conf"},
+		{"a folder replaces", "conf\n!conf/\n", map[string]string{"conf": "secret"},
+			map[string]string{"conf/main": "n"}, "conf/main"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := t.TempDir()
+			fixture(t, src, map[string]string{".gitignore": tc.ignore, "k": "k"})
+			fixture(t, src, tc.src)
+			b, s := open(t, Copy, src)
+			if err := os.RemoveAll(filepath.Join(s.Dir, "conf")); err != nil {
+				t.Fatal(err)
+			}
+			fixture(t, s.Dir, tc.replace)
+			fixture(t, s.Dir, map[string]string{"k": "K"})
+			if _, err := b.Checkpoint(s, "t1"); err != nil {
+				t.Fatal(err)
+			}
+			var cf *connector.Conflict
+			if _, err := applyIn(t, s, src, Base, "t1"); !errors.As(err, &cf) || len(cf.Files) != 1 || cf.Files[0].Path != tc.want {
+				t.Fatalf("apply over an ignored file: %v", err)
+			}
+			for p, w := range tc.src {
+				if got := read(t, filepath.Join(src, filepath.FromSlash(p))); got != w {
+					t.Errorf("%s: %q, want %q", p, got, w)
+				}
+			}
+			if got := read(t, filepath.Join(src, "k")); got != "k" {
+				t.Errorf("a refused apply wrote k: %q", got)
+			}
+		})
+	}
 }
 
 // A turn that puts a file and a link back as the Base had them, after an

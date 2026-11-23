@@ -367,9 +367,8 @@ func TestTreeFromSnapshot(t *testing.T) {
 }
 
 // A file replaced by a folder of the same name, and the reverse, show in
-// the diff. Apply refuses them and writes nothing (it checks each path on
-// its own, and a folder where a file goes is not a file): a limit kept in
-// the framework TODO.
+// the diff, and apply: what the changes remove makes way for what they add.
+// A file of the person's in the folder that makes way refuses the apply.
 func TestFileBecomesFolder(t *testing.T) {
 	for _, name := range fast(t) {
 		t.Run(name, func(t *testing.T) {
@@ -396,12 +395,21 @@ func TestFileBecomesFolder(t *testing.T) {
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("diff %v, want %v", got, want)
 			}
+			fixture(t, src, map[string]string{"dir/mine.txt": "m"})
 			var cf *connector.Conflict
 			if _, err := applyIn(t, s, src, Base, "t1"); !errors.As(err, &cf) {
+				t.Fatalf("apply over a file of the person's: %v", err)
+			}
+			if read(t, filepath.Join(src, "item")) != "a file" || read(t, filepath.Join(src, "dir", "x.txt")) != "x" ||
+				read(t, filepath.Join(src, "dir", "mine.txt")) != "m" {
+				t.Fatal("a refused apply wrote")
+			}
+			os.Remove(filepath.Join(src, "dir", "mine.txt"))
+			if _, err := applyIn(t, s, src, Base, "t1"); err != nil {
 				t.Fatalf("apply: %v", err)
 			}
-			if read(t, filepath.Join(src, "item")) != "a file" || read(t, filepath.Join(src, "dir", "x.txt")) != "x" {
-				t.Fatal("a refused apply wrote")
+			if read(t, filepath.Join(src, "item", "child.txt")) != "c" || read(t, filepath.Join(src, "dir")) != "now a file" {
+				t.Fatal("the folder is not as the turn left its copy")
 			}
 		})
 	}
