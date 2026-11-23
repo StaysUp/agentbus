@@ -1,6 +1,8 @@
 package gateway
 
 import (
+	"bytes"
+	"compress/gzip"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -110,6 +112,11 @@ func TestOnlyRecordedCallsGetTheCredential(t *testing.T) {
 			{"PUT", "/v1/responses", oaiRequest, false},
 			{"POST", "/v1/chat/completions", "{}", false},
 			{"POST", "/backend-api/codex/responses?alt=proto", oaiRequest, false},
+			// codex's web search is a service call (TestServiceCallIsRecordedByStatus);
+			// no other alpha call is recorded.
+			{"GET", "/backend-api/codex/alpha/search", "", false},
+			{"POST", "/backend-api/codex/alpha/search?x=1", "{}", false},
+			{"POST", "/backend-api/codex/alpha/other", "{}", false},
 		}},
 		{gemini.Adapter{}, "text/event-stream", gemReply, []ruleCase{
 			{"POST", "/v1internal:streamGenerateContent?alt=sse", gemRequest, true},
@@ -180,7 +187,9 @@ func TestOnlyRecordedCallsGetTheCredential(t *testing.T) {
 // recorded as vendor.called, by status; their bodies are not read: agy's
 // Code Assist methods, and codex's list of models (GET
 // /backend-api/codex/models?client_version=0.164.0, the call codex-cli
-// 0.164.0 app-server made for model/list, 2026-11-14).
+// 0.164.0 app-server made for model/list, 2026-11-14), and codex's web
+// search (POST /backend-api/codex/alpha/search, codex-cli 0.171.0,
+// 2026-11-23).
 func TestServiceCallIsRecordedByStatus(t *testing.T) {
 	for _, c := range []struct {
 		a                   adapter.Adapter
@@ -189,6 +198,8 @@ func TestServiceCallIsRecordedByStatus(t *testing.T) {
 	}{
 		{gemini.Adapter{}, "POST", "/v1internal:loadCodeAssist", "", `{"metadata":{}}`, `{"cloudaicompanionProject":"p"}`},
 		{openai.Adapter{}, "GET", "/backend-api/codex/models", "client_version=0.164.0", "", `{"models":[{"slug":"gpt-5.5"}]}`},
+		{openai.Adapter{}, "POST", "/backend-api/codex/alpha/search", "", searchRequest, searchReply},
+		{openai.Adapter{}, "POST", "/v1/alpha/search", "", searchRequest, searchReply},
 	} {
 		for _, how := range []string{"relayed", "up"} {
 			vendor := newRuleVendor(t, "application/json; charset=UTF-8", c.reply)
@@ -210,6 +221,45 @@ func TestServiceCallIsRecordedByStatus(t *testing.T) {
 			if got := vendor.calls(); len(got) != 1 || got[0] != c.method+" "+c.path+"?"+c.query+" cred=yes" {
 				t.Fatalf("%s %s: the vendor got %v", how, c.path, got)
 			}
+		}
+	}
+}
+
+// The shape of codex's web search, with the values cut: the call codex-cli
+// 0.171.0 made through a local relay to chatgpt.com, 2026-11-23.
+const (
+	searchRequest = `{"id":"s","model":"m","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}],` +
+		`"commands":{"search_query":[{"q":"q"}],"open":[{"ref_id":"https://example.com/"}],"response_length":"short"},` +
+		`"settings":{"allowed_callers":["direct"],"external_web_access":false},"max_output_tokens":10000}`
+	searchReply = `{"encrypted_output":"e","output":"o","results":[{"type":"text_result","domain":"example.com",` +
+		`"ref_id":"turn0search0","snippet":"s","title":"t","url":"https://example.com/"}]}`
+)
+
+// chatgpt.com sent codex's web search reply gzip-compressed (codex-cli
+// 0.171.0, 2026-11-23). The agent gets the vendor's bytes as they came, with
+// their encoding, and the call is recorded by its status.
+func TestWebSearchReplyPassesOnCompressed(t *testing.T) {
+	var zipped bytes.Buffer
+	zw := gzip.NewWriter(&zipped)
+	io.WriteString(zw, searchReply)
+	zw.Close()
+	for _, how := range []string{"relayed", "up"} {
+		vendor := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			io.Copy(io.Discard, r.Body)
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Write(zipped.Bytes())
+		}))
+		t.Cleanup(vendor.Close)
+		do, mem, g, _ := ruleGateway(t, how, openai.Adapter{}, vendor.URL)
+		status, body := do("POST", "/backend-api/codex/alpha/search", searchRequest)
+		g.Settle("s1", "t_1", 3*time.Second)
+		if status != http.StatusOK || body != zipped.String() {
+			t.Fatalf("%s: %d, %d bytes, want the vendor's %d", how, status, len(body), zipped.Len())
+		}
+		evs := mem.Events()
+		if len(evs) != 1 || evs[0].Kind != event.VendorCalled || evs[0].Call != "POST /backend-api/codex/alpha/search" || evs[0].Status != 200 {
+			t.Fatalf("%s: events %+v", how, evs)
 		}
 	}
 }
