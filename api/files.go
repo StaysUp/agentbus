@@ -12,7 +12,6 @@ import (
 	"syscall"
 
 	"github.com/staysup/agentbus/gateway"
-	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 )
@@ -25,19 +24,35 @@ type toolGatedKey struct{}
 const filesElsewhere = "read_file, list_folder and write_file work only for a session whose folder is on control's own machine; this session's folder is on another machine"
 
 // refuseFilesElsewhere answers w with 409 and says true when g's session has
-// its folder on a machine other than control's own (agentbus up's). A call
-// without a session (the main token, the turns token) is not refused, and nor
-// is one on a service with no queue, which runs every session itself.
+// its folder on a machine other than control's own (agentbus up's). The
+// folder's machine lives on the session's workspace record, which is written
+// when the workspace is created, so the check does not wait for a turn to
+// finish (the queue's folder row is). A call without a session (the main token,
+// the turns token) is not refused, and nor is one on a service with no queue,
+// which runs every session itself.
 func (a *API) refuseFilesElsewhere(w http.ResponseWriter, g *run.Grant) bool {
-	if g == nil || g.Session == "" || a.cfg.Queue == nil {
+	if g == nil || g.Session == "" || a.cfg.Queue == nil || a.cfg.Store == nil {
 		return false
 	}
-	_, machine, _, err := a.cfg.Queue.SessionFolder(queue.DefaultTeam, g.Session)
+	ws, found, err := a.workspaceOf(g.Session)
 	if err != nil {
 		a.internal(w)
 		return true
 	}
-	if own := a.cfg.Folders; own != nil && machine == own.Machine() {
+	if !found {
+		return false
+	}
+	rec, found, err := a.cfg.Store.Workspace(ws)
+	if err != nil {
+		a.internal(w)
+		return true
+	}
+	// An empty machine is control's own (the workspace record's convention); so
+	// is one equal to control's machine id.
+	if !found || rec.Machine == "" {
+		return false
+	}
+	if own := a.cfg.Folders; own != nil && rec.Machine == own.Machine() {
 		return false
 	}
 	writeError(w, http.StatusConflict, filesElsewhere)
