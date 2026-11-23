@@ -24,8 +24,10 @@ have (Claude Code, Codex, Antigravity, OpenCode or any OpenRouter model) and tra
   question, take on a task or check its work. The answer comes back into the same session.
 - **You see every model call**, and what it cost: exactly what each model was sent, piece by piece,
   and what it answered.
-- **Your folder stays as it is.** Each session works in its own copy. You review the changes and
-  apply them to your folder. Turn on the sandbox to make the copy a hard wall.
+- **Your folder stays as it is.** A Copy session works in its own copy of your folder. The agent's
+  commands write only there. You review the changes, then apply them to your folder or drop them.
+  Several sessions can work on the same code at once. A Direct session works in your folder itself,
+  like your terminal.
 - **Everything stays on your machine.** Your sessions, every model call and reply, and your sign-ins
   and keys are kept in AgentBus's data folder on your machine.
 
@@ -100,9 +102,15 @@ By default (`-replay`), `agentbus up`, `server` and `runner` continue Claude and
 
 ### Sign-ins and keys
 
-Every turn uses the sign-in connected in Settings. A tool's own sign-in on your machine
-(`~/.claude`, `~/.codex`) is not used: each session runs in a home of its own. A turn whose tool is
-not connected is refused with "connect your claude subscription in Settings".
+Every turn uses the sign-in you connect in Settings. This one path, **Connect**, is used in every
+mode. Your tool's own sign-in on this machine (`~/.claude`, `~/.codex`) is not touched: AgentBus
+gives the agent a stand-in and swaps in the real token at the gateway, so recording is never
+bypassed. A turn whose tool is not connected is refused with "connect your claude subscription in
+Settings".
+
+On `agentbus up`, a turn runs in your real home, so the rest of your setup comes along: your
+`CLAUDE.md`, hooks, plugins, skills, and logins such as `gh`, `aws`, `ssh` and `gitconfig`. Only the
+vendor sign-in goes through Connect.
 
 An agent can also use an API key instead of a subscription. Paste the key once in Settings,
 Subscriptions: an OpenRouter key for any OpenRouter model, or the vendor's own key (Anthropic for
@@ -138,6 +146,28 @@ behind it changes. From an empty AgentBus:
 Claude Code's tools are tuned for Claude, so other models may behave differently; give clear steps
 and read what they reply.
 
+## How a session runs: Direct, Copy, Locked
+
+When you start a session you pick how it runs. The choice is remembered.
+
+- **Copy (default).** The session works in its own copy of your folder. The agent's commands write
+  only inside the copy, plus temporary files and package caches; reads across your disk stay open.
+  The network, Docker and local services work as normal. Several sessions can work on the same code
+  without stepping on each other.
+- **Direct.** The session works in your folder itself, like your terminal. Nothing is held back.
+- **Locked.** Copy, plus hidden secrets and no writing to the internet. This comes later; the
+  selector shows it, disabled.
+
+A Copy session brings your setup in read only, leaving out the agents' own login files so Connect's
+sign-in is used.
+
+### Review, apply, discard
+
+A Copy session's **workspace** holds its copy, and its file changes are held for you. Open the
+session, read what each turn changed, and ask another model to check it with **Review**, right next
+to Apply. Then **Apply** writes the changes into your folder, or **Discard** drops the copy. What a
+turn's commands did outside the copy is shown in the turn view; it is not undone.
+
 ## Settings
 
 Settings apply to every session, from the next turn. Change them on the cockpit's Settings page, or
@@ -152,16 +182,15 @@ their defaults are in `/docs`, under Settings).
   same turn, **Always allow** runs it and allows it from then on, and **Refuse** or no answer in time
   returns a plain refusal. Refuse wins over Ask, Ask over Allow. **Anything else** decides a call on
   none of the lists. Agents reach the record, and apply and stop a turn, through `agentbus-api`.
-- **Config:** files from your home copied into each session's own home at each turn: your
+- **Config:** files from your home copied into each session's home at each turn: your
   settings, skills, MCP servers and logins. **Use my config** fills the list. Sign-ins are never
   copied.
-- **Isolation:** each session works in its own copy of your folder, cloned copy-on-write where the
-  disk supports it, so a big `node_modules` costs nothing to copy. To reach a file outside its copy,
-  an agent uses an app that asks you once per folder (**Always for this folder** grants it from then
-  on). The sandbox walls each session to its folder and its home, and network contain lets agents
-  reach only the hosts you list. Both are off by default.
 - **Limits:** how much work one message may cause: how deep agents may ask each other, how many
   turns, and the cost.
+
+Whether a session runs Direct, Copy or Locked is a per-session choice in **New Session**, not a
+global setting; see [How a session runs](#how-a-session-runs-direct-copy-locked). A Copy's folder is
+cloned copy-on-write where the disk supports it, so a big `node_modules` costs nothing to copy.
 
 ## Known limits
 
@@ -169,25 +198,30 @@ their defaults are in `/docs`, under Settings).
   or `&&`, or started with environment variables, is checked by Claude Code's own rules too, which
   can block it even after you allow it. AgentBus runs every command and tool call through one rules
   list, by name; the vendor's own rules still apply on top.
-- On Ubuntu 24.04 and later, AppArmor allows user namespaces only to a program with a profile, so
-  the sandbox and network contain need one. The install script offers it when it installs into a
+- A Copy session walls each command, not the whole agent, through the vendor's own per-command
+  sandbox. On Ubuntu 24.04 and later, AppArmor allows user namespaces only to a program with a
+  profile, so that wall needs one. The install script offers it when it installs into a
   folder only root can change: `curl -fsSL https://raw.githubusercontent.com/staysup/agentbus/main/install.sh | sudo AGENTBUS_INSTALL_DIR=/usr/local/bin sh`.
   The profile is `packaging/apparmor/agentbus`, also in each release archive. AgentBus says what is
   missing. The fallback is `sudo sysctl kernel.apparmor_restrict_unprivileged_userns=0`, which turns
   the rule off for every program, so the profile is the better choice.
+- **Copy does not hide your secrets.** Reads across your disk stay open, so `~/.aws`, `~/.ssh` and
+  git credentials work as in your terminal, and a `.env` in a folder you read is visible. Only the
+  agents' own login files are hidden, so Connect's sign-in is used. Hiding secrets comes with
+  **Locked**, later.
+- **Copy's network for Claude Code, Antigravity and OpenCode is a broad allow-list, not fully
+  open.** These run on a sandbox engine that refuses a wildcard, so AgentBus allows the gateway, the
+  package registries (npm, PyPI, Go, crates) and GitHub, plus localhost and Docker; widen it from
+  real use. Codex is the exception: its own sandbox takes a truly open network. Antigravity's Copy
+  wall is only partly verified so far.
 - On ext4 a copy is a full copy. A clone (APFS) or a reflink (xfs, btrfs) is used where the disk can
   make one.
+- AgentBus's own folder tools (`read_file`, `list_folder`, `write_file`) are hidden for now; an
+  agent reaches files through its CLI's built-in tools, and the gateway refuses a file edit outside
+  the copy with a plain reason.
 - MCP servers in your config load on every turn, reviews included. On a Mac, a server that
   signs in with OAuth keeps its token in the Keychain, and macOS asks to let the session read it;
   deny it to keep that server off. What a server does is outside AgentBus's record.
-- Antigravity cannot start with the sandbox on, on macOS: it opens a local port, and the macOS sandbox cannot
-  limit a port to this machine, so AgentBus does not allow it. Turn the sandbox off to use Antigravity on a Mac.
-  Linux runners are not affected. A fix that keeps the sandbox is planned.
-- The sandbox hides your secret folders (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`,
-  `~/.docker/config.json`, `~/.npmrc`, `~/.netrc`, the Keychains) and any `.env` outside the copy,
-  even from a folder you grant for reading. On macOS this is enforced in full. On Linux the agent
-  sees only what the wall binds in, so an ungranted secret is invisible, but a secret that sits
-  inside a folder you grant is not yet hidden there. Grant narrowly on Linux until that lands.
 - Claude's browser (Chrome) cannot run in AgentBus sessions: it needs the tool's own sign-in.
 - Antigravity: use it with a Gemini API key (Settings, Subscriptions). Its Google sign-in does not
   work through AgentBus yet: before any work it checks your account with Google directly, outside

@@ -1,0 +1,60 @@
+# Changelog
+
+All notable changes to AgentBus. Full notes for each release are on the
+[releases page](https://github.com/staysup/agentbus/releases).
+
+## 0.6.4 (2026-11-23)
+
+### Added
+- **Use any model.** Claude Code can run on any model OpenRouter offers; the agent stays Claude
+  Code, the model behind it changes.
+- **OpenCode** joins as a harness, on an OpenRouter key.
+- AgentBus records OpenRouter's Chat Completions format, with its cost.
+- **Direct, Copy or Locked, per session.** Copy (the default) works in its own copy of your folder:
+  commands write only inside the copy, reads stay open, the network and local services work as
+  normal. Direct works in your folder itself. Locked comes later.
+- **Workspaces, Review, Discard.** A Copy session's workspace holds its copy; read the changes, ask
+  another model to check them with Review, then Apply or Discard.
+- **One sign-in path (Connect) in every mode.** On `agentbus up` a turn runs in your real home, so
+  your setup (`CLAUDE.md`, hooks, plugins, skills, `gh`, `aws`, `ssh`, `gitconfig`) comes along.
+- A turn's record comes back in one read.
+
+### Changed (breaking)
+- Apply and preview act on a workspace: `POST /api/v0/workspaces/{id}/apply` replaces
+  `POST /api/v0/turns/{id}/apply`, and `GET /api/v0/workspaces/{id}/changes` replaces
+  `GET /api/v0/sessions/{id}/changes`.
+- New routes: `POST /api/v0/sessions`, `POST /api/v0/workspaces`, `GET /api/v0/workspaces`,
+  `GET /api/v0/workspaces/{id}`, `POST /api/v0/workspaces/{id}/discard`.
+- The `[sandbox]` mode and `[network]` contain/allow settings are retired with the whole-process
+  wall. An older `permissions.toml` or stored policy keeps working with those keys left out. The
+  `isolation` and `home_files` settings stay.
+- At startup, sessions are migrated to workspaces, idempotently and without deleting or moving
+  anything on disk. Back up your data folder first.
+
+### Fixed
+- The file tools (`read_file`, `list_folder`, `write_file`) for a session whose folder is on another
+  machine no longer act on control's own disk; they are refused with a 409. Thanks to Ahmed
+  (`ahmed-elnashar`) for the fix (#56).
+- `agentbus up` says which data folder it uses, and whether it is new.
+- The install script prints the exact PATH line for your shell, with a literal `~`.
+- Plainer words for two known failures (an agy sign-in that needs a retry, a sandbox the machine
+  cannot build).
+- Ask-flow cleanups.
+
+### Cockpit
+- A Direct / Copy / Locked selector in New Session (Locked disabled, "coming later").
+- Review beside Apply in the changes panel; workspace status; Discard on a Copy session.
+- Settings drops the Isolation group; it is now Subscriptions, Commands, Limits and Config.
+
+## 0.6.3 (2026-11-20)
+
+### Added
+- **Archive replaces close.** Archiving hides a session from the list without deleting anything; it
+  can be unarchived, and works even while a turn runs. Closing no longer deletes a session's copy.
+- The record works as an event log that readers follow from where they left off; an event a reader
+  keeps failing on is set aside rather than blocking the rest.
+
+### Cockpit
+- Archive and Unarchive replace Close; the list hides archived sessions, and Show archived brings
+  them back.
+</content>

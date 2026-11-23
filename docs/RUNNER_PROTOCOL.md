@@ -138,7 +138,7 @@ its reference. File data goes through the server's blob store, by the hash of it
 - An apply job goes to the runner of the folder's machine, which reads both changesets and the
   files from the store (on that machine they are already in its own store), checks the folder and
   writes it.
-- A `preview` job (from 0.5.5) is an apply's dry run, for `GET /api/v0/sessions/{id}/changes`. Its
+- A `preview` job (from 0.5.5) is an apply's dry run, for `GET /api/v0/workspaces/{id}/changes`. Its
   spec is the one the apply would have (`folder_ref`, `apply_from`, `apply_to`). The runner runs the
   apply's own code and stops before it would write: it answers `result.preview` with each file the
   apply would write or remove, and each file that would refuse it, with the file's change and
