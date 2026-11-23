@@ -162,10 +162,11 @@ func page(w http.ResponseWriter, r *http.Request, body []byte) {
 
 // NotPackedPage is what / answers in a build without the cockpit.
 const NotPackedPage = `<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><title>AgentBus</title></head>
-<body style="font-family: system-ui, sans-serif; max-width: 40em; margin: 4em auto; padding: 0 1em; line-height: 1.5">
+<html lang="en"><head><meta charset="utf-8"><meta name="color-scheme" content="light dark"><title>AgentBus</title>
+<style>body { font-family: system-ui, sans-serif; max-width: 40em; margin: 4em auto; padding: 0 1em; line-height: 1.5; background: Canvas; color: CanvasText }</style></head>
+<body>
 <h1>AgentBus is running</h1>
-<p>The cockpit is not packed in this build. Release builds include it.</p>
+<p>The cockpit is not packed in this build. Install a release to get it (<code>brew install staysup/tap/agentbus</code>, or the install script in the README), or from a clone run <code>tools/pack-cockpit.sh</code>.</p>
 <p>The API works: see <a href="/docs">/docs</a>. To use the cockpit from its own repository, run its dev server
 (<code>npm run dev</code> in agentbus-cockpit) and connect it to this address.</p>
 </body></html>

@@ -10,6 +10,23 @@ import (
 	"testing"
 )
 
+func TestNotPackedLine(t *testing.T) {
+	got := notPackedLine("127.0.0.1:8787")
+	for _, want := range []string{
+		"The cockpit is not packed in this build",
+		"brew install staysup/tap/agentbus",
+		"tools/pack-cockpit.sh",
+		"http://127.0.0.1:8787/docs",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing %q in %q", want, got)
+		}
+	}
+	if strings.Contains(got, "\n") {
+		t.Errorf("want one line, got %q", got)
+	}
+}
+
 func TestCheckListen(t *testing.T) {
 	type want struct{ ok, loopback bool }
 	for addr, w := range map[string]want{

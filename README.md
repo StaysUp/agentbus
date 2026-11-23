@@ -51,6 +51,8 @@ brew install staysup/tap/agentbus
 go install github.com/staysup/agentbus/cmd/agentbus@latest
 ```
 
+A source build has no cockpit. Use the install script or Homebrew to follow the Quickstart, or from a clone run `tools/pack-cockpit.sh` then `go build`.
+
 The install script takes `AGENTBUS_INSTALL_DIR` (another folder) and `AGENTBUS_VERSION` (another
 release). Check the install with `agentbus version`. If `~/.local/bin` is not on your PATH, the
 script prints the exact line to add for your shell (zsh, bash or fish); it never edits a profile.

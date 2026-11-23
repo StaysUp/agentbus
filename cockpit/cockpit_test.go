@@ -105,8 +105,22 @@ func TestPackedFiles(t *testing.T) {
 func TestNotPacked(t *testing.T) {
 	h := New(fstest.MapFS{".keep": {}})
 	w := serve(h, "GET", "/")
-	if w.Code != 200 || !strings.Contains(w.Body.String(), "The cockpit is not packed in this build") {
-		t.Fatalf("GET /: %d %s", w.Code, w.Body.String())
+	body := w.Body.String()
+	if w.Code != 200 {
+		t.Fatalf("GET /: %d %s", w.Code, body)
+	}
+	for _, want := range []string{
+		"The cockpit is not packed in this build",
+		"brew install staysup/tap/agentbus",
+		"tools/pack-cockpit.sh",
+		`name="color-scheme" content="light dark"`,
+		"background: Canvas",
+		"color: CanvasText",
+		"npm run dev",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("GET / missing %q in %s", want, body)
+		}
 	}
 	if w := serve(h, "GET", "/settings"); w.Code != 404 {
 		t.Errorf("GET /settings without the cockpit: %d", w.Code)

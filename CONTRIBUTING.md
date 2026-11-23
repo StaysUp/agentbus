@@ -12,11 +12,15 @@ You need Go 1.27.1 or later, and `claude`, `codex` or `agy` installed to run a r
 go build ./cmd/agentbus && ./agentbus version
 ```
 
-Start it and open the cockpit:
+Start it:
 
 ```sh
 ./agentbus up -open
 ```
+
+A source build has no cockpit until you pack one (`tools/pack-cockpit.sh TAG` or
+`tools/pack-cockpit.sh --from DIR`, then `go build`). Without that, `up` prints how to get a
+release and serves the API; `-open` does not open a UI.
 
 The Quickstart in [README.md](README.md) walks a first run from nothing to two vendors talking
 about the same work.

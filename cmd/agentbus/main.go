@@ -195,7 +195,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	case c.mode == modeRunner:
 	case !cockpit.Packed():
 		// No cockpit to sign in to: no code is made.
-		fmt.Fprintf(stdout, "\nThe cockpit is not packed in this build. The API's docs: http://%s/docs\n\n", linkHost(svc.addr))
+		fmt.Fprintf(stdout, "\n%s\n\n", notPackedLine(svc.addr))
 	default:
 		// The cockpit's one-time sign-in link: printed, never the token.
 		link := signInLink(svc.addr, svc.api.NewSignInCode())
@@ -1612,6 +1612,12 @@ func (s *service) shutdown() {
 func freshFolder(home string) bool {
 	entries, err := os.ReadDir(home)
 	return len(entries) == 0 && (err == nil || errors.Is(err, fs.ErrNotExist))
+}
+
+// notPackedLine is what a source build prints instead of a sign-in link.
+// Release binaries pack the cockpit; go install and go build do not.
+func notPackedLine(listen string) string {
+	return "The cockpit is not packed in this build. Install a release to get it (brew install staysup/tap/agentbus, or the install script in the README), or from a clone run tools/pack-cockpit.sh. The API's docs: http://" + linkHost(listen) + "/docs"
 }
 
 // dataFolderLine is what agentbus up says about its data folder when it
