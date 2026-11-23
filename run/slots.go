@@ -284,6 +284,12 @@ type turnRule struct {
 	allowOnce      []string
 	refuseUnlisted bool
 	live           bool
+	// copyWrite is the writable set of a turn that runs in a session's copy: the
+	// copy directory first, then any extra writable paths, exactly what the
+	// per-command sandbox allows (run.go). The gateway refuses a file-edit tool
+	// call whose path is outside it (gateway/copyguard.go). Empty for a turn with
+	// no copy (a Direct turn).
+	copyWrite []string
 }
 
 // set records a live turn's rules. Every live turn gets an entry, even with
@@ -303,6 +309,21 @@ func (t *turnRules) set(session, turn string, allow, ask, forbid, allowOnce []st
 		refuseUnlisted: refuseUnlisted,
 		live:           true,
 	}
+}
+
+// setCopyWrite records a live turn's copy writable set, the copy directory and
+// any extra writable paths. It updates the entry set() already made for the
+// turn, so it is called after set once the copy is known (run.go). A turn with
+// no copy never calls it, so its copyWrite stays empty.
+func (t *turnRules) setCopyWrite(session, turn string, write []string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	r, ok := t.m[turnKey{session, turn}]
+	if !ok {
+		return
+	}
+	r.copyWrite = append([]string(nil), write...)
+	t.m[turnKey{session, turn}] = r
 }
 
 func (t *turnRules) clear(session, turn string) {
@@ -338,6 +359,14 @@ func (e *Engine) Allow(session, turn string) []string {
 // an earlier card. They run this turn only and are written to no settings.
 func (e *Engine) AllowOnce(session, turn string) []string {
 	return e.turnRules.get(session, turn).allowOnce
+}
+
+// CopyWrite is the copy writable set of a live turn — the copy directory and
+// any extra writable paths — for the gateway's guard to refuse a file-edit tool
+// call whose path is outside it (gateway/copyguard.go). A turn with no copy, or
+// one not live, gets nil, so no edit is refused on a path.
+func (e *Engine) CopyWrite(session, turn string) []string {
+	return e.turnRules.get(session, turn).copyWrite
 }
 
 // Unlisted is the gateway's decision for a command of a live turn on none of

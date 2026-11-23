@@ -887,6 +887,21 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		// The whole-process wall was skipped, so the turn is not Walled: a
 		// harness must not also turn its own sandbox off (harness.Turn.Walled).
 		spec.Walled = false
+		// The gateway refuses a structured file-edit tool call whose path is
+		// outside this turn's copy, the same boundary the sandbox fences writes
+		// to (gateway/copyguard.go). The writable set mirrors the sandbox's
+		// allowWrite exactly — the copy and its extra writable paths. Each is
+		// expanded with appendReal, as permissions.go does for the sandbox's own
+		// write list: the copy may sit under a symlinked root (/tmp ->
+		// /private/tmp on macOS) and Claude Code reports the resolved path to the
+		// model, so the gateway must accept both names. The copy dir stays first,
+		// the cwd a relative path resolves against. The symlink work stays here on
+		// the runner side, so gateway/ touches no folder.
+		copyWrite := appendReal(nil, spec.Copy.Dir)
+		for _, p := range spec.Copy.Write {
+			copyWrite = appendReal(copyWrite, p)
+		}
+		e.turnRules.setCopyWrite(t.session, t.id, copyWrite)
 	}
 	// The person's own MCP servers in the turn's home: every turn loads them
 	// now that read-only is retired (harness.Turn.OwnServers). Names only,

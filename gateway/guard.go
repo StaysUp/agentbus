@@ -50,6 +50,12 @@ type Guard interface {
 	Allow(session, turn string) []string
 	AllowOnce(session, turn string) []string
 	Unlisted(session, turn string) Decision
+	// CopyWrite is the writable set of a turn that runs in a session's copy:
+	// the copy directory first, then any extra writable paths, exactly what the
+	// per-command sandbox allows. A file-edit tool call whose path is outside it
+	// is refused (copyguard.go). A turn with no copy (Direct, or a vendor the
+	// guard does not read) gets nil, so no edit is refused on a path.
+	CopyWrite(session, turn string) []string
 }
 
 // SetGuard sets the Guard. Call it before serving.
@@ -295,6 +301,7 @@ type guardBody struct {
 	vendor    string
 	rules     Rules    // allow, ask, forbid and the unlisted default
 	allowOnce []string // command lines allowed once for this turn
+	copyWrite []string // the copy's writable set; a file edit outside it is refused
 	src       io.ReadCloser
 	br        *bufio.Reader
 	end       func()
@@ -362,8 +369,8 @@ type openCall struct {
 
 // guardReply wraps src. end runs once, when the guard has read the whole
 // reply or the reply is closed: every tool.refused is emitted by then.
-func (g *Gateway) guardReply(ctx context.Context, ex *exchange, rules Rules, allowOnce []string, src io.ReadCloser, end func()) io.ReadCloser {
-	return &guardBody{g: g, ex: ex, vendor: g.adapter.Vendor(), rules: rules, allowOnce: allowOnce, src: src, end: end,
+func (g *Gateway) guardReply(ctx context.Context, ex *exchange, rules Rules, allowOnce, copyWrite []string, src io.ReadCloser, end func()) io.ReadCloser {
+	return &guardBody{g: g, ex: ex, vendor: g.adapter.Vendor(), rules: rules, allowOnce: allowOnce, copyWrite: copyWrite, src: src, end: end,
 		br: bufio.NewReaderSize(src, 64<<10), open: map[string]*openCall{}, refused: map[string]string{}, ctx: ctx}
 }
 
@@ -662,6 +669,20 @@ func jsonText(v any) []byte {
 // "waiting for a person" message, and each of its ask commands is collected for
 // the reply's one approval (registerApproval).
 func (b *guardBody) decide(key, callID, name string, input json.RawMessage, item map[string]any) {
+	// Copy mode: a structured file-edit call whose path is outside the turn's
+	// copy is refused here, the same boundary the per-command sandbox fences
+	// writes to (copyguard.go). A turn with no copy has an empty write-set, so
+	// outsideCopy is false and nothing is refused on a path. The copy dir is the
+	// write-set's first entry and the turn's working folder, so it resolves a
+	// relative path.
+	if len(b.copyWrite) > 0 {
+		for _, p := range fileEditPaths(b.vendor, item) {
+			if outsideCopy(b.copyWrite, b.copyWrite[0], p) {
+				b.refuse(key, callID, name, input, "", copyRefusalText(p))
+				return
+			}
+		}
+	}
 	cmds := commandsOf(b.vendor, item)
 	decs := make([]Decision, len(cmds))
 	for i, c := range cmds {
