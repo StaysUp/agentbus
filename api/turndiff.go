@@ -1,7 +1,7 @@
 package api
 
 // A turn's diff summary and its apply: GET /api/v0/turns/{id}/diff and
-// POST /api/v0/turns/{id}/apply. The summary is read from the record: the
+// POST /api/v0/workspaces/{id}/apply. The summary is read from the record: the
 // turn's turn.changed holds its file changes (listed at /changes), and its
 // events its model calls (/calls) and tool calls (/tools); its turn.applied
 // events hold its applies. A turn from before 0.5 has its changes and applies
@@ -48,7 +48,7 @@ type TurnDiff struct {
 // FilesSummary is a turn's file changes in summary, from its turn.changed.
 // The list is at GET /api/v0/turns/{id}/changes.
 type FilesSummary struct {
-	Isolated bool   `json:"isolated" doc:"The turn ran in an isolated copy, between two checkpoints: POST /api/v0/turns/{id}/apply can put its changes in the person's folder."`
+	Isolated bool   `json:"isolated" doc:"The turn ran in an isolated copy, between two checkpoints: POST /api/v0/workspaces/{id}/apply can put its changes in the person's folder."`
 	From     string `json:"from,omitempty" doc:"The checkpoint the turn started from. In an isolated copy only."`
 	To       string `json:"to,omitempty" doc:"The checkpoint the turn ended with. The same as from: the turn changed nothing."`
 	Kind     string `json:"kind" doc:"Always snapshot: the files were compared by their SHA-256."`
@@ -162,7 +162,7 @@ type TurnRecord struct {
 	ModelCalls CallsSummary `json:"model_calls" doc:"The turn's model calls, in summary with their cost; the list pages at GET /api/v0/turns/{id}/calls."`
 }
 
-// ApplyState is an apply of a turn: the answer to POST /api/v0/turns/{id}/apply,
+// ApplyState is an apply of a turn: the answer to POST /api/v0/workspaces/{id}/apply,
 // and apply in GET /api/v0/turns/{id}/diff.
 type ApplyState struct {
 	State     string                `json:"state" doc:"none (never asked for), queued, running, applied, refused (a file in your folder changed, or the turn cannot be applied: error says why), or failed (the apply did not finish)."`
@@ -526,7 +526,7 @@ const (
 	applyOffline       = "the folder's machine is offline, so nothing was written: start agentbus runner there, then ask again"
 )
 
-// POST /api/v0/turns/<id>/apply: put the turn's changes into the person's
+// POST /api/v0/workspaces/<id>/apply: put the turn's changes into the person's
 // folder, through the runner that holds its session.
 // whyNotApplicable says why turn id's changes cannot be applied: it has not
 // ended, it never started, or it did not run in a copy.
