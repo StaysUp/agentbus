@@ -869,6 +869,17 @@ func (r *Runner) request(at *attempt) run.Request {
 	sp := at.job.Spec
 	req := run.Request{Turn: at.job.Turn, Prompt: sp.Prompt, Model: sp.Model, Workspace: string(sp.Workspace),
 		IdempotencyKey: at.job.IdempotencyKey, AllowOnce: sp.AllowOnce}
+	// Copy mode is the workspace's sandbox kind: the turn runs in a copy, so its
+	// commands are walled to it. prepare set at.ws to the kind it opened; the
+	// job's Workspace row is written only when a first turn ends, so the first
+	// turn of a Copy workspace must read the prepared kind, not that row.
+	w := at.ws
+	if w == nil {
+		w = at.job.Workspace
+	}
+	if w != nil && (w.Kind == queue.WorkspaceCopy || w.Kind == queue.WorkspaceWorktree) {
+		req.Copy = true
+	}
 	// The agent's token for the API is control's: a runner of a server's
 	// always, and in up too. Its model calls carry the stand-in, not the token.
 	if (r.cfg.Forward || r.cfg.NoSecrets) && at.token != "" {

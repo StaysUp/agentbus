@@ -2,6 +2,7 @@ package harness
 
 import (
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -100,6 +101,95 @@ func TestClaudeRelayedCredsPinnedInSettings(t *testing.T) {
 	}
 	if v, ok := envVal(orEnv, "ANTHROPIC_AUTH_TOKEN"); !ok || v != "" {
 		t.Errorf("relayed WireOpenRouter env ANTHROPIC_AUTH_TOKEN=%q (set %v), want cleared", v, ok)
+	}
+}
+
+// A Copy turn's two --settings (the gateway env from Wire, the sandbox from
+// Args) are folded into one, keeping both top-level keys and taking the first's
+// place. A turn with one --settings is unchanged.
+func TestClaudeCombineSettings(t *testing.T) {
+	// Two --settings: merged into one carrying both env and sandbox.
+	in := []string{"--settings", `{"env":{"ANTHROPIC_BASE_URL":"gw"}}`, "-p", "--model", "haiku",
+		"--settings", `{"sandbox":{"enabled":true}}`, "--", "hi"}
+	got := claude{}.CombineSettings(in)
+	if got[0] != "--settings" {
+		t.Fatalf("merged --settings not first: %q", got)
+	}
+	var v map[string]any
+	if err := json.Unmarshal([]byte(got[1]), &v); err != nil {
+		t.Fatalf("merged value not JSON: %v", err)
+	}
+	if _, ok := v["env"]; !ok {
+		t.Errorf("merged lost env: %q", got[1])
+	}
+	if _, ok := v["sandbox"]; !ok {
+		t.Errorf("merged lost sandbox: %q", got[1])
+	}
+	if rest := strings.Join(got[2:], " "); rest != "-p --model haiku -- hi" {
+		t.Errorf("rest reordered or dropped: %q", rest)
+	}
+	if n := strings.Count(strings.Join(got, "\x00"), "--settings"); n != 1 {
+		t.Errorf("want exactly one --settings, got %d", n)
+	}
+	// One --settings: unchanged.
+	one := []string{"--settings", `{"env":{"X":"1"}}`, "-p", "--", "hi"}
+	if g := (claude{}).CombineSettings(one); !slices.Equal(g, one) {
+		t.Errorf("single --settings changed: %q", g)
+	}
+	// A flag VALUE equal to "--settings" (a hint, a tool rule, the prompt) must
+	// not be read as a flag: counting it would leave two real --settings and make
+	// claude drop the gateway one (live, claude 2.1.330). Here the only real
+	// --settings is the gateway's; the poison value is --append-system-prompt's.
+	poison := []string{"--settings", `{"env":{"ANTHROPIC_BASE_URL":"gw"}}`, "--append-system-prompt", "--settings",
+		"--allowedTools", "Bash", "--", "--settings"}
+	if g := (claude{}).CombineSettings(poison); !slices.Equal(g, poison) {
+		t.Errorf("a flag value of --settings poisoned the merge: %q", g)
+	}
+}
+
+// The Copy sandbox block fences writes to the copy plus the extra writable
+// paths, keeps reads open except the CLI's login file, and gives a broad
+// network allow-list (hosts plus the defaults) with localhost via
+// allowLocalBinding. srt cannot be truly open (it refuses "*"), so this is the
+// documented honest limit (DESIGN_contain_mode, measured 2026-11-23).
+func TestClaudeSandboxBlock(t *testing.T) {
+	b := claudeSandboxBlock("/copy", []string{"/tmp/t", "/caches/go"}, []string{"/home/.claude/.credentials.json"},
+		[]string{"gw.local:8787"})
+	if b["enabled"] != true {
+		t.Errorf("enabled = %v, want true", b["enabled"])
+	}
+	// A cloned project's settings.json must not extend allowWrite or run
+	// unsandboxed; a sandbox backend that cannot start must fail the turn, not
+	// run it unconfined (both verified live, claude 2.1.330).
+	if b["allowUnsandboxedCommands"] != false {
+		t.Errorf("allowUnsandboxedCommands = %v, want false", b["allowUnsandboxedCommands"])
+	}
+	if b["failIfUnavailable"] != true {
+		t.Errorf("failIfUnavailable = %v, want true", b["failIfUnavailable"])
+	}
+	// A nil denyRead must become [], not JSON null (claude 2.1.330 exits on null).
+	if d := claudeSandboxBlock("/copy", nil, nil, nil)["filesystem"].(map[string]any)["denyRead"].([]string); d == nil {
+		t.Error("denyRead is nil; marshals as null and claude rejects it")
+	}
+	fs := b["filesystem"].(map[string]any)
+	if w := fs["allowWrite"].([]string); !slices.Equal(w, []string{"/copy", "/tmp/t", "/caches/go"}) {
+		t.Errorf("allowWrite = %v, want copy + extras", w)
+	}
+	if d := fs["denyRead"].([]string); !slices.Equal(d, []string{"/home/.claude/.credentials.json"}) {
+		t.Errorf("denyRead = %v, want the login file", d)
+	}
+	net := b["network"].(map[string]any)
+	if net["allowLocalBinding"] != true {
+		t.Errorf("allowLocalBinding = %v, want true (localhost)", net["allowLocalBinding"])
+	}
+	dom := net["allowedDomains"].([]string)
+	if dom[0] != "gw.local:8787" {
+		t.Errorf("allowedDomains[0] = %q, want the gateway first", dom[0])
+	}
+	for _, want := range []string{"registry.npmjs.org", "pypi.org", "proxy.golang.org", "crates.io", "github.com"} {
+		if !slices.Contains(dom, want) {
+			t.Errorf("allowedDomains missing a registry/GitHub host %q: %v", want, dom)
+		}
 	}
 }
 

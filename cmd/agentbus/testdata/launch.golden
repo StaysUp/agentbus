@@ -2142,6 +2142,33 @@ cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=769 asked_by=520 mcp_instructions=320
 session.closed resume_id="tid-0"
+=== claude copy
+--- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\"},\"sandbox\":{\"allowUnsandboxedCommands\":false,\"enabled\":true,\"failIfUnavailable\":true,\"filesystem\":{\"allowRead\":[],\"allowWrite\":[\"<folder>\"],\"denyRead\":[\"<home>/.claude/.credentials.json\"],\"denyWrite\":[]},\"network\":{\"allowLocalBinding\":true,\"allowedDomains\":[\"127.0.0.1:8787\",\"registry.npmjs.org\",\"pypi.org\",\"files.pythonhosted.org\",\"proxy.golang.org\",\"sum.golang.org\",\"crates.io\",\"static.crates.io\",\"github.com\",\"codeload.github.com\",\"*.githubusercontent.com\"],\"deniedDomains\":[]}}}"
+arg "-p"
+arg "--output-format"
+arg "json"
+arg "--append-system-prompt"
+arg "You work through AgentBus, in session s1. A turn is one message to you, your reply and your changes.\nYour folder is usually your session's own copy of the person's folder. Your edits stay in the copy. They reach the person's folder only when a turn is applied.\nUse the agentbus MCP tools to ask other saved agents (any vendor) for work (ask_agent) or to have one review a turn (review_turn). AgentBus agents are saved setups across vendors, not your harness's own agents or subagents.\nTo read turns and their diffs, search this session, or stop a turn, use agentbus-api (GET /api/v0/turns, GET /api/v0/turns/T/diff, POST /api/v0/turns/T/stop).\nThe person applies turns to their folder; you cannot.\nWork you ask for comes back to you as a later turn: do not wait for it."
+arg "--allowedTools"
+arg "Edit(/<folder>/**),Bash,mcp__agentbus"
+arg "--mcp-config"
+arg "{\"mcpServers\":{\"agentbus\":{\"headers\":{\"Authorization\":\"Bearer ${AGENTBUS_TOKEN}\"},\"type\":\"http\",\"url\":\"http://127.0.0.1:8787/api/v0/mcp\"}}}"
+arg "--no-chrome"
+arg "--disallowedTools"
+arg "Edit(/<data>/permissions.toml),Edit(/<data>/instructions.md),Edit(/<data>/agents.json),Task,Agent,Workflow,ListAgents,SendMessage"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "HOME=<home>"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="claude" continuity="" replay_from="" model="" context=""
+context.added instructions=769 mcp_instructions=320
+session.closed resume_id="sid-0"
 === agy subscription, then resume
 --- turn t_1 harness="agy" access="" model=""
 arg "--output-format"

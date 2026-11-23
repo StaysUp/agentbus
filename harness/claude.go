@@ -17,6 +17,9 @@ func (claude) Info() Info {
 		Name:    "claude",
 		Label:   "Claude Code",
 		Product: "Claude Code",
+		// Claude Code wraps each shell command in its own srt sandbox, set per
+		// run through --settings, so a Copy turn needs no whole-process wall.
+		CopySandbox: true,
 		// Answers with network access denied (Claude Code 2.1.318,
 		// 2026-11-05, run under a sandbox profile that denies the network).
 		StatusArgs:         []string{"auth", "status"},
@@ -261,6 +264,13 @@ func (claude) ResumeID(line []byte, current string) string {
 func (claude) Args(t Turn) []string {
 	// --output-format json prints one result object with the session_id.
 	a := []string{"-p", "--output-format", "json"}
+	// Copy mode: Claude Code's own per-command sandbox, as a second --settings
+	// the engine folds into the gateway one (CombineSettings). Writes fenced to
+	// the copy, the login file hidden, the network a broad allow-list.
+	if t.Copy.Dir != "" {
+		sb, _ := json.Marshal(map[string]any{"sandbox": claudeSandboxBlock(t.Copy.Dir, t.Copy.Write, t.Copy.DenyRead, t.Copy.Hosts)})
+		a = append(a, "--settings", string(sb))
+	}
 	// The hint goes at the end of Claude Code's system prompt. Own replay
 	// keeps each request's system prompt as the agent sent it, and the
 	// text is the same on every turn of the session, so the main thread
@@ -374,6 +384,59 @@ func claudeMCPConfig(url string) string {
 	return string(b)
 }
 
+// claudeCopyDomains is the default broad network allow-list for a Copy turn on
+// the srt-backed sandbox. srt refuses "*" ("overly broad... not allowed") and
+// requires a network block, so "open" is this list plus allowLocalBinding for
+// localhost (measured 2026-11-23 against srt v0.0.83; DESIGN_contain_mode "Copy
+// network: the honest limit"). The gateway host is added per run. Widen from
+// real use.
+var claudeCopyDomains = []string{
+	"registry.npmjs.org",
+	"pypi.org", "files.pythonhosted.org",
+	"proxy.golang.org", "sum.golang.org",
+	"crates.io", "static.crates.io",
+	"github.com", "codeload.github.com", "*.githubusercontent.com",
+}
+
+// claudeSandboxBlock is Claude Code's "sandbox" settings for a Copy turn: writes
+// fenced to the copy plus the extra writable paths (the per-run temp and tool
+// caches), reads open across the disk except denyRead (the CLI's own login
+// file, so Connect's stand-in is used), and the network a broad allow-list
+// (claudeCopyDomains plus hosts, e.g. the gateway) with localhost reachable
+// through allowLocalBinding. deniedDomains, denyWrite and allowRead are present
+// and empty because srt's config requires them. Reads are open by default, so
+// allowRead stays empty and denyRead carves out the login file.
+func claudeSandboxBlock(copyDir string, write, denyRead, hosts []string) map[string]any {
+	allowWrite := append([]string{copyDir}, write...)
+	domains := append(append([]string{}, hosts...), claudeCopyDomains...)
+	if denyRead == nil {
+		denyRead = []string{} // a nil marshals as JSON null, which Claude Code rejects
+	}
+	return map[string]any{
+		"enabled": true,
+		// A cloned project's .claude/settings.json can add to allowWrite (and
+		// run commands unsandboxed) unless this is false — measured live on
+		// claude 2.1.330 (agy review 2026-11-23): without it a repo settings.json
+		// allowWrite escaped the copy; with it the write was refused.
+		"allowUnsandboxedCommands": false,
+		// Without the whole-process wall behind it (perCommand), a sandbox
+		// backend that cannot start must fail the turn, not run it unconfined:
+		// Claude Code's default here is false (silent fail-open).
+		"failIfUnavailable": true,
+		"filesystem": map[string]any{
+			"allowRead":  []string{},
+			"denyRead":   denyRead,
+			"allowWrite": allowWrite,
+			"denyWrite":  []string{},
+		},
+		"network": map[string]any{
+			"allowedDomains":    domains,
+			"deniedDomains":     []string{},
+			"allowLocalBinding": true,
+		},
+	}
+}
+
 // claudeSettings is the --settings argument pair pinning environment values
 // Claude Code must not let a settings.json "env" override — a user's own, or a
 // cloned project's .claude/settings.json. Claude Code's settings "env" wins
@@ -389,6 +452,86 @@ func claudeMCPConfig(url string) string {
 func claudeSettings(env map[string]string) []string {
 	b, _ := json.Marshal(map[string]any{"env": env})
 	return []string{"--settings", string(b)}
+}
+
+// LoginFiles is Claude Code's own sign-in file, hidden in Copy mode so the turn
+// uses Connect's stand-in: $CLAUDE_CONFIG_DIR/.credentials.json, or
+// $HOME/.claude/.credentials.json. (On macOS Claude Code may hold the token in
+// the Keychain instead; a live run confirms whether a file deny is enough.)
+func (claude) LoginFiles(env []string) []string {
+	var files []string
+	add := func(dir string) {
+		if dir == "" {
+			return
+		}
+		if f := filepath.Join(dir, ".credentials.json"); !slices.Contains(files, f) {
+			files = append(files, f)
+		}
+	}
+	add(envValue(env, "CLAUDE_CONFIG_DIR"))
+	if h := envValue(env, "HOME"); h != "" {
+		add(filepath.Join(h, ".claude"))
+	}
+	return files
+}
+
+// CombineSettings folds the turn's --settings arguments into one. A Copy turn
+// carries two — the gateway env block from Wire and the sandbox block from Args
+// — and Claude Code is not relied on to merge two --settings flags. The merged
+// object keeps each one's top-level keys (env and sandbox are disjoint) and is
+// prepended at index 0, the rest in order. One --settings, or none, is returned
+// as given.
+//
+// The scan walks by flag position so a flag VALUE equal to "--settings" is not
+// read as a flag: a value (an instruction, a tool rule) is attacker-reachable,
+// and a mis-parse that left two --settings in place made Claude Code drop the
+// first and bypass the gateway (agy review, live on claude 2.1.330, 2026-11-23).
+func (claude) CombineSettings(args []string) []string {
+	var at []int
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--" {
+			break // the prompt and anything after it are positional, not flags
+		}
+		if args[i] == "--settings" && i+1 < len(args) {
+			at = append(at, i)
+			i++ // the value is not a flag
+			continue
+		}
+		if claudeValueFlags[args[i]] {
+			i++ // skip this flag's value, which is not a flag
+		}
+	}
+	if len(at) < 2 {
+		return args
+	}
+	merged := map[string]any{}
+	drop := map[int]bool{}
+	for _, i := range at {
+		var v map[string]any
+		if json.Unmarshal([]byte(args[i+1]), &v) != nil {
+			return args // leave a malformed value alone
+		}
+		for k, val := range v {
+			merged[k] = val
+		}
+		drop[i], drop[i+1] = true, true
+	}
+	b, _ := json.Marshal(merged)
+	out := []string{"--settings", string(b)}
+	for i := 0; i < len(args); i++ {
+		if !drop[i] {
+			out = append(out, args[i])
+		}
+	}
+	return out
+}
+
+// claudeValueFlags are the flags claude.Args emits that take a following value,
+// so CombineSettings skips that value when scanning for --settings flags.
+var claudeValueFlags = map[string]bool{
+	"--settings": true, "--append-system-prompt": true, "--output-format": true,
+	"--resume": true, "--allowedTools": true, "--mcp-config": true,
+	"--disallowedTools": true, "--model": true,
 }
 
 // claudeTools is the --allowedTools rule that lets the tool server's tools run

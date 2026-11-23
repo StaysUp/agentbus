@@ -57,6 +57,11 @@ type Info struct {
 	// sandbox that one is off (Turn.Walled), so the wall keeps the turn's
 	// folder read only in its place.
 	OwnSandbox bool
+	// CopySandbox: in Copy mode the harness walls each command itself (its own
+	// per-command sandbox, configured through Turn.Copy), so the runner does not
+	// wrap the whole process. A harness without it falls back to the runner's
+	// whole-process wall for a Copy turn.
+	CopySandbox bool
 	// StatusArgs is its own offline sign-in status command: exit 0 signed
 	// in, 1 not. Its output is never read, since it can name the account.
 	StatusArgs []string
@@ -313,6 +318,25 @@ type OpenRouterWire struct {
 	Model string
 }
 
+// Copy is a turn's Copy-mode sandbox (DESIGN_contain_mode): the CLI's own
+// per-command sandbox, configured for the session's copy. Dir empty means the
+// turn is not in Copy mode, and the harness adds no sandbox settings. Only a
+// harness with Info.CopySandbox reads it.
+type Copy struct {
+	// Dir is the session's copy, the writable root; "" means not Copy mode.
+	Dir string
+	// Write are extra writable paths beyond Dir: the per-run temp and the tool
+	// caches, so a build does not break on a cold cache.
+	Write []string
+	// DenyRead are the CLI's own login files, hidden so the agent uses Connect's
+	// stand-in rather than the real token. Reads are otherwise open.
+	DenyRead []string
+	// Hosts are extra allowed network hosts (the gateway) on top of the
+	// harness's default allow-list. srt cannot open the network fully, so Copy's
+	// network is a broad allow-list (DESIGN_contain_mode, measured 2026-11-23).
+	Hosts []string
+}
+
 // Writes is what one turn may change: the files under each folder of Edit,
 // never the files of Protect.
 type Writes struct {
@@ -353,6 +377,10 @@ type Turn struct {
 	// turn loads them and may call them, reviews included (read-only retired,
 	// B12). Names only: never a server's settings, which may hold a token.
 	OwnServers []string
+	// Copy, when its Dir is set, is the turn's Copy-mode sandbox: a harness with
+	// Info.CopySandbox walls each command itself (its own per-command sandbox),
+	// fenced to the copy, instead of the runner wrapping the whole process.
+	Copy Copy
 	// Walled says the runner's sandbox walls the turn in (package sandbox):
 	// the harness's own sandbox stays off, since macOS cannot build one
 	// Seatbelt sandbox inside another ("sandbox_apply: Operation not
@@ -436,6 +464,39 @@ func Unkept(h Harness, t Turn) []string {
 		return u.Unkept(t)
 	}
 	return nil
+}
+
+// LoginFiler is a harness whose own sign-in files a Copy turn hides (denyRead),
+// so the agent reaches its model through Connect's stand-in rather than the real
+// token on disk. env is the child's environment, which locates the files.
+type LoginFiler interface {
+	LoginFiles(env []string) []string
+}
+
+// LoginFiles are h's own sign-in files to hide in Copy mode (LoginFiler), or
+// none.
+func LoginFiles(h Harness, env []string) []string {
+	if l, ok := h.(LoginFiler); ok {
+		return l.LoginFiles(env)
+	}
+	return nil
+}
+
+// SettingsCombiner is a harness whose child takes more than one --settings
+// argument that must be folded into one. Claude Code is the case: the gateway
+// env block (from Wire) and the Copy sandbox block (from Args) arrive as
+// separate --settings, and two --settings flags are not relied on to merge.
+type SettingsCombiner interface {
+	CombineSettings(args []string) []string
+}
+
+// CombineSettings folds h's repeated --settings into one (SettingsCombiner), or
+// returns args unchanged.
+func CombineSettings(h Harness, args []string) []string {
+	if c, ok := h.(SettingsCombiner); ok {
+		return c.CombineSettings(args)
+	}
+	return args
 }
 
 // TurnEnver is a harness that takes some of a turn's settings in its child's

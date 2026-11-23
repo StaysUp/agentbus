@@ -300,6 +300,10 @@ type Request struct {
 	Workspace      string
 	Prompt, Model  string
 	IdempotencyKey string // stored on turn.started, as the caller's key
+	// Copy is Copy mode: the turn runs in the workspace's sandbox copy, so its
+	// commands are walled to the copy. Stamped on the job from the workspace
+	// record (the runner reads the workspace kind); the engine never derives it.
+	Copy bool
 	// AgentID, Access and KeyEnv: the saved agent and how it reaches its
 	// model (Access). Every turn needs Harness, a next one too (NoAgent):
 	// with Session, the turn runs on that agent in the session's folder.
@@ -435,7 +439,7 @@ func (e *Engine) Start(req Request) (*Turn, error) {
 	if model == "" {
 		model = req.AgentModel
 	}
-	return e.start(turn{harness: req.Harness, folder: req.Folder, folderRef: req.FolderRef, workspace: req.Workspace, session: id, id: req.Turn,
+	return e.start(turn{harness: req.Harness, folder: req.Folder, folderRef: req.FolderRef, workspace: req.Workspace, copy: req.Copy, session: id, id: req.Turn,
 		model: model, prompt: req.Prompt, key: req.IdempotencyKey,
 		agentID: req.AgentID, access: req.Access, keyEnv: req.KeyEnv, origin: req.Origin, root: req.Root, depth: req.Depth,
 		token: req.Token, apiURL: req.APIURL, standIn: req.StandIn, signin: req.Signin, allowOnce: req.AllowOnce})
@@ -566,7 +570,7 @@ func (e *Engine) next(req Request) (*Turn, error) {
 		return fail(refuse(http.StatusBadRequest, "folder is not this session's folder "+strconv.Quote(c.Folder)+
 			"; leave folder out to use the session's"))
 	}
-	t := turn{harness: agent, folder: c.Folder, folderRef: c.FolderRef, workspace: req.Workspace, session: session, id: req.Turn, resumeID: c.ResumeID, replayFrom: from,
+	t := turn{harness: agent, folder: c.Folder, folderRef: c.FolderRef, workspace: req.Workspace, copy: req.Copy, session: session, id: req.Turn, resumeID: c.ResumeID, replayFrom: from,
 		recoveredFrom: recovered, recoveredWhy: recoveredWhy, continuity: continuity, model: model,
 		prompt: req.Prompt, context: context, key: req.IdempotencyKey,
 		agentID: agentID, access: access, keyEnv: keyEnv, origin: req.Origin, root: req.Root, depth: req.Depth,
@@ -629,6 +633,7 @@ const replayOnly = "this session cannot be continued from here: it was continued
 type turn struct {
 	harness, folder, session string
 	workspace                string // the workspace the turn runs in; stored on turn.started
+	copy                     bool   // Copy mode: the folder is a sandbox copy, commands walled to it
 	folderRef                string // the person's folder, by its reference
 	id                       string // the turn id
 	resumeID                 string // a next turn by resume: the conversation it continues; empty for a first
@@ -733,6 +738,10 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	cmd := exec.Command(l.Path)
 	asked := askedBy(t.origin)
 	cmd.Env = turnEnv(l.Env, os.Environ(), apiURL, childTok, e.cfg.APIDir, asked)
+	// The host's own environment, before e.home swaps in a clean session home:
+	// Copy mode hides the CLI's real login file, which sits under the host HOME,
+	// not the empty session home (its login file does not exist).
+	hostEnv := append([]string(nil), cmd.Env...)
 	if e.cfg.Homes != "" {
 		var made bool
 		cmd.Env, made, err = e.home(t.session, t.continuity == "", h, cmd.Env)
@@ -823,7 +832,22 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	// machine whose only way to close an agent off is the wall (macOS): the
 	// person turns contain on, and the runner builds what it needs.
 	autoWall := perm.Sandbox.Mode != settings.SandboxOn && needsWall(perm)
-	if perm.Sandbox.Mode == settings.SandboxOn || autoWall {
+	// A Copy turn on a harness that walls each command itself (Info.CopySandbox,
+	// such as Claude Code) needs no whole-process wall: its own per-command
+	// sandbox (Turn.Copy, set below) fences writes to the copy and governs the
+	// network. A Copy turn on a harness without its own command sandbox keeps
+	// today's behaviour until that harness gains one (his call, 2026-11-23).
+	// It defers to any legacy whole-process containment the person set
+	// explicitly — the global Sandbox toggle or [network] contain — which keeps
+	// building the whole-process wall or netjail until step 5 retires those
+	// toggles. One predicate, so a future legacy toggle is added here, not
+	// missed at a call site.
+	legacyWall := perm.Sandbox.Mode == settings.SandboxOn || perm.Network.Contain == settings.ContainOn
+	perCommand := t.copy && h.Info().CopySandbox && !legacyWall
+	switch {
+	case perCommand:
+		// no whole-process wall and no netjail; the per-command sandbox does it.
+	case perm.Sandbox.Mode == settings.SandboxOn || autoWall:
 		// A turn that may edit nothing (edit = "none"), of a harness whose
 		// own sandbox kept it from writing, is off in the wall
 		// (harness.Turn.Walled); other turns write their own copy.
@@ -840,13 +864,15 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		}
 		jail = box
 		cmd.Env = setEnv(cmd.Env, box.Env())
-	} else if on, why := e.contained(perm); why != "" {
-		e.cfg.Logf("run.refused agent=%s reason=network", t.harness)
-		return nil, refuse(http.StatusBadRequest, why)
-	} else if on {
-		j := netjail.New(netSpec)
-		jail = j
-		cmd.Env = setEnv(cmd.Env, j.Env())
+	default:
+		if on, why := e.contained(perm); why != "" {
+			e.cfg.Logf("run.refused agent=%s reason=network", t.harness)
+			return nil, refuse(http.StatusBadRequest, why)
+		} else if on {
+			j := netjail.New(netSpec)
+			jail = j
+			cmd.Env = setEnv(cmd.Env, j.Env())
+		}
 	}
 	defer func() {
 		if !started && jail != nil {
@@ -855,6 +881,35 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	}()
 	spec := turnSpec(hint, t.resumeID, t.model, w, perm, t.context+t.prompt)
 	spec.Access = t.access
+	// Copy mode: hand the harness its own per-command sandbox for this turn —
+	// the copy writable, its login file hidden (so Connect's stand-in is used),
+	// and the gateway host added to the broad network allow-list (localhost is
+	// reachable through allowLocalBinding; DESIGN_contain_mode, measured
+	// 2026-11-23).
+	if perCommand {
+		// The gateway the child calls, and control's API (AGENTBUS_URL), which on
+		// a remote runner is a non-loopback address the deny-by-default network
+		// would otherwise block; localhost is reachable through allowLocalBinding.
+		var hosts []string
+		for _, raw := range []string{e.cfg.BaseURL, apiURL} {
+			if u, err := url.Parse(raw); err == nil && u.Host != "" && !slices.Contains(hosts, u.Host) {
+				hosts = append(hosts, u.Host)
+			}
+		}
+		// Hide the CLI's real login file (under the host HOME) and, in a clean
+		// session home, that home's too, so neither the host token nor a stale
+		// one is readable and Connect's stand-in is used.
+		deny := harness.LoginFiles(h, hostEnv)
+		for _, f := range harness.LoginFiles(h, cmd.Env) {
+			if !slices.Contains(deny, f) {
+				deny = append(deny, f)
+			}
+		}
+		spec.Copy = harness.Copy{Dir: t.folder, DenyRead: deny, Hosts: hosts}
+		// The whole-process wall was skipped, so the turn is not Walled: a
+		// harness must not also turn its own sandbox off (harness.Turn.Walled).
+		spec.Walled = false
+	}
 	// The person's own MCP servers in the turn's home: every turn loads them
 	// now that read-only is retired (harness.Turn.OwnServers). Names only,
 	// in the service log.
@@ -877,6 +932,9 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	// command line (harness.TurnEnver).
 	cmd.Env = setEnv(cmd.Env, harness.TurnEnv(h, spec, cmd.Env))
 	all := append(append([]string{}, l.Args...), args...)
+	// Fold any repeated --settings into one (Claude Code in Copy mode: the
+	// gateway env block from the wire and the sandbox block from Args).
+	all = harness.CombineSettings(h, all)
 	cmd.Args = append([]string{l.Path}, all...)
 	cmd.Dir = t.folder
 	// Stdin stays nil: the child reads an empty stdin. Stdout is read for the

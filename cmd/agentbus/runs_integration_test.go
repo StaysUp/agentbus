@@ -846,3 +846,38 @@ func TestUpFileToolsRunOnOwnMachine(t *testing.T) {
 		t.Fatalf("list_folder in agentbus up: want the folder's entries, got %s", got)
 	}
 }
+
+// A sandbox (Copy) workspace's FIRST turn runs through the per-command sandbox,
+// though the workspace's queue row is written only when a turn finishes: the
+// runner reads the prepared kind, not that row. Without that, the first and most
+// important turn would run unsandboxed (agy review evt_3daaa8a056a9d8ec, P1.1).
+func TestFirstCopyTurnIsSandboxed(t *testing.T) {
+	home := t.TempDir()
+	oldToolDefaults(t, home)
+	svc := runService(t, home, nil, 0)
+	tok := readToken(t, home)
+	report := filepath.Join(t.TempDir(), "report")
+	t.Setenv("AGENTBUS_FAKE_OUT", report)
+	t.Setenv("AGENTBUS_FAKE_EXIT", "0")
+	// No isolate: it defaults true, so this first turn runs in a sandbox copy.
+	code, out, raw := postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": t.TempDir(), "prompt": "one"})
+	if code != http.StatusAccepted {
+		t.Fatalf("run: %d %s", code, raw)
+	}
+	waitClosed(t, svc.store, out["session"].(string))
+	s := settingsArg(readReport(t, report).Args)
+	if !strings.Contains(s, `"sandbox":`) || !strings.Contains(s, `"allowUnsandboxedCommands":false`) {
+		t.Fatalf("the first Copy turn is not sandboxed: --settings %q", s)
+	}
+	// A Direct turn (isolate false) is not sandboxed: no sandbox block.
+	direct := filepath.Join(t.TempDir(), "direct")
+	t.Setenv("AGENTBUS_FAKE_OUT", direct)
+	code, out, raw = postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": t.TempDir(), "isolate": false, "prompt": "one"})
+	if code != http.StatusAccepted {
+		t.Fatalf("direct run: %d %s", code, raw)
+	}
+	waitClosed(t, svc.store, out["session"].(string))
+	if d := settingsArg(readReport(t, direct).Args); strings.Contains(d, `"sandbox":`) {
+		t.Fatalf("a Direct turn carries a sandbox block: --settings %q", d)
+	}
+}

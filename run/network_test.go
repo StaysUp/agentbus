@@ -91,6 +91,43 @@ func TestContainOnRefusedWhereItCannot(t *testing.T) {
 	}
 }
 
+// A Copy turn does not escape [network] contain: with contain on, perCommand
+// defers to the whole-process wall / netjail, so where the wall cannot be built
+// the turn refuses rather than running on the per-command sandbox with its own
+// open network (agy review evt_c248147bf347263b, P1).
+func TestCopyTurnDoesNotEscapeContain(t *testing.T) {
+	path := filepath.Join(t.TempDir(), settings.PolicyFile)
+	writePerm(t, path, "[network]\ncontain = \"on\"\n")
+	st, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	e, err := New(Config{Store: st, BaseURL: "http://127.0.0.1:1", Settings: settings.NewFiles(filepath.Dir(path)),
+		Wire: func(agent, baseURL string, _ Access) (Launch, error) {
+			return Launch{Path: "/bin/sh", Args: []string{"-c", "exit 0"}}, nil
+		}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Copy mode and claude (Info.CopySandbox), which without the contain guard
+	// would take the per-command path and skip the wall.
+	turn, err := e.Start(Request{Harness: "claude", Folder: t.TempDir(), Prompt: "hi", Copy: true})
+	if cannot := !netjail.Supported || netjail.Check() != nil; cannot {
+		var r *Refusal
+		if !errors.As(err, &r) || r.Status != 400 {
+			t.Fatalf("Copy + contain: %v, want a 400 refusal (perCommand must not skip contain)", err)
+		}
+		if snap, _ := st.Snapshot(); len(snap.Sessions) != 0 {
+			t.Errorf("%d sessions stored for a refused turn, want none", len(snap.Sessions))
+		}
+	} else if err != nil {
+		t.Fatalf("Start: %v", err)
+	} else {
+		<-turn.Done()
+	}
+}
+
 // The wall is built for contain on only where netjail is not and the
 // sandbox is (macOS); the sandbox's own switch, and contain off, never ask
 // for it.

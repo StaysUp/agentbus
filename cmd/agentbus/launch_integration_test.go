@@ -147,6 +147,9 @@ func TestLaunchGolden(t *testing.T) {
 	}
 	allowOnly := "allow = [\"go test\", \"git commit\"]\n"
 	cases = append(cases,
+		// Copy mode: Claude Code's own per-command sandbox, folded into the
+		// gateway --settings; no whole-process wall (Info.CopySandbox).
+		launchCase{name: "claude copy", turns: []engine.Request{with(first("claude"), func(r *engine.Request) { r.Copy = true })}},
 		launchCase{name: "agy subscription, then resume", turns: []engine.Request{first("agy"), next("t_2")}},
 		launchCase{name: "agy lists, model, own instructions", perm: allowOnly, instr: strp("Be brief in {session}.\n"),
 			turns: []engine.Request{with(first("agy"), func(r *engine.Request) { r.Model = "gemini-3.8-flash-medium" })}},
