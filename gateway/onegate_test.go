@@ -171,3 +171,30 @@ func TestForbidBehindWrappersAndDeepStack(t *testing.T) {
 		t.Errorf("a deeply wrapped command was silently allowed")
 	}
 }
+
+// A line the shell parser cannot read still holds, but suggests no rule: the
+// fallback cuts it into runs of words to decide it, and those runs are not
+// commands a person chose. Seen live (codex-cli 0.171.0, 2026-11-23): the model
+// left a stray quote at the end of this line, and one "always allow" wrote 21
+// entries such as "import", "if isinstance" and "in" to the allow list.
+func TestUnparsedLineSuggestsNoRule(t *testing.T) {
+	line := `curl -sS 'https://api.github.com/repos/StaysUp/agentbus/issues?state=open&per_page=50' | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d if isinstance(d,dict) else [(i["number"],i["title"],i["html_url"],len(i["assignees"])) for i in d if "pull_request" not in i])'; head -100 ROADMAP.md'`
+	if _, err := parse(line); err == nil {
+		t.Fatal("the line parsed; the test needs one the parser rejects")
+	}
+	rules := Rules{Allow: []string{"ls"}, Unlisted: Ask}
+	if dec, _ := classify(rules, line); dec != Ask {
+		t.Fatalf("the unparsed line decided %v; want it held (Ask)", dec)
+	}
+	b := decider(t, anthropic.Adapter{}, rules, nil)
+	b.decide("0", "t1", "Bash", json.RawMessage(`{}`), bashItem(line))
+	if r := rulesHeld(b); len(r) != 0 {
+		t.Fatalf("an unparsed line suggested %d rules: %q", len(r), r)
+	}
+	if len(b.asked) != 1 || b.asked[0].command != line {
+		t.Fatalf("the unparsed line was not held once: %d held", len(b.asked))
+	}
+	if _, ok := b.refused["0"]; !ok {
+		t.Error("the call was not refused to the agent")
+	}
+}
