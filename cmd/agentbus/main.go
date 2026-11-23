@@ -659,7 +659,7 @@ func start(c config) (*service, error) {
 		svcLog.Close()
 		st.Close()
 		closeQ()
-		return nil, fmt.Errorf("-listen %s: %w", c.listen, err)
+		return nil, listenError(c.listen, err)
 	}
 	addr := ln.Addr().String()
 	_, port, _ := net.SplitHostPort(addr)
@@ -1809,6 +1809,15 @@ func withPort(addr string) string {
 		return addr
 	}
 	return net.JoinHostPort(host, defaultPort)
+}
+
+// listenError is the refusal when net.Listen fails: fixed wording, never
+// Go's own message.
+func listenError(addr string, err error) error {
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return errors.New("-listen " + addr + " is in use. Stop the other process, or pick another port with -listen")
+	}
+	return errors.New("-listen " + addr + " could not be bound")
 }
 
 // checkListen accepts an IP literal and a port, or a port alone (":8787",
