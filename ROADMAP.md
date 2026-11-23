@@ -18,6 +18,8 @@ One person, `agentbus up` on one machine: any model, and its work checked.
 
 Programs that react to events: something happens (a new pull request, a message), a turn runs, an action goes out
 (a drafted review, a reply). GitHub and Telegram are the first examples; the core stays generic.
+A program acts with its own scoped token: a grant naming which sources it may work from, which levels (Copy or
+Locked, never Direct) and which actions, so each pull request or chat gets its own workspace.
 
 ## Then
 
