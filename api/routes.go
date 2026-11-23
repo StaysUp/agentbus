@@ -445,6 +445,7 @@ var routes = slices.Concat([]route{
 			"The apply writes each file the unapplied turns added or changed, and removes each one they deleted. " +
 			"Before it writes anything it checks every file in the folder: one that is neither as it was at the changes' start nor already as they leave it refuses the whole apply, " +
 			"with 409, state refused, and each file in conflicts with why. Nothing is written then, so the agent can read why and make another turn. " +
+			"A file is never looked up through a link in the folder. A turn may put a folder where a link was, or change only the case of a name. " +
 			"Applying again when nothing is unapplied is a no-op: 200 with already true. " +
 			"An apply that was refused may be asked for again. " +
 			"It runs on the runner of the folder's machine, in a place of its own, so it does not wait behind running turns. " +
