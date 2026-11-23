@@ -602,6 +602,82 @@ func TestXProcApprovalFromRunnerReachesControl(t *testing.T) {
 	}
 }
 
+// A codex exec script whose cmd is known only at run time is held on a
+// separate runner and lists on control, as a shell line's $cmd would: the
+// guard on the runner's gateway decides it from the reply, and control lists
+// it from the record. The script is the shape codex-cli 0.171.0 wrote in a
+// live turn (2026-11-23): commands from an array, passed as {cmd}. Before, the
+// guard read no command from it, and the call ran under no command rule.
+func TestXProcCodexRunTimeCmdIsHeld(t *testing.T) {
+	script := "for (const cmd of [\"uname -a\",\"date\"]) {\n  const result = await tools.exec_command({cmd});\n  text(result.output);\n}\n"
+	item, _ := json.Marshal(map[string]any{"type": "custom_tool_call", "id": "ctc_1", "call_id": "call_1",
+		"name": "exec", "input": script, "status": "completed"})
+	reply := `{"model":"gpt-x","status":"completed","output":[` + string(item) + `],"usage":{"input_tokens":5,"output_tokens":1}}`
+	anth := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, claudeReply)
+	}))
+	defer anth.Close()
+	cg := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, reply)
+	}))
+	defer cg.Close()
+
+	folder := t.TempDir()
+	x := startServerTwoUpstreams(t, anth.URL, cg.URL, "codex")
+	// Lists narrowed to named commands: no "*", so a command on no list is held.
+	{
+		body, _ := json.Marshal(map[string]any{"allow": []string{"ls"}, "ask": []string{}, "forbid": []string{}})
+		req, _ := http.NewRequest("PUT", x.base+"/api/v0/settings/permissions", bytes.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+x.tok)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("If-Match", "*")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		if resp.StatusCode != 200 {
+			t.Fatalf("set the lists: %d", resp.StatusCode)
+		}
+	}
+	x.setAgentEnv(`AGENTBUS_FAKE_CODEX_BODY={"model":"gpt-x","input":[{"type":"message","role":"user","content":"hi"}]}`)
+	x.addRunner("far", folder)
+	fs := x.folders()
+	code, st := x.startTurnX(map[string]any{"agent": "codex", "folder_ref": fs[0].Ref,
+		"machine": fs[0].Machine, "prompt": "run them", "isolate": false})
+	if code/100 != 2 || st.Session == "" {
+		t.Fatalf("POST /api/v0/turns: %d %+v", code, st)
+	}
+	waitFor(t, "the run-time command held on the runner and listed on control", func() bool {
+		code, b := x.get("/api/v0/approvals")
+		if code != 200 {
+			return false
+		}
+		var page struct {
+			Approvals []struct {
+				Commands []string `json:"commands"`
+				Rule     string   `json:"rule"`
+			} `json:"approvals"`
+		}
+		if json.Unmarshal(b, &page) != nil {
+			return false
+		}
+		for _, a := range page.Approvals {
+			if len(a.Commands) > 0 && a.Commands[0] == `"$cmd"` {
+				if a.Rule != "" {
+					t.Fatalf("a command known only at run time suggested the rule %q", a.Rule)
+				}
+				return true
+			}
+		}
+		return false
+	})
+}
+
 // Vendor isolation end to end across processes (rule 3): an agent's call
 // carries a stand-in the relay swaps for control's own sign-in and sends to
 // the one vendor the path names. A claude turn's model call reaches only the

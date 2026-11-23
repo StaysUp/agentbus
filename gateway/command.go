@@ -535,11 +535,22 @@ func gitSubcommand(words []string) []string {
 //	const r = await tools.exec_command({cmd:"git push origin main",workdir:"…"});
 //
 // (codex-cli 0.164.0, 2026-11-08). It finds every cmd key followed by a
-// string literal. A cmd built at run time, such as "git " + "push" or a
-// variable, is not seen. A cmd key anywhere counts, not only inside an
+// string literal. A cmd key anywhere counts, not only inside an
 // exec_command call: {cmd: "git push"} kept in a variable is refused even if
 // the script never runs it. That errs on the side of refusing, since an
 // object built first and passed later, exec_command(o), runs it.
+//
+// A cmd whose value is not one string literal is known only at run time: a
+// variable, an expression such as "git " + "push", or the shorthand {cmd}.
+// codex-cli 0.171.0 wrote
+//
+//	for (const cmd of ["uname -a","date","whoami"]) {
+//	  const result = await tools.exec_command({cmd});
+//
+// (2026-11-23, a live turn). Each such cmd is returned as runTimeCommand, so
+// it is decided as a shell line's $cmd is: held unless "*" allows it, and with
+// no rule to suggest. Before, it gave no command at all, and the call ran
+// under no command rule.
 func execCommands(script string) []string {
 	var out []string
 	key := false // the last token was a cmd key
@@ -549,6 +560,12 @@ func execCommands(script string) []string {
 	prevWord := ""
 	for i := 0; i < len(script); {
 		c := script[i]
+		if key && !isJSSpace(c) && !strings.HasPrefix(script[i:], "//") && !strings.HasPrefix(script[i:], "/*") &&
+			c != '"' && c != '\'' && c != '`' {
+			// The value of a cmd key is not a string literal.
+			out = append(out, runTimeCommand)
+			key = false
+		}
 		switch {
 		case strings.HasPrefix(script[i:], "//"):
 			i = lineEnd(script, i)
@@ -558,7 +575,7 @@ func execCommands(script string) []string {
 			} else {
 				i = len(script)
 			}
-		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+		case isJSSpace(c):
 			i++
 		case c == '/' && regexAllowed(prev, prevWord):
 			// A regular expression literal, such as /https?:\/\//: its
@@ -572,6 +589,11 @@ func execCommands(script string) []string {
 			if key {
 				out = append(out, v)
 				key = false
+				// More after the literal, such as + "push": the rest is
+				// built at run time.
+				if !nextIs(script, i, ',') && !nextIs(script, i, '}') {
+					out = append(out, runTimeCommand)
+				}
 				continue
 			}
 			// A quoted key: "cmd":
@@ -584,6 +606,10 @@ func execCommands(script string) []string {
 			k := i
 			for k < len(script) && isIdent(script[k]) {
 				k++
+			}
+			// The shorthand {cmd} or {…, cmd}: the value of a variable.
+			if script[i:k] == "cmd" && (prev == '{' || prev == ',') && (nextIs(script, k, ',') || nextIs(script, k, '}')) {
+				out = append(out, runTimeCommand)
 			}
 			prev, prevWord = c, script[i:k]
 			key = script[i:k] == "cmd" && nextIs(script, k, ':')
@@ -598,6 +624,14 @@ func execCommands(script string) []string {
 		}
 	}
 	return out
+}
+
+// runTimeCommand stands for an exec script's cmd known only at run time. As a
+// shell line it is one word built at run time, which matches no rule but "*".
+const runTimeCommand = `"$cmd"`
+
+func isJSSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
 // regexAllowed says whether a / after prev (and the word prevWord) starts a
