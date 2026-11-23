@@ -138,6 +138,101 @@ func TestReplayedClaudeTurn(t *testing.T) {
 	}
 }
 
+// A fresh OpenCode request in 1.19.6's Chat Completions layout (synthetic):
+// the system message, then the person's prompt as a user message.
+func freshOpencodeBody(prompt string) string {
+	p, _ := json.Marshal(prompt)
+	return `{"model":"z-ai/glm-5.3-flash","messages":[{"role":"system","content":"You are opencode."},` +
+		`{"role":"user","content":` + string(p) + `}],"tools":[{"type":"function","function":{"name":"bash","parameters":{"type":"object"}}}],` +
+		`"stream":true,"stream_options":{"include_usage":true}}`
+}
+
+const opencodeStreamedReply = "data: {\"id\":\"gen-1\",\"object\":\"chat.completion.chunk\",\"model\":\"z-ai/glm-5.3-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Noted: kiwi.\"},\"finish_reason\":null}]}\n\n" +
+	"data: {\"id\":\"gen-1\",\"object\":\"chat.completion.chunk\",\"model\":\"z-ai/glm-5.3-flash\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+	"data: {\"id\":\"gen-1\",\"object\":\"chat.completion.chunk\",\"model\":\"z-ai/glm-5.3-flash\",\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":3,\"total_tokens\":15,\"prompt_tokens_details\":{\"cached_tokens\":0}}}\n\n" +
+	"data: [DONE]\n\n"
+
+// Own replay end to end for opencode: the second turn starts with no
+// --session, its turn.started names the first turn in replay_from, and
+// OpenRouter receives its request with the first turn's history in front,
+// the first reply rebuilt from the stream.
+func TestReplayedOpencodeTurn(t *testing.T) {
+	const keyValue = "test-key-value-replay-oc"
+	t.Setenv("AB_TEST_OR_KEY", keyValue)
+	var mu sync.Mutex
+	var bodies []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(b))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		io.WriteString(w, opencodeStreamedReply)
+	}))
+	t.Cleanup(upstream.Close)
+	home := t.TempDir()
+	svc := openRouterServiceReplay(t, home, upstream.URL+"/api")
+	tok := readToken(t, home)
+
+	code, ag := sendAPI(t, svc, tok, "POST", "/api/v0/agents", map[string]any{"name": "GLM", "harness": "opencode",
+		"access": "openrouter", "model": "z-ai/glm-5.3-flash", "key_env": "AB_TEST_OR_KEY"})
+	if code != http.StatusCreated {
+		t.Fatalf("create: %d %v", code, ag)
+	}
+
+	t.Setenv("AGENTBUS_FAKE_OPENCODE_BODY", freshOpencodeBody("one"))
+	code, out, raw := postRun(t, svc, tok, map[string]any{"agent": ag["id"], "folder": t.TempDir(), "prompt": "one"})
+	if code != http.StatusAccepted {
+		t.Fatalf("turn 1: %d %s", code, raw)
+	}
+	id := out["session"].(string)
+	waitClosed(t, svc.store, id)
+	var first string
+	for _, e := range turnEvents(t, svc.store, id) {
+		if e.Kind == "turn.started" {
+			first = e.Turn
+		}
+	}
+
+	report := t.TempDir() + "/report"
+	t.Setenv("AGENTBUS_FAKE_OUT", report)
+	t.Setenv("AGENTBUS_FAKE_OPENCODE_BODY", freshOpencodeBody("which word?"))
+	code, out, raw = postMessage(t, svc, tok, id, map[string]any{"prompt": "which word?"})
+	if code != http.StatusAccepted {
+		t.Fatalf("next: %d %s", code, raw)
+	}
+	waitClosedN(t, svc, id, 2)
+	r := readReport(t, report)
+	if strings.Contains(strings.Join(r.Args, " "), "--session") {
+		t.Errorf("args %q, want a fresh opencode with no --session", r.Args)
+	}
+	if c, from := continuityOf(t, svc, id, out["turn"].(string)); c != "replay" || from != first {
+		t.Errorf("turn 2 continuity %q replay_from %q, want replay and %q", c, from, first)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(bodies) != 2 {
+		t.Fatalf("upstream got %d requests, want 2", len(bodies))
+	}
+	var sent struct{ Messages []json.RawMessage }
+	if err := json.Unmarshal([]byte(bodies[1]), &sent); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		`{"role":"system","content":"You are opencode."}`,
+		`{"role":"user","content":"one"}`,
+		`{"role":"assistant","content":"Noted: kiwi."}`,
+		`{"role":"user","content":"which word?"}`,
+	}
+	var got []string
+	for _, m := range sent.Messages {
+		got = append(got, string(m))
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("turn 2 sent\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
 // A claude session from before replies were stored (no stored reply, a
 // resume_id, never replayed) still continues, by --resume, and its
 // turn.started says so. A session that did use replay is refused: its

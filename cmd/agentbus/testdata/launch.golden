@@ -2672,6 +2672,48 @@ cwd <folder>
 turn.started agent="opencode" continuity="resume" replay_from="" model="z-ai/glm-5.3-flash" context=""
 session.closed resume_id="ses_000000000001LaunchFake0001"
 log run.hint session=s1 turn=t_2 left_out=opencode_no_instruction_flag
+=== opencode openrouter replay
+--- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
+arg "run"
+arg "--format"
+arg "json"
+arg "--agent"
+arg "agentbus"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "HOME=<home>"
+env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"deny\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter/v1\"}}},\"share\":\"disabled\"}"
+env "OPENROUTER_API_KEY=test-key"
+env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD="
+cwd <folder>
+turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
+session.closed resume_id="ses_000000000000LaunchFake0000"
+log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
+--- turn t_2 harness="" access="" model=""
+arg "run"
+arg "--format"
+arg "json"
+arg "--agent"
+arg "agentbus"
+arg "--"
+arg "next t_2"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "HOME=<home>"
+env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"deny\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_2/openrouter/v1\"}}},\"share\":\"disabled\"}"
+env "OPENROUTER_API_KEY=test-key"
+env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD="
+cwd <folder>
+turn.started agent="opencode" continuity="replay" replay_from="t_1" model="z-ai/glm-5.3-flash" context=""
+session.closed resume_id="ses_000000000001LaunchFake0001"
+replay_base opencode
+log run.hint session=s1 turn=t_2 left_out=opencode_no_instruction_flag
 === opencode openrouter, key not set
 --- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
 refused 400 this agent reads its OpenRouter key from OPENROUTER_API_KEY, which is not set where the turn runs; set it and restart agentbus
