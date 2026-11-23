@@ -890,9 +890,10 @@ func TestUpgradeImportsFileWithRetiredKey(t *testing.T) {
 }
 
 // A settings.db that 0.5.1 wrote, with its four steps done and sandbox.read
-// stored, has the value moved to home_files on the first start of 0.5.2:
-// one change whose settings.changed event names both keys, the rest kept.
-// A second start does nothing, and the policy keeps the files.
+// and sandbox.mode stored, has sandbox.read's value moved to home_files on a
+// later start, and sandbox.mode removed (retired at the Copy level): one
+// change whose settings.changed event names the keys, the rest kept. A
+// second start does nothing, and the policy keeps the files.
 func TestUpgradeMovesSandboxRead(t *testing.T) {
 	dir := home(t)
 	storedDB(t, dir, `{"sandbox.mode":"on","sandbox.read":["~/.aws/config"],"forbid":["rm"]}`)
@@ -908,18 +909,18 @@ func TestUpgradeMovesSandboxRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(rep.Removed, ",") != "sandbox.read" || strings.Join(rep.Moved, ",") != "home_files" || len(rep.Kept) != 0 {
+	if strings.Join(rep.Removed, ",") != "sandbox.read,sandbox.mode" || strings.Join(rep.Moved, ",") != "home_files" || len(rep.Kept) != 0 {
 		t.Fatalf("removed %v moved %v kept %v", rep.Removed, rep.Moved, rep.Kept)
 	}
 	var got []Change
 	d.SetSink(func(c Change) error { got = append(got, c); return nil }, nil)
-	if s := stored(t, d, SettingPermissions); s != `{"forbid":["rm"],"home_files":["~/.aws/config"],"sandbox.mode":"on"}` {
+	if s := stored(t, d, SettingPermissions); s != `{"forbid":["rm"],"home_files":["~/.aws/config"]}` {
 		t.Fatalf("stored %s", s)
 	}
-	if len(got) != 1 || got[0].Setting != SettingPermissions || strings.Join(got[0].Keys, ",") != "sandbox.read,home_files" {
+	if len(got) != 1 || got[0].Setting != SettingPermissions || strings.Join(got[0].Keys, ",") != "sandbox.read,sandbox.mode,home_files" {
 		t.Fatalf("events %+v", got)
 	}
-	if p, _, err := d.Policy(); err != nil || strings.Join(p.HomeFiles, ",") != "~/.aws/config" || p.Sandbox.Mode != SandboxOn {
+	if p, _, err := d.Policy(); err != nil || strings.Join(p.HomeFiles, ",") != "~/.aws/config" {
 		t.Fatalf("policy %+v %v", p, err)
 	}
 	d.Close()

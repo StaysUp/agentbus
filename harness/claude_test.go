@@ -170,11 +170,12 @@ func TestClaudeSettingsPinBypassVectors(t *testing.T) {
 			}
 		}
 	}
-	// A NON-loopback gateway must NOT be exempted: a walled turn reaches it
-	// through the wall's proxy, so NO_PROXY leaves it subject to the proxy.
+	// A non-loopback gateway (a LAN/Tailscale -listen IP) is also exempted: there
+	// is no whole-process wall any more, so it is reached directly, not through a
+	// settings.json proxy that could not reach it.
 	_, lan := claude{}.Wire("http://192.168.1.2:8787/s/s1/t/t_1")
-	if np := settingsEnv(t, lan)["NO_PROXY"]; strings.Contains(np, "192.168.1.2") {
-		t.Errorf("NO_PROXY %q exempts a non-loopback gateway; a walled turn needs it via the proxy", np)
+	if np := settingsEnv(t, lan)["NO_PROXY"]; !strings.Contains(","+np+",", ",192.168.1.2:8787,") {
+		t.Errorf("NO_PROXY %q does not exempt the LAN gateway; a settings.json proxy would divert it", np)
 	}
 	var full map[string]any
 	for i := 0; i+1 < len(args); i++ {

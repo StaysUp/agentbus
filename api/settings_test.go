@@ -303,9 +303,9 @@ func TestSettingsPolicyPatch(t *testing.T) {
 	if resp, out := send(t, e, "PATCH", "/api/v0/settings/permissions", v1, `{"isolation":"everywhere"}`); resp.StatusCode != 400 || !strings.Contains(out, "isolation") {
 		t.Fatalf("PATCH out of range: %d %s", resp.StatusCode, out)
 	}
-	resp, out := send(t, e, "PATCH", "/api/v0/settings/permissions", v1, `{"network":{"allow":["github.com"]}}`)
+	resp, out := send(t, e, "PATCH", "/api/v0/settings/permissions", v1, `{"home_files":["~/.aws/config"]}`)
 	if resp.StatusCode != 200 || !strings.Contains(out, `"forbid":["git push"]`) ||
-		!strings.Contains(out, `"allow":["github.com"]`) || !strings.Contains(out, `"contain":"off"`) || !strings.Contains(out, `"max_depth":2`) {
+		!strings.Contains(out, `"home_files":["~/.aws/config"]`) || !strings.Contains(out, `"max_depth":2`) {
 		t.Fatalf("PATCH: %d %s", resp.StatusCode, out)
 	}
 	if resp, _ := send(t, e, "PATCH", "/api/v0/settings/permissions", v1, `{"unlisted":"ask"}`); resp.StatusCode != 412 {

@@ -88,37 +88,6 @@ max_cost_usd_per_tree = 0.0  # USD one request tree may cost before asking stops
 [agent_api]
 apply = false        # apply a turn's changes to the person's folder, for a turn in its tree;
                      # off by default: only the main token applies
-
-# What a turn's agent may reach on the network. Linux closes an agent off in
-# a network namespace; macOS has none, so there the runner builds the
-# session's sandbox for it, sandbox on or off.
-# contain: whether each agent runs closed off from the network.
-#   "off"   the default: agents reach any host.
-#   "on"    an agent reaches only its runner's gateway, the server's API,
-#           and the hosts in allow, through a proxy. Anything else is
-#           refused and recorded (network.refused). A runner that can
-#           close the network off neither way refuses the turn.
-# allow: host names an agent may reach, on any port, such as "github.com".
-# "*.example.com" also allows every name under example.com.
-[network]
-contain = "off"
-allow = []           # e.g. ["github.com", "registry.npmjs.org"]
-
-# A wall around each session, built by the runner around the agent's whole
-# process. A proof of concept: off by default.
-# mode: "off" (the default) or "on". On, a session reads and writes only its
-# own folder and its own home; it reads the system folders and the agent's
-# own program; nothing else of your home and no other session. Its network
-# goes only through the runner's proxy: the public internet when contain is
-# "off" (this machine and its networks only by [network] allow), the allow
-# list when "on". macOS uses Seatbelt,
-# Linux bubblewrap inside the network namespace. A runner that cannot build
-# the wall refuses the turn, and a runner with no home per session (agentbus
-# up) cannot build it. The home_files are in the session's home, so it reads
-# them inside the wall too. On macOS, [network] contain = "on" builds the wall
-# even with mode "off": it is the only way there to close an agent off.
-[sandbox]
-mode = "off"
 `
 
 // Unlisted values: what the gateway does with a command on none of the lists.
@@ -153,19 +122,6 @@ const (
 	IsolationNone    = "none"
 )
 
-// Contain values of [network]: whether a turn's agent runs closed off from
-// the network.
-const (
-	ContainOff = "off"
-	ContainOn  = "on"
-)
-
-// Mode values of [sandbox]: whether each session runs inside a wall.
-const (
-	SandboxOff = "off"
-	SandboxOn  = "on"
-)
-
 // The defaults, as the starter file writes them.
 const (
 	DefaultMaxDepth       = 2
@@ -186,8 +142,6 @@ type Policy struct {
 	HomeFiles []string `toml:"home_files" json:"home_files" doc:"Files or folders under the home folder, each starting with ~/, copied into each session's own home at the same place at the start of each turn, such as ~/.aws/config."`
 	Limits    Limits   `toml:"limits" json:"limits" doc:"The limits on work agents ask for."`
 	AgentAPI  AgentAPI `toml:"agent_api" json:"agent_api" doc:"What a turn's own token may call."`
-	Network   Network  `toml:"network" json:"network" doc:"What a turn's agent may reach on the network (on Linux by its network namespace, on macOS by the session's sandbox)."`
-	Sandbox   Sandbox  `toml:"sandbox" json:"sandbox" doc:"A wall around each session's agent (a proof of concept)."`
 
 	// where and fix say, in a turn's refusal, where the policy came from and
 	// what to do: set by the store that read it (Error).
@@ -213,19 +167,6 @@ type Limits struct {
 	MaxJobsPerTurn    *int     `toml:"max_jobs_per_turn" json:"max_jobs_per_turn,omitempty" doc:"Turns and reviews one turn may ask for. Absent in a PUT: 10."`
 	MaxJobsPerTree    *int     `toml:"max_jobs_per_tree" json:"max_jobs_per_tree,omitempty" doc:"Turns and reviews one request tree may ask for in all. Absent in a PUT: 30."`
 	MaxCostUSDPerTree *float64 `toml:"max_cost_usd_per_tree" json:"max_cost_usd_per_tree,omitempty" doc:"USD one request tree may cost before asking stops; 0 is off. Absent in a PUT: 0."`
-}
-
-// Network says what a turn's agent may reach ([network]). Read by the
-// runner that starts the agent (netjail).
-type Network struct {
-	Contain string   `toml:"contain" json:"contain,omitempty" doc:"Whether each agent runs closed off from the network: off (the default; agents reach any host) or on. On, it reaches only its runner's gateway, the server's API and the hosts in allow; anything else is refused and recorded as network.refused. Linux closes an agent off in a network namespace; on macOS the runner builds the session's sandbox for it, even with [sandbox] off, so a turn there needs a home of its own. A runner that can do neither refuses the turn with why. Host names are checked, not addresses. Absent in a PUT: off."`
-	Allow   []string `toml:"allow" json:"allow" doc:"Host names a closed-off agent may reach, on any port, such as github.com. *.example.com also allows every name under example.com. Absent in a PUT: none."`
-}
-
-// Sandbox says whether each session runs inside a wall ([sandbox]). Read by
-// the runner that starts the agent (package sandbox).
-type Sandbox struct {
-	Mode string `toml:"mode" json:"mode,omitempty" doc:"off (the default) or on. On, a session's agent reads and writes only the session's folder and home (home_files included), read the system folders and the agent's program, and reach the network only through the runner's proxy. A runner that cannot build it refuses the turn. On macOS, [network] contain on builds it even with mode off. macOS uses sandbox-exec and Linux bwrap. The copy's .git stays writable. Absent in a PUT: off."`
 }
 
 // DefaultPolicy is the policy of a missing or empty file.
@@ -260,10 +201,8 @@ func (p *Policy) fill() {
 	if p.Ask == nil {
 		p.Ask = []string{}
 	}
-	for _, l := range []*[]string{&p.HomeFiles, &p.Network.Allow} {
-		if *l == nil {
-			*l = []string{}
-		}
+	if p.HomeFiles == nil {
+		p.HomeFiles = []string{}
 	}
 	if p.Unlisted == "" {
 		p.Unlisted = UnlistedAsk
@@ -282,12 +221,6 @@ func (p *Policy) fill() {
 	if p.Limits.MaxCostUSDPerTree == nil {
 		off := 0.0
 		p.Limits.MaxCostUSDPerTree = &off
-	}
-	if p.Network.Contain == "" {
-		p.Network.Contain = ContainOff
-	}
-	if p.Sandbox.Mode == "" {
-		p.Sandbox.Mode = SandboxOff
 	}
 	if p.AgentAPI.Apply == nil {
 		off := false
@@ -318,27 +251,12 @@ func (p *Policy) Check() error {
 	if c := p.Limits.MaxCostUSDPerTree; c != nil && (*c < 0 || *c != *c) {
 		return errors.New("[limits] max_cost_usd_per_tree must be 0 (off) or more")
 	}
-	switch p.Network.Contain {
-	case "", ContainOff, ContainOn:
-	default:
-		return fmt.Errorf("[network] contain must be %q or %q", ContainOff, ContainOn)
-	}
-	switch p.Sandbox.Mode {
-	case "", SandboxOff, SandboxOn:
-	default:
-		return fmt.Errorf("[sandbox] mode must be %q or %q", SandboxOff, SandboxOn)
-	}
 	for _, f := range p.HomeFiles {
 		if err := grantShape(f); err != nil {
 			return fmt.Errorf("home_files entry %s %v", strconv.Quote(f), err)
 		}
 		if what := SignInFile(f); what != "" {
 			return fmt.Errorf("home_files entry %s is %s; vendor sign-ins stay with control and never go into a session's home", strconv.Quote(f), what)
-		}
-	}
-	for _, h := range p.Network.Allow {
-		if !hostShape(h) {
-			return fmt.Errorf("[network] allow entry %s must be a host name, such as \"github.com\" or \"*.github.com\": no scheme, port or path", strconv.Quote(h))
 		}
 	}
 	for _, list := range []struct {
@@ -396,7 +314,7 @@ func parsePolicy(b []byte) (Policy, error) {
 		return false
 	})
 	if len(extra) > 0 {
-		return Policy{}, fmt.Errorf("unknown key %s; the keys are allow, ask, forbid, unlisted, isolation, home_files, [limits], [agent_api], [network] and [sandbox] (see the README)", strconv.Quote(extra[0].String()))
+		return Policy{}, fmt.Errorf("unknown key %s; the keys are allow, ask, forbid, unlisted, isolation, home_files, [limits] and [agent_api] (see the README)", strconv.Quote(extra[0].String()))
 	}
 	if err := p.Check(); err != nil {
 		return Policy{}, err
@@ -406,7 +324,7 @@ func parsePolicy(b []byte) (Policy, error) {
 
 // wrongTypeTOML is a permissions.toml's error for a value of the wrong type.
 const wrongTypeTOML = "a value has the wrong type: allow, ask, forbid and home_files are lists of strings, such as [\"go test\"]; " +
-	"unlisted, isolation, contain and mode are strings; [network] allow is a list of strings; the [limits] are numbers; the [agent_api] switches are true or false"
+	"unlisted and isolation are strings; the [limits] are numbers; the [agent_api] switches are true or false"
 
 // over is p, read with the keys it leaves out unset, on top of base: each key
 // p leaves out takes base's value, and the result is filled.
@@ -563,11 +481,11 @@ func DecodePolicyChange(b []byte) (Policy, error) {
 		switch {
 		case errors.As(err, &te) && te.Field != "":
 			return Policy{}, fmt.Errorf("%s has the wrong type: allow, ask, forbid and home_files are lists of strings; "+
-				"unlisted, isolation, contain and mode are strings; network.allow is a list of strings; the limits are numbers", te.Field)
+				"unlisted and isolation are strings; the limits are numbers", te.Field)
 		case errors.As(err, &se):
 			return Policy{}, errors.New("the body is not valid JSON")
 		case strings.HasPrefix(err.Error(), "json: unknown field "):
-			return Policy{}, fmt.Errorf("unknown key %s; the keys are allow, ask, forbid, unlisted, isolation, home_files, limits, agent_api, network and sandbox",
+			return Policy{}, fmt.Errorf("unknown key %s; the keys are allow, ask, forbid, unlisted, isolation, home_files, limits and agent_api",
 				strings.TrimPrefix(err.Error(), "json: unknown field "))
 		}
 		return Policy{}, errors.New("the body must be one JSON object: the policy")
@@ -599,8 +517,6 @@ func FormatPolicy(p Policy) []byte {
 		"limits.max_depth": *p.Limits.MaxDepth, "limits.max_jobs_per_turn": *p.Limits.MaxJobsPerTurn,
 		"limits.max_jobs_per_tree": *p.Limits.MaxJobsPerTree, "limits.max_cost_usd_per_tree": *p.Limits.MaxCostUSDPerTree,
 		"agent_api.apply": *p.AgentAPI.Apply,
-		"network.contain": p.Network.Contain, "network.allow": p.Network.Allow,
-		"sandbox.mode": p.Sandbox.Mode,
 	}
 	var out bytes.Buffer
 	section := ""
@@ -681,7 +597,7 @@ func folderShape(f string) error {
 	return nil
 }
 
-// grantShape refuses a [sandbox] read entry that is not a path under the
+// grantShape refuses a home_files entry that is not a path under the
 // home folder: it starts with ~/, names something below it, and never
 // climbs out with "..".
 func grantShape(f string) error {
@@ -763,24 +679,3 @@ func checkCommand(c string) error {
 }
 
 func isControl(r rune) bool { return r < 0x20 || r == 0x7f }
-
-// hostShape accepts a host name or an IPv4 address, optionally starting
-// with "*." for every name under it: letters, digits, dots and dashes, each
-// label 1 to 63 characters.
-func hostShape(h string) bool {
-	h = strings.TrimPrefix(h, "*.")
-	if h == "" || len(h) > 253 {
-		return false
-	}
-	for _, l := range strings.Split(h, ".") {
-		if l == "" || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
-			return false
-		}
-		for _, r := range l {
-			if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
-				return false
-			}
-		}
-	}
-	return true
-}

@@ -3,7 +3,6 @@ package harness
 import (
 	"bufio"
 	"encoding/json"
-	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -477,21 +476,16 @@ func claudeSettings(env map[string]string) []string {
 	// Pin NO_PROXY so a settings.json HTTP_PROXY / ALL_PROXY cannot route the
 	// gateway through a proxy (zero calls reached it otherwise; measured live,
 	// claude 2.1.330). HTTP_PROXY itself is NOT cleared — that would break an
-	// external proxy a wall sets — only the gateway is exempted, and only when it
-	// is a LOOPBACK gateway. A non-loopback gateway (a LAN or Tailscale -listen
-	// IP) must stay subject to the proxy: a walled/contained turn reaches it
-	// THROUGH the wall's proxy (netjail/Seatbelt block a direct non-loopback
-	// dial), so exempting it there would stop every model call. An IPv6 loopback
-	// listener ([::1]:port) needs its exact host:port added, because claude's
-	// NO_PROXY matches a ":"-bearing token only by equality and "::1" does not
-	// equal "[::1]:port".
+	// external proxy sets — only the gateway is exempted. There is no
+	// whole-process wall any more, so the gateway is reached directly whatever
+	// address it listens on (loopback, or a LAN/Tailscale -listen IP), and its
+	// exact host:port and bare host are both added (claude's NO_PROXY matches a
+	// ":"-bearing token only by equality, so "[::1]:port" needs the host:port).
 	noProxy := claudeNoProxy
 	if u, err := url.Parse(env["ANTHROPIC_BASE_URL"]); err == nil && u.Host != "" {
-		if h := u.Hostname(); h == "localhost" || (net.ParseIP(h) != nil && net.ParseIP(h).IsLoopback()) {
-			for _, x := range []string{u.Host, h} {
-				if x != "" && !strings.Contains(","+noProxy+",", ","+x+",") {
-					noProxy += "," + x
-				}
+		for _, x := range []string{u.Host, u.Hostname()} {
+			if x != "" && !strings.Contains(","+noProxy+",", ","+x+",") {
+				noProxy += "," + x
 			}
 		}
 	}

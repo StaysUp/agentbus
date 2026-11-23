@@ -81,7 +81,7 @@ func TestUpgradeSteps(t *testing.T) {
 	}
 	wantRetired := "commands,subscriptions_on_runners,agent_api.continue,sandbox.read," +
 		"agent_api.scope,agent_api.read,agent_api.list_agents,agent_api.start,agent_api.review,agent_api.cancel,agent_api.rename,share_read_only,read_folders," +
-		"agent_api.tools,subagents,edit"
+		"agent_api.tools,subagents,edit,sandbox.mode,network.contain,network.allow"
 	if strings.Join(retiredKeys, ",") != wantRetired {
 		t.Errorf("retired keys %v, want %s", retiredKeys, wantRetired)
 	}

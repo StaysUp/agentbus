@@ -38,8 +38,6 @@ func defaultPolicy() Policy {
 		HomeFiles: []string{},
 		AgentAPI:  AgentAPI{Apply: &off},
 		Limits:    Limits{MaxDepth: num(2), MaxJobsPerTurn: num(10), MaxJobsPerTree: num(30), MaxCostUSDPerTree: &cost},
-		Network:   Network{Contain: ContainOff, Allow: []string{}},
-		Sandbox:   Sandbox{Mode: SandboxOff},
 	}
 }
 
@@ -103,6 +101,14 @@ var upgradeSteps = []upgradeStep{
 	{Key: "agent_api.tools", Retired: true},
 	{Key: "subagents", Retired: true},
 	{Key: "edit", Retired: true},
+	// Copy level: the whole-process wall is retired (his call, 2026-11-22), so
+	// [sandbox] mode and [network] contain/allow are retired with it. A Copy
+	// turn is walled per command by the harness's own sandbox; a Direct turn
+	// runs open. An older permissions.toml or stored policy that still holds
+	// these keeps working, with the keys left out.
+	{Key: "sandbox.mode", Retired: true},
+	{Key: "network.contain", Retired: true},
+	{Key: "network.allow", Retired: true},
 }
 
 const stepSwitchesToRules = 14

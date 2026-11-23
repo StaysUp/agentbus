@@ -25,7 +25,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -42,7 +41,6 @@ import (
 	"github.com/staysup/agentbus/gateway"
 	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/logfile"
-	"github.com/staysup/agentbus/netjail"
 	"github.com/staysup/agentbus/sandbox"
 	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
@@ -759,13 +757,12 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	needsCleanHome := !e.cfg.Personal
 	// makeClean tells e.home to make the home when it is not there. A first turn
 	// always makes its own; a personal continuation that NEWLY needs a clean one
-	// (it ran in the real home, then a later turn turns on a wall or runs a
-	// harness whose relay writes a home file) must make it too — e.home leaves a
-	// continuation with no home in the real home, which would break the wall.
+	// (it ran in the real home, then a later turn runs a harness whose relay
+	// writes a home file) must make it too — e.home leaves a continuation with no
+	// home in the real home.
 	makeClean := t.continuity == ""
 	if e.cfg.Personal {
-		wholeWall := perm.Sandbox.Mode == settings.SandboxOn || needsWall(perm)
-		needNew := wholeWall || len(l.HomeFiles) > 0
+		needNew := len(l.HomeFiles) > 0
 		existingClean := false
 		if e.cfg.Homes != "" && t.continuity != "" {
 			if _, err := os.Stat(filepath.Join(e.cfg.Homes, t.session)); err == nil {
@@ -854,70 +851,12 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	if why != "" {
 		e.cfg.Logf("run.edit session=%s turn=%s left_out=%s", t.session, t.id, why)
 	}
-	// Inside the session's sandbox, or closed off from the network, when the
-	// policy says so: before anything is stored, a runner that cannot do it
-	// refuses the turn. The sandbox closes the network off too.
-	var jail wall
-	forward, pass := reach(e.cfg.BaseURL, apiURL)
-	session, turn := t.session, t.id
-	netSpec := netjail.Spec{Forward: forward, Pass: pass, Allow: perm.Network.Allow,
-		Refused: func(target, why string) {
-			if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.NetworkRefused,
-				Time: e.cfg.Now().UTC(), Session: session, Turn: turn, Host: target, Error: why}); err != nil {
-				e.cfg.Logf("store.error what=network_refused session=%s turn=%s", session, turn)
-			}
-		}}
-	// The wall is built when the sandbox is on, and when contain is on on a
-	// machine whose only way to close an agent off is the wall (macOS): the
-	// person turns contain on, and the runner builds what it needs.
-	autoWall := perm.Sandbox.Mode != settings.SandboxOn && needsWall(perm)
-	// A Copy turn on a harness that walls each command itself (Info.CopySandbox,
-	// such as Claude Code) needs no whole-process wall: its own per-command
-	// sandbox (Turn.Copy, set below) fences writes to the copy and governs the
-	// network. A Copy turn on a harness without its own command sandbox keeps
-	// today's behaviour until that harness gains one (his call, 2026-11-23).
-	// It defers to any legacy whole-process containment the person set
-	// explicitly — the global Sandbox toggle or [network] contain — which keeps
-	// building the whole-process wall or netjail until step 5 retires those
-	// toggles. One predicate, so a future legacy toggle is added here, not
-	// missed at a call site.
-	legacyWall := perm.Sandbox.Mode == settings.SandboxOn || perm.Network.Contain == settings.ContainOn
-	perCommand := t.copy && h.Info().CopySandbox && !legacyWall
-	switch {
-	case perCommand:
-		// no whole-process wall and no netjail; the per-command sandbox does it.
-	case perm.Sandbox.Mode == settings.SandboxOn || autoWall:
-		// A turn that may edit nothing (edit = "none"), of a harness whose
-		// own sandbox kept it from writing, is off in the wall
-		// (harness.Turn.Walled); other turns write their own copy.
-		readOnly := h.Info().OwnSandbox && len(w.Edit) == 0
-		lead := "the sandbox is on in Settings"
-		if autoWall {
-			lead = "Network contain is on in Settings, which on this machine needs the session's sandbox"
-		}
-		box, why, say := e.sandbox(perm, lead, t.session, t.folder, readOnly, readOnly && h.Info().OwnSandbox,
-			append(sandbox.Program(l.Path), e.apiProgram()...), netSpec)
-		if why != "" {
-			e.cfg.Logf("run.refused agent=%s reason=sandbox auto=%t", t.harness, autoWall)
-			return nil, refuse(http.StatusBadRequest, sandboxRefusal(why, say, autoWall))
-		}
-		jail = box
-		cmd.Env = setEnv(cmd.Env, box.Env())
-	default:
-		if on, why := e.contained(perm); why != "" {
-			e.cfg.Logf("run.refused agent=%s reason=network", t.harness)
-			return nil, refuse(http.StatusBadRequest, why)
-		} else if on {
-			j := netjail.New(netSpec)
-			jail = j
-			cmd.Env = setEnv(cmd.Env, j.Env())
-		}
-	}
-	defer func() {
-		if !started && jail != nil {
-			jail.Close()
-		}
-	}()
+	// Each shell command is walled by the harness's own per-command sandbox
+	// (Info.CopySandbox) when the turn runs in a Copy workspace: that sandbox
+	// (Turn.Copy, set below) fences writes to the copy and governs the network.
+	// There is no whole-process wall — a Direct turn, and a Copy turn on a
+	// harness without its own command sandbox, run unwrapped.
+	perCommand := t.copy && h.Info().CopySandbox
 	spec := turnSpec(hint, t.resumeID, t.model, w, perm, t.context+t.prompt)
 	spec.Access = t.access
 	// Copy mode: hand the harness its own per-command sandbox for this turn —
@@ -1039,11 +978,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		return nil, storeFailed
 	}
 	cmd.Stdout, cmd.Stderr = pipes.outW, pipes.errW
-	startCmd := cmd.Start
-	if jail != nil {
-		startCmd = func() error { return jail.Start(cmd) }
-	}
-	code, msg, lt := e.runs.start(cmd, startCmd, t.session, t.id)
+	code, msg, lt := e.runs.start(cmd, cmd.Start, t.session, t.id)
 	pipes.closeWriters() // the child holds its own copies
 	if code != 0 {
 		pipes.closeReaders()
@@ -1088,9 +1023,6 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		copied(OutputGrace)
 		e.keepOutput(t, all[:len(all)-1], code, ended, out)
 		unsettled := e.cfg.Settle != nil && !e.cfg.Settle(t.session, t.id)
-		if jail != nil {
-			jail.Close()
-		}
 		e.cfg.Logf("%s.exit session=%s agent=%s turn=%s hold=%s exit=%d stopped=%t duration=%s", kind, t.session, t.harness, t.id, holdID,
 			code, stopped, ended.Sub(begun).Round(time.Millisecond))
 		// The turn's end, with how it ended and, when it failed, why: the
@@ -1120,78 +1052,6 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		close(res.done)
 	}()
 	return res, nil
-}
-
-// wall is what a turn starts in: netjail's namespace, or the
-// session's sandbox.
-type wall interface {
-	Start(*exec.Cmd) error
-	Close()
-}
-
-// sandbox builds the wall around one of session's turns in
-// folder (read only when readOnly; with no network beyond its gateway and
-// the API when offline, see wallNet), with read readable too, or says why it cannot (fixed wording),
-// and in plain words too when the sandbox has them (sandbox.Error.Say).
-// lead says why the wall is built, and starts a refusal.
-// It needs the session's own home, which holds the home_files already
-// (copyHomeFiles), so they are readable inside the wall.
-// The network goes through the proxy: the hosts in [network] allow when
-// contain is on, every host when it is off.
-func (e *Engine) sandbox(p settings.Policy, lead, session, folder string, readOnly, offline bool, read []string, net netjail.Spec) (box *sandbox.Box, why, say string) {
-	if e.cfg.Homes == "" || !SessionShape.MatchString(session) {
-		return nil, lead + ", and " + NoHomes, ""
-	}
-	home := filepath.Join(e.cfg.Homes, session)
-	if info, err := os.Lstat(home); err != nil || !info.IsDir() {
-		return nil, lead + ", and this session has no home of its own: it began before homes", ""
-	}
-	net = wallNet(p, offline, net)
-	box, err := sandbox.New(sandbox.Spec{Copy: folder, ReadOnly: readOnly, Home: home, Read: read, Net: net})
-	if err != nil {
-		var se *sandbox.Error
-		if errors.As(err, &se) {
-			say = se.Say
-		}
-		return nil, err.Error(), say
-	}
-	return box, "", ""
-}
-
-// sandboxRefusal is the refusal of a turn whose wall could not be built for
-// why. With say, the sandbox's plain words for a machine that cannot run
-// it, they come first and why stays as the detail. Not for a wall Network
-// contain asked for (autoWall): Sandbox is not the switch to turn off there.
-func sandboxRefusal(why, say string, autoWall bool) string {
-	switch {
-	case autoWall:
-		return why + ", so the turn did not start. Fix it on this runner, or turn Network contain off in the cockpit's Settings (Isolation, Network)."
-	case say != "":
-		return say + " Detail: " + why + "."
-	}
-	return why + ", so the turn did not start. Fix it on this runner, or turn Sandbox off in the cockpit's Settings (Isolation)."
-}
-
-// wallNet is what the proxy of a walled turn lets through: the
-// hosts in [network] allow when contain is on, the public internet when it
-// is off. An offline one reaches its gateway and the API only: a turn of a
-// harness whose own read-only sandbox kept it off the network, which is
-// off in the wall (harness.Info.OwnSandbox).
-func wallNet(p settings.Policy, offline bool, net netjail.Spec) netjail.Spec {
-	if offline {
-		net.Allow, net.Open = nil, false
-		return net
-	}
-	// The sandbox's default allow-list (package registries, git over HTTPS)
-	// so a build's usual fetches work without the person naming each host.
-	// Only for a real sandbox turn with contain on: an autoWall turn (contain
-	// on, sandbox off) keeps exactly the hosts [network] allow names, and
-	// with contain off the proxy already reaches every public host.
-	if p.Sandbox.Mode == settings.SandboxOn && p.Network.Contain == settings.ContainOn {
-		net.Allow = append(append([]string(nil), netjail.DefaultAllow...), net.Allow...)
-	}
-	net.Open = p.Network.Contain != settings.ContainOn
-	return net
 }
 
 // copyHomeFiles copies the policy's home_files into session's own home at
@@ -1233,63 +1093,6 @@ func (e *Engine) apiProgram() []string {
 		return nil
 	}
 	return []string{filepath.Join(e.cfg.APIDir, APIClient)}
-}
-
-// needsWall says a turn on policy p is closed off from the network by the
-// session's sandbox, built for it even with the sandbox off: contain is on,
-// and this machine has no network namespace but has the wall (macOS).
-// Linux closes an agent off with netjail alone.
-func needsWall(p settings.Policy) bool {
-	return p.Network.Contain == settings.ContainOn && !netjail.Supported && sandbox.Supported
-}
-
-// contained says whether a turn on policy p runs closed off from the
-// network by netjail, or why it cannot start: the policy asks for it and
-// this runner can do it neither with netjail nor with the wall.
-func (e *Engine) contained(p settings.Policy) (bool, string) {
-	if p.Network.Contain != settings.ContainOn {
-		return false, ""
-	}
-	if !netjail.Supported {
-		return false, "Network contain is on in Settings, and this machine can close an agent off on neither Linux's network namespace nor a sandbox, so the turn did not start. " +
-			"Run the agent on a Linux or macOS runner, or turn Network contain off in the cockpit's Settings (Isolation, Network)."
-	}
-	if err := netjail.Check(); err != nil {
-		return false, err.Error() + ", so the turn did not start. Fix it on this runner, or turn Network contain off in the cockpit's Settings (Isolation, Network) to run agents open."
-	}
-	return true, ""
-}
-
-// reach sorts the addresses a turn's agent is given: loopback ones are
-// forwarded into its namespace as they are, others pass the proxy as
-// host:port.
-func reach(urls ...string) (forward, pass []string) {
-	for _, s := range urls {
-		u, err := url.Parse(s)
-		if err != nil || u.Host == "" {
-			continue
-		}
-		port := u.Port()
-		if port == "" {
-			port = "80"
-			if u.Scheme == "https" {
-				port = "443"
-			}
-		}
-		host := u.Hostname()
-		if host == "localhost" {
-			host = "127.0.0.1"
-		}
-		addr := net.JoinHostPort(host, port)
-		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-			if !slices.Contains(forward, addr) {
-				forward = append(forward, addr)
-			}
-		} else if !slices.Contains(pass, addr) {
-			pass = append(pass, addr)
-		}
-	}
-	return forward, pass
 }
 
 // setEnv is env with each of set's variables in place of any earlier value.
@@ -1390,9 +1193,12 @@ func turnSpec(hint, resumeID, model string, w Writes, perm settings.Policy, prom
 	// Temporary glue: mapping tool:subagent to harness NoSubagents until AgentBus's own loop replaces each harness.
 	subDec, _ := gateway.DecideTool(rules, "tool:subagent")
 	noSubagents := subDec != gateway.Allow
+	// Walled is always false now the whole-process wall is retired; the field
+	// and codex's branches on it are vestigial (removed with harness.Turn.Walled
+	// in a follow-up that does not collide with the codex Copy-sandbox work).
 	return harness.Turn{Hint: hint, ResumeID: resumeID, Model: model, Writes: w,
 		Allow: perm.Allow, Ask: perm.Ask, Forbid: perm.Forbid,
-		NoSubagents: noSubagents, Walled: perm.Sandbox.Mode == settings.SandboxOn, Prompt: prompt}
+		NoSubagents: noSubagents, Prompt: prompt}
 }
 
 // withAPI is perm with the agent's way to the API on the allow list, on every

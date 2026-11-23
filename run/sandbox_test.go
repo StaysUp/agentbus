@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/staysup/agentbus/netjail"
 	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 )
@@ -37,63 +36,25 @@ func sandboxEngine(t *testing.T, policy string, homes bool, script string) (*Eng
 	return e, st
 }
 
-// [sandbox] mode = "on" where the wall cannot be built refuses the turn
-// with why, before anything is stored: a runner with no home per session.
-// It names the Settings switch.
-func TestSandboxRefusedBeforeStart(t *testing.T) {
-	for _, c := range []struct {
-		name, policy string
-		homes        bool
-		want         string
-	}{
-		{"no homes", "[sandbox]\nmode = \"on\"\n", false, "no home of its own"},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			e, st := sandboxEngine(t, c.policy, c.homes, "exit 0")
-			_, err := e.Start(Request{Harness: "claude", Folder: t.TempDir(), Prompt: "hi"})
-			var r *Refusal
-			if !errors.As(err, &r) || r.Status != 400 || !strings.Contains(r.Msg, c.want) || !strings.Contains(r.Msg, "so the turn did not start") {
-				t.Fatalf("Start: %v, want a 400 refusal saying %q", err, c.want)
-			}
-			// It points to the switch a person can reach: the cockpit's
-			// Settings, not a file key (0.5.1).
-			if !strings.Contains(r.Msg, "turn Sandbox off in the cockpit's Settings (Isolation)") || strings.Contains(r.Msg, "[sandbox] mode") {
-				t.Errorf("refusal %q does not point to the Settings switch", r.Msg)
-			}
-			if snap, _ := st.Snapshot(); len(snap.Sessions) != 0 {
-				t.Errorf("%d sessions stored, want none", len(snap.Sessions))
-			}
-		})
-	}
-}
-
 // A home_files entry that is not on this runner refuses the turn before
-// anything is stored, sandbox on or off, and the refusal points to Home
-// files in Settings. The old name, sandbox.read, is read the same way.
+// anything is stored, and the refusal points to Home files in Settings.
 func TestHomeFilesRefusedBeforeStart(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	for _, policy := range []string{
-		"home_files = [\"~/.agentbus-home-files-test-not-there\"]\n",
-		"home_files = [\"~/.agentbus-home-files-test-not-there\"]\n[sandbox]\nmode = \"on\"\n",
-		"[sandbox]\nread = [\"~/.agentbus-home-files-test-not-there\"]\n",
-	} {
-		e, st := sandboxEngine(t, policy, true, "exit 0")
-		_, err := e.Start(Request{Harness: "claude", Folder: t.TempDir(), Prompt: "hi"})
-		var r *Refusal
-		if !errors.As(err, &r) || r.Status != 400 || !strings.Contains(r.Msg, "not on this runner") ||
-			!strings.Contains(r.Msg, "so the turn did not start") || !strings.Contains(r.Msg, "Home files in the cockpit's Settings") {
-			t.Fatalf("%q: Start: %v, want a 400 refusal pointing to Home files", policy, err)
-		}
-		if snap, _ := st.Snapshot(); len(snap.Sessions) != 0 {
-			t.Errorf("%q: %d sessions stored, want none", policy, len(snap.Sessions))
-		}
+	e, st := sandboxEngine(t, "home_files = [\"~/.agentbus-home-files-test-not-there\"]\n", true, "exit 0")
+	_, err := e.Start(Request{Harness: "claude", Folder: t.TempDir(), Prompt: "hi"})
+	var r *Refusal
+	if !errors.As(err, &r) || r.Status != 400 || !strings.Contains(r.Msg, "not on this runner") ||
+		!strings.Contains(r.Msg, "so the turn did not start") || !strings.Contains(r.Msg, "Home files in the cockpit's Settings") {
+		t.Fatalf("Start: %v, want a 400 refusal pointing to Home files", err)
+	}
+	if snap, _ := st.Snapshot(); len(snap.Sessions) != 0 {
+		t.Errorf("%d sessions stored, want none", len(snap.Sessions))
 	}
 }
 
-// A path outside ~ never reaches a turn: the policy refuses it, under its
-// new name and its old one.
+// A path outside ~ never reaches a turn: the policy refuses it.
 func TestHomeFilesOutsideHomeRefused(t *testing.T) {
-	for _, policy := range []string{"home_files = [\"/etc/passwd\"]\n", "[sandbox]\nread = [\"/etc/passwd\"]\n", "home_files = [\"~/../x\"]\n"} {
+	for _, policy := range []string{"home_files = [\"/etc/passwd\"]\n", "home_files = [\"~/../x\"]\n"} {
 		if _, err := settings.ParsePolicy([]byte(policy)); err == nil || !strings.Contains(err.Error(), "home_files") {
 			t.Errorf("%q: %v, want a refusal naming home_files", policy, err)
 		}
@@ -133,95 +94,11 @@ func TestHomeFilesNoHome(t *testing.T) {
 	}
 }
 
-// A turn in the wall tells its harness so, and codex keeps its own sandbox
-// off there.
-func TestSandboxTurnSpec(t *testing.T) {
-	p, err := settings.ParsePolicy([]byte("[sandbox]\nmode = \"on\"\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !turnSpec("", "", "", Writes{}, p, "hi").Walled {
-		t.Error("Walled is false with [sandbox] on")
-	}
-	if turnSpec("", "", "", Writes{}, settings.DefaultPolicy(), "hi").Walled {
-		t.Error("Walled is true by default")
-	}
-}
-
-// The wall's network: the allow list when contain is on, the public
-// internet when it is off, and for an offline turn (codex that may not
-// write) its gateway and the API only, whatever contain says (review of
-// 2026-11-11, round 5).
-func TestWallNet(t *testing.T) {
-	in := netjail.Spec{Forward: []string{"127.0.0.1:1"}, Pass: []string{"api.test:443"}, Allow: []string{"github.com"}}
-	on, _ := settings.ParsePolicy([]byte("[network]\ncontain = \"on\"\n"))
-	off := settings.DefaultPolicy()
-	if got := wallNet(on, false, in); got.Open || len(got.Allow) != 1 {
-		t.Errorf("contain on: %+v", got)
-	}
-	if got := wallNet(off, false, in); !got.Open {
-		t.Errorf("contain off: %+v", got)
-	}
-	for _, p := range []settings.Policy{on, off} {
-		got := wallNet(p, true, in)
-		if got.Open || len(got.Allow) != 0 || len(got.Forward) != 1 || len(got.Pass) != 1 {
-			t.Errorf("offline, contain %s: %+v", p.Network.Contain, got)
-		}
-	}
-	// Sandbox mode adds the default allow-list (registries, git hosts) on top
-	// of [network] allow; offline still keeps it shut, and autoWall (contain
-	// on, sandbox off) does not get it.
-	sb, err := settings.ParsePolicy([]byte("[sandbox]\nmode = \"on\"\n[network]\ncontain = \"on\"\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := wallNet(sb, false, in)
-	if got.Open || len(got.Allow) != len(netjail.DefaultAllow)+1 {
-		t.Errorf("sandbox on: want the default allow-list plus the one listed host, got %+v", got.Allow)
-	}
-	if !netjail.Allowed(got.Allow, "registry.npmjs.org") || !netjail.Allowed(got.Allow, "github.com") {
-		t.Errorf("sandbox on: default allow-list not added: %+v", got.Allow)
-	}
-	if got := wallNet(sb, true, in); len(got.Allow) != 0 {
-		t.Errorf("sandbox on but offline: the allow-list must stay shut, got %+v", got.Allow)
-	}
-	if got := wallNet(on, false, in); len(got.Allow) != 1 {
-		t.Errorf("autoWall (sandbox off) must keep only [network] allow: %+v", got.Allow)
-	}
-	// Sandbox on with contain off: the proxy is open to every public host,
-	// so the default allow-list adds nothing and is left out.
-	sbOpen, err := settings.ParsePolicy([]byte("[sandbox]\nmode = \"on\"\n"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := wallNet(sbOpen, false, in); !got.Open || len(got.Allow) != 1 {
-		t.Errorf("sandbox on, contain off: want open proxy and only the listed host, got %+v", got)
-	}
-}
-
-// agentbus-api is readable in the wall as one file: never the folder that
-// holds the agentbus binary (review of 2026-11-12, round 8).
+// agentbus-api is readable as one file: never the folder that holds the
+// agentbus binary (review of 2026-11-12, round 8).
 func TestSandboxAPIProgramIsOneFile(t *testing.T) {
 	e := &Engine{cfg: Config{APIDir: "/data/bin"}}
 	if got := e.apiProgram(); len(got) != 1 || got[0] != filepath.Join("/data/bin", APIClient) {
 		t.Errorf("apiProgram = %v, want the link alone", got)
-	}
-}
-
-// A machine that cannot run the wall is refused in plain words, with the
-// sandbox's own reason kept after them. Any other reason, and a wall that
-// Network contain asked for, read as before.
-func TestSandboxRefusalWords(t *testing.T) {
-	const why = "the session's sandbox could not be built: bubblewrap could not start a program in it"
-	const say = "This machine can't run the sandbox. Turn Sandbox off for this session, or run AgentBus on a machine that allows it."
-	if got, want := sandboxRefusal(why, say, false), say+" Detail: "+why+"."; got != want {
-		t.Errorf("refusal %q, want %q", got, want)
-	}
-	if got := sandboxRefusal(why, "", false); !strings.HasPrefix(got, why+", so the turn did not start") || !strings.Contains(got, "turn Sandbox off in the cockpit's Settings (Isolation)") {
-		t.Errorf("refusal %q of a reason with no plain words changed", got)
-	}
-	// Sandbox is not the switch that asked for this wall.
-	if got := sandboxRefusal(why, say, true); strings.Contains(got, "Turn Sandbox off") || !strings.Contains(got, "turn Network contain off") {
-		t.Errorf("refusal %q of a wall Network contain asked for names the wrong switch", got)
 	}
 }
