@@ -81,10 +81,11 @@ var turnTokenDoc = map[int]string{
 		"A new session must be in the turn's own folder or one inside it (the person's folder when absent), always isolated. " +
 		"A session it continues must be one its request tree started, never its own or the person's. " +
 		"The turn's result comes back to the asking session as a later turn. Caps: " + askCaps,
-	askedTurn:     "A turn token may stop only a turn its request tree asked for.",
-	anyRead:       "A turn token may call this too.",
-	applyTurnTok:  "A turn token may call this for a turn of a session in its request tree only when the Agents may apply switch is on in Settings (Permissions) (off by default).",
-	renameSession: "A turn token may rename a session in its request tree. It never closes one.",
+	askedTurn:           "A turn token may stop only a turn its request tree asked for.",
+	anyRead:             "A turn token may call this too.",
+	changesWorkspaceTok: "A turn token may preview the changes of its own workspace (the workspace of its session).",
+	applyWorkspaceTok:   "A turn token may apply its own workspace's changes (the workspace of its session) only when the Agents may apply switch is on in Settings (Permissions) (off by default).",
+	renameSession:       "A turn token may rename a session in its request tree. It never closes one.",
 	toolList: "A turn token may call this: its list holds the tools its turn may call under permissions (none of them when tool:* is refused), " +
 		"and each call is checked by the operation it names.",
 }
@@ -530,7 +531,7 @@ func describe(runner bool) (*openapi3.T, error) {
 			if err != nil {
 				return nil, err
 			}
-			op.RequestBody = &openapi3.RequestBodyRef{Value: openapi3.NewRequestBody().WithRequired(true).WithJSONSchemaRef(ref)}
+			op.RequestBody = &openapi3.RequestBodyRef{Value: openapi3.NewRequestBody().WithRequired(!rt.bodyOpt).WithJSONSchemaRef(ref)}
 		}
 		for _, r := range rt.replies {
 			var resp *openapi3.ResponseRef

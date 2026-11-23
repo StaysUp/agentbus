@@ -128,6 +128,9 @@ type client struct {
 	t     *testing.T
 	base  string
 	token string
+	// ws maps a session this client created to its workspace, so apply can
+	// reach the workspace route (apply moved from the turn to the workspace).
+	ws map[string]string
 }
 
 // waitService waits for the service at addr with data folder home to answer.
@@ -208,6 +211,10 @@ func (c *client) newWorkspaceSession(body map[string]any) string {
 	if code, out := c.call("POST", "/api/v0/sessions", map[string]any{"workspace": ws.Workspace}, &sc); code/100 != 2 || sc.Session == "" {
 		c.t.Fatalf("POST /api/v0/sessions: %d %s", code, out)
 	}
+	if c.ws == nil {
+		c.ws = map[string]string{}
+	}
+	c.ws[sc.Session] = ws.Workspace
 	return sc.Session
 }
 
@@ -296,9 +303,13 @@ type applyAnswer struct {
 	Error     string
 }
 
-func (c *client) apply(turn string) (int, applyAnswer) {
+func (c *client) apply(s started) (int, applyAnswer) {
 	var a applyAnswer
-	code, _ := c.call("POST", "/api/v0/turns/"+turn+"/apply", nil, &a)
+	ws := c.ws[s.Session]
+	if ws == "" {
+		c.t.Fatalf("apply: no workspace known for session %s", s.Session)
+	}
+	code, _ := c.call("POST", "/api/v0/workspaces/"+ws+"/apply", map[string]any{"turn": s.Turn}, &a)
 	return code, a
 }
 
@@ -338,20 +349,20 @@ func filesFlow(t *testing.T, c *client, folder string, body map[string]any) {
 	}; !equalMaps(got, want) {
 		t.Fatalf("second turn's diff %q, want %q", got, want)
 	}
-	if code, a := c.apply(t1.Turn); code != 200 || a.State != "applied" || strings.Join(a.Files, ",") != "a.txt,new.txt" {
+	if code, a := c.apply(t1); code != 200 || a.State != "applied" || strings.Join(a.Files, ",") != "a.txt,new.txt" {
 		t.Fatalf("apply of the first turn: %d %+v", code, a)
 	}
 	if got := fileText(t, filepath.Join(folder, "a.txt")) + fileText(t, filepath.Join(folder, "new.txt")); got != "one\np1\np1\n" {
 		t.Fatalf("after the first apply: %q", got)
 	}
-	if code, a := c.apply(t2.Turn); code != 200 || a.State != "applied" || strings.Join(a.Files, ",") != "a.txt,new.txt" {
+	if code, a := c.apply(t2); code != 200 || a.State != "applied" || strings.Join(a.Files, ",") != "a.txt,new.txt" {
 		t.Fatalf("apply of the second turn: %d %+v", code, a)
 	}
 	if got := fileText(t, filepath.Join(folder, "a.txt")) + fileText(t, filepath.Join(folder, "new.txt")); got != "one\np1\np2\n<missing>" {
 		t.Fatalf("after the second apply: %q", got)
 	}
 	// Asked again: the same apply, and nothing written.
-	if code, a := c.apply(t2.Turn); code != 200 || !a.Already {
+	if code, a := c.apply(t2); code != 200 || !a.Already {
 		t.Fatalf("apply asked again: %d %+v", code, a)
 	}
 	// A new session; the person changes a.txt before applying it: refused,
@@ -360,7 +371,7 @@ func filesFlow(t *testing.T, c *client, folder string, body map[string]any) {
 	if err := os.WriteFile(filepath.Join(folder, "a.txt"), []byte("mine\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	code, a := c.apply(t3.Turn)
+	code, a := c.apply(t3)
 	if code != http.StatusConflict || a.State != "refused" || len(a.Conflicts) != 1 || a.Conflicts[0].Path != "a.txt" ||
 		a.Conflicts[0].Why != "changed in your folder since the checkpoint" {
 		_, d := c.call("GET", "/api/v0/turns/"+t3.Turn+"/diff", nil, nil)
@@ -378,11 +389,11 @@ func filesFlow(t *testing.T, c *client, folder string, body map[string]any) {
 func restoreFlow(t *testing.T, c *client, folder string, body map[string]any) {
 	t.Helper()
 	t1 := c.turn(merge(body, map[string]any{"agent": "claude", "prompt": "p1"}))
-	if code, a := c.apply(t1.Turn); code != 200 || a.State != "applied" {
+	if code, a := c.apply(t1); code != 200 || a.State != "applied" {
 		t.Fatalf("apply of the first turn: %d %+v", code, a)
 	}
 	t2 := c.turn(map[string]any{"session": t1.Session, "agent": "claude", "prompt": "restore"})
-	if code, a := c.apply(t2.Turn); code != 200 || a.State != "applied" {
+	if code, a := c.apply(t2); code != 200 || a.State != "applied" {
 		t.Fatalf("apply of the turn that puts a.txt back: %d %+v", code, a)
 	}
 	if got := fileText(t, filepath.Join(folder, "a.txt")); got != "one\n" {

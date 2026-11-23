@@ -1,13 +1,13 @@
 package api
 
-// A conversation's changes not applied yet: GET /api/v0/sessions/{id}/changes.
-// It pages the apply's dry run - what POST /api/v0/turns/{id}/apply of the
-// session's latest turn would do - from the record. A preview runs on the
-// folder's machine (connector.Preview, nothing written) and control stores it
-// as a changes.previewed event, the one source; the route serves and pages
-// that event. A later request reuses the stored preview until the session
-// changes or ?fresh=true asks for a new one; an apply always re-checks the
-// folder itself, so the safety stays there.
+// A workspace's changes not applied yet: GET /api/v0/workspaces/{id}/changes.
+// It pages the apply's dry run - what POST /api/v0/workspaces/{id}/apply would
+// do - from the record. A preview runs on the folder's machine
+// (connector.Preview, nothing written) and control stores it as a
+// changes.previewed event, the one source; the route serves and pages that
+// event. A later request reuses the stored preview until the workspace changes
+// or ?fresh=true asks for a new one; an apply always re-checks the folder
+// itself, so the safety stays there.
 
 import (
 	"context"
@@ -20,13 +20,13 @@ import (
 	"github.com/staysup/agentbus/queue"
 )
 
-// SessionChangesPage is the answer to GET /api/v0/sessions/{id}/changes: a
+// WorkspaceChangesPage is the answer to GET /api/v0/workspaces/{id}/changes: a
 // page of the apply preview, from the record's latest changes.previewed.
-type SessionChangesPage struct {
-	Session     string              `json:"session"`
-	Isolated    bool                `json:"isolated" doc:"The session works in an isolated copy of the person's folder, so its changes reach the folder only by an apply. false: it works in the folder as it is, there is nothing to apply, and why says so."`
+type WorkspaceChangesPage struct {
+	Workspace   string              `json:"workspace"`
+	Isolated    bool                `json:"isolated" doc:"The workspace works in an isolated copy of the person's folder, so its changes reach the folder only by an apply. false: it works in the folder as it is, there is nothing to apply, and why says so."`
 	Unapplied   bool                `json:"unapplied" doc:"An apply would change the person's folder: files or conflicts is not empty. false when every change is applied, when the folder already holds them, or when nothing can be applied (why says why)."`
-	Turn        string              `json:"turn,omitempty" doc:"The session's latest ended turn with changes: the turn to name in POST /api/v0/turns/{id}/apply to apply everything. Also set when it is applied already. Absent when the session has none, or its first turn has not ended."`
+	Turn        string              `json:"turn,omitempty" doc:"The workspace's latest ended turn with changes: the turn to name on POST /api/v0/workspaces/{id}/apply to apply everything. Also set when it is applied already. Absent when the workspace has none, or its first turn has not ended."`
 	Turns       []string            `json:"turns,omitempty" doc:"Every turn whose changes that apply would carry, oldest first."`
 	PreviewedAt *time.Time          `json:"previewed_at,omitempty" doc:"When this preview was taken. A reused preview is as of then, not now; ?fresh=true takes a new one. Absent when there is nothing to preview."`
 	Store       string              `json:"store" doc:"The store id."`
@@ -37,8 +37,8 @@ type SessionChangesPage struct {
 	Files       []PreviewFile       `json:"files" doc:"A page of the files the apply would write or remove, and the conflicts, sorted by path, each with its change against the person's folder now."`
 	Conflicts   []event.RefusedFile `json:"conflicts" doc:"Each file in the person's folder that is neither as it was at the start of the changes nor already as they leave it, with why: exactly the files that would refuse the apply. Not empty: the apply would write nothing."`
 	NextBefore  *int64              `json:"next_before" doc:"The before for the next, earlier page, or null when the page reaches the first file."`
-	Stale       bool                `json:"stale,omitempty" doc:"This preview is out of date: the session changed, but the runner is offline so a fresh one cannot run. It is the last preview taken, as of previewed_at; retry when the runner is back, or ?fresh=true."`
-	Why         string              `json:"why,omitempty" doc:"Why nothing can be applied: the session does not work in an isolated copy, or it was closed; or, with stale, that the runner is offline."`
+	Stale       bool                `json:"stale,omitempty" doc:"This preview is out of date: the workspace changed, but the runner is offline so a fresh one cannot run. It is the last preview taken, as of previewed_at; retry when the runner is back, or ?fresh=true."`
+	Why         string              `json:"why,omitempty" doc:"Why nothing can be applied: the workspace does not work in an isolated copy, or it was closed; or, with stale, that the runner is offline."`
 }
 
 // PreviewFile is one file of a session changes page.
@@ -53,36 +53,38 @@ type PreviewFile struct {
 
 // Answers of the changes route, in fixed wording.
 const (
-	changesNotIsolated = "this session works in your folder as it is, not in an isolated copy, so its changes are already there: there is nothing to apply"
+	changesNotIsolated = "this workspace works in your folder as it is, not in an isolated copy, so its changes are already there: there is nothing to apply"
 	changesSlow        = "the folder's machine did not answer in time, so no preview was made; nothing was written: ask again"
 	changesFailed      = "the preview could not be made; nothing was written"
-	changesStale       = "the session changed after this preview was taken, so it is not current: ?fresh=true takes a new one, which needs the folder's machine online"
+	changesStale       = "the workspace changed after this preview was taken, so it is not current: ?fresh=true takes a new one, which needs the folder's machine online"
 )
 
-// GET /api/v0/sessions/<id>/changes: what applying the session's changes
-// would do to the person's folder now.
-func (a *API) sessionChanges(w http.ResponseWriter, r *http.Request, id string) {
+// GET /api/v0/workspaces/<id>/changes: what applying the workspace's changes
+// would do to the person's folder now. id is the workspace, so the preview
+// event, the reuse gate and the page are all keyed by the workspace id.
+func (a *API) workspaceChanges(w http.ResponseWriter, r *http.Request, id string) {
 	before, limit, ok := pageParams(w, r)
 	if !ok {
 		return
 	}
-	// The one door: resolve the session to its workspace and answer 404 for an id
-	// the record knows no session by, so a workspace id cannot masquerade as a
-	// session and probe its own copy.
-	ws, found, err := a.workspaceOf(id)
+	// Validate the id is a real workspace, so a session id (or any other) cannot
+	// probe a workspace's copy; the sandbox mode comes from the same record.
+	ws := ids.WorkspaceID(id)
+	wsp, found, err := a.cfg.Store.Workspace(ws)
 	if err != nil {
 		a.internal(w)
 		return
 	}
 	if !found {
-		writeError(w, http.StatusNotFound, "no such session")
+		writeError(w, http.StatusNotFound, "no such workspace")
 		return
 	}
+	sandbox := wsp.Sandbox
 	q := r.URL.Query()
 	// Paging a preview already served: read the pinned event and page it, so
 	// every page is of the same snapshot even if the folder changes meanwhile.
 	if pin := q.Get("event"); pin != "" {
-		e, found, err := a.cfg.Store.EventByID(id, "", pin)
+		e, found, err := a.cfg.Store.PreviewByID(id, pin)
 		if err != nil {
 			a.internal(w)
 			return
@@ -133,7 +135,7 @@ func (a *API) sessionChanges(w http.ResponseWriter, r *http.Request, id string) 
 	if a.servedCurrent(w, r, id, ws, before, limit) {
 		return
 	}
-	a.runPreview(w, r, id, ws, before, limit)
+	a.runPreview(w, r, id, ws, sandbox, before, limit)
 }
 
 // servedCurrent serves the session's latest stored preview when it may be
@@ -203,21 +205,20 @@ func (a *API) sessionClosed(ws ids.WorkspaceID) bool {
 // runPreview runs a fresh dry run, stores it as a changes.previewed event,
 // and pages it. A session with nothing to apply answers without an event;
 // only a real preview is stored.
-func (a *API) runPreview(w http.ResponseWriter, r *http.Request, id string, ws ids.WorkspaceID, before int64, limit int) {
-	out := SessionChangesPage{Session: id, Isolated: true, Store: a.cfg.Store.ID(),
+func (a *API) runPreview(w http.ResponseWriter, r *http.Request, id string, ws ids.WorkspaceID, sandbox bool, before int64, limit int) {
+	out := WorkspaceChangesPage{Workspace: id, Isolated: true, Store: a.cfg.Store.ID(),
 		Files: []PreviewFile{}, Conflicts: []event.RefusedFile{}}
 	if a.cfg.Queue == nil {
-		a.changesWithoutQueue(w, id)
+		a.changesWithoutQueue(w, id, sandbox)
 		return
 	}
-	// Preview the WORKSPACE's changes (shared by every session of it), so a
-	// second session with no turn of its own still sees the workspace's unapplied
-	// changes. The stored preview stays keyed by the session route.
+	// Preview the workspace's changes. The stored preview is keyed by the
+	// workspace id (the route's id), the one id its sessions share.
 	job, turn, applies, err := a.cfg.Queue.Preview(queue.DefaultTeam, ws)
 	out.Turn = turn
 	switch {
 	case errors.Is(err, queue.ErrNotFound):
-		a.changesWithoutQueue(w, id)
+		a.changesWithoutQueue(w, id, sandbox)
 		return
 	case errors.Is(err, queue.ErrNotIsolated):
 		out.Isolated, out.Why = false, changesNotIsolated
@@ -239,12 +240,7 @@ func (a *API) runPreview(w http.ResponseWriter, r *http.Request, id string, ws i
 		// is the one switch: a sandbox workspace is isolated while its first turn
 		// runs (the copy is coming), a direct one is not. The isolation setting
 		// is only the backend and never turns the wall off (his rule, 2026-11-21).
-		sandbox, found, err := a.sessionSandbox(id)
-		if err != nil {
-			a.internal(w)
-			return
-		}
-		if found && !sandbox {
+		if !sandbox {
 			out.Isolated, out.Why = false, changesNotIsolated
 		}
 		writeJSON(w, http.StatusOK, out)
@@ -305,8 +301,11 @@ func (a *API) runPreview(w http.ResponseWriter, r *http.Request, id string, ws i
 		return
 	}
 	// The preview records the appliable cursor it was planned against (turn
-	// and applies), so the route reuses it only while that cursor holds.
-	e := event.Event{Kind: event.ChangesPreviewed, Session: id, Previewed: previewedFrom(applies, turn, j.Links.AppliesTurns, p)}
+	// and applies), so the route reuses it only while that cursor holds. It is
+	// keyed by the WORKSPACE (never the session): a preview is of a workspace's
+	// changes, and keeping the session field empty keeps a workspace id out of
+	// the session namespace, so no session reader ever sees a preview.
+	e := event.Event{Kind: event.ChangesPreviewed, Workspace: id, Previewed: previewedFrom(applies, turn, j.Links.AppliesTurns, p)}
 	e.ID, e.Time = newEventID(), a.cfg.Now().UTC()
 	if _, _, err := a.cfg.Store.Append(e); err != nil {
 		a.internal(w)
@@ -336,8 +335,9 @@ func previewedFrom(applies int, turn string, turns []string, p *queue.PreviewRes
 	return pv
 }
 
-// writePreviewPage pages a stored changes.previewed event's file list.
-func (a *API) writePreviewPage(w http.ResponseWriter, session string, e event.Event, before int64, limit int, stale bool) {
+// writePreviewPage pages a stored changes.previewed event's file list. key is
+// the workspace id the preview is of (the page's workspace field).
+func (a *API) writePreviewPage(w http.ResponseWriter, key string, e event.Event, before int64, limit int, stale bool) {
 	p := e.Previewed
 	window, next := pageBefore(p.Files, before, limit)
 	files := make([]PreviewFile, 0, len(window))
@@ -354,7 +354,7 @@ func (a *API) writePreviewPage(w http.ResponseWriter, session string, e event.Ev
 	if stale {
 		why = changesStale
 	}
-	writeJSON(w, http.StatusOK, SessionChangesPage{Session: session, Isolated: true,
+	writeJSON(w, http.StatusOK, WorkspaceChangesPage{Workspace: key, Isolated: true,
 		Unapplied: p.Count > 0 || len(conflicts) > 0, Turn: p.Turn, Turns: p.Turns, PreviewedAt: &at,
 		Store: a.cfg.Store.ID(), Event: e.ID, Count: p.Count, Truncated: p.Truncated, DiffsCut: p.DiffsCut,
 		Files: files, Conflicts: conflicts, NextBefore: next, Stale: stale, Why: why})
@@ -379,38 +379,14 @@ func (a *API) workspaceOf(session string) (ids.WorkspaceID, bool, error) {
 	return a.cfg.Queue.SessionWorkspace(queue.DefaultTeam, ids.SessionID(session))
 }
 
-// sessionSandbox is whether a session's workspace is a sandbox (a copy behind a
-// wall), the one switch for whether its changes must be applied. found is false
-// for a session the record does not place in a workspace.
-func (a *API) sessionSandbox(session string) (sandbox, found bool, err error) {
-	ws, ok, err := a.cfg.Store.WorkspaceOf(ids.SessionID(session))
-	if err != nil || !ok {
-		return false, false, err
-	}
-	wsp, ok, err := a.cfg.Store.Workspace(ws)
-	if err != nil || !ok {
-		return false, false, err
-	}
-	return wsp.Sandbox, true, nil
-}
-
-// changesWithoutQueue answers for a session the queue holds no copy row for yet:
-// before its first turn ends, or one that works in the folder as it is (a hook
-// or gateway session). The workspace's sandbox is the one switch -- a sandbox
-// session is isolated with nothing unapplied yet, a direct one is not -- so the
-// route reads ws.Sandbox, never the isolation setting (his rule, 2026-11-21). A
-// session the record does not place in a workspace is 404.
-func (a *API) changesWithoutQueue(w http.ResponseWriter, session string) {
-	sandbox, found, err := a.sessionSandbox(session)
-	if err != nil {
-		a.internal(w)
-		return
-	}
-	if !found {
-		writeError(w, http.StatusNotFound, "no such session")
-		return
-	}
-	out := SessionChangesPage{Session: session, Isolated: sandbox, Store: a.cfg.Store.ID(),
+// changesWithoutQueue answers for a workspace the queue holds no copy row for
+// yet: before its first turn ends, or one that works in the folder as it is (a
+// hook or gateway workspace). The workspace's sandbox is the one switch -- a
+// sandbox workspace is isolated with nothing unapplied yet, a direct one is not
+// -- so the route reads ws.Sandbox, never the isolation setting (his rule,
+// 2026-11-21). The caller validated the workspace exists.
+func (a *API) changesWithoutQueue(w http.ResponseWriter, ws string, sandbox bool) {
+	out := WorkspaceChangesPage{Workspace: ws, Isolated: sandbox, Store: a.cfg.Store.ID(),
 		Files: []PreviewFile{}, Conflicts: []event.RefusedFile{}}
 	if !sandbox {
 		out.Why = changesNotIsolated

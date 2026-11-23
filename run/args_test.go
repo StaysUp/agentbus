@@ -60,8 +60,9 @@ func TestInstructionsWithTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got = withTools(got, "abc", true, true)
-	if !strings.Contains(got, settings.ToolsText(true)) || strings.Contains(got, "{tools}") ||
+	got = withTools(got, "abc", "ws_abc", true, true)
+	wantTools := strings.ReplaceAll(settings.ToolsText(true), "{workspace}", "ws_abc")
+	if !strings.Contains(got, wantTools) || strings.Contains(got, "{tools}") || strings.Contains(got, "{workspace}") ||
 		!strings.Contains(got, "own copy of the person's folder") {
 		t.Errorf("instructions with tools:\n%s", got)
 	}
@@ -77,15 +78,15 @@ func TestInstructionsFollowApply(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tools := range []bool{false, true} {
-		off, on := withTools(got, "abc", tools, false), withTools(got, "abc", tools, true)
-		if strings.Contains(off, "/apply") || strings.Contains(off, "apply and stop") || !strings.Contains(off, "The person applies turns to their folder; you cannot.") {
+		off, on := withTools(got, "abc", "ws_abc", tools, false), withTools(got, "abc", "ws_abc", tools, true)
+		if strings.Contains(off, "/apply") || strings.Contains(off, "apply and stop") || !strings.Contains(off, "The person applies your changes to their folder; you cannot.") {
 			t.Errorf("tools %v, apply off:\n%s", tools, off)
 		}
-		if !strings.Contains(on, "apply") || strings.Contains(on, "you cannot") {
+		if !strings.Contains(on, "apply") || strings.Contains(on, "you cannot") || strings.Contains(on, "{workspace}") {
 			t.Errorf("tools %v, apply on:\n%s", tools, on)
 		}
 	}
-	if !strings.Contains(withTools(got, "abc", false, true), "agentbus-api POST /api/v0/turns/T/apply") {
+	if !strings.Contains(withTools(got, "abc", "ws_abc", false, true), "agentbus-api POST /api/v0/workspaces/ws_abc/apply") {
 		t.Error("apply on: no apply command")
 	}
 	if off := settings.ToolServerInstructions(false); strings.Contains(off, "apply_turn") || strings.Contains(off, "apply turns") {
@@ -102,11 +103,11 @@ func TestInstructionsDefault(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got = withTools(got, "abc", false, true)
-	want := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(settings.DefaultInstructions, "{tools}", settings.APIText(true)), "{session}", "abc"))
+	got = withTools(got, "abc", "ws_abc", false, true)
+	want := strings.TrimSpace(strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(settings.DefaultInstructions, "{tools}", settings.APIText(true)), "{session}", "abc"), "{workspace}", "ws_abc"))
 	// What the baseline found agents miss: their copy is not the person's
 	// folder, how to apply, and how to ask for a review.
-	for _, line := range []string{"in session abc", "own copy of the person's folder", "agentbus-api POST /api/v0/turns/T/apply",
+	for _, line := range []string{"in session abc", "own copy of the person's folder", "agentbus-api POST /api/v0/workspaces/ws_abc/apply",
 		"agentbus-api POST /api/v0/turns ", `"/api/v0/sessions/abc/search?q=<text>"`, "not your harness's own agents"} {
 		if !strings.Contains(got, line) {
 			t.Errorf("instructions lack %q", line)
@@ -136,7 +137,7 @@ func TestInstructionsDefault(t *testing.T) {
 func TestInstructionsFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), settings.InstructionsFile)
 	e := &Engine{cfg: Config{Settings: settings.NewFiles(filepath.Dir(path))}}
-	if got, err := e.instructions("s1"); err != nil || !strings.Contains(withTools(got, "s1", false, false), "/api/v0/sessions/s1/search") {
+	if got, err := e.instructions("s1"); err != nil || !strings.Contains(withTools(got, "s1", "ws_s1", false, false), "/api/v0/sessions/s1/search") {
 		t.Fatalf("missing: %q %v", got, err)
 	}
 	for _, tc := range []struct{ file, want string }{

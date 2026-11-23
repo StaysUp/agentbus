@@ -154,7 +154,7 @@ func TestTurnsTokenScope(t *testing.T) {
 		{"GET", "/api/v0/agents", "", 403},
 		{"GET", "/api/v0/version", "", 403},
 		{"GET", "/api/v0/turns/t_a/calls/x1", "", 403},
-		{"POST", "/api/v0/turns/t_a/apply", "", 403},
+		{"POST", "/api/v0/workspaces/ws_a/apply", "", 403},
 		{"PATCH", "/api/v0/sessions/s1", `{"closed":true}`, 403},
 	} {
 		got, out := asTok(t, e, turnsTok, c.method, c.path, c.body)

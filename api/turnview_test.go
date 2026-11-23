@@ -89,7 +89,11 @@ func TestStoppedQueuedTurnIsListed(t *testing.T) {
 		t.Fatalf("stop: %d %s", resp.StatusCode, raw)
 	}
 	// It has no changes to apply, and the refusal says it never started.
-	if resp, raw := do(t, e.req(t, "POST", "/api/v0/turns/"+st.Turn+"/apply", nil)); resp.StatusCode != 400 || !strings.Contains(raw, applyNeverStarted) {
+	j, err := e.q.JobByTurn(queue.DefaultTeam, st.Turn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp, raw := do(t, e.req(t, "POST", "/api/v0/workspaces/"+string(j.Spec.Workspace)+"/apply", strings.NewReader(`{"turn":"`+st.Turn+`"}`))); resp.StatusCode != 400 || !strings.Contains(raw, applyNeverStarted) {
 		t.Errorf("apply of a turn that never started: %d %s", resp.StatusCode, raw)
 	}
 	now := time.Now().UTC()

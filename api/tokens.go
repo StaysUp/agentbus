@@ -59,9 +59,12 @@ const (
 	anyRead
 	// renameSession: {id} is a session in the token's scope, to rename.
 	renameSession
-	// applyTurnTok: {id} is a turn of a session in the token's scope, whose
-	// changes to apply.
-	applyTurnTok
+	// changesWorkspaceTok: {id} is the token's own workspace, whose changes to
+	// preview.
+	changesWorkspaceTok
+	// applyWorkspaceTok: {id} is the token's own workspace, whose changes to
+	// apply, allowed only when Agents may apply is on.
+	applyWorkspaceTok
 	// toolList: POST /api/v0/mcp, the API as tools. Each tool call is sent
 	// through its own route and checked there (tools.go).
 	toolList
@@ -241,17 +244,16 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 		} else if !ok {
 			return refuse(turnSessionRefused)
 		}
-	case applyTurnTok:
-		if a.cfg.Queue == nil {
-			return failed(queue.ErrNotFound)
-		}
-		j, err := a.cfg.Queue.JobByTurn(queue.DefaultTeam, id)
+	case changesWorkspaceTok, applyWorkspaceTok:
+		// A turn token reads or applies only its OWN workspace: the workspace of
+		// the token's session must be the id in the path. g.Session is always in
+		// the token's tree, so inScope is not needed.
+		ws, found, err := a.workspaceOf(g.Session)
 		if err != nil {
-			return failed(err)
+			a.internal(w)
+			return nil, false
 		}
-		if ok, err := inScope(turnSession(j)); err != nil {
-			return failed(err)
-		} else if !ok {
+		if !found || string(ws) != id {
 			return refuse(turnSessionRefused)
 		}
 	case askedTurn:
@@ -280,7 +282,7 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 }
 
 // turnRefusal says why a turn token may not call a route under the person's
-// rules and switches, or "": applyTurn and tools. Reading, listing agents, starting,
+// rules and switches, or "": applyWorkspace and tools. Reading, listing agents, starting,
 // reviewing, stopping and renaming have no switch: within its request tree a
 // turn token always may (0.5.2). The rest of the check needs the request
 // (allowTurn). The tool list (tools.go) asks it too, so a tool is listed only
@@ -290,8 +292,8 @@ func turnRefusal(rt *route, rules gateway.Rules, applyAllowed bool) string {
 	switch {
 	case rt.turn == mainOnly:
 		return turnWriteRefused
-	case rt.turn == applyTurnTok && !applyAllowed:
-		return turnSwitchedOff("apply a turn's changes", "Agents may apply")
+	case rt.turn == applyWorkspaceTok && !applyAllowed:
+		return turnSwitchedOff("apply a workspace's changes", "Agents may apply")
 	case (rt.turn == toolList || rt.turn == fileOp) && toolDec == gateway.Refuse:
 		return turnSwitchedOff("use the agentbus MCP tools", "AgentBus tools")
 	}

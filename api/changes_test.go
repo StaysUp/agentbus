@@ -22,15 +22,21 @@ func TestSessionChangesReportsTruncatedAndPagesPinned(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		files = append(files, event.PreviewedFile{Path: fmt.Sprintf("f%02d.txt", i), Change: "added"})
 	}
-	ev := event.Event{ID: "evt_p", Kind: event.ChangesPreviewed, Time: now, Session: "s1",
+	sb := true
+	wc := event.Event{ID: "wc_ws1", Kind: event.WorkspaceCreated, Time: now, Workspace: "ws1",
+		FolderRef: "fld_0123456789abcdef", Machine: "con_aaaaaaaaaaaaaaaa", Sandbox: &sb}
+	if _, _, err := e.store.Append(wc); err != nil {
+		t.Fatal(err)
+	}
+	ev := event.Event{ID: "evt_p", Kind: event.ChangesPreviewed, Time: now, Workspace: "ws1",
 		Previewed: &event.Previewed{Turn: "t_1", Count: 5000, Truncated: true, Files: files}}
 	if _, _, err := e.store.Append(ev); err != nil {
 		t.Fatal(err)
 	}
 
 	// The route reuses the stored preview (no fresh) and reports it plainly.
-	var p SessionChangesPage
-	if getJSON(t, e, "/api/v0/sessions/s1/changes?limit=2", &p) != http.StatusOK {
+	var p WorkspaceChangesPage
+	if getJSON(t, e, "/api/v0/workspaces/ws1/changes?limit=2", &p) != http.StatusOK {
 		t.Fatal("changes")
 	}
 	if p.Count != 5000 || !p.Truncated || len(p.Files) != 2 || p.Event != "evt_p" || p.PreviewedAt == nil || p.NextBefore == nil {
@@ -40,8 +46,8 @@ func TestSessionChangesReportsTruncatedAndPagesPinned(t *testing.T) {
 	seen := len(p.Files)
 
 	// Page the rest, pinned to the same event so the snapshot is stable.
-	var p2 SessionChangesPage
-	path := "/api/v0/sessions/s1/changes?limit=2&event=evt_p&before=" + strconv.FormatInt(*p.NextBefore, 10)
+	var p2 WorkspaceChangesPage
+	path := "/api/v0/workspaces/ws1/changes?limit=2&event=evt_p&before=" + strconv.FormatInt(*p.NextBefore, 10)
 	if getJSON(t, e, path, &p2) != http.StatusOK {
 		t.Fatal("second page")
 	}

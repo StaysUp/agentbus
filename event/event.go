@@ -177,10 +177,11 @@ const (
 	// The changes and the reply are elsewhere (turn.changed, the job result).
 	TurnEnded Kind = "turn.ended"
 
-	// ChangesPreviewed: what applying the session's changes to the person's
-	// folder would do now, the dry run's result, stored so GET /sessions/{id}/
-	// changes serves it from the record (one source) and pages it. Previewed
-	// holds it. Stored when a preview runs; reused until the session changes.
+	// ChangesPreviewed: what applying a workspace's changes to the person's
+	// folder would do now, the dry run's result, stored so GET
+	// /workspaces/{id}/changes serves it from the record (one source) and pages
+	// it. Previewed holds it. It is keyed by its workspace (its session field is
+	// empty). Stored when a preview runs; reused until the workspace changes.
 	ChangesPreviewed Kind = "changes.previewed"
 
 	// PlanUsage: how much of a subscription's plan is used in one of its
@@ -242,7 +243,7 @@ var Kinds = []KindInfo{
 	{WorkspaceApplied, "An apply of a workspace's changes to the person's folder ended (POST /api/v0/workspaces/{id}/apply): workspace and session name it, turn is the turn applied up to, and applied holds every turn whose changes it carried, the from and to changesets, who asked (by: the person or an agent, never a token), the result (applied, refused or failed), the files written or removed, and on a refusal the files that refused it, each with why. Stored once per apply. Show a refusal as a warning.", []string{"workspace", "applied"}},
 	{WorkspaceDiscarded, "The unapplied changes of a sandbox workspace were dropped (POST /api/v0/workspaces/{id}/discard): workspace and session name it, and discarded holds the changeset it was reset to (the last applied one, or base when never applied), the turns whose file changes were dropped, and who asked. The conversation stays in the record. Stored once per discard.", []string{"workspace", "discarded"}},
 	{TurnEnded, "A turn job ended, whatever its outcome: control writes it once per turn job for every ended turn (finished, failed, stopped, cancelled or its runner lost), so a reactor (a delivery) learns a turn ended from the record, not from the scheduler's job table. It is keyed on the turn and carries no session -- a reactor trigger, not part of a session's event stream. state is how it ended and error says why. The changes and the reply are not here: those are turn.changed and the job's result.", []string{"turn", "state"}},
-	{ChangesPreviewed, "What applying the session's changes to the person's folder would do now, the dry run of POST /api/v0/turns/{id}/apply computed on the folder's machine, nothing written: previewed holds the files it would write or remove (with diffs), the conflicts it would refuse, the turn it would apply up to and the turns it would carry. Stored so GET /api/v0/sessions/{id}/changes serves and pages it from the record, as of this event's time; a new one is stored when a preview runs again (the session changed, or a fresh one was asked for). The file list can be cut (truncated) when too many to send; count still counts them all.", []string{"session", "previewed"}},
+	{ChangesPreviewed, "What applying a workspace's changes to the person's folder would do now, the dry run of POST /api/v0/workspaces/{id}/apply computed on the folder's machine, nothing written: previewed holds the files it would write or remove (with diffs), the conflicts it would refuse, the turn it would apply up to and the turns it would carry. workspace names the workspace it is of (its session field is empty, so it never enters the session namespace). Stored so GET /api/v0/workspaces/{id}/changes serves and pages it from the record, as of this event's time; a new one is stored when a preview runs again (the workspace changed, or a fresh one was asked for). The file list can be cut (truncated) when too many to send; count still counts them all.", []string{"workspace", "previewed"}},
 	{PlanUsage, "How much of a subscription's plan is used in one of its windows, as the vendor said in the headers of a model reply that carried control's credential for that subscription: plan holds the subscription (the harness, such as claude), the connect its credential came from, the window, its length in minutes, the percent used, when it resets and the vendor's status word. " +
 		"exchange names the call it was read from. Stored when the reading changes, and again every 10 minutes at most while calls keep it the same. " +
 		"The latest per subscription, connect and window is kept; GET /api/v0/subscriptions shows those of the subscription's current connect. Only control's own gateway stores it: a runner's record is refused it. Read from a fixed list of the vendor's usage headers only; no other header. No session.", []string{"plan"}},
@@ -452,7 +453,7 @@ type Event struct {
 	// Discarded, only on workspace.discarded: what the discard dropped.
 	Discarded *Discarded `json:"discarded,omitempty" doc:"On workspace.discarded: the changeset the workspace was reset to, the turns dropped, and who asked."`
 	// Previewed, only on changes.previewed: the apply dry run's result.
-	Previewed *Previewed `json:"previewed,omitempty" doc:"On changes.previewed: what applying the session's changes would do to the folder now, listed and paged by GET /api/v0/sessions/{id}/changes."`
+	Previewed *Previewed `json:"previewed,omitempty" doc:"On changes.previewed: what applying the workspace's changes would do to the folder now, listed and paged by GET /api/v0/workspaces/{id}/changes."`
 	// Plan, only on plan.usage: the reading.
 	Plan *Plan `json:"plan,omitempty" doc:"On plan.usage: how much of the subscription's plan is used in one window."`
 
@@ -612,7 +613,7 @@ type Previewed struct {
 	// one) retakes it, while a not-yet-ended turn or a failed upload -- neither
 	// of which is appliable -- does not.
 	Applies   int             `json:"applies,omitempty" doc:"How many apply jobs the session had when the preview was taken; part of the cursor it is reused against."`
-	Turn      string          `json:"turn,omitempty" doc:"The turn an apply would go up to; POST /api/v0/turns/{id}/apply of it applies the session's changes."`
+	Turn      string          `json:"turn,omitempty" doc:"The turn an apply would go up to; POST /api/v0/workspaces/{id}/apply applies the workspace's changes up to it."`
 	Turns     []string        `json:"turns,omitempty" doc:"Every turn whose changes that apply would carry, oldest first."`
 	Count     int             `json:"count" doc:"Every file the apply would write or remove, and every conflict, counted whole; files may list fewer, with truncated."`
 	Truncated bool            `json:"truncated,omitempty" doc:"files is not every file: too many to send, so later ones were left out; count still counts them, so count minus the files listed is how many are not here."`

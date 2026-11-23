@@ -283,7 +283,7 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 	// /api/v0/harnesses/{id}/models, which lists a harness's models, 46
 	// with POST /api/v0/signin, the cockpit's one-time sign-in link, and 52
 	// with PUT and DELETE of the anthropic, openai and gemini API keys, and
-	// 53 with GET /api/v0/sessions/{id}/changes, an apply's preview, which
+	// 53 with GET /api/v0/workspaces/{id}/changes, an apply's preview, which
 	// writes nothing, and 54 with GET /api/v0/folders/{id}/home-files, which
 	// lists a home's config files and starts no turn, and 56 with GET
 	// /api/v0/approvals and POST /api/v0/approvals/{id}, which list and answer
@@ -312,15 +312,24 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 	// sandbox mode), and POST /api/v0/sessions, which creates a session in a
 	// workspace. All four start no turn: a workspace, then a session in it,
 	// then the session's turns. 77 with POST /api/v0/workspaces/{id}/discard,
-	// which drops a sandbox workspace's unapplied changes by resetting its copy.
+	// which drops a sandbox workspace's unapplied changes by resetting its copy,
+	// and POST /api/v0/workspaces/{id}/apply, which applies them to the person's
+	// folder (apply and the changes preview above moved from the turn and the
+	// session to the workspace, so the count is unchanged).
 	if len(ops) != 77 {
 		t.Errorf("%d endpoints, want 77: %v", len(ops), ops)
 	}
 	for _, want := range []string{"POST /api/v0/turns", "GET /api/v0/turns", "GET /api/v0/turns/{id}", "POST /api/v0/turns/{id}/stop",
-		"GET /api/v0/turns/{id}/diff", "POST /api/v0/turns/{id}/apply",
+		"GET /api/v0/turns/{id}/diff", "GET /api/v0/workspaces/{id}/changes", "POST /api/v0/workspaces/{id}/apply",
 		"GET /api/v0/turns/{id}/calls/{call}", "GET /api/v0/turns/{id}/calls/{call}/pieces/{n}", "GET /api/v0/sessions/{id}/events"} {
 		if !slices.Contains(ops, want) {
 			t.Errorf("%s is not in the description", want)
+		}
+	}
+	// The per-turn apply and per-session changes routes moved to the workspace.
+	for _, gone := range []string{"POST /api/v0/turns/{id}/apply", "GET /api/v0/sessions/{id}/changes"} {
+		if slices.Contains(ops, gone) {
+			t.Errorf("%s should have moved to the workspace", gone)
 		}
 	}
 	for p := range doc.Paths.Map() {

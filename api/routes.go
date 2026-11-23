@@ -34,7 +34,8 @@ type route struct {
 	// doc is the description. Its first sentence says what the route does.
 	doc     string
 	query   []param
-	body    any // a zero value of the request body's type; nil for none
+	body    any  // a zero value of the request body's type; nil for none
+	bodyOpt bool // the body is optional (an empty request is valid)
 	replies []reply
 	// public routes need no token. The router skips them: public answers
 	// them before the token check.
@@ -354,26 +355,9 @@ var routes = slices.Concat([]route{
 		turns:     true,
 		wrappable: true,
 		serve:     (*API).turnContext},
-	{method: "POST", path: "/api/v0/turns/{id}/apply", op: "applyTurn",
-		idDoc:   turnIDDoc,
-		tag:     "Turns",
-		summary: "Apply a turn's changes",
-		doc: "Put a turn's file changes into the person's folder: the folder its session's copy was made from. A turn works in its own copy, so its changes reach the person's folder only by an apply. No body is read.\n\n" +
-			"The apply writes the session's changes up to and including this turn: each file added or changed, and removes each one deleted. " +
-			"Before it writes anything it checks every file in the folder: one that is neither as it was at the turn's start nor already as the turn left it refuses the whole apply, " +
-			"with 409, state refused, and each file in conflicts with why. Nothing is written then, so the agent can read why and make another turn. " +
-			"Applying the same turn again is a no-op: 200 with already true and the files the first apply wrote. " +
-			"An apply that was refused may be asked for again. " +
-			"It runs on the runner of the folder's machine, in a place of its own, so it does not wait behind running turns. " +
-			"The reply waits up to 30 seconds; past that it is 202 with state queued or running, and GET /api/v0/turns/{id}/diff shows how it ended.",
-		replies: []reply{ok(200, ApplyState{}, "Applied: files lists what was written. already true: applied before, and nothing more was written."),
-			ok(202, ApplyState{}, "The apply has not finished yet."),
-			badRequest,
-			fail(404, "This service keeps no queue, or no turn of this service has this id."),
-			ok(409, ApplyState{}, "Refused or failed: error says why, and conflicts names each file in your folder that changed. Nothing was written on a conflict."),
-			tooMany, fail(503, "The runner of the folder's machine has not been seen for a minute. Nothing was written and no apply was made."), storeFailed},
-		turn:  applyTurnTok,
-		serve: (*API).applyTurn},
+	// Apply is a workspace operation, on POST /api/v0/workspaces/{id}/apply: a
+	// turn works in its workspace's copy, so its changes reach the folder only
+	// by an apply of the workspace. There is no per-turn apply route.
 	// B15: the review route is removed. Review is a default app (review_turn,
 	// apps.go) — ask_agent with a review prompt — so core holds no review route,
 	// kind, verdict or recipe. A review is a normal turn.
@@ -431,6 +415,50 @@ var routes = slices.Concat([]route{
 			ok(409, DiscardState{}, "Refused: an apply or discard of the workspace is still running or waiting. Nothing was dropped."),
 			tooMany, fail(503, "The runner holding the copy has not been seen for a minute. Nothing was discarded."), storeFailed},
 		serve: (*API).discardWorkspace},
+	{method: "GET", path: "/api/v0/workspaces/{id}/changes", op: "workspaceChanges",
+		tag:     "Workspaces",
+		summary: "Preview a workspace's changes",
+		idDoc:   "A workspace id (ws_ and 16 hex digits). Another shape gets 404.",
+		doc: "A page of what applying the workspace's changes would do to the person's folder now, without writing anything: a preview of POST /api/v0/workspaces/{id}/apply, which applies every turn not applied yet.\n\n" +
+			"The preview is made by the apply's own code, on the runner of the folder's machine, and stops before the apply would write. Control stores it as a changes.previewed event, the one source, and this route serves and pages that event. A later request reuses the stored preview until the workspace changes (a new turn or apply) or ?fresh=true asks for a new one; previewed_at says when it was taken. An apply always re-checks the folder itself.\n\n" +
+			"files is a page, sorted by path: each file the apply would write or remove, with its change (added, modified or deleted) against the folder now, how many lines it adds and removes, and its unified diff for small text files; a file with no diff says diff_left_out. count is every file. Page the rest with before set to the previous page's next_before and event set to the event id, so every page is of the same preview. truncated is set only when the stored preview kept fewer files than count because they were too many to send (some are not in the record at all); that is distinct from a page simply holding fewer than count, which next_before continues. " +
+			"conflicts lists each file the apply would refuse, with why: a file in the folder that is neither as it was at the start of the changes nor already as they leave it. Those files are in files too. " +
+			"unapplied is true when files or conflicts is not empty; turn is the turn to apply. When every change is applied, or the folder already holds them, unapplied is false and files is empty. " +
+			"A workspace that works in the folder as it is, not in an isolated copy, answers isolated false, with why; so does a closed workspace, whose copy is gone. The reply waits up to 30 seconds for the folder's machine when a fresh preview is run.",
+		query: []param{
+			{name: "fresh", doc: "true runs a new preview instead of reusing the stored one: the Refresh on the changes view, and opening the apply view."},
+			{name: "event", doc: "The event id of a changes.previewed from a previous page: pages the same preview."},
+			{name: "before", doc: "Only files before this position: the previous page's next_before.", integer: true, min: 1},
+			{name: "limit", doc: "Files per page. 100 when absent.", integer: true, min: 1, max: maxTurnLimit}},
+		replies: []reply{ok(200, WorkspaceChangesPage{}, "A page of the preview."),
+			badRequest, fail(404, "No such workspace."),
+			fail(409, "An apply of the workspace has not ended (ask again once it has), or the preview could not be made: error says why. Nothing was written."),
+			tooMany, fail(503, "The runner of the folder's machine has not been seen for a minute. Nothing was written."),
+			fail(504, "The folder's machine did not answer within 30 seconds. Nothing was written."), storeFailed},
+		turn:  changesWorkspaceTok,
+		serve: (*API).workspaceChanges},
+	{method: "POST", path: "/api/v0/workspaces/{id}/apply", op: "applyWorkspace",
+		tag:     "Workspaces",
+		summary: "Apply a workspace's changes",
+		idDoc:   "A workspace id (ws_ and 16 hex digits). Another shape gets 404.",
+		doc: "Put the workspace's unapplied file changes into the person's folder: the folder its copy was made from. A turn works in the workspace's copy, so its changes reach the person's folder only by an apply. The body is optional: {turn} applies up to that turn (it and every earlier unapplied turn); no body, or {}, applies up to the workspace's head turn.\n\n" +
+			"The apply writes each file the unapplied turns added or changed, and removes each one they deleted. " +
+			"Before it writes anything it checks every file in the folder: one that is neither as it was at the changes' start nor already as they leave it refuses the whole apply, " +
+			"with 409, state refused, and each file in conflicts with why. Nothing is written then, so the agent can read why and make another turn. " +
+			"Applying again when nothing is unapplied is a no-op: 200 with already true. " +
+			"An apply that was refused may be asked for again. " +
+			"It runs on the runner of the folder's machine, in a place of its own, so it does not wait behind running turns. " +
+			"The reply waits up to 30 seconds; past that it is 202 with state queued or running, and GET /api/v0/workspaces/{id}/changes shows the state.",
+		body:    ApplyRequest{},
+		bodyOpt: true,
+		replies: []reply{ok(200, ApplyState{}, "Applied: files lists what was written. already true: nothing was unapplied, and nothing more was written."),
+			ok(202, ApplyState{}, "The apply has not finished yet."),
+			badRequest,
+			fail(404, "This service keeps no queue, or no such workspace, or the named turn is not this service's."),
+			ok(409, ApplyState{}, "Refused or failed: error says why, and conflicts names each file in your folder that changed. Nothing was written on a conflict."),
+			tooMany, fail(503, "The runner of the folder's machine has not been seen for a minute. Nothing was written and no apply was made."), storeFailed},
+		turn:  applyWorkspaceTok,
+		serve: (*API).applyWorkspace},
 	{method: "POST", path: "/api/v0/sessions", op: "createSession",
 		tag:     "Sessions",
 		summary: "Create a session",
@@ -480,27 +508,6 @@ var routes = slices.Concat([]route{
 			fail(403, "A turn token's request is refused: error says why."), noSession, storeFailed},
 		turn:  renameSession,
 		serve: (*API).updateSession},
-	{method: "GET", path: "/api/v0/sessions/{id}/changes", op: "sessionChanges",
-		tag:     "Sessions",
-		summary: "Preview a session's changes",
-		doc: "A page of what applying the session's changes would do to the person's folder now, without writing anything: a preview of POST /api/v0/turns/{id}/apply for the session's latest ended turn with changes, which applies every turn not applied yet.\n\n" +
-			"The preview is made by the apply's own code, on the runner of the folder's machine, and stops before the apply would write. Control stores it as a changes.previewed event, the one source, and this route serves and pages that event. A later request reuses the stored preview until the session changes (a new turn or apply) or ?fresh=true asks for a new one; previewed_at says when it was taken. An apply always re-checks the folder itself.\n\n" +
-			"files is a page, sorted by path: each file the apply would write or remove, with its change (added, modified or deleted) against the folder now, how many lines it adds and removes, and its unified diff for small text files; a file with no diff says diff_left_out. count is every file. Page the rest with before set to the previous page's next_before and event set to the event id, so every page is of the same preview. truncated is set only when the stored preview kept fewer files than count because they were too many to send (some are not in the record at all); that is distinct from a page simply holding fewer than count, which next_before continues. " +
-			"conflicts lists each file the apply would refuse, with why: a file in the folder that is neither as it was at the start of the changes nor already as they leave it. Those files are in files too. " +
-			"unapplied is true when files or conflicts is not empty; turn is the turn to apply. When every change is applied, or the folder already holds them, unapplied is false and files is empty. " +
-			"A session that works in the folder as it is, not in an isolated copy, answers isolated false, with why; so does a closed session, whose copy is gone. The reply waits up to 30 seconds for the folder's machine when a fresh preview is run.",
-		query: []param{
-			{name: "fresh", doc: "true runs a new preview instead of reusing the stored one: the Refresh on the changes view, and opening the apply view."},
-			{name: "event", doc: "The event id of a changes.previewed from a previous page: pages the same preview."},
-			{name: "before", doc: "Only files before this position: the previous page's next_before.", integer: true, min: 1},
-			{name: "limit", doc: "Files per page. 100 when absent.", integer: true, min: 1, max: maxTurnLimit}},
-		replies: []reply{ok(200, SessionChangesPage{}, "A page of the preview."),
-			badRequest, noSession,
-			fail(409, "An apply of the session has not ended (ask again once it has), or the preview could not be made: error says why. Nothing was written."),
-			tooMany, fail(503, "The runner of the folder's machine has not been seen for a minute. Nothing was written."),
-			fail(504, "The folder's machine did not answer within 30 seconds. Nothing was written."), storeFailed},
-		turn:  treeSessionPath,
-		serve: (*API).sessionChanges},
 	{method: "GET", path: "/api/v0/sessions/{id}/events", op: "sessionEvents",
 		tag:     "Sessions",
 		summary: "Read a session's events",

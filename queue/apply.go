@@ -169,6 +169,67 @@ func (q *Queue) ApplyAs(team, turn string, by *By) (job Job, created bool, err e
 	// two at once must not both start from the same last applied turn.
 	q.applyMu.Lock()
 	defer q.applyMu.Unlock()
+	return q.applyLocked(team, turn, by)
+}
+
+// ApplyWorkspace applies the workspace's changes up to turn, or up to its
+// appliable head when turn is empty. The head is the queue's appliable cursor --
+// the same source Preview and Discard read -- resolved under applyMu so the
+// target cannot move under the apply, and NOT store.Workspace.HeadTurn, which is
+// a second source that disagrees (a turn whose publish failed records
+// turn.changed with an empty changeset; a pre-0.5 job stores a changeset with no
+// turn.changed event). A turn of another workspace is ErrNotFound; a workspace
+// with nothing the queue can apply is ErrAllApplied, unless an apply or discard
+// is in flight (ErrApplyBusy) or the copy is closed (ErrSessionClosed).
+func (q *Queue) ApplyWorkspace(team string, ws ids.WorkspaceID, turn string, by *By) (job Job, created bool, err error) {
+	q.applyMu.Lock()
+	defer q.applyMu.Unlock()
+	if turn == "" {
+		head, _, ok, err := q.appliableCursor(team, ws)
+		if err != nil {
+			return Job{}, false, err
+		}
+		if !ok {
+			// Nothing the queue can apply up to. Report a closed copy or an
+			// apply-or-discard in flight the way an apply with a turn would, so
+			// an empty-body apply is not silently 200 while a discard runs.
+			if w, found, werr := q.Workspace(team, ws); werr != nil {
+				return Job{}, false, werr
+			} else if found && w.Closed != nil {
+				return Job{}, false, ErrSessionClosed
+			}
+			if busy, berr := q.jobsInFlight(team, ws, `'discard'`); berr != nil {
+				return Job{}, false, berr
+			} else if busy {
+				return Job{}, false, ErrApplyBusy
+			}
+			return Job{}, false, ErrAllApplied
+		}
+		turn = head
+	} else {
+		tws, werr := q.turnWorkspaceID(team, turn)
+		if werr != nil {
+			return Job{}, false, werr
+		}
+		if tws != ws {
+			return Job{}, false, ErrNotFound
+		}
+	}
+	return q.applyLocked(team, turn, by)
+}
+
+// turnWorkspaceID is the workspace a turn's job runs in. ErrNotFound when no
+// job of the team has the turn.
+func (q *Queue) turnWorkspaceID(team, turn string) (ids.WorkspaceID, error) {
+	j, err := q.JobByTurn(team, turn)
+	if err != nil {
+		return "", err
+	}
+	return q.workspaceID(team, ids.SessionID(j.Session))
+}
+
+// applyLocked plans and creates an apply of turn. The caller holds applyMu.
+func (q *Queue) applyLocked(team, turn string, by *By) (Job, bool, error) {
 	p, done, has, err := q.planApply(team, turn, by)
 	if err != nil {
 		return Job{}, false, err

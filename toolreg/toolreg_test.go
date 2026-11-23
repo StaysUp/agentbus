@@ -154,7 +154,7 @@ func TestRemoveAndReadd(t *testing.T) {
 	custom := tool("apply_turn")
 	custom.Description = "a custom apply"
 	custom.Inputs = map[string]any{"type": "object", "properties": map[string]any{"turn": map[string]any{"type": "string"}}}
-	custom.Run = Run{Kind: RunAPI, Method: "POST", Path: "/api/v0/turns/{id}/apply", IDInput: "turn", Body: true}
+	custom.Run = Run{Kind: RunAPI, Method: "POST", Path: "/api/v0/workspaces/{id}/apply", IDInput: "turn", Body: true}
 	if _, err := r.Add(custom); err != nil {
 		t.Fatal(err)
 	}

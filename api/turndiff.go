@@ -528,60 +528,6 @@ const (
 
 // POST /api/v0/turns/<id>/apply: put the turn's changes into the person's
 // folder, through the runner that holds its session.
-func (a *API) applyTurn(w http.ResponseWriter, r *http.Request, id string) {
-	if a.cfg.Queue == nil {
-		writeError(w, http.StatusNotFound, noTurns)
-		return
-	}
-	j, created, err := a.cfg.Queue.ApplyAs(queue.DefaultTeam, id, askedBy(r))
-	switch {
-	case errors.Is(err, queue.ErrNotFound):
-		writeError(w, http.StatusNotFound, applyNoJob)
-		return
-	case errors.Is(err, queue.ErrNotApplicable):
-		writeError(w, http.StatusBadRequest, a.whyNotApplicable(id))
-		return
-	case errors.Is(err, queue.ErrSessionClosed):
-		writeError(w, http.StatusBadRequest, applySessionClosed)
-		return
-	case errors.Is(err, queue.ErrApplyBusy):
-		writeError(w, http.StatusConflict, applyBusy)
-		return
-	case errors.Is(err, queue.ErrMachineOffline):
-		writeError(w, http.StatusServiceUnavailable, applyOffline)
-		return
-	case errors.Is(err, queue.ErrFull):
-		writeError(w, http.StatusTooManyRequests, "too many turns and applies are waiting; retry later")
-		return
-	case err != nil:
-		a.internal(w)
-		return
-	}
-	already := !created && j.Ended != nil
-	if j.Ended == nil {
-		if j, err = a.awaitEnd(r.Context(), j); err != nil {
-			if r.Context().Err() == nil {
-				a.internal(w)
-			}
-			return
-		}
-	}
-	st, err := a.applyStateOf(j)
-	if err != nil {
-		a.internal(w)
-		return
-	}
-	st.Already = already
-	switch st.State {
-	case "applied":
-		writeJSON(w, http.StatusOK, st)
-	case "queued", "running":
-		writeJSON(w, http.StatusAccepted, st)
-	default:
-		writeJSON(w, http.StatusConflict, st)
-	}
-}
-
 // whyNotApplicable says why turn id's changes cannot be applied: it has not
 // ended, it never started, or it did not run in a copy.
 func (a *API) whyNotApplicable(id string) string {

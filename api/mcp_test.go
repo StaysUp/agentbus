@@ -307,7 +307,7 @@ func TestOpenAPINamesTools(t *testing.T) {
 		}
 	}
 	// The removed write route copies no longer name a tool.
-	op = doc.Paths.Value("/api/v0/turns/{id}/apply").Post
+	op = doc.Paths.Value("/api/v0/workspaces/{id}/apply").Post
 	b, _ = json.Marshal(op.Extensions["x-agentbus-tools"])
 	if strings.Contains(string(b), "apply_turn") {
 		t.Errorf("apply still names apply_turn: %s", b)

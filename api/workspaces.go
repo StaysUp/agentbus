@@ -7,9 +7,12 @@ package api
 // turn (POST /api/v0/turns) names the session its workspace comes from.
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -306,6 +309,121 @@ func (a *API) discardWorkspace(w http.ResponseWriter, r *http.Request, id string
 	}
 	st, status := a.discardStateOf(j)
 	writeJSON(w, status, st)
+}
+
+// ApplyRequest is the optional body of POST /api/v0/workspaces/{id}/apply.
+type ApplyRequest struct {
+	Turn string `json:"turn,omitempty" doc:"Apply the workspace's changes up to this turn (it and every earlier unapplied turn). Absent, or an empty body: up to the workspace's head turn, its latest with changes. A turn of another workspace is refused with 404."`
+}
+
+// applyNotSandbox: a direct workspace has nothing to apply.
+const applyNotSandbox = "this workspace works in your folder as it is, not in an isolated copy, so its changes are already there: there is nothing to apply"
+
+// applyWorkspace serves POST /api/v0/workspaces/{id}/apply: put the workspace's
+// unapplied changes into the person's folder, up to the body's turn or the
+// workspace's head turn. Main token, or a turn token for its own workspace when
+// Agents may apply is on.
+func (a *API) applyWorkspace(w http.ResponseWriter, r *http.Request, id string) {
+	if a.cfg.Queue == nil {
+		writeError(w, http.StatusNotFound, noTurns)
+		return
+	}
+	wsID := ids.WorkspaceID(id)
+	ws, found, err := a.cfg.Store.Workspace(wsID)
+	if err != nil {
+		a.internal(w)
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "no such workspace")
+		return
+	}
+	if !ws.Sandbox {
+		writeError(w, http.StatusBadRequest, applyNotSandbox)
+		return
+	}
+	body, ok := decodeApplyBody(w, r)
+	if !ok {
+		return
+	}
+	// The target turn and every check are resolved in the queue under one lock
+	// (ApplyWorkspace): the empty-body head comes from the queue's appliable
+	// cursor, the same source the preview uses, not store.HeadTurn.
+	j, created, err := a.cfg.Queue.ApplyWorkspace(queue.DefaultTeam, wsID, body.Turn, askedBy(r))
+	switch {
+	case errors.Is(err, queue.ErrAllApplied):
+		// Nothing the workspace can apply: the folder already holds its changes.
+		writeJSON(w, http.StatusOK, ApplyState{State: "applied", Already: true})
+		return
+	case errors.Is(err, queue.ErrNotFound):
+		writeError(w, http.StatusNotFound, "no turn of this workspace has this id")
+		return
+	case errors.Is(err, queue.ErrNotApplicable):
+		writeError(w, http.StatusBadRequest, a.whyNotApplicable(body.Turn))
+		return
+	case errors.Is(err, queue.ErrSessionClosed):
+		writeError(w, http.StatusBadRequest, applySessionClosed)
+		return
+	case errors.Is(err, queue.ErrApplyBusy):
+		writeError(w, http.StatusConflict, applyBusy)
+		return
+	case errors.Is(err, queue.ErrMachineOffline):
+		writeError(w, http.StatusServiceUnavailable, applyOffline)
+		return
+	case errors.Is(err, queue.ErrFull):
+		writeError(w, http.StatusTooManyRequests, "too many turns and applies are waiting; retry later")
+		return
+	case err != nil:
+		a.internal(w)
+		return
+	}
+	already := !created && j.Ended != nil
+	if j.Ended == nil {
+		if j, err = a.awaitEnd(r.Context(), j); err != nil {
+			if r.Context().Err() == nil {
+				a.internal(w)
+			}
+			return
+		}
+	}
+	st, err := a.applyStateOf(j)
+	if err != nil {
+		a.internal(w)
+		return
+	}
+	st.Already = already
+	switch st.State {
+	case "applied":
+		writeJSON(w, http.StatusOK, st)
+	case "queued", "running":
+		writeJSON(w, http.StatusAccepted, st)
+	default:
+		writeJSON(w, http.StatusConflict, st)
+	}
+}
+
+// decodeApplyBody reads the optional apply body: an empty body is no turn, a
+// non-empty one must be a JSON object. It writes the 400 and returns false on a
+// malformed body.
+func decodeApplyBody(w http.ResponseWriter, r *http.Request) (ApplyRequest, bool) {
+	var body ApplyRequest
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "the body could not be read")
+		return body, false
+	}
+	// A non-empty body must be exactly one JSON object, the same as decodeObject:
+	// null decodes into body with no error but is not an object, and a trailing
+	// } or ] leaves json.Decoder.More() false, so both are refused here.
+	if t := bytes.TrimLeft(data, " \t\r\n"); len(t) > 0 {
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.DisallowUnknownFields()
+		if t[0] != '{' || dec.Decode(&body) != nil || dec.More() || dec.Decode(&struct{}{}) != io.EOF {
+			writeError(w, http.StatusBadRequest, "the body must be a JSON object with an optional turn, or empty")
+			return body, false
+		}
+	}
+	return body, true
 }
 
 // WorkspacesPage is a page of workspaces.

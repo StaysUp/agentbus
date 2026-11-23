@@ -781,7 +781,13 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	// The turn may apply as its token may: agent_api.apply is on. A review's
 	// own changes stay in its copy; it never applies them automatically.
 	apply := perm.AgentAPI.Apply != nil && *perm.AgentAPI.Apply
-	hint = withTools(hint, t.session, tools, apply)
+	// The workspace to apply: the turn's, or its session's id when the turn
+	// carries none (a migrated or direct session is its own workspace).
+	ws := t.workspace
+	if ws == "" {
+		ws = t.session
+	}
+	hint = withTools(hint, t.session, ws, tools, apply)
 	// The folder's AGENTS.md, then the instructions, then who asked: the
 	// same for every harness, each once.
 	doc, why := folderDoc(h, t.folder)
