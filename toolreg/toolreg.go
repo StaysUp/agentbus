@@ -271,14 +271,25 @@ func checkAppRun(t *Tool) string {
 	return ""
 }
 
-// Expression grammar for an app's workflow (Arazzo's, with one addition):
+// Expression grammar for an app's workflow (Arazzo's, with two additions):
 //   - $inputs.<name>              a tool-call argument
 //   - $steps.<stepId>.outputs.<name>  an earlier step's declared output
-//   - $caller.session             the calling turn's session (the addition)
+//   - $caller.session             the calling turn's session (an addition)
 //   - $response.body#/<pointer>   a value in a step's own reply (step outputs only)
 //
 // A request value is a literal, a full expression (the whole string is one
 // $... reference), or a string with {$...} references embedded in text.
+//
+// A value may also be a conditional (the second addition): an object
+//
+//	{"if_present": <value>, "then": <value>, "else": <value>}
+//
+// that resolves to "then" when "if_present" resolves to a non-empty string and
+// to "else" otherwise. It lets one app answer a call that gives an optional
+// input and one that omits it (review_turn: a named turn, or the workspace's
+// whole unapplied set). "then" and "else" are themselves values, so each may
+// embed its own {$...} references. A plain object with no "if_present" key is a
+// literal, as before.
 var (
 	stepIDShape    = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 	operationShape = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*$`)
@@ -352,6 +363,14 @@ func Interpolate(s string, resolve func(expr string) string) string {
 // A reference to $response, or to a later/own step, is refused. A literal
 // (non-string, or a string with no expression) is always fine.
 func checkValueExpr(v any, props map[string]any, seen map[string]bool, outs map[string]map[string]bool, self string) string {
+	if c, ok := AsConditional(v); ok {
+		for _, part := range []any{c["if_present"], c["then"], c["else"]} {
+			if why := checkValueExpr(part, props, seen, outs, self); why != "" {
+				return why
+			}
+		}
+		return ""
+	}
 	s, ok := v.(string)
 	if !ok {
 		return "" // a literal number, bool, object or array
@@ -365,6 +384,21 @@ func checkValueExpr(v any, props map[string]any, seen map[string]bool, outs map[
 		}
 	}
 	return "" // a plain literal string
+}
+
+// AsConditional reports whether v is a conditional value: an object with an
+// "if_present" key (see the grammar above). It returns the object so the caller
+// reads its "if_present", "then" and "else" parts. A map without "if_present"
+// is a literal object, not a conditional.
+func AsConditional(v any) (map[string]any, bool) {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	if _, has := m["if_present"]; !has {
+		return nil, false
+	}
+	return m, true
 }
 
 // checkRef validates a single reference used in a request value.

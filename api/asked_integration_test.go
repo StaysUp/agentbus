@@ -43,7 +43,7 @@ func askEnvCap(t *testing.T, perm string, maxRuns int) (*env, string) {
 	t.Helper()
 	dir := t.TempDir()
 	script := `for a; do p="$a"; done; echo '{"type":"result","session_id":"sid-'$$'"}'; ` +
-		`case "$p" in "[AgentBus]"*) printf '%s' "$p" > "$D/delivered-$$"; exit 0;; quick|"Review a change"*) exit 0;; esac; ` +
+		`case "$p" in "[AgentBus]"*) printf '%s' "$p" > "$D/delivered-$$"; exit 0;; quick|"Review a change"*|"Review the changes"*) exit 0;; esac; ` +
 		`printf '%s\n' "$@" > "$D/args-$p"; env > "$D/env-$p.tmp"; pwd > "$D/pwd-$p"; mv "$D/env-$p.tmp" "$D/env-$p"; ` +
 		`i=0; while [ ! -e "$D/release-$p" ] && [ $i -lt 1500 ]; do sleep 0.02; i=$((i+1)); done`
 	wire := func(agent, baseURL string, _ run.Access) (run.Launch, error) {
@@ -357,6 +357,54 @@ func TestReviewTurnAppDelivers(t *testing.T) {
 	}
 	// The reviewer's reply is delivered to the driving turn's session (w's),
 	// behind the drive turn, which must end first.
+	release(dir, "drive")
+	got := deliverUntil(t, e, w.Session, 1)
+	if got[0].Origin == nil || got[0].Origin.Turn != r.Turn {
+		t.Fatalf("the review reply was not delivered: %+v", got)
+	}
+}
+
+// review_turn with no turn reviews the asker's workspace's whole unapplied set:
+// the app still starts a review turn and delivers its reply, with no turn id in
+// the call. The reviewer's prompt points at the workspace changes route.
+func TestReviewTurnAppNoTurnDelivers(t *testing.T) {
+	perm := filepath.Join(t.TempDir(), settings.PolicyFile)
+	if err := os.WriteFile(perm, []byte("allow = [\"review_turn\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e, dir := askEnvWith(t, perm)
+	folder := t.TempDir()
+	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\n"), 0o644)
+	// A turn that ends with a change, then a live follow-up turn drives the review.
+	w := e.firstTurn(t, folder, "claude", "work", true)
+	tokenOf(t, dir, "work")
+	os.WriteFile(filepath.Join(pwdOf(t, dir, "work"), "a.txt"), []byte("two\n"), 0o644)
+	release(dir, "work")
+	waitEnded(t, e, w.Turn)
+
+	startTurn(t, e, `{"agent":"claude","session":"`+w.Session+`","prompt":"drive"}`)
+	tok := tokenOf(t, dir, "drive")
+	// No turn argument: the whole unapplied set is reviewed.
+	call := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"review_turn","arguments":{"agent":"codex"}}}`
+	code, out := as(t, e, tok, "POST", "/api/v0/mcp", call)
+	if code != 200 {
+		t.Fatalf("review_turn call: %d %s", code, out)
+	}
+	var env struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+			IsError bool `json:"isError"`
+		} `json:"result"`
+	}
+	if json.Unmarshal([]byte(out), &env) != nil || env.Result.IsError || len(env.Result.Content) == 0 {
+		t.Fatalf("review_turn (no turn) failed: %s", out)
+	}
+	var r struct{ Turn, Session string }
+	if json.Unmarshal([]byte(env.Result.Content[0].Text), &r) != nil || r.Turn == "" {
+		t.Fatalf("review_turn (no turn) output %q", env.Result.Content[0].Text)
+	}
 	release(dir, "drive")
 	got := deliverUntil(t, e, w.Session, 1)
 	if got[0].Origin == nil || got[0].Origin.Turn != r.Turn {

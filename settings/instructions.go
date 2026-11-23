@@ -32,10 +32,10 @@ Your folder is usually your session's own copy of the person's folder. Your edit
 // reading turns and diffs, searching, apply and stop go through agentbus-api.
 // apply is [agent_api] apply: whether the turn may apply turns.
 func ToolsText(apply bool) string {
-	write := `To read turns and their diffs, search this session, or stop a turn, use agentbus-api (GET /api/v0/turns, GET /api/v0/turns/T/diff, POST /api/v0/turns/T/stop).
+	write := `To read turns and their diffs, search this session, or stop a turn, use agentbus-api (GET /api/v0/turns, GET /api/v0/turns/T/diff, POST /api/v0/turns/T/stop). A short guide to every route is at agentbus-api GET /docs/llms.txt.
 The person applies your changes to their folder; you cannot.`
 	if apply {
-		write = `To read turns and their diffs, search this session, stop a turn, or apply your workspace's changes to the person's folder, use agentbus-api (GET /api/v0/turns, GET /api/v0/turns/T/diff, POST /api/v0/turns/T/stop, POST /api/v0/workspaces/{workspace}/apply).`
+		write = `To read turns and their diffs, search this session, stop a turn, or apply your workspace's changes to the person's folder, use agentbus-api (GET /api/v0/turns, GET /api/v0/turns/T/diff, POST /api/v0/turns/T/stop, POST /api/v0/workspaces/{workspace}/apply). A short guide to every route is at agentbus-api GET /docs/llms.txt.`
 	}
 	return `Use the agentbus MCP tools to ask other saved agents (any vendor) for work (ask_agent) or to have one review a turn (review_turn). AgentBus agents are saved setups across vendors, not your harness's own agents or subagents.
 ` + write + `

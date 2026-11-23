@@ -207,6 +207,12 @@ func TestTurnToken(t *testing.T) {
 		{"GET", "/api/v0/workspaces", "", 403},
 		{"POST", "/api/v0/workspaces", `{"folder":"/tmp"}`, 403},
 		{"POST", "/api/v0/sessions", `{"workspace":"ws_0123456789abcdef"}`, 201},
+		// A turn token previews or applies only its OWN workspace's changes
+		// (changesWorkspaceTok / applyWorkspaceTok). A workspace that is not the
+		// token's own is refused, so a review_turn reviewer cannot read another
+		// workspace's changes.
+		{"GET", "/api/v0/workspaces/ws_0123456789abcdef/changes", "", 403},
+		{"POST", "/api/v0/workspaces/ws_0123456789abcdef/apply", "{}", 403},
 		// Gone from the API.
 		{"GET", "/api/v0/jobs", "", 404},
 		// Reads that hold no session's data.
