@@ -1,5 +1,7 @@
 === claude subscription, then resume
 --- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -17,7 +19,6 @@ arg "one"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -25,6 +26,8 @@ turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-0"
 --- turn t_2 harness="" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_2\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -44,7 +47,6 @@ arg "next t_2"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_2"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -53,6 +55,8 @@ context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-1"
 === claude edit none
 --- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -70,7 +74,6 @@ arg "one"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -79,6 +82,8 @@ context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-0"
 === claude lists, model, own instructions
 --- turn t_1 harness="claude" access="" model="opus"
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -96,7 +101,6 @@ arg "one"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -105,6 +109,8 @@ context.added instructions=15
 session.closed resume_id="sid-0"
 === claude empty instructions
 --- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -120,7 +126,6 @@ arg "one"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -129,6 +134,8 @@ context.added mcp_instructions=320
 session.closed resume_id="sid-0"
 === claude openrouter
 --- turn t_1 harness="claude" access="openrouter" model="deepseek/deepseek-v4.1-flash"
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_API_KEY\":\"\",\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter\",\"ANTHROPIC_DEFAULT_FABLE_MODEL\":\"deepseek/deepseek-v4.1-flash\",\"ANTHROPIC_DEFAULT_HAIKU_MODEL\":\"deepseek/deepseek-v4.1-flash\",\"ANTHROPIC_DEFAULT_OPUS_MODEL\":\"deepseek/deepseek-v4.1-flash\",\"ANTHROPIC_DEFAULT_SONNET_MODEL\":\"deepseek/deepseek-v4.1-flash\",\"ANTHROPIC_MODEL\":\"deepseek/deepseek-v4.1-flash\",\"ANTHROPIC_SMALL_FAST_MODEL\":\"deepseek/deepseek-v4.1-flash\",\"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS\":\"1\",\"CLAUDE_CODE_SUBAGENT_MODEL\":\"deepseek/deepseek-v4.1-flash\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -150,15 +157,6 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "ANTHROPIC_API_KEY="
 env "ANTHROPIC_AUTH_TOKEN=test-key"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1/openrouter"
-env "ANTHROPIC_DEFAULT_FABLE_MODEL=deepseek/deepseek-v4.1-flash"
-env "ANTHROPIC_DEFAULT_HAIKU_MODEL=deepseek/deepseek-v4.1-flash"
-env "ANTHROPIC_DEFAULT_OPUS_MODEL=deepseek/deepseek-v4.1-flash"
-env "ANTHROPIC_DEFAULT_SONNET_MODEL=deepseek/deepseek-v4.1-flash"
-env "ANTHROPIC_MODEL=deepseek/deepseek-v4.1-flash"
-env "ANTHROPIC_SMALL_FAST_MODEL=deepseek/deepseek-v4.1-flash"
-env "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1"
-env "CLAUDE_CODE_SUBAGENT_MODEL=deepseek/deepseek-v4.1-flash"
 env "HOME=<home>"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
@@ -168,6 +166,8 @@ context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-0"
 === claude openrouter without a model
 --- turn t_1 harness="claude" access="openrouter" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_API_KEY\":\"\",\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter\",\"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS\":\"1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -187,8 +187,6 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "ANTHROPIC_API_KEY="
 env "ANTHROPIC_AUTH_TOKEN=test-key"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1/openrouter"
-env "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1"
 env "HOME=<home>"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
@@ -209,6 +207,8 @@ refused 400 agent claude cannot start: the program claude is not on the service'
 log run.refused agent=claude program=claude reason=not_on_path
 === claude odd folder
 --- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -226,7 +226,6 @@ arg "one"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -236,6 +235,8 @@ session.closed resume_id="sid-0"
 log run.edit session=s1 turn=t_1 left_out=folder_shape
 === claude folder holds the data folder
 --- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -253,7 +254,6 @@ arg "one"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -262,6 +262,8 @@ context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-0"
 === claude codex config sets developer_instructions
 --- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -279,7 +281,6 @@ arg "one"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -288,6 +289,8 @@ context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-0"
 === claude replay
 --- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -305,7 +308,6 @@ arg "one"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -313,6 +315,8 @@ turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-0"
 --- turn t_2 harness="" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_2\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -330,7 +334,6 @@ arg "next t_2"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_2"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -340,6 +343,8 @@ session.closed resume_id="sid-1"
 replay_base claude
 === claude openrouter replay
 --- turn t_1 harness="claude" access="openrouter" model="m/x"
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_API_KEY\":\"\",\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter\",\"ANTHROPIC_DEFAULT_FABLE_MODEL\":\"m/x\",\"ANTHROPIC_DEFAULT_HAIKU_MODEL\":\"m/x\",\"ANTHROPIC_DEFAULT_OPUS_MODEL\":\"m/x\",\"ANTHROPIC_DEFAULT_SONNET_MODEL\":\"m/x\",\"ANTHROPIC_MODEL\":\"m/x\",\"ANTHROPIC_SMALL_FAST_MODEL\":\"m/x\",\"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS\":\"1\",\"CLAUDE_CODE_SUBAGENT_MODEL\":\"m/x\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -361,15 +366,6 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "ANTHROPIC_API_KEY="
 env "ANTHROPIC_AUTH_TOKEN=test-key"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1/openrouter"
-env "ANTHROPIC_DEFAULT_FABLE_MODEL=m/x"
-env "ANTHROPIC_DEFAULT_HAIKU_MODEL=m/x"
-env "ANTHROPIC_DEFAULT_OPUS_MODEL=m/x"
-env "ANTHROPIC_DEFAULT_SONNET_MODEL=m/x"
-env "ANTHROPIC_MODEL=m/x"
-env "ANTHROPIC_SMALL_FAST_MODEL=m/x"
-env "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1"
-env "CLAUDE_CODE_SUBAGENT_MODEL=m/x"
 env "HOME=<home>"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
@@ -378,6 +374,8 @@ turn.started agent="claude" continuity="" replay_from="" model="m/x" context=""
 context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-0"
 --- turn t_2 harness="" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_API_KEY\":\"\",\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_2/openrouter\",\"ANTHROPIC_DEFAULT_FABLE_MODEL\":\"m/x\",\"ANTHROPIC_DEFAULT_HAIKU_MODEL\":\"m/x\",\"ANTHROPIC_DEFAULT_OPUS_MODEL\":\"m/x\",\"ANTHROPIC_DEFAULT_SONNET_MODEL\":\"m/x\",\"ANTHROPIC_MODEL\":\"m/x\",\"ANTHROPIC_SMALL_FAST_MODEL\":\"m/x\",\"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS\":\"1\",\"CLAUDE_CODE_SUBAGENT_MODEL\":\"m/x\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -399,15 +397,6 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "ANTHROPIC_API_KEY="
 env "ANTHROPIC_AUTH_TOKEN=test-key"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_2/openrouter"
-env "ANTHROPIC_DEFAULT_FABLE_MODEL=m/x"
-env "ANTHROPIC_DEFAULT_HAIKU_MODEL=m/x"
-env "ANTHROPIC_DEFAULT_OPUS_MODEL=m/x"
-env "ANTHROPIC_DEFAULT_SONNET_MODEL=m/x"
-env "ANTHROPIC_MODEL=m/x"
-env "ANTHROPIC_SMALL_FAST_MODEL=m/x"
-env "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1"
-env "CLAUDE_CODE_SUBAGENT_MODEL=m/x"
 env "HOME=<home>"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
@@ -425,6 +414,8 @@ refused 400 an agent on an API key runs only where control adds its key; run it 
 log run.refused agent=claude access=api reason=wire
 === claude api key, relayed, then resume
 --- turn t_1 harness="claude" access="api" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_API_KEY\":\"\",\"ANTHROPIC_AUTH_TOKEN\":\"abs_test-standin\",\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1/key/claude\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -443,8 +434,7 @@ env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL="
 env "ANTHROPIC_API_KEY="
-env "ANTHROPIC_AUTH_TOKEN=abs_test-standin"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1/key/claude"
+env "ANTHROPIC_AUTH_TOKEN="
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -452,6 +442,8 @@ turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-0"
 --- turn t_2 harness="" access="api" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_API_KEY\":\"\",\"ANTHROPIC_AUTH_TOKEN\":\"abs_test-standin\",\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_2/key/claude\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -472,8 +464,7 @@ env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL="
 env "ANTHROPIC_API_KEY="
-env "ANTHROPIC_AUTH_TOKEN=abs_test-standin"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_2/key/claude"
+env "ANTHROPIC_AUTH_TOKEN="
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -482,6 +473,8 @@ context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-1"
 === claude subscription, relayed, then resume
 --- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_API_KEY\":\"\",\"ANTHROPIC_AUTH_TOKEN\":\"\",\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\",\"CLAUDE_CODE_OAUTH_TOKEN\":\"abs_test-standin\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -499,8 +492,9 @@ arg "one"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL="
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
-env "CLAUDE_CODE_OAUTH_TOKEN=abs_test-standin"
+env "ANTHROPIC_API_KEY="
+env "ANTHROPIC_AUTH_TOKEN="
+env "CLAUDE_CODE_OAUTH_TOKEN="
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -508,6 +502,8 @@ turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-0"
 --- turn t_2 harness="" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_API_KEY\":\"\",\"ANTHROPIC_AUTH_TOKEN\":\"\",\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_2\",\"CLAUDE_CODE_OAUTH_TOKEN\":\"abs_test-standin\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -527,8 +523,9 @@ arg "next t_2"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL="
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_2"
-env "CLAUDE_CODE_OAUTH_TOKEN=abs_test-standin"
+env "ANTHROPIC_API_KEY="
+env "ANTHROPIC_AUTH_TOKEN="
+env "CLAUDE_CODE_OAUTH_TOKEN="
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -537,6 +534,8 @@ context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-1"
 === claude api key, relayed, with a model
 --- turn t_1 harness="claude" access="api" model="opus"
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_API_KEY\":\"\",\"ANTHROPIC_AUTH_TOKEN\":\"abs_test-standin\",\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1/key/claude\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -557,8 +556,7 @@ env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL="
 env "ANTHROPIC_API_KEY="
-env "ANTHROPIC_AUTH_TOKEN=abs_test-standin"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1/key/claude"
+env "ANTHROPIC_AUTH_TOKEN="
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -567,6 +565,8 @@ context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-0"
 === claude subagents off, then resume
 --- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -584,7 +584,6 @@ arg "one"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -592,6 +591,8 @@ turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-0"
 --- turn t_2 harness="" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_2\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -611,7 +612,6 @@ arg "next t_2"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_2"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -620,6 +620,8 @@ context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-1"
 === claude subagents on, said
 --- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -637,7 +639,6 @@ arg "one"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -646,6 +647,8 @@ context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-0"
 === claude in a home of its own, then resume
 --- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -663,7 +666,6 @@ arg "one"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "CLAUDE_CONFIG_DIR=<homes>/s1/.claude"
 env "CODEX_HOME=<home>/.codex"
 env "HOME=<homes>/s1"
@@ -673,6 +675,8 @@ turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-0"
 --- turn t_2 harness="" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_2\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -692,7 +696,6 @@ arg "next t_2"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_2"
 env "CLAUDE_CONFIG_DIR=<homes>/s1/.claude"
 env "CODEX_HOME=<home>/.codex"
 env "HOME=<homes>/s1"
@@ -703,6 +706,8 @@ context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-1"
 === claude folder with AGENTS.md only, asked by another agent
 --- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -722,7 +727,6 @@ env "AGENTBUS_ASKED_BY_TURN=t_0"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -731,6 +735,8 @@ context.added instructions=769 asked_by=520 mcp_instructions=320
 session.closed resume_id="sid-0"
 === claude folder with AGENTS.md and a CLAUDE.md of its own, asked
 --- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -750,7 +756,6 @@ env "AGENTBUS_ASKED_BY_TURN=t_0"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -759,6 +764,8 @@ context.added agents_md=71 instructions=769 asked_by=520 mcp_instructions=320
 session.closed resume_id="sid-0"
 === claude folder with AGENTS.md and CLAUDE.md linked to it
 --- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -776,7 +783,6 @@ arg "one"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -1880,6 +1886,8 @@ context.added instructions=769 mcp_instructions=320
 session.closed resume_id="tid-0"
 === claude tools on, then resume
 --- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -1897,7 +1905,6 @@ arg "one"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -1905,6 +1912,8 @@ turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-0"
 --- turn t_2 harness="" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_2\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -1924,7 +1933,6 @@ arg "next t_2"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_2"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -1933,6 +1941,8 @@ context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-1"
 === claude tools on, subagents off, with lists
 --- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -1950,7 +1960,6 @@ arg "one"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -1959,6 +1968,8 @@ context.added instructions=769 mcp_instructions=320
 session.closed resume_id="sid-0"
 === claude tools on, asked by another agent
 --- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -1978,7 +1989,6 @@ env "AGENTBUS_ASKED_BY_TURN=t_0"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -2385,6 +2395,8 @@ session.closed resume_id="cid-0"
 log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
 === switch claude to agy, transcript
 --- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -2402,7 +2414,6 @@ arg "one"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -2427,6 +2438,8 @@ session.closed resume_id="cid-1"
 log run.hint session=s1 turn=t_2 left_out=agy_no_instruction_flag
 === switch claude to codex, replay
 --- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -2444,7 +2457,6 @@ arg "one"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -2523,6 +2535,8 @@ turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=769 mcp_instructions=320
 session.closed resume_id="tid-0"
 --- turn t_2 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_2\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -2542,7 +2556,6 @@ arg "[AgentBus: this conversation started before you joined it. Earlier turns ra
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_2"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -2554,6 +2567,8 @@ session.closed resume_id="sid-1"
 refused 400 agent must be claude, codex, agy or opencode
 === unknown harness on a next turn
 --- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -2571,7 +2586,6 @@ arg "one"
 env "AGENTBUS_LAUNCH_DIR=<launch>"
 env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
@@ -2841,6 +2855,8 @@ session.closed resume_id="ses_000000000000LaunchFake0000"
 log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
 === switch claude to opencode, resume
 --- turn t_1 harness="claude" access="openrouter" model=""
+arg "--settings"
+arg "{\"env\":{\"ANTHROPIC_API_KEY\":\"\",\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter\",\"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS\":\"1\"}}"
 arg "-p"
 arg "--output-format"
 arg "json"
@@ -2860,8 +2876,6 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "ANTHROPIC_API_KEY="
 env "ANTHROPIC_AUTH_TOKEN=test-key"
-env "ANTHROPIC_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1/openrouter"
-env "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1"
 env "HOME=<home>"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"

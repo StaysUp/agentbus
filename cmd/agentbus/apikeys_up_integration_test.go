@@ -119,7 +119,7 @@ func TestUpAPIKeyOnlyOnRecordedCalls(t *testing.T) {
 			}
 			session, turn := out["session"].(string), out["turn"].(string)
 			waitFor(t, "the running turn's report", func() bool { _, err := os.Stat(report); return err == nil })
-			env := envOf(t, report)
+			env := settingsEnvOf(t, report)
 			placeholder := env[tc.placeholder]
 			if !strings.HasPrefix(placeholder, jobs.StandInPrefix) {
 				t.Fatalf("the agent's placeholder: %q", placeholder)

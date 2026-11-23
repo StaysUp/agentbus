@@ -218,6 +218,33 @@ func envOf(t *testing.T, report string) map[string]string {
 	return env
 }
 
+// settingsEnvOf is envOf overlaid with the env block AgentBus now passes to
+// Claude Code in a --settings argument (the gateway URL and the Connect
+// stand-in travel there, not in a process env var; VERIFY_copy_level.md). The
+// settings value wins, as it does in the real Claude Code.
+func settingsEnvOf(t *testing.T, report string) map[string]string {
+	t.Helper()
+	out := envOf(t, report)
+	var rep fakeReport
+	if b, err := os.ReadFile(report); err == nil {
+		_ = json.Unmarshal(b, &rep)
+	}
+	for i := 0; i+1 < len(rep.Args); i++ {
+		if rep.Args[i] != "--settings" {
+			continue
+		}
+		var s struct {
+			Env map[string]string `json:"env"`
+		}
+		if json.Unmarshal([]byte(rep.Args[i+1]), &s) == nil {
+			for k, v := range s.Env {
+				out[k] = v
+			}
+		}
+	}
+	return out
+}
+
 func TestRunnerHoldsNoKey(t *testing.T) {
 	ns := startNoSecrets(t)
 	// A resume id, so the session can take a next turn.
@@ -263,8 +290,10 @@ func TestRunnerHoldsNoKey(t *testing.T) {
 			t.Fatalf("a turn token on %s: %d", path, code)
 		}
 	}
-	// The vendor got the server's key; the agent never had it.
-	env := envOf(t, ns.report)
+	// The vendor got the server's key; the agent never had it. On this relayed
+	// OpenRouter turn ANTHROPIC_AUTH_TOKEN is pinned in --settings (a stand-in);
+	// AB_TEST_OR_KEY stays in env. settingsEnvOf has both.
+	env := settingsEnvOf(t, ns.report)
 	placeholder := env["ANTHROPIC_AUTH_TOKEN"]
 	turnTok := env["AGENTBUS_TOKEN"]
 	if !strings.HasPrefix(placeholder, jobs.StandInPrefix) || env["AB_TEST_OR_KEY"] != placeholder ||
@@ -402,7 +431,7 @@ func TestRunnerUsesConnectedSubscription(t *testing.T) {
 	if got := ns.anth.seen(); len(got) != 1 || got[0] != "/v1/messages Bearer fake-subscription-token-for-tests" {
 		t.Fatalf("the vendor saw %v", got)
 	}
-	env := envOf(t, ns.report)
+	env := settingsEnvOf(t, ns.report)
 	if !strings.HasPrefix(env["CLAUDE_CODE_OAUTH_TOKEN"], jobs.StandInPrefix) {
 		t.Fatalf("the agent's sign-in: %q", env["CLAUDE_CODE_OAUTH_TOKEN"])
 	}

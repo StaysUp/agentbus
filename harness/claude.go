@@ -54,52 +54,87 @@ func (claude) Info() Info {
 	}
 }
 
-// Wire: Claude Code reads ANTHROPIC_BASE_URL (2.1.318, 2026-11-05).
+// Wire: Claude Code's gateway address goes in --settings, not the environment.
+// A process env var ANTHROPIC_BASE_URL loses to a user's own settings.json
+// "env" block — or a cloned project's .claude/settings.json — but --settings
+// wins over both, so a user config cannot silently redirect model calls off our
+// gateway and escape recording and review (VERIFY_copy_level.md check 2 and agy
+// review evt_768459feb737cd6f, both live, measured 2026-11-22; Claude Code
+// 2.1.318 and 2.1.330).
 func (claude) Wire(baseURL string) (env, args []string) {
-	return []string{"ANTHROPIC_BASE_URL=" + baseURL}, nil
+	return nil, claudeSettings(map[string]string{"ANTHROPIC_BASE_URL": baseURL})
 }
 
-// WireRelay: as Wire, with the placeholder in CLAUDE_CODE_OAUTH_TOKEN, where
-// Claude Code reads a setup-token's token from
-// (code.claude.com/docs/en/authentication, read 2026-11-08).
-func (c claude) WireRelay(baseURL, placeholder string) (env, args []string) {
-	env, args = c.Wire(baseURL)
-	return append(env, "CLAUDE_CODE_OAUTH_TOKEN="+placeholder), args
+// WireRelay: a runner that holds no secret. The gateway, the Connect stand-in
+// (placeholder in CLAUDE_CODE_OAUTH_TOKEN, where Claude Code reads a
+// setup-token's token from, code.claude.com/docs/en/authentication, read
+// 2026-11-08), and empty ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN go through
+// --settings. So a settings.json can neither redirect the call nor let its own
+// key preempt the stand-in: a settings.json ANTHROPIC_API_KEY or
+// ANTHROPIC_AUTH_TOKEN makes Claude Code drop the OAuth token and send that key
+// instead (agy review, live on claude 2.1.330, 2026-11-22). env clears a host
+// CLAUDE_CODE_OAUTH_TOKEN, ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN so none
+// linger in cmd.Env (/proc/self/environ) — the --settings values are what Claude
+// Code reads (measured live on claude 2.1.330, agy review 2026-11-22; the
+// stand-in path was an inference until then).
+func (claude) WireRelay(baseURL, placeholder string) (env, args []string) {
+	return []string{"CLAUDE_CODE_OAUTH_TOKEN=", "ANTHROPIC_API_KEY=", "ANTHROPIC_AUTH_TOKEN="},
+		claudeSettings(map[string]string{
+			"ANTHROPIC_BASE_URL":      baseURL,
+			"CLAUDE_CODE_OAUTH_TOKEN": placeholder,
+			"ANTHROPIC_API_KEY":       "",
+			"ANTHROPIC_AUTH_TOKEN":    "",
+		})
 }
 
-// WireOpenRouter: ANTHROPIC_BASE_URL at the service, the key in
-// ANTHROPIC_AUTH_TOKEN, ANTHROPIC_API_KEY empty (OpenRouter's Claude Code
-// guide says it must be), every model alias set to the turn's model so a
-// subagent or a small fast call uses it too, and no experimental betas, which
-// a non-Anthropic upstream refuses.
+// WireOpenRouter: ANTHROPIC_BASE_URL at the service, every model alias set to
+// the turn's model so a subagent or a small fast call uses it too, no
+// experimental betas (a non-Anthropic upstream refuses them), and
+// ANTHROPIC_API_KEY empty (OpenRouter's Claude Code guide says it must be) all
+// pinned in --settings, so a settings.json cannot redirect the call and carry
+// the OpenRouter token off to another host.
+// The token (ANTHROPIC_AUTH_TOKEN) depends on w.StandIn. On every relayed turn
+// (agentbus up and runner) it is a per-turn stand-in (abs_...): argv-safe, so it
+// is pinned in --settings too — otherwise a settings.json ANTHROPIC_AUTH_TOKEN
+// preempts it and the relay rejects the call with HTTP 401 (agy review, live on
+// claude 2.1.330, 2026-11-22). Only the person's own real key (non-relay, from
+// KeyEnv) stays in env, which argv (ps) must not hold; the pinned gateway keeps
+// it reaching only our service even if a settings.json swaps the env token
+// (which then only breaks that turn, never exfiltrates).
 func (claude) WireOpenRouter(w OpenRouterWire) (env, args []string) {
-	env = []string{
-		"ANTHROPIC_BASE_URL=" + w.Base,
-		"ANTHROPIC_AUTH_TOKEN=" + w.Key,
-		"ANTHROPIC_API_KEY=",
-		"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1",
+	set := map[string]string{
+		"ANTHROPIC_BASE_URL":                     w.Base,
+		"ANTHROPIC_API_KEY":                      "",
+		"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
 	}
 	if w.Model != "" {
 		for _, v := range []string{"ANTHROPIC_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL", "ANTHROPIC_DEFAULT_SONNET_MODEL",
 			"ANTHROPIC_DEFAULT_HAIKU_MODEL", "ANTHROPIC_DEFAULT_FABLE_MODEL", "ANTHROPIC_SMALL_FAST_MODEL", "CLAUDE_CODE_SUBAGENT_MODEL"} {
-			env = append(env, v+"="+w.Model)
+			set[v] = w.Model
 		}
 	}
-	return env, nil
+	if w.StandIn {
+		set["ANTHROPIC_AUTH_TOKEN"] = w.Key
+		return []string{"ANTHROPIC_AUTH_TOKEN=", "ANTHROPIC_API_KEY="}, claudeSettings(set)
+	}
+	return []string{"ANTHROPIC_AUTH_TOKEN=" + w.Key, "ANTHROPIC_API_KEY="}, claudeSettings(set)
 }
 
 // WireAPI: ANTHROPIC_BASE_URL at the service, the placeholder in
-// ANTHROPIC_AUTH_TOKEN, which Claude Code sends as "Authorization: Bearer"
-// (as for OpenRouter), and ANTHROPIC_API_KEY empty, so no key of the
-// machine's is sent. Control's relay puts the key set in Settings in
-// x-api-key in its place. Claude Code names Anthropic's own models, so no
-// alias is set: --model is enough.
+// ANTHROPIC_AUTH_TOKEN, which Claude Code sends as "Authorization: Bearer" (as
+// for OpenRouter), and ANTHROPIC_API_KEY empty, so no key of the machine's is
+// sent — all in --settings, so a settings.json cannot redirect the call or send
+// a machine's own key. The placeholder is a stand-in (abs_...), safe in argv;
+// control's relay puts the key set in Settings in x-api-key in its place. env
+// clears any host ANTHROPIC_AUTH_TOKEN / ANTHROPIC_API_KEY from cmd.Env. Claude
+// Code names Anthropic's own models, so no alias is set: --model is enough.
 func (claude) WireAPI(w APIWire) (env, args []string) {
-	return []string{
-		"ANTHROPIC_BASE_URL=" + w.Base,
-		"ANTHROPIC_AUTH_TOKEN=" + w.Placeholder,
-		"ANTHROPIC_API_KEY=",
-	}, nil
+	return []string{"ANTHROPIC_AUTH_TOKEN=", "ANTHROPIC_API_KEY="},
+		claudeSettings(map[string]string{
+			"ANTHROPIC_BASE_URL":   w.Base,
+			"ANTHROPIC_AUTH_TOKEN": w.Placeholder,
+			"ANTHROPIC_API_KEY":    "",
+		})
 }
 
 // Edit: Claude Code's rules hold paths; a name that cannot go in one gets no
@@ -337,6 +372,23 @@ func claudeMCPConfig(url string) string {
 		"type": "http", "url": url,
 		"headers": map[string]string{"Authorization": "Bearer ${AGENTBUS_TOKEN}"}}}})
 	return string(b)
+}
+
+// claudeSettings is the --settings argument pair pinning environment values
+// Claude Code must not let a settings.json "env" override — a user's own, or a
+// cloned project's .claude/settings.json. Claude Code's settings "env" wins
+// over settings.json and over a process env var of the same name (measured live
+// on claude 2.1.330, agy review 2026-11-22). The gateway URL above all: a
+// settings.json base URL redirects every model call off our gateway, carrying
+// the turn's credential with it. Values forced to "" (ANTHROPIC_API_KEY,
+// ANTHROPIC_AUTH_TOKEN) stop a settings.json key preempting the intended
+// sign-in. A REAL secret never goes here: argv is readable by ps, so a real key
+// stays in the process env, where the pinned gateway keeps it reaching only our
+// service. json.Marshal sorts the keys, so the value is stable for the launch
+// golden.
+func claudeSettings(env map[string]string) []string {
+	b, _ := json.Marshal(map[string]any{"env": env})
+	return []string{"--settings", string(b)}
 }
 
 // claudeTools is the --allowedTools rule that lets the tool server's tools run

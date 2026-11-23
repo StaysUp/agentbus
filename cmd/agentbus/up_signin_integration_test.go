@@ -57,7 +57,7 @@ func TestUpUsesTheSubscriptionConnectedOnControl(t *testing.T) {
 	if got := vendor.seen(); len(got) != 1 || got[0] != "/v1/messages Bearer "+fakeSubscription {
 		t.Fatalf("the vendor saw %v", got)
 	}
-	env := envOf(t, report)
+	env := settingsEnvOf(t, report)
 	if !strings.HasPrefix(env["CLAUDE_CODE_OAUTH_TOKEN"], jobs.StandInPrefix) {
 		t.Fatal("the agent's sign-in is not the placeholder")
 	}
@@ -292,7 +292,7 @@ func TestUpRelayRecordsADirectCall(t *testing.T) {
 	}
 	session := out["session"].(string)
 	waitFor(t, "the running turn's report", func() bool { _, err := os.Stat(report); return err == nil })
-	placeholder := envOf(t, report)["CLAUDE_CODE_OAUTH_TOKEN"]
+	placeholder := settingsEnvOf(t, report)["CLAUDE_CODE_OAUTH_TOKEN"]
 	if !strings.HasPrefix(placeholder, jobs.StandInPrefix) {
 		t.Fatal("no placeholder")
 	}
@@ -361,7 +361,7 @@ func TestUpTokenGetsNoCredentialOnAnotherTurnsPath(t *testing.T) {
 	}
 	session, turn := out["session"].(string), out["turn"].(string)
 	waitFor(t, "the running turn's report", func() bool { _, err := os.Stat(report); return err == nil })
-	placeholder := envOf(t, report)["CLAUDE_CODE_OAUTH_TOKEN"]
+	placeholder := settingsEnvOf(t, report)["CLAUDE_CODE_OAUTH_TOKEN"]
 	for _, path := range []string{"/s/othersession/t/t_other/v1/messages", "/s/" + session + "/t/t_other/v1/messages", "/v1/messages"} {
 		req, _ := http.NewRequest("POST", "http://"+svc.addr+path, strings.NewReader(`{"model":"claude-x","messages":[{"role":"user","content":"x"}]}`))
 		req.Header.Set("Authorization", "Bearer "+placeholder)
@@ -419,7 +419,7 @@ func TestUpSignInOnlyOnRecordedCalls(t *testing.T) {
 	}
 	session, turn := out["session"].(string), out["turn"].(string)
 	waitFor(t, "the running turn's report", func() bool { _, err := os.Stat(report); return err == nil })
-	placeholder := envOf(t, report)["CLAUDE_CODE_OAUTH_TOKEN"]
+	placeholder := settingsEnvOf(t, report)["CLAUDE_CODE_OAUTH_TOKEN"]
 	own := "/s/" + session + "/t/" + turn
 	send := func(method, path string) (int, string) {
 		req, _ := http.NewRequest(method, "http://"+svc.addr+path, strings.NewReader(`{"model":"claude-x","messages":[{"role":"user","content":"x"}]}`))

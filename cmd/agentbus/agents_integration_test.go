@@ -106,6 +106,10 @@ func TestOpenRouterAgentTurnGoesThroughTheGateway(t *testing.T) {
 	waitClosed(t, svc.store, session)
 
 	r := readReport(t, report)
+	// The non-secret OpenRouter config (gateway, model aliases, betas, empty
+	// api key) is pinned in --settings so a settings.json cannot redirect it;
+	// the auth token (a stand-in here) stays in env, checked below.
+	se := settingsEnvOf(t, report)
 	for k, want := range map[string]string{
 		"ANTHROPIC_BASE_URL":                     base + "/openrouter",
 		"ANTHROPIC_API_KEY":                      "",
@@ -113,13 +117,15 @@ func TestOpenRouterAgentTurnGoesThroughTheGateway(t *testing.T) {
 		"CLAUDE_CODE_SUBAGENT_MODEL":             "deepseek/deepseek-v4.1-flash",
 		"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
 	} {
-		if v, ok := envValue(r.Env, k); !ok || v != want {
+		if v, ok := se[k]; !ok || v != want {
 			t.Errorf("child %s = %q (set %v), want %q", k, v, ok, want)
 		}
 	}
+	// ANTHROPIC_AUTH_TOKEN is now pinned in --settings (a stand-in on this
+	// relayed path); AB_TEST_OR_KEY stays in the process env. settingsEnvOf has both.
 	for _, k := range []string{"ANTHROPIC_AUTH_TOKEN", "AB_TEST_OR_KEY"} {
-		if v, _ := envValue(r.Env, k); !strings.HasPrefix(v, jobs.StandInPrefix) {
-			t.Errorf("child %s is not the placeholder", k)
+		if !strings.HasPrefix(se[k], jobs.StandInPrefix) {
+			t.Errorf("child %s is not the placeholder: %q", k, se[k])
 		}
 	}
 	if strings.Contains(strings.Join(r.Env, "\n"), keyValue) {

@@ -304,6 +304,11 @@ type OpenRouterWire struct {
 	Base string
 	// KeyEnv names the variable that holds the key; Key is its value.
 	KeyEnv, Key string
+	// StandIn says Key is a per-turn stand-in (abs_...), not a real secret, so
+	// it is safe in argv and control's relay swaps the real key in. True on
+	// every relayed turn (agentbus up and runner); false only when the turn
+	// carries the person's own real OpenRouter key from KeyEnv.
+	StandIn bool
 	// Model is the turn's model, or "".
 	Model string
 }

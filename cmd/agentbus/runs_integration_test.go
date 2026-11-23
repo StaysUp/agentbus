@@ -209,14 +209,21 @@ func TestRunSetsBaseURLInChildOnlyAndClosesWithExitCode(t *testing.T) {
 	}
 
 	r := readReport(t, report)
-	if u, _ := envValue(r.Env, "ANTHROPIC_BASE_URL"); u != base {
-		t.Fatalf("child ANTHROPIC_BASE_URL %q, want %q", u, base)
+	// The gateway address reaches the child through --settings, not a process
+	// env var: a user's own settings.json "env" overrides the env var but not
+	// --settings, so recording and review cannot be bypassed
+	// (VERIFY_copy_level.md check 2).
+	if u, _ := envValue(r.Env, "ANTHROPIC_BASE_URL"); u == base {
+		t.Fatalf("child ANTHROPIC_BASE_URL env is the gateway %q, want it only in --settings", u)
 	}
 	if got := os.Getenv("ANTHROPIC_BASE_URL"); got != "" {
 		t.Fatalf("the service's own ANTHROPIC_BASE_URL changed to %q", got)
 	}
+	if s := settingsArg(r.Args); !strings.Contains(s, `"ANTHROPIC_BASE_URL":"`+base+`"`) {
+		t.Fatalf("--settings %q, want it to carry the gateway %q", s, base)
+	}
 	// The prompt comes last, after --, so a prompt shaped like a flag stays a prompt.
-	want := "-p --output-format json --append-system-prompt HINT --allowedTools EDIT,Bash --no-chrome --disallowedTools PROTECT --model haiku -- --dangerously-skip-permissions hello"
+	want := "--settings SETTINGS -p --output-format json --append-system-prompt HINT --allowedTools EDIT,Bash --no-chrome --disallowedTools PROTECT --model haiku -- --dangerously-skip-permissions hello"
 	if got := argsOf(t, r.Args, id); got != want {
 		t.Fatalf("child args %q, want %q", got, want)
 	}
@@ -352,7 +359,7 @@ func TestRunReadOnlyRetired(t *testing.T) {
 		agent string
 		want  string // with BASE for the session's base URL
 	}{
-		{"claude", "-p --output-format json --append-system-prompt HINT --allowedTools EDIT,Bash --no-chrome --disallowedTools PROTECT -- hi"},
+		{"claude", "--settings SETTINGS -p --output-format json --append-system-prompt HINT --allowedTools EDIT,Bash --no-chrome --disallowedTools PROTECT -- hi"},
 		{"codex", codexRelayArgs + ` exec --skip-git-repo-check --json --sandbox workspace-write -c developer_instructions=HINT -c sandbox_workspace_write.network_access=true --disable apps --disable plugins -- hi`},
 	} {
 		for _, readOnly := range []any{nil, true, false} {
@@ -710,6 +717,11 @@ func argsOf(t *testing.T, args []string, session string) string {
 				t.Errorf("codex's tool server: %q", a)
 			}
 			out[i] = "mcp_servers.agentbus.url=TOOLS"
+		case i > 0 && out[i-1] == "--settings":
+			// The gateway URL and the per-turn stand-in travel here; both are
+			// dynamic. TestRunSetsBaseURLInChildOnlyAndClosesWithExitCode
+			// checks them directly.
+			out[i] = "SETTINGS"
 		case i > 0 && out[i-1] == "--append-system-prompt":
 			if !strings.Contains(a, search) {
 				t.Errorf("claude's hint does not name session %s: %q", session, a)
@@ -725,6 +737,16 @@ func argsOf(t *testing.T, args []string, session string) string {
 		}
 	}
 	return strings.Join(out, " ")
+}
+
+// settingsArg returns the value of the child's --settings argument, or "".
+func settingsArg(args []string) string {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--settings" {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 // editRulesShort shows a rule list with the edit rule for the turn's folder

@@ -118,7 +118,7 @@ func TestRunnerUsesAPIKeysSetInSettings(t *testing.T) {
 	if got := ns.keyed["claude"].keysSeen(); got[0] != "/v1/messages "+keys["anthropic"]+"|" {
 		t.Fatalf("Anthropic's API saw keys %v", got)
 	}
-	env := envOf(t, ns.report)
+	env := settingsEnvOf(t, ns.report)
 	if tok := env["ANTHROPIC_AUTH_TOKEN"]; !strings.HasPrefix(tok, jobs.StandInPrefix) || env["ANTHROPIC_API_KEY"] != "" ||
 		!strings.HasSuffix(env["ANTHROPIC_BASE_URL"], "/key/claude") {
 		t.Fatalf("claude's environment: %q %q %q", tok, env["ANTHROPIC_API_KEY"], env["ANTHROPIC_BASE_URL"])

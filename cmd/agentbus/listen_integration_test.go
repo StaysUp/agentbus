@@ -127,8 +127,8 @@ func TestNonLoopbackHandsAgentsLoopback(t *testing.T) {
 	}
 	waitClosed(t, svc.store, id)
 	r := readReport(t, report)
-	if u, _ := envValue(r.Env, "ANTHROPIC_BASE_URL"); u != base {
-		t.Errorf("child ANTHROPIC_BASE_URL %q, want %q", u, base)
+	if s := settingsArg(r.Args); !strings.Contains(s, `"ANTHROPIC_BASE_URL":"`+base+`"`) {
+		t.Errorf("child --settings %q, want gateway %q", s, base)
 	}
 	if u, _ := envValue(r.Env, "AGENTBUS_URL"); u != want {
 		t.Errorf("child AGENTBUS_URL %q, want %q", u, want)

@@ -254,13 +254,13 @@ func TestRunWithSessionRunsNextTurnInSameSession(t *testing.T) {
 		want                  string // BASE is the session's base URL, ID the first resume id
 	}{
 		{"claude", claudeResultA, idA, nil, "haiku",
-			"-p --output-format json --append-system-prompt HINT --resume ID --allowedTools EDIT,Bash --no-chrome --disallowedTools PROTECT --model haiku -- --next"},
+			"--settings SETTINGS -p --output-format json --append-system-prompt HINT --resume ID --allowedTools EDIT,Bash --no-chrome --disallowedTools PROTECT --model haiku -- --next"},
 		// Read-only turns retired (B12): read_only is accepted and ignored, so
 		// true gets the same normal args as the default.
 		{"claude", claudeResultA, idA, true, "haiku",
-			"-p --output-format json --append-system-prompt HINT --resume ID --allowedTools EDIT,Bash --no-chrome --disallowedTools PROTECT --model haiku -- --next"},
+			"--settings SETTINGS -p --output-format json --append-system-prompt HINT --resume ID --allowedTools EDIT,Bash --no-chrome --disallowedTools PROTECT --model haiku -- --next"},
 		{"claude", claudeResultA, idA, false, "",
-			"-p --output-format json --append-system-prompt HINT --resume ID --allowedTools EDIT,Bash --no-chrome --disallowedTools PROTECT -- --next"},
+			"--settings SETTINGS -p --output-format json --append-system-prompt HINT --resume ID --allowedTools EDIT,Bash --no-chrome --disallowedTools PROTECT -- --next"},
 		{"codex", codexEventsA, codexIDA, nil, "",
 			codexRelayArgs + ` exec --skip-git-repo-check --sandbox workspace-write -c developer_instructions=HINT -c sandbox_workspace_write.network_access=true --disable apps --disable plugins resume --json -- ID --next`},
 		{"codex", codexEventsA, codexIDA, true, "",
@@ -304,8 +304,9 @@ func TestRunWithSessionRunsNextTurnInSameSession(t *testing.T) {
 			t.Errorf("%s: args %q\nwant %q", name, got, want)
 		}
 		if tc.agent == "claude" {
-			if u, _ := envValue(r.Env, "ANTHROPIC_BASE_URL"); u != base {
-				t.Errorf("%s: base URL %q, want this turn's %q", name, u, base)
+			// The gateway travels in --settings now, not a process env var.
+			if s := settingsArg(r.Args); !strings.Contains(s, `"ANTHROPIC_BASE_URL":"`+base+`"`) {
+				t.Errorf("%s: --settings %q, want this turn's gateway %q", name, s, base)
 			}
 		}
 		if strings.Contains(strings.Join(r.Env, "\n")+strings.Join(r.Args, "\n"), tok) {

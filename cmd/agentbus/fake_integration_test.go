@@ -62,6 +62,30 @@ func fakePost(path, body, out string) {
 	}
 }
 
+// claudeGatewayEnv reads a variable AgentBus now passes to Claude Code inside a
+// --settings argument's "env" block (the gateway URL, the Connect stand-in, and
+// the stand-in auth token on every relayed path), falling back to a process env
+// var for the one case that still sets one: the person's own real OpenRouter key
+// (non-relay). The real Claude Code reads its settings "env" the same way; the
+// fake mirrors it, as it already parses codex's -c arguments.
+func claudeGatewayEnv(name string) string {
+	args := os.Args[1:]
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] != "--settings" {
+			continue
+		}
+		var v struct {
+			Env map[string]string `json:"env"`
+		}
+		if json.Unmarshal([]byte(args[i+1]), &v) == nil {
+			if val, ok := v.Env[name]; ok {
+				return val
+			}
+		}
+	}
+	return os.Getenv(name)
+}
+
 func fakeAgent() {
 	if a := os.Args[1:]; len(a) == 1 && a[0] == "--version" {
 		fmt.Println(os.Getenv("AGENTBUS_FAKE_VERSION"))
@@ -81,7 +105,7 @@ func fakeAgent() {
 	if p := os.Getenv("AGENTBUS_FAKE_MARK"); p != "" {
 		os.WriteFile(p, []byte("ran"), 0o600)
 	}
-	fmt.Printf("url=%s\n", os.Getenv("ANTHROPIC_BASE_URL"))
+	fmt.Printf("url=%s\n", claudeGatewayEnv("ANTHROPIC_BASE_URL"))
 	fmt.Printf("args=%s\n", strings.Join(os.Args[1:], " "))
 	fmt.Print(os.Getenv("AGENTBUS_FAKE_STDOUT"))
 	// With AGENTBUS_FAKE_CALL=1, one model call through the base URL, as
@@ -96,13 +120,15 @@ func fakeAgent() {
 		calls = []string{b}
 	}
 	for _, body := range calls {
-		req, _ := http.NewRequest("POST", os.Getenv("ANTHROPIC_BASE_URL")+"/v1/messages", strings.NewReader(body))
+		req, _ := http.NewRequest("POST", claudeGatewayEnv("ANTHROPIC_BASE_URL")+"/v1/messages", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		// As Claude Code sends a gateway credential, or the OAuth token of
-		// claude setup-token.
-		if tok := os.Getenv("ANTHROPIC_AUTH_TOKEN"); tok != "" {
+		// claude setup-token. claudeGatewayEnv reads it from --settings on every
+		// relayed path (subscription, API, OpenRouter stand-in) and from env only
+		// for a real OpenRouter key.
+		if tok := claudeGatewayEnv("ANTHROPIC_AUTH_TOKEN"); tok != "" {
 			req.Header.Set("Authorization", "Bearer "+tok)
-		} else if tok := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); tok != "" {
+		} else if tok := claudeGatewayEnv("CLAUDE_CODE_OAUTH_TOKEN"); tok != "" {
 			req.Header.Set("Authorization", "Bearer "+tok)
 			req.Header.Set("anthropic-beta", "oauth-2025-04-20")
 		}
@@ -240,8 +266,8 @@ func fakeAgent() {
 			}
 			hdr.Set("Authorization", "Bearer "+os.Getenv("AGENTBUS_OPENAI_TOKEN"))
 		default:
-			base = os.Getenv("ANTHROPIC_BASE_URL")
-			hdr.Set("Authorization", "Bearer "+os.Getenv("ANTHROPIC_AUTH_TOKEN"))
+			base = claudeGatewayEnv("ANTHROPIC_BASE_URL")
+			hdr.Set("Authorization", "Bearer "+claudeGatewayEnv("ANTHROPIC_AUTH_TOKEN"))
 		}
 		req, _ := http.NewRequest(method, base+path, nil)
 		req.Header = hdr
