@@ -155,6 +155,11 @@ func (s *Server) record(w http.ResponseWriter, r *http.Request, rn queue.Runner)
 	writeJSON(w, http.StatusOK, RecordAck{Stored: n})
 }
 
+// RunnerLostText is what the person reads when a turn's runner stopped
+// answering mid-turn, so the turn ended with no result: plain words that say
+// what to do next (his call, 2026-11-23).
+const RunnerLostText = "The runner stopped answering; send the turn again."
+
 // CloseLost stores session.closed, unsettled, for each hold the record has
 // open whose turn's attempt lease ran out. Its runner stopped
 // during the turn, so nothing else closes it: the cockpit would show the
@@ -181,7 +186,8 @@ func CloseLost(q *queue.Queue, st *store.Store, now time.Time) (int, error) {
 			continue
 		}
 		if _, _, err := st.Append(event.Event{ID: queue.NewID("evt_"), Kind: event.SessionClosed, Time: now,
-			Session: h.Session, Turn: h.Turn, Hold: h.Hold, Unsettled: true, State: store.TurnFailed}); err != nil {
+			Session: h.Session, Turn: h.Turn, Hold: h.Hold, Unsettled: true, State: store.TurnFailed,
+			Error: RunnerLostText}); err != nil {
 			return n, err
 		}
 		n++

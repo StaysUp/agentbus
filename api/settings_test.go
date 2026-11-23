@@ -94,7 +94,7 @@ func TestSettingsPolicyReadWrite(t *testing.T) {
 
 	// Nothing changed yet: every default.
 	resp, out := send(t, e, "GET", "/api/v0/settings/permissions", "", "")
-	if resp.StatusCode != 200 || !strings.Contains(out, `"tool:edit"`) {
+	if resp.StatusCode != 200 || !strings.Contains(out, `"tool:*"`) {
 		t.Fatalf("GET with nothing changed: %d %s", resp.StatusCode, out)
 	}
 	v0 := resp.Header.Get("ETag")
@@ -119,7 +119,6 @@ func TestSettingsPolicyReadWrite(t *testing.T) {
 		{`{"limits":{"max_depth":-1}}`, "max_depth must be 0 or more"},
 		{`{"forbid":"git push"}`, "forbid has the wrong type"},
 		{`{"allow":["go test:*"]}`, `allow entry "go test:*" has a star`},
-		{`{"unlisted":"yes"}`, "unlisted must be"},
 		{`{"allowed":[]}`, `unknown key "allowed"`},
 		{`[]`, "one JSON object"},
 		{`null`, "one JSON object"},

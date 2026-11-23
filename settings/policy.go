@@ -38,15 +38,15 @@ const PolicyStarter = `# What AgentBus turns may do without asking. Read at the 
 # forbid: commands and tools agents may never run. The gateway refuses them.
 # It reads the command text, so it cannot see a command built at run time or
 # run from a script. For a hard rule, also leave out what the command needs.
-# unlisted: what the gateway does with a command on none of the lists:
-# "ask" (the default) holds it for a person like an ask entry; "refuse" refuses
-# it. The gateway decides every shell command this way, for claude and codex
-# alike: forbid, then ask, then allow, then this default for what is left.
+# The gateway decides every shell command and tool call this way, for claude
+# and codex alike: forbid, then ask, then allow. A command or tool on none of
+# the lists is held for a person. The default allow list holds "*" (every
+# command) and "tool:*" (every tool), so nothing is held by default; narrow it
+# to hold or refuse what you choose.
 
-allow = ["tool:*", "tool:edit"]
+allow = ["*", "tool:*"]
 ask = []
 forbid = ["tool:subagent"]
-unlisted = "ask"    # "ask" or "refuse": what a command on no list gets
 
 # isolation: where a new session's turns run.
 #   "auto"     the fastest copy this machine can make: on macOS "copy" (one
@@ -90,27 +90,13 @@ apply = false        # apply a turn's changes to the person's folder, for a turn
                      # off by default: only the main token applies
 `
 
-// Unlisted values: what the gateway does with a command on none of the lists.
-const (
-	UnlistedAsk    = "ask"
-	UnlistedRefuse = "refuse"
-)
-
-// StarterAllow is the small read-only allow list a new install starts with, so
-// a first session is not a card for every command. Each is a command that
-// reads, never one that changes anything. A tool is decided by its name against
-// this one list, the same as a shell command (his decision, 2026-11-18,
-// DESIGN_0_6_tools.md #9); the apps that do something, such as ask_agent, carry
-// no rule and are asked by default. Reading the record is the API's own routes,
-// reached with agentbus-api, not tools (read-only turns and the read-tool
-// copies retired in 0.6, B12), so none is listed here.
-var StarterAllow = []string{
-	"tool:*", "tool:edit",
-	"ls", "cat", "head", "tail", "grep", "find", "wc",
-	"git status", "git diff", "git log", "git show",
-}
-
-var defaultAllow = []string{"tool:*", "tool:edit"}
+// defaultAllow is the allow list of a person who changed nothing: "*" (every
+// command) and "tool:*" (every tool), so nothing is held by default. A person
+// narrows it to hold or refuse what they choose. A command or tool on none of
+// the lists is still held for a person, so emptying allow holds everything.
+// defaultForbid refuses subagents, the one thing off by default (his call,
+// 2026-11-23).
+var defaultAllow = []string{"*", "tool:*"}
 var defaultForbid = []string{"tool:subagent"}
 
 // Isolation values: where a new session's turns run.
@@ -137,7 +123,6 @@ type Policy struct {
 	Allow     []string `toml:"allow" json:"allow" doc:"Commands and tools agents may run without asking, for claude and codex alike: a command or tool:<name>. Absent in a PUT: default allow rules."`
 	Ask       []string `toml:"ask" json:"ask" doc:"Commands and tools that wait for a person before an agent runs them, for claude and codex alike. The gateway holds a matching call and records it for a person; an \"always\" moves the entry to allow and continues the session so the agent can run it, \"once\" lets it run that continuation turn only, a refusal records the decision. Forbid wins over ask; ask wins over allow."`
 	Forbid    []string `toml:"forbid" json:"forbid" doc:"Commands and tools agents may never run. The gateway refuses them."`
-	Unlisted  string   `toml:"unlisted" json:"unlisted,omitempty" doc:"What the gateway does with a command on none of the lists: ask (the default; it holds the command and records it for a person) or refuse (it refuses the command). Forbid, ask and allow are matched first; this decides only what is left. Absent in a PUT: ask."`
 	Isolation string   `toml:"isolation" json:"isolation,omitempty" doc:"Where a new session's turns run: auto (copy on macOS; overlay on Linux where the runner can mount one, else copy), overlay, copy (a copy of its folder as it is now), git (a git worktree with the folder's uncommitted edits, in a repo) or none (the folder itself). On ext4, copy and the overlay's snapshot copy every byte: use xfs, btrfs, git or none for a big folder. Absent in a PUT: auto."`
 	HomeFiles []string `toml:"home_files" json:"home_files" doc:"Files or folders under the home folder, each starting with ~/, copied into each session's own home at the same place at the start of each turn, such as ~/.aws/config."`
 	Limits    Limits   `toml:"limits" json:"limits" doc:"The limits on work agents ask for."`
@@ -176,16 +161,6 @@ func DefaultPolicy() Policy {
 	return p
 }
 
-// FirstInstallPolicy is the policy a new install's permissions.toml starts
-// with: the defaults, plus the small read-only StarterAllow list, so a first
-// session is not a card for every command. A person who wants none clears the
-// allow list. A missing or hand-emptied file is the plain DefaultPolicy.
-func FirstInstallPolicy() Policy {
-	p := DefaultPolicy()
-	p.Allow = append([]string(nil), StarterAllow...)
-	return p
-}
-
 // fill sets every value left out to its default.
 func (p *Policy) fill() {
 	if p.Allow == nil {
@@ -203,9 +178,6 @@ func (p *Policy) fill() {
 	}
 	if p.HomeFiles == nil {
 		p.HomeFiles = []string{}
-	}
-	if p.Unlisted == "" {
-		p.Unlisted = UnlistedAsk
 	}
 	if p.Isolation == "" {
 		p.Isolation = IsolationAuto
@@ -232,9 +204,6 @@ func (p *Policy) fill() {
 // checks the folders' shape only: whether each exists is for the machine
 // that runs the turn (Resolve).
 func (p *Policy) Check() error {
-	if p.Unlisted != "" && p.Unlisted != UnlistedAsk && p.Unlisted != UnlistedRefuse {
-		return fmt.Errorf("unlisted must be %q or %q", UnlistedAsk, UnlistedRefuse)
-	}
 	switch p.Isolation {
 	case "", IsolationAuto, IsolationOverlay, IsolationCopy, IsolationGit, IsolationNone:
 	default:
@@ -314,7 +283,7 @@ func parsePolicy(b []byte) (Policy, error) {
 		return false
 	})
 	if len(extra) > 0 {
-		return Policy{}, fmt.Errorf("unknown key %s; the keys are allow, ask, forbid, unlisted, isolation, home_files, [limits] and [agent_api] (see the README)", strconv.Quote(extra[0].String()))
+		return Policy{}, fmt.Errorf("unknown key %s; the keys are allow, ask, forbid, isolation, home_files, [limits] and [agent_api] (see the README)", strconv.Quote(extra[0].String()))
 	}
 	if err := p.Check(); err != nil {
 		return Policy{}, err
@@ -324,7 +293,7 @@ func parsePolicy(b []byte) (Policy, error) {
 
 // wrongTypeTOML is a permissions.toml's error for a value of the wrong type.
 const wrongTypeTOML = "a value has the wrong type: allow, ask, forbid and home_files are lists of strings, such as [\"go test\"]; " +
-	"unlisted and isolation are strings; the [limits] are numbers; the [agent_api] switches are true or false"
+	"isolation is a string; the [limits] are numbers; the [agent_api] switches are true or false"
 
 // over is p, read with the keys it leaves out unset, on top of base: each key
 // p leaves out takes base's value, and the result is filled.
@@ -430,8 +399,18 @@ func (p *Policy) applyLegacy(tools *bool, subagents *bool, edit *string) {
 			p.Allow = addRule(p.Allow, "tool:*")
 			p.Forbid = removeRule(p.Forbid, "tool:*")
 		} else {
+			// Tools off preserves whatever edit permission there was: if
+			// editing was allowed (its own rule, or under tool:*), it stays
+			// allowed after tool:* goes, so turning tools off with the legacy
+			// switch does not silently take edit away (the old default allowed
+			// it) nor silently grant it where it was not allowed. An explicit
+			// edit below still wins.
+			editWasAllowed := slices.Contains(p.Allow, "tool:edit") || slices.Contains(p.Allow, "tool:*")
 			p.Forbid = addRule(p.Forbid, "tool:*")
 			p.Allow = removeRule(p.Allow, "tool:*")
+			if edit == nil && editWasAllowed {
+				p.Allow = addRule(p.Allow, "tool:edit")
+			}
 		}
 	}
 	if subagents != nil {
@@ -481,11 +460,11 @@ func DecodePolicyChange(b []byte) (Policy, error) {
 		switch {
 		case errors.As(err, &te) && te.Field != "":
 			return Policy{}, fmt.Errorf("%s has the wrong type: allow, ask, forbid and home_files are lists of strings; "+
-				"unlisted and isolation are strings; the limits are numbers", te.Field)
+				"isolation is a string; the limits are numbers", te.Field)
 		case errors.As(err, &se):
 			return Policy{}, errors.New("the body is not valid JSON")
 		case strings.HasPrefix(err.Error(), "json: unknown field "):
-			return Policy{}, fmt.Errorf("unknown key %s; the keys are allow, ask, forbid, unlisted, isolation, home_files, limits and agent_api",
+			return Policy{}, fmt.Errorf("unknown key %s; the keys are allow, ask, forbid, isolation, home_files, limits and agent_api",
 				strings.TrimPrefix(err.Error(), "json: unknown field "))
 		}
 		return Policy{}, errors.New("the body must be one JSON object: the policy")
@@ -512,7 +491,7 @@ var starterLine = regexp.MustCompile(`^([a-z_]+) = (.*?)((?: {2,}|\t+)#.*)?$`)
 func FormatPolicy(p Policy) []byte {
 	p.fill()
 	values := map[string]any{
-		"allow": p.Allow, "ask": p.Ask, "forbid": p.Forbid, "unlisted": p.Unlisted, "isolation": p.Isolation,
+		"allow": p.Allow, "ask": p.Ask, "forbid": p.Forbid, "isolation": p.Isolation,
 		"home_files":       p.HomeFiles,
 		"limits.max_depth": *p.Limits.MaxDepth, "limits.max_jobs_per_turn": *p.Limits.MaxJobsPerTurn,
 		"limits.max_jobs_per_tree": *p.Limits.MaxJobsPerTree, "limits.max_cost_usd_per_tree": *p.Limits.MaxCostUSDPerTree,
@@ -669,11 +648,14 @@ func checkCommand(c string) error {
 		}
 		return nil
 	}
+	if c == "*" {
+		return nil // every command
+	}
 	switch {
 	case strings.HasPrefix(c, "-"):
 		return errors.New("starts with -")
 	case strings.Contains(c, "*"):
-		return errors.New("has a star; write the command alone, such as \"go test\"")
+		return errors.New("has a star; write * for every command, or the command alone, such as \"go test\"")
 	}
 	return nil
 }

@@ -177,13 +177,15 @@ through the API (`/api/v0/settings/permissions` and `/api/v0/settings/instructio
 their defaults are in `/docs`, under Settings).
 
 - **Permissions:** whether an agent may apply its own changes (off by default; you always may), then
-  two lists by name, each in three parts: **Commands** and **Tools**. **Allow** runs without asking,
-  **Ask** holds the call, and **Refuse** never runs it. Starting subagents and editing files are
-  tools too (`subagent`, `edit`), so they are ruled like any other. On **Ask** the call is held for
-  up to 60 seconds while a card above the message box waits for you: **Allow once** runs it in the
-  same turn, **Always allow** runs it and allows it from then on, and **Refuse** or no answer in time
-  returns a plain refusal. Refuse wins over Ask, Ask over Allow. **Anything else** decides a call on
-  none of the lists. Agents reach the record, and apply and stop a turn, through `agentbus-api`.
+  rules by name, over **Commands** and **Tools**. **Allow** runs without asking, **Ask** holds the
+  call, and **Forbid** never runs it. By default Allow holds `*` (every command) and `tool:*` (every
+  tool) and Forbid holds `tool:subagent`, so everything runs except starting subagents; narrow the
+  lists to hold or refuse what you choose. A command or tool on none of the lists is held for a
+  person. Starting subagents and editing files are tools too (`subagent`, `edit`), so they are ruled
+  like any other. On **Ask** the call is held for up to 60 seconds while a card above the message box
+  waits for you: **Allow once** runs it in the same turn, **Always allow** runs it and allows it from
+  then on, and **Refuse** or no answer in time returns a plain refusal. Forbid wins over Ask, Ask over
+  Allow. Agents reach the record, and apply and stop a turn, through `agentbus-api`.
 - **Config:** files from your home copied into each session's home at each turn: your
   settings, skills, MCP servers and logins. **Use my config** fills the list. Sign-ins are never
   copied.

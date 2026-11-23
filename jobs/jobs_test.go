@@ -267,7 +267,7 @@ func TestRunnerSettings(t *testing.T) {
 	a, b := enroll(t, srv, 1), enroll(t, srv, 1)
 	path := "/api/v0/runner/settings"
 	var got settings.RunnerSettings
-	if code := send(t, srv, a.Token, "GET", path, nil, &got); code != 200 || got.Instructions != settings.DefaultInstructions || !slices.Contains(got.Permissions.Allow, "tool:edit") {
+	if code := send(t, srv, a.Token, "GET", path, nil, &got); code != 200 || got.Instructions != settings.DefaultInstructions || !slices.Contains(got.Permissions.Allow, "tool:*") {
 		t.Fatalf("no files: %d %+v", code, got)
 	}
 	if err := os.WriteFile(filepath.Join(dir, settings.PolicyFile), []byte("forbid = [\"git push\"]\n"), 0o600); err != nil {

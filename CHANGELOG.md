@@ -3,6 +3,26 @@
 All notable changes to AgentBus. Full notes for each release are on the
 [releases page](https://github.com/staysup/agentbus/releases).
 
+## Unreleased
+
+### Changed
+- **Rules allow everything by default except subagents.** The default Allow list is now `*` (every
+  command) and `tool:*` (every tool), Ask is empty, and Forbid holds `tool:subagent`. `*` matches
+  every command and `tool:*` allows every tool; Forbid still wins over Ask, Ask over Allow. A command
+  or tool on none of the lists is held for a person. Narrow the lists to hold or refuse what you
+  choose. The redundant `tool:edit` default is gone (editing runs under `tool:*`).
+- **The `unlisted` setting is retired.** A command or tool on none of the lists is always held for a
+  person now. An older `permissions.toml` or stored policy that still sets `unlisted` keeps working,
+  with the key left out.
+- The folder tools `read_file`, `list_folder` and `write_file` are hidden: they are no longer offered
+  to agents or listed in Settings or the turn view. The HTTP routes stay for a later release.
+- When a runner stops answering mid-turn, the turn ends with a plain message: "The runner stopped
+  answering; send the turn again."
+
+### Fixed
+- `tools/bench` applies through `POST /api/v0/workspaces/{id}/apply`, the route that replaced the
+  removed per-turn apply.
+
 ## 0.6.4 (2026-11-23)
 
 ### Added

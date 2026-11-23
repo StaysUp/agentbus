@@ -708,13 +708,10 @@ var routes = slices.Concat([]route{
 		doc:     "Read a file outside the session copy, on control's machine. Only for a session whose folder is on control's own machine (agentbus up), or a call without a session; a session on another machine's runner gets 409, before any approval card.",
 		body:    ReadFileRequest{},
 		turn:    fileOp,
-		tools: []tool{
-			{name: "read_file",
-				fields:   []string{"path"},
-				required: []string{"path"},
-				doc:      "Read a file outside the session copy, on control's machine. A session on another machine is refused.",
-			},
-		},
+		// B8 folder tools (read_file, list_folder, write_file) are hidden: not
+		// registered as tools, so no agent can call them (his call, 2026-11-23).
+		// The HTTP route stays for 0.9, when the file tools come back. An agent
+		// reaches files through its CLI's own built-in tools meanwhile.
 		replies: []reply{ok(200, ReadFileResponse{}, "The file content."), badRequest, fail(404, "File not found."), elsewhere, storeFailed},
 		serve:   plain((*API).readFile)},
 	{method: "POST", path: "/api/v0/files/list", op: "listFolder",
@@ -723,13 +720,7 @@ var routes = slices.Concat([]route{
 		doc:     "List entries of a folder outside the session copy, on control's machine. Only for a session whose folder is on control's own machine (agentbus up), or a call without a session; a session on another machine's runner gets 409, before any approval card.",
 		body:    ListFolderRequest{},
 		turn:    fileOp,
-		tools: []tool{
-			{name: "list_folder",
-				fields:   []string{"path"},
-				required: []string{"path"},
-				doc:      "List a folder outside the session copy, on control's machine. A session on another machine is refused.",
-			},
-		},
+		// Hidden folder tool: not registered (see read_file above).
 		replies: []reply{ok(200, ListFolderResponse{}, "The folder entries."), badRequest, fail(404, "Folder not found."), elsewhere, storeFailed},
 		serve:   plain((*API).listFolder)},
 	{method: "POST", path: "/api/v0/files/write", op: "writeFile",
@@ -738,13 +729,7 @@ var routes = slices.Concat([]route{
 		doc:     "Write a file outside the session copy, on control's machine. Only for a session whose folder is on control's own machine (agentbus up), or a call without a session; a session on another machine's runner gets 409, before any approval card.",
 		body:    WriteFileRequest{},
 		turn:    fileOp,
-		tools: []tool{
-			{name: "write_file",
-				fields:   []string{"path", "content"},
-				required: []string{"path", "content"},
-				doc:      "Write a file outside the session copy, on control's machine. A session on another machine is refused.",
-			},
-		},
+		// Hidden folder tool: not registered (see read_file above).
 		replies: []reply{ok(200, WriteFileResponse{}, "File written."), badRequest, elsewhere, storeFailed},
 		serve:   plain((*API).writeFile)},
 

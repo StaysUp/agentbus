@@ -830,13 +830,12 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	hint = joinText(doc, hint, askText)
 	perm = withAPI(perm, e.cfg.APIDir != "")
 	// The gateway decides every shell command of this turn: forbid refused,
-	// ask held for a person, allow run, a command on no list held (or refused
-	// when the person set the unlisted default to refuse), and a command
-	// allowed once on an earlier card run this turn only. For claude and codex
-	// alike (gateway/guard.go, gateway/approvals.go); a harness whose format
-	// the guard does not read refuses a turn with forbid or ask
+	// ask held for a person, allow run, a command on no list held for a person,
+	// and a command allowed once on an earlier card run this turn only. For
+	// claude and codex alike (gateway/guard.go, gateway/approvals.go); a harness
+	// whose format the guard does not read refuses a turn with forbid or ask
 	// (Harness.Refuse). Set after withAPI, so allow carries the API client.
-	e.turnRules.set(t.session, t.id, perm.Allow, perm.Ask, perm.Forbid, t.allowOnce, perm.Unlisted == settings.UnlistedRefuse)
+	e.turnRules.set(t.session, t.id, perm.Allow, perm.Ask, perm.Forbid, t.allowOnce)
 	if hint != "" {
 		if why := h.OwnInstructions(cmd.Env, t.folder); why != "" {
 			hint, added = "", nil

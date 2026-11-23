@@ -265,6 +265,10 @@ func agySettings(t Turn) string {
 		allow = append(allow, "write_file("+f+")", "edit_file("+f+")")
 	}
 	for _, c := range t.Allow {
+		if c == "*" {
+			allow = append(allow, "command(*)") // every command; the gateway still gates forbid and ask
+			continue
+		}
 		if !strings.HasPrefix(c, "tool:") && !strings.HasPrefix(c, "api:") && ruleSafe(c) {
 			allow = append(allow, "command("+c+")")
 		}

@@ -94,15 +94,15 @@ func TestUpgradeNewFolder(t *testing.T) {
 		}
 	}
 	in, err := d.Info()
-	if err != nil || in.Imported.IsZero() || len(in.Files) != 0 || in.Version != 1 {
+	if err != nil || in.Imported.IsZero() || len(in.Files) != 0 || in.Version != 0 {
 		t.Fatalf("info %+v %v", in, err)
 	}
-	// A fresh install seeds the read-only starter allow list, so a first
-	// session is not a card for every command.
+	// A fresh install runs on the defaults, which allow every command and
+	// tool, so a first session is not a card for every command.
 	if p, _, err := d.Policy(); err != nil || *p.Limits.MaxDepth != DefaultMaxDepth {
 		t.Fatalf("policy %+v %v", p, err)
-	} else if !slices.Equal(p.Allow, StarterAllow) {
-		t.Fatalf("fresh install did not seed the starter allow list: %v", p.Allow)
+	} else if !slices.Equal(p.Allow, []string{"*", "tool:*"}) {
+		t.Fatalf("fresh install did not take the default allow list: %v", p.Allow)
 	}
 }
 
@@ -145,8 +145,8 @@ func TestUpgradeStarters(t *testing.T) {
 		if got := ids(d); got != "codex,agy" {
 			t.Fatalf("stopped %v: agents %q", stopped, got)
 		}
-		if in, _ := d.Info(); in.Version != 1 {
-			t.Fatalf("stopped %v: version %d, want 1 (the seeded starter allow list)", stopped, in.Version)
+		if in, _ := d.Info(); in.Version != 0 {
+			t.Fatalf("stopped %v: version %d, want 0 (a fresh install runs on the defaults, nothing seeded)", stopped, in.Version)
 		}
 		d.Close()
 		u.Starters = func() []AgentRow { t.Fatal("asked again"); return nil }
@@ -1074,6 +1074,11 @@ func TestUpgrade06SwitchesToRules(t *testing.T) {
 				if !slices.Contains(p.Forbid, "tool:*") || slices.Contains(p.Allow, "tool:*") {
 					t.Fatalf("tools off: allow %v, forbid %v", p.Allow, p.Forbid)
 				}
+				// Editing kept its own rule across the upgrade: tools off does
+				// not take edit away (the old default allowed it).
+				if !slices.Contains(p.Allow, "tool:edit") || slices.Contains(p.Forbid, "tool:edit") {
+					t.Fatalf("tools off should keep editing allowed: allow %v, forbid %v", p.Allow, p.Forbid)
+				}
 			},
 		},
 		{
@@ -1107,8 +1112,11 @@ func TestUpgrade06SwitchesToRules(t *testing.T) {
 				if !slices.Contains(rep.Removed, "edit") {
 					t.Fatalf("removed %v, want edit", rep.Removed)
 				}
-				if !slices.Contains(p.Allow, "tool:edit") || slices.Contains(p.Ask, "tool:edit") || slices.Contains(p.Forbid, "tool:edit") {
-					t.Fatalf("edit session: allow %v, ask %v, forbid %v", p.Allow, p.Ask, p.Forbid)
+				// edit session means editing is allowed. The default tool:*
+				// already allows it, so the migration leaves tool:edit off the
+				// ask and forbid lists rather than adding a redundant rule.
+				if slices.Contains(p.Ask, "tool:edit") || slices.Contains(p.Forbid, "tool:edit") {
+					t.Fatalf("edit session should leave editing allowed: allow %v, ask %v, forbid %v", p.Allow, p.Ask, p.Forbid)
 				}
 			},
 		},

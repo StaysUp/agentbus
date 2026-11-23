@@ -910,9 +910,9 @@ func start(c config) (*service, error) {
 		if c.mode == modeUp && relayBase != "" {
 			g.SetCredential(runnerJobs.TurnGate())
 		}
-		// The command rules of permissions.toml (allow, ask, forbid and the
-		// unlisted default), applied to each run turn's replies: refuse, hold
-		// for a person, or run.
+		// The command rules of permissions.toml (allow, ask, forbid), applied
+		// to each run turn's replies: refuse, hold for a person, or run. A
+		// command on none of the lists is held for a person.
 		if eng != nil {
 			g.SetGuard(eng)
 			// A held Ask reply (H1) learns its decision from control's record

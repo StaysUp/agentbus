@@ -33,7 +33,6 @@ func defaultPolicy() Policy {
 		Allow:     append([]string(nil), defaultAllow...),
 		Ask:       []string{},
 		Forbid:    append([]string(nil), defaultForbid...),
-		Unlisted:  UnlistedAsk,
 		Isolation: IsolationAuto,
 		HomeFiles: []string{},
 		AgentAPI:  AgentAPI{Apply: &off},
@@ -109,6 +108,11 @@ var upgradeSteps = []upgradeStep{
 	{Key: "sandbox.mode", Retired: true},
 	{Key: "network.contain", Retired: true},
 	{Key: "network.allow", Retired: true},
+	// 0.6.5: the unlisted setting is retired (his call, 2026-11-23). A command
+	// or tool on no list is always held for a person; the allow list, with "*"
+	// and "tool:*" by default, decides what runs without asking. A stored
+	// unlisted key is dropped on read, like the other retired keys.
+	{Key: "unlisted", Retired: true},
 }
 
 const stepSwitchesToRules = 14
@@ -202,7 +206,15 @@ func convert06Switches(o flat) (modified, removed []string) {
 			if hasTools && !toolsVal {
 				allow = removeRule(allow, "tool:*")
 			}
-			if hasEdit && editVal == "none" {
+			// Editing kept its own rule across the switch-to-rules change: the
+			// old default allowed it (tool:edit), so a legacy edit of "session"
+			// (the default) stays allowed even when tools are off. Without this
+			// an upgrade of {"agent_api":{"tools":false}} forbids tool:* and
+			// leaves no tool:edit, so editing would be lost (the default no
+			// longer carries tool:edit).
+			if editVal == "session" {
+				allow = addRule(allow, "tool:edit")
+			} else if editVal == "none" {
 				allow = removeRule(allow, "tool:edit")
 				ask := getRuleList(o, "ask", []string{})
 				ask = addRule(ask, "tool:edit")

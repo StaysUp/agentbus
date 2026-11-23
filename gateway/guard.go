@@ -42,8 +42,9 @@ import (
 // shell command the turn runs: forbid entries it may never run, ask entries
 // held until a person answers, allow entries that run without asking, the
 // command lines allowed once for this turn (an "allow once" on an earlier
-// card), and whether a command on none of the lists is refused rather than
-// held (the unlisted default: ask unless the person set refuse).
+// card), and the decision for a command on none of the lists (the unlisted
+// default: Ask for a live turn, so it is held for a person; Allow for a turn
+// that is not guarded).
 type Guard interface {
 	Forbid(session, turn string) []string
 	Ask(session, turn string) []string

@@ -64,8 +64,8 @@ func TestDecideToolDoesNotCrossMatch(t *testing.T) {
 }
 
 // B16: Rules in AgentBus's own names (tool:<name>, tool:*).
-// tool:* in allow enables the tool server; an unlisted tool is still asked.
-// tool:* in forbid forbids all tools. tool:subagent is forbidden.
+// tool:* in allow allows every tool (0.6.5); tool:* in forbid forbids all
+// tools, and a specific allow still wins over it. tool:subagent is forbidden.
 // tool:* in allow never allows a shell command.
 func TestToolRules(t *testing.T) {
 	rules := Rules{
@@ -73,13 +73,13 @@ func TestToolRules(t *testing.T) {
 		Forbid:   []string{"tool:subagent"},
 		Unlisted: Ask,
 	}
-	// tool:* is allowed (tool server enabled)
+	// tool:* is allowed
 	if d, _ := DecideTool(rules, "tool:*"); d != Allow {
 		t.Errorf("tool:*: %v, want Allow", d)
 	}
-	// an unlisted tool is asked by default
-	if d, _ := DecideTool(rules, "ask_agent"); d != Ask {
-		t.Errorf("ask_agent under tool:*: %v, want Ask", d)
+	// every other tool is allowed under tool:*
+	if d, _ := DecideTool(rules, "ask_agent"); d != Allow {
+		t.Errorf("ask_agent under tool:*: %v, want Allow", d)
 	}
 	// tool:edit is allowed
 	if d, _ := DecideTool(rules, "edit"); d != Allow {
@@ -94,6 +94,21 @@ func TestToolRules(t *testing.T) {
 	}
 	if d, rule := DecideTool(rules, "tool:subagent"); d != Refuse || rule != "tool:subagent" {
 		t.Errorf("tool:subagent: %v %q, want Refuse tool:subagent", d, rule)
+	}
+	// The tool:* catch-alls keep forbid > ask > allow: ask tool:* holds a tool
+	// that allow tool:* would otherwise run, and forbid tool:* refuses it.
+	askAll := Rules{Allow: []string{"tool:*"}, Ask: []string{"tool:*"}}
+	if d, rule := DecideTool(askAll, "ask_agent"); d != Ask || rule != "tool:*" {
+		t.Errorf("ask_agent under ask tool:* and allow tool:*: %v %q, want Ask tool:*", d, rule)
+	}
+	forbidOverAsk := Rules{Allow: []string{"tool:*"}, Ask: []string{"tool:*"}, Forbid: []string{"tool:*"}}
+	if d, rule := DecideTool(forbidOverAsk, "ask_agent"); d != Refuse || rule != "tool:*" {
+		t.Errorf("ask_agent under forbid+ask+allow tool:*: %v %q, want Refuse tool:*", d, rule)
+	}
+	// A specific allow still wins over ask tool:*.
+	askAllButOne := Rules{Allow: []string{"tool:*", "tool:ask_agent"}, Ask: []string{"tool:*"}}
+	if d, _ := DecideTool(askAllButOne, "ask_agent"); d != Allow {
+		t.Errorf("ask_agent with a specific allow under ask tool:*: %v, want Allow", d)
 	}
 	// forbid tool:* forbids unlisted tools, but explicit tool:edit in allow stays allowed
 	forbidAll := Rules{

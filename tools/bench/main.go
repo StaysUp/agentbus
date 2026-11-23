@@ -453,18 +453,26 @@ func (s *service) session(folder, tag string) (runResult, error) {
 			return r, fmt.Errorf("diff of %s: %d %v, no changed files", t.id, code, err)
 		}
 	}
+	if first.ws == "" || later.ws == "" {
+		return r, errors.New("the turn events carried no workspace id, so the apply cannot run")
+	}
+	// Apply is a workspace operation now (the per-turn apply route was removed):
+	// POST /api/v0/workspaces/{id}/apply with {turn} applies up to that turn.
+	// Both turns share the session's one workspace, so each apply writes just
+	// its own turn's changes — the first turn first, then the later one.
 	for _, t := range []struct {
-		id   string
+		ws   string
+		turn string
 		appl *time.Duration
-	}{{first.id, &r.ApplyFirst}, {later.id, &r.ApplyLater}} {
+	}{{first.ws, first.id, &r.ApplyFirst}, {later.ws, later.id, &r.ApplyLater}} {
 		var ap struct {
 			State string `json:"state"`
 		}
 		t0 := time.Now()
-		code, err := s.call("POST", "/api/v0/turns/"+t.id+"/apply", nil, &ap)
+		code, err := s.call("POST", "/api/v0/workspaces/"+t.ws+"/apply", map[string]any{"turn": t.turn}, &ap)
 		*t.appl = time.Since(t0)
 		if err != nil || code != 200 || ap.State != "applied" {
-			return r, fmt.Errorf("apply of %s: %d %v, state %q", t.id, code, err, ap.State)
+			return r, fmt.Errorf("apply of %s (workspace %s): %d %v, state %q", t.turn, t.ws, code, err, ap.State)
 		}
 	}
 	// The stand-in added bench-new.txt in the first turn and removed it in
@@ -477,6 +485,7 @@ func (s *service) session(folder, tag string) (runResult, error) {
 
 type turnDone struct {
 	id    string
+	ws    string // the workspace the turn ran in, for the apply
 	times turnTimes
 }
 
@@ -523,6 +532,10 @@ func (s *service) turn(body map[string]any, method *string) (turnDone, string, e
 	}
 	when := map[string]time.Time{}
 	files := 0
+	// The workspace the turn ran in (ws_ and 16 hex digits), for the apply
+	// (POST /api/v0/workspaces/{id}/apply). It is the job's spec.workspace,
+	// the same key apply scopes a copy's turns on (queue/apply.go jobWorkspace).
+	ws := string(job.Spec.Workspace)
 	for _, e := range list {
 		when[e.Kind] = e.Time
 		// What the turn changed is in the record (turn.changed); its count
@@ -554,7 +567,7 @@ func (s *service) turn(body map[string]any, method *string) (turnDone, string, e
 		t.Copy, startFrom = ready.Sub(when["attempt.started"]), ready
 	}
 	t.Start = when["turn.created"].Sub(startFrom)
-	return turnDone{id: st.Turn, times: t}, st.Session, nil
+	return turnDone{id: st.Turn, ws: ws, times: t}, st.Session, nil
 }
 
 // rss is the resident memory of the service's own processes, in KB: the one

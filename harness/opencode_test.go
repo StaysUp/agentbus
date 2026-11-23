@@ -108,6 +108,16 @@ func TestOpencodeTurnEnv(t *testing.T) {
 	}
 }
 
+// "*" in allow means every command: bash's catch-all flips from deny to allow,
+// so OpenCode runs any command (the gateway still gates forbid and ask).
+func TestOpencodeAllowEveryCommand(t *testing.T) {
+	perm := opencodePermission(Turn{Allow: []string{"*", "git status"}})
+	bash := perm["bash"].(orderedRules)
+	if bash["*"] != "allow" {
+		t.Errorf(`bash["*"] = %v, want allow (every command): %v`, bash["*"], bash)
+	}
+}
+
 func TestOpencodeArgs(t *testing.T) {
 	h, _ := Get("opencode")
 	if got, want := h.Args(Turn{Prompt: "hi", Model: "m"}), []string{"run", "--format", "json", "--agent", "agentbus", "--", "hi"}; !slices.Equal(got, want) {

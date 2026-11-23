@@ -41,7 +41,7 @@ func mcpEnvTools(t *testing.T, tools bool) *env {
 func mcpEnvGrants(t *testing.T, tools bool, grants map[string]run.Grant) *env {
 	t.Helper()
 	dir := t.TempDir()
-	p := settings.FirstInstallPolicy() // a fresh install's policy
+	p := settings.DefaultPolicy() // a fresh install's policy (allows every command and tool)
 	if tools {
 		p.Allow = append(p.Allow, "tool:*")
 		p.Forbid = slices.DeleteFunc(p.Forbid, func(s string) bool { return s == "tool:*" })

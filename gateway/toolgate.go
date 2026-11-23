@@ -38,9 +38,12 @@ func matchExactTool(rule, target, bare string) bool {
 }
 
 // DecideTool decides one tool call by the person's rules and the tool's name.
-// A forbid, ask or allow entry naming the tool wins; with no rule the call is
-// held for a person (Ask), never allowed silently. rule is the ask or forbid
-// entry that drove an Ask or a Refuse, "" when no rule matched.
+// A forbid, ask or allow entry naming the tool wins; then the tool:* catch-alls,
+// in the same precedence (forbid over ask over allow): tool:* in forbid refuses
+// every other tool, tool:* in ask holds every other tool, tool:* in allow allows
+// every other tool. With no rule the call is held for a person (Ask), never
+// allowed silently. rule is the ask or forbid entry that drove an Ask or a
+// Refuse, "" when no rule matched.
 func DecideTool(r Rules, name string) (Decision, string) {
 	bare := strings.TrimPrefix(name, "tool:")
 	target := "tool:" + bare
@@ -59,8 +62,16 @@ func DecideTool(r Rules, name string) (Decision, string) {
 			return Allow, ""
 		}
 	}
-	if target != "tool:*" && slices.Contains(r.Forbid, "tool:*") {
-		return Refuse, "tool:*"
+	if target != "tool:*" {
+		if slices.Contains(r.Forbid, "tool:*") {
+			return Refuse, "tool:*"
+		}
+		if slices.Contains(r.Ask, "tool:*") {
+			return Ask, "tool:*"
+		}
+		if slices.Contains(r.Allow, "tool:*") {
+			return Allow, ""
+		}
 	}
 	return Ask, ""
 }

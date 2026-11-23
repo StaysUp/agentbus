@@ -49,7 +49,7 @@ func TestReadPolicy(t *testing.T) {
 		*def.Limits.MaxCostUSDPerTree != 0 {
 		t.Fatalf("defaults: %+v", def.Limits)
 	}
-	if !slices.Equal(def.Allow, []string{"tool:*", "tool:edit"}) || !slices.Equal(def.Forbid, []string{"tool:subagent"}) {
+	if !slices.Equal(def.Allow, []string{"*", "tool:*"}) || !slices.Equal(def.Forbid, []string{"tool:subagent"}) {
 		t.Fatalf("default rules: allow %v forbid %v", def.Allow, def.Forbid)
 	}
 	// The starter parses and writes out every default.
@@ -105,8 +105,6 @@ func TestReadPolicy(t *testing.T) {
 		{"tab", "allow = [\"go\\ttest\"]\n", "control character"},
 		{"isolation unknown", "isolation = \"everywhere\"\n", `isolation must be`},
 		{"isolation not a string", "isolation = true\n", "wrong type"},
-		{"unlisted unknown", "unlisted = \"everywhere\"\n", `unlisted must be`},
-		{"unlisted not a string", "unlisted = true\n", "wrong type"},
 		{"limit negative", "[limits]\nmax_depth = -1\n", "max_depth must be 0 or more"},
 		{"limit not a number", "[limits]\nmax_jobs_per_turn = \"10\"\n", "wrong type"},
 		{"cost negative", "[limits]\nmax_cost_usd_per_tree = -0.5\n", "max_cost_usd_per_tree must be 0"},
@@ -239,6 +237,24 @@ func TestCommandsKeyRetired(t *testing.T) {
 	}
 }
 
+// unlisted is retired in 0.6.5: a permissions.toml or a PUT body that still
+// holds it reads as if it did not, whatever its value, and the policy written
+// back has no such key. A command or tool on no list is always held now.
+func TestUnlistedKeyRetired(t *testing.T) {
+	for _, src := range []string{"unlisted = \"ask\"\n", "unlisted = \"refuse\"\n", "unlisted = true\n"} {
+		p, err := ParsePolicy([]byte(src))
+		if err != nil {
+			t.Fatalf("%q: %v", src, err)
+		}
+		if strings.Contains(string(FormatPolicy(p)), "\nunlisted =") {
+			t.Errorf("%q: the policy written back holds unlisted", src)
+		}
+	}
+	if _, err := DecodePolicy([]byte(`{"unlisted":"refuse"}`)); err != nil {
+		t.Errorf("JSON with unlisted: %v", err)
+	}
+}
+
 // A vendor sign-in file is refused in home_files, in words that say why,
 // however it is written; the usual config list holds none.
 func TestHomeFilesSignInRefused(t *testing.T) {
@@ -307,6 +323,11 @@ func TestDecodePolicyLegacySwitchesConverted(t *testing.T) {
 	if slices.Contains(pol.Allow, "tool:*") {
 		t.Fatalf("tools false: tool:* should be removed from Allow, got %v", pol.Allow)
 	}
+	// Editing is not taken away with tools off (the old default allowed it, and
+	// no explicit edit was set), so it stays allowed and out of forbid.
+	if !slices.Contains(pol.Allow, "tool:edit") || slices.Contains(pol.Forbid, "tool:edit") {
+		t.Fatalf("tools false should keep editing allowed: allow %v, forbid %v", pol.Allow, pol.Forbid)
+	}
 
 	// PATCH edit: none
 	pEditNone, err := DecodePolicyChange([]byte(`{"edit":"none"}`))
@@ -366,6 +387,34 @@ func TestDecodePolicyLegacySwitchesConverted(t *testing.T) {
 	}
 	if !slices.Contains(pol.Ask, "deploy") {
 		t.Fatalf("mixed patch: want deploy in Ask, got %v", pol.Ask)
+	}
+}
+
+// A legacy tools-off PATCH preserves the existing edit permission: it keeps
+// editing allowed where it was (under tool:* or an explicit tool:edit), and
+// does not grant it where the allow list did not have it.
+func TestToolsOffPreservesEditPermission(t *testing.T) {
+	off := func(allow []string) Policy {
+		t.Helper()
+		base := DefaultPolicy()
+		base.Allow = allow
+		patch, err := DecodePolicyChange([]byte(`{"agent_api":{"tools":false}}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := patch.over(base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	// Default allow has tool:*, so editing was allowed and stays allowed.
+	if p := off([]string{"*", "tool:*"}); !slices.Contains(p.Allow, "tool:edit") || slices.Contains(p.Allow, "tool:*") {
+		t.Errorf("tools off under tool:*: editing should stay allowed, got allow %v", p.Allow)
+	}
+	// An empty allow did not allow editing, so tools off must not grant it.
+	if p := off([]string{}); slices.Contains(p.Allow, "tool:edit") {
+		t.Errorf("tools off with empty allow: editing must not be granted, got allow %v", p.Allow)
 	}
 }
 

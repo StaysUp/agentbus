@@ -272,18 +272,16 @@ type turnRules struct {
 }
 
 // turnRule is one live turn's command rules, for the gateway to decide every
-// shell command: allow (run), ask (held), forbid (refused), allowOnce (command
-// lines allowed once for this turn, from an earlier card), and refuseUnlisted
-// (a command on no list is refused, not held — the unlisted default is ask
-// unless the person set refuse). live marks the entry as a running turn, so the
-// gateway asks for a command on no list; a turn not in the map is not guarded.
+// shell command: allow (run), ask (held), forbid (refused) and allowOnce
+// (command lines allowed once for this turn, from an earlier card). live marks
+// the entry as a running turn, so the gateway holds a command on no list for a
+// person; a turn not in the map is not guarded.
 type turnRule struct {
-	allow          []string
-	ask            []string
-	forbid         []string
-	allowOnce      []string
-	refuseUnlisted bool
-	live           bool
+	allow     []string
+	ask       []string
+	forbid    []string
+	allowOnce []string
+	live      bool
 	// copyWrite is the writable set of a turn that runs in a session's copy: the
 	// copy directory first, then any extra writable paths, exactly what the
 	// per-command sandbox allows (run.go). The gateway refuses a file-edit tool
@@ -293,21 +291,20 @@ type turnRule struct {
 }
 
 // set records a live turn's rules. Every live turn gets an entry, even with
-// empty lists, so the gateway knows the turn is guarded and asks for a command
-// on no list.
-func (t *turnRules) set(session, turn string, allow, ask, forbid, allowOnce []string, refuseUnlisted bool) {
+// empty lists, so the gateway knows the turn is guarded and holds a command on
+// no list for a person.
+func (t *turnRules) set(session, turn string, allow, ask, forbid, allowOnce []string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.m == nil {
 		t.m = map[turnKey]turnRule{}
 	}
 	t.m[turnKey{session, turn}] = turnRule{
-		allow:          append([]string(nil), allow...),
-		ask:            append([]string(nil), ask...),
-		forbid:         append([]string(nil), forbid...),
-		allowOnce:      append([]string(nil), allowOnce...),
-		refuseUnlisted: refuseUnlisted,
-		live:           true,
+		allow:     append([]string(nil), allow...),
+		ask:       append([]string(nil), ask...),
+		forbid:    append([]string(nil), forbid...),
+		allowOnce: append([]string(nil), allowOnce...),
+		live:      true,
 	}
 }
 
@@ -370,15 +367,12 @@ func (e *Engine) CopyWrite(session, turn string) []string {
 }
 
 // Unlisted is the gateway's decision for a command of a live turn on none of
-// its lists: Ask (the default) or Refuse (when the person set it). A turn that
-// is not live is not guarded, so a command on no list runs (Allow).
+// its lists: Ask, so it is held for a person. A turn that is not live is not
+// guarded, so a command on no list runs (Allow).
 func (e *Engine) Unlisted(session, turn string) gateway.Decision {
 	r := e.turnRules.get(session, turn)
 	if !r.live {
 		return gateway.Allow
-	}
-	if r.refuseUnlisted {
-		return gateway.Refuse
 	}
 	return gateway.Ask
 }

@@ -119,10 +119,23 @@ func (a *API) resolveServed(def toolreg.Tool) (servedTool, bool) {
 		return servedTool{def: def, rt: nil, annot: annotations(false)}, true
 	}
 	rt := a.routeFor(def.Run.Method, def.Run.Path)
-	if rt == nil {
+	if rt == nil || !routeServableAsTool(rt) {
+		// The route is gone, or not servable as a tool (it ships no default
+		// tool and is not wrappable, like the hidden file routes). A stored
+		// custom tool on such a route is dropped on read, the same rule
+		// createTool applies to a new one, so a tool persisted before the
+		// route stopped being a tool cannot keep being served.
 		return servedTool{}, false
 	}
 	return servedTool{def: def, rt: rt, annot: annotations(rt.method == http.MethodGet)}, true
+}
+
+// routeServableAsTool says whether an api tool may run this route: it ships a
+// default tool, or it is wrappable. The one rule createTool and resolveServed
+// share, so a route that stops being a tool stops serving both new and stored
+// tools alike.
+func routeServableAsTool(rt *route) bool {
+	return len(rt.tools) > 0 || rt.wrappable
 }
 
 // servedByName is the tool named name, served or not listed to this caller.
@@ -229,10 +242,17 @@ func (a *API) listTools(w http.ResponseWriter, r *http.Request) {
 	if !noBody(w, r) {
 		return
 	}
-	defs := a.registry.List()
-	out := make([]ToolSummary, len(defs))
-	for i, d := range defs {
-		out[i] = ToolSummary{Name: d.Name, Description: d.Description, Where: d.Where}
+	out := []ToolSummary{}
+	for _, d := range a.registry.List() {
+		// A stored tool whose route is not servable as a tool (a hidden route,
+		// or one since removed) is not served (resolveServed) and not listed,
+		// so a folder tool persisted from before 0.6.5 does not show here.
+		if d.Run.Kind == toolreg.RunAPI {
+			if rt := a.routeFor(d.Run.Method, d.Run.Path); rt == nil || !routeServableAsTool(rt) {
+				continue
+			}
+		}
+		out = append(out, ToolSummary{Name: d.Name, Description: d.Description, Where: d.Where})
 	}
 	writeJSON(w, http.StatusOK, ToolList{out})
 }
@@ -267,7 +287,7 @@ func (a *API) createTool(w http.ResponseWriter, r *http.Request) {
 	// still runs with the caller's own token, so a custom tool can reach nothing
 	// the caller could not.
 	if t.Run.Kind == toolreg.RunAPI {
-		if rt := a.routeFor(t.Run.Method, t.Run.Path); rt == nil || (len(rt.tools) == 0 && !rt.wrappable) {
+		if rt := a.routeFor(t.Run.Method, t.Run.Path); rt == nil || !routeServableAsTool(rt) {
 			writeError(w, http.StatusBadRequest, toolRoute0)
 			return
 		}

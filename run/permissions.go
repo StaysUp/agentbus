@@ -7,10 +7,10 @@ package run
 //
 // What each list becomes, per harness (the flags are built in harness/):
 //
-//	allow/ask/forbid/unlisted  the gateway decides every shell command of the
+//	allow/ask/forbid  the gateway decides every shell command of the
 //	                  turn from these lists, for claude and codex alike
 //	                  (gateway/guard.go): forbid refused, ask held, allow run, a
-//	                  command on no list held (or refused when unlisted = refuse).
+//	                  command on no list held for a person.
 //	                  claude's own Bash check must not refuse one first, so an
 //	                  edit turn is given the whole Bash tool (--allowedTools Bash)
 //	                  and the gateway is the gate; agy, whose format the guard

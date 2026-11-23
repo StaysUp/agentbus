@@ -84,10 +84,10 @@ func TestFilesPolicy(t *testing.T) {
 	}
 	// A value out of range is Invalid, and writes nothing.
 	bad := DefaultPolicy()
-	bad.Unlisted = "everywhere"
+	bad.Isolation = "everywhere"
 	var inv *Invalid
-	if _, _, err := f.SetPolicy(bad, Any); !errors.As(err, &inv) || !strings.Contains(inv.Why, "unlisted must be") {
-		t.Fatalf("an unlisted value out of range: %v", err)
+	if _, _, err := f.SetPolicy(bad, Any); !errors.As(err, &inv) || !strings.Contains(inv.Why, "isolation must be") {
+		t.Fatalf("an isolation value out of range: %v", err)
 	}
 
 	// Broken: an Error naming the file and the line, with the version of
@@ -177,7 +177,7 @@ func TestFilesInit(t *testing.T) {
 	if err := f.Init(); err != nil {
 		t.Fatal(err)
 	}
-	for _, tc := range []struct{ file, text string }{{PolicyFile, string(FormatPolicy(FirstInstallPolicy()))}, {InstructionsFile, DefaultInstructions}} {
+	for _, tc := range []struct{ file, text string }{{PolicyFile, string(FormatPolicy(DefaultPolicy()))}, {InstructionsFile, DefaultInstructions}} {
 		path := filepath.Join(dir, tc.file)
 		info, err := os.Stat(path)
 		if err != nil || info.Mode().Perm() != 0o600 {
