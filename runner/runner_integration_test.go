@@ -507,10 +507,10 @@ func TestDiscardWithNoCopyIsRefused(t *testing.T) {
 	}
 }
 
-// Until the private git checkpoints land (W3 AREA 2), a copy workspace's discard
-// is refused with a plain "not yet" and touches nothing: the copy keeps the
-// turn's edits and the person's folder is untouched.
-func TestDiscardNotYetLeavesCopyAndFolderUntouched(t *testing.T) {
+// A discard resets the workspace's copy to base (nothing applied), through the
+// copy's private git repo, dropping the turn's unapplied changes, and never
+// touches the person's folder.
+func TestDiscardResetsTheCopyAndLeavesTheFolder(t *testing.T) {
 	src := t.TempDir()
 	write(t, filepath.Join(src, "a.txt"), "a1")
 	w := newWorld(t, 2)
@@ -531,9 +531,8 @@ func TestDiscardNotYetLeavesCopyAndFolderUntouched(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitFor(t, "the discard finished", func() bool { return w.job(t, dj.ID).Ended != nil })
-	// The copy backend has no restore yet, so the discard is refused, not applied.
-	if d := w.job(t, dj.ID); d.State == queue.Finished {
-		t.Fatalf("discard unexpectedly succeeded before the private git lands: %s", d.Result)
+	if d := w.job(t, dj.ID); d.State != queue.Finished {
+		t.Fatalf("discard %s: %s", d.State, d.Result)
 	}
 
 	rd := func(p string) string {
@@ -543,14 +542,14 @@ func TestDiscardNotYetLeavesCopyAndFolderUntouched(t *testing.T) {
 		}
 		return string(b)
 	}
-	// The copy still holds the turn's edits (nothing was reset), and the person's
-	// folder is untouched.
+	// The copy is reset to base: the turn's edits are gone.
 	copyDir := filepath.Join(w.r.cfg.Workdir, first.Session)
-	if a, b := rd(filepath.Join(copyDir, "a.txt")), rd(filepath.Join(copyDir, "b.txt")); a != "a2" || b != "b1" {
-		t.Fatalf("the refused discard changed the copy: a=%q b=%q", a, b)
+	if a, b := rd(filepath.Join(copyDir, "a.txt")), rd(filepath.Join(copyDir, "b.txt")); a != "a1" || b != "<missing>" {
+		t.Fatalf("copy not reset to base: a=%q b=%q", a, b)
 	}
+	// The person's folder is untouched.
 	if a, b := rd(filepath.Join(src, "a.txt")), rd(filepath.Join(src, "b.txt")); a != "a1" || b != "<missing>" {
-		t.Fatalf("the refused discard touched the person's folder: a=%q b=%q", a, b)
+		t.Fatalf("the discard touched the person's folder: a=%q b=%q", a, b)
 	}
 }
 

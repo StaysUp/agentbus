@@ -139,6 +139,64 @@ func TestCopyRoundTrip(t *testing.T) {
 	}
 }
 
+// RestoreTo resets the copy to a checkpoint through its private git repo: a
+// file changed since goes back, one added since is removed, one deleted since
+// returns, and a base file survives. The copy's own .git is not tracked or
+// removed, and an ignored folder (node_modules) is left alone. The person's
+// folder is never touched, and a reset to a checkpoint that is not there fails
+// cleanly without changing the copy.
+func TestCopyRestoreToViaGit(t *testing.T) {
+	src := t.TempDir()
+	fixture(t, src, map[string]string{
+		"a.txt": "a1", "keep.txt": "k", ".git/HEAD": "ref: refs/heads/main",
+		"node_modules/pkg/i.js": "n1",
+	})
+	b, s := open(t, Copy, src)
+
+	// Turn 1 -- the applied point.
+	fixture(t, s.Dir, map[string]string{"a.txt": "a2", "new/c.txt": "c1"})
+	if _, err := b.Checkpoint(s, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	// Unapplied turn 2 -- what Discard drops.
+	fixture(t, s.Dir, map[string]string{"a.txt": "a3", "extra.txt": "e1", "node_modules/pkg/i.js": "n2"})
+	os.Remove(filepath.Join(s.Dir, "new", "c.txt"))
+	os.Remove(filepath.Join(s.Dir, "keep.txt")) // a base file, deleted in t2
+	if _, err := b.Checkpoint(s, "t2"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := b.RestoreTo(s, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"a.txt":                 "a2",                   // reverted from a3
+		"new/c.txt":             "c1",                   // deleted in t2, back
+		"keep.txt":              "k",                    // a base file, back
+		"extra.txt":             "<missing>",            // added in t2, gone
+		".git/HEAD":             "ref: refs/heads/main", // the copy's git repo is kept
+		"node_modules/pkg/i.js": "n2",                   // ignored: a discard leaves it as it is
+	}
+	for p, w := range want {
+		if got := read(t, filepath.Join(s.Dir, filepath.FromSlash(p))); got != w {
+			t.Fatalf("copy %s = %q, want %q", p, got, w)
+		}
+	}
+	// The person's folder is untouched.
+	if read(t, filepath.Join(src, "a.txt")) != "a1" || read(t, filepath.Join(src, "new", "c.txt")) != "<missing>" {
+		t.Fatal("the discard reached the person's folder")
+	}
+
+	// A reset to a checkpoint that is not there fails cleanly: the copy stays at
+	// t1, nothing half reset.
+	if err := b.RestoreTo(s, "nosuch"); err == nil {
+		t.Fatal("restore to a missing checkpoint did not fail")
+	}
+	if read(t, filepath.Join(s.Dir, "a.txt")) != "a2" {
+		t.Fatal("a failed restore changed the copy")
+	}
+}
+
 // A checkpoint of a space nothing changed is the latest one: a turn's start
 // and an empty turn record nothing.
 func TestCheckpointUnchangedIsTheLatest(t *testing.T) {
@@ -397,6 +455,14 @@ func TestCheckpointRootIsTheSnapshotID(t *testing.T) {
 	fixture(t, a, map[string]string{"x.txt": "1", "d/y.txt": "2"})
 	ba, sa := open(t, Copy, a)
 	bb, sb := open(t, Copy, a)
+	if sa.hasShadow() {
+		// A content-addressed snapshot id is a property of a Merkle copy whose
+		// base hashes every file: a clone copy (preserved mtimes give two copies
+		// the same id) and a snapshot-built copy. A git-backed copy keeps its
+		// checkpoints as git commits with no snapshot id, the local fast path's
+		// empty Root, so this no longer applies to it.
+		t.Skip("a git-backed copy has no content-addressed snapshot id")
+	}
 	ca, err1 := ba.Checkpoint(sa, Base)
 	cb, err2 := bb.Checkpoint(sb, Base)
 	if err1 != nil || err2 != nil || len(ca.Root) != 64 || ca.Root != cb.Root {

@@ -167,6 +167,9 @@ func TestCheckpointWritesOnlyChangedTrees(t *testing.T) {
 			age(t, src)
 			b, s := open(t, name, src)
 			defer b.Close(s)
+			if s.hasShadow() {
+				t.Skip("a git-backed copy keeps no Merkle trees")
+			}
 			at := treeFiles(t, s)
 			if at < 20*6 {
 				t.Fatalf("the Base wrote %d trees", at)
@@ -203,6 +206,12 @@ func TestOldCheckpointMigrated(t *testing.T) {
 	fixture(t, src, map[string]string{"a.txt": "a1", "sub/b.txt": "b1"})
 	b, s := open(t, Copy, src)
 	defer b.Close(s)
+	if s.hasShadow() {
+		// Migration of the old on-disk checkpoint form is the Merkle store's,
+		// which a git-backed copy no longer keeps; a snapshot-built copy and
+		// overlay still exercise it.
+		t.Skip("a git-backed copy keeps no Merkle checkpoint files to migrate")
+	}
 	fixture(t, s.Dir, map[string]string{"a.txt": "a2", "sub/c.txt": "c"})
 	if _, err := b.Checkpoint(s, "t1"); err != nil {
 		t.Fatal(err)

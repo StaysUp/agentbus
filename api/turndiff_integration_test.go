@@ -287,15 +287,9 @@ func TestTurnDiffAndApply(t *testing.T) {
 // setting: the job's result holds what the backend's Diff of the turn's
 // start and end checkpoints answers, and GET /turns/{id}/diff shows the
 // same. In a folder used as it is (none), the folder changes in place and
-// the changes cannot be applied. None of it runs git: git here is a program
-// that only notes it was run, first on the runner's PATH.
+// the changes cannot be applied. (The copy's private git repo tracks the copy
+// for Discard; it never touches the person's folder -- TestDiscardLeavesThePersonsRepo.)
 func TestTurnChangesAreTheCheckpointDiff(t *testing.T) {
-	bin := t.TempDir()
-	mark := filepath.Join(t.TempDir(), "git-ran")
-	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\necho \"$@\" >> "+mark+"\nexit 1\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	for _, setting := range []string{settings.IsolationCopy, settings.IsolationOverlay, settings.IsolationNone} {
 		t.Run(setting, func(t *testing.T) {
 			// Where no overlay can be mounted, the setting falls back to
@@ -369,8 +363,5 @@ func TestTurnChangesAreTheCheckpointDiff(t *testing.T) {
 				t.Fatalf("the folder used as it is has a.txt %q, %v", b, err)
 			}
 		})
-	}
-	if b, err := os.ReadFile(mark); err == nil {
-		t.Fatalf("git ran: %s", b)
 	}
 }

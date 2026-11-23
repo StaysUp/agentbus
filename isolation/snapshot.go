@@ -330,6 +330,9 @@ func hexHash(s string) bool {
 // Base: every file a later checkpoint changed, as the Base held it and as
 // name holds it.
 func ChangesetOf(s *Space, name string) (workspace.Changeset, error) {
+	if s.hasShadow() {
+		return s.gitChangeset(context.Background(), name)
+	}
 	unlock := lock(s)
 	defer unlock()
 	list, err := headers(s)

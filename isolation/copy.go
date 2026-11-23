@@ -1,6 +1,7 @@
 package isolation
 
 import (
+	"context"
 	"errors"
 	"io"
 	"io/fs"
@@ -66,12 +67,16 @@ func (copyBackend) Open(r Request) (*Space, error) {
 			return nil, err
 		}
 	}
-	if err := s.save(); err != nil {
-		removeAll(s.Root)
-		removeState(s)
+	// The copy's private git repo is the one mechanism for its checkpoints: its
+	// first commit (Base) is the copy as opened. space.json is written only
+	// after the repo and its Base are made, so a copy with a record always has
+	// a working shadow, and a crash before then is remade from scratch.
+	if err := s.initShadow(ctxOf(r)); err != nil {
+		copyBackend{}.Close(s)
 		return nil, err
 	}
-	if _, err := checkpoint(s, Base, copyBackend{}); err != nil {
+	s.Shadow = true
+	if err := s.save(); err != nil {
 		copyBackend{}.Close(s)
 		return nil, err
 	}
@@ -79,6 +84,9 @@ func (copyBackend) Open(r Request) (*Space, error) {
 }
 
 func (b copyBackend) Checkpoint(s *Space, name string) (Checkpoint, error) {
+	if s.hasShadow() {
+		return s.gitCheckpoint(context.Background(), name)
+	}
 	return checkpoint(s, name, b)
 }
 
@@ -99,17 +107,38 @@ func checkFolder(r Request) error {
 	return nil
 }
 
-func (copyBackend) Checkpoints(s *Space) ([]Checkpoint, error) { return checkpoints(s) }
+func (copyBackend) Checkpoints(s *Space) ([]Checkpoint, error) {
+	if s.hasShadow() {
+		// The lock, as the other shadow reads take it, so a list never races a
+		// checkpoint or a restore moving the refs.
+		unlock := lock(s)
+		defer unlock()
+		return s.shadowCheckpoints(context.Background())
+	}
+	return checkpoints(s)
+}
 
 func (copyBackend) Diff(s *Space, from, to string) (workspace.Changes, error) {
+	if s.hasShadow() {
+		return s.gitDiff(context.Background(), from, to)
+	}
 	return diff(s, from, to)
 }
 
-// RestoreTo is not built for the copy backend: the private git checkpoints
-// (W3 AREA 2) replace the homemade restore, which could half-wipe the copy if a
-// later file failed to restore. Until that lands, a copy workspace's Discard is
-// refused with a plain message, as the other backends are.
-func (copyBackend) RestoreTo(s *Space, name string) error { return ErrNoRestore }
+// RestoreTo resets the copy's working files to checkpoint name through the
+// copy's private git repo (reset --hard, then clean, then the restrictive modes
+// git cannot store). Only the copy under s.Dir is touched, never the person's
+// real folder. A failed reset leaves the copy as it was; a clean that fails
+// after the reset (which the chmod-first guards against) could leave it part
+// way, so a failed RestoreTo keeps the dropped turns un-discarded and control
+// may retry. A copy without a shadow repo (a snapshot copy, or one made before
+// this) cannot be reset, and its Discard is refused.
+func (copyBackend) RestoreTo(s *Space, name string) error {
+	if s.hasShadow() {
+		return s.restoreShadow(context.Background(), name)
+	}
+	return ErrNoRestore
+}
 
 func (copyBackend) Close(s *Space) error {
 	if s.Root != filepath.Join(s.Workdir, s.ID) {
@@ -209,6 +238,9 @@ func openSnapshot(r Request) (*Space, error) {
 		copyBackend{}.Close(s)
 		return nil, err
 	}
+	// A copy built from a snapshot keeps its checkpoints the Merkle way and has
+	// no shadow repo: its runner is remote, where a discard is not offered yet,
+	// so RestoreTo refuses and nothing resets it.
 	return s, nil
 }
 

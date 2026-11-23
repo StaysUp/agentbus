@@ -178,13 +178,55 @@ func TestFastBackendsLeaveGitOut(t *testing.T) {
 	}
 }
 
-// No backend but git runs git, in a repo or not: here git is a program that
-// only notes it was run, first on the PATH.
+// A copy's private git repo, and its restore, never touch the person's own git
+// repo: no refs, worktrees, reflog or local config are added to it.
+func TestDiscardLeavesThePersonsRepo(t *testing.T) {
+	git, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("no git on PATH")
+	}
+	r := repo(t)
+	state := func() string {
+		run := func(args ...string) string {
+			out, _ := exec.Command(git, append([]string{"-C", r}, args...)...).Output()
+			return string(out)
+		}
+		return run("for-each-ref") + "\x00" + run("worktree", "list", "--porcelain") + "\x00" +
+			run("reflog", "--all") + "\x00" + run("config", "--local", "-l")
+	}
+	before := state()
+
+	b, s := open(t, Copy, r)
+	fixture(t, s.Dir, map[string]string{"top.txt": "changed", "extra.txt": "e"})
+	os.Remove(filepath.Join(s.Dir, "sub", "keep.txt"))
+	if _, err := b.Checkpoint(s, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.RestoreTo(s, Base); err != nil {
+		t.Fatal(err)
+	}
+	if err := Close(s); err != nil {
+		t.Fatal(err)
+	}
+
+	if after := state(); after != before {
+		t.Fatalf("the private git touched the person's repo:\nbefore:\n%q\nafter:\n%q", before, after)
+	}
+}
+
 func TestOnlyGitRunsGit(t *testing.T) {
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Skip("no git on PATH")
+	}
 	r := repo(t)
 	bin := t.TempDir()
 	mark := filepath.Join(t.TempDir(), "ran")
-	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\necho \"$@\" >> "+mark+"\nexit 1\n"), 0o755); err != nil {
+	// A git that records each call and then runs the real git: the copy's private
+	// repo works, and the record shows every git AgentBus ran. The copy backend's
+	// private checkpoints run git; none runs none.
+	if err := os.WriteFile(filepath.Join(bin, "git"),
+		[]byte("#!/bin/sh\necho \"$@\" >> "+mark+"\nexec "+realGit+" \"$@\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -212,7 +254,18 @@ func TestOnlyGitRunsGit(t *testing.T) {
 	for _, setting := range []string{"", Auto, Overlay, Copy, None} {
 		For(setting, r)
 	}
-	if b, err := os.ReadFile(mark); err == nil {
-		t.Fatalf("git ran: %s", b)
+	// Every git AgentBus ran was against a copy's OWN private repo (its --git-dir
+	// under .isolation), never a bare git on the person's folder.
+	b, _ := os.ReadFile(mark)
+	for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
+		if line == "" {
+			continue
+		}
+		if !strings.Contains(line, "--git-dir=") || !strings.Contains(line, ".isolation") {
+			t.Fatalf("git ran outside a private repo: %s", line)
+		}
+		if strings.Contains(line, r) {
+			t.Fatalf("git ran on the person's folder: %s", line)
+		}
 	}
 }

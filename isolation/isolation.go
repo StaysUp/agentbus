@@ -26,15 +26,17 @@
 // over the session's own read-only copy of the folder or snapshot
 // (overlay_linux.go). git makes a git worktree of the folder's repo at its
 // HEAD and carries the folder's uncommitted edits into it, on the local fast
-// path only; it is the only code that runs git (git.go). A fourth, none,
-// makes no copy: it checkpoints a folder used as it is for one job, so that
-// every job's changes come from checkpoints (none.go). All keep checkpoints
-// the same way: a Merkle tree of every file's size, modification time, mode
-// and hash, and a copy of each file a checkpoint saw change. Hashes are
-// taken only where a file's size or time says it changed (checkpoint), and
-// a copy made by clone records its base by size, time and mode only, as the
-// clone keeps each file's time: hashing every file of a 50,000-file folder
-// costs about 2 s on an APFS Mac (measured 2026-11-10), more than the clone.
+// path only (git.go). A fourth, none, makes no copy: it checkpoints a folder
+// used as it is for one job, so that every job's changes come from checkpoints
+// (none.go). A local copy keeps its checkpoints as commits in a private git
+// repo of its own, invisible to the person, which also computes its diffs and
+// resets it on a discard (gitshadow.go); the git worktree, overlay, none and a
+// snapshot-built copy keep checkpoints the Merkle way: a tree of every file's
+// size, modification time, mode and hash, and a copy of each file a checkpoint
+// saw change. Hashes are taken only where a file's size or time says it changed
+// (checkpoint), and a copy made by clone records its base by size, time and
+// mode only, as the clone keeps each file's time: hashing every file of a
+// 50,000-file folder costs about 2 s on an APFS Mac (measured 2026-11-10).
 // A checkpoint whose files are all hashed has a snapshot id (Checkpoint.Root):
 // the same on any machine for the same files. For picks a backend for the
 // isolation setting; auto is the fastest one this machine has. A VM backend
@@ -150,6 +152,13 @@ type Space struct {
 	// Method, for copy: clone (copy-on-write), reflink, or copy (a plain
 	// copy); overlay for overlay.
 	Method string `json:"method,omitempty"`
+	// Shadow, for a local copy: the copy carries a private git repo that
+	// records its checkpoints, computes its diffs and resets it on a discard
+	// (gitshadow.go). It is set once the repo and its Base commit are made,
+	// and space.json is written only then, so a copy with a record always has
+	// a working shadow. A copy built from a snapshot, or one made before this,
+	// has none: it keeps checkpoints the Merkle way and cannot be reset.
+	Shadow bool `json:"shadow,omitempty"`
 	// Fallback: why the backend asked for could not be used, and which one
 	// was, as For's choice fell back. Empty when it was used.
 	Fallback string `json:"fallback,omitempty"`
