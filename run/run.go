@@ -192,6 +192,13 @@ type Config struct {
 	// elsewhere, as on a runner that holds no secrets. Empty runs every turn
 	// in the service's own HOME, with the harness's own sign-in.
 	Homes string
+	// Personal is agentbus up, the personal runner: an ordinary turn runs in
+	// the person's real home (the service's own HOME), so their setup comes
+	// along, and only a turn that needs a clean home — a whole-process wall, a
+	// harness whose relay writes a home file, or a continuation of a session
+	// that already has one — gets one from Homes. A compute runner (Personal
+	// false) runs every turn in a clean per-session home.
+	Personal bool
 	// AgentName names a saved agent by its id in the transcript a turn on
 	// another harness gets; "" or a nil func names it by harness and model.
 	AgentName func(id string) string
@@ -742,9 +749,35 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	// Copy mode hides the CLI's real login file, which sits under the host HOME,
 	// not the empty session home (its login file does not exist).
 	hostEnv := append([]string(nil), cmd.Env...)
-	if e.cfg.Homes != "" {
+	// Personal (agentbus up): an ordinary turn runs in the person's real home,
+	// so their setup comes along. A clean home is still used when the turn needs
+	// one: a whole-process wall has no home of its own to wall (a legacy
+	// toggle), a harness whose relay writes a home file must not write it into
+	// the person's home, and a continuation of a session that already has a
+	// clean home keeps using it (a session created before this change). A
+	// compute runner (Personal false) always runs in a clean per-session home.
+	needsCleanHome := !e.cfg.Personal
+	// makeClean tells e.home to make the home when it is not there. A first turn
+	// always makes its own; a personal continuation that NEWLY needs a clean one
+	// (it ran in the real home, then a later turn turns on a wall or runs a
+	// harness whose relay writes a home file) must make it too — e.home leaves a
+	// continuation with no home in the real home, which would break the wall.
+	makeClean := t.continuity == ""
+	if e.cfg.Personal {
+		wholeWall := perm.Sandbox.Mode == settings.SandboxOn || needsWall(perm)
+		needNew := wholeWall || len(l.HomeFiles) > 0
+		existingClean := false
+		if e.cfg.Homes != "" && t.continuity != "" {
+			if _, err := os.Stat(filepath.Join(e.cfg.Homes, t.session)); err == nil {
+				existingClean = true
+			}
+		}
+		needsCleanHome = needNew || existingClean
+		makeClean = makeClean || needNew
+	}
+	if e.cfg.Homes != "" && needsCleanHome {
 		var made bool
-		cmd.Env, made, err = e.home(t.session, t.continuity == "", h, cmd.Env)
+		cmd.Env, made, err = e.home(t.session, makeClean, h, cmd.Env)
 		// A home made for a turn that does not start goes again: no session
 		// owns it.
 		defer func() {

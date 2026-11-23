@@ -715,13 +715,17 @@ func start(c config) (*service, error) {
 				return a.Name
 			}
 		}
-		// A runner that holds no secrets, agentbus up's built-in one too,
-		// runs each session in a home of its own: its agents' credentials
-		// come from control, so nothing of this user's home is needed. Every
-		// runner with an engine is such a runner now (noSecrets == hasEngine),
-		// so this block, inside hasEngine, always makes the homes dir.
+		// Runner profiles (his call, 2026-11-23). A compute runner (joined for
+		// work, holds no secrets) runs each session in a clean home of its own.
+		// agentbus up is the PERSONAL runner: its ordinary sessions run in the
+		// person's real home, so their setup (CLAUDE.md, hooks, plugins, aws,
+		// ssh, gitconfig) comes along (Config.Personal). The clean home dir is
+		// still made, because a personal turn that needs one — a whole-process
+		// wall (a legacy toggle), a harness whose relay writes a home file, or a
+		// continuation of a session that already has a clean home — still uses
+		// it (run/run.go decides per turn).
 		homes := filepath.Join(c.home, homesDir)
-		eng, err = engine.New(engine.Config{Store: st, BaseURL: baseURL, MaxRuns: c.maxRuns, ReplayBase: replayBase, AgentName: agentName, Homes: homes,
+		eng, err = engine.New(engine.Config{Store: st, BaseURL: baseURL, MaxRuns: c.maxRuns, ReplayBase: replayBase, AgentName: agentName, Homes: homes, Personal: c.mode == modeUp,
 			Settings: cfgStore, Protect: protect, APIDir: apiLink(c.home, c.self, svcLog), Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace, Logf: svcLog.Printf,
 			RunLog: func(session string, data []byte) {
 				// The session id is the service's own hex, so it is a plain

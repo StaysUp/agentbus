@@ -43,6 +43,12 @@ func runServiceVendors(t *testing.T, home string, getenv func(string) string, gr
 	// codex's config is read for the person's own developer_instructions;
 	// an empty one, so the machine's own config never changes a test.
 	t.Setenv("CODEX_HOME", t.TempDir())
+	// agentbus up (the personal runner) now runs sessions in the person's real
+	// home, so give the tests a clean temp HOME and clear CLAUDE_CONFIG_DIR
+	// (claude.OwnServers reads it before HOME): the machine's own ~/.claude
+	// (its MCP servers, config) must never change a test.
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
 	// The service's own environment must not send an agent elsewhere.
 	t.Setenv("ANTHROPIC_BASE_URL", "")
 	t.Setenv("OPENAI_BASE_URL", "")
@@ -780,10 +786,11 @@ func TestCodexOwnInstructionsLeaveOutTheHint(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("AGENTBUS_FAKE_EXIT", "0")
-	// Each session has a home of its own since 0.5.1, so the person's own
-	// codex config is not read there, and codex gets the hint as claude
-	// does.
-	for agent, want := range map[string]bool{"codex": true, "claude": true} {
+	// agentbus up (the personal runner) runs in the person's real home, so the
+	// person's own codex config IS read: its developer_instructions leaves the
+	// hint out (codex.OwnInstructions), as it would in their terminal. claude
+	// has no such config here, so it still gets the hint.
+	for agent, want := range map[string]bool{"codex": false, "claude": true} {
 		report := filepath.Join(t.TempDir(), "report")
 		t.Setenv("AGENTBUS_FAKE_OUT", report)
 		code, out, raw := postRun(t, svc, tok, map[string]any{"agent": agent, "folder": t.TempDir(), "prompt": "hi"})

@@ -5,8 +5,8 @@ package main
 // agentbus up uses the subscription connected on control, as a runner of a
 // server does (0.5.1): its agent gets the turn's token as a placeholder, its
 // gateway swaps in the connected sign-in in up's own process (the relay's
-// answer, with no hop over HTTP), and each session runs in a home of its
-// own. Every credential here is fake.
+// answer, with no hop over HTTP), and an ordinary session runs in the person's
+// real home (the personal runner). Every credential here is fake.
 
 import (
 	"io"
@@ -45,8 +45,8 @@ func TestUpUsesTheSubscriptionConnectedOnControl(t *testing.T) {
 		t.Fatalf("with nothing connected the vendor saw %v", got)
 	}
 
-	// Connected: the vendor gets the person's token, the agent a
-	// placeholder and a home of its own.
+	// Connected: the vendor gets the person's token, the agent a placeholder
+	// and the real home (the personal runner).
 	connectFake(t, home, "claude")
 	code, out, raw := postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": t.TempDir(), "prompt": "hi"})
 	if code != http.StatusAccepted {
@@ -61,8 +61,10 @@ func TestUpUsesTheSubscriptionConnectedOnControl(t *testing.T) {
 	if !strings.HasPrefix(env["CLAUDE_CODE_OAUTH_TOKEN"], jobs.StandInPrefix) {
 		t.Fatal("the agent's sign-in is not the placeholder")
 	}
-	if want := filepath.Join(home, homesDir, session); env["HOME"] != want {
-		t.Fatalf("the agent's HOME %q, want %q", env["HOME"], want)
+	// agentbus up is the personal runner: the session runs in the person's real
+	// home (the test's HOME), not a clean per-session home.
+	if want := os.Getenv("HOME"); env["HOME"] != want {
+		t.Fatalf("the agent's HOME %q, want the real home %q", env["HOME"], want)
 	}
 	b, _ := os.ReadFile(report)
 	if strings.Contains(string(b), fakeSubscription) {

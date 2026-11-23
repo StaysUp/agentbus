@@ -147,6 +147,48 @@ func TestClaudeCombineSettings(t *testing.T) {
 	}
 }
 
+// --settings pins the settings a real home's (or a cloned repo's) settings.json
+// could use to route a call off our gateway or override the sign-in: the
+// alternate-backend switches, custom headers, and apiKeyHelper (all measured
+// live on claude 2.1.330). This holds on every claude turn (personal runner).
+func TestClaudeSettingsPinBypassVectors(t *testing.T) {
+	// IPv6 loopback listener: its exact host:port must be exempted (a "::1"
+	// token does not match "[::1]:8787" in claude's NO_PROXY).
+	_, args := claude{}.Wire("http://[::1]:8787/s/s1/t/t_1")
+	env := settingsEnv(t, args)
+	// Every alternate-backend / header / socket switch is pinned empty.
+	for _, k := range claudePinnedEnv {
+		if v, ok := env[k]; !ok || v != "" {
+			t.Errorf("--settings env %s = %q (set %v), want pinned empty (settings.json could route off the gateway)", k, v, ok)
+		}
+	}
+	for _, k := range []string{"NO_PROXY", "no_proxy"} {
+		v := env[k]
+		for _, want := range []string{"127.0.0.1", "[::1]:8787"} {
+			if !strings.Contains(","+v+",", ","+want+",") {
+				t.Errorf("--settings env %s = %q, want it to exempt loopback %q", k, v, want)
+			}
+		}
+	}
+	// A NON-loopback gateway must NOT be exempted: a walled turn reaches it
+	// through the wall's proxy, so NO_PROXY leaves it subject to the proxy.
+	_, lan := claude{}.Wire("http://192.168.1.2:8787/s/s1/t/t_1")
+	if np := settingsEnv(t, lan)["NO_PROXY"]; strings.Contains(np, "192.168.1.2") {
+		t.Errorf("NO_PROXY %q exempts a non-loopback gateway; a walled turn needs it via the proxy", np)
+	}
+	var full map[string]any
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == "--settings" {
+			if err := json.Unmarshal([]byte(args[i+1]), &full); err != nil {
+				t.Fatalf("--settings not JSON: %v", err)
+			}
+		}
+	}
+	if full["apiKeyHelper"] != "" {
+		t.Errorf("--settings apiKeyHelper = %v, want \"\" (a settings.json helper would preempt the stand-in)", full["apiKeyHelper"])
+	}
+}
+
 // The Copy sandbox block fences writes to the copy plus the extra writable
 // paths, keeps reads open except the CLI's login file, and gives a broad
 // network allow-list (hosts plus the defaults) with localhost via

@@ -3,6 +3,8 @@ package harness
 import (
 	"bufio"
 	"encoding/json"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -263,6 +265,11 @@ func (claude) ResumeID(line []byte, current string) string {
 
 func (claude) Args(t Turn) []string {
 	// --output-format json prints one result object with the session_id.
+	// (No --setting-sources: it would also stop Claude Code reading the folder's
+	// CLAUDE.md / AGENTS.md, losing the project's instructions. A project
+	// settings.json cannot bypass the gateway anyway — claudeSettings pins every
+	// bypass key in --settings, which wins over the project and user settings.json
+	// alike by command-line precedence.)
 	a := []string{"-p", "--output-format", "json"}
 	// Copy mode: Claude Code's own per-command sandbox, as a second --settings
 	// the engine folds into the gateway one (CombineSettings). Writes fenced to
@@ -450,9 +457,73 @@ func claudeSandboxBlock(copyDir string, write, denyRead, hosts []string) map[str
 // service. json.Marshal sorts the keys, so the value is stable for the launch
 // golden.
 func claudeSettings(env map[string]string) []string {
-	b, _ := json.Marshal(map[string]any{"env": env})
+	// On the personal runner Claude Code reads the person's real ~/.claude
+	// settings AND the folder's project .claude/settings.json (a cloned repo's,
+	// untrusted), so --settings pins every setting that could route a call off
+	// our gateway or override the sign-in — and --settings (the command line)
+	// wins over both the project and the user settings.json by precedence, so no
+	// settings.json layer can undo a pin. This is the ONE place that list lives;
+	// a new bypass vector is added here (all measured live on claude 2.1.330,
+	// agy review 2026-11-23):
+	//   - CLAUDE_CODE_USE_BEDROCK/_VERTEX/_FOUNDRY send calls straight to that
+	//     backend, past ANTHROPIC_BASE_URL — zero requests reach our gateway.
+	//   - ANTHROPIC_CUSTOM_HEADERS overwrites the stand-in Authorization header.
+	// --settings "env" wins over settings.json and host env.
+	for _, k := range claudePinnedEnv {
+		if _, ok := env[k]; !ok {
+			env[k] = ""
+		}
+	}
+	// Pin NO_PROXY so a settings.json HTTP_PROXY / ALL_PROXY cannot route the
+	// gateway through a proxy (zero calls reached it otherwise; measured live,
+	// claude 2.1.330). HTTP_PROXY itself is NOT cleared — that would break an
+	// external proxy a wall sets — only the gateway is exempted, and only when it
+	// is a LOOPBACK gateway. A non-loopback gateway (a LAN or Tailscale -listen
+	// IP) must stay subject to the proxy: a walled/contained turn reaches it
+	// THROUGH the wall's proxy (netjail/Seatbelt block a direct non-loopback
+	// dial), so exempting it there would stop every model call. An IPv6 loopback
+	// listener ([::1]:port) needs its exact host:port added, because claude's
+	// NO_PROXY matches a ":"-bearing token only by equality and "::1" does not
+	// equal "[::1]:port".
+	noProxy := claudeNoProxy
+	if u, err := url.Parse(env["ANTHROPIC_BASE_URL"]); err == nil && u.Host != "" {
+		if h := u.Hostname(); h == "localhost" || (net.ParseIP(h) != nil && net.ParseIP(h).IsLoopback()) {
+			for _, x := range []string{u.Host, h} {
+				if x != "" && !strings.Contains(","+noProxy+",", ","+x+",") {
+					noProxy += "," + x
+				}
+			}
+		}
+	}
+	for _, k := range []string{"NO_PROXY", "no_proxy"} {
+		if _, ok := env[k]; !ok {
+			env[k] = noProxy
+		}
+	}
+	// apiKeyHelper (a top-level key) would otherwise run and send its key instead
+	// of the Connect stand-in, so the relay rejects the turn and the real key
+	// reaches the gateway. "" suppresses it.
+	b, _ := json.Marshal(map[string]any{"env": env, "apiKeyHelper": ""})
 	return []string{"--settings", string(b)}
 }
+
+// claudePinnedEnv are Claude Code env settings forced empty in every turn's
+// --settings so a person's real (or a cloned repo's) settings.json cannot route
+// a call off our gateway or overwrite the sign-in.
+var claudePinnedEnv = []string{
+	// Alternate model backends: each skips ANTHROPIC_BASE_URL and sends calls to
+	// that provider (all live-verified on claude 2.1.330).
+	"CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+	"CLAUDE_CODE_USE_MANTLE", "CLAUDE_CODE_USE_ANTHROPIC_AWS",
+	"CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD", "CLAUDE_CODE_USE_GATEWAY",
+	// ANTHROPIC_CUSTOM_HEADERS overwrites the stand-in Authorization header;
+	// ANTHROPIC_UNIX_SOCKET redirects every Anthropic request to a unix socket.
+	"ANTHROPIC_CUSTOM_HEADERS", "ANTHROPIC_UNIX_SOCKET",
+}
+
+// claudeNoProxy exempts the loopback gateway from any proxy a settings.json sets
+// (localhost and both IPv4 and IPv6 loopback), matching netjail's own NO_PROXY.
+const claudeNoProxy = "localhost,127.0.0.1,::1"
 
 // LoginFiles is Claude Code's own sign-in file, hidden in Copy mode so the turn
 // uses Connect's stand-in: $CLAUDE_CONFIG_DIR/.credentials.json, or
