@@ -357,7 +357,7 @@ func (g *Gateway) Settle(session, turn string, timeout time.Duration) bool {
 	// The deadline is set before the timer, so the timer never fires before
 	// it, and the timer broadcasts holding openMu, so its wakeup cannot fall
 	// between the deadline check and Wait (a lost wakeup left Settle, and
-	// with it session.closed and shutdown, waiting on a stalled sink for
+	// with it run.ended and shutdown, waiting on a stalled sink for
 	// ever).
 	deadline := time.Now().Add(timeout)
 	timer := time.AfterFunc(time.Until(deadline), func() {

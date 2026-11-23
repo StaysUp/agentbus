@@ -108,7 +108,7 @@ func runEvents(t *testing.T, st *store.Store, session string) []runEvent {
 
 func closedEvent(evs []runEvent) *runEvent {
 	for i := range evs {
-		if evs[i].Kind == "session.closed" {
+		if evs[i].Kind == "run.ended" {
 			return &evs[i]
 		}
 	}
@@ -118,14 +118,14 @@ func closedEvent(evs []runEvent) *runEvent {
 func waitClosed(t *testing.T, st *store.Store, session string) runEvent {
 	t.Helper()
 	var c *runEvent
-	waitFor(t, "session.closed", func() bool { c = closedEvent(runEvents(t, st, session)); return c != nil })
+	waitFor(t, "run.ended", func() bool { c = closedEvent(runEvents(t, st, session)); return c != nil })
 	return *c
 }
 
 // waitEnded waits for turn's job to end and answers it. A turn is done when
 // its job is: the job ends only once its outcome (turn.changed) is in the
 // record, so a test that waits here reads the whole turn at once. Its
-// session.closed, in the record a moment before, is not that point.
+// run.ended, in the record a moment before, is not that point.
 func waitEnded(t *testing.T, svc *service, turn string) queue.Job {
 	t.Helper()
 	var j queue.Job
@@ -197,9 +197,9 @@ func TestRunSetsBaseURLInChildOnlyAndClosesWithExitCode(t *testing.T) {
 	waitEnded(t, svc, turn)
 	c := waitClosed(t, svc.store, id)
 	if c.ExitCode == nil || *c.ExitCode != 3 || c.Hold == "" {
-		t.Fatalf("session.closed %+v, want exit_code 3 and a hold", c)
+		t.Fatalf("run.ended %+v, want exit_code 3 and a hold", c)
 	}
-	// Nothing writes session.registered any more: session.opened carries
+	// Nothing writes session.registered any more: run.started carries
 	// the agent and folder, and the run stores its turn's turn.started.
 	// The turn's job ended, so what it changed (turn.changed) is in too.
 	evs := runEvents(t, svc.store, id)
@@ -207,11 +207,11 @@ func TestRunSetsBaseURLInChildOnlyAndClosesWithExitCode(t *testing.T) {
 	for i, e := range evs {
 		kinds[i] = e.Kind
 	}
-	if got := strings.Join(kinds, " "); got != "session.created session.opened turn.started context.added session.closed turn.changed" || evs[1].Hold != c.Hold {
+	if got := strings.Join(kinds, " "); got != "session.created run.started turn.started context.added run.ended turn.changed" || evs[1].Hold != c.Hold {
 		t.Fatalf("events %s: %+v", got, evs)
 	}
 	if evs[1].Agent != "claude" || evs[1].Folder != folder {
-		t.Fatalf("session.opened %+v, want agent claude and the folder", evs[1])
+		t.Fatalf("run.started %+v, want agent claude and the folder", evs[1])
 	}
 
 	r := readReport(t, report)
@@ -253,11 +253,11 @@ func TestRunSetsBaseURLInChildOnlyAndClosesWithExitCode(t *testing.T) {
 }
 
 // An agent that exits with an error leaves its last stderr lines on its
-// session.closed, with state failed and its own error line as the error, and
+// run.ended, with state failed and its own error line as the error, and
 // the turn's error says that line: the record says why it failed, not only
 // that it did. One that exits 0 leaves none, with state finished. The fake
 // agent makes no model call, so the turn fails before any.
-func TestRunErrorTailOnSessionClosed(t *testing.T) {
+func TestRunErrorTailOnRunEnded(t *testing.T) {
 	home := t.TempDir()
 	svc := runService(t, home, nil, 0)
 	tok := readToken(t, home)
@@ -276,7 +276,7 @@ func TestRunErrorTailOnSessionClosed(t *testing.T) {
 			wantErr, wantState = "Error: Eligibility check failed: request failed with status 401", store.TurnFailed
 		}
 		if c.ErrorTail != want || c.State != wantState || c.Error != wantErr {
-			t.Fatalf("exit %s: session.closed %+v, want error_tail %q, state %s, error %q", exit, c, want, wantState, wantErr)
+			t.Fatalf("exit %s: run.ended %+v, want error_tail %q, state %s, error %q", exit, c, want, wantState, wantErr)
 		}
 		list, err := svc.store.Turns(store.TurnQuery{Session: id, Limit: 1})
 		if err != nil || len(list.Turns) != 1 {
@@ -314,7 +314,7 @@ func TestRunErrorIsTheErrorLineNotTheList(t *testing.T) {
 	id, _ := out["session"].(string)
 	c := waitClosed(t, svc.store, id)
 	if c.State != store.TurnFailed || c.Error != errLine || strings.Contains(c.ErrorTail, "invalid model") {
-		t.Fatalf("session.closed %+v", c)
+		t.Fatalf("run.ended %+v", c)
 	}
 	list, err := svc.store.Turns(store.TurnQuery{Session: id, Limit: 1})
 	if err != nil || len(list.Turns) != 1 || list.Turns[0].Error != errLine || list.Turns[0].ModelCalls != 0 {
@@ -337,7 +337,7 @@ func TestRunHoldsSessionOpenUntilChildExits(t *testing.T) {
 	id := out["session"].(string)
 	time.Sleep(150 * time.Millisecond)
 	if closedEvent(runEvents(t, svc.store, id)) != nil {
-		t.Fatal("session.closed while the child runs")
+		t.Fatal("run.ended while the child runs")
 	}
 	snap, err := svc.store.Snapshot()
 	if err != nil {
@@ -348,7 +348,7 @@ func TestRunHoldsSessionOpenUntilChildExits(t *testing.T) {
 	}
 	os.WriteFile(release, nil, 0o600)
 	if c := waitClosed(t, svc.store, id); c.ExitCode == nil || *c.ExitCode != 0 {
-		t.Fatalf("session.closed %+v, want exit_code 0", c)
+		t.Fatalf("run.ended %+v, want exit_code 0", c)
 	}
 }
 
@@ -606,7 +606,7 @@ func TestServiceStopEndsRuns(t *testing.T) {
 			defer st.Close()
 			c := closedEvent(runEvents(t, st, out["session"].(string)))
 			if c == nil || c.ExitCode == nil || *c.ExitCode != tc.want {
-				t.Fatalf("session.closed %+v, want exit_code %d", c, tc.want)
+				t.Fatalf("run.ended %+v, want exit_code %d", c, tc.want)
 			}
 		})
 	}

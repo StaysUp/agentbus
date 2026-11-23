@@ -79,7 +79,7 @@ func gatewayFor(gs []*gateway.Gateway, method, path string) *gateway.Gateway {
 }
 
 // SettleWait bounds how long control waits, before it stores a turn's
-// session.closed, for the relay to finish recording the turn's calls: their
+// run.ended, for the relay to finish recording the turn's calls: their
 // events are written off the reply's path, and can land after the runner
 // sent the end. Under the runner's own wait for the answer.
 const SettleWait = 5 * time.Second

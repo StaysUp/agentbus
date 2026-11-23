@@ -485,8 +485,8 @@ func runLaunchCase(t *testing.T, self string, c launchCase) string {
 				case event.TurnStarted:
 					fmt.Fprintf(&b, "turn.started agent=%q continuity=%q replay_from=%q model=%q context=%s\n",
 						ev.Harness, ev.Continuity, ev.ReplayFrom, ev.Model, strconv.Quote(ev.Context))
-				case event.SessionClosed:
-					fmt.Fprintf(&b, "session.closed resume_id=%q\n", ev.ResumeID)
+				case event.RunEnded:
+					fmt.Fprintf(&b, "run.ended resume_id=%q\n", ev.ResumeID)
 				case event.ContextAdded:
 					fmt.Fprintf(&b, "context.added")
 					for _, p := range ev.Added {

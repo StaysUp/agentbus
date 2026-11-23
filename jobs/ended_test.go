@@ -113,7 +113,7 @@ func TestRecordTurnEndsEveryStateIdempotent(t *testing.T) {
 }
 
 // turn.ended is keyed on the turn and carries no session, so a turn refused
-// before it ran (recorded only as turn.ended, with no session.opened or
+// before it ran (recorded only as turn.ended, with no run.started or
 // turn.started) does NOT make its job's session "known" and does NOT appear as
 // a phantom session in the snapshot (review P1, 2026-11-19).
 func TestTurnEndedDoesNotCreateSession(t *testing.T) {

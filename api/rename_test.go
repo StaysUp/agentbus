@@ -91,7 +91,7 @@ func TestRenameSession(t *testing.T) {
 // A title of exactly 120 characters is kept whole.
 func TestRenameSessionWithoutTitle(t *testing.T) {
 	e := newEnv(t)
-	if _, _, err := e.store.Append(event.Event{ID: "evt_o", Kind: event.SessionOpened, Time: time.Now().UTC(),
+	if _, _, err := e.store.Append(event.Event{ID: "evt_o", Kind: event.RunStarted, Time: time.Now().UTC(),
 		Session: "s2", Hold: "h1"}); err != nil {
 		t.Fatal(err)
 	}

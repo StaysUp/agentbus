@@ -25,13 +25,13 @@ func turnCost(session, turn string, cost float64, complete bool) event.Event {
 }
 
 func runOpened(session, turn, holdID string) event.Event {
-	e := inTurn(event.SessionOpened, session, turn)
+	e := inTurn(event.RunStarted, session, turn)
 	e.Hold, e.Harness, e.Folder = holdID, "claude", "/f"
 	return e
 }
 
 func runClosed(session, turn, holdID string, code *int) event.Event {
-	e := inTurn(event.SessionClosed, session, turn)
+	e := inTurn(event.RunEnded, session, turn)
 	e.Hold, e.ExitCode = holdID, code
 	return e
 }

@@ -412,7 +412,7 @@ func (s *Store) EnsureDirectWorkspace(session, folder, folderRef, machine string
 }
 
 // sessionFolder reads a session's folder and folder reference from its latest
-// agent event (turn.started, session.opened or session.registered).
+// agent event (turn.started, run.started or session.registered).
 func (s *Store) sessionFolder(session string) (folder, ref string, err error) {
 	var f, r sql.NullString
 	err = s.r.QueryRow(`SELECT json_extract(data, '$.folder'), json_extract(data, '$.folder_ref') FROM events

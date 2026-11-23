@@ -51,15 +51,15 @@ type Turn struct {
 	Outcome    string     `json:"outcome,omitempty" doc:"The outcome of the turn's latest turn.completed, when it has one."`
 	ExitCode   *int       `json:"exit_code,omitempty" doc:"A run's turn: its child's exit code, once it exited. Absent for a child the service closed on restart."`
 	Stopped    bool       `json:"stopped,omitempty" doc:"A run's turn: someone stopped it with POST /api/v0/turns/{id}/stop. Its state is then stopped."`
-	Unsettled  bool       `json:"unsettled,omitempty" doc:"A run's turn: its session.closed says the gateway could not confirm that every model call was stored, as for a turn the service closed on restart. Own replay does not continue from it."`
+	Unsettled  bool       `json:"unsettled,omitempty" doc:"A run's turn: its run.ended says the gateway could not confirm that every model call was stored, as for a turn the service closed on restart. Own replay does not continue from it."`
 	// Discarded marks a turn whose file changes a discard dropped (POST
 	// /api/v0/workspaces/{id}/discard), as Applied marks a turn an apply put in
 	// the folder: the conversation stays, but the turn's edits are gone from the
 	// copy. A turn id is in a workspace.discarded's dropped_turns for its own
 	// workspace.
 	Discarded bool   `json:"discarded,omitempty" doc:"The turn's file changes were dropped by a discard of its workspace. Its conversation stays in the record; its edits are gone from the copy, as after a discard."`
-	Error     string `json:"error,omitempty" doc:"A failed run's turn: why it failed, why its child could not start, from its session.closed; else the error of its last model call's reply, when the vendor or control's relay refused that call with a status other than 200; else its session.closed's error: the agent's own error line from its stderr (the first line that starts with error or fatal, else the first that is not a list item, at most 300 bytes), or its exit code. A failure its harness knows reads in plain words that say what to do, and the agent's line is then in error_tail. Its state is then failed. A turn from before 0.5.7 whose session.closed has no error takes the error line of error_tail."`
-	ErrorTail string `json:"error_tail,omitempty" doc:"A run's turn whose agent exited with an error: the last lines it wrote to stderr, from its session.closed (at most 20 lines and 2 KiB, anything shaped like a secret hidden)."`
+	Error     string `json:"error,omitempty" doc:"A failed run's turn: why it failed, why its child could not start, from its run.ended; else the error of its last model call's reply, when the vendor or control's relay refused that call with a status other than 200; else its run.ended's error: the agent's own error line from its stderr (the first line that starts with error or fatal, else the first that is not a list item, at most 300 bytes), or its exit code. A failure its harness knows reads in plain words that say what to do, and the agent's line is then in error_tail. Its state is then failed. A turn from before 0.5.7 whose run.ended has no error takes the error line of error_tail."`
+	ErrorTail string `json:"error_tail,omitempty" doc:"A run's turn whose agent exited with an error: the last lines it wrote to stderr, from its run.ended (at most 20 lines and 2 KiB, anything shaped like a secret hidden)."`
 	// Origin, from the turn's turn.started: who started it when the person
 	// did not.
 	Origin *event.Origin `json:"origin,omitempty" doc:"From the turn's turn.started: who started this turn when the person did not. kind result marks a delivered result: AgentBus started the turn, and its prompt is the result of work this session asked for. kind asked marks a turn another agent's turn asked for. Absent for a turn the person started."`
@@ -256,14 +256,14 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 			COALESCE(MAX(kind = 'model.responded' AND json_extract(data, '$.usage.output_incomplete') = 1), 0),
 			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.cost_usd') END), 0),
 			SUM(kind = 'model.responded' AND COALESCE(json_extract(data, '$.cost_complete'), 0) <> 1),
-			SUM(kind = 'session.opened'),
-			SUM(kind = 'session.closed'),
-			MAX(CASE WHEN kind = 'session.closed' THEN time END),
-			MAX(CASE WHEN kind = 'session.closed' THEN json_extract(data, '$.exit_code') END),
-			MAX(CASE WHEN kind = 'session.closed' THEN COALESCE(json_extract(data, '$.error'), '') END),
-			MAX(CASE WHEN kind = 'session.closed' THEN COALESCE(json_extract(data, '$.error_tail'), '') END),
-			COALESCE(MAX(CASE WHEN kind = 'session.closed' THEN json_extract(data, '$.stopped') END), 0),
-			COALESCE(MAX(CASE WHEN kind = 'session.closed' THEN json_extract(data, '$.unsettled') END), 0),
+			SUM(kind = 'run.started'),
+			SUM(kind = 'run.ended'),
+			MAX(CASE WHEN kind = 'run.ended' THEN time END),
+			MAX(CASE WHEN kind = 'run.ended' THEN json_extract(data, '$.exit_code') END),
+			MAX(CASE WHEN kind = 'run.ended' THEN COALESCE(json_extract(data, '$.error'), '') END),
+			MAX(CASE WHEN kind = 'run.ended' THEN COALESCE(json_extract(data, '$.error_tail'), '') END),
+			COALESCE(MAX(CASE WHEN kind = 'run.ended' THEN json_extract(data, '$.stopped') END), 0),
+			COALESCE(MAX(CASE WHEN kind = 'run.ended' THEN json_extract(data, '$.unsettled') END), 0),
 			MAX(CASE WHEN kind = 'turn.completed' THEN time END),
 			(SELECT json_extract(e2.data, '$.outcome') FROM events e2
 				WHERE e2.turn = events.turn AND e2.session = events.session AND e2.kind = 'turn.completed' AND e2.seq <= ?
@@ -329,7 +329,7 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 					t.Error = r
 				}
 				// A record from before 0.5.7 has no error on an exited
-				// child's session.closed: the error line of its tail.
+				// child's run.ended: the error line of its tail.
 				if t.Error == "" {
 					t.Error = event.ErrorLine(t.ErrorTail)
 				}

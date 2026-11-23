@@ -86,7 +86,7 @@ func TestToolsListedNotForTheMainToken(t *testing.T) {
 func TestToolsListedHarnessFromTheSession(t *testing.T) {
 	const tok = "turn-tok-next-0123456789abcdef"
 	e := mcpEnvGrants(t, true, map[string]run.Grant{tok: {Session: "s2", Turn: "t_9", Root: "s2"}})
-	if _, _, err := e.store.Append(event.Event{ID: "evt_open", Kind: event.SessionOpened, Time: time.Now().UTC(),
+	if _, _, err := e.store.Append(event.Event{ID: "evt_open", Kind: event.RunStarted, Time: time.Now().UTC(),
 		Session: "s2", Turn: "t_8", Hold: "h1", Harness: "codex"}); err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestToolsListedHarnessFromTheSession(t *testing.T) {
 	const tok2 = "turn-tok-next2-0123456789abcdef"
 	e2 := mcpEnvGrants(t, true, map[string]run.Grant{tok2: {Session: "s3", Turn: "t_2", Root: "s3"}})
 	for i, h := range []string{"codex", "claude"} {
-		if _, _, err := e2.store.Append(event.Event{ID: "evt_o" + h, Kind: event.SessionOpened, Time: time.Now().UTC(),
+		if _, _, err := e2.store.Append(event.Event{ID: "evt_o" + h, Kind: event.RunStarted, Time: time.Now().UTC(),
 			Session: "s3", Turn: "t_" + string(rune('a'+i)), Hold: "h" + h, Harness: h}); err != nil {
 			t.Fatal(err)
 		}

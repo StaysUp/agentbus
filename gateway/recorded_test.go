@@ -348,7 +348,7 @@ func ruleGateway(t *testing.T, how string, a adapter.Adapter, upstream string) (
 }
 
 // A refused call whose upload is still coming holds its turn open, as every
-// call does: the turn does not settle (and control stores no session.closed)
+// call does: the turn does not settle (and control stores no run.ended)
 // until its call.refused is recorded. Before, the body was closed first,
 // which waits for the upload, with nothing held: the turn settled with no
 // refusal in the record, and the refusal landed after.

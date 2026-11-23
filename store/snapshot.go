@@ -32,7 +32,7 @@ type Session struct {
 	Folder  string    `json:"folder" doc:"From the session's latest turn.started or run that names one. Empty for a session no run started."`
 	Started time.Time `json:"started"`
 	Last    time.Time `json:"last"`
-	Open    bool      `json:"open" doc:"A run's child for this session is running: a session.opened without its session.closed."`
+	Open    bool      `json:"open" doc:"A run's child for this session is running: a run.started without its run.ended."`
 	Turns   int       `json:"turns"`
 	// FirstAgent stays put when a later turn runs on another harness, so a
 	// list grouped by it keeps the session in one place.
@@ -52,7 +52,7 @@ type Session struct {
 	// session; CostUSD is then a lower bound.
 	CostUSD      float64 `json:"cost_usd" doc:"Sums cost_usd over the session's model.responded events."`
 	CostComplete bool    `json:"cost_complete" doc:"False when a reply lacks a complete cost, or a drop names the session."`
-	// Resumable: the session has a resume_id on a session.closed and is not
+	// Resumable: the session has a resume_id on a run.ended and is not
 	// open, so POST /api/v0/turns with this session can run its next turn.
 	Resumable bool `json:"resumable" doc:"POST /api/v0/turns accepts it as session."`
 	// Title is the title of the session's latest session.renamed, else the
@@ -327,7 +327,7 @@ func (s *Store) snapshotAt(hi int64) (Snapshot, error) {
 
 	// A session with a resume_id can be continued.
 	rows, err = s.r.Query(`SELECT DISTINCT session FROM events
-		WHERE seq <= ? AND kind = 'session.closed' AND json_extract(data, '$.resume_id') IS NOT NULL`, hi)
+		WHERE seq <= ? AND kind = 'run.ended' AND json_extract(data, '$.resume_id') IS NOT NULL`, hi)
 	if err != nil {
 		return snap, fmt.Errorf("store: snapshot: %w", err)
 	}

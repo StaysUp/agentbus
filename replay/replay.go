@@ -233,7 +233,7 @@ type Plan struct {
 // how. Base keeps nothing it reads.
 //
 // Base reads a turn as final. The service makes that true: a turn's
-// session.closed is stored only after the gateway has written all of the
+// run.ended is stored only after the gateway has written all of the
 // turn's calls (gateway.Settle), and a next turn starts only once the session
 // is closed.
 func (r *Replayer) Base(session string) (Plan, error) {
@@ -455,7 +455,7 @@ func (r *Replayer) history(session, turn string, keep bool) (*history, error) {
 	// stopped after that reply came and before its agent exited: the model
 	// had done the turn's work, and Claude Code's layout has no place for a
 	// note after a final reply (the note is an assistant message). The stop
-	// is still on the turn's session.closed and in the turn list.
+	// is still on the turn's run.ended and in the turn list.
 	if !e.finished {
 		end, err := r.src.TurnEnd(session, turn)
 		if err != nil {
@@ -608,7 +608,7 @@ func endUnfinished(f format, h *history, turn string, a store.Call, end store.Tu
 	return nil
 }
 
-// stoppedWords says the person stopped a turn (session.closed's stopped).
+// stoppedWords says the person stopped a turn (run.ended's stopped).
 const stoppedWords = "the person stopped this turn"
 
 // exitWords says how an agent's process ended, from its exit code.

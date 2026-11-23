@@ -250,7 +250,7 @@ func (a *API) turnRecord(w http.ResponseWriter, r *http.Request, id string) {
 	// The reads below settle state, files and the seq cursor. Take them in an
 	// order that cannot tear: sample seq first, so the cursor a client streams
 	// from never skips an event left out of the state here; then read the job
-	// before the turn, so once the job has ended (and its session.closed is
+	// before the turn, so once the job has ended (and its run.ended is
 	// stored) the turn read reflects it — the record can never read running
 	// with files already filled.
 	seq := a.cfg.Store.Last()

@@ -25,8 +25,8 @@ func resumableEnv(t *testing.T, wire run.Wire) *env {
 		now := time.Now().UTC()
 		seedWorkspace(t, st, "s1", folder, false)
 		for _, e := range []event.Event{
-			{ID: "evt_2", Kind: event.SessionOpened, Time: now, Session: "s1", Hold: "hold_1", Harness: "claude", Folder: folder},
-			{ID: "evt_3", Kind: event.SessionClosed, Time: now, Session: "s1", Hold: "hold_1", ExitCode: &code, ResumeID: "abc-1"},
+			{ID: "evt_2", Kind: event.RunStarted, Time: now, Session: "s1", Hold: "hold_1", Harness: "claude", Folder: folder},
+			{ID: "evt_3", Kind: event.RunEnded, Time: now, Session: "s1", Hold: "hold_1", ExitCode: &code, ResumeID: "abc-1"},
 		} {
 			if _, _, err := st.Append(e); err != nil {
 				t.Fatal(err)
@@ -125,7 +125,7 @@ func TestNextTurnQueuesWhileAnotherIsStarting(t *testing.T) {
 // process did not start (such as one stored just before a restart).
 func TestNextTurnRefusedWhileAChildIsOpen(t *testing.T) {
 	e := resumableEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) { return run.Launch{}, run.ErrNotFound })
-	if _, _, err := e.store.Append(event.Event{ID: "evt_4", Kind: event.SessionOpened, Time: time.Now().UTC(),
+	if _, _, err := e.store.Append(event.Event{ID: "evt_4", Kind: event.RunStarted, Time: time.Now().UTC(),
 		Session: "s1", Hold: "hold_2"}); err != nil {
 		t.Fatal(err)
 	}

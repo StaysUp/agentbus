@@ -17,17 +17,17 @@ func TestSessionAcrossAgents(t *testing.T) {
 	s := open(t, filepath.Join(t.TempDir(), "events.db"))
 	exit0 := 0
 	for _, e := range []event.Event{
-		{ID: "1", Kind: event.SessionOpened, Session: "s", Turn: "t1", Hold: "h1", Harness: "claude", AgentID: "a_haiku", Folder: "/w"},
+		{ID: "1", Kind: event.RunStarted, Session: "s", Turn: "t1", Hold: "h1", Harness: "claude", AgentID: "a_haiku", Folder: "/w"},
 		{ID: "2", Kind: event.TurnStarted, Session: "s", Turn: "t1", Text: "remember PELICAN", Harness: "claude", AgentID: "a_haiku", Folder: "/w"},
 		{ID: "3", Kind: event.ModelRequested, Session: "s", Turn: "t1", Exchange: "x-1", Model: "claude-haiku"},
 		{ID: "4", Kind: event.ModelResponded, Session: "s", Turn: "t1", Exchange: "x-1", Status: 200, Text: "OK"},
-		{ID: "5", Kind: event.SessionClosed, Session: "s", Turn: "t1", Hold: "h1", ExitCode: &exit0, ResumeID: "claude-sess"},
-		{ID: "6", Kind: event.SessionOpened, Session: "s", Turn: "t2", Hold: "h2", Harness: "codex", AgentID: "codex", Folder: "/w"},
+		{ID: "5", Kind: event.RunEnded, Session: "s", Turn: "t1", Hold: "h1", ExitCode: &exit0, ResumeID: "claude-sess"},
+		{ID: "6", Kind: event.RunStarted, Session: "s", Turn: "t2", Hold: "h2", Harness: "codex", AgentID: "codex", Folder: "/w"},
 		{ID: "7", Kind: event.TurnStarted, Session: "s", Turn: "t2", Text: "which word?", Context: "[earlier turns]\n\n",
 			Harness: "codex", AgentID: "codex", Folder: "/w", Continuity: "transcript"},
 		{ID: "8", Kind: event.ModelRequested, Session: "s", Turn: "t2", Exchange: "x-2", Model: "gpt"},
 		{ID: "9", Kind: event.ModelResponded, Session: "s", Turn: "t2", Exchange: "x-2", Status: 200, Text: "PELICAN"},
-		{ID: "10", Kind: event.SessionClosed, Session: "s", Turn: "t2", Hold: "h2", ExitCode: &exit0},
+		{ID: "10", Kind: event.RunEnded, Session: "s", Turn: "t2", Hold: "h2", ExitCode: &exit0},
 	} {
 		mustAppend(t, s, e)
 	}
@@ -77,7 +77,7 @@ func TestSessionAcrossAgents(t *testing.T) {
 	}
 	// A turn after the switch that gives a resume id makes it current.
 	mustAppend(t, s, event.Event{ID: "11", Kind: event.TurnStarted, Session: "s", Turn: "t3", Text: "more", Harness: "codex", Continuity: "replay"})
-	mustAppend(t, s, event.Event{ID: "12", Kind: event.SessionClosed, Session: "s", Turn: "t3", Hold: "h3", ExitCode: &exit0, ResumeID: "codex-thread"})
+	mustAppend(t, s, event.Event{ID: "12", Kind: event.RunEnded, Session: "s", Turn: "t3", Hold: "h3", ExitCode: &exit0, ResumeID: "codex-thread"})
 	if c, err := s.Continuation("s"); err != nil || c.ResumeID != "codex-thread" || c.ResumeStale {
 		t.Errorf("continuation %+v %v, want codex's id, current", c, err)
 	}

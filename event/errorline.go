@@ -42,7 +42,7 @@ func ErrorLine(text string) string {
 	return bound(first)
 }
 
-// ExitError is the error of a failed run's session.closed when its agent
+// ExitError is the error of a failed run's run.ended when its agent
 // wrote no line ErrorLine would take: its exit code alone.
 func ExitError(code int) string {
 	return fmt.Sprintf("the agent exited with code %d and wrote no reason to its error output", code)

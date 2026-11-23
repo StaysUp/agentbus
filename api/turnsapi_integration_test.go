@@ -89,7 +89,7 @@ func TestIdempotentStartStartsOneChild(t *testing.T) {
 		t.Fatalf("while running: %d %s", code, out)
 	}
 	os.WriteFile(filepath.Join(dir, "release"), nil, 0o600)
-	waitSessionClosed(t, e.store, got[0].Session)
+	waitRunEnded(t, e.store, got[0].Session)
 	// It reads running until its job has ended too.
 	waitEnded(t, e, got[0].Turn)
 	code, out := asTok(t, e, turnsTok, "GET", path, "")
@@ -126,7 +126,7 @@ func TestIdempotencyKey(t *testing.T) {
 		first.BaseURL != e.api.cfg.BaseURL+"/s/"+first.Session+"/t/"+first.Turn {
 		t.Fatalf("first: %d %s", resp.StatusCode, out)
 	}
-	waitSessionClosed(t, e.store, first.Session)
+	waitRunEnded(t, e.store, first.Session)
 	resp, out = do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(body)))
 	var s Started
 	_ = json.Unmarshal([]byte(out), &s)
@@ -188,7 +188,7 @@ func TestMaxRunsQueuesAndStopWithTurnsToken(t *testing.T) {
 	if code, out := asTok(t, e, turnsTok, "POST", "/api/v0/turns/"+first.Turn+"/stop", ""); code != 202 {
 		t.Fatalf("stop: %d %s", code, out)
 	}
-	waitSessionClosed(t, e.store, first.Session)
+	waitRunEnded(t, e.store, first.Session)
 	code, out = asTok(t, e, turnsTok, "POST", "/api/v0/turns", second)
 	var s Started
 	_ = json.Unmarshal([]byte(out), &s)

@@ -74,7 +74,7 @@ func TestForwardLeavesRelayedCallsToControl(t *testing.T) {
 		// A call the runner's gateway refused on its own, before the relay:
 		// no credential, sent nowhere, so control never saw it (relayOnly).
 		{ID: "gw-callrefused", Kind: event.CallRefused, Exchange: "x-run-2"},
-		{ID: "own-closed", Kind: event.SessionClosed},
+		{ID: "own-closed", Kind: event.RunEnded},
 	}
 	for _, e := range evs {
 		e.Time, e.Session, e.Turn = now, "s1", "t_1"

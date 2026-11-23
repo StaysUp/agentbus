@@ -887,7 +887,7 @@ func TestCustomEventRefusals(t *testing.T) {
 		want       string
 	}{
 		{"framework kind", ev("turn.completed", ""), 400, badKind},
-		{"session kind", ev("session.closed", ""), 400, badKind},
+		{"session kind", ev("run.ended", ""), 400, badKind},
 		{"empty program", ev("x..a", ""), 400, badKind},
 		{"no name", ev("x.review.", ""), 400, badKind},
 		{"upper case", ev("x.Review.finding", ""), 400, badKind},

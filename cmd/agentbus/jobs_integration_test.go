@@ -192,7 +192,7 @@ func TestUpRunsAJobOnItsOwnRunner(t *testing.T) {
 	for _, e := range runEvents(t, svc.store, res.Session) {
 		kinds = append(kinds, e.Kind)
 	}
-	if len(kinds) < 4 || kinds[len(kinds)-2] != "session.closed" || kinds[len(kinds)-1] != "turn.changed" {
+	if len(kinds) < 4 || kinds[len(kinds)-2] != "run.ended" || kinds[len(kinds)-1] != "turn.changed" {
 		t.Fatalf("record of the job's session: %v", kinds)
 	}
 	// The data folder holds the queue beside the record, and the runner's

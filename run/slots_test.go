@@ -53,7 +53,7 @@ func TestNewClosesStaleHolds(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	if _, _, err := st.Append(event.Event{ID: "o", Kind: event.SessionOpened, Session: "s", Hold: "h1", Time: time.Now()}); err != nil {
+	if _, _, err := st.Append(event.Event{ID: "o", Kind: event.RunStarted, Session: "s", Hold: "h1", Time: time.Now()}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := New(Config{Store: st}); err != nil {

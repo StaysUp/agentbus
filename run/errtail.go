@@ -1,6 +1,6 @@
 package run
 
-// An agent's last error lines, for its turn's session.closed when it exits
+// An agent's last error lines, for its turn's run.ended when it exits
 // with an error: what it wrote to stderr, bounded, with anything shaped
 // like a secret hidden. Without it the record says only "failed", and the
 // reason sits in the runner's own log (logs/runs/<session>.log).
@@ -19,7 +19,7 @@ const (
 	// ErrorTailKept is how much of a child's stderr is held while it runs:
 	// its last bytes.
 	ErrorTailKept = 8 << 10
-	// ErrorTailLines and ErrorTailMax bound what goes on session.closed.
+	// ErrorTailLines and ErrorTailMax bound what goes on run.ended.
 	ErrorTailLines = 20
 	ErrorTailMax   = 2 << 10
 )
@@ -38,7 +38,7 @@ var (
 	secretEnv = regexp.MustCompile(`(?i)(key|token|secret|password|passwd|auth|credential|cookie)`)
 )
 
-// errorTail is the last lines of b, a child's stderr, as session.closed
+// errorTail is the last lines of b, a child's stderr, as run.ended
 // holds them: at most ErrorTailLines lines and ErrorTailMax bytes, the end
 // kept, as errorLines cleans them. Empty when b holds no text.
 func errorTail(b []byte, cut bool, hide ...string) string {
@@ -59,7 +59,7 @@ func errorTail(b []byte, cut bool, hide ...string) string {
 }
 
 // errorReason is why a child that exited with code failed, for its
-// session.closed's error: the line of all of b, its stderr as kept, that
+// run.ended's error: the line of all of b, its stderr as kept, that
 // says so (event.ErrorLine), cleaned as errorLines cleans it, else its exit
 // code. Read from all that is kept, not from the tail: a harness can print
 // its error and then a list longer than the tail (agy 1.5.9 prints

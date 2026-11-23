@@ -860,7 +860,7 @@ func start(c config) (*service, error) {
 			}
 		}
 	}
-	// A turn's session.closed waits for the gateway to write all of the
+	// A turn's run.ended waits for the gateway to write all of the
 	// turn's calls: their events and replies are written off the reply's
 	// path and can land after the child has exited.
 	if eng != nil {
@@ -1086,9 +1086,9 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 				}
 				// Record that each ended turn job ended, AFTER the steps above
 				// that end jobs (Sweep expires leases; CloseLost writes a lost
-				// turn's session.closed) and BEFORE FireOns, so a turn ended
+				// turn's run.ended) and BEFORE FireOns, so a turn ended
 				// this tick has its turn.ended in the record — after its
-				// session.closed — and is delivered this tick. Idempotent by
+				// run.ended — and is delivered this tick. Idempotent by
 				// job id; the finisher also writes it on its own path.
 				if n, last, err := jobs.RecordTurnEnds(s.queue, s.store, endedCursor, time.Now().Add(-jobs.TurnEndedGrace), 200); err != nil {
 					svcLog.Printf("record.turn_ends_failed")
@@ -1430,7 +1430,7 @@ func subscriptionLogins(c config, subs *credentials.Subscriptions) *credentials.
 	return m
 }
 
-// settleTimeout bounds how long a turn's session.closed waits for the
+// settleTimeout bounds how long a turn's run.ended waits for the
 // gateway to write the turn's calls.
 const settleTimeout = 30 * time.Second
 
@@ -1649,7 +1649,7 @@ func (s *service) shutdown() {
 		s.stopRunner()
 		<-s.runnerDone
 	}
-	// Turns next: each stores its session.closed, and new ones are refused.
+	// Turns next: each stores its run.ended, and new ones are refused.
 	if s.eng != nil {
 		s.eng.StopAll()
 	}

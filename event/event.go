@@ -30,10 +30,10 @@ const (
 	// registered the session with its agent and folder. Nothing writes it now;
 	// old stores keep theirs and readers still accept them.
 	SessionRegistered Kind = "session.registered"
-	// SessionOpened and SessionClosed: a run's child started or exited. Hold
-	// names that child, so each opened has its own closed.
-	SessionOpened Kind = "session.opened"
-	SessionClosed Kind = "session.closed"
+	// RunStarted and RunEnded: a run's child started or exited. Hold
+	// names that child, so each run.started has its own run.ended.
+	RunStarted Kind = "run.started"
+	RunEnded   Kind = "run.ended"
 
 	// SchemaUnexpected: the vendor sent a shape the adapter does not know, such
 	// as a new block type or usage field. Unexpected says what, as names only.
@@ -213,8 +213,8 @@ var Kinds = []KindInfo{
 		"waiting on tools (stop reason tool_use), stopped (an error or a non-200 reply), or left behind (a later turn started).", []string{"outcome"}},
 	{EventsDropped, "Events were lost because the output did not keep up: dropped, and sessions or all_sessions.", []string{"dropped"}},
 	{SessionRegistered, "Older stores only: a launcher or a run registered the session, with agent and folder. Nothing writes it now.", []string{"session"}},
-	{SessionOpened, "A run's child is starting: hold names it; agent and folder say what and where; turn is the turn it runs. Stored just before the child starts.", []string{"session", "hold"}},
-	{SessionClosed, "A run's turn ended: its child exited, or could not start. hold, exit_code, resume_id, turn, state (finished, failed or stopped), error when it failed (the agent's own error line from its stderr, or plain words in its place for a failure its harness knows, else its exit code, or why it could not start), stopped when the person stopped the turn, error_tail (the last lines the agent wrote to stderr, when it exited with an error), and unsettled when the gateway could not confirm all of the turn's calls were stored. Also stored at start, with unsettled and state failed, for a child the previous service left running, and by control for a turn whose runner stopped answering.", []string{"session"}},
+	{RunStarted, "A run's child is starting: hold names it; agent and folder say what and where; turn is the turn it runs. Stored just before the child starts.", []string{"session", "hold"}},
+	{RunEnded, "A run's turn ended: its child exited, or could not start. hold, exit_code, resume_id, turn, state (finished, failed or stopped), error when it failed (the agent's own error line from its stderr, or plain words in its place for a failure its harness knows, else its exit code, or why it could not start), stopped when the person stopped the turn, error_tail (the last lines the agent wrote to stderr, when it exited with an error), and unsettled when the gateway could not confirm all of the turn's calls were stored. Also stored at start, with unsettled and state failed, for a child the previous service left running, and by control for a turn whose runner stopped answering.", []string{"session"}},
 	{SchemaUnexpected, "The vendor sent a shape the adapter does not know: unexpected, as names only. Show it as a quiet warning.", []string{"unexpected"}},
 	{ReplayFailed, "A model request of a replayed turn (a turn.started with replay_from) could not be given the earlier turn's history: error says why, such as the harness's request layout not being one the gateway knows. The gateway refused that request with 400 and did not send it to the vendor, so the turn fails rather than continue without its history. Show it as an error.", []string{"error"}},
 	{ToolRefused, "The gateway refused a tool call before the agent could run it, because its command matched a forbid entry of permissions.toml: tool_id, tool_name, tool_input, rule (the entry), and text (what the model is told in place of the output). The call's tool.requested is still stored, and its tool.completed carries that text. Show it as a warning.", []string{"tool_id", "rule"}},
@@ -321,7 +321,7 @@ type Event struct {
 	Client   string    `json:"client,omitempty" doc:"The harness, from its User-Agent, such as claude-cli/2.1.318."`
 	Turn     string    `json:"turn,omitempty" doc:"The turn this event belongs to. A turn started by POST /api/v0/turns: the id its reply named, on every event of it. Traffic no run started: a hash of the conversation up to the person's message."`
 
-	Model        string   `json:"model,omitempty" doc:"On model.requested: the model asked for. On a run's turn.started and session.opened: the model the run was started with, absent for the harness's default; a session's next turn that names no agent and no model keeps it."`
+	Model        string   `json:"model,omitempty" doc:"On model.requested: the model asked for. On a run's turn.started and run.started: the model the run was started with, absent for the harness's default; a session's next turn that names no agent and no model keeps it."`
 	Text         string   `json:"text,omitempty" doc:"The person's words on turn.started, the reply on model.responded, a program's text."`
 	ToolsOffered []string `json:"tools_offered,omitempty" doc:"On model.requested: the tools the harness offered."`
 	StopReason   string   `json:"stop_reason,omitempty" doc:"The vendor's own word for how the reply ended."`
@@ -400,16 +400,16 @@ type Event struct {
 	// report can list, so every session counts as affected. Sessions is empty.
 	AllSessions bool `json:"all_sessions,omitempty" doc:"On events.dropped: too many sessions to list, so every session counts as affected."`
 
-	// Harness and Folder, on turn.started and session.opened: the harness a
+	// Harness and Folder, on turn.started and run.started: the harness a
 	// run started, such as claude, and the folder it started in. On
 	// turn.started they are empty for a session no run started, such as one
 	// pointed at the gateway by hand. The JSON name stays agent, for the
 	// records already kept.
-	Harness string `json:"agent,omitempty" doc:"On turn.started and session.opened: the run's agent, such as claude. Empty on a turn of a session no run started."`
-	Folder  string `json:"folder,omitempty" doc:"On turn.started and session.opened: the folder the run's agent started in. Empty on a turn of a session no run started."`
+	Harness string `json:"agent,omitempty" doc:"On turn.started and run.started: the run's agent, such as claude. Empty on a turn of a session no run started."`
+	Folder  string `json:"folder,omitempty" doc:"On turn.started and run.started: the folder the run's agent started in. Empty on a turn of a session no run started."`
 	// FolderRef: the reference of the person's folder the session was
 	// started in, issued by its connector. The path stays there.
-	FolderRef string `json:"folder_ref,omitempty" doc:"On turn.started, session.opened and workspace.created: the reference (fld_ and 16 hex digits) of the folder, as its connector issued it. Absent for a session started before references, or in a folder no connector owns."`
+	FolderRef string `json:"folder_ref,omitempty" doc:"On turn.started, run.started and workspace.created: the reference (fld_ and 16 hex digits) of the folder, as its connector issued it. Absent for a session started before references, or in a folder no connector owns."`
 	// Workspace, Machine and Sandbox name a workspace and its mode.
 	// Workspace is on workspace.created, workspace.applied,
 	// workspace.discarded and every turn.started (the workspace the turn ran
@@ -420,31 +420,31 @@ type Event struct {
 	Workspace string `json:"workspace,omitempty" doc:"On workspace.created, workspace.applied, workspace.discarded and turn.started: the workspace the turn ran in (ws_ and 16 hex digits)."`
 	Machine   string `json:"machine,omitempty" doc:"On workspace.created: the connector that owns the workspace's folder (con_ and 16 hex digits). Absent when no connector owns the folder, as for hook or gateway traffic."`
 	Sandbox   *bool  `json:"sandbox,omitempty" doc:"On workspace.created: the workspace's mode, true for a copy behind a wall and false for the person's real folder. Always present on workspace.created; absent on every other kind."`
-	// AgentID, Access and KeyEnv, on a run's turn.started and session.opened:
+	// AgentID, Access and KeyEnv, on a run's turn.started and run.started:
 	// the saved agent the run started, how it reaches its model, and for an
 	// OpenRouter agent the name of the variable that holds its key. Never
 	// the key itself. A session's next turn reads them back.
-	AgentID string `json:"agent_id,omitempty" doc:"On a run's turn.started and session.opened: the saved agent the run started, as GET /api/v0/agents names it. Absent for a turn started by harness name alone."`
-	Access  string `json:"access,omitempty" doc:"On a run's turn.started and session.opened: how the agent reaches its model: subscription, openrouter or api. Absent means subscription."`
-	KeyEnv  string `json:"key_env,omitempty" doc:"On a run's turn.started and session.opened of an OpenRouter agent: the name of the environment variable that holds the key. Never the key."`
-	Hold    string `json:"hold,omitempty" doc:"On session.opened and session.closed: names one run's child."`
-	// ExitCode, only on session.closed from a run: the child's exit code, or
+	AgentID string `json:"agent_id,omitempty" doc:"On a run's turn.started and run.started: the saved agent the run started, as GET /api/v0/agents names it. Absent for a turn started by harness name alone."`
+	Access  string `json:"access,omitempty" doc:"On a run's turn.started and run.started: how the agent reaches its model: subscription, openrouter or api. Absent means subscription."`
+	KeyEnv  string `json:"key_env,omitempty" doc:"On a run's turn.started and run.started of an OpenRouter agent: the name of the environment variable that holds the key. Never the key."`
+	Hold    string `json:"hold,omitempty" doc:"On run.started and run.ended: names one run's child."`
+	// ExitCode, only on run.ended from a run: the child's exit code, or
 	// 128 plus the signal that ended it. Nil for a child closed by a service
 	// restart.
-	ExitCode *int `json:"exit_code,omitempty" doc:"On a run's session.closed: the child's exit code, or 128 plus its signal."`
-	// ResumeID, only on session.closed from a run or a turn: the vendor's own
+	ExitCode *int `json:"exit_code,omitempty" doc:"On a run's run.ended: the child's exit code, or 128 plus its signal."`
+	// ResumeID, only on run.ended from a run or a turn: the vendor's own
 	// session id, read from the child's stdout (claude's session_id, codex's
 	// thread_id). It is what the session's next turn continues.
-	ResumeID string `json:"resume_id,omitempty" doc:"On a run's session.closed: the vendor's own session id, which the next turn continues."`
+	ResumeID string `json:"resume_id,omitempty" doc:"On a run's run.ended: the vendor's own session id, which the next turn continues."`
 
-	// ErrorTail, only on a run's session.closed of a child that exited with
+	// ErrorTail, only on a run's run.ended of a child that exited with
 	// an error and was not stopped: the last lines it wrote to stderr,
 	// bounded, with anything shaped like a secret hidden.
-	ErrorTail string `json:"error_tail,omitempty" doc:"On a run's session.closed of an agent that exited with an error: the last lines it wrote to stderr, at most 20 lines and 2 KiB, with anything shaped like a token or key replaced by [hidden]. Absent when it exited 0, was stopped, or wrote nothing there, and when all it kept is one line whose start was cut (it may begin inside a secret)."`
-	// State, only on a run's session.closed: how the turn ended, as the
+	ErrorTail string `json:"error_tail,omitempty" doc:"On a run's run.ended of an agent that exited with an error: the last lines it wrote to stderr, at most 20 lines and 2 KiB, with anything shaped like a token or key replaced by [hidden]. Absent when it exited 0, was stopped, or wrote nothing there, and when all it kept is one line whose start was cut (it may begin inside a secret)."`
+	// State, only on a run's run.ended: how the turn ended, as the
 	// turn list says it (finished, failed or stopped). With failed, Error
 	// says why (ErrorLine).
-	State string `json:"state,omitempty" doc:"On a run's session.closed: how the turn ended: finished (its agent exited 0), stopped (someone stopped it) or failed (anything else). A failed turn's error says why: the agent's own error line from its stderr, else its exit code, or why it could not start. Absent on records from before 0.5.7."`
+	State string `json:"state,omitempty" doc:"On a run's run.ended: how the turn ended: finished (its agent exited 0), stopped (someone stopped it) or failed (anything else). A failed turn's error says why: the agent's own error line from its stderr, else its exit code, or why it could not start. Absent on records from before 0.5.7."`
 
 	// Changes, only on turn.changed: what the turn changed.
 	Changes *TurnChanges `json:"changes,omitempty" doc:"On turn.changed: every file the turn added, modified or deleted, with diffs."`
@@ -462,13 +462,13 @@ type Event struct {
 	// in place of the vendor's own resume. Empty when the turn continues by
 	// the vendor's resume, or is a session's first.
 	ReplayFrom string `json:"replay_from,omitempty" doc:"On turn.started: the session's earlier turn whose history the gateway replays in front of every model request of this turn, in place of the vendor's resume. Absent for a first turn and for a turn continued by the vendor's resume."`
-	// Unsettled, only on a run's session.closed: the gateway could not
+	// Unsettled, only on a run's run.ended: the gateway could not
 	// confirm that all of the turn's model calls were stored (it gave up
 	// waiting, or a queue was full), so the turn may be missing calls.
-	Unsettled bool `json:"unsettled,omitempty" doc:"On a run's session.closed: the gateway could not confirm that every model call of the turn was stored, so the turn may be missing calls. Own replay does not continue from such a turn."`
-	// Stopped, only on a run's session.closed: the person stopped the turn
+	Unsettled bool `json:"unsettled,omitempty" doc:"On a run's run.ended: the gateway could not confirm that every model call of the turn was stored, so the turn may be missing calls. Own replay does not continue from such a turn."`
+	// Stopped, only on a run's run.ended: the person stopped the turn
 	// (POST /api/v0/turns/{id}/stop) while its child ran.
-	Stopped bool `json:"stopped,omitempty" doc:"On a run's session.closed: the person stopped the turn with POST /api/v0/turns/{id}/stop while its child ran. The session's next turn continues after it, told that the person stopped it."`
+	Stopped bool `json:"stopped,omitempty" doc:"On a run's run.ended: the person stopped the turn with POST /api/v0/turns/{id}/stop while its child ran. The session's next turn continues after it, told that the person stopped it."`
 	// Continuity, only on a next turn's turn.started: how it reaches the
 	// session's earlier turns, "replay", "resume" or "transcript".
 	Continuity string `json:"continuity,omitempty" doc:"On the turn.started of a session's next turn started by POST /api/v0/turns: replay (own replay, see replay_from), resume (the vendor's resume_id) or transcript (the turn's harness differs from the previous turn's, so it got the earlier turns as plain text, see context). Absent on a first turn."`

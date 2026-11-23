@@ -224,7 +224,7 @@ func (s *Store) TurnCalls(session, turn string) ([]Call, error) {
 
 // TurnIncomplete reports whether the turn may be missing events: an
 // events.dropped naming its session (or every session) stored after its
-// turn.started, or its session.closed saying unsettled (the gateway could not
+// turn.started, or its run.ended saying unsettled (the gateway could not
 // confirm all of its calls were stored).
 func (s *Store) TurnIncomplete(session, turn string) (bool, error) {
 	var n int
@@ -233,7 +233,7 @@ func (s *Store) TurnIncomplete(session, turn string) (bool, error) {
 			AND d.seq > COALESCE((SELECT MIN(seq) FROM events WHERE session = ?1 AND turn = ?2 AND kind = 'turn.started'), 0)
 			AND (COALESCE(json_extract(d.data, '$.all_sessions'), 0) = 1
 				OR EXISTS(SELECT 1 FROM json_each(COALESCE(json_extract(d.data, '$.sessions'), '[]')) WHERE value = ?1)))
-		OR EXISTS(SELECT 1 FROM events WHERE session = ?1 AND turn = ?2 AND kind = 'session.closed'
+		OR EXISTS(SELECT 1 FROM events WHERE session = ?1 AND turn = ?2 AND kind = 'run.ended'
 			AND COALESCE(json_extract(data, '$.unsettled'), 0) = 1)`, session, turn).Scan(&n)
 	if err != nil {
 		return false, fmt.Errorf("store: read a turn: %w", err)
@@ -257,11 +257,11 @@ func (s *Store) UsedReplay(session string) (bool, error) {
 	return n > 0, nil
 }
 
-// TurnClosed reports whether the turn's run has a session.closed: its child
+// TurnClosed reports whether the turn's run has a run.ended: its child
 // exited.
 func (s *Store) TurnClosed(session, turn string) (bool, error) {
 	var n int
-	err := s.r.QueryRow(`SELECT EXISTS(SELECT 1 FROM events WHERE session = ? AND turn = ? AND kind = 'session.closed')`,
+	err := s.r.QueryRow(`SELECT EXISTS(SELECT 1 FROM events WHERE session = ? AND turn = ? AND kind = 'run.ended')`,
 		session, turn).Scan(&n)
 	if err != nil {
 		return false, fmt.Errorf("store: read a turn: %w", err)
@@ -269,29 +269,29 @@ func (s *Store) TurnClosed(session, turn string) (bool, error) {
 	return n > 0, nil
 }
 
-// TurnEnd is how a turn's run ended, from its session.closed, and whether any
+// TurnEnd is how a turn's run ended, from its run.ended, and whether any
 // of its model requests was refused by own replay (replay.failed).
 type TurnEnd struct {
-	Closed       bool   // the turn has a session.closed
+	Closed       bool   // the turn has a run.ended
 	ExitCode     *int   // its exit code; nil when the service closed it at start, or it never started
 	Error        string // why it could not start, such as "the agent could not be started"; never an exited agent's own error line (0.5.7), whose stderr stays out of any history
 	ReplayFailed bool   // a replay.failed of the turn is stored
-	Stopped      bool   // the person stopped the turn (session.closed's stopped)
+	Stopped      bool   // the person stopped the turn (run.ended's stopped)
 }
 
-// TurnEnd reads how the turn's run ended: its newest session.closed.
+// TurnEnd reads how the turn's run ended: its newest run.ended.
 func (s *Store) TurnEnd(session, turn string) (TurnEnd, error) {
 	var e TurnEnd
 	var closed, failed, stopped int
 	var code sql.NullInt64
 	var msg sql.NullString
 	err := s.r.QueryRow(`SELECT
-		EXISTS(SELECT 1 FROM events WHERE session = ?1 AND turn = ?2 AND kind = 'session.closed'),
-		(SELECT json_extract(data, '$.exit_code') FROM events WHERE session = ?1 AND turn = ?2 AND kind = 'session.closed' ORDER BY seq DESC LIMIT 1),
+		EXISTS(SELECT 1 FROM events WHERE session = ?1 AND turn = ?2 AND kind = 'run.ended'),
+		(SELECT json_extract(data, '$.exit_code') FROM events WHERE session = ?1 AND turn = ?2 AND kind = 'run.ended' ORDER BY seq DESC LIMIT 1),
 		(SELECT CASE WHEN json_extract(data, '$.exit_code') IS NULL THEN json_extract(data, '$.error') END
-			FROM events WHERE session = ?1 AND turn = ?2 AND kind = 'session.closed' ORDER BY seq DESC LIMIT 1),
+			FROM events WHERE session = ?1 AND turn = ?2 AND kind = 'run.ended' ORDER BY seq DESC LIMIT 1),
 		EXISTS(SELECT 1 FROM events WHERE session = ?1 AND turn = ?2 AND kind = 'replay.failed'),
-		COALESCE((SELECT json_extract(data, '$.stopped') FROM events WHERE session = ?1 AND turn = ?2 AND kind = 'session.closed' ORDER BY seq DESC LIMIT 1), 0)`,
+		COALESCE((SELECT json_extract(data, '$.stopped') FROM events WHERE session = ?1 AND turn = ?2 AND kind = 'run.ended' ORDER BY seq DESC LIMIT 1), 0)`,
 		session, turn).Scan(&closed, &code, &msg, &failed, &stopped)
 	if err != nil {
 		return e, fmt.Errorf("store: read a turn: %w", err)

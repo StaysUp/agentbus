@@ -54,8 +54,8 @@ func fill(t *testing.T, st *store.Store) {
 		// An older store's registration: nothing writes it now, readers
 		// still meet it.
 		{ID: "evt_0", Kind: event.SessionRegistered, Time: now, Session: "s1", Harness: "claude", Folder: "/Users/ana/app"},
-		{ID: "evt_4", Kind: event.SessionOpened, Time: now, Session: "s1", Hold: "hold_2", Harness: "claude", Folder: "/Users/ana/app"},
-		{ID: "evt_5", Kind: event.SessionClosed, Time: now, Session: "s1", Hold: "hold_2", ExitCode: &code, ResumeID: "abc-2"},
+		{ID: "evt_4", Kind: event.RunStarted, Time: now, Session: "s1", Hold: "hold_2", Harness: "claude", Folder: "/Users/ana/app"},
+		{ID: "evt_5", Kind: event.RunEnded, Time: now, Session: "s1", Hold: "hold_2", ExitCode: &code, ResumeID: "abc-2"},
 	} {
 		if _, _, err := st.Append(e); err != nil {
 			t.Fatal(err)
@@ -93,7 +93,7 @@ func TestOpenAPIResponsesMatch(t *testing.T) {
 		kinds[ev["kind"].(string)] = true
 	}
 	for _, k := range []string{"turn.started", "model.requested", "model.responded", "tool.requested", "tool.completed",
-		"turn.completed", "session.registered", "session.opened", "session.closed", "events.dropped", "schema.unexpected", "x.review.finding"} {
+		"turn.completed", "session.registered", "run.started", "run.ended", "events.dropped", "schema.unexpected", "x.review.finding"} {
 		if !kinds[k] {
 			t.Errorf("the page has no %s to check", k)
 		}

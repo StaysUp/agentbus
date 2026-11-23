@@ -18,7 +18,7 @@ import (
 
 // The write after the child started was ignored, so with a store that could
 // not write the API answered 202 and the child ran with no record.
-// session.opened is now written first: a failed write answers 500 and starts
+// run.started is now written first: a failed write answers 500 and starts
 // nothing.
 func TestRunRefusedWhenStoreCannotWrite(t *testing.T) {
 	mark := filepath.Join(t.TempDir(), "ran")
@@ -39,7 +39,7 @@ func TestRunRefusedWhenStoreCannotWrite(t *testing.T) {
 }
 
 // The API kept every session's agent and folder in memory forever. TurnSink
-// now reads them from the store's session.opened, so the API keeps nothing,
+// now reads them from the store's run.started, so the API keeps nothing,
 // and a turn.started that arrives after its child exited is still named.
 func TestTurnSinkNamesTurnsAfterChildExits(t *testing.T) {
 	e := resumableEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) {

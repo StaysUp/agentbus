@@ -106,7 +106,7 @@ func snapSession(t *testing.T, svc *service, tok, id string) map[string]any {
 func closedEvents(evs []runEvent) []runEvent {
 	var out []runEvent
 	for _, e := range evs {
-		if e.Kind == "session.closed" {
+		if e.Kind == "run.ended" {
 			out = append(out, e)
 		}
 	}
@@ -116,7 +116,7 @@ func closedEvents(evs []runEvent) []runEvent {
 func waitClosedN(t *testing.T, svc *service, session string, n int) []runEvent {
 	t.Helper()
 	var c []runEvent
-	waitFor(t, "session.closed", func() bool { c = closedEvents(runEvents(t, svc.store, session)); return len(c) >= n })
+	waitFor(t, "run.ended", func() bool { c = closedEvents(runEvents(t, svc.store, session)); return len(c) >= n })
 	return c
 }
 
@@ -296,7 +296,7 @@ func TestRunWithSessionRunsNextTurnInSameSession(t *testing.T) {
 		base = out["base_url"].(string) // this turn's own
 		closed := waitClosedN(t, svc, id, 2)
 		if c := closed[1]; c.ExitCode == nil || *c.ExitCode != 4 || c.ResumeID != idB || c.Hold == "" || c.Hold == closed[0].Hold {
-			t.Fatalf("%s: second session.closed %+v, want exit 4, resume_id %s, a new hold", name, c, idB)
+			t.Fatalf("%s: second run.ended %+v, want exit 4, resume_id %s, a new hold", name, c, idB)
 		}
 		r := readReport(t, report)
 		want := strings.ReplaceAll(strings.ReplaceAll(tc.want, "BASE", base), "ID", tc.firstID)
@@ -319,8 +319,8 @@ func TestRunWithSessionRunsNextTurnInSameSession(t *testing.T) {
 		for _, e := range runEvents(t, svc.store, id) {
 			kinds = append(kinds, e.Kind)
 		}
-		if got := strings.Join(kinds, " "); got != "session.created session.opened turn.started context.added session.closed turn.changed "+
-			"session.opened turn.started context.added session.closed turn.changed" {
+		if got := strings.Join(kinds, " "); got != "session.created run.started turn.started context.added run.ended turn.changed "+
+			"run.started turn.started context.added run.ended turn.changed" {
 			t.Fatalf("%s: events %s", name, got)
 		}
 		t.Setenv("AGENTBUS_FAKE_OUT", "")
@@ -389,7 +389,7 @@ func TestRunWithSessionRefusals(t *testing.T) {
 	if code, _, raw := postMessage(t, svc, tok, id, map[string]any{"prompt": "two"}); code != http.StatusAccepted {
 		t.Fatalf("second turn: %d %s", code, raw)
 	}
-	waitFor(t, "the turn's session.opened", func() bool { return snapSession(t, svc, tok, id)["open"].(bool) })
+	waitFor(t, "the turn's run.started", func() bool { return snapSession(t, svc, tok, id)["open"].(bool) })
 	if snapSession(t, svc, tok, id)["resumable"].(bool) {
 		t.Error("resumable while a turn runs")
 	}
@@ -540,14 +540,14 @@ func TestRunWithSessionOneTurnAtATime(t *testing.T) {
 	if codes[0] != 202 || codes[1] != 202 || queued[0] == queued[1] {
 		t.Fatalf("codes %v queued %v, want both 202 and one queued", codes, queued)
 	}
-	// One turn runs at a time: only one session.opened is open now.
+	// One turn runs at a time: only one run.started is open now.
 	if n := len(closedEvents(runEvents(t, svc.store, id))); n != 1 {
-		t.Fatalf("%d session.closed while the second runs, want 1", n)
+		t.Fatalf("%d run.ended while the second runs, want 1", n)
 	}
 	os.WriteFile(release, nil, 0o600)
 	waitClosedN(t, svc, id, 3)
 	time.Sleep(50 * time.Millisecond)
 	if n := len(closedEvents(runEvents(t, svc.store, id))); n != 3 {
-		t.Fatalf("%d session.closed, want 3", n)
+		t.Fatalf("%d run.ended, want 3", n)
 	}
 }

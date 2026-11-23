@@ -24,7 +24,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 --- turn t_2 harness="" access="" model=""
 arg "--settings"
 arg "{\"apiKeyHelper\":\"\",\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_2\",\"ANTHROPIC_CUSTOM_HEADERS\":\"\",\"ANTHROPIC_UNIX_SOCKET\":\"\",\"CLAUDE_CODE_USE_ANTHROPIC_AWS\":\"\",\"CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD\":\"\",\"CLAUDE_CODE_USE_BEDROCK\":\"\",\"CLAUDE_CODE_USE_FOUNDRY\":\"\",\"CLAUDE_CODE_USE_GATEWAY\":\"\",\"CLAUDE_CODE_USE_MANTLE\":\"\",\"CLAUDE_CODE_USE_VERTEX\":\"\",\"NO_PROXY\":\"localhost,127.0.0.1,::1,127.0.0.1:8787\",\"no_proxy\":\"localhost,127.0.0.1,::1,127.0.0.1:8787\"}}"
@@ -52,7 +52,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="resume" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-1"
+run.ended resume_id="sid-1"
 === claude edit none
 --- turn t_1 harness="claude" access="" model=""
 arg "--settings"
@@ -79,7 +79,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 === claude lists, model, own instructions
 --- turn t_1 harness="claude" access="" model="opus"
 arg "--settings"
@@ -106,7 +106,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="opus" context=""
 context.added instructions=15
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 === claude empty instructions
 --- turn t_1 harness="claude" access="" model=""
 arg "--settings"
@@ -131,7 +131,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 === claude openrouter
 --- turn t_1 harness="claude" access="openrouter" model="deepseek/deepseek-v4.1-flash"
 arg "--settings"
@@ -163,7 +163,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="deepseek/deepseek-v4.1-flash" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 === claude openrouter without a model
 --- turn t_1 harness="claude" access="openrouter" model=""
 arg "--settings"
@@ -193,7 +193,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 === claude openrouter, key not set
 --- turn t_1 harness="claude" access="openrouter" model=""
 refused 400 this agent reads its OpenRouter key from OPENROUTER_API_KEY, which is not set where the turn runs; set it and restart agentbus
@@ -231,7 +231,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 log run.edit session=s1 turn=t_1 left_out=folder_shape
 === claude folder holds the data folder
 --- turn t_1 harness="claude" access="" model=""
@@ -259,7 +259,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 === claude codex config sets developer_instructions
 --- turn t_1 harness="claude" access="" model=""
 arg "--settings"
@@ -286,7 +286,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 === claude replay
 --- turn t_1 harness="claude" access="" model=""
 arg "--settings"
@@ -313,7 +313,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 --- turn t_2 harness="" access="" model=""
 arg "--settings"
 arg "{\"apiKeyHelper\":\"\",\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_2\",\"ANTHROPIC_CUSTOM_HEADERS\":\"\",\"ANTHROPIC_UNIX_SOCKET\":\"\",\"CLAUDE_CODE_USE_ANTHROPIC_AWS\":\"\",\"CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD\":\"\",\"CLAUDE_CODE_USE_BEDROCK\":\"\",\"CLAUDE_CODE_USE_FOUNDRY\":\"\",\"CLAUDE_CODE_USE_GATEWAY\":\"\",\"CLAUDE_CODE_USE_MANTLE\":\"\",\"CLAUDE_CODE_USE_VERTEX\":\"\",\"NO_PROXY\":\"localhost,127.0.0.1,::1,127.0.0.1:8787\",\"no_proxy\":\"localhost,127.0.0.1,::1,127.0.0.1:8787\"}}"
@@ -339,7 +339,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="replay" replay_from="t_1" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-1"
+run.ended resume_id="sid-1"
 replay_base claude
 === claude openrouter replay
 --- turn t_1 harness="claude" access="openrouter" model="m/x"
@@ -372,7 +372,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="m/x" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 --- turn t_2 harness="" access="" model=""
 arg "--settings"
 arg "{\"apiKeyHelper\":\"\",\"env\":{\"ANTHROPIC_API_KEY\":\"\",\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_2/openrouter\",\"ANTHROPIC_CUSTOM_HEADERS\":\"\",\"ANTHROPIC_DEFAULT_FABLE_MODEL\":\"m/x\",\"ANTHROPIC_DEFAULT_HAIKU_MODEL\":\"m/x\",\"ANTHROPIC_DEFAULT_OPUS_MODEL\":\"m/x\",\"ANTHROPIC_DEFAULT_SONNET_MODEL\":\"m/x\",\"ANTHROPIC_MODEL\":\"m/x\",\"ANTHROPIC_SMALL_FAST_MODEL\":\"m/x\",\"ANTHROPIC_UNIX_SOCKET\":\"\",\"CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS\":\"1\",\"CLAUDE_CODE_SUBAGENT_MODEL\":\"m/x\",\"CLAUDE_CODE_USE_ANTHROPIC_AWS\":\"\",\"CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD\":\"\",\"CLAUDE_CODE_USE_BEDROCK\":\"\",\"CLAUDE_CODE_USE_FOUNDRY\":\"\",\"CLAUDE_CODE_USE_GATEWAY\":\"\",\"CLAUDE_CODE_USE_MANTLE\":\"\",\"CLAUDE_CODE_USE_VERTEX\":\"\",\"NO_PROXY\":\"localhost,127.0.0.1,::1,127.0.0.1:8787\",\"no_proxy\":\"localhost,127.0.0.1,::1,127.0.0.1:8787\"}}"
@@ -403,7 +403,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="replay" replay_from="t_1" model="m/x" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-1"
+run.ended resume_id="sid-1"
 replay_base claude
 === claude access unknown
 --- turn t_1 harness="claude" access="local" model=""
@@ -440,7 +440,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 --- turn t_2 harness="" access="api" model=""
 arg "--settings"
 arg "{\"apiKeyHelper\":\"\",\"env\":{\"ANTHROPIC_API_KEY\":\"\",\"ANTHROPIC_AUTH_TOKEN\":\"abs_test-standin\",\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_2/key/claude\",\"ANTHROPIC_CUSTOM_HEADERS\":\"\",\"ANTHROPIC_UNIX_SOCKET\":\"\",\"CLAUDE_CODE_USE_ANTHROPIC_AWS\":\"\",\"CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD\":\"\",\"CLAUDE_CODE_USE_BEDROCK\":\"\",\"CLAUDE_CODE_USE_FOUNDRY\":\"\",\"CLAUDE_CODE_USE_GATEWAY\":\"\",\"CLAUDE_CODE_USE_MANTLE\":\"\",\"CLAUDE_CODE_USE_VERTEX\":\"\",\"NO_PROXY\":\"localhost,127.0.0.1,::1,127.0.0.1:8787\",\"no_proxy\":\"localhost,127.0.0.1,::1,127.0.0.1:8787\"}}"
@@ -470,7 +470,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="resume" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-1"
+run.ended resume_id="sid-1"
 === claude subscription, relayed, then resume
 --- turn t_1 harness="claude" access="" model=""
 arg "--settings"
@@ -500,7 +500,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 --- turn t_2 harness="" access="" model=""
 arg "--settings"
 arg "{\"apiKeyHelper\":\"\",\"env\":{\"ANTHROPIC_API_KEY\":\"\",\"ANTHROPIC_AUTH_TOKEN\":\"\",\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_2\",\"ANTHROPIC_CUSTOM_HEADERS\":\"\",\"ANTHROPIC_UNIX_SOCKET\":\"\",\"CLAUDE_CODE_OAUTH_TOKEN\":\"abs_test-standin\",\"CLAUDE_CODE_USE_ANTHROPIC_AWS\":\"\",\"CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD\":\"\",\"CLAUDE_CODE_USE_BEDROCK\":\"\",\"CLAUDE_CODE_USE_FOUNDRY\":\"\",\"CLAUDE_CODE_USE_GATEWAY\":\"\",\"CLAUDE_CODE_USE_MANTLE\":\"\",\"CLAUDE_CODE_USE_VERTEX\":\"\",\"NO_PROXY\":\"localhost,127.0.0.1,::1,127.0.0.1:8787\",\"no_proxy\":\"localhost,127.0.0.1,::1,127.0.0.1:8787\"}}"
@@ -531,7 +531,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="resume" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-1"
+run.ended resume_id="sid-1"
 === claude api key, relayed, with a model
 --- turn t_1 harness="claude" access="api" model="opus"
 arg "--settings"
@@ -562,7 +562,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="opus" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 === claude subagents off, then resume
 --- turn t_1 harness="claude" access="" model=""
 arg "--settings"
@@ -589,7 +589,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 --- turn t_2 harness="" access="" model=""
 arg "--settings"
 arg "{\"apiKeyHelper\":\"\",\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_2\",\"ANTHROPIC_CUSTOM_HEADERS\":\"\",\"ANTHROPIC_UNIX_SOCKET\":\"\",\"CLAUDE_CODE_USE_ANTHROPIC_AWS\":\"\",\"CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD\":\"\",\"CLAUDE_CODE_USE_BEDROCK\":\"\",\"CLAUDE_CODE_USE_FOUNDRY\":\"\",\"CLAUDE_CODE_USE_GATEWAY\":\"\",\"CLAUDE_CODE_USE_MANTLE\":\"\",\"CLAUDE_CODE_USE_VERTEX\":\"\",\"NO_PROXY\":\"localhost,127.0.0.1,::1,127.0.0.1:8787\",\"no_proxy\":\"localhost,127.0.0.1,::1,127.0.0.1:8787\"}}"
@@ -617,7 +617,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="resume" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-1"
+run.ended resume_id="sid-1"
 === claude subagents on, said
 --- turn t_1 harness="claude" access="" model=""
 arg "--settings"
@@ -644,7 +644,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 === claude in a home of its own, then resume
 --- turn t_1 harness="claude" access="" model=""
 arg "--settings"
@@ -673,7 +673,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 --- turn t_2 harness="" access="" model=""
 arg "--settings"
 arg "{\"apiKeyHelper\":\"\",\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_2\",\"ANTHROPIC_CUSTOM_HEADERS\":\"\",\"ANTHROPIC_UNIX_SOCKET\":\"\",\"CLAUDE_CODE_USE_ANTHROPIC_AWS\":\"\",\"CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD\":\"\",\"CLAUDE_CODE_USE_BEDROCK\":\"\",\"CLAUDE_CODE_USE_FOUNDRY\":\"\",\"CLAUDE_CODE_USE_GATEWAY\":\"\",\"CLAUDE_CODE_USE_MANTLE\":\"\",\"CLAUDE_CODE_USE_VERTEX\":\"\",\"NO_PROXY\":\"localhost,127.0.0.1,::1,127.0.0.1:8787\",\"no_proxy\":\"localhost,127.0.0.1,::1,127.0.0.1:8787\"}}"
@@ -703,7 +703,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="resume" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-1"
+run.ended resume_id="sid-1"
 === claude folder with AGENTS.md only, asked by another agent
 --- turn t_1 harness="claude" access="" model=""
 arg "--settings"
@@ -732,7 +732,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 asked_by=520 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 === claude folder with AGENTS.md and a CLAUDE.md of its own, asked
 --- turn t_1 harness="claude" access="" model=""
 arg "--settings"
@@ -761,7 +761,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added agents_md=71 instructions=776 asked_by=520 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 === claude folder with AGENTS.md and CLAUDE.md linked to it
 --- turn t_1 harness="claude" access="" model=""
 arg "--settings"
@@ -788,7 +788,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 === codex subscription, then resume
 --- turn t_1 harness="codex" access="" model=""
 arg "-c"
@@ -824,7 +824,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 --- turn t_2 harness="" access="" model=""
 arg "-c"
 arg "openai_base_url=\"http://127.0.0.1:8787/s/s1/t/t_2/backend-api/codex\""
@@ -861,7 +861,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="resume" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-1"
+run.ended resume_id="tid-1"
 === codex edit none
 --- turn t_1 harness="codex" access="" model=""
 arg "-c"
@@ -895,7 +895,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 === codex lists, model, own instructions
 --- turn t_1 harness="codex" access="" model="opus"
 arg "-c"
@@ -927,7 +927,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="opus" context=""
 context.added instructions=15
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 === codex empty instructions
 --- turn t_1 harness="codex" access="" model=""
 arg "-c"
@@ -961,7 +961,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 === codex openrouter
 --- turn t_1 harness="codex" access="openrouter" model="deepseek/deepseek-v4.1-flash"
 arg "-c"
@@ -1010,7 +1010,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="deepseek/deepseek-v4.1-flash" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 === codex openrouter without a model
 --- turn t_1 harness="codex" access="openrouter" model=""
 arg "-c"
@@ -1057,7 +1057,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 === codex openrouter, key not set
 --- turn t_1 harness="codex" access="openrouter" model=""
 refused 400 this agent reads its OpenRouter key from OPENROUTER_API_KEY, which is not set where the turn runs; set it and restart agentbus
@@ -1104,7 +1104,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 === codex folder holds the data folder
 --- turn t_1 harness="codex" access="" model=""
 arg "-c"
@@ -1138,7 +1138,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 log run.edit session=s1 turn=t_1 left_out=data_folder_inside
 === codex codex config sets developer_instructions
 --- turn t_1 harness="codex" access="" model=""
@@ -1173,7 +1173,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 log run.hint session=s1 turn=t_1 left_out=codex_developer_instructions_set
 === codex replay
 --- turn t_1 harness="codex" access="" model=""
@@ -1210,7 +1210,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 --- turn t_2 harness="" access="" model=""
 arg "-c"
 arg "openai_base_url=\"http://127.0.0.1:8787/s/s1/t/t_2/backend-api/codex\""
@@ -1245,7 +1245,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="replay" replay_from="t_1" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-1"
+run.ended resume_id="tid-1"
 replay_base codex
 === codex openrouter replay
 --- turn t_1 harness="codex" access="openrouter" model="m/x"
@@ -1295,7 +1295,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="m/x" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 --- turn t_2 harness="" access="" model=""
 arg "-c"
 arg "model_provider=agentbus_openrouter"
@@ -1343,7 +1343,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="transcript" replay_from="" model="m/x" context="[AgentBus: this conversation started before you joined it. Earlier turns ran on other agents. Below is each message the person sent and the final reply the agent gave, oldest first. Tool calls are left out. Any files those agents changed are in your current folder.]\n\n--- Turn 1, the person to Codex ---\none\n\n--- Turn 1, Codex replied ---\n(no reply: the turn ended without one)\n\n[AgentBus: end of the earlier turns. The person's new message to you follows.]\n\n"
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-1"
+run.ended resume_id="tid-1"
 === codex access unknown
 --- turn t_1 harness="codex" access="local" model=""
 refused 400 access must be subscription, openrouter or api
@@ -1397,7 +1397,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 --- turn t_2 harness="" access="api" model=""
 arg "-c"
 arg "model_provider=agentbus_openai"
@@ -1445,7 +1445,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="resume" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-1"
+run.ended resume_id="tid-1"
 === codex subscription, relayed, then resume
 --- turn t_1 harness="codex" access="" model=""
 arg "-c"
@@ -1492,7 +1492,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 --- turn t_2 harness="" access="" model=""
 arg "-c"
 arg "model_provider=agentbus_chatgpt"
@@ -1540,7 +1540,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="resume" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-1"
+run.ended resume_id="tid-1"
 === codex api key, relayed, with a model
 --- turn t_1 harness="codex" access="api" model="opus"
 arg "-c"
@@ -1589,7 +1589,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="opus" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 === codex subagents off, then resume
 --- turn t_1 harness="codex" access="" model=""
 arg "-c"
@@ -1625,7 +1625,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 --- turn t_2 harness="" access="" model=""
 arg "-c"
 arg "openai_base_url=\"http://127.0.0.1:8787/s/s1/t/t_2/backend-api/codex\""
@@ -1662,7 +1662,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="resume" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-1"
+run.ended resume_id="tid-1"
 === codex subagents on, said
 --- turn t_1 harness="codex" access="" model=""
 arg "-c"
@@ -1694,7 +1694,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 === codex in a home of its own, then resume
 --- turn t_1 harness="codex" access="" model=""
 arg "-c"
@@ -1732,7 +1732,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 --- turn t_2 harness="" access="" model=""
 arg "-c"
 arg "openai_base_url=\"http://127.0.0.1:8787/s/s1/t/t_2/backend-api/codex\""
@@ -1771,7 +1771,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="resume" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-1"
+run.ended resume_id="tid-1"
 === codex folder with AGENTS.md only, asked by another agent
 --- turn t_1 harness="codex" access="" model=""
 arg "-c"
@@ -1809,7 +1809,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=776 asked_by=520 mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 === codex folder with AGENTS.md and a CLAUDE.md of its own, asked
 --- turn t_1 harness="codex" access="" model=""
 arg "-c"
@@ -1847,7 +1847,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=776 asked_by=520 mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 === codex folder with AGENTS.md and CLAUDE.md linked to it
 --- turn t_1 harness="codex" access="" model=""
 arg "-c"
@@ -1883,7 +1883,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 === claude tools on, then resume
 --- turn t_1 harness="claude" access="" model=""
 arg "--settings"
@@ -1910,7 +1910,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 --- turn t_2 harness="" access="" model=""
 arg "--settings"
 arg "{\"apiKeyHelper\":\"\",\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_2\",\"ANTHROPIC_CUSTOM_HEADERS\":\"\",\"ANTHROPIC_UNIX_SOCKET\":\"\",\"CLAUDE_CODE_USE_ANTHROPIC_AWS\":\"\",\"CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD\":\"\",\"CLAUDE_CODE_USE_BEDROCK\":\"\",\"CLAUDE_CODE_USE_FOUNDRY\":\"\",\"CLAUDE_CODE_USE_GATEWAY\":\"\",\"CLAUDE_CODE_USE_MANTLE\":\"\",\"CLAUDE_CODE_USE_VERTEX\":\"\",\"NO_PROXY\":\"localhost,127.0.0.1,::1,127.0.0.1:8787\",\"no_proxy\":\"localhost,127.0.0.1,::1,127.0.0.1:8787\"}}"
@@ -1938,7 +1938,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="resume" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-1"
+run.ended resume_id="sid-1"
 === claude tools on, subagents off, with lists
 --- turn t_1 harness="claude" access="" model=""
 arg "--settings"
@@ -1965,7 +1965,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 === claude tools on, asked by another agent
 --- turn t_1 harness="claude" access="" model=""
 arg "--settings"
@@ -1994,7 +1994,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 asked_by=520 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 === codex tools on, then resume
 --- turn t_1 harness="codex" access="" model=""
 arg "-c"
@@ -2030,7 +2030,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 --- turn t_2 harness="" access="" model=""
 arg "-c"
 arg "openai_base_url=\"http://127.0.0.1:8787/s/s1/t/t_2/backend-api/codex\""
@@ -2067,7 +2067,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="resume" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-1"
+run.ended resume_id="tid-1"
 === codex tools on, subagents off, with lists
 --- turn t_1 harness="codex" access="" model=""
 arg "-c"
@@ -2103,7 +2103,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 === codex tools on, asked by another agent
 --- turn t_1 harness="codex" access="" model=""
 arg "-c"
@@ -2141,7 +2141,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=776 asked_by=520 mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 === claude copy
 --- turn t_1 harness="claude" access="" model=""
 arg "--settings"
@@ -2168,7 +2168,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 === agy subscription, then resume
 --- turn t_1 harness="agy" access="" model=""
 arg "--output-format"
@@ -2184,7 +2184,7 @@ env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="" context=""
-session.closed resume_id="cid-0"
+run.ended resume_id="cid-0"
 log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
 --- turn t_2 harness="" access="" model=""
 arg "--output-format"
@@ -2202,7 +2202,7 @@ env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="agy" continuity="resume" replay_from="" model="" context=""
-session.closed resume_id="cid-1"
+run.ended resume_id="cid-1"
 log run.hint session=s1 turn=t_2 left_out=agy_no_instruction_flag
 === agy lists, model, own instructions
 --- turn t_1 harness="agy" access="" model="gemini-3.8-flash-medium"
@@ -2221,7 +2221,7 @@ env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="gemini-3.8-flash-medium" context=""
-session.closed resume_id="cid-0"
+run.ended resume_id="cid-0"
 log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
 === agy edit none
 --- turn t_1 harness="agy" access="" model=""
@@ -2238,7 +2238,7 @@ env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="" context=""
-session.closed resume_id="cid-0"
+run.ended resume_id="cid-0"
 log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
 === agy forbid
 --- turn t_1 harness="agy" access="" model=""
@@ -2260,7 +2260,7 @@ env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="" context=""
-session.closed resume_id="cid-0"
+run.ended resume_id="cid-0"
 log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
 === agy subagents off
 --- turn t_1 harness="agy" access="" model=""
@@ -2277,7 +2277,7 @@ env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="" context=""
-session.closed resume_id="cid-0"
+run.ended resume_id="cid-0"
 log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
 === agy openrouter
 --- turn t_1 harness="agy" access="openrouter" model="deepseek/deepseek-v4.1-flash"
@@ -2305,7 +2305,7 @@ env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="" context=""
-session.closed resume_id="cid-0"
+run.ended resume_id="cid-0"
 log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
 log run.edit session=s1 turn=t_1 left_out=folder_shape
 === agy folder holds the data folder
@@ -2323,7 +2323,7 @@ env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="" context=""
-session.closed resume_id="cid-0"
+run.ended resume_id="cid-0"
 log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
 === agy in a home of its own, then resume
 --- turn t_1 harness="agy" access="" model=""
@@ -2340,7 +2340,7 @@ env "HOME=<homes>/s1"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="" context=""
-session.closed resume_id="cid-0"
+run.ended resume_id="cid-0"
 log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
 --- turn t_2 harness="" access="" model=""
 arg "--output-format"
@@ -2358,7 +2358,7 @@ env "HOME=<homes>/s1"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="agy" continuity="resume" replay_from="" model="" context=""
-session.closed resume_id="cid-1"
+run.ended resume_id="cid-1"
 log run.hint session=s1 turn=t_2 left_out=agy_no_instruction_flag
 === agy folder with AGENTS.md, asked by another agent
 --- turn t_1 harness="agy" access="" model=""
@@ -2377,7 +2377,7 @@ env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="" context=""
-session.closed resume_id="cid-0"
+run.ended resume_id="cid-0"
 log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
 === agy subscription, relayed, in a home of its own
 --- turn t_1 harness="agy" access="" model=""
@@ -2394,7 +2394,7 @@ env "HOME=<homes>/s1"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="" context=""
-session.closed resume_id="cid-0"
+run.ended resume_id="cid-0"
 log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
 === agy api key, not relayed
 --- turn t_1 harness="agy" access="api" model=""
@@ -2418,7 +2418,7 @@ env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="gemini-3.1-pro-preview" context=""
-session.closed resume_id="cid-0"
+run.ended resume_id="cid-0"
 log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
 === switch claude to agy, transcript
 --- turn t_1 harness="claude" access="" model=""
@@ -2446,7 +2446,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 --- turn t_2 harness="agy" access="" model=""
 arg "--output-format"
 arg "json"
@@ -2461,7 +2461,7 @@ env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="agy" continuity="transcript" replay_from="" model="" context="[AgentBus: this conversation started before you joined it. Earlier turns ran on other agents. Below is each message the person sent and the final reply the agent gave, oldest first. Tool calls are left out. Any files those agents changed are in your current folder.]\n\n--- Turn 1, the person to Claude Code ---\none\n\n--- Turn 1, Claude Code replied ---\n(no reply: the turn ended without one)\n\n[AgentBus: end of the earlier turns. The person's new message to you follows.]\n\n"
-session.closed resume_id="cid-1"
+run.ended resume_id="cid-1"
 log run.hint session=s1 turn=t_2 left_out=agy_no_instruction_flag
 === switch claude to codex, replay
 --- turn t_1 harness="claude" access="" model=""
@@ -2489,7 +2489,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 --- turn t_2 harness="codex" access="" model=""
 arg "-c"
 arg "openai_base_url=\"http://127.0.0.1:8787/s/s1/t/t_2/backend-api/codex\""
@@ -2524,7 +2524,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="transcript" replay_from="" model="" context="[AgentBus: this conversation started before you joined it. Earlier turns ran on other agents. Below is each message the person sent and the final reply the agent gave, oldest first. Tool calls are left out. Any files those agents changed are in your current folder.]\n\n--- Turn 1, the person to Claude Code ---\none\n\n--- Turn 1, Claude Code replied ---\n(no reply: the turn ended without one)\n\n[AgentBus: end of the earlier turns. The person's new message to you follows.]\n\n"
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-1"
+run.ended resume_id="tid-1"
 === switch codex to claude, resume
 --- turn t_1 harness="codex" access="" model=""
 arg "-c"
@@ -2560,7 +2560,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="tid-0"
+run.ended resume_id="tid-0"
 --- turn t_2 harness="claude" access="" model=""
 arg "--settings"
 arg "{\"apiKeyHelper\":\"\",\"env\":{\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_2\",\"ANTHROPIC_CUSTOM_HEADERS\":\"\",\"ANTHROPIC_UNIX_SOCKET\":\"\",\"CLAUDE_CODE_USE_ANTHROPIC_AWS\":\"\",\"CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD\":\"\",\"CLAUDE_CODE_USE_BEDROCK\":\"\",\"CLAUDE_CODE_USE_FOUNDRY\":\"\",\"CLAUDE_CODE_USE_GATEWAY\":\"\",\"CLAUDE_CODE_USE_MANTLE\":\"\",\"CLAUDE_CODE_USE_VERTEX\":\"\",\"NO_PROXY\":\"localhost,127.0.0.1,::1,127.0.0.1:8787\",\"no_proxy\":\"localhost,127.0.0.1,::1,127.0.0.1:8787\"}}"
@@ -2588,7 +2588,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="transcript" replay_from="" model="sonnet" context="[AgentBus: this conversation started before you joined it. Earlier turns ran on other agents. Below is each message the person sent and the final reply the agent gave, oldest first. Tool calls are left out. Any files those agents changed are in your current folder.]\n\n--- Turn 1, the person to Codex ---\none\n\n--- Turn 1, Codex replied ---\n(no reply: the turn ended without one)\n\n[AgentBus: end of the earlier turns. The person's new message to you follows.]\n\n"
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-1"
+run.ended resume_id="sid-1"
 === unknown harness
 --- turn t_1 harness="gemini" access="" model=""
 refused 400 agent must be claude, codex, agy or opencode
@@ -2618,7 +2618,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 --- turn t_2 harness="gemini" access="" model=""
 refused 400 agent must be claude, codex, agy or opencode
 === opencode subscription
@@ -2648,7 +2648,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 env "PWD="
 cwd <folder>
 turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
-session.closed resume_id="ses_000000000000LaunchFake0000"
+run.ended resume_id="ses_000000000000LaunchFake0000"
 log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
 --- turn t_2 harness="" access="" model=""
 arg "run"
@@ -2670,7 +2670,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 env "PWD="
 cwd <folder>
 turn.started agent="opencode" continuity="resume" replay_from="" model="z-ai/glm-5.3-flash" context=""
-session.closed resume_id="ses_000000000001LaunchFake0001"
+run.ended resume_id="ses_000000000001LaunchFake0001"
 log run.hint session=s1 turn=t_2 left_out=opencode_no_instruction_flag
 === opencode openrouter replay
 --- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
@@ -2691,7 +2691,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 env "PWD="
 cwd <folder>
 turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
-session.closed resume_id="ses_000000000000LaunchFake0000"
+run.ended resume_id="ses_000000000000LaunchFake0000"
 log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
 --- turn t_2 harness="" access="" model=""
 arg "run"
@@ -2711,7 +2711,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 env "PWD="
 cwd <folder>
 turn.started agent="opencode" continuity="replay" replay_from="t_1" model="z-ai/glm-5.3-flash" context=""
-session.closed resume_id="ses_000000000001LaunchFake0001"
+run.ended resume_id="ses_000000000001LaunchFake0001"
 replay_base opencode
 log run.hint session=s1 turn=t_2 left_out=opencode_no_instruction_flag
 === opencode openrouter, key not set
@@ -2737,7 +2737,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 env "PWD="
 cwd <folder>
 turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
-session.closed resume_id="ses_000000000000LaunchFake0000"
+run.ended resume_id="ses_000000000000LaunchFake0000"
 log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
 --- turn t_2 harness="" access="" model=""
 arg "run"
@@ -2759,7 +2759,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 env "PWD="
 cwd <folder>
 turn.started agent="opencode" continuity="resume" replay_from="" model="z-ai/glm-5.3-flash" context=""
-session.closed resume_id="ses_000000000001LaunchFake0001"
+run.ended resume_id="ses_000000000001LaunchFake0001"
 log run.hint session=s1 turn=t_2 left_out=opencode_no_instruction_flag
 === opencode allow list, own instructions
 --- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
@@ -2780,7 +2780,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 env "PWD="
 cwd <folder>
 turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
-session.closed resume_id="ses_000000000000LaunchFake0000"
+run.ended resume_id="ses_000000000000LaunchFake0000"
 log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
 === opencode edit none
 --- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
@@ -2801,7 +2801,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 env "PWD="
 cwd <folder>
 turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
-session.closed resume_id="ses_000000000000LaunchFake0000"
+run.ended resume_id="ses_000000000000LaunchFake0000"
 log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
 === opencode subagents on
 --- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
@@ -2822,7 +2822,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 env "PWD="
 cwd <folder>
 turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
-session.closed resume_id="ses_000000000000LaunchFake0000"
+run.ended resume_id="ses_000000000000LaunchFake0000"
 log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
 === opencode forbid
 --- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
@@ -2855,7 +2855,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 env "PWD="
 cwd <folder>
 turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
-session.closed resume_id="ses_000000000000LaunchFake0000"
+run.ended resume_id="ses_000000000000LaunchFake0000"
 log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
 log run.edit session=s1 turn=t_1 left_out=data_folder_inside
 === opencode in a home of its own, then resume
@@ -2877,7 +2877,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 env "PWD="
 cwd <folder>
 turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
-session.closed resume_id="ses_000000000000LaunchFake0000"
+run.ended resume_id="ses_000000000000LaunchFake0000"
 log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
 --- turn t_2 harness="" access="" model=""
 arg "run"
@@ -2899,7 +2899,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 env "PWD="
 cwd <folder>
 turn.started agent="opencode" continuity="resume" replay_from="" model="z-ai/glm-5.3-flash" context=""
-session.closed resume_id="ses_000000000001LaunchFake0001"
+run.ended resume_id="ses_000000000001LaunchFake0001"
 log run.hint session=s1 turn=t_2 left_out=opencode_no_instruction_flag
 === opencode folder with AGENTS.md
 --- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
@@ -2920,7 +2920,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 env "PWD="
 cwd <folder>
 turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
-session.closed resume_id="ses_000000000000LaunchFake0000"
+run.ended resume_id="ses_000000000000LaunchFake0000"
 log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
 === switch claude to opencode, resume
 --- turn t_1 harness="claude" access="openrouter" model=""
@@ -2951,7 +2951,7 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=776 mcp_instructions=327
-session.closed resume_id="sid-0"
+run.ended resume_id="sid-0"
 --- turn t_2 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
 arg "run"
 arg "--format"
@@ -2970,5 +2970,5 @@ env "PATH=<data>/bin:/usr/bin:/bin"
 env "PWD="
 cwd <folder>
 turn.started agent="opencode" continuity="transcript" replay_from="" model="z-ai/glm-5.3-flash" context="[AgentBus: this conversation started before you joined it. Earlier turns ran on other agents. Below is each message the person sent and the final reply the agent gave, oldest first. Tool calls are left out. Any files those agents changed are in your current folder.]\n\n--- Turn 1, the person to Claude Code ---\none\n\n--- Turn 1, Claude Code replied ---\n(no reply: the turn ended without one)\n\n[AgentBus: end of the earlier turns. The person's new message to you follows.]\n\n"
-session.closed resume_id="ses_000000000001LaunchFake0001"
+run.ended resume_id="ses_000000000001LaunchFake0001"
 log run.hint session=s1 turn=t_2 left_out=opencode_no_instruction_flag

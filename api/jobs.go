@@ -127,7 +127,7 @@ var runnerRoutes = []route{
 			"its session, prompt, model calls and how it ended. Each event keeps its id, and one already held is not stored again. " +
 			"An event's folder (the copy's path on the runner) is dropped; folder_ref stays. " +
 			"Only the kinds a runner writes for a turn are taken: turn.started, model.*, tool.requested, tool.completed, tool.refused, turn.completed, " +
-			"session.opened, session.closed, context.added, network.refused, schema.unexpected, replay.failed, call.refused and vendor.called. " +
+			"run.started, run.ended, context.added, network.refused, schema.unexpected, replay.failed, call.refused and vendor.called. " +
 			"A batch with any other kind (control's own, such as plan.usage, tools.listed or session.renamed, or a program's x.*) is refused whole with 400.",
 		body:    jobs.RecordBatch{},
 		replies: []reply{ok(200, jobs.RecordAck{}, "Stored."), badRequest, noAttempt, staleReply, storeFailed},

@@ -36,7 +36,7 @@ type RecordBatch struct {
 var RunnerKinds = map[event.Kind]bool{
 	event.TurnStarted: true, event.ModelRequested: true, event.ModelResponded: true,
 	event.ToolRequested: true, event.ToolCompleted: true, event.TurnCompleted: true,
-	event.SessionOpened: true, event.SessionClosed: true, event.ContextAdded: true,
+	event.RunStarted: true, event.RunEnded: true, event.ContextAdded: true,
 	event.NetworkRefused: true, event.SchemaUnexpected: true, event.ReplayFailed: true,
 	event.ToolRefused: true, event.CallRefused: true, event.VendorCalled: true,
 	// A runner's gateway raises approval.requested when it holds an Ask, and
@@ -119,7 +119,7 @@ func (s *Server) record(w http.ResponseWriter, r *http.Request, rn queue.Runner)
 	// allow or refuse, and duplicate-id reuse, are impossible by construction,
 	// with no ownership lookup and no uniqueness check. Binding (not rejecting)
 	// also keeps a legacy protocol-5 runner working: its raw ids are scoped
-	// rather than refused, so its batch — the approval AND its session.closed —
+	// rather than refused, so its batch — the approval AND its run.ended —
 	// is stored. A runner still never records an allow: a person's allow is
 	// control's own, through the client API.
 	attemptID := r.PathValue("id")
@@ -140,7 +140,7 @@ func (s *Server) record(w http.ResponseWriter, r *http.Request, rn queue.Runner)
 		// are: a reader that sees the end sees all of them. One the relay
 		// could not confirm leaves the turn marked unsettled, as the runner
 		// marks one its own gateway could not.
-		if e.Kind == event.SessionClosed && e.Turn != "" && !s.settle(e.Session, e.Turn) {
+		if e.Kind == event.RunEnded && e.Turn != "" && !s.settle(e.Session, e.Turn) {
 			e.Unsettled = true
 		}
 		stored, err := s.cfg.Record.AppendOnce(e)
@@ -160,7 +160,7 @@ func (s *Server) record(w http.ResponseWriter, r *http.Request, rn queue.Runner)
 // what to do next (his call, 2026-11-23).
 const RunnerLostText = "The runner stopped answering; send the turn again."
 
-// CloseLost stores session.closed, unsettled, for each hold the record has
+// CloseLost stores run.ended, unsettled, for each hold the record has
 // open whose turn's attempt lease ran out. Its runner stopped
 // during the turn, so nothing else closes it: the cockpit would show the
 // turn running, and the session would take no next turn. It is what
@@ -185,7 +185,7 @@ func CloseLost(q *queue.Queue, st *store.Store, now time.Time) (int, error) {
 		if !lost[h.Turn] {
 			continue
 		}
-		if _, _, err := st.Append(event.Event{ID: queue.NewID("evt_"), Kind: event.SessionClosed, Time: now,
+		if _, _, err := st.Append(event.Event{ID: queue.NewID("evt_"), Kind: event.RunEnded, Time: now,
 			Session: h.Session, Turn: h.Turn, Hold: h.Hold, Unsettled: true, State: store.TurnFailed,
 			Error: RunnerLostText}); err != nil {
 			return n, err

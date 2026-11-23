@@ -1107,7 +1107,7 @@ func (r *Runner) loadCopy(at *attempt, w queue.Workspace) (res *queue.Result, re
 		return nil, false
 	}
 	// Name the folder reference the session's first turn records (folder_ref on
-	// session.opened and turn.started), without touching the source folder: an
+	// run.started and turn.started), without touching the source folder: an
 	// asked or second session's first turn reuses an existing copy here and still
 	// needs its workspace's folder_ref, or that event -- and every continuation
 	// after it -- loses the folder (a remote runner's record keeps only the ref).
@@ -1374,7 +1374,7 @@ wait:
 			return
 		case <-stopWait:
 			// The stop's SIGKILL came and went and the turn has not ended:
-			// its session.closed waits on something. The job ends now and
+			// its run.ended waits on something. The job ends now and
 			// says so; the turn ends on its own.
 			at.event("turn.unended", map[string]any{"turn": turn.ID})
 			res := queue.Result{Session: turn.Session, Error: "the turn was stopped and had not ended in time"}

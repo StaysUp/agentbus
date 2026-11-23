@@ -54,7 +54,7 @@ func TestRunnerRecordAllowList(t *testing.T) {
 	var all []json.RawMessage
 	n := 0
 	for k := range RunnerKinds {
-		if k == event.SessionClosed {
+		if k == event.RunEnded {
 			continue // a turn's end settles it, tested with the outcome
 		}
 		if k == event.ApprovalRequested || k == event.ApprovalDecided {
@@ -74,7 +74,7 @@ func TestRunnerRecordAllowList(t *testing.T) {
 		}
 	}
 	for k := range RunnerKinds {
-		if k != event.SessionClosed && k != event.ApprovalRequested && k != event.ApprovalDecided && got[k] == 0 {
+		if k != event.RunEnded && k != event.ApprovalRequested && k != event.ApprovalDecided && got[k] == 0 {
 			t.Errorf("the record lacks %s", k)
 		}
 	}

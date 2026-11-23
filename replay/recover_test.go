@@ -465,7 +465,7 @@ func TestUnknownLayoutIsNotNotActedOn(t *testing.T) {
 	}
 }
 
-// A turn the person stopped (session.closed's stopped) continues like one
+// A turn the person stopped (run.ended's stopped) continues like one
 // stopped any other way, and its note says the person stopped it.
 func TestRecoverStoppedByThePerson(t *testing.T) {
 	src, r := twoTurns(t)

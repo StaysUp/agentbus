@@ -437,10 +437,10 @@ func TestXProcRunnerForwardsRecord(t *testing.T) {
 	// start and close, and, at the job's end, control's own turn.changed.
 	waitFor(t, "the runner's turn in control's record", func() bool {
 		k := x.recordKinds(st.Session)
-		return hasKind(k, "session.closed") && hasKind(k, "turn.changed")
+		return hasKind(k, "run.ended") && hasKind(k, "turn.changed")
 	})
 	k := x.recordKinds(st.Session)
-	for _, want := range []string{"session.opened", "turn.started", "session.closed", "turn.changed"} {
+	for _, want := range []string{"run.started", "turn.started", "run.ended", "turn.changed"} {
 		if !hasKind(k, want) {
 			t.Fatalf("control's record lacks %s: %v", want, k)
 		}

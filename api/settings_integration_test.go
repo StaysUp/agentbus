@@ -36,7 +36,7 @@ func TestTurnRecordsSettingsVersion(t *testing.T) {
 	if code != 202 || json.Unmarshal([]byte(out), &started) != nil {
 		t.Fatalf("start: %d %s", code, out)
 	}
-	waitSessionClosed(t, e.store, started.Session)
+	waitRunEnded(t, e.store, started.Session)
 	recs, err := e.store.After(0, store.Filter{}, 100)
 	if err != nil {
 		t.Fatal(err)

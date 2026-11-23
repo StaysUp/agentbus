@@ -113,7 +113,7 @@ func as(t *testing.T, e *env, tok, method, path, body string) (int, string) {
 	return resp.StatusCode, out
 }
 
-func waitSessionClosed(t *testing.T, st *store.Store, session string) {
+func waitRunEnded(t *testing.T, st *store.Store, session string) {
 	t.Helper()
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
 		recs, err := st.After(0, store.Filter{Session: session, Only: true}, 1000)
@@ -121,17 +121,17 @@ func waitSessionClosed(t *testing.T, st *store.Store, session string) {
 			t.Fatal(err)
 		}
 		for _, r := range recs {
-			if r.Kind == event.SessionClosed {
+			if r.Kind == event.RunEnded {
 				return
 			}
 		}
 	}
-	t.Fatal("no session.closed")
+	t.Fatal("no run.ended")
 }
 
 // A turn's child gets its own token and the service's address. The token reads
 // its own session on the read routes and nothing else, and stops working once
-// the turn's session.closed is written. The main token is unaffected.
+// the turn's run.ended is written. The main token is unaffected.
 func TestTurnToken(t *testing.T) {
 	e, dir := childEnv(t)
 	folder := t.TempDir()
@@ -236,14 +236,14 @@ func TestTurnToken(t *testing.T) {
 
 	// The session's next turn gets a token of its own.
 	os.WriteFile(filepath.Join(dir, "release"), nil, 0o600)
-	waitSessionClosed(t, e.store, own)
+	waitRunEnded(t, e.store, own)
 	// The refused stop stopped nothing.
 	if end, err := e.store.TurnEnd(own, s.Turn); err != nil || end.Stopped || end.ExitCode == nil || *end.ExitCode != 0 {
 		t.Errorf("the turn after a turn token's stop: %+v %v, want exit 0, not stopped", end, err)
 	}
 	// The 401 says the token ended with its turn.
 	if code, out := as(t, e, tok, "GET", "/api/v0/sessions/"+own+"/events", ""); code != http.StatusUnauthorized || !strings.Contains(out, turnTokenEnded) {
-		t.Fatalf("the token after session.closed: %d %s, want 401 that says it ended", code, out)
+		t.Fatalf("the token after run.ended: %d %s, want 401 that says it ended", code, out)
 	}
 	if n := e.eng.LiveTokens(); n != 0 {
 		t.Errorf("%d live tokens after the turn", n)
@@ -295,9 +295,9 @@ func TestTurnTokenRevokedAtProcessExitNotPipeClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, r := range recs {
-		if r.Kind == event.SessionClosed {
-			t.Fatal("session.closed already stored; the test no longer holds the pipes open")
+		if r.Kind == event.RunEnded {
+			t.Fatal("run.ended already stored; the test no longer holds the pipes open")
 		}
 	}
-	waitSessionClosed(t, e.store, s.Session)
+	waitRunEnded(t, e.store, s.Session)
 }

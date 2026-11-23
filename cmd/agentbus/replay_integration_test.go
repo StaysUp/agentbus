@@ -288,9 +288,9 @@ func continuityOf(t *testing.T, svc *service, session, turn string) (continuity,
 	return "", ""
 }
 
-// A turn's session.closed is stored only after Settle returns, so a reader
+// A turn's run.ended is stored only after Settle returns, so a reader
 // that sees the turn closed sees all of its calls.
-func TestSessionClosedWaitsForSettle(t *testing.T) {
+func TestRunEndedWaitsForSettle(t *testing.T) {
 	home := t.TempDir()
 	svc := runServiceWith(t, home, nil, 0, "http://127.0.0.1:1", false)
 	tok := readToken(t, home)
@@ -303,7 +303,7 @@ func TestSessionClosedWaitsForSettle(t *testing.T) {
 	})
 	startRun(t, svc, tok, "claude", claudeResultA)
 	if closedYet := <-settled; closedYet {
-		t.Error("session.closed was stored before Settle returned")
+		t.Error("run.ended was stored before Settle returned")
 	}
 }
 

@@ -151,7 +151,7 @@ func TestRunMissingAgentIsRefused(t *testing.T) {
 
 // A run whose child cannot start (an executable whose interpreter is missing
 // passes lookup but fails to start) left its session registered with no
-// closing event. session.opened is written before the child starts, so it
+// closing event. run.started is written before the child starts, so it
 // must be closed, with the reason.
 func TestRunThatCannotStartIsClosed(t *testing.T) {
 	home := t.TempDir()
@@ -176,9 +176,9 @@ func TestRunThatCannotStartIsClosed(t *testing.T) {
 		t.Fatalf("status %d, want a server error for a child that cannot start", code)
 	}
 	evs := storedEvents(t, svc.store)
-	if len(evs) != 5 || evs[0].Kind != "session.created" || evs[1].Kind != "session.opened" || evs[2].Kind != "turn.started" || evs[3].Kind != "context.added" ||
-		evs[4].Kind != "session.closed" || evs[1].Hold == "" || evs[4].Hold != evs[1].Hold || evs[4].Error == "" {
-		t.Fatalf("events %+v, want session.created, session.opened, turn.started, context.added, then its session.closed with the reason", evs)
+	if len(evs) != 5 || evs[0].Kind != "session.created" || evs[1].Kind != "run.started" || evs[2].Kind != "turn.started" || evs[3].Kind != "context.added" ||
+		evs[4].Kind != "run.ended" || evs[1].Hold == "" || evs[4].Hold != evs[1].Hold || evs[4].Error == "" {
+		t.Fatalf("events %+v, want session.created, run.started, turn.started, context.added, then its run.ended with the reason", evs)
 	}
 	if snap, err := svc.store.Snapshot(); err != nil || len(snap.Sessions) != 1 || snap.Sessions[0].Open {
 		t.Fatalf("snapshot %+v, %v; want one closed session", snap.Sessions, err)

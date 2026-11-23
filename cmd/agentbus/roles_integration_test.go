@@ -531,7 +531,7 @@ func TestSessionRunsOnItsFolderMachine(t *testing.T) {
 	}
 	for _, se := range ss.Sessions {
 		code, out := c.call("GET", "/api/v0/sessions/"+se.ID+"/events?after=0&limit=1000&store="+ss.Store, nil, nil)
-		if code != 200 || strings.Contains(out, homeB) || !strings.Contains(out, "turn.started") || !strings.Contains(out, "session.closed") {
+		if code != 200 || strings.Contains(out, homeB) || !strings.Contains(out, "turn.started") || !strings.Contains(out, "run.ended") {
 			t.Fatalf("the server's record of %s: %d %s", se.ID, code, out)
 		}
 	}

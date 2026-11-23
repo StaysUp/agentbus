@@ -162,12 +162,12 @@ func TestOpenRouterAgentTurnGoesThroughTheGateway(t *testing.T) {
 		}
 		var e map[string]any
 		json.Unmarshal(rec.Data, &e)
-		if e["kind"] == "session.opened" {
+		if e["kind"] == "run.started" {
 			opened = e
 		}
 	}
 	if opened["agent"] != "claude" || opened["agent_id"] != id || opened["access"] != "openrouter" || opened["key_env"] != "AB_TEST_OR_KEY" {
-		t.Errorf("session.opened %v", opened)
+		t.Errorf("run.started %v", opened)
 	}
 	var responded bool
 	waitFor(t, "model.responded", func() bool {

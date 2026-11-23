@@ -1,8 +1,8 @@
 // Package run starts one turn of a stock agent CLI and watches it. It
 // prepares the turn (its session, own replay or the vendor's resume, the
 // person's permissions.toml, the guard's forbid list, the gateway path), stores
-// session.opened and turn.started, starts the agent as a child, and stores
-// session.closed with the exit code and the vendor's own session id
+// run.started and turn.started, starts the agent as a child, and stores
+// run.ended with the exit code and the vendor's own session id
 // (resume_id) when it exits. All three carry the turn id. The child's base URL
 // is <service>/s/<session>/t/<turn>, so the gateway gives every event of the
 // child's model calls the same turn id.
@@ -154,10 +154,10 @@ type Config struct {
 	// those harnesses continue by the vendor's resume (Continuity).
 	ReplayBase func(agent, session string) (ReplayPlan, error)
 	// Settle, when set, is called after a turn's child exits and before its
-	// session.closed is stored. It returns once the gateway has written every
+	// run.ended is stored. It returns once the gateway has written every
 	// model call of the turn (gateway.Settle). It reports false when that
-	// could not be confirmed; session.closed then carries unsettled, and own
-	// replay will not continue from that turn. Nil stores session.closed at
+	// could not be confirmed; run.ended then carries unsettled, and own
+	// replay will not continue from that turn. Nil stores run.ended at
 	// once.
 	Settle func(session, turn string) bool
 	// MaxRuns bounds the turns running at once. Past it Start refuses with
@@ -362,7 +362,7 @@ type Ended struct {
 	Unsettled bool // the gateway's writes could not be confirmed
 }
 
-// Done is closed once the turn's session.closed is stored.
+// Done is closed once the turn's run.ended is stored.
 func (t *Turn) Done() <-chan struct{} { return t.done }
 
 // Ended is how the turn ended. Read it after Done.
@@ -406,7 +406,7 @@ func PromptOK(prompt string) bool {
 }
 
 // Start starts a turn: a new session's first, or req.Session's next. It
-// returns once the turn's session.opened and turn.started are stored and its
+// returns once the turn's run.started and turn.started are stored and its
 // child has started, or a *Refusal saying why nothing ran.
 func (e *Engine) Start(req Request) (*Turn, error) {
 	if msg := CheckPrompt(req.Prompt, req.Model); msg != "" {
@@ -466,7 +466,7 @@ func (e *Engine) next(req Request) (*Turn, error) {
 	}
 	// The slot and the session are taken before the session is read again,
 	// so a turn that started meanwhile is either refused here as busy or
-	// already shows its open session.opened below.
+	// already shows its open run.started below.
 	if code, msg := e.runs.take(session); code != 0 {
 		return nil, refuse(code, msg)
 	}
@@ -662,13 +662,13 @@ type turn struct {
 	allowOnce                []string // command lines allowed once for this turn, from an earlier card
 }
 
-// start stores session.opened and turn.started, starts t's child in a slot
-// already taken for t.session, and stores session.closed when it exits. A
-// failed session.opened write starts nothing: the store is the only record of
+// start stores run.started and turn.started, starts t's child in a slot
+// already taken for t.session, and stores run.ended when it exits. A
+// failed run.started write starts nothing: the store is the only record of
 // the child, and of its agent and folder for TurnSink. A child that cannot
-// start after session.opened is stored, or whose turn.started cannot be
-// stored, gets its session.closed with the reason. The slot is freed when
-// nothing started, or once the child's session.closed is stored.
+// start after run.started is stored, or whose turn.started cannot be
+// stored, gets its run.ended with the reason. The slot is freed when
+// nothing started, or once the child's run.ended is stored.
 func (e *Engine) start(t turn) (*Turn, error) {
 	h, _ := harness.Get(t.harness) // Start and next checked it (KnownHarness)
 	started := false
@@ -936,7 +936,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	// RunOutputMax bytes, go to the run's own log and nowhere else.
 	ids := &idScanner{harness: h}
 	out := &logfile.Tail{Max: RunOutputMax}
-	// The end of its stderr alone, for session.closed when it exits with
+	// The end of its stderr alone, for run.ended when it exits with
 	// an error (errtail.go).
 	errs := &logfile.Tail{Max: ErrorTailKept}
 	// Its own session, and so its own process group: stopping it reaches
@@ -947,15 +947,15 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	holdID := "hold_" + randomHex(8)
 	// Before the child starts, so its first model call finds the agent and
 	// folder, and a store that cannot write starts nothing.
-	if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.SessionOpened,
+	if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.RunStarted,
 		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Hold: holdID, Harness: t.harness, Folder: t.folder, FolderRef: t.folderRef,
 		AgentID: t.agentID, Access: t.access, KeyEnv: t.keyEnv, Model: t.model}); err != nil {
 		return nil, storeFailed
 	}
-	// session.opened is stored, so on any failure below the hold must close,
+	// run.started is stored, so on any failure below the hold must close,
 	// or the session would read open until the next restart.
 	closeHoldWhy := func(why string) {
-		if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.SessionClosed,
+		if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.RunEnded,
 			Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Hold: holdID, Error: why, State: store.TurnFailed}); err != nil {
 			e.cfg.Logf("run.unclosed session=%s turn=%s hold=%s reason=store", t.session, t.id, holdID)
 		}
@@ -1012,7 +1012,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	go func() {
 		err := cmd.Wait()
 		// The token stops working once the child's own process exits, before
-		// its output is collected and before the turn's session.closed is
+		// its output is collected and before the turn's run.ended is
 		// stored: nothing of the turn may read after it.
 		e.turnTokens.revoke(tok)
 		e.turnRules.clear(t.session, t.id)
@@ -1055,7 +1055,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 			tail = errorTail(b, cut, hide...)
 			why = h.Info().Plain(errorReason(b, cut, code, hide...))
 		}
-		if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.SessionClosed,
+		if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.RunEnded,
 			Time: ended.UTC(), Session: t.session, Turn: t.id, Hold: holdID, ExitCode: &code, ResumeID: ids.ID(),
 			Unsettled: unsettled, Stopped: stopped, ErrorTail: tail, State: state, Error: why}); err != nil {
 			// The session reads open until the next start.
@@ -1124,7 +1124,7 @@ func setEnv(env, set []string) []string {
 
 // Stop stops a running turn: SIGTERM to its whole process tree, then SIGKILL
 // after the grace period to what still runs. It returns at once; the turn's
-// session.closed, with stopped true, comes once the tree has ended. running
+// run.ended, with stopped true, comes once the tree has ended. running
 // is false when this engine runs no such turn.
 func (e *Engine) Stop(turnID string) (running bool) {
 	lt := e.runs.find(turnID)
@@ -1149,7 +1149,7 @@ func (e *Engine) Stop(turnID string) (running bool) {
 
 // Interrupt ends a running turn the way StopAll ends every turn: SIGTERM to
 // its tree, SIGKILL after the grace period. Unlike Stop it is not a stop by a
-// person: the turn's session.closed does not say stopped, and its exit code
+// person: the turn's run.ended does not say stopped, and its exit code
 // says the signal. running is false when this engine runs no such turn.
 func (e *Engine) Interrupt(turnID string) (running bool) {
 	lt := e.runs.find(turnID)
@@ -1176,7 +1176,7 @@ func (e *Engine) Interrupt(turnID string) (running bool) {
 
 // StopAll refuses new turns, sends every running child's tree SIGTERM, then
 // SIGKILL after the grace period, and returns once each has stored its
-// session.closed. Call it before the store closes.
+// run.ended. Call it before the store closes.
 func (e *Engine) StopAll() {
 	e.runs.mu.Lock()
 	e.runs.stopping = true
@@ -1433,11 +1433,11 @@ func ExitCode(ps *os.ProcessState, err error) int {
 }
 
 // TurnSink passes every event on to next, first filling agent and folder on
-// each turn.started from the session's latest session.opened in the store.
+// each turn.started from the session's latest run.started in the store.
 // It keeps no state, so nothing grows with the runs, and a turn whose events
 // arrive after its child exited, or after a restart, is still named. A
 // session no turn started, such as one pointed at the gateway by hand, has no
-// session.opened and keeps them empty.
+// run.started and keeps them empty.
 func (e *Engine) TurnSink(next event.Sink) event.Sink { return TurnSink(e.cfg.Store, next) }
 
 // TurnSink is the engine's TurnSink for a service that runs no turns itself,
