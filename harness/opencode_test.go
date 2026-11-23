@@ -193,7 +193,8 @@ func TestOpencodeContext(t *testing.T) {
 	if h.OwnInstructions(nil, "/f") == "" {
 		t.Error("a hint would be given")
 	}
-	if h.Info().ToolServer || h.Info().Replay != "" || harnessOffers(h, Subscription) || harnessOffers(h, API) || !harnessOffers(h, OpenRouter) {
+	if h.Info().ToolServer || h.Info().Replay != FormatChatCompletions || !h.Info().ReplayOnOpenRouter ||
+		harnessOffers(h, Subscription) || harnessOffers(h, API) || !harnessOffers(h, OpenRouter) {
 		t.Errorf("info %+v", h.Info())
 	}
 }

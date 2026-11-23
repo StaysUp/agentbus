@@ -672,18 +672,23 @@ func start(c config) (*service, error) {
 	if c.lookPath == nil {
 		c.lookPath = exec.LookPath
 	}
-	// Own replay: claude's and codex's next turns start fresh, and each
-	// vendor's gateway puts the earlier turn's history in front of their
+	// Own replay: claude's, codex's and opencode's next turns start fresh, and
+	// each vendor's gateway puts the earlier turn's history in front of their
 	// requests.
-	var claudeReplay, codexReplay *replay.Replayer
+	var claudeReplay, codexReplay, chatReplay *replay.Replayer
 	var replayBase func(string, string) (engine.ReplayPlan, error)
 	if !c.noReplay {
-		claudeReplay, codexReplay = replay.New(st), replay.NewCodex(st)
+		claudeReplay, codexReplay, chatReplay = replay.New(st), replay.NewCodex(st), replay.NewChatCompletions(st)
 		replayBase = func(agent, session string) (engine.ReplayPlan, error) {
 			// Each harness names the history format own replay uses for it.
 			r := claudeReplay
-			if h, ok := harness.Get(agent); ok && h.Info().Replay == harness.FormatOpenAI {
-				r = codexReplay
+			if h, ok := harness.Get(agent); ok {
+				switch h.Info().Replay {
+				case harness.FormatOpenAI:
+					r = codexReplay
+				case harness.FormatChatCompletions:
+					r = chatReplay
+				}
 			}
 			p, err := r.Base(session)
 			var no *replay.NoBase
@@ -929,6 +934,7 @@ func start(c config) (*service, error) {
 		orAnth.SetRewriter(claudeReplay)
 		oai.SetRewriter(codexReplay)
 		orOAI.SetRewriter(codexReplay)
+		orChat.SetRewriter(chatReplay)
 	}
 	host, _, _ := net.SplitHostPort(c.listen)
 	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: append(gws, relayGws...), api: a, eng: eng, store: st, blobs: bs, blobSwp: blobSweep, jobsSrv: runnerJobs,

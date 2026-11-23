@@ -193,6 +193,8 @@ func TestLaunchGolden(t *testing.T) {
 		launchCase{name: "opencode api key, relayed", turns: []engine.Request{with(first("opencode"), apiKey)}},
 		launchCase{name: "opencode openrouter, then resume", env: orKey,
 			turns: []engine.Request{with(first("opencode"), ocOR), next("t_2")}},
+		launchCase{name: "opencode openrouter replay", replay: true, env: orKey,
+			turns: []engine.Request{with(first("opencode"), ocOR), next("t_2")}},
 		launchCase{name: "opencode openrouter, key not set", turns: []engine.Request{with(first("opencode"), ocOR)}},
 		launchCase{name: "opencode openrouter, relayed, then resume", turns: []engine.Request{
 			with(first("opencode"), func(r *engine.Request) { relayed(r); ocOR(r) }), with(next("t_2"), relayed)}},

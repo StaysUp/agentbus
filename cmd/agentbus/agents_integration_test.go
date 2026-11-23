@@ -25,6 +25,15 @@ import (
 
 // openRouterService is runService with OpenRouter at upstream.
 func openRouterService(t *testing.T, home, upstream string) *service {
+	return openRouterServiceOpt(t, home, upstream, true)
+}
+
+// openRouterServiceReplay is openRouterService with own replay on.
+func openRouterServiceReplay(t *testing.T, home, upstream string) *service {
+	return openRouterServiceOpt(t, home, upstream, false)
+}
+
+func openRouterServiceOpt(t *testing.T, home, upstream string, noReplay bool) *service {
 	t.Helper()
 	self, err := os.Executable()
 	if err != nil {
@@ -37,7 +46,7 @@ func openRouterService(t *testing.T, home, upstream string) *service {
 	connectFake(t, home)
 	svc, err := start(config{listen: "127.0.0.1:0", home: home, upstream: mustURL("http://127.0.0.1:1"),
 		chatgpt: mustURL("http://127.0.0.1:1"), openrouter: mustURL(upstream), logf: t.Logf,
-		lookPath: func(string) (string, error) { return self, nil }, noReplay: true,
+		lookPath: func(string) (string, error) { return self, nil }, noReplay: noReplay,
 		heartbeat: 100 * time.Millisecond, turnWait: 2 * time.Second})
 	if err != nil {
 		t.Fatal(err)

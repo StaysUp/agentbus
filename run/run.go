@@ -8,7 +8,7 @@
 // child's model calls the same turn id.
 //
 // It knows nothing about jobs or queues: a runner calls it (package runner).
-// A session's next turn continues by own replay for claude and codex (the
+// A session's next turn continues by own replay for claude, codex and opencode (the
 // gateway puts the earlier turn's history in front of its requests); with
 // replay off, or for a session that has no history to replay and never used
 // replay, it continues the vendor's conversation named by its resume_id
@@ -148,9 +148,10 @@ type Config struct {
 	// Wire says how a turn reaches each agent's binary. Nil refuses every
 	// turn.
 	Wire Wire
-	// ReplayBase turns on own replay for claude and codex: it plans how a new
-	// turn of agent's session continues it (replay.Replayer.Base). Nil turns
-	// own replay off, and both continue by the vendor's resume (Continuity).
+	// ReplayBase turns on own replay for a harness that names a replay format
+	// (claude, codex, opencode): it plans how a new turn of agent's session
+	// continues it (replay.Replayer.Base). Nil turns own replay off, and
+	// those harnesses continue by the vendor's resume (Continuity).
 	ReplayBase func(agent, session string) (ReplayPlan, error)
 	// Settle, when set, is called after a turn's child exits and before its
 	// session.closed is stored. It returns once the gateway has written every
@@ -606,8 +607,8 @@ const (
 
 // Continuity says how agent's next turns continue a session. A harness with a
 // replay format (harness.Info.Replay) uses own replay when ReplayBase is set:
-// claude and codex send the whole conversation on every request, so the
-// gateway can rebuild what the vendor's resume would send. Any other agent,
+// claude, codex and opencode send the whole conversation on every request, so
+// the gateway can rebuild what the vendor's resume would send. Any other agent,
 // and every agent with ReplayBase nil, use the vendor's resume.
 func (e *Engine) Continuity(agent string) string {
 	if h, ok := harness.Get(agent); ok && h.Info().Replay != "" && e.cfg.ReplayBase != nil {

@@ -72,7 +72,7 @@ may hold other projects' Go code. Go's own tools skip folders that start with `_
   still handed a loopback URL, and the vendor paths answer callers on this machine only.
 - **An adapter is per API format, not per agent.** Record a vendor quirk with the date and the
   agent version it was seen on, in a comment next to the code and in a test with that exact shape.
-- **Own replay covers both agents.** `replay/` continues Claude and codex sessions from the store.
+- **Own replay covers the three formats.** `replay/` continues Claude, Codex and OpenCode sessions from the store.
   A change to how history is built needs a test for each agent.
 - **A turn that cannot start stores nothing.** If the agent's program is missing, the API answers
   HTTP 400 with how to install it. Keep that check before anything is written.

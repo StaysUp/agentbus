@@ -34,8 +34,9 @@ const (
 
 // History formats own replay knows (package replay).
 const (
-	FormatAnthropic = "anthropic" // Anthropic Messages, as Claude Code sends them
-	FormatOpenAI    = "openai"    // the Responses API, as codex sends it
+	FormatAnthropic       = "anthropic"       // Anthropic Messages, as Claude Code sends them
+	FormatOpenAI          = "openai"          // the Responses API, as codex sends it
+	FormatChatCompletions = "chatcompletions" // Chat Completions, as OpenCode sends them
 	// FormatGemini is the Gemini API's generateContent, as agy sends it. No
 	// own replay reads it; it names the API format of agy's APIKey.
 	FormatGemini = "gemini"

@@ -16,9 +16,11 @@
 // continues from it: what it did, made valid for the API, then one note
 // saying how it ended and to check the folder (endUnfinished, notReached).
 //
-// Two formats, one Replayer each: the Anthropic Messages format as Claude Code
-// sends it (New), and the OpenAI Responses format as codex sends it
-// (NewCodex, codex.go). The rules are the same for both and live here: calls
+// Three formats, one Replayer each: the Anthropic Messages format as Claude Code
+// sends it (New), the OpenAI Responses format as codex sends it
+// (NewCodex, codex.go), and the OpenAI Chat Completions format as OpenCode
+// sends it (NewChatCompletions, chatcompletions.go). The rules are the same
+// for all of them and live here: calls
 // in request order, the newest main-thread call and never an older one, one
 // identity rule for the main thread, refusal with replay.failed on a layout
 // the gateway does not know, and the same note for a turn that did not
@@ -76,6 +78,10 @@ func New(src Source) *Replayer { return newReplayer(src, claude{}) }
 
 // NewCodex returns a Replayer for codex's requests, reading src.
 func NewCodex(src Source) *Replayer { return newReplayer(src, codex{}) }
+
+// NewChatCompletions returns a Replayer for OpenCode's Chat Completions
+// requests, reading src.
+func NewChatCompletions(src Source) *Replayer { return newReplayer(src, chatCompletions{}) }
 
 func newReplayer(src Source, f format) *Replayer {
 	return &Replayer{src: src, f: f, turns: map[[2]string]turnInfo{}, hists: map[[2]string]*history{},
