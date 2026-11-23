@@ -394,6 +394,8 @@ const (
 	WhyAdded   = "added in your folder since the checkpoint"
 	WhyRemoved = "removed from your folder since the checkpoint"
 	WhyNotFile = "is a folder or cannot be read in your folder"
+	// WhyNoFolder: the file's own folder, or one above it, is no folder.
+	WhyNoFolder = "belongs in a folder that is a file or a link in your folder"
 )
 
 // More apply refusals, in fixed wording.
@@ -415,8 +417,9 @@ var applyMu sync.Mutex
 // changeset from holds it ("" is the copy's base): every file the two
 // differ on. It is all or nothing for conflicts: each file must be as at
 // from, or already as at to; any other refuses the whole apply with a
-// *Conflict, and nothing is written. Then every new file is written out of
-// sight (staged) before any is put in place, so a file that cannot be read
+// *Conflict, and nothing is written. What the folder holds at a path is what
+// a checkpoint would list there (lookup). Then every new file is written out
+// of sight (staged) before any is put in place, so a file that cannot be read
 // from the store writes nothing either. Only a failure while files are put
 // in place leaves some written; ErrPartial says so, and Applied lists them.
 func (c *Connector) Apply(ctx context.Context, ref, from, to string) (Applied, error) {
@@ -480,9 +483,11 @@ func (c *Connector) apply(ctx context.Context, ref, from, to string, dry bool) (
 		chmod      bool
 		staged     string
 		removeOnly bool
+		respelt    string // the path removed that rel spells in another way
 	}
 	var ops []*op
 	var conflict Conflict
+	look := newLookup(rt, steps)
 	// shown, for a dry run: each file an op or a conflict names, and the
 	// folder's file at that path as the check found it.
 	var shown []shownFile
@@ -490,30 +495,39 @@ func (c *Connector) apply(ctx context.Context, ref, from, to string, dry bool) (
 		nops, nconf := len(ops), len(conflict.Files)
 		name := filepath.FromSlash(st.Path)
 		fa, fb := st.From, st.To
+		there, respelt, why := look.at(st)
 		// A file the base recorded without a hash is as the base saw it,
 		// by size, modification time and mode: one still so in the folder
 		// is as at from, without reading it.
-		if fa != nil && fa.Hash == "" && sameStat(rt, name, *fa) {
+		if there && fa != nil && fa.Hash == "" && sameStat(rt, name, *fa) {
 			ops = append(ops, &op{rel: st.Path, to: fb, removeOnly: fb == nil})
 			shown = append(shown, shownFile{rel: st.Path, to: fb, exists: true, mode: fa.Mode})
 			continue
 		}
-		cur, mode, exists, err := hashIn(rt, name)
+		var cur string
+		var mode fs.FileMode
+		var exists bool
+		if there {
+			var err error
+			if cur, mode, exists, err = hashIn(rt, name); err != nil {
+				why = WhyNotFile
+			}
+		}
 		// The same content is the same file only as the same kind: a
 		// regular file holding "link:x" is not the link to x.
 		is := func(f *workspace.File) bool {
 			return f != nil && exists && cur == f.Hash && mode&fs.ModeSymlink == f.Mode&fs.ModeSymlink
 		}
 		switch {
-		case err != nil:
-			conflict.Files = append(conflict.Files, ConflictFile{st.Path, WhyNotFile})
+		case why != "":
+			conflict.Files = append(conflict.Files, ConflictFile{st.Path, why})
 		case is(fb):
 			if mode.IsRegular() && mode.Perm() != fb.Mode.Perm() {
 				ops = append(ops, &op{rel: st.Path, to: fb, chmod: true})
 			}
 		case fb == nil && !exists:
 		case is(fa), fa == nil && !exists:
-			ops = append(ops, &op{rel: st.Path, to: fb, removeOnly: fb == nil})
+			ops = append(ops, &op{rel: st.Path, to: fb, removeOnly: fb == nil, respelt: respelt})
 		case fa == nil:
 			conflict.Files = append(conflict.Files, ConflictFile{st.Path, WhyAdded})
 		case !exists:
@@ -522,7 +536,7 @@ func (c *Connector) apply(ctx context.Context, ref, from, to string, dry bool) (
 			conflict.Files = append(conflict.Files, ConflictFile{st.Path, WhyChanged})
 		}
 		if len(ops) > nops || len(conflict.Files) > nconf {
-			shown = append(shown, shownFile{rel: st.Path, to: fb, exists: exists || err != nil, mode: mode, unread: err != nil})
+			shown = append(shown, shownFile{rel: st.Path, to: fb, exists: exists || why == WhyNotFile, mode: mode, unread: why == WhyNotFile})
 		}
 	}
 	sort.Slice(conflict.Files, func(i, j int) bool { return conflict.Files[i].Path < conflict.Files[j].Path })
@@ -598,6 +612,15 @@ func (c *Connector) apply(ctx context.Context, ref, from, to string, dry bool) (
 			return fail()
 		}
 		out.Files = append(out.Files, o.rel)
+	}
+	// A folder whose name changes only in case is emptied by now, and is made
+	// in its new spelling. One that still holds a file keeps its name.
+	renamed := map[string]bool{}
+	for _, o := range ops {
+		if d := respeltFolder(o.respelt, o.rel); d != "" && !renamed[d] {
+			renamed[d] = true
+			_ = removeEmptied(rt, filepath.FromSlash(d))
+		}
 	}
 	for _, o := range ops {
 		if o.to == nil {
