@@ -119,6 +119,9 @@ var (
 	turnFailed = fail(http.StatusInternalServerError, "The store could not be written, or the agent's program would not start.")
 )
 
+// elsewhere is the file routes' 409: they act on control's disk only.
+var elsewhere = fail(http.StatusConflict, "The session's folder is on a machine other than control's: these routes act on control's disk only.")
+
 // streamDoc is the one description of the event stream's framing.
 const streamDoc = "Server-sent events. Every stored event after the cursor, in order, then new ones as they land. " +
 	"Without store and after it starts with new events only. Each message is `id: <store>/<seq>`, " +
@@ -631,47 +634,47 @@ var routes = slices.Concat([]route{
 	{method: "POST", path: "/api/v0/files/read", op: "readFile",
 		tag:     "Files",
 		summary: "Read an outside file",
-		doc:     "Read a file outside the session copy, on the runner machine.",
+		doc:     "Read a file outside the session copy, on control's machine. Only for a session whose folder is on control's own machine (agentbus up), or a call without a session; a session on another machine's runner gets 409, before any approval card.",
 		body:    ReadFileRequest{},
 		turn:    fileOp,
 		tools: []tool{
 			{name: "read_file",
 				fields:   []string{"path"},
 				required: []string{"path"},
-				doc:      "Read a file outside the session copy on the runner.",
+				doc:      "Read a file outside the session copy, on control's machine. A session on another machine is refused.",
 			},
 		},
-		replies: []reply{ok(200, ReadFileResponse{}, "The file content."), badRequest, fail(404, "File not found.")},
+		replies: []reply{ok(200, ReadFileResponse{}, "The file content."), badRequest, fail(404, "File not found."), elsewhere, storeFailed},
 		serve:   plain((*API).readFile)},
 	{method: "POST", path: "/api/v0/files/list", op: "listFolder",
 		tag:     "Files",
 		summary: "List an outside folder",
-		doc:     "List entries of a folder outside the session copy, on the runner machine.",
+		doc:     "List entries of a folder outside the session copy, on control's machine. Only for a session whose folder is on control's own machine (agentbus up), or a call without a session; a session on another machine's runner gets 409, before any approval card.",
 		body:    ListFolderRequest{},
 		turn:    fileOp,
 		tools: []tool{
 			{name: "list_folder",
 				fields:   []string{"path"},
 				required: []string{"path"},
-				doc:      "List a folder outside the session copy on the runner.",
+				doc:      "List a folder outside the session copy, on control's machine. A session on another machine is refused.",
 			},
 		},
-		replies: []reply{ok(200, ListFolderResponse{}, "The folder entries."), badRequest, fail(404, "Folder not found.")},
+		replies: []reply{ok(200, ListFolderResponse{}, "The folder entries."), badRequest, fail(404, "Folder not found."), elsewhere, storeFailed},
 		serve:   plain((*API).listFolder)},
 	{method: "POST", path: "/api/v0/files/write", op: "writeFile",
 		tag:     "Files",
 		summary: "Write an outside file",
-		doc:     "Write a file outside the session copy, on the runner machine.",
+		doc:     "Write a file outside the session copy, on control's machine. Only for a session whose folder is on control's own machine (agentbus up), or a call without a session; a session on another machine's runner gets 409, before any approval card.",
 		body:    WriteFileRequest{},
 		turn:    fileOp,
 		tools: []tool{
 			{name: "write_file",
 				fields:   []string{"path", "content"},
 				required: []string{"path", "content"},
-				doc:      "Write a file outside the session copy on the runner.",
+				doc:      "Write a file outside the session copy, on control's machine. A session on another machine is refused.",
 			},
 		},
-		replies: []reply{ok(200, WriteFileResponse{}, "File written."), badRequest},
+		replies: []reply{ok(200, WriteFileResponse{}, "File written."), badRequest, elsewhere, storeFailed},
 		serve:   plain((*API).writeFile)},
 
 	{method: "GET", path: "/api/v0/approvals", op: "listApprovals",

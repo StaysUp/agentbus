@@ -327,6 +327,11 @@ func (a *API) callTool(r *http.Request, st servedTool, args map[string]any, call
 	// call falls through to run below. Built-in and custom tools pass here alike.
 	approvedTarget := "*"
 	if isFolderServedTool(st) {
+		// Before the gate, so a call the route would refuse shows no card: the
+		// route's own answer, so the agent reads the same either way.
+		if rec := (&toolRecorder{header: http.Header{}}); a.refuseFilesElsewhere(rec, g) {
+			return fail(toolStatus(rec.code) + ": " + strings.TrimSpace(rec.body.String()))
+		}
 		p, _ := args["path"].(string)
 		if p == "" {
 			return fail("path argument is required")
