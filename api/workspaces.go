@@ -311,6 +311,110 @@ func (a *API) discardWorkspace(w http.ResponseWriter, r *http.Request, id string
 	writeJSON(w, status, st)
 }
 
+// UpdateState is the state of a workspace update (POST
+// /api/v0/workspaces/{id}/update): the person's folder merged into the copy.
+type UpdateState struct {
+	State     string   `json:"state,omitempty" doc:"queued, running, updated (the folder was merged in), conflict (the files in conflicts changed on both sides; nothing changed), or failed (error says why)."`
+	Updated   bool     `json:"updated,omitempty" doc:"The folder was merged into the copy; the next apply writes only the session's work."`
+	Conflicts []string `json:"conflicts,omitempty" doc:"On a conflict: the files that changed on both sides, sorted. Nothing changed; ask the agent to resolve them in a turn."`
+	Error     string   `json:"error,omitempty" doc:"Why the update failed."`
+}
+
+// updateStateOf reads an update job's state and the HTTP status that reports it:
+// 200 for a finished update (updated or conflict, both normal outcomes), 202
+// while it waits behind a running turn, and the runner's own status for a real
+// failure (400 when the workspace's backend has no update, else 500).
+func (a *API) updateStateOf(j queue.Job) (UpdateState, int) {
+	switch {
+	case j.State == queue.Queued:
+		return UpdateState{State: "queued"}, http.StatusAccepted
+	case j.Ended == nil:
+		return UpdateState{State: "running"}, http.StatusAccepted
+	case j.State == queue.Finished:
+		r, _ := queue.ReadResult(j.Result)
+		if r.Update.Clean() {
+			return UpdateState{State: "updated", Updated: true}, http.StatusOK
+		}
+		st := UpdateState{State: "conflict"}
+		if r.Update != nil {
+			st.Conflicts = r.Update.Conflicts
+		}
+		return st, http.StatusOK
+	default:
+		st := UpdateState{State: "failed", Error: "the update did not finish"}
+		status := http.StatusInternalServerError
+		if r, _ := queue.ReadResult(j.Result); r.Refused != "" {
+			st.Error = r.Refused
+			if r.Status != 0 {
+				status = r.Status
+			}
+		}
+		return st, status
+	}
+}
+
+// updateWorkspace serves POST /api/v0/workspaces/{id}/update: merge the person's
+// folder as it is now into the sandbox copy, so the session's work sits on top
+// and the next apply writes only that work. The person's folder is never
+// touched. Main token only.
+func (a *API) updateWorkspace(w http.ResponseWriter, r *http.Request, id string) {
+	if a.cfg.Queue == nil {
+		writeError(w, http.StatusNotFound, noTurns)
+		return
+	}
+	wsID := ids.WorkspaceID(id)
+	ws, found, err := a.cfg.Store.Workspace(wsID)
+	if err != nil {
+		a.internal(w)
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "no such workspace")
+		return
+	}
+	if !ws.Sandbox {
+		writeError(w, http.StatusBadRequest, "this session works directly in your folder; there is nothing to update into a copy")
+		return
+	}
+	j, created, err := a.cfg.Queue.Update(queue.DefaultTeam, wsID, ws.Machine, askedBy(r))
+	var removed *queue.RunnerRemovedError
+	switch {
+	case errors.Is(err, queue.ErrApplyBusy):
+		writeJSON(w, http.StatusConflict, UpdateState{State: "failed", Error: "an apply, discard or update of this workspace is still running or waiting; wait for it to end before updating"})
+		return
+	case errors.Is(err, queue.ErrSessionClosed):
+		writeError(w, http.StatusBadRequest, "this workspace is closed, so its copy cannot be updated")
+		return
+	case errors.Is(err, queue.ErrNotApplicable):
+		writeError(w, http.StatusBadRequest, "this workspace's copy cannot be updated from its folder")
+		return
+	case errors.As(err, &removed):
+		writeError(w, http.StatusServiceUnavailable, "the runner holding this workspace's copy was removed; nothing was updated")
+		return
+	case errors.Is(err, queue.ErrMachineOffline):
+		writeError(w, http.StatusServiceUnavailable, "the runner holding this workspace's copy has not been seen for a minute; nothing was updated")
+		return
+	case errors.Is(err, queue.ErrFull):
+		writeError(w, http.StatusTooManyRequests, "too many turns and applies are waiting; retry later")
+		return
+	case err != nil:
+		a.internal(w)
+		return
+	}
+	_ = created
+	// The update waits behind a running turn in the workspace lane; await it.
+	if j.Ended == nil {
+		if j, err = a.awaitEnd(r.Context(), j); err != nil {
+			if r.Context().Err() == nil {
+				a.internal(w)
+			}
+			return
+		}
+	}
+	st, status := a.updateStateOf(j)
+	writeJSON(w, status, st)
+}
+
 // ApplyRequest is the optional body of POST /api/v0/workspaces/{id}/apply.
 type ApplyRequest struct {
 	Turn string `json:"turn,omitempty" doc:"Apply the workspace's changes up to this turn (it and every earlier unapplied turn). Absent, or an empty body: up to the workspace's head turn, its latest with changes. A turn of another workspace is refused with 404."`

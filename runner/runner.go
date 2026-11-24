@@ -809,6 +809,9 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	case job.Kind == queue.KindDiscard:
 		at.finish(ctx, r.discardWork(at))
 		return
+	case job.Kind == queue.KindUpdate:
+		at.finish(ctx, r.updateWork(ctx, at))
+		return
 	case job.Kind == queue.KindHome:
 		at.finish(ctx, r.homeWork(at))
 		return
@@ -1180,6 +1183,102 @@ func (r *Runner) discardWork(at *attempt) queue.Finish {
 		return refuse("the copy could not be reset to the last applied state, so nothing was discarded", http.StatusInternalServerError)
 	}
 	return queue.Finish{Status: queue.Finished}
+}
+
+// updateWork merges the person's folder as it is now into the workspace's copy
+// by a three-way merge in the copy's private git (isolation.UpdateFrom), on the
+// runner holding the copy. That runner must also own the folder (the local fast
+// path), so it can read the folder for the "theirs" side; a copy and folder on
+// different machines are refused for now. A clean merge publishes the folder's
+// current state (the new apply baseline) and the merge as changesets and answers
+// them; a conflict answers the files and changes nothing. The person's folder is
+// only read, never written. Control records workspace.updated from the finish.
+func (r *Runner) updateWork(ctx context.Context, at *attempt) queue.Finish {
+	ctx, stop := attemptContext(ctx, at)
+	defer stop()
+	sp := at.job.Spec
+	refuse := func(msg string, status int) queue.Finish {
+		return queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup,
+			Result: mustJSON(queue.Result{Refused: msg, Status: status})}
+	}
+	// The copy to merge into: the workspace's copy row, or a copy left on disk
+	// under the workspace id, exactly as discardWork finds it.
+	var s *isolation.Space
+	if w := at.job.Workspace; w != nil && (w.Kind == queue.WorkspaceCopy || w.Kind == queue.WorkspaceWorktree) {
+		if sp2, err := r.loadSpace(*w); err == nil {
+			s = sp2
+		}
+	} else if ws := sp.Workspace; ws != "" {
+		if sp2, err := r.loadSpace(queue.Workspace{Space: string(ws)}); err == nil {
+			s = sp2
+		}
+	}
+	if s == nil {
+		return refuse("there is no sandbox copy to update", http.StatusBadRequest)
+	}
+	b, ok := isolation.Get(s.Backend)
+	if !ok {
+		return refuse("the copy could not be read, so nothing was updated", http.StatusInternalServerError)
+	}
+	if err := isolation.Remount(s); err != nil {
+		return refuse("the copy could not be read, so nothing was updated", http.StatusInternalServerError)
+	}
+	// Reading the folder for "theirs" needs it on this machine: the copy's runner
+	// must own the folder. A far runner holding only the copy cannot read it yet.
+	if r.cfg.FolderSide == nil || r.cfg.Folders == nil || sp.Machine != r.cfg.Folders.Machine() {
+		return refuse("update needs the copy and the folder on one machine; it is not available for a copy on another machine yet", http.StatusBadRequest)
+	}
+	folder, ok := r.folderPath("", sp.FolderRef, sp.Machine)
+	if !ok {
+		return refuse(folderUnknown, http.StatusBadRequest)
+	}
+	res, err := b.UpdateFrom(s, sp.Restore, folder)
+	if err != nil {
+		if errors.Is(err, isolation.ErrNoUpdate) {
+			return refuse(err.Error(), http.StatusBadRequest)
+		}
+		if ctx.Err() != nil {
+			return refuse("the update was stopped; nothing was changed", http.StatusConflict)
+		}
+		return refuse("the folder could not be merged into the copy, so nothing was updated", http.StatusInternalServerError)
+	}
+	if !res.Clean {
+		// A real conflict: nothing changed. Finished, with the files, so control
+		// records workspace.updated(result conflict) and the person can ask the
+		// agent to resolve them.
+		return queue.Finish{Status: queue.Finished,
+			Result: mustJSON(queue.Result{Update: &queue.UpdateResult{Conflicts: res.Conflicts}})}
+	}
+	// Publish the folder's current state (the new apply baseline) and the merge as
+	// changesets, so an apply reads them from the store by blob. UpdateFrom has
+	// already advanced the copy to the merge; if a publish fails (or the runner
+	// has no store), the merge is not recorded, so the copy must go back to its
+	// pre-update head, or a later turn would checkpoint an unrecorded merge and a
+	// later apply could write the folder's imported content wrongly.
+	undo := func(msg string) queue.Finish {
+		if res.PriorHead != "" {
+			if err := b.RestoreTo(s, res.PriorHead); err != nil {
+				// The copy could not be reset to its pre-update state, so it may hold
+				// the merge control is not recording. Say so rather than report a plain
+				// failure: a later turn must not reuse a copy in an unknown state.
+				return refuse("the folder could not be merged and the copy could not be reset; discard this session's changes before continuing", http.StatusInternalServerError)
+			}
+		}
+		return refuse(msg, http.StatusInternalServerError)
+	}
+	fromCS, err := r.publish(ctx, s, res.Theirs)
+	if err != nil {
+		return undo("the merge could not be saved, so nothing was updated")
+	}
+	toCS, err := r.publish(ctx, s, res.Merged)
+	if err != nil {
+		return undo("the merge could not be saved, so nothing was updated")
+	}
+	if fromCS == "" || toCS == "" {
+		return undo("this runner has no store to save the merge, so nothing was updated")
+	}
+	return queue.Finish{Status: queue.Finished, Result: mustJSON(queue.Result{Update: &queue.UpdateResult{
+		From: fromCS, To: toCS, TheirsCheckpoint: res.Theirs, MergedCheckpoint: res.Merged}})}
 }
 
 // isolate opens a session's first job's copy with b, and its turn starts

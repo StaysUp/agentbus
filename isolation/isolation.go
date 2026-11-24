@@ -102,13 +102,47 @@ type Backend interface {
 	// the copy side of Discard. A backend that cannot do it yet returns
 	// ErrNoRestore, and the person's real folder is never touched.
 	RestoreTo(s *Space, name string) error
+	// UpdateFrom brings the person's folder as it is now (at path folder) into
+	// the copy by a three-way merge: base is the checkpoint the folder last
+	// matched (the last applied one, or Base), the copy's head is "ours", and a
+	// fresh snapshot of the folder is "theirs". A clean merge records the folder
+	// state and the merge as two new checkpoints (UpdateResult.Theirs and
+	// .Merged) and leaves the copy holding the merge; a real conflict changes
+	// nothing and names the files (UpdateResult.Conflicts). The person's folder
+	// is only read, never written. A backend that cannot do it returns
+	// ErrNoUpdate.
+	UpdateFrom(s *Space, base, folder string) (UpdateResult, error)
 	// Close removes the copy and everything the space kept.
 	Close(s *Space) error
+}
+
+// UpdateResult is what an UpdateFrom did. On a clean merge Clean is true,
+// Theirs names the checkpoint recorded for the folder's current state (the new
+// baseline the folder matches) and Merged names the checkpoint the copy now
+// holds (the merge of the session's work and the folder). On a real conflict
+// Clean is false, Conflicts names the folder-relative files that conflicted
+// (sorted), and nothing changed.
+type UpdateResult struct {
+	Clean     bool
+	Theirs    string
+	Merged    string
+	Conflicts []string
+	// PriorHead is the copy's head checkpoint before the merge (ours). On a
+	// clean merge the copy is advanced to Merged; a caller whose own later step
+	// fails (publishing the changesets, say) resets the copy to PriorHead to undo
+	// the merge, so the copy matches control's unchanged view.
+	PriorHead string
 }
 
 // ErrNoRestore: this backend cannot reset a copy to a checkpoint yet, so a
 // Discard of a workspace on it is refused with a plain message for the person.
 var ErrNoRestore = errors.New("Discard is not available for this workspace yet")
+
+// ErrNoUpdate: this backend cannot update a copy from the folder (it keeps no
+// private git repo -- a snapshot-built or overlay copy, or one from before the
+// shadow landed), so an update of a workspace on it is refused with a plain
+// message for the person.
+var ErrNoUpdate = errors.New("Update from your folder is not available for this workspace")
 
 // Request is the copy a session asks for.
 type Request struct {
@@ -309,6 +343,9 @@ func (f fallback) Checkpoint(s *Space, name string) (Checkpoint, error) {
 }
 func (f fallback) Checkpoints(s *Space) ([]Checkpoint, error) { return f.own(s).Checkpoints(s) }
 func (f fallback) RestoreTo(s *Space, name string) error      { return f.own(s).RestoreTo(s, name) }
+func (f fallback) UpdateFrom(s *Space, base, folder string) (UpdateResult, error) {
+	return f.own(s).UpdateFrom(s, base, folder)
+}
 func (f fallback) Diff(s *Space, from, to string) (workspace.Changes, error) {
 	return f.own(s).Diff(s, from, to)
 }

@@ -81,6 +81,12 @@ func (noneBackend) Diff(s *Space, from, to string) (workspace.Changes, error) {
 // no copy to reset; Discard is refused for it (direct mode already is).
 func (noneBackend) RestoreTo(s *Space, name string) error { return ErrNoRestore }
 
+// UpdateFrom: the none backend runs in the person's folder as it is, so there
+// is no copy to update from it.
+func (noneBackend) UpdateFrom(s *Space, base, folder string) (UpdateResult, error) {
+	return UpdateResult{}, ErrNoUpdate
+}
+
 func (noneBackend) Close(s *Space) error {
 	if s.Backend != None {
 		return errors.New("isolation: not a folder used as it is")

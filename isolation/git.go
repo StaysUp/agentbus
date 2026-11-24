@@ -127,6 +127,12 @@ func (gitBackend) Diff(s *Space, from, to string) (workspace.Changes, error) {
 // git reset --hard + clean to the worktree commit of the checkpoint).
 func (gitBackend) RestoreTo(s *Space, name string) error { return ErrNoRestore }
 
+// UpdateFrom is not built for the git worktree backend: it keeps no private
+// shadow repo, so there is no three-way merge to run.
+func (gitBackend) UpdateFrom(s *Space, base, folder string) (UpdateResult, error) {
+	return UpdateResult{}, ErrNoUpdate
+}
+
 func (gitBackend) Close(s *Space) error {
 	if s.Root != filepath.Join(s.Workdir, s.ID) {
 		return ErrOutside

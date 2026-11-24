@@ -93,6 +93,14 @@ const (
 	// the copy, so it waits in the workspace lane behind a running turn
 	// (laneKinds). It starts no turn.
 	KindDiscard = "discard"
+	// KindUpdate brings the person's folder as it is now into a sandbox
+	// workspace's copy by a three-way merge, so the session's work sits on top
+	// of the folder and the next apply writes only that work (update.go). The
+	// runner holding the copy reads the folder (its own machine, the local fast
+	// path), merges in the private git, and control records workspace.updated.
+	// Like a discard it changes the copy, so it waits in the workspace lane and
+	// at most one apply, discard or update runs per workspace. It starts no turn.
+	KindUpdate = "update"
 	// A "snapshot" job (a folder's snapshot, for a runner that built a copy
 	// from it before 0.5) is retired in 0.5.1: a session runs on its
 	// folder's machine, so nothing asks for one. One stored before is read
@@ -908,15 +916,16 @@ func (q *Queue) HasKey(team, key string) (bool, error) {
 }
 
 // laneKinds are the job kinds that share a workspace's one ordered lane: the
-// jobs that CHANGE the one copy -- a turn (runs in it) and a discard (resets it
-// to the last applied point). They run one at a time on the runner that holds
-// the copy, so a discard never resets a copy a turn is editing. apply and
-// preview are NOT here: they read finished checkpoints (published changesets)
-// and the person's folder, never the live copy, so they leave the lane and
-// never wait on a running turn (his call, 2026-11-22). folder and home touch no
-// workspace copy. (B15: a review is a turn in its own session, so no review
-// clause.)
-const laneKinds = `('turn','discard')`
+// jobs that CHANGE the one copy -- a turn (runs in it), a discard (resets it to
+// the last applied point) and an update (merges the folder into it). They run
+// one at a time on the runner that holds the copy, so neither a discard nor an
+// update ever touches a copy a turn is editing, and what an update merges is
+// computed when it runs (like a discard's dropped turns). apply and preview are
+// NOT here: they read finished checkpoints (published changesets) and the
+// person's folder, never the live copy, so they leave the lane and never wait
+// on a running turn (his call, 2026-11-22). folder and home touch no workspace
+// copy. (B15: a review is a turn in its own session, so no review clause.)
+const laneKinds = `('turn','discard','update')`
 
 // jobCopyKey is a job's workspace copy key in SQL, qualified by alias a (e.g.
 // "j"): its workspace, or its session when it names none, exactly as CopyKey
@@ -1335,9 +1344,13 @@ func workspaceOf(db querier, j Job) (*Workspace, error) {
 	// The checkpoint the copy is at now, so the workspace's next turn diffs from
 	// the copy as it is, not from base: the latest of the workspace's turns that
 	// ended with a changeset (its end checkpoint is Result.Checkpoint, or in a
-	// result from before 0.5 its changes' to) and its finished discards (which
-	// reset the copy to Restore -- empty means base). A discard after the latest
-	// turn moves the copy back, so the dropped turns are not diffed from again.
+	// result from before 0.5 its changes' to), its finished discards (which reset
+	// the copy to Restore -- empty means base), and its finished clean updates
+	// (which advance the copy to the merge, Result.Update.MergedCheckpoint). A
+	// discard after the latest turn moves the copy back, so the dropped turns are
+	// not diffed from again; an update after the latest turn moves it forward to
+	// the merge, so the next turn's diff does not include the folder's own changes
+	// that the update merged in as if the turn had made them.
 	err = db.QueryRow(`SELECT checkpoint FROM (
 		SELECT ended, rowid, COALESCE(json_extract(result, '$.checkpoint'), json_extract(result, '$.changes.to'), '') AS checkpoint
 			FROM jobs WHERE team = ? AND kind = 'turn' AND COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), session) = ?
@@ -1345,8 +1358,12 @@ func workspaceOf(db querier, j Job) (*Workspace, error) {
 		UNION ALL
 		SELECT ended, rowid, COALESCE(json_extract(spec, '$.restore'), '') AS checkpoint
 			FROM jobs WHERE team = ? AND kind = 'discard' AND COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), session) = ?
-			AND ended IS NOT NULL AND state = 'finished')
-		ORDER BY ended DESC, rowid DESC LIMIT 1`, j.Team, key, j.Team, key).Scan(&w.DiffFrom)
+			AND ended IS NOT NULL AND state = 'finished'
+		UNION ALL
+		SELECT ended, rowid, json_extract(result, '$.update.merged_checkpoint') AS checkpoint
+			FROM jobs WHERE team = ? AND kind = 'update' AND COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), session) = ?
+			AND ended IS NOT NULL AND state = 'finished' AND COALESCE(json_extract(result, '$.update.merged_checkpoint'), '') != '')
+		ORDER BY ended DESC, rowid DESC LIMIT 1`, j.Team, key, j.Team, key, j.Team, key).Scan(&w.DiffFrom)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("queue: read workspace head: %w", err)
 	}

@@ -232,6 +232,12 @@ func (overlayBackend) Diff(s *Space, from, to string) (workspace.Changes, error)
 // upper layer to the checkpoint's snapshot, then remount).
 func (overlayBackend) RestoreTo(s *Space, name string) error { return ErrNoRestore }
 
+// UpdateFrom is not built for the overlay backend: it keeps no private shadow
+// repo, so there is no three-way merge to run.
+func (overlayBackend) UpdateFrom(s *Space, base, folder string) (UpdateResult, error) {
+	return UpdateResult{}, ErrNoUpdate
+}
+
 func (overlayBackend) Close(s *Space) error {
 	if s.Root != filepath.Join(s.Workdir, s.ID) {
 		return ErrOutside

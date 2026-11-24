@@ -42,6 +42,10 @@ type Result struct {
 	// plane's store, of what the copy holds at the turn's end that differs
 	// from its base (workspace.Changeset). An apply reads it.
 	Changeset string `json:"changeset,omitempty"`
+	// Update, for an update job: the outcome of merging the person's folder
+	// into the copy (From/To changesets on a clean merge, Conflicts on a
+	// conflict). The runner fills it at the finish.
+	Update *UpdateResult `json:"update,omitempty"`
 	// Snapshot, for a snapshot job: the snapshot it took.
 	Snapshot *SnapshotTaken `json:"snapshot,omitempty"`
 	// FolderRef, for a folder job: the reference the connector registered
@@ -65,6 +69,9 @@ type Result struct {
 	// DiscardedEvent: a discard's workspace.discarded, by its id, in place of
 	// the outcome itself (as AppliedEvent is for an apply).
 	DiscardedEvent string `json:"discarded_event,omitempty"`
+	// UpdatedEvent: an update's workspace.updated, by its id, in place of the
+	// outcome itself (as DiscardedEvent is for a discard).
+	UpdatedEvent string `json:"updated_event,omitempty"`
 	// OutcomeDue: the job ended with no finish (its runner was lost), so
 	// no finisher wrote its outcome; control's sweep writes it to the
 	// record and sets the pointer in its place (OutcomesDue, KeepOutcome).
@@ -115,6 +122,28 @@ type ApplyConflict struct {
 	Path string `json:"path"`
 	Why  string `json:"why"`
 }
+
+// UpdateResult is what an update job did: on a clean merge From is the new
+// baseline changeset (the folder as it is now) and To the merged changeset (the
+// copy's new head), both blobs in the control plane's store; on a real conflict
+// From and To are empty and Conflicts names the files. Clean reports which.
+//
+// TheirsCheckpoint and MergedCheckpoint are the copy's own checkpoint names for
+// the folder snapshot and the merge: the shadow names, which control passes back
+// as the merge base of the next update (the folder the copy last matched) and
+// the reset point of a discard after this merge was applied. Changesets name
+// content by blob; these name it by checkpoint, which the copy's git needs.
+type UpdateResult struct {
+	From             string   `json:"from,omitempty"`
+	To               string   `json:"to,omitempty"`
+	TheirsCheckpoint string   `json:"theirs_checkpoint,omitempty"`
+	MergedCheckpoint string   `json:"merged_checkpoint,omitempty"`
+	Conflicts        []string `json:"conflicts,omitempty"`
+}
+
+// Clean reports whether the update merged the folder in (From and To set), as
+// against leaving the copy unchanged on a conflict.
+func (u *UpdateResult) Clean() bool { return u != nil && u.To != "" && len(u.Conflicts) == 0 }
 
 // ReadResult reads a job's result. An empty one is the zero Result.
 func ReadResult(raw json.RawMessage) (Result, error) {

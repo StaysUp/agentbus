@@ -80,13 +80,16 @@ const jobWorkspace = `COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), se
 
 func (q *Queue) appliableTurns(team string, ws ids.WorkspaceID) ([]sessionTurn, error) {
 	// A turn a finished discard dropped is gone from the copy, so it is not
-	// appliable, previewable or droppable again: exclude every turn a finished
-	// discard of this workspace named in its dropped turns (links.applies_turns).
+	// appliable, previewable or droppable again; a turn a finished update folded
+	// into the merge (its links.applies_turns, every folded turn but the update's
+	// head turn) is no longer applied on its own either -- applying the head turn
+	// writes the merge. Exclude both: every turn a finished discard or update of
+	// this workspace named in links.applies_turns.
 	rows, err := q.db.Query(`SELECT turn, COALESCE(json_extract(result, '$.changeset'), '') FROM jobs
 		WHERE team = ? AND `+jobWorkspace+` = ? AND kind = 'turn' AND ended IS NOT NULL AND attempt IS NOT NULL
 		AND turn NOT IN (
 			SELECT je.value FROM jobs d, json_each(COALESCE(json_extract(d.links, '$.applies_turns'), '[]')) je
-			WHERE d.team = ? AND COALESCE(NULLIF(json_extract(d.spec, '$.workspace'), ''), d.session) = ? AND d.kind = 'discard' AND d.state = 'finished')
+			WHERE d.team = ? AND COALESCE(NULLIF(json_extract(d.spec, '$.workspace'), ''), d.session) = ? AND d.kind IN ('discard','update') AND d.state = 'finished')
 		ORDER BY ended, rowid`, team, string(ws), team, string(ws))
 	if err != nil {
 		return nil, fmt.Errorf("queue: list turns: %w", err)
@@ -198,7 +201,7 @@ func (q *Queue) ApplyWorkspace(team string, ws ids.WorkspaceID, turn string, by 
 			} else if found && w.Closed != nil {
 				return Job{}, false, ErrSessionClosed
 			}
-			if busy, berr := q.jobsInFlight(team, ws, `'discard'`); berr != nil {
+			if busy, berr := q.jobsInFlight(team, ws, `'discard','update'`); berr != nil {
 				return Job{}, false, berr
 			} else if busy {
 				return Job{}, false, ErrApplyBusy
@@ -281,10 +284,11 @@ func (q *Queue) planApply(team, turn string, by *By) (plan applyPlan, done Job, 
 	if err != nil {
 		return plan, Job{}, false, err
 	}
-	// Apply and discard both move the applied point, so one runs per workspace:
-	// an apply while a discard is in flight is refused (ErrApplyBusy -> 409), the
-	// same way a discard is refused while an apply runs (his call, 2026-11-22).
-	if busy, err := q.jobsInFlight(team, ws, `'discard'`); err != nil {
+	// Apply, discard and update all move the applied point or the copy, so one
+	// runs per workspace: an apply while a discard or an update is in flight is
+	// refused (ErrApplyBusy -> 409), the same way a discard is refused while an
+	// apply runs (his call, 2026-11-22).
+	if busy, err := q.jobsInFlight(team, ws, `'discard','update'`); err != nil {
 		return plan, Job{}, false, err
 	} else if busy {
 		return plan, Job{}, false, ErrApplyBusy
@@ -309,6 +313,7 @@ func (q *Queue) planApply(team, turn string, by *By) (plan applyPlan, done Job, 
 		return plan, Job{}, false, err
 	}
 	mark := -1
+	lastAppliedTo := "" // what the folder holds now: the most recent finished apply's target
 	for _, a := range applies {
 		k := indexOf(turns, a.Links.AppliesTurn)
 		switch {
@@ -320,15 +325,30 @@ func (q *Queue) planApply(team, turn string, by *By) (plan applyPlan, done Job, 
 			return plan, a, true, nil // applied already
 		case a.State == Finished:
 			mark = max(mark, k)
+			if lastAppliedTo == "" { // applies are newest first: the first finished is the folder's state
+				lastAppliedTo = a.Spec.ApplyTo
+			}
 		case a.Links.AppliesTurn == turn:
 			plan.refused++
 		}
 	}
-	from := ""
-	if mark >= 0 {
-		from = turns[mark].changeset
+	// The baseline the apply starts from is what the folder holds now: the most
+	// recent apply's target changeset. An active update (one with no apply or
+	// discard after it) moved the copy to the folder's current state without
+	// touching the folder, so until the next apply the baseline is the update's
+	// recorded folder state (from), and applying up to the update's head turn
+	// writes the merge (to) rather than that turn's own changeset.
+	from := lastAppliedTo
+	to := r.Changeset
+	if upd, ok, uerr := q.activeUpdate(team, ws); uerr != nil {
+		return plan, Job{}, false, uerr
+	} else if ok {
+		from = upd.From
+		if turn == upd.HeadTurn {
+			to = upd.To
+		}
 	}
-	plan.spec = Spec{Session: ids.SessionID(j.Session), Workspace: j.Spec.Workspace, FolderRef: first.FolderRef, Machine: first.Machine, ApplyFrom: from, ApplyTo: r.Changeset}
+	plan.spec = Spec{Session: ids.SessionID(j.Session), Workspace: j.Spec.Workspace, FolderRef: first.FolderRef, Machine: first.Machine, ApplyFrom: from, ApplyTo: to}
 	carried := make([]string, 0, at-mark)
 	for _, t := range turns[mark+1 : at+1] {
 		carried = append(carried, t.turn)
@@ -449,7 +469,10 @@ func (q *Queue) appliableCursor(team string, ws ids.WorkspaceID) (turn string, a
 	if len(turns) == 0 {
 		return "", 0, false, nil
 	}
-	if err := q.db.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND `+jobWorkspace+` = ? AND kind = 'apply'`,
+	// Count applies, discards and updates: each moves the folder's baseline or
+	// the copy, so a new one must retake a stored preview (the preview reuse
+	// cursor is this count).
+	if err := q.db.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND `+jobWorkspace+` = ? AND kind IN ('apply','discard','update')`,
 		team, string(ws)).Scan(&applies); err != nil {
 		return "", 0, false, fmt.Errorf("queue: count applies: %w", err)
 	}
@@ -471,7 +494,7 @@ func (q *Queue) appliableCursor(team string, ws ids.WorkspaceID) (turn string, a
 func (q *Queue) Discard(team string, ws ids.WorkspaceID, machine string, by *By) (job Job, created bool, err error) {
 	q.applyMu.Lock()
 	defer q.applyMu.Unlock()
-	busy, err := q.jobsInFlight(team, ws, `'apply', 'discard'`)
+	busy, err := q.jobsInFlight(team, ws, `'apply','discard','update'`)
 	if err != nil {
 		return Job{}, false, err
 	}
@@ -495,12 +518,23 @@ func (q *Queue) Discard(team string, ws ids.WorkspaceID, machine string, by *By)
 	}
 	restore := ""
 	if mark >= 0 {
-		if restore, err = q.turnCheckpoint(team, turns[mark].turn); err != nil {
-			return Job{}, false, err
+		// Reset to the checkpoint whose content the folder's last apply wrote --
+		// which may be an update's merge, not the applied turn's own pre-merge
+		// checkpoint. Using the turn checkpoint would reset the copy behind the
+		// merge the folder holds, and a later turn + apply would then revert the
+		// folder's imported content.
+		to, ok, terr := q.lastFinishedApplyTo(team, ws)
+		if terr != nil {
+			return Job{}, false, terr
+		}
+		if ok {
+			if restore, err = q.checkpointForChangeset(team, ws, to); err != nil {
+				return Job{}, false, err
+			}
 		}
 		if restore == "" {
-			// The applied turn has no end checkpoint to reset to. Refuse rather
-			// than let an empty Restore reset the copy all the way to base and drop
+			// The applied content has no checkpoint to reset to. Refuse rather than
+			// let an empty Restore reset the copy all the way to base and drop
 			// changes that were applied.
 			return Job{}, false, ErrNotApplicable
 		}

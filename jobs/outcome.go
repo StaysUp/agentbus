@@ -36,6 +36,7 @@ var ErrOutcomeMissing = errors.New("jobs: the job's outcome is not in the record
 func changedID(j queue.Job) string { return "evt_tc_" + j.ID }
 func appliedID(j queue.Job) string { return "evt_ta_" + j.ID }
 func discardID(j queue.Job) string { return "evt_wd_" + j.ID }
+func updateID(j queue.Job) string  { return "evt_wu_" + j.ID }
 
 // registeredID is the id of a folder's folder.registered, by its reference and
 // machine rather than by the job, so the many folder jobs of one folder (one
@@ -57,6 +58,28 @@ func DiscardedOf(j queue.Job) *event.Discarded {
 		d.By = &event.By{Kind: b.Kind, Session: b.Session, Turn: b.Turn}
 	}
 	return d
+}
+
+// UpdatedOf is what an update job did, from the job and its result res: the
+// workspace.updated it is recorded as. A clean merge carries the new baseline
+// (from) and merged (to) changesets and the folded turns; a conflict carries
+// the files that conflicted and nothing else.
+func UpdatedOf(j queue.Job, res queue.Result) *event.Updated {
+	u := &event.Updated{}
+	if b := j.Links.ApplyBy; b != nil {
+		u.By = &event.By{Kind: b.Kind, Session: b.Session, Turn: b.Turn}
+	}
+	if res.Update.Clean() {
+		u.Result = "updated"
+		u.From, u.To = res.Update.From, res.Update.To
+		u.FoldedTurns = j.Links.AppliesTurns
+	} else {
+		u.Result = "conflict"
+		if res.Update != nil {
+			u.Conflicts = res.Update.Conflicts
+		}
+	}
+	return u
 }
 
 // errOutcome: the job's outcome could not be written to the record. Its
@@ -151,6 +174,20 @@ func keepOutcomes(rec Recorder, j queue.Job, f queue.Finish) (kept json.RawMessa
 		if _, err := rec.AppendOnce(e); err != nil {
 			return nil, err
 		}
+	case queue.KindUpdate:
+		if res.UpdatedEvent != "" || j.State != queue.Finished {
+			break
+		}
+		// workspace.updated names the workspace whose copy was merged, keyed by the
+		// workspace id, so it resolves by it even when the update job has no session
+		// of its own. Recorded on a clean merge and on a conflict alike.
+		ws := queue.CopyKey(j.Spec.Workspace, j.Session)
+		e := event.Event{ID: updateID(j), Kind: event.WorkspaceUpdated, Time: now, Workspace: string(ws), Session: j.Session,
+			Updated: UpdatedOf(j, res)}
+		if _, err := rec.AppendOnce(e); err != nil {
+			return nil, err
+		}
+		res.UpdatedEvent, moved = e.ID, true
 	}
 	if !moved {
 		return nil, nil

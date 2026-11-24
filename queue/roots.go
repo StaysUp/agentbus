@@ -102,6 +102,13 @@ func (out *BlobRoots) addJobs(rows *sql.Rows) error {
 		}
 		res, _ := ReadResult(json.RawMessage(*result))
 		out.Changesets = appendSet(out.Changesets, res.Changeset)
+		if u := res.Update; u != nil {
+			// An update's folder baseline (from) and merge (to) changesets are
+			// named by a later apply, which may come after the retention grace
+			// period, so they are roots until then -- or the sweep removes them
+			// and the apply fails.
+			out.Changesets = appendSet(out.Changesets, u.From, u.To)
+		}
 		if s := res.Snapshot; s != nil {
 			out.Trees = appendSet(out.Trees, s.ID, s.Git)
 			out.Blobs = appendSet(out.Blobs, s.Times)

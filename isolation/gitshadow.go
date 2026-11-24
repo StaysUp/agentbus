@@ -67,10 +67,19 @@ func zeroOID(sha string) bool { return strings.Trim(sha, "0") == "" }
 // config, attributes or ignore files (a global excludes file is read even with
 // no global config, so a file a developer ignores globally -- notes.md, .env --
 // would otherwise silently drop from every changeset).
-func (s *Space) gitBaseArgs() []string {
+func (s *Space) gitBaseArgs() []string { return s.gitBaseArgsWT(s.Dir) }
+
+// gitBaseArgsWT is gitBaseArgs with the work tree named, so a call can read a
+// tree other than the copy -- the person's folder, to build the "theirs" side
+// of an update's three-way merge (gitupdate.go) -- under the same sealing: no
+// hooks, no signing, a fixed identity, no content transformation, and none of
+// the person's config, attributes or ignore files. The named work tree is only
+// ever read (git add stages into the object store and a named index), never
+// written, so the person's folder is untouched and its own .git is never seen.
+func (s *Space) gitBaseArgsWT(workTree string) []string {
 	return []string{
 		"--git-dir=" + s.gitShadowDir(),
-		"--work-tree=" + s.Dir,
+		"--work-tree=" + workTree,
 		"-c", "core.hooksPath=/dev/null",
 		"-c", "commit.gpgSign=false",
 		"-c", "gc.auto=0",
@@ -86,12 +95,26 @@ func (s *Space) gitBaseArgs() []string {
 }
 
 func (s *Space) runGit(ctx context.Context, args ...string) (stdout, stderr []byte, code int, err error) {
-	cmd := exec.CommandContext(ctx, "git", append(s.gitBaseArgs(), args...)...)
-	// Run from the work tree, so a "." pathspec resolves against the copy, not
-	// the process's own folder. --git-dir is explicit, so git never discovers
-	// the copy's own .git from here.
-	cmd.Dir = s.Dir
-	cmd.Env = sealedGitEnv()
+	return s.runGitFull(ctx, s.Dir, "", args...)
+}
+
+// runGitFull is runGit with the work tree and index file named: it runs from
+// workTree (so a "." pathspec resolves there), sets --work-tree to it, and sets
+// GIT_INDEX_FILE when indexFile is not empty. runGit uses the copy's own work
+// tree and default index; an update (gitupdate.go) names a throwaway index and
+// either the person's folder (to read "theirs") or a scratch directory (the
+// trial merge), so it never disturbs the copy's own index or work tree.
+func (s *Space) runGitFull(ctx context.Context, workTree, indexFile string, args ...string) (stdout, stderr []byte, code int, err error) {
+	cmd := exec.CommandContext(ctx, "git", append(s.gitBaseArgsWT(workTree), args...)...)
+	// Run from the work tree, so a "." pathspec resolves against it, not the
+	// process's own folder. --git-dir is explicit, so git never discovers the
+	// work tree's own .git from here.
+	cmd.Dir = workTree
+	env := sealedGitEnv()
+	if indexFile != "" {
+		env = append(env, "GIT_INDEX_FILE="+indexFile)
+	}
+	cmd.Env = env
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	err = cmd.Run()
@@ -947,6 +970,17 @@ func (s *Space) restoreShadow(ctx context.Context, name string) error {
 		// discarded one whose ref lingered must not resurrect its commit.
 		return ErrNoCheckpoint
 	}
+	return s.resetTo(ctx, name)
+}
+
+// resetTo resets the copy's work tree to the checkpoint name and prunes the
+// checkpoints no longer reachable from it. The caller holds lock(s) and has
+// checked name is a valid target. Dirs made read-only by a turn are made
+// writable first, then a hard reset, then a clean; each either completes or
+// leaves the copy as it was. It is the shared body of restoreShadow (a discard)
+// and an update's rollback, so an update that fails after advancing the copy
+// resets it back to its prior head the same way a discard resets it.
+func (s *Space) resetTo(ctx context.Context, name string) error {
 	if err := makeTreeWritable(s.Dir); err != nil {
 		return err
 	}

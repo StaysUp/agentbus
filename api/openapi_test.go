@@ -315,9 +315,11 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 	// which drops a sandbox workspace's unapplied changes by resetting its copy,
 	// and POST /api/v0/workspaces/{id}/apply, which applies them to the person's
 	// folder (apply and the changes preview above moved from the turn and the
-	// session to the workspace, so the count is unchanged).
-	if len(ops) != 77 {
-		t.Errorf("%d endpoints, want 77: %v", len(ops), ops)
+	// session to the workspace, so the count is unchanged). 78 with POST
+	// /api/v0/workspaces/{id}/update, which merges the person's folder into the
+	// copy so the next apply writes only the session's work.
+	if len(ops) != 78 {
+		t.Errorf("%d endpoints, want 78: %v", len(ops), ops)
 	}
 	for _, want := range []string{"POST /api/v0/turns", "GET /api/v0/turns", "GET /api/v0/turns/{id}", "POST /api/v0/turns/{id}/stop",
 		"GET /api/v0/turns/{id}/diff", "GET /api/v0/workspaces/{id}/changes", "POST /api/v0/workspaces/{id}/apply",
