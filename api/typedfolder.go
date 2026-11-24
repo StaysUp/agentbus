@@ -80,7 +80,7 @@ func (a *API) folderJob(ctx context.Context, machine string, c queue.FolderCheck
 	// The path goes from the job whatever happens, once it is read.
 	defer a.cfg.Queue.ForgetFolder(queue.DefaultTeam, job.ID)
 	wait := queue.FolderWait
-	if c.Remote != "" || c.Branches {
+	if c.Remote != "" {
 		wait += queue.FetchWait
 	}
 	deadline := time.NewTimer(wait)
@@ -109,8 +109,11 @@ func (a *API) folderJob(ctx context.Context, machine string, c queue.FolderCheck
 		case <-ctx.Done():
 			return queue.Result{}, "", 0, "gone"
 		case <-deadline.C:
+			if c.Branches && c.Remote != "" {
+				return queue.Result{}, "", http.StatusServiceUnavailable, "the machine's runner did not list the remote's branches within 75 seconds; check that it runs and that git can reach the remote there, and try again"
+			}
 			if c.Branches {
-				return queue.Result{}, "", http.StatusServiceUnavailable, "the machine's runner did not list the branches within 75 seconds; check that it runs and that git can reach the remote there, and try again"
+				return queue.Result{}, "", http.StatusServiceUnavailable, "the machine's runner did not list the branches within 15 seconds; check that it runs, and try again"
 			}
 			if c.Remote != "" {
 				return queue.Result{}, "", http.StatusServiceUnavailable, "the machine's runner did not fetch the branch within 75 seconds; check that git can reach the remote there, and try again"

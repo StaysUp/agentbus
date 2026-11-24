@@ -390,8 +390,11 @@ All notable changes to AgentBus. Full notes for each release are on the
   resolves it when the workspace is made, so a name the repo does not have is refused there. The
   workspace records `base`, `remote` and `base_commit`, and its turns run in a git worktree at that
   commit. None of the folder's uncommitted edits are in it, and the folder, its branch and its HEAD
-  are not changed. The repo gains one `.git/worktrees` entry while the workspace lives, and a fetch
-  moves that branch's remote-tracking ref.
+  are not changed. The repo gains one `.git/worktrees` entry while the workspace lives, a fetch
+  moves that branch's remote-tracking ref and rewrites `.git/FETCH_HEAD`, and the repo's own hooks
+  run as for any fetch and worktree add (`reference-transaction`, `post-checkout`).
+  `POST /api/v0/folders/branches` lists the repo's branches, or a remote's, for a picker; listing
+  changes nothing of the repo.
 - **`carry_files` setting.** Files of the folder that a session started from a base copies in,
   such as `.env`: patterns relative to the folder, empty by default. A file the commit already has
   keeps the commit's content.

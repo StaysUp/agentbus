@@ -22,11 +22,14 @@ import (
 )
 
 // baseStandIn writes what the turn saw: a.txt as it was, and .env or none.
+// A later turn of the session, which finds the first one's seen.txt, also
+// writes second.txt.
 const baseStandIn = `#!/bin/sh
 case "$1" in
 --version) echo "0.0.0 (agentbus test stand-in)"; exit 0 ;;
 auth) exit 0 ;;
 esac
+if [ -e seen.txt ]; then echo again > second.txt; fi
 cp a.txt seen.txt
 if [ -e .env ]; then cp .env env-seen.txt; else echo none > env-seen.txt; fi
 if [ -e build.log ]; then echo leaked > log-seen.txt; fi
@@ -170,6 +173,28 @@ func TestWorkspaceFromABaseAcrossProcesses(t *testing.T) {
 		}
 		if _, ok := got[".env"]; ok {
 			t.Errorf("%s: the carried .env shows as the turn's change", tc.name)
+		}
+		if tc.name != "remote" {
+			continue
+		}
+		// A second turn continues in the same worktree, and an apply writes
+		// the session's work into the person's folder, which stays on its
+		// own branch and HEAD.
+		t2 := c.turn(map[string]any{"session": sc.Session, "agent": "claude", "prompt": "again"})
+		if got := c.diffFiles(t2.Turn); !strings.Contains(got["second.txt"], "+again") {
+			t.Errorf("the second turn did not see the first one's files: %v", got)
+		}
+		if c.ws == nil {
+			c.ws = map[string]string{}
+		}
+		c.ws[sc.Session] = ws.Workspace
+		if code, a := c.apply(t2); code != 200 || a.State != "applied" {
+			t.Fatalf("apply: %d %+v", code, a)
+		}
+		for p, want := range map[string]string{"seen.txt": "feature online\n", "second.txt": "again\n", "env-seen.txt": "SECRET=1\n"} {
+			if got := fileText(t, filepath.Join(folder, p)); got != want {
+				t.Errorf("%s in the folder after the apply: %q, want %q", p, got, want)
+			}
 		}
 	}
 	// The person's folder: same branch, same HEAD, the edit still there.

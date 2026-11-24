@@ -21,16 +21,20 @@ import (
 // With a remote, the branch is fetched from it first, with this machine's own
 // git credentials, so the workspace starts from what the remote has now. The
 // fetch updates that one branch's remote-tracking ref
-// (refs/remotes/<remote>/<branch>), as a git fetch in a terminal does, and
-// nothing else of the person's repo: no branch, no index, no working file.
+// (refs/remotes/<remote>/<branch>) and .git/FETCH_HEAD, as a git fetch in a
+// terminal does, and runs the repo's own hooks as that would
+// (reference-transaction); it changes no branch, no index and no working
+// file of the person's.
 
 // Base refusals, in fixed wording: git's own words can name paths.
 var (
-	ErrNotRepo  = errors.New("the folder is not in a git repo with a commit, so it cannot start from a base")
-	ErrNoBase   = errors.New("base is not a branch, tag or commit in the folder's repo")
-	ErrNoRemote = errors.New("remote is not a remote of the folder's repo")
-	ErrFetch    = errors.New("the branch could not be fetched from that remote; check the branch name and that git can reach the remote from this machine")
-	ErrBadBase  = errors.New("base must be a branch, tag or commit id")
+	ErrNotRepo    = errors.New("the folder is not in a git repo with a commit, so it cannot start from a base")
+	ErrNoBase     = errors.New("base is not a branch, tag or commit in the folder's repo")
+	ErrNoRemote   = errors.New("remote is not a remote of the folder's repo")
+	ErrFetch      = errors.New("the branch could not be fetched from that remote; check the branch name and that git can reach the remote from this machine")
+	ErrBadBase    = errors.New("base must be a branch, tag or commit id")
+	ErrNoBranches = errors.New("the folder is not in a git repo with a commit, so it has no branches to list")
+	ErrNoFolder   = errors.New("the folder is not in that base: the commit has no folder at the folder's place in the repo")
 )
 
 // Base resolves base in the repo that holds the folder ref to its commit id,
@@ -65,7 +69,21 @@ func (c *Connector) Base(ctx context.Context, ref, base, remote string) (string,
 	if err != nil {
 		return "", ErrNoBase
 	}
-	return strings.TrimSpace(string(out)), nil
+	commit := strings.TrimSpace(string(out))
+	// A folder below the repo's top must be in the base too: the runner
+	// works in that folder of a worktree at the commit, so a base without it
+	// would be accepted here and then refuse every turn.
+	pre, err := gitIn(ctx, dir, "rev-parse", "--show-prefix")
+	if err != nil {
+		return "", ErrNotRepo
+	}
+	if p := strings.TrimSuffix(strings.TrimSpace(string(pre)), "/"); p != "" {
+		kind, err := gitIn(ctx, dir, "cat-file", "-t", commit+":"+p)
+		if err != nil || strings.TrimSpace(string(kind)) != "tree" {
+			return "", ErrNoFolder
+		}
+	}
+	return commit, nil
 }
 
 // hasLine says whether out has a line that is exactly want.
@@ -117,11 +135,11 @@ func (c *Connector) Branches(ctx context.Context, ref, remote string) (queue.Bra
 		return out, ErrNoRemote
 	}
 	if _, err := gitIn(ctx, dir, "rev-parse", "--verify", "-q", "HEAD^{commit}"); err != nil {
-		return out, ErrNotRepo
+		return out, ErrNoBranches
 	}
 	rs, err := gitIn(ctx, dir, "remote")
 	if err != nil {
-		return out, ErrNotRepo
+		return out, ErrNoBranches
 	}
 	out.Remotes = []string{}
 	for _, l := range strings.Split(string(rs), "\n") {
@@ -137,7 +155,7 @@ func (c *Connector) Branches(ctx context.Context, ref, remote string) (queue.Bra
 		}
 		refs, err := gitIn(ctx, dir, "for-each-ref", "--sort=-committerdate", "--format=%(objectname)%09%(refname)", "refs/heads/")
 		if err != nil {
-			return out, ErrNotRepo
+			return out, ErrNoBranches
 		}
 		addBranches(&out, refs, "refs/heads/")
 		return out, nil

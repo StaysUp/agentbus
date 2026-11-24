@@ -101,3 +101,27 @@ func TestGitAtABaseRefusesAFolderNotInIt(t *testing.T) {
 		t.Fatalf("want the refusal, got %v", err)
 	}
 }
+
+// carry_files copies regular files only. A symbolic link it names is left
+// out, on purpose: its target is a path on the person's machine, which in the
+// worktree could point anywhere, or at what the folder holds that the base
+// does not.
+func TestGitAtABaseSkipsACarriedLink(t *testing.T) {
+	r, feature := baseRepo(t)
+	src := filepath.Join(r, "sub")
+	if err := os.Symlink(".env", filepath.Join(src, ".env.link")); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := Get(Git)
+	s, err := b.Open(Request{ID: "job_1", Workdir: filepath.Join(t.TempDir(), "w"), Folder: src, Base: feature, Carry: []string{".env*"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close(s)
+	if _, err := os.Lstat(filepath.Join(s.Dir, ".env.link")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the link was carried: %v", err)
+	}
+	if got := read(t, filepath.Join(s.Dir, ".env")); got != "SECRET=1" {
+		t.Errorf(".env: %q", got)
+	}
+}

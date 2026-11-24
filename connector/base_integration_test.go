@@ -78,6 +78,35 @@ func TestBaseLocalAndRemote(t *testing.T) {
 	}
 }
 
+// A folder below the repo's top starts only from a base that has it: an
+// older commit from before the folder was added is refused when the workspace
+// is made, not on its first turn. A base that has it resolves as usual.
+func TestBaseLacksTheFolder(t *testing.T) {
+	repo := t.TempDir()
+	gitT(t, repo, "init", "-q", "-b", "main")
+	write(t, repo, map[string]string{"a.txt": "1"})
+	gitT(t, repo, "add", ".")
+	gitT(t, repo, "commit", "-q", "-m", "one")
+	old := gitT(t, repo, "rev-parse", "HEAD")
+	write(t, repo, map[string]string{"sub/b.txt": "2", "c.txt": "3"})
+	gitT(t, repo, "add", ".")
+	gitT(t, repo, "commit", "-q", "-m", "two")
+	gitT(t, repo, "tag", "with-sub")
+	c, ref := newConnector(t, filepath.Join(repo, "sub"))
+	ctx := context.Background()
+	if _, err := c.Base(ctx, ref, old, ""); !errors.Is(err, ErrNoFolder) {
+		t.Errorf("base without the folder: %v, want ErrNoFolder", err)
+	}
+	if got, err := c.Base(ctx, ref, "with-sub", ""); err != nil || got != gitT(t, repo, "rev-parse", "with-sub") {
+		t.Errorf("base with the folder: %q %v", got, err)
+	}
+	// At the repo's top every commit has the folder.
+	top, topRef := newConnector(t, repo)
+	if _, err := top.Base(ctx, topRef, old, ""); err != nil {
+		t.Errorf("top folder at an old base: %v", err)
+	}
+}
+
 // Each refusal is its fixed sentence: a folder outside git, a name the repo
 // does not have, a remote it does not have, a branch the remote does not
 // have, and an option-shaped name.
@@ -115,6 +144,7 @@ func TestBranches(t *testing.T) {
 	gitT(t, filepath.Join(filepath.Dir(clone), "work"), "push", "-q", "origin", "HEAD:refs/heads/only-online")
 	gitT(t, clone, "branch", "older", "HEAD")
 	c, ref := newConnector(t, clone)
+	plainC, plainRef := newConnector(t, t.TempDir())
 	ctx := context.Background()
 	before := gitT(t, clone, "for-each-ref")
 
@@ -146,6 +176,9 @@ func TestBranches(t *testing.T) {
 	stale, err := c.Branches(ctx, ref, "origin")
 	if err != nil || !stale.Stale || len(stale.Branches) != 2 {
 		t.Fatalf("offline origin: %+v %v", stale, err)
+	}
+	if _, err := plainC.Branches(ctx, plainRef, ""); !errors.Is(err, ErrNoBranches) {
+		t.Errorf("a folder outside git: %v, want ErrNoBranches", err)
 	}
 	if _, err := c.Branches(ctx, ref, "nope"); !errors.Is(err, ErrNoRemote) {
 		t.Fatalf("unknown remote: %v", err)
