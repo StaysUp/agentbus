@@ -317,6 +317,10 @@ type OpenRouterWire struct {
 	StandIn bool
 	// Model is the turn's model, or "".
 	Model string
+	// Provider names the provider (Providers) when the endpoint is not
+	// OpenRouter's, and Label is its name for the person; both empty for
+	// OpenRouter. Only a harness that offers providers reads them.
+	Provider, Label string
 }
 
 // Copy is a turn's Copy-mode sandbox (DESIGN_contain_mode): the CLI's own

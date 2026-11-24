@@ -172,3 +172,23 @@ func TestAPIKeysByHarness(t *testing.T) {
 		t.Fatal("a name that is no key has a file")
 	}
 }
+
+// A provider's key: the one set in Settings, refused in plain words while
+// none is.
+func TestProviderKey(t *testing.T) {
+	const fakeXAI = "xai-fake0000111122223333444455556666"
+	s := &Subscriptions{Dir: filepath.Join(t.TempDir(), "subscriptions")}
+	xai := ProviderKey{Kept: s, Key: KeyXAI, Label: "xAI API key"}
+	if _, err := xai.Credential(Need{Access: "xai"}); err == nil || err.Error() != "set your xAI API key in Settings" {
+		t.Fatalf("no key: %v", err)
+	}
+	if why := xai.Ready(Need{Access: "xai"}); why != "set your xAI API key in Settings" {
+		t.Fatalf("ready: %q", why)
+	}
+	if err := s.SetKey(KeyXAI, fakeXAI); err != nil {
+		t.Fatal(err)
+	}
+	if c, err := xai.Credential(Need{Access: "xai"}); err != nil || c.Token != fakeXAI || c.Header != "" {
+		t.Fatalf("set: %+v %v", c, err)
+	}
+}

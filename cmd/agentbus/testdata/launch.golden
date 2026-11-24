@@ -21,6 +21,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -49,6 +50,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="resume" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -76,6 +78,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -103,6 +106,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="opus" context=""
 context.added instructions=15
@@ -128,6 +132,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added mcp_instructions=327
@@ -160,6 +165,7 @@ env "ANTHROPIC_AUTH_TOKEN=test-key"
 env "HOME=<home>"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="deepseek/deepseek-v4.1-flash" context=""
 context.added instructions=844 mcp_instructions=327
@@ -190,6 +196,7 @@ env "ANTHROPIC_AUTH_TOKEN=test-key"
 env "HOME=<home>"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -228,6 +235,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -256,6 +264,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -283,6 +292,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -310,6 +320,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -336,6 +347,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="replay" replay_from="t_1" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -369,6 +381,7 @@ env "ANTHROPIC_AUTH_TOKEN=test-key"
 env "HOME=<home>"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="m/x" context=""
 context.added instructions=844 mcp_instructions=327
@@ -400,6 +413,7 @@ env "ANTHROPIC_AUTH_TOKEN=test-key"
 env "HOME=<home>"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="replay" replay_from="t_1" model="m/x" context=""
 context.added instructions=844 mcp_instructions=327
@@ -407,7 +421,7 @@ run.ended resume_id="sid-1"
 replay_base claude
 === claude access unknown
 --- turn t_1 harness="claude" access="local" model=""
-refused 400 access must be subscription, openrouter or api
+refused 400 access must be subscription, openrouter, api or a provider (xai)
 === claude api key, not relayed
 --- turn t_1 harness="claude" access="api" model=""
 refused 400 an agent on an API key runs only where control adds its key; run it on agentbus up or a runner
@@ -437,6 +451,7 @@ env "ANTHROPIC_API_KEY="
 env "ANTHROPIC_AUTH_TOKEN="
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -467,6 +482,7 @@ env "ANTHROPIC_API_KEY="
 env "ANTHROPIC_AUTH_TOKEN="
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="resume" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -497,6 +513,7 @@ env "ANTHROPIC_AUTH_TOKEN="
 env "CLAUDE_CODE_OAUTH_TOKEN="
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -528,6 +545,7 @@ env "ANTHROPIC_AUTH_TOKEN="
 env "CLAUDE_CODE_OAUTH_TOKEN="
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="resume" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -559,6 +577,7 @@ env "ANTHROPIC_API_KEY="
 env "ANTHROPIC_AUTH_TOKEN="
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="opus" context=""
 context.added instructions=844 mcp_instructions=327
@@ -586,6 +605,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -614,6 +634,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="resume" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -641,6 +662,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -670,6 +692,7 @@ env "CLAUDE_CONFIG_DIR=<homes>/s1/.claude"
 env "CODEX_HOME=<home>/.codex"
 env "HOME=<homes>/s1"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -700,6 +723,7 @@ env "CLAUDE_CONFIG_DIR=<homes>/s1/.claude"
 env "CODEX_HOME=<home>/.codex"
 env "HOME=<homes>/s1"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="resume" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -729,6 +753,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 asked_by=520 mcp_instructions=327
@@ -758,6 +783,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added agents_md=71 instructions=844 asked_by=520 mcp_instructions=327
@@ -785,6 +811,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -821,6 +848,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -858,6 +886,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="resume" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -892,6 +921,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -924,6 +954,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="opus" context=""
 context.added instructions=15
@@ -958,6 +989,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added mcp_instructions=327
@@ -1007,6 +1039,7 @@ env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="deepseek/deepseek-v4.1-flash" context=""
 context.added instructions=844 mcp_instructions=327
@@ -1054,6 +1087,7 @@ env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -1101,6 +1135,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -1135,6 +1170,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -1170,6 +1206,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added mcp_instructions=327
@@ -1207,6 +1244,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -1242,6 +1280,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="replay" replay_from="t_1" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -1292,6 +1331,7 @@ env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="m/x" context=""
 context.added instructions=844 mcp_instructions=327
@@ -1340,13 +1380,14 @@ env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="transcript" replay_from="" model="m/x" context="[AgentBus: this conversation started before you joined it. Earlier turns ran on other agents. Below is each message the person sent and the final reply the agent gave, oldest first. Tool calls are left out. Any files those agents changed are in your current folder.]\n\n--- Turn 1, the person to Codex ---\none\n\n--- Turn 1, Codex replied ---\n(no reply: the turn ended without one)\n\n[AgentBus: end of the earlier turns. The person's new message to you follows.]\n\n"
 context.added instructions=844 mcp_instructions=327
 run.ended resume_id="tid-1"
 === codex access unknown
 --- turn t_1 harness="codex" access="local" model=""
-refused 400 access must be subscription, openrouter or api
+refused 400 access must be subscription, openrouter, api or a provider (xai)
 === codex api key, not relayed
 --- turn t_1 harness="codex" access="api" model=""
 refused 400 an agent on an API key runs only where control adds its key; run it on agentbus up or a runner
@@ -1394,6 +1435,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL="
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -1442,6 +1484,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL="
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="resume" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -1489,6 +1532,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL="
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -1537,6 +1581,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL="
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="resume" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -1586,6 +1631,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL="
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="opus" context=""
 context.added instructions=844 mcp_instructions=327
@@ -1622,6 +1668,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -1659,6 +1706,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="resume" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -1691,6 +1739,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -1729,6 +1778,7 @@ env "CLAUDE_CONFIG_DIR=<home>/.claude"
 env "CODEX_HOME=<homes>/s1/.codex"
 env "HOME=<homes>/s1"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -1768,6 +1818,7 @@ env "CLAUDE_CONFIG_DIR=<home>/.claude"
 env "CODEX_HOME=<homes>/s1/.codex"
 env "HOME=<homes>/s1"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="resume" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -1806,6 +1857,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=844 asked_by=520 mcp_instructions=327
@@ -1844,6 +1896,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=844 asked_by=520 mcp_instructions=327
@@ -1880,6 +1933,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -1907,6 +1961,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -1935,6 +1990,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="resume" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -1962,6 +2018,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -1991,6 +2048,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 asked_by=520 mcp_instructions=327
@@ -2027,6 +2085,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -2064,6 +2123,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="resume" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -2100,6 +2160,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -2138,6 +2199,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=844 asked_by=520 mcp_instructions=327
@@ -2165,6 +2227,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -2182,6 +2245,7 @@ env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="" context=""
 run.ended resume_id="cid-0"
@@ -2200,6 +2264,7 @@ env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_2"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="agy" continuity="resume" replay_from="" model="" context=""
 run.ended resume_id="cid-1"
@@ -2219,6 +2284,7 @@ env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="gemini-3.8-flash-medium" context=""
 run.ended resume_id="cid-0"
@@ -2236,6 +2302,7 @@ env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="" context=""
 run.ended resume_id="cid-0"
@@ -2258,6 +2325,7 @@ env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="" context=""
 run.ended resume_id="cid-0"
@@ -2275,6 +2343,7 @@ env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="" context=""
 run.ended resume_id="cid-0"
@@ -2303,6 +2372,7 @@ env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="" context=""
 run.ended resume_id="cid-0"
@@ -2321,6 +2391,7 @@ env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="" context=""
 run.ended resume_id="cid-0"
@@ -2338,6 +2409,7 @@ env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<homes>/s1"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="" context=""
 run.ended resume_id="cid-0"
@@ -2356,6 +2428,7 @@ env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_2"
 env "HOME=<homes>/s1"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="agy" continuity="resume" replay_from="" model="" context=""
 run.ended resume_id="cid-1"
@@ -2375,6 +2448,7 @@ env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="" context=""
 run.ended resume_id="cid-0"
@@ -2392,6 +2466,7 @@ env "AGENTBUS_URL="
 env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
 env "HOME=<homes>/s1"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="" context=""
 run.ended resume_id="cid-0"
@@ -2416,6 +2491,7 @@ env "GEMINI_API_KEY=abs_test-standin"
 env "GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1/key/agy"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="agy" continuity="" replay_from="" model="gemini-3.1-pro-preview" context=""
 run.ended resume_id="cid-0"
@@ -2443,6 +2519,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -2459,6 +2536,7 @@ env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_2"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="agy" continuity="transcript" replay_from="" model="" context="[AgentBus: this conversation started before you joined it. Earlier turns ran on other agents. Below is each message the person sent and the final reply the agent gave, oldest first. Tool calls are left out. Any files those agents changed are in your current folder.]\n\n--- Turn 1, the person to Claude Code ---\none\n\n--- Turn 1, Claude Code replied ---\n(no reply: the turn ended without one)\n\n[AgentBus: end of the earlier turns. The person's new message to you follows.]\n\n"
 run.ended resume_id="cid-1"
@@ -2486,6 +2564,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -2521,6 +2600,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="transcript" replay_from="" model="" context="[AgentBus: this conversation started before you joined it. Earlier turns ran on other agents. Below is each message the person sent and the final reply the agent gave, oldest first. Tool calls are left out. Any files those agents changed are in your current folder.]\n\n--- Turn 1, the person to Claude Code ---\none\n\n--- Turn 1, Claude Code replied ---\n(no reply: the turn ended without one)\n\n[AgentBus: end of the earlier turns. The person's new message to you follows.]\n\n"
 context.added instructions=844 mcp_instructions=327
@@ -2557,6 +2637,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="codex" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -2585,6 +2666,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="transcript" replay_from="" model="sonnet" context="[AgentBus: this conversation started before you joined it. Earlier turns ran on other agents. Below is each message the person sent and the final reply the agent gave, oldest first. Tool calls are left out. Any files those agents changed are in your current folder.]\n\n--- Turn 1, the person to Codex ---\none\n\n--- Turn 1, Codex replied ---\n(no reply: the turn ended without one)\n\n[AgentBus: end of the earlier turns. The person's new message to you follows.]\n\n"
 context.added instructions=844 mcp_instructions=327
@@ -2615,6 +2697,7 @@ env "AGENTBUS_TOKEN=<token>
 env "AGENTBUS_URL=http://127.0.0.1:8787"
 env "HOME=<home>"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
@@ -2632,6 +2715,7 @@ log run.refused agent=opencode access=api reason=wire
 === opencode openrouter, then resume
 --- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
 arg "run"
+arg "--standalone"
 arg "--format"
 arg "json"
 arg "--agent"
@@ -2645,13 +2729,14 @@ env "HOME=<home>"
 env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"allow\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter/v1\"}}},\"share\":\"disabled\"}"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
-env "PWD="
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
 run.ended resume_id="ses_000000000000LaunchFake0000"
 log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
 --- turn t_2 harness="" access="" model=""
 arg "run"
+arg "--standalone"
 arg "--format"
 arg "json"
 arg "--agent"
@@ -2667,7 +2752,7 @@ env "HOME=<home>"
 env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"allow\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_2/openrouter/v1\"}}},\"share\":\"disabled\"}"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
-env "PWD="
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="opencode" continuity="resume" replay_from="" model="z-ai/glm-5.3-flash" context=""
 run.ended resume_id="ses_000000000001LaunchFake0001"
@@ -2675,6 +2760,7 @@ log run.hint session=s1 turn=t_2 left_out=opencode_no_instruction_flag
 === opencode openrouter replay
 --- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
 arg "run"
+arg "--standalone"
 arg "--format"
 arg "json"
 arg "--agent"
@@ -2688,13 +2774,14 @@ env "HOME=<home>"
 env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"allow\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter/v1\"}}},\"share\":\"disabled\"}"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
-env "PWD="
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
 run.ended resume_id="ses_000000000000LaunchFake0000"
 log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
 --- turn t_2 harness="" access="" model=""
 arg "run"
+arg "--standalone"
 arg "--format"
 arg "json"
 arg "--agent"
@@ -2708,7 +2795,7 @@ env "HOME=<home>"
 env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"allow\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_2/openrouter/v1\"}}},\"share\":\"disabled\"}"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
-env "PWD="
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="opencode" continuity="replay" replay_from="t_1" model="z-ai/glm-5.3-flash" context=""
 run.ended resume_id="ses_000000000001LaunchFake0001"
@@ -2721,6 +2808,7 @@ log run.refused agent=opencode access=openrouter reason=wire
 === opencode openrouter, relayed, then resume
 --- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
 arg "run"
+arg "--standalone"
 arg "--format"
 arg "json"
 arg "--agent"
@@ -2734,13 +2822,14 @@ env "HOME=<home>"
 env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"allow\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter/v1\"}}},\"share\":\"disabled\"}"
 env "OPENROUTER_API_KEY=abs_test-standin"
 env "PATH=<data>/bin:/usr/bin:/bin"
-env "PWD="
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
 run.ended resume_id="ses_000000000000LaunchFake0000"
 log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
 --- turn t_2 harness="" access="" model=""
 arg "run"
+arg "--standalone"
 arg "--format"
 arg "json"
 arg "--agent"
@@ -2756,7 +2845,7 @@ env "HOME=<home>"
 env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"allow\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_2/openrouter/v1\"}}},\"share\":\"disabled\"}"
 env "OPENROUTER_API_KEY=abs_test-standin"
 env "PATH=<data>/bin:/usr/bin:/bin"
-env "PWD="
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="opencode" continuity="resume" replay_from="" model="z-ai/glm-5.3-flash" context=""
 run.ended resume_id="ses_000000000001LaunchFake0001"
@@ -2764,6 +2853,7 @@ log run.hint session=s1 turn=t_2 left_out=opencode_no_instruction_flag
 === opencode allow list, own instructions
 --- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
 arg "run"
+arg "--standalone"
 arg "--format"
 arg "json"
 arg "--agent"
@@ -2777,7 +2867,7 @@ env "HOME=<home>"
 env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"deny\",\"agentbus-api *\":\"allow\",\"git commit *\":\"allow\",\"go test *\":\"allow\"},\"edit\":\"deny\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter/v1\"}}},\"share\":\"disabled\"}"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
-env "PWD="
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
 run.ended resume_id="ses_000000000000LaunchFake0000"
@@ -2785,6 +2875,7 @@ log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
 === opencode edit none
 --- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
 arg "run"
+arg "--standalone"
 arg "--format"
 arg "json"
 arg "--agent"
@@ -2798,7 +2889,7 @@ env "HOME=<home>"
 env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"deny\",\"agentbus-api *\":\"allow\"},\"edit\":\"deny\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter/v1\"}}},\"share\":\"disabled\"}"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
-env "PWD="
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
 run.ended resume_id="ses_000000000000LaunchFake0000"
@@ -2806,6 +2897,7 @@ log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
 === opencode subagents on
 --- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
 arg "run"
+arg "--standalone"
 arg "--format"
 arg "json"
 arg "--agent"
@@ -2819,7 +2911,7 @@ env "HOME=<home>"
 env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"deny\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter/v1\"}}},\"share\":\"disabled\"}"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
-env "PWD="
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
 run.ended resume_id="ses_000000000000LaunchFake0000"
@@ -2834,11 +2926,12 @@ log run.refused agent=opencode reason=harness_setting
 refused 400 the service's environment already sends this agent to another endpoint; unset it and restart agentbus
 === opencode missing
 --- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
-refused 400 agent opencode cannot start: the program opencode is not on the service's PATH. Install OpenCode (npm install -g opencode-ai) and run opencode once to sign in, then try again. If it is installed, start agentbus from a shell where opencode runs.
+refused 400 agent opencode cannot start: the program opencode is not on the service's PATH. Install OpenCode 2 or later (npm install -g opencode-ai) and run opencode once to sign in, then try again. If it is installed, start agentbus from a shell where opencode runs.
 log run.refused agent=opencode program=opencode reason=not_on_path
 === opencode folder holds the data folder
 --- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
 arg "run"
+arg "--standalone"
 arg "--format"
 arg "json"
 arg "--agent"
@@ -2852,7 +2945,7 @@ env "HOME=<home>"
 env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"allow\",\"agentbus-api *\":\"allow\"},\"edit\":\"deny\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter/v1\"}}},\"share\":\"disabled\"}"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
-env "PWD="
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
 run.ended resume_id="ses_000000000000LaunchFake0000"
@@ -2861,6 +2954,7 @@ log run.edit session=s1 turn=t_1 left_out=data_folder_inside
 === opencode in a home of its own, then resume
 --- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
 arg "run"
+arg "--standalone"
 arg "--format"
 arg "json"
 arg "--agent"
@@ -2874,13 +2968,14 @@ env "HOME=<homes>/s1"
 env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"allow\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter/v1\"}}},\"share\":\"disabled\"}"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
-env "PWD="
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
 run.ended resume_id="ses_000000000000LaunchFake0000"
 log run.hint session=s1 turn=t_1 left_out=opencode_no_instruction_flag
 --- turn t_2 harness="" access="" model=""
 arg "run"
+arg "--standalone"
 arg "--format"
 arg "json"
 arg "--agent"
@@ -2896,7 +2991,7 @@ env "HOME=<homes>/s1"
 env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"allow\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_2/openrouter/v1\"}}},\"share\":\"disabled\"}"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
-env "PWD="
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="opencode" continuity="resume" replay_from="" model="z-ai/glm-5.3-flash" context=""
 run.ended resume_id="ses_000000000001LaunchFake0001"
@@ -2904,6 +2999,7 @@ log run.hint session=s1 turn=t_2 left_out=opencode_no_instruction_flag
 === opencode folder with AGENTS.md
 --- turn t_1 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
 arg "run"
+arg "--standalone"
 arg "--format"
 arg "json"
 arg "--agent"
@@ -2917,7 +3013,7 @@ env "HOME=<home>"
 env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"allow\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_1/openrouter/v1\"}}},\"share\":\"disabled\"}"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
-env "PWD="
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="opencode" continuity="" replay_from="" model="z-ai/glm-5.3-flash" context=""
 run.ended resume_id="ses_000000000000LaunchFake0000"
@@ -2948,12 +3044,14 @@ env "ANTHROPIC_AUTH_TOKEN=test-key"
 env "HOME=<home>"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
 run.ended resume_id="sid-0"
 --- turn t_2 harness="opencode" access="openrouter" model="z-ai/glm-5.3-flash"
 arg "run"
+arg "--standalone"
 arg "--format"
 arg "json"
 arg "--agent"
@@ -2967,7 +3065,7 @@ env "HOME=<home>"
 env "OPENCODE_CONFIG_CONTENT={\"agent\":{\"agentbus\":{\"mode\":\"primary\",\"permission\":{\"bash\":{\"*\":\"allow\",\"agentbus-api *\":\"allow\"},\"edit\":\"allow\",\"task\":\"deny\"}},\"title\":{\"disable\":true}},\"autoupdate\":false,\"model\":\"agentbus_openrouter/z-ai/glm-5.3-flash\",\"provider\":{\"agentbus_openrouter\":{\"models\":{\"z-ai/glm-5.3-flash\":{}},\"name\":\"OpenRouter\",\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"apiKey\":\"{env:OPENROUTER_API_KEY}\",\"baseURL\":\"http://127.0.0.1:8787/s/s1/t/t_2/openrouter/v1\"}}},\"share\":\"disabled\"}"
 env "OPENROUTER_API_KEY=test-key"
 env "PATH=<data>/bin:/usr/bin:/bin"
-env "PWD="
+env "PWD=<folder>"
 cwd <folder>
 turn.started agent="opencode" continuity="transcript" replay_from="" model="z-ai/glm-5.3-flash" context="[AgentBus: this conversation started before you joined it. Earlier turns ran on other agents. Below is each message the person sent and the final reply the agent gave, oldest first. Tool calls are left out. Any files those agents changed are in your current folder.]\n\n--- Turn 1, the person to Claude Code ---\none\n\n--- Turn 1, Claude Code replied ---\n(no reply: the turn ended without one)\n\n[AgentBus: end of the earlier turns. The person's new message to you follows.]\n\n"
 run.ended resume_id="ses_000000000001LaunchFake0001"

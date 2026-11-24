@@ -16,14 +16,16 @@ import (
 //
 // Everything here was read in OpenCode's source at v1.19.6
 // (github.com/anomalyco/opencode, packages/opencode/src) and checked live with
-// opencode-ai 1.19.6 on 2026-11-21, unless it says otherwise.
+// opencode-ai 1.19.6 on 2026-11-21, unless it says otherwise. A turn needs
+// opencode 2 or later: Args passes --standalone, which 1.x does not take;
+// run and its PWD were checked live with opencode 2.1.1 on 2026-11-24.
 type opencode struct{}
 
 func (opencode) Info() Info {
 	return Info{
 		Name:    "opencode",
 		Label:   "OpenCode",
-		Product: "OpenCode (npm install -g opencode-ai)",
+		Product: "OpenCode 2 or later (npm install -g opencode-ai)",
 		// No offline sign-in status: OpenCode signs in per model provider,
 		// and only its OpenRouter access is offered here, which needs none.
 		StatusArgs: nil,
@@ -35,10 +37,12 @@ func (opencode) Info() Info {
 		// an @ai-sdk/openai-compatible provider (WireOpenRouter), recorded by
 		// adapter/chatcompletions. Its own provider sign-ins (opencode auth)
 		// cannot reach the service yet, and it offers no vendor API key.
-		Access: []Access{
+		// And each provider (Providers), through the same kind of provider
+		// of the run's own, at the service's path for it.
+		Access: append([]Access{
 			{Kind: Subscription, Label: "OpenCode's own sign-in", Disabled: true, Models: []string{}},
 			{Kind: OpenRouter, Label: "OpenRouter key", Models: OpenRouterModels, AnyModel: true},
-		},
+		}, providerAccess()...),
 		// Own replay reads Chat Completions (replay.NewChatCompletions): a
 		// next turn starts fresh, without --session, and the OpenRouter
 		// gateway puts the earlier turn's history in front of each request.
@@ -86,26 +90,30 @@ const opencodeConfigEnv = "OPENCODE_CONFIG_CONTENT"
 // returns when there is no "title" agent), and that call would read as a
 // turn of its own. Sharing and its own updates are off for the run.
 //
-// PWD is emptied: opencode run takes its project folder from PWD before its
-// working folder (cli/cmd/run.ts: process.env.PWD ?? process.cwd()), and the
-// PWD a child inherits is the service's own, not the turn's folder it starts
-// in. Checked live: with the service's PWD, a turn wrote a file into the
-// folder agentbus was started from. Empty, it resolves to the working folder.
+// opencode run takes its project folder from PWD before its working folder;
+// run/ sets PWD to the folder every child starts in.
+//
+// A provider (w.Provider) is wired the same way, as agentbus_<name>, at its
+// own path of the service.
 func (opencode) WireOpenRouter(w OpenRouterWire) (env, args []string) {
+	id, label := opencodeProvider, "OpenRouter"
+	if w.Provider != "" {
+		id, label = "agentbus_"+w.Provider, w.Label
+	}
 	cfg := map[string]any{
-		"provider": map[string]any{opencodeProvider: map[string]any{
+		"provider": map[string]any{id: map[string]any{
 			"npm":     "@ai-sdk/openai-compatible",
-			"name":    "OpenRouter",
+			"name":    label,
 			"options": map[string]any{"baseURL": w.Base + "/v1", "apiKey": "{env:" + w.KeyEnv + "}"},
 			"models":  map[string]any{w.Model: map[string]any{}},
 		}},
-		"model":      opencodeProvider + "/" + w.Model,
+		"model":      id + "/" + w.Model,
 		"agent":      map[string]any{"title": map[string]any{"disable": true}},
 		"share":      "disabled",
 		"autoupdate": false,
 	}
 	b, _ := json.Marshal(cfg)
-	return []string{opencodeConfigEnv + "=" + string(b), "PWD="}, nil
+	return []string{opencodeConfigEnv + "=" + string(b)}, nil
 }
 
 // TurnEnv adds the turn's agent to the run's config (WireOpenRouter's
@@ -303,8 +311,17 @@ func (opencode) ResumeID(line []byte, current string) string {
 // Args: opencode run, its events as JSON lines, as the run's own agent
 // (TurnEnv). The model is the run's config's (WireOpenRouter). The prompt
 // comes after "--", so it is never read as a flag.
+//
+// --standalone: since opencode 2, run hands the turn to a background service
+// shared by every opencode of the user, on one fixed port, started with
+// whatever config its first caller had (cli/src/commands/commands.ts,
+// services/standalone.ts, opencode 54b4698). The run's config and the
+// service's path for its calls would not reach it: seen live with opencode
+// 2.1.1 on 2026-11-24, a turn failed with "Agent not found: \"agentbus\"". A
+// standalone run starts a private server of its own, which inherits the
+// run's environment and folder, and ends with it.
 func (opencode) Args(t Turn) []string {
-	a := []string{"run", "--format", "json", "--agent", opencodeAgent}
+	a := []string{"run", "--standalone", "--format", "json", "--agent", opencodeAgent}
 	if t.ResumeID != "" {
 		a = append(a, "--session", t.ResumeID)
 	}

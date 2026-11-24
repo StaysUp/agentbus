@@ -36,10 +36,6 @@ func TestOpencodeWireOpenRouter(t *testing.T) {
 	if strings.Contains(strings.Join(env, "\n"), "sk-or-secret") {
 		t.Error("the key is in the child's config")
 	}
-	// opencode takes its folder from PWD first: the service's own is emptied.
-	if !slices.Contains(env, "PWD=") {
-		t.Errorf("env %q does not empty PWD", env)
-	}
 	cfg := runConfig(t, env)
 	p := cfg["provider"].(map[string]any)[opencodeProvider].(map[string]any)
 	opts := p["options"].(map[string]any)
@@ -61,6 +57,44 @@ func TestOpencodeWireOpenRouter(t *testing.T) {
 // The turn's agent is added to the run's config, the wire's provider and
 // title setting kept: every command no allow rule names is refused, "*"
 // coming first since OpenCode's last matching rule wins.
+// A provider is wired as OpenRouter is, as a provider of its own named
+// agentbus_<name>, at the service's path for it.
+func TestOpencodeWireProvider(t *testing.T) {
+	h, _ := Get("opencode")
+	for _, p := range Providers {
+		if !Offers(h.Info(), p.Name) {
+			t.Errorf("opencode does not offer %s", p.Name)
+		}
+		env, _ := h.WireOpenRouter(OpenRouterWire{Base: "http://127.0.0.1:7/s/s1/t/t_1" + ProviderPrefix(p.Name),
+			KeyEnv: "AGENTBUS_PROVIDER_KEY", Key: "abs_stand-in", StandIn: true, Model: p.Models[0], Provider: p.Name, Label: p.Label})
+		cfg := runConfig(t, env)
+		id := "agentbus_" + p.Name
+		pr, ok := cfg["provider"].(map[string]any)[id].(map[string]any)
+		if !ok {
+			t.Fatalf("%s: provider %v", p.Name, cfg["provider"])
+		}
+		opts := pr["options"].(map[string]any)
+		if pr["npm"] != "@ai-sdk/openai-compatible" || pr["name"] != p.Label ||
+			opts["baseURL"] != "http://127.0.0.1:7/s/s1/t/t_1/p/"+p.Name+"/v1" || opts["apiKey"] != "{env:AGENTBUS_PROVIDER_KEY}" {
+			t.Errorf("%s: provider %v", p.Name, pr)
+		}
+		if cfg["model"] != id+"/"+p.Models[0] {
+			t.Errorf("%s: model %v", p.Name, cfg["model"])
+		}
+		if strings.Contains(strings.Join(env, "\n"), "abs_stand-in") {
+			t.Errorf("%s: the placeholder is in the config", p.Name)
+		}
+	}
+	for _, name := range []string{"claude", "codex", "agy"} {
+		h, _ := Get(name)
+		for _, p := range Providers {
+			if Offers(h.Info(), p.Name) {
+				t.Errorf("%s offers %s", name, p.Name)
+			}
+		}
+	}
+}
+
 func TestOpencodeTurnEnv(t *testing.T) {
 	h, _ := Get("opencode")
 	env, _ := h.WireOpenRouter(OpenRouterWire{Base: "http://b/openrouter", KeyEnv: "K_KEY", Model: "m"})
@@ -120,11 +154,11 @@ func TestOpencodeAllowEveryCommand(t *testing.T) {
 
 func TestOpencodeArgs(t *testing.T) {
 	h, _ := Get("opencode")
-	if got, want := h.Args(Turn{Prompt: "hi", Model: "m"}), []string{"run", "--format", "json", "--agent", "agentbus", "--", "hi"}; !slices.Equal(got, want) {
+	if got, want := h.Args(Turn{Prompt: "hi", Model: "m"}), []string{"run", "--standalone", "--format", "json", "--agent", "agentbus", "--", "hi"}; !slices.Equal(got, want) {
 		t.Errorf("args %q, want %q", got, want)
 	}
 	id := "ses_19a7c2e4f5b6Ab3dE4fG5hI6jK"
-	if got, want := h.Args(Turn{Prompt: "-p", ResumeID: id}), []string{"run", "--format", "json", "--agent", "agentbus", "--session", id, "--", "-p"}; !slices.Equal(got, want) {
+	if got, want := h.Args(Turn{Prompt: "-p", ResumeID: id}), []string{"run", "--standalone", "--format", "json", "--agent", "agentbus", "--session", id, "--", "-p"}; !slices.Equal(got, want) {
 		t.Errorf("args %q, want %q", got, want)
 	}
 }

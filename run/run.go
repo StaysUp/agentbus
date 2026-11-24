@@ -101,17 +101,18 @@ type Access struct {
 }
 
 // accessKnown says access is one a turn can run on: "" (the subscription),
-// subscription, openrouter or api.
+// subscription, openrouter, api or a provider's name (harness.Providers).
 func accessKnown(access string) bool {
 	switch access {
 	case "", harness.Subscription, harness.OpenRouter, harness.API:
 		return true
 	}
-	return false
+	_, ok := harness.ProviderOf(access)
+	return ok
 }
 
 // accessWords refuses an access that is none of accessKnown's.
-const accessWords = "access must be subscription, openrouter or api"
+const accessWords = "access must be subscription, openrouter, api or a provider (xai)"
 
 // Refused makes a refusal a Wire can return: status and the person's words.
 func Refused(status int, msg string) error { return refuse(status, msg) }
@@ -930,6 +931,13 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	all = harness.CombineSettings(h, all)
 	cmd.Args = append([]string{l.Path}, all...)
 	cmd.Dir = t.folder
+	// PWD names the folder the child starts in, as a shell sets it: the one
+	// it would inherit is the service's own. opencode run takes its project
+	// folder from PWD before its working folder (opencode 2.1.1, cli/src/run/
+	// run.ts: process.env.PWD ?? process.cwd(), then chdir), so an inherited
+	// PWD sends its turn to the folder agentbus started in, and an empty one
+	// fails ("Failed to change directory to ", seen live 2026-11-24).
+	cmd.Env = setEnv(cmd.Env, []string{"PWD=" + t.folder})
 	// Stdin stays nil: the child reads an empty stdin. Stdout is read for the
 	// vendor's session id, the only thing from it that reaches an event; the
 	// work is in the events. Stdout and stderr together, their last

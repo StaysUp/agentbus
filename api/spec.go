@@ -122,7 +122,7 @@ var constraints = map[string]func(*openapi3.Schema){
 	"AgentRequest":         closed,
 	"AgentRequest.name":    func(s *openapi3.Schema) { minLength(1)(s); maxLength(agents.MaxName)(s) },
 	"AgentRequest.harness": func(s *openapi3.Schema) { s.Enum = harnessEnum() },
-	"AgentRequest.access":  func(s *openapi3.Schema) { s.Enum = []any{agents.Subscription, agents.OpenRouter} },
+	"AgentRequest.access":  func(s *openapi3.Schema) { s.Enum = accessEnum() },
 	"AgentRequest.model":   pattern(runModel.String()),
 	"AgentRequest.key_env": pattern(agents.KeyEnvShape()),
 
@@ -677,6 +677,16 @@ func harnessEnum() []any {
 	var out []any
 	for _, n := range harness.Names() {
 		out = append(out, n)
+	}
+	return out
+}
+
+// accessEnum is every access an agent may name: subscription, openrouter,
+// api and each provider (harness.Providers).
+func accessEnum() []any {
+	out := []any{agents.Subscription, agents.OpenRouter, agents.API}
+	for _, p := range harness.Providers {
+		out = append(out, p.Name)
 	}
 	return out
 }

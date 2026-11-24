@@ -34,7 +34,19 @@ func runWire(getenv func(string) string, environ func() []string, lookPath func(
 		}
 		var env, pre []string
 		var files map[string][]byte
+		prov, isProvider := harness.ProviderOf(acc.Kind)
 		switch {
+		case isProvider:
+			// A provider's key is only ever control's, set in Settings: the
+			// child gets the placeholder in the variable its config reads,
+			// and control's relay puts the provider's key on the call. With no placeholder there is no
+			// relay to do that, and nothing of this machine's is read.
+			if acc.Placeholder == "" {
+				return engine.Launch{}, engine.Refused(http.StatusBadRequest, "an agent on "+prov.Name+" runs only where control adds its key; run it on agentbus up or a runner")
+			}
+			env, pre = h.WireOpenRouter(harness.OpenRouterWire{Base: baseURL + harness.ProviderPrefix(prov.Name),
+				KeyEnv: providerKeyEnv, Key: acc.Placeholder, StandIn: true, Model: acc.Model, Provider: prov.Name, Label: prov.Label})
+			env = append(env, providerKeyEnv+"="+acc.Placeholder)
 		case acc.Placeholder != "" && (acc.Kind == "" || acc.Kind == harness.Subscription):
 			// A runner that holds no secrets: the child's sign-in is the
 			// placeholder, and control's gateway adds the person's own
@@ -76,7 +88,7 @@ func runWire(getenv func(string) string, environ func() []string, lookPath func(
 			env, pre = h.WireOpenRouter(harness.OpenRouterWire{Base: baseURL + openRouterPrefix,
 				KeyEnv: acc.KeyEnv, Key: getenv(acc.KeyEnv), Model: acc.Model})
 		default:
-			return engine.Launch{}, engine.Refused(http.StatusBadRequest, "access must be subscription, openrouter or api")
+			return engine.Launch{}, engine.Refused(http.StatusBadRequest, "access must be subscription, openrouter, api or a provider (xai)")
 		}
 		bin, err := lookPath(agent)
 		if err != nil {
@@ -96,6 +108,10 @@ func runWire(getenv func(string) string, environ func() []string, lookPath func(
 // models). Each harness says how its child is pointed there
 // (harness.Harness.WireOpenRouter).
 const openRouterPrefix = "/openrouter"
+
+// providerKeyEnv holds a provider agent's placeholder in its child's
+// environment, where the harness's config reads it (harness.OpenRouterWire).
+const providerKeyEnv = "AGENTBUS_PROVIDER_KEY"
 
 // childEnv is the parent's environment with each of set replacing any entry
 // of the same name. The parent's own environment is not changed.

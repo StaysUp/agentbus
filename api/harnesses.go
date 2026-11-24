@@ -43,7 +43,7 @@ type AccessOption struct {
 	Models   []string `json:"models" doc:"Models to offer. A new subscription agent names none, so the harness picks its own; an OpenRouter one starts with the first. An agent may name another one when any_model is true."`
 	AnyModel bool     `json:"any_model,omitempty" doc:"True when any model name is accepted: an OpenRouter model id, or for a subscription any name its account may offer. A model the vendor refuses fails the turn with the vendor's own words."`
 	KeyEnv   string   `json:"key_env,omitempty" doc:"For openrouter: the variable a new agent reads its key from unless it names another. GET /api/v0/subscriptions env_keys says whether it is set."`
-	KeyName  string   `json:"key_name,omitempty" doc:"For api: the key it uses, as Settings names it (PUT /api/v0/subscriptions/{key_name}/key): anthropic, openai or gemini. GET /api/v0/subscriptions api_keys says whether it is set."`
+	KeyName  string   `json:"key_name,omitempty" doc:"For api and a provider: the key it uses, as Settings names it (PUT /api/v0/subscriptions/{key_name}/key): anthropic, openai, gemini or xai. GET /api/v0/subscriptions api_keys says whether it is set."`
 }
 
 // RunnerHarness is one runner's report of one harness.
@@ -146,6 +146,9 @@ func accessOptions(info harness.Info) []AccessOption {
 		}
 		if ac.Kind == harness.API && info.APIKey != nil {
 			out[i].KeyName = info.APIKey.Name
+		}
+		if p, ok := harness.ProviderOf(ac.Kind); ok {
+			out[i].KeyName = p.Key
 		}
 	}
 	return out

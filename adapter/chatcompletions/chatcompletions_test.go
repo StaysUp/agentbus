@@ -423,3 +423,24 @@ func TestBadBodies(t *testing.T) {
 		t.Fatalf("events = %+v", evs)
 	}
 }
+
+// xAI's usage.cost_in_usd_ticks is kept as the vendor's own charge, in units
+// of 1e-10 dollars (litellm's xai test: 37756000 ticks = $0.0037756). A
+// negative count is no charge reported.
+func TestXAICostTicks(t *testing.T) {
+	for _, tc := range []struct {
+		ticks string
+		want  *float64
+	}{{"37756000", ptr(0.0037756)}, {"0", ptr(0)}, {"-37756000", nil}} {
+		body := `{"model":"grok-4.7","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x"}}],` +
+			`"usage":{"prompt_tokens":100,"completion_tokens":200,"total_tokens":300,"cost_in_usd_ticks":` + tc.ticks + `}}`
+		evs := reply(t, 200, "application/json", []byte(body))
+		u := evs[0].Usage
+		if u == nil || (tc.want == nil) != (u.CostUSD == nil) || (tc.want != nil && *u.CostUSD != *tc.want) {
+			t.Errorf("ticks %s: usage = %+v", tc.ticks, u)
+		}
+		wantKinds(t, evs, event.ModelResponded, event.TurnCompleted)
+	}
+}
+
+func ptr(f float64) *float64 { return &f }

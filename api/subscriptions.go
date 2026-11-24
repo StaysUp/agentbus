@@ -26,7 +26,7 @@ type SubscriptionList struct {
 	Subscriptions []SubscriptionState `json:"subscriptions" doc:"One per harness whose subscription can be connected here."`
 	// APIKeys is the one place a stored key's "is it set" is answered, by
 	// name (openrouter included). Never a key.
-	APIKeys map[string]credentials.KeyStatus `json:"api_keys" doc:"Whether each vendor's key is set in Settings (PUT /api/v0/subscriptions/{name}/key), by its name: anthropic (claude), openai (codex), gemini (agy) and openrouter. Never a key."`
+	APIKeys map[string]credentials.KeyStatus `json:"api_keys" doc:"Whether each vendor's key is set in Settings (PUT /api/v0/subscriptions/{name}/key), by its name: anthropic (claude), openai (codex), gemini (agy), openrouter and xai (the xai provider, for opencode). Never a key."`
 	// EnvKeys answers "is a key available from the environment" for the
 	// variables saved agents name in key_env, so a cockpit can show a key-set
 	// dot without the agent carrying its own copy.
@@ -123,8 +123,8 @@ var subscriptionRoutes = []route{
 }
 
 // keyRoutes are PUT and DELETE /api/v0/subscriptions/<name>/key for each key
-// that can be set in Settings: the OpenRouter key, and each vendor's API key
-// (harness.Info.APIKey).
+// that can be set in Settings: the OpenRouter key, each vendor's API key
+// (harness.Info.APIKey) and each provider's key (harness.Providers).
 func keyRoutes() []route {
 	var out []route
 	for _, name := range credentials.KeyNames {
@@ -159,10 +159,23 @@ func keyOp(name string) string {
 	return strings.ToUpper(name[:1]) + name[1:]
 }
 
+// providerOfKey is the provider whose key is named name.
+func providerOfKey(name string) (harness.Provider, bool) {
+	for _, p := range harness.Providers {
+		if p.Key != "" && p.Key == name {
+			return p, true
+		}
+	}
+	return harness.Provider{}, false
+}
+
 // keyLabel is the key's name for the person, such as Anthropic API key.
 func keyLabel(name string) string {
 	if name == credentials.AccessOpenRouter {
 		return "OpenRouter key"
+	}
+	if p, ok := providerOfKey(name); ok {
+		return p.KeyLabel
 	}
 	for _, h := range harness.All() {
 		if k := h.Info().APIKey; k != nil && k.Name == name {
@@ -188,6 +201,10 @@ func keyUse(name string) string {
 	if name == credentials.AccessOpenRouter {
 		return "Control adds it to every OpenRouter agent's model calls; it wins over the variable an agent names (key_env), which is used only while no key is set here."
 	}
+	if p, ok := providerOfKey(name); ok {
+		return "Control's relay adds it to the model calls of every agent with access " + p.Name +
+			", which never holds it: the agent gets a placeholder, and the key goes in on the way to the provider."
+	}
 	return "Control's relay adds it to the model calls of every " + strings.Join(keyHarnesses(name), " and ") +
 		" agent with access api, which never holds it: the agent gets a placeholder, and the key goes in on the way to the vendor."
 }
@@ -196,6 +213,9 @@ func keyUse(name string) string {
 func keyGone(name string) string {
 	if name == credentials.AccessOpenRouter {
 		return "OpenRouter agents then read their key from the variable they name (key_env), where control runs, or are refused."
+	}
+	if p, ok := providerOfKey(name); ok {
+		return "Turns of agents with access " + p.Name + " are then refused until a key is set again."
 	}
 	return "Turns of agents with access api on it are then refused until a key is set again."
 }

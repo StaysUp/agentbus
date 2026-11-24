@@ -19,7 +19,7 @@ import (
 // ModelList is the answer to GET /api/v0/harnesses/{id}/models.
 type ModelList struct {
 	Harness string `json:"harness" doc:"The harness."`
-	Access  string `json:"access" doc:"The access: subscription, openrouter or api."`
+	Access  string `json:"access" doc:"The access: subscription, openrouter, api or a provider (xai)."`
 	models.List
 }
 
@@ -63,9 +63,10 @@ var modelsRoute = route{method: "GET", path: "/api/v0/harnesses/{id}/models", op
 		"codex's own model/list, from unmodified codex app-server run on control in a clean home of its own, its one call for the list sent through control's relay, which adds the ChatGPT sign-in kept on control and records the call. " +
 		"access api: the vendor's list-models call, made by control with the key set in Settings; for agy, whose --model takes only the models agy knows, not the Gemini API's whole list, " +
 		"agy's own agy models instead, run unmodified on control in a clean home of its own with the Gemini provider and a placeholder key, which makes no call. " +
+		"access xai (a provider): the models AgentBus offers first for it (source fixed), with no call; any other xAI model id is accepted. " +
 		"No subscription's own endpoint is called by AgentBus. A list is kept with the time it was fetched and fetched again at most once an hour, or now with refresh=true. " +
 		"An agent may still name a model the list lacks, and one that names none uses the tool's own default.",
-	query: []param{{name: "access", doc: "subscription, openrouter or api. Required."},
+	query: []param{{name: "access", doc: "subscription, openrouter, api or a provider (xai). Required."},
 		{name: "refresh", doc: "true fetches the list again now, rather than the one kept within the hour."}},
 	replies: []reply{ok(200, ModelList{}, "The models, or none with why."), fail(400, "No access was named."), fail(404, "No such harness, or it offers no such access.")},
 	turn:    anyRead,
@@ -76,7 +77,7 @@ func (a *API) listModels(w http.ResponseWriter, r *http.Request, id string) {
 	q := r.URL.Query()
 	access := q.Get("access")
 	if access == "" {
-		writeError(w, http.StatusBadRequest, "access is required: subscription, openrouter or api")
+		writeError(w, http.StatusBadRequest, "access is required: subscription, openrouter, api or a provider (xai)")
 		return
 	}
 	if !ok || !harness.Offers(h.Info(), access) {
@@ -117,6 +118,15 @@ func (a *API) modelList(ctx context.Context, h harness.Harness, access string, r
 		})
 	case agents.API:
 		return a.apiKeyModels(ctx, client, h, refresh)
+	}
+	// A provider: the models it offers first (harness.Providers); any other
+	// id is accepted.
+	if p, ok := harness.ProviderOf(access); ok {
+		list := make([]models.Model, len(p.Models))
+		for i, id := range p.Models {
+			list[i] = models.Model{ID: id}
+		}
+		return models.List{Models: list, Source: models.FromFixed}
 	}
 	// A subscription: through the unmodified tool only.
 	_, served := h.(harness.ModelServer)

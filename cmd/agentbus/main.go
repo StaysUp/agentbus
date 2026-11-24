@@ -239,7 +239,10 @@ type config struct {
 	// apiKeys are the vendor APIs of access "api", by harness; a harness
 	// absent here uses its own (harness.APIKey.URL).
 	apiKeys map[string]*url.URL
-	logf    func(string, ...any)
+	// providers are the providers' APIs, by name; a provider not here uses
+	// its own (harness.Providers). Tests point them at fakes.
+	providers map[string]*url.URL
+	logf      func(string, ...any)
 	// self is this program's path, which agentbus-api links to
 	// (apiLink). Empty tells turns to use curl.
 	self string
@@ -588,6 +591,12 @@ func start(c config) (*service, error) {
 		// wins over the variable an agent names.
 		creds := credentials.Plug{credentials.AccessOpenRouter: credentials.KeyFirst{Kept: subs, Env: credentials.Env{Getenv: c.getenvOr()}},
 			credentials.AccessSubscription: subs, credentials.AccessAPI: credentials.APIKeys{Kept: subs, Of: apiKeys}}
+		// Each provider's Chat Completions API (harness.Providers), with its
+		// key set in Settings.
+		for _, p := range harness.Providers {
+			relay[relayProvider(p.Name)] = relayed(jobs.Upstream{URL: c.providerURL(p), Access: p.Name}, chatcompletions.Adapter{})
+			creds[p.Name] = credentials.ProviderKey{Kept: subs, Key: p.Key, Label: p.KeyLabel}
+		}
 		js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollToken, Version: build(debug.ReadBuildInfo()).Version,
 			Heartbeat: c.heartbeat, Agents: saved, Settings: cfgStore,
 			Folders: issuer, Blobs: bs, Sweeper: blobSweep, Record: st, Relay: relay, Credentials: creds})
@@ -858,6 +867,22 @@ func start(c config) (*service, error) {
 			case harness.FormatOpenAI:
 				g.SetRewriter(codexReplay)
 			}
+		}
+	}
+	// An agent on a provider (harness.Providers), under /p/<name> of its
+	// base URL: to control's relay, which adds the provider's key. A
+	// provider agent runs only where there is one (runWire).
+	for _, p := range harness.Providers {
+		u := c.providerURL(p)
+		if relayBase != "" {
+			u = mustParse(relayBase + jobs.RelayPrefix + relayProvider(p.Name))
+		}
+		g := gateway.New(u, chatcompletions.Adapter{}, gwSink)
+		g.SetPrefix(harness.ProviderPrefix(p.Name))
+		gws = append(gws, g)
+		keyed[harness.ProviderPrefix(p.Name)] = g
+		if chatReplay != nil {
+			g.SetRewriter(chatReplay)
 		}
 	}
 	// A turn's run.ended waits for the gateway to write all of the
@@ -1275,6 +1300,18 @@ func modelSources(c config, subs *credentials.Subscriptions) *api.ModelSources {
 			k, _ := subs.Key(name)
 			return k
 		}}
+}
+
+// relayProvider is the relay's name for the provider named name.
+func relayProvider(name string) string { return "p-" + name }
+
+// providerURL is where a provider's calls go: c.providers's entry for it, or
+// the provider's own API.
+func (c config) providerURL(p harness.Provider) *url.URL {
+	if u := c.providers[p.Name]; u != nil {
+		return u
+	}
+	return mustParse(p.URL)
 }
 
 // relayAPIKey is the relay's name for the vendor API of harness's access
