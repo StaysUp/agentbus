@@ -71,7 +71,6 @@ const (
 	Copy    = "copy"
 	Git     = "git"
 	Overlay = "overlay"
-	None    = "none"
 	Auto    = "auto"
 )
 
@@ -221,8 +220,6 @@ type Space struct {
 	start time.Time
 	// base, while a copy built from a snapshot takes its Base: its files.
 	base *workspace.Snapshot
-	// temp, for none: Workdir is a temporary folder of this space's own.
-	temp bool
 }
 
 // Checkpoint is one recorded state of a space.
@@ -251,7 +248,7 @@ var (
 	ErrOutside      = errors.New("isolation: the folder is not under this runner's workdir")
 )
 
-var registry = map[string]Backend{Copy: copyBackend{}, Git: gitBackend{}, Overlay: overlayBackend{}, None: noneBackend{}}
+var registry = map[string]Backend{Copy: copyBackend{}, Git: gitBackend{}, Overlay: overlayBackend{}}
 
 // Get is the backend of that name.
 func Get(name string) (Backend, bool) {
@@ -294,7 +291,7 @@ func Available() []string {
 //
 // A fallback is not an error: the space's Fallback says why. none, or a
 // setting it does not know, is false: the session works in the folder
-// itself, and each of its jobs is checkpointed there by the None backend.
+// itself, and AgentBus keeps no record of what its turns change there.
 func For(setting, folder string) (Backend, bool) {
 	switch setting {
 	case "", Auto:

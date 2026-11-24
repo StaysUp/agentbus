@@ -198,13 +198,14 @@ func TestRunSetsBaseURLInChildOnlyAndClosesWithExitCode(t *testing.T) {
 	}
 	// Nothing writes session.registered any more: run.started carries
 	// the agent and folder, and the run stores its turn's turn.started.
-	// The turn's job ended, so what it changed (turn.changed) is in too.
+	// The turn ran in the folder itself (direct), so AgentBus keeps no record
+	// of what it changed (0.6.5): no turn.changed.
 	evs := runEvents(t, svc.store, id)
 	kinds := make([]string, len(evs))
 	for i, e := range evs {
 		kinds[i] = e.Kind
 	}
-	if got := strings.Join(kinds, " "); got != "session.created run.started turn.started context.added run.ended turn.changed" || evs[1].Hold != c.Hold {
+	if got := strings.Join(kinds, " "); got != "session.created run.started turn.started context.added run.ended" || evs[1].Hold != c.Hold {
 		t.Fatalf("events %s: %+v", got, evs)
 	}
 	if evs[1].Agent != "claude" || evs[1].Folder != folder {

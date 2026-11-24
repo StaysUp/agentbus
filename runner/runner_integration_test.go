@@ -281,7 +281,8 @@ func TestJobsRunAsTurns(t *testing.T) {
 		for _, e := range evs {
 			kinds = append(kinds, e.Kind)
 		}
-		if strings.Join(kinds, ",") != "attempt.started,turn.created,turn.ended,workspace.changes" {
+		// A folder used as it is (Direct) records no changes: no workspace.changes.
+		if strings.Join(kinds, ",") != "attempt.started,turn.created,turn.ended" {
 			t.Fatalf("events %v", kinds)
 		}
 	}

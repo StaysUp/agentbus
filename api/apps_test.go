@@ -216,6 +216,14 @@ func TestReviewTurnAppPrompt(t *testing.T) {
 	if p, _ := noTurn["prompt"].(string); !strings.Contains(p, "GET /api/v0/workspaces/ws_abc/changes") || strings.Contains(p, "/api/v0/turns/") {
 		t.Fatalf("with no turn, the prompt should read the workspace's unapplied set, not a turn: %q", p)
 	}
+	// A direct workspace keeps no record of its changes (0.6.5): neither prompt
+	// promises a diff without saying so.
+	for _, p := range []any{withTurn["prompt"], noTurn["prompt"]} {
+		if s, _ := p.(string); !strings.Contains(s, "direct workspace") && !strings.Contains(s, "the workspace is direct") ||
+			!strings.Contains(s, "keeps no record of its changes") {
+			t.Fatalf("the prompt should say a direct workspace has no diff: %q", s)
+		}
+	}
 }
 
 func TestJSONPointer(t *testing.T) {

@@ -183,16 +183,19 @@ func TestUpRunsAJobOnItsOwnRunner(t *testing.T) {
 	if err := json.Unmarshal(j.Result, &res); err != nil || res.Session == "" {
 		t.Fatalf("result %s", j.Result)
 	}
-	// What the turn changed is in the record (turn.changed); the job names it.
-	if c, err := jobs.Changes(svc.store, j); err != nil || c == nil || c.Count != 1 {
-		t.Fatalf("changes %+v %v, result %s", c, err, j.Result)
+	// The turn ran in the folder itself (direct): the folder changed in place,
+	// and AgentBus keeps no record of the change (0.6.5), so no turn.changed.
+	if _, err := os.Stat(filepath.Join(folder, "made.txt")); err != nil {
+		t.Fatalf("the turn did not run in the folder: %v", err)
 	}
-	// The job ended, so its turn.changed is in, after the turn's own end.
+	if c, err := jobs.Changes(svc.store, j); err != nil || c != nil {
+		t.Fatalf("a direct turn recorded changes %+v %v, result %s", c, err, j.Result)
+	}
 	var kinds []string
 	for _, e := range runEvents(t, svc.store, res.Session) {
 		kinds = append(kinds, e.Kind)
 	}
-	if len(kinds) < 4 || kinds[len(kinds)-2] != "run.ended" || kinds[len(kinds)-1] != "turn.changed" {
+	if len(kinds) < 4 || kinds[len(kinds)-1] != "run.ended" {
 		t.Fatalf("record of the job's session: %v", kinds)
 	}
 	// The data folder holds the queue beside the record, and the runner's
@@ -235,7 +238,8 @@ func TestServerAndRunner(t *testing.T) {
 	}
 	tok := readToken(t, serverHome)
 	folder := t.TempDir()
-	t.Setenv("AGENTBUS_FAKE_MARK", filepath.Join(folder, "made.txt"))
+	// Relative: the fake agent writes it in its own folder, the session's copy.
+	t.Setenv("AGENTBUS_FAKE_MARK", "made.txt")
 
 	// The server has no folders of its own, and no connector is connected
 	// yet to check a path: creating the workspace is refused. The runner owns
@@ -250,8 +254,9 @@ func TestServerAndRunner(t *testing.T) {
 	ref, connector := folders.Ref(folder), fr.Machine()
 
 	// With no runner yet, a turn waits in the server's queue. Its workspace is
-	// the folder by reference (no path resolved on the server), direct mode.
-	sess := newSessionOf(t, server, tok, map[string]any{"folder_ref": ref, "machine": connector, "sandbox": false})
+	// the folder by reference (no path resolved on the server), in a copy on
+	// the runner, so what the turn changes is recorded.
+	sess := newSessionOf(t, server, tok, map[string]any{"folder_ref": ref, "machine": connector, "sandbox": true})
 	code, queued := startTurn(t, server, tok, map[string]any{"session": sess, "agent": "claude",
 		"prompt": "hello", "model": "haiku"})
 	if code != 202 {

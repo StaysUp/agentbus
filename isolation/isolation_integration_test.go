@@ -224,13 +224,13 @@ func TestOnlyGitRunsGit(t *testing.T) {
 	mark := filepath.Join(t.TempDir(), "ran")
 	// A git that records each call and then runs the real git: the copy's private
 	// repo works, and the record shows every git AgentBus ran. The copy backend's
-	// private checkpoints run git; none runs none.
+	// private checkpoints run git.
 	if err := os.WriteFile(filepath.Join(bin, "git"),
 		[]byte("#!/bin/sh\necho \"$@\" >> "+mark+"\nexec "+realGit+" \"$@\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
-	for _, name := range append(fast(t), None) {
+	for _, name := range fast(t) {
 		t.Run(name, func(t *testing.T) {
 			b, s := open(t, name, r)
 			fixture(t, s.Dir, map[string]string{"top.txt": "t2", "new.txt": "n"})
@@ -244,14 +244,9 @@ func TestOnlyGitRunsGit(t *testing.T) {
 			if err := Close(s); err != nil {
 				t.Fatal(err)
 			}
-			if name == None {
-				// The folder was used as it is: put it back for the next.
-				fixture(t, r, map[string]string{"top.txt": "t"})
-				os.Remove(filepath.Join(r, "new.txt"))
-			}
 		})
 	}
-	for _, setting := range []string{"", Auto, Overlay, Copy, None} {
+	for _, setting := range []string{"", Auto, Overlay, Copy, "none"} {
 		For(setting, r)
 	}
 	// Every git AgentBus ran was against a copy's OWN private repo (its --git-dir

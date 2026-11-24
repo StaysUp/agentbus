@@ -39,7 +39,7 @@ type TurnDiff struct {
 	Started    time.Time     `json:"started"`
 	Ended      *time.Time    `json:"ended,omitempty" doc:"Absent while running."`
 	DurationMS *int64        `json:"duration_ms" doc:"From started to ended. Null while running."`
-	Files      *FilesSummary `json:"files" doc:"What the turn changed, in summary: the whole list pages at GET /api/v0/turns/{id}/changes. Null when the record holds none: the turn is running, or this service did not run it."`
+	Files      *FilesSummary `json:"files" doc:"What the turn changed, in summary: the whole list pages at GET /api/v0/turns/{id}/changes. Null when the record holds none: the turn is running, this service did not run it, or it ran in a direct workspace (sandbox false), whose changes go straight into the person's folder and are not recorded."`
 	ModelCalls CallsSummary  `json:"model_calls" doc:"The turn's model calls, in summary: the list pages at GET /api/v0/turns/{id}/calls."`
 	Tools      ToolsSummary  `json:"tools" doc:"The turn's tool calls, in summary: the list pages at GET /api/v0/turns/{id}/tools, each tool call with the commands it ran."`
 	Apply      ApplyState    `json:"apply" doc:"Whether the turn's changes were applied to the person's folder. state none when no apply was asked for."`

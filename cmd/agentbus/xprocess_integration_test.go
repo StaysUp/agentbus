@@ -434,19 +434,18 @@ func TestXProcRunnerForwardsRecord(t *testing.T) {
 	}
 
 	// The runner wrote the turn's record and forwarded it; control holds its
-	// start and close, and, at the job's end, control's own turn.changed.
+	// start and close. The turn ran in the folder itself (direct), so AgentBus
+	// keeps no record of what it changed (0.6.5): no turn.changed follows.
 	waitFor(t, "the runner's turn in control's record", func() bool {
-		k := x.recordKinds(st.Session)
-		return hasKind(k, "run.ended") && hasKind(k, "turn.changed")
+		return hasKind(x.recordKinds(st.Session), "run.ended")
 	})
 	k := x.recordKinds(st.Session)
-	for _, want := range []string{"run.started", "turn.started", "run.ended", "turn.changed"} {
+	for _, want := range []string{"run.started", "turn.started", "run.ended"} {
 		if !hasKind(k, want) {
 			t.Fatalf("control's record lacks %s: %v", want, k)
 		}
 	}
-	// The fake agent ran on the runner: it wrote the mark in the folder's copy,
-	// and the turn's one change came back to control.
+	// The fake agent ran on the runner: it wrote the mark in the folder itself.
 	if _, err := os.Stat(filepath.Join(folder, "made.txt")); err != nil {
 		t.Fatalf("the agent did not run on the runner: %v", err)
 	}
