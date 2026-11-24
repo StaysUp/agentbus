@@ -171,10 +171,18 @@ type Request struct {
 	// Folder is the person's folder, copied as it is now: the local fast
 	// path, where the folder is on this machine's disk. Snapshot, instead,
 	// is a snapshot of it, built from its blobs. Repo and Base, for git
-	// only and instead of either: a worktree of Repo at Base.
+	// only and instead of either: a worktree of Repo at Base. Folder and
+	// Base, for git only: a worktree of the folder's repo at the commit
+	// Base, with turns run at the folder's place in it; none of the
+	// folder's uncommitted edits are carried, only the files Carry names.
 	Folder     string
 	Snapshot   *Snapshot
 	Repo, Base string
+	// Carry, with Folder and Base: patterns (path.Match, slash-separated,
+	// relative to the folder) of files copied from the person's folder into
+	// the worktree, such as .env, where the base commit has nothing at that
+	// path. The carry_files setting names them.
+	Carry []string
 	// Ref is the folder's reference, kept with the space: the Lender reads
 	// the folder by it.
 	Ref string

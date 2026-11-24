@@ -159,8 +159,9 @@ const (
 	// before any turn job of it is queued. Workspace is its id, FolderRef (and
 	// Folder on a local agentbus up) the folder, Machine the connector, and
 	// Sandbox the mode (always present: true for a copy behind a wall, false
-	// for the person's real folder). It is the single source of the
-	// workspace's folder, machine and mode. Stored once per workspace
+	// for the person's real folder). Start, when set, is the git base it
+	// started from. It is the single source of the workspace's folder,
+	// machine, mode and start. Stored once per workspace
 	// (AppendOnce with event id wc_<workspace>).
 	//
 	// WorkspaceApplied is written when an apply job of the workspace ends on
@@ -573,6 +574,9 @@ type Event struct {
 	Discarded *Discarded `json:"discarded,omitempty" doc:"On workspace.discarded: the changeset the workspace was reset to, the turns dropped, and who asked."`
 	// Failed, only on workspace.failed: the action that did nothing, and why.
 	Failed *Failed `json:"failed,omitempty" doc:"On workspace.failed: the action (discard, update or close), why it failed, and who asked."`
+	// Start, on workspace.created: the base the workspace started from, when
+	// it started from one rather than the folder as it is.
+	Start *Start `json:"start,omitempty" doc:"On workspace.created: the git branch, tag or commit the workspace started from, and the commit it resolved to. Absent for a workspace that started from the folder as it is."`
 	// Updated, only on workspace.updated: what the update from the folder did.
 	Updated *Updated `json:"updated,omitempty" doc:"On workspace.updated: the result, the new baseline (from) and merged (to) changesets on a clean update, the folded turns, the conflicting files on a conflict, and who asked."`
 	// Previewed, only on changes.previewed: the apply dry run's result.
@@ -863,6 +867,15 @@ const (
 	// only in older records.
 	AddedCommands = "commands"
 )
+
+// Start is where a workspace started from, when not the folder as it is: a
+// base of the git repo that holds the folder, resolved on the folder's
+// machine when the workspace was made.
+type Start struct {
+	Base   string `json:"base" doc:"The branch, tag or commit as the person named it."`
+	Remote string `json:"remote,omitempty" doc:"The remote the branch was fetched from first, such as origin. Absent for a local base."`
+	Commit string `json:"commit" doc:"The commit id base resolved to; the workspace's files begin as this commit has them."`
+}
 
 // Origin says who started a turn when the person did not.
 type Origin struct {

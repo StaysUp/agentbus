@@ -137,6 +137,8 @@ func TestAgentMakesWorkspaceWithinAuthority(t *testing.T) {
 	refused(ctok, "POST", "/api/v0/workspaces", `{"folders":[{"folder_ref":"`+ref1+`"},{"folder_ref":"`+ref2+`"}]}`, agentFolderRefused)
 	refused(ctok, "POST", "/api/v0/workspaces", `{"folder":"`+f1+`"}`, agentPathRefused)
 	refused(ctok, "POST", "/api/v0/workspaces", `{"folder_ref":"`+ref1+`","sandbox":false}`, agentDirectRefused)
+	// A git base reads, and with a remote fetches into, the person's own repo.
+	refused(ctok, "POST", "/api/v0/workspaces", `{"folder_ref":"`+ref1+`","base":"main"}`, agentBaseRefused)
 	// Another session's workspace is not its own.
 	refused(ctok, "POST", "/api/v0/sessions", `{"workspace":"`+w.ID+`"}`, turnWorkspaceRefused)
 	refused(ctok, "GET", "/api/v0/workspaces/"+w.ID, "", turnSessionRefused)

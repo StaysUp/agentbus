@@ -35,6 +35,7 @@ func defaultPolicy() Policy {
 		Forbid:     append([]string(nil), defaultForbid...),
 		Isolation:  IsolationAuto,
 		HomeFiles:  []string{},
+		CarryFiles: []string{},
 		AgentAPI:   AgentAPI{Apply: &off},
 		Limits:     Limits{MaxDepth: num(2), MaxJobsPerTurn: num(10), MaxJobsPerTree: num(30), MaxDelegatedAtOnce: num(8), MaxCostUSDPerTree: &cost},
 		Workspaces: Workspaces{PutAwayAfterMinutes: num(30)},

@@ -399,7 +399,7 @@ func TestRunRefusals(t *testing.T) {
 	// /api/v0/workspaces, before any turn, and store nothing.
 	const (
 		badFolder    = "folder must be an absolute path or start with ~/, at most 4096 bytes"
-		badWorkspace = "the body must be one JSON object with folder (an absolute path or ~/...) or folder_ref, and optionally machine, sandbox and idempotency_key"
+		badWorkspace = "the body must be one JSON object with folder (an absolute path or ~/...) or folder_ref, and optionally machine, sandbox, base, remote and idempotency_key"
 	)
 	for _, tc := range []struct{ name, body, want string }{
 		{"relative folder", `{"folder":"x/y"}`, badFolder},

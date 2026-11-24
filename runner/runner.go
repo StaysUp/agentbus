@@ -1475,6 +1475,13 @@ func (r *Runner) prepare(ctx context.Context, at *attempt) *queue.Result {
 			if setting == settings.IsolationNone {
 				setting = settings.IsolationAuto
 			}
+			// A workspace started from a base (a commit control resolved on this
+			// machine when it was made) is a git worktree at that commit, whatever
+			// the setting: the setting picks a backend for the folder as it is.
+			if sp.Base != "" {
+				b, _ := isolation.Get(isolation.Git)
+				return r.isolate(at, b, isolation.Request{Folder: folder, Ref: at.ref, Base: sp.Base, Carry: p.CarryFiles})
+			}
 			if b, ok := isolation.For(setting, folder); ok {
 				return r.isolate(ctx, at, b, isolation.Request{Folder: folder, Ref: at.ref})
 			}

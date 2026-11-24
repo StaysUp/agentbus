@@ -33,8 +33,11 @@ type Workspace struct {
 	// with one folder (also in Folder and FolderRef, as before), several for
 	// one made with several (Folder and FolderRef then empty, so nothing reads
 	// one folder as the whole workspace). Empty for a workspace with no folder.
-	Folders []WorkspaceFolder `json:"folders,omitempty" doc:"The workspace's folders, in order. One for a workspace with one folder, which folder and folder_ref also name; several for a workspace made with several, whose folder and folder_ref are then absent."`
-	Created time.Time         `json:"created" doc:"When the workspace was created."`
+	Folders    []WorkspaceFolder `json:"folders,omitempty" doc:"The workspace's folders, in order. One for a workspace with one folder, which folder and folder_ref also name; several for a workspace made with several, whose folder and folder_ref are then absent."`
+	Base       string            `json:"base,omitempty" doc:"The git branch, tag or commit the workspace started from, as named. Absent for a workspace that started from the folder as it is."`
+	Remote     string            `json:"remote,omitempty" doc:"The remote the base was fetched from first. Absent for a local base."`
+	BaseCommit string            `json:"base_commit,omitempty" doc:"The commit the base resolved to when the workspace was made; its turns start from this commit's files."`
+	Created    time.Time         `json:"created" doc:"When the workspace was created."`
 	// HeadTurn is the workspace's latest turn that recorded a changeset
 	// (turn.changed), the turn an apply would go up to. Empty when no turn of
 	// the workspace has ended with a changeset.
@@ -74,14 +77,15 @@ const resolvedWorkspace = `COALESCE(NULLIF(json_extract(ts.data, '$.workspace'),
 // workspace.created names it.
 func (s *Store) Workspace(id ids.WorkspaceID) (w Workspace, found bool, err error) {
 	w.ID = string(id)
-	var folder, ref, machine, list sql.NullString
+	var folder, ref, machine, list, base, remote, commit sql.NullString
 	var sandbox int
 	var created int64
 	err = s.r.QueryRow(`SELECT json_extract(data, '$.folder'), json_extract(data, '$.folder_ref'),
 			json_extract(data, '$.machine'), COALESCE(json_extract(data, '$.sandbox'), 0), time,
-			json_extract(data, '$.folders')
+			json_extract(data, '$.folders'),
+			json_extract(data, '$.start.base'), json_extract(data, '$.start.remote'), json_extract(data, '$.start.commit')
 		FROM events WHERE kind = ? AND json_extract(data, '$.workspace') = ? ORDER BY seq LIMIT 1`,
-		string(event.WorkspaceCreated), string(id)).Scan(&folder, &ref, &machine, &sandbox, &created, &list)
+		string(event.WorkspaceCreated), string(id)).Scan(&folder, &ref, &machine, &sandbox, &created, &list, &base, &remote, &commit)
 	if errors.Is(err, sql.ErrNoRows) {
 		return w, false, nil
 	}
@@ -102,6 +106,7 @@ func (s *Store) Workspace(id ids.WorkspaceID) (w Workspace, found bool, err erro
 		// of one, with no name, as its copy is the folder itself.
 		w.Folders = []WorkspaceFolder{{Folder: w.Folder, FolderRef: w.FolderRef}}
 	}
+	w.Base, w.Remote, w.BaseCommit = base.String, remote.String, commit.String
 	w.Sandbox = sandbox != 0
 	w.Created = time.Unix(0, created).UTC()
 	if err := s.workspaceState(&w); err != nil {

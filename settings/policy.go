@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"path/filepath"
 	"regexp"
 	"slices"
@@ -76,6 +77,14 @@ isolation = "auto"
 # replaced when the original is newer. ~/.claude.json gives its MCP servers
 # only. Vendor sign-in files never go.
 home_files = []      # e.g. ["~/.aws/config"]
+
+# carry_files: files of your folder, such as ".env", copied into a session
+# that starts from a branch or commit (a git worktree) instead of the folder
+# as it is. Such a session has only what git has at that commit, so a file
+# git ignores is missing unless named here. Patterns are relative to the
+# folder, with * and ? for any name, such as ".env.*". A file the commit
+# already has keeps the commit's content. Nothing under .git is copied.
+carry_files = []     # e.g. [".env", ".env.*"]
 
 # Work agents ask other agents for. A request tree is the person's turns in one
 # session and every turn work asked for from them, at any depth, in whatever
@@ -147,6 +156,7 @@ type Policy struct {
 	Forbid     []string   `toml:"forbid" json:"forbid" doc:"Commands and tools agents may never run. The gateway refuses them."`
 	Isolation  string     `toml:"isolation" json:"isolation,omitempty" doc:"Where a new session's turns run: auto (copy on macOS; overlay on Linux where the runner can mount one, else copy), overlay, copy (a copy of its folder as it is now), git (a git worktree with the folder's uncommitted edits, in a repo) or none (the folder itself). On ext4, copy and the overlay's snapshot copy every byte: use xfs, btrfs, git or none for a big folder. Absent in a PUT: auto."`
 	HomeFiles  []string   `toml:"home_files" json:"home_files" doc:"Files or folders under the home folder, each starting with ~/, copied into each session's own home at the same place at the start of each turn, such as ~/.aws/config."`
+	CarryFiles []string `toml:"carry_files" json:"carry_files" doc:"Files of the person's folder, as patterns relative to it with * and ? (such as .env or .env.*), copied into a workspace started from a base (a git worktree at a branch or commit) when it is made, where the commit has nothing at that path. Nothing under .git is copied. Absent in a PUT: none."`
 	Limits     Limits     `toml:"limits" json:"limits" doc:"The limits on work agents ask for."`
 	AgentAPI   AgentAPI   `toml:"agent_api" json:"agent_api" doc:"What a turn's own token may call."`
 	Workspaces Workspaces `toml:"workspaces" json:"workspaces" doc:"How AgentBus looks after sandbox workspaces' copies."`
@@ -229,6 +239,9 @@ func (p *Policy) fill() {
 	if p.HomeFiles == nil {
 		p.HomeFiles = []string{}
 	}
+	if p.CarryFiles == nil {
+		p.CarryFiles = []string{}
+	}
 	if p.Isolation == "" {
 		p.Isolation = IsolationAuto
 	}
@@ -286,6 +299,11 @@ func (p *Policy) Check() error {
 			return fmt.Errorf("home_files entry %s is %s; vendor sign-ins stay with control and never go into a session's home", strconv.Quote(f), what)
 		}
 	}
+	for _, f := range p.CarryFiles {
+		if err := carryShape(f); err != nil {
+			return fmt.Errorf("carry_files entry %s %v", strconv.Quote(f), err)
+		}
+	}
 	for _, list := range []struct {
 		name string
 		cmds []string
@@ -341,7 +359,7 @@ func parsePolicy(b []byte) (Policy, error) {
 		return false
 	})
 	if len(extra) > 0 {
-		return Policy{}, fmt.Errorf("unknown key %s; the keys are allow, ask, forbid, isolation, home_files, [limits], [agent_api] and [workspaces] (see the README)", strconv.Quote(extra[0].String()))
+		return Policy{}, fmt.Errorf("unknown key %s; the keys are allow, ask, forbid, isolation, home_files, carry_files, [limits], [agent_api] and [workspaces] (see the README)", strconv.Quote(extra[0].String()))
 	}
 	if err := p.Check(); err != nil {
 		return Policy{}, err
@@ -350,7 +368,7 @@ func parsePolicy(b []byte) (Policy, error) {
 }
 
 // wrongTypeTOML is a permissions.toml's error for a value of the wrong type.
-const wrongTypeTOML = "a value has the wrong type: allow, ask, forbid and home_files are lists of strings, such as [\"go test\"]; " +
+const wrongTypeTOML = "a value has the wrong type: allow, ask, forbid, home_files and carry_files are lists of strings, such as [\"go test\"]; " +
 	"isolation is a string; the [limits] are numbers; the [agent_api] switches are true or false"
 
 // over is p, read with the keys it leaves out unset, on top of base: each key
@@ -517,12 +535,12 @@ func DecodePolicyChange(b []byte) (Policy, error) {
 		var se *json.SyntaxError
 		switch {
 		case errors.As(err, &te) && te.Field != "":
-			return Policy{}, fmt.Errorf("%s has the wrong type: allow, ask, forbid and home_files are lists of strings; "+
+			return Policy{}, fmt.Errorf("%s has the wrong type: allow, ask, forbid, home_files and carry_files are lists of strings; "+
 				"isolation is a string; the limits are numbers", te.Field)
 		case errors.As(err, &se):
 			return Policy{}, errors.New("the body is not valid JSON")
 		case strings.HasPrefix(err.Error(), "json: unknown field "):
-			return Policy{}, fmt.Errorf("unknown key %s; the keys are allow, ask, forbid, isolation, home_files, limits, agent_api and workspaces",
+			return Policy{}, fmt.Errorf("unknown key %s; the keys are allow, ask, forbid, isolation, home_files, carry_files, limits, agent_api and workspaces",
 				strings.TrimPrefix(err.Error(), "json: unknown field "))
 		}
 		return Policy{}, errors.New("the body must be one JSON object: the policy")
@@ -550,7 +568,7 @@ func FormatPolicy(p Policy) []byte {
 	p.fill()
 	values := map[string]any{
 		"allow": p.Allow, "ask": p.Ask, "forbid": p.Forbid, "isolation": p.Isolation,
-		"home_files":       p.HomeFiles,
+		"home_files": p.HomeFiles, "carry_files": p.CarryFiles,
 		"limits.max_depth": *p.Limits.MaxDepth, "limits.max_jobs_per_turn": *p.Limits.MaxJobsPerTurn,
 		"limits.max_jobs_per_tree": *p.Limits.MaxJobsPerTree, "limits.max_cost_usd_per_tree": *p.Limits.MaxCostUSDPerTree,
 		"limits.max_delegated_at_once":      *p.Limits.MaxDelegatedAtOnce,
@@ -649,6 +667,30 @@ func grantShape(f string) error {
 	}
 	if c := filepath.Clean(rest); c == "." || c == ".." || strings.HasPrefix(c, "../") || filepath.IsAbs(c) {
 		return errors.New("must name a file or folder under ~, not ~ itself or above it")
+	}
+	return nil
+}
+
+// carryShape refuses a carry_files entry that is not a pattern of files
+// inside the folder: relative, slash-separated, never climbing out with ".."
+// and never naming .git.
+func carryShape(f string) error {
+	if strings.ContainsFunc(f, isControl) {
+		return errors.New("has a control character")
+	}
+	if f == "" || strings.HasPrefix(f, "/") || strings.HasPrefix(f, "~") || strings.Contains(f, "\\") || filepath.IsAbs(f) {
+		return errors.New("must be a path relative to the folder, with / between names")
+	}
+	for _, part := range strings.Split(f, "/") {
+		switch part {
+		case "", ".", "..":
+			return errors.New("must name files inside the folder: no empty name, . or ..")
+		case ".git":
+			return errors.New("names .git; a repo's own files are never copied")
+		}
+	}
+	if _, err := path.Match(f, ""); err != nil {
+		return errors.New("is not a valid pattern")
 	}
 	return nil
 }

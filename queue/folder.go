@@ -20,21 +20,43 @@ import (
 // waits this long for the answer, and a job still queued after it ends.
 const FolderWait = 15 * time.Second
 
+// FetchWait bounds the fetch of a folder job whose base names a remote: the
+// API waits this long more for its answer.
+const FetchWait = 60 * time.Second
+
 // RegisterFolder makes a folder job: the runner of the machine checks the
 // folder at path and registers it. The path is kept in memory only, until ForgetFolder.
 func (q *Queue) RegisterFolder(team, machine, path string) (Job, error) {
+	return q.CheckFolder(team, machine, FolderCheck{Path: path})
+}
+
+// FolderCheck is what a folder job checks: a typed folder (Path, kept in
+// memory only) or a registered one (Ref), and, when Base is set, the
+// branch, tag or commit of the folder's repo it resolves, fetched from
+// Remote first when that is set.
+type FolderCheck struct {
+	Path, Ref, Base, Remote string
+}
+
+// CheckFolder makes a folder job for c on the machine's runner: its result
+// is the folder's reference and, for a base, the commit.
+func (q *Queue) CheckFolder(team, machine string, c FolderCheck) (Job, error) {
 	// Held while the job is made, so Take, which waits for this lock, never
 	// hands the job out before its path is here.
 	q.typedMu.Lock()
 	defer q.typedMu.Unlock()
-	job, _, err := q.create(team, KindFolder, "", Spec{Machine: machine}, Links{}, nil, "", nil)
+	spec := Spec{Machine: machine, FolderRef: c.Ref, Base: c.Base, Remote: c.Remote}
+	job, _, err := q.create(team, KindFolder, "", spec, Links{}, nil, "", nil)
 	if err != nil {
 		return Job{}, err
+	}
+	if c.Path == "" {
+		return job, nil
 	}
 	if q.typed == nil {
 		q.typed = map[string]string{}
 	}
-	q.typed[job.ID] = path
+	q.typed[job.ID] = c.Path
 	return job, nil
 }
 

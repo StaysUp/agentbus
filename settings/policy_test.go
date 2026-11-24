@@ -439,3 +439,26 @@ func TestB16InvalidLegacyEdit(t *testing.T) {
 		}
 	}
 }
+
+// carry_files: empty by default, patterns inside the folder only, written
+// back by FormatPolicy, refused by name in TOML and JSON alike.
+func TestCarryFilesPolicy(t *testing.T) {
+	if p := DefaultPolicy(); p.CarryFiles == nil || len(p.CarryFiles) != 0 {
+		t.Fatalf("default carry_files: %v", p.CarryFiles)
+	}
+	p, err := ParsePolicy([]byte("carry_files = [\".env\", \".env.*\", \"config/local.yml\"]\n"))
+	if err != nil || len(p.CarryFiles) != 3 {
+		t.Fatalf("carry_files: %v %v", p.CarryFiles, err)
+	}
+	if back, err := ParsePolicy(FormatPolicy(p)); err != nil || len(back.CarryFiles) != 3 || back.CarryFiles[1] != ".env.*" {
+		t.Errorf("FormatPolicy lost carry_files: %v %v", back.CarryFiles, err)
+	}
+	for _, bad := range []string{`"/etc/passwd"`, `"~/.ssh/id"`, `"../x"`, `"a/../b"`, `".git/config"`, `"sub/.git"`, `""`, `"a//b"`, `"[x"`, `"a\\b"`} {
+		if _, err := ParsePolicy([]byte("carry_files = [" + bad + "]\n")); err == nil || !strings.Contains(err.Error(), "carry_files") {
+			t.Errorf("%s: %v, want a refusal naming carry_files", bad, err)
+		}
+		if _, err := DecodePolicy([]byte(`{"carry_files":[` + bad + `]}`)); err == nil || !strings.Contains(err.Error(), "carry_files") {
+			t.Errorf("JSON %s: %v, want a refusal naming carry_files", bad, err)
+		}
+	}
+}

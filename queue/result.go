@@ -61,6 +61,9 @@ type Result struct {
 	// FolderRef, for a folder job: the reference the connector registered
 	// the typed folder under.
 	FolderRef string `json:"folder_ref,omitempty"`
+	// BaseCommit, for a folder job that named a base: the commit it
+	// resolved to in the folder's repo.
+	BaseCommit string `json:"base_commit,omitempty"`
 	// Home, for a home job: the usual config files its machine's home
 	// holds. Names, kinds and sizes only.
 	Home []HomeFile `json:"home,omitempty"`

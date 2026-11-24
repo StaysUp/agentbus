@@ -9,7 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/staysup/agentbus/workspace"
 )
@@ -24,8 +26,11 @@ import (
 // edits are carried in, tracked and untracked files alike, so the session
 // starts from the folder as it is; files git ignores are not, which keeps a
 // big build folder out of the copy. Checkpoints are kept as the copy
-// backend keeps them. A Request with Repo and Base, and no Folder, is a
-// worktree of Repo at Base, with nothing carried and nowhere to apply.
+// backend keeps them. A Request with Folder and Base is a worktree of the
+// folder's repo at the commit Base: the folder's uncommitted edits are not
+// carried, only the files Carry names. A Request with Repo and Base, and no
+// Folder, is a worktree of Repo at Base, with nothing carried and nowhere to
+// apply.
 type gitBackend struct{}
 
 func (gitBackend) Name() string { return Git }
@@ -34,6 +39,14 @@ func (gitBackend) Name() string { return Git }
 // symbolic link there, so the worktree has no such folder to run in.
 const refusedNotInCommit = "the folder is not in its repo's last commit, so it cannot get its own worktree; " +
 	"commit it, or start the session with isolate false to use the folder as it is"
+
+// refusedNotInBase: the folder is not in the base commit, or is a symbolic
+// link there.
+const refusedNotInBase = "the folder is not in the base commit, so the session cannot start from it; " +
+	"pick a base that has the folder, or start from the folder as it is"
+
+// refusedBase: the base is not a commit of the folder's repo on this machine.
+const refusedBase = "the base commit is not in the folder's repo on this machine; create the workspace again"
 
 func (gitBackend) Open(r Request) (*Space, error) {
 	if err := checkOpen(r); err != nil {
@@ -47,7 +60,7 @@ func (gitBackend) Open(r Request) (*Space, error) {
 		return nil, &Unavailable{Git, "a worktree needs the folder's repo on this machine"}
 	}
 	s := &Space{ID: r.ID, Backend: Git, Root: root, Dir: root, Workdir: r.Workdir, stop: ctxOf(r)}
-	rel, source := ".", ""
+	rel, source, notIn := ".", "", refusedNotInCommit
 	if r.Folder != "" {
 		repo, in, head, ok := repoOf(r.Folder)
 		if !ok {
@@ -59,6 +72,18 @@ func (gitBackend) Open(r Request) (*Space, error) {
 			return nil, &Refusal{refusedHoldsWorkdir}
 		}
 		source, s.Ref, s.Repo, s.Base, rel = filepath.Clean(r.Folder), r.Ref, repo, head, in
+		if r.Base != "" {
+			// The base is a full commit id, resolved on the folder's machine
+			// when the workspace was made (control checked its shape).
+			if !commitShape.MatchString(r.Base) {
+				return nil, &Refusal{refusedBase}
+			}
+			got, err := git(repo, "rev-parse", "--verify", "-q", r.Base+"^{commit}")
+			if err != nil || strings.TrimSpace(string(got)) != r.Base {
+				return nil, &Refusal{refusedBase}
+			}
+			s.Base, notIn = r.Base, refusedNotInBase
+		}
 	} else {
 		s.Repo, s.Base = r.Repo, r.Base
 	}
@@ -83,9 +108,14 @@ func (gitBackend) Open(r Request) (*Space, error) {
 	// commit records as a symlink could lead anywhere.
 	s.Dir = filepath.Join(root, rel)
 	if !insideDir(root, s.Dir) {
-		return undo(&Refusal{refusedNotInCommit})
+		return undo(&Refusal{notIn})
 	}
-	if source != "" {
+	switch {
+	case source != "" && r.Base != "":
+		if err := carryNamed(source, s.Dir, r.Carry); err != nil {
+			return undo(err)
+		}
+	case source != "":
 		if err := carry(s.stopCtx(), s.Repo, source, root); err != nil {
 			return undo(err)
 		}
@@ -197,6 +227,49 @@ func carry(ctx context.Context, repo, folder, root string) error {
 		}
 		if err := carryFile(rt, filepath.Join(repo, rel), rel); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// commitShape is a full git commit id: SHA-1 or SHA-256, in hex.
+var commitShape = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
+
+// carryNamed copies into dir, the worktree's folder, each regular file of
+// the person's folder that a pattern names, where dir has nothing at that
+// path: a file the base commit holds keeps the base's content. Patterns are
+// path.Match patterns, slash-separated and relative to the folder; nothing
+// under .git is ever copied. Every write goes through dir as a root.
+func carryNamed(folder, dir string, patterns []string) error {
+	if len(patterns) == 0 {
+		return nil
+	}
+	rt, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer rt.Close()
+	src := os.DirFS(folder)
+	for _, pat := range patterns {
+		names, err := fs.Glob(src, pat)
+		if err != nil {
+			continue // the setting's check refuses a bad pattern
+		}
+		for _, name := range names {
+			if name == ".git" || strings.HasPrefix(name, ".git/") || strings.Contains(name, "/.git/") {
+				continue
+			}
+			from := filepath.Join(folder, filepath.FromSlash(name))
+			if info, err := os.Lstat(from); err != nil || !info.Mode().IsRegular() {
+				continue
+			}
+			rel := filepath.FromSlash(name)
+			if _, err := rt.Lstat(rel); err == nil || !errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			if err := carryFile(rt, from, rel); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -346,6 +419,12 @@ func makeWorktree(ctx context.Context, repo, base, dir string) error {
 	if gitTop(dir) {
 		return nil
 	}
+	// One worktree add at a time per repo: two at once race on the repo's
+	// worktree records.
+	m, _ := addLocks.LoadOrStore(repo, &sync.Mutex{})
+	mu := m.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(dir), 0o700); err != nil {
 		return errors.New("the worktree folder could not be made")
 	}
@@ -354,6 +433,9 @@ func makeWorktree(ctx context.Context, repo, base, dir string) error {
 	_, err := gitContext(ctx, repo, "worktree", "add", "--detach", dir, base)
 	return err
 }
+
+// addLocks holds a mutex per repo, for makeWorktree.
+var addLocks sync.Map
 
 // RemoveWorktree removes a worktree the runner made, with whatever is in it:
 // the git backend's, or one made before the backends kept a record. dir is

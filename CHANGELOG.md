@@ -384,6 +384,17 @@ All notable changes to AgentBus. Full notes for each release are on the
   writes any, and a conflict in one refuses the whole apply. Discard and Update cover every folder.
   A file the agent leaves beside the folders, in none of them, refuses the apply until it is moved
   or discarded.
+- **Start a Copy session from a git branch or commit.** `POST /api/v0/workspaces` takes `base`, a
+  branch, tag or commit of the folder's repo, and optionally `remote`, such as `origin`, to fetch
+  the branch from first. A workspace with several folders takes no base. The folder's machine
+  resolves it when the workspace is made, so a name the repo does not have is refused there. The
+  workspace records `base`, `remote` and `base_commit`, and its turns run in a git worktree at that
+  commit. None of the folder's uncommitted edits are in it, and the folder, its branch and its HEAD
+  are not changed. The repo gains one `.git/worktrees` entry while the workspace lives, and a fetch
+  moves that branch's remote-tracking ref.
+- **`carry_files` setting.** Files of the folder that a session started from a base copies in,
+  such as `.env`: patterns relative to the folder, empty by default. A file the commit already has
+  keeps the commit's content.
 
 ### Changed
 - **A turn is queued first.** `POST /api/v0/turns` answers at once, and the `wait` parameter is
