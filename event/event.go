@@ -166,6 +166,15 @@ const (
 	WorkspaceApplied   Kind = "workspace.applied"
 	WorkspaceDiscarded Kind = "workspace.discarded"
 
+	// FolderRegistered is control's record that a folder a person typed was
+	// checked and registered on its machine's runner (queue.KindFolder), so a
+	// folder becoming known to control is in the record and not only in the
+	// folder registry. FolderRef is its reference and Machine the connector
+	// that holds it. The path is not carried: it is kept off control's disk
+	// (queue/folder.go). No session. Stored once per folder reference and
+	// machine, as the folder is first registered.
+	FolderRegistered Kind = "folder.registered"
+
 	// TurnEnded: control's record that a turn job ended, written for every
 	// ended turn job whatever its outcome (finished, failed, stopped,
 	// cancelled or its runner lost), once per turn job. It is the signal a
@@ -242,6 +251,7 @@ var Kinds = []KindInfo{
 	{WorkspaceCreated, "A workspace was created, before any turn of it ran: workspace is its id, folder_ref (and folder on a local agentbus up) the folder it runs in, machine the connector that owns the folder, and sandbox the mode (true for a copy behind a wall, false for the person's real folder; always present). It is the single source of the workspace's folder, machine and mode. Stored once per workspace, keyed on the event id wc_<workspace>.", []string{"workspace", "sandbox"}},
 	{WorkspaceApplied, "An apply of a workspace's changes to the person's folder ended (POST /api/v0/workspaces/{id}/apply): workspace and session name it, turn is the turn applied up to, and applied holds every turn whose changes it carried, the from and to changesets, who asked (by: the person or an agent, never a token), the result (applied, refused or failed), the files written or removed, and on a refusal the files that refused it, each with why. Stored once per apply. Show a refusal as a warning.", []string{"workspace", "applied"}},
 	{WorkspaceDiscarded, "The unapplied changes of a sandbox workspace were dropped (POST /api/v0/workspaces/{id}/discard): workspace and session name it, and discarded holds the changeset it was reset to (the last applied one, or base when never applied), the turns whose file changes were dropped, and who asked. The conversation stays in the record. Stored once per discard.", []string{"workspace", "discarded"}},
+	{FolderRegistered, "A folder a person typed was checked and registered on its machine's runner (POST /api/v0/workspaces with folder): folder_ref is the reference its machine issued, and machine the connector that holds it. The path is not carried; it is kept off control's disk. No session. Stored once per folder reference and machine, as the folder is first registered, so a folder becoming known is in the record and not only in the folder listing (GET /api/v0/folders).", []string{"folder_ref", "machine"}},
 	{TurnEnded, "A turn job ended, whatever its outcome: control writes it once per turn job for every ended turn (finished, failed, stopped, cancelled or its runner lost), so a reactor (a delivery) learns a turn ended from the record, not from the scheduler's job table. It is keyed on the turn and carries no session -- a reactor trigger, not part of a session's event stream. state is how it ended and error says why. The changes and the reply are not here: those are turn.changed and the job's result.", []string{"turn", "state"}},
 	{ChangesPreviewed, "What applying a workspace's changes to the person's folder would do now, the dry run of POST /api/v0/workspaces/{id}/apply computed on the folder's machine, nothing written: previewed holds the files it would write or remove (with diffs), the conflicts it would refuse, the turn it would apply up to and the turns it would carry. workspace names the workspace it is of (its session field is empty, so it never enters the session namespace). Stored so GET /api/v0/workspaces/{id}/changes serves and pages it from the record, as of this event's time; a new one is stored when a preview runs again (the workspace changed, or a fresh one was asked for). The file list can be cut (truncated) when too many to send; count still counts them all.", []string{"workspace", "previewed"}},
 	{PlanUsage, "How much of a subscription's plan is used in one of its windows, as the vendor said in the headers of a model reply that carried control's credential for that subscription: plan holds the subscription (the harness, such as claude), the connect its credential came from, the window, its length in minutes, the percent used, when it resets and the vendor's status word. " +
@@ -286,6 +296,11 @@ type Usage struct {
 	// unknown lifetime.
 	CacheWrite5mTokens int `json:"cache_write_5m_tokens,omitempty" doc:"The part of cache_write_tokens with a 5 minute lifetime, when the vendor said."`
 	CacheWrite1hTokens int `json:"cache_write_1h_tokens,omitempty" doc:"The part of cache_write_tokens with a 1 hour lifetime, when the vendor said."`
+	// CacheWrite30mTokens and CacheWrite12hTokens are OpenAI's two write
+	// lifetimes, from input_tokens_details.cache_write_tokens_details. Each has
+	// its own price.
+	CacheWrite30mTokens int `json:"cache_write_30m_tokens,omitempty" doc:"The part of cache_write_tokens with a 30 minute lifetime, when the vendor said."`
+	CacheWrite12hTokens int `json:"cache_write_12h_tokens,omitempty" doc:"The part of cache_write_tokens with a 12 hour lifetime, when the vendor said."`
 	// ServiceTier and Speed are the tier and speed the vendor reports it
 	// served the call at, in its own words. Empty when it reported none.
 	ServiceTier string `json:"service_tier,omitempty" doc:"The tier the vendor says served the call, in its own words."`
@@ -409,7 +424,7 @@ type Event struct {
 	Folder  string `json:"folder,omitempty" doc:"On turn.started and run.started: the folder the run's agent started in. Empty on a turn of a session no run started."`
 	// FolderRef: the reference of the person's folder the session was
 	// started in, issued by its connector. The path stays there.
-	FolderRef string `json:"folder_ref,omitempty" doc:"On turn.started, run.started and workspace.created: the reference (fld_ and 16 hex digits) of the folder, as its connector issued it. Absent for a session started before references, or in a folder no connector owns."`
+	FolderRef string `json:"folder_ref,omitempty" doc:"On turn.started, run.started, workspace.created and folder.registered: the reference (fld_ and 16 hex digits) of the folder, as its connector issued it. Absent for a session started before references, or in a folder no connector owns."`
 	// Workspace, Machine and Sandbox name a workspace and its mode.
 	// Workspace is on workspace.created, workspace.applied,
 	// workspace.discarded and every turn.started (the workspace the turn ran
@@ -418,7 +433,7 @@ type Event struct {
 	// false (the person's real folder) is always present, told apart from a
 	// kind that carries no mode at all.
 	Workspace string `json:"workspace,omitempty" doc:"On workspace.created, workspace.applied, workspace.discarded and turn.started: the workspace the turn ran in (ws_ and 16 hex digits)."`
-	Machine   string `json:"machine,omitempty" doc:"On workspace.created: the connector that owns the workspace's folder (con_ and 16 hex digits). Absent when no connector owns the folder, as for hook or gateway traffic."`
+	Machine   string `json:"machine,omitempty" doc:"On workspace.created and folder.registered: the connector that owns the folder (con_ and 16 hex digits). Absent when no connector owns the folder, as for hook or gateway traffic."`
 	Sandbox   *bool  `json:"sandbox,omitempty" doc:"On workspace.created: the workspace's mode, true for a copy behind a wall and false for the person's real folder. Always present on workspace.created; absent on every other kind."`
 	// AgentID, Access and KeyEnv, on a run's turn.started and run.started:
 	// the saved agent the run started, how it reaches its model, and for an

@@ -690,11 +690,13 @@ func TestSnapshotSumsCacheWriteLifetimes(t *testing.T) {
 	s := newStore(t)
 	mustAppend(t, s, responded("a", &event.Usage{CacheWriteTokens: 30, CacheWrite5mTokens: 10, CacheWrite1hTokens: 20}))
 	mustAppend(t, s, responded("a", &event.Usage{CacheWriteTokens: 5, CacheWrite1hTokens: 5}))
+	// OpenAI's lifetimes are summed too, each kept apart from Anthropic's.
+	mustAppend(t, s, responded("a", &event.Usage{CacheWriteTokens: 7, CacheWrite30mTokens: 3, CacheWrite12hTokens: 4}))
 	snap, err := s.Snapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := event.Usage{CacheWriteTokens: 35, CacheWrite5mTokens: 10, CacheWrite1hTokens: 25}
+	want := event.Usage{CacheWriteTokens: 42, CacheWrite5mTokens: 10, CacheWrite1hTokens: 25, CacheWrite30mTokens: 3, CacheWrite12hTokens: 4}
 	if x := session(t, snap, "a"); x.Usage == nil || !reflect.DeepEqual(*x.Usage, want) {
 		t.Errorf("usage = %+v, want %+v", x.Usage, want)
 	}

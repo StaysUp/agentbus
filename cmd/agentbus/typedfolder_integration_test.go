@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,7 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/store"
 )
 
 // A session starts in a folder the person types, on a server with a runner
@@ -160,6 +163,37 @@ func TestTypedFolderOnServer(t *testing.T) {
 	}
 	if kinds[queue.KindFolder] < 5 {
 		t.Errorf("folder jobs: %v", kinds)
+	}
+
+	// The record holds the folder becoming known: one folder.registered, with
+	// its reference and machine and no path, however many folder jobs ran.
+	st, err := store.Open(filepath.Join(serverHome, "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	recs, err := st.After(0, store.Filter{}, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reg []event.Event
+	for _, r := range recs {
+		var e event.Event
+		if err := json.Unmarshal(r.Data, &e); err != nil {
+			t.Fatal(err)
+		}
+		if e.Kind == event.FolderRegistered {
+			reg = append(reg, e)
+		}
+	}
+	if len(reg) != 1 {
+		t.Fatalf("folder.registered events: %d, want 1", len(reg))
+	}
+	if reg[0].FolderRef != fs.Folders[0].Ref || reg[0].Machine != fs.Folders[0].Machine {
+		t.Fatalf("folder.registered: %+v, want ref %s machine %s", reg[0], fs.Folders[0].Ref, fs.Folders[0].Machine)
+	}
+	if reg[0].Folder != "" || reg[0].Session != "" {
+		t.Fatalf("folder.registered carries a path or a session: %+v", reg[0])
 	}
 	files, _ := filepath.Glob(filepath.Join(serverHome, "jobs.db*"))
 	records, _ := filepath.Glob(filepath.Join(serverHome, "events.db*"))

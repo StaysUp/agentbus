@@ -112,6 +112,8 @@ func (s *Store) snapshotAt(hi int64) (Snapshot, error) {
 			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_tokens') END), 0),
 			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_5m_tokens') END), 0),
 			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_1h_tokens') END), 0),
+			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_30m_tokens') END), 0),
+			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_12h_tokens') END), 0),
 			COALESCE(MAX(kind = 'model.responded' AND json_extract(data, '$.usage.output_incomplete') = 1), 0),
 			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.cost_usd') END), 0),
 			SUM(kind = 'model.responded' AND COALESCE(json_extract(data, '$.cost_complete'), 0) <> 1),
@@ -131,8 +133,8 @@ func (s *Store) snapshotAt(hi int64) (Snapshot, error) {
 		var client sql.NullString
 		if err := rows.Scan(&x.ID, &first, &last, &x.LastSeq, &x.Turns, &withUsage, &x.UsageMissing,
 			&u.InputTokens, &u.OutputTokens, &u.CacheReadTokens, &u.CacheWriteTokens,
-			&u.CacheWrite5mTokens, &u.CacheWrite1hTokens, &x.OutputIncomplete,
-			&x.CostUSD, &x.CostMissing, &client); err != nil {
+			&u.CacheWrite5mTokens, &u.CacheWrite1hTokens, &u.CacheWrite30mTokens, &u.CacheWrite12hTokens,
+			&x.OutputIncomplete, &x.CostUSD, &x.CostMissing, &client); err != nil {
 			rows.Close()
 			return snap, fmt.Errorf("store: snapshot: %w", err)
 		}

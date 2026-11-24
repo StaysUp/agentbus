@@ -92,14 +92,26 @@ func TestSinkOutputIncomplete(t *testing.T) {
 	wantCost(t, e, 20, false)
 }
 
-// OpenAI's adapter has already taken cached tokens out of input. Its cache
-// writes come with no lifetime (30m or 12h), so they are not priced.
+// OpenAI's adapter has already taken cached tokens out of input. A cache write
+// with no stated lifetime (30m or 12h) has no price and is incomplete.
 func TestSinkOpenAI(t *testing.T) {
 	e := priced(t, responded("openai", "gpt-6.1-sol", &event.Usage{InputTokens: 100_000, OutputTokens: 10_000, CacheReadTokens: 100_000, ServiceTier: "default"}))
 	wantCost(t, e, 0.2+0.1+0.01, true)
 
 	e = priced(t, responded("openai", "gpt-6.1-sol", &event.Usage{InputTokens: 100_000, CacheWriteTokens: 1000, ServiceTier: "default"}))
 	wantCost(t, e, 0.2, false)
+}
+
+// OpenAI splits cache writes into 30m and 12h lifetimes
+// (cache_write_tokens_details), each with its own price: $2.50/M and $5/M on
+// gpt-6.1-sol. With the whole write accounted for, the cost is complete.
+// The prompt stays under the 272K long-context threshold, so the short price
+// applies.
+func TestSinkOpenAIWriteLifetimes(t *testing.T) {
+	e := priced(t, responded("openai", "gpt-6.1-sol", &event.Usage{
+		CacheWriteTokens: 200_000, CacheWrite30mTokens: 100_000, CacheWrite12hTokens: 100_000, ServiceTier: "default",
+	}))
+	wantCost(t, e, 0.25+0.50, true)
 }
 
 func TestSinkLeavesOtherKindsAlone(t *testing.T) {

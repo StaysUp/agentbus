@@ -12,6 +12,8 @@ package jobs
 // its result, which is read as it is. Nothing older is moved or rewritten.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"time"
@@ -34,6 +36,14 @@ var ErrOutcomeMissing = errors.New("jobs: the job's outcome is not in the record
 func changedID(j queue.Job) string { return "evt_tc_" + j.ID }
 func appliedID(j queue.Job) string { return "evt_ta_" + j.ID }
 func discardID(j queue.Job) string { return "evt_wd_" + j.ID }
+
+// registeredID is the id of a folder's folder.registered, by its reference and
+// machine rather than by the job, so the many folder jobs of one folder (one
+// per workspace that types it) record it once.
+func registeredID(ref, machine string) string {
+	sum := sha256.Sum256([]byte(ref + "\x00" + machine))
+	return "evt_fr_" + hex.EncodeToString(sum[:8])
+}
 
 // DiscardedOf is what a discard job dropped, from the job alone: the checkpoint
 // its copy was reset to (the job's Restore, or "base" when none was applied),
@@ -125,6 +135,22 @@ func keepOutcomes(rec Recorder, j queue.Job, f queue.Finish) (kept json.RawMessa
 			return nil, err
 		}
 		res.Refused, res.DiscardedEvent, moved = "", e.ID, true
+	case queue.KindFolder:
+		// A folder a person typed was checked and registered on its machine's
+		// runner. folder.registered records it becoming known to control,
+		// keyed by its reference and machine (not the job), so repeated
+		// registrations of the same folder store it once. Written here, before
+		// End, it survives the request that typed the folder going away. No
+		// path: it is kept off control's disk. The result is left as it is, so
+		// the caller still reads the reference from it.
+		if j.State != queue.Finished || !queue.FolderRefShape.MatchString(res.FolderRef) {
+			break
+		}
+		e := event.Event{ID: registeredID(res.FolderRef, j.Spec.Machine), Kind: event.FolderRegistered,
+			Time: now, FolderRef: res.FolderRef, Machine: j.Spec.Machine}
+		if _, err := rec.AppendOnce(e); err != nil {
+			return nil, err
+		}
 	}
 	if !moved {
 		return nil, nil

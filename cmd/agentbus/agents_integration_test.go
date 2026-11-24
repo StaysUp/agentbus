@@ -341,14 +341,15 @@ func TestOpenRouterAgentWithoutKeyRefused(t *testing.T) {
 		t.Fatalf("%d %s", code, raw)
 	}
 	// The session and its workspace were created before the turn (the 3-call
-	// flow); the turn job's end is recorded (turn.ended), as for every ended turn
-	// job; nothing else runs or is stored (C0).
+	// flow), and the typed folder was registered then too (folder.registered);
+	// the turn job's end is recorded (turn.ended), as for every ended turn job;
+	// nothing else runs or is stored (C0).
 	if evs, err := svc.store.After(before, store.Filter{}, 10); err != nil {
 		t.Fatal(err)
 	} else {
 		for _, e := range evs {
 			switch e.Kind {
-			case "turn.ended", "workspace.created", "session.created":
+			case "turn.ended", "workspace.created", "session.created", "folder.registered":
 			default:
 				t.Fatalf("a refused turn stored %s", e.Kind)
 			}

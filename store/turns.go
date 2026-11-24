@@ -253,6 +253,8 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_tokens') END), 0),
 			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_5m_tokens') END), 0),
 			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_1h_tokens') END), 0),
+			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_30m_tokens') END), 0),
+			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_12h_tokens') END), 0),
 			COALESCE(MAX(kind = 'model.responded' AND json_extract(data, '$.usage.output_incomplete') = 1), 0),
 			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.cost_usd') END), 0),
 			SUM(kind = 'model.responded' AND COALESCE(json_extract(data, '$.cost_complete'), 0) <> 1),
@@ -285,7 +287,8 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 		var closeErr, errTail, outcome sql.NullString
 		if err := rows.Scan(&session, &turn, &withUsage, &usageMissing,
 			&u.InputTokens, &u.OutputTokens, &u.CacheReadTokens, &u.CacheWriteTokens,
-			&u.CacheWrite5mTokens, &u.CacheWrite1hTokens, &outputIncomplete, &cost, &costMissing,
+			&u.CacheWrite5mTokens, &u.CacheWrite1hTokens, &u.CacheWrite30mTokens, &u.CacheWrite12hTokens,
+			&outputIncomplete, &cost, &costMissing,
 			&opened, &closed, &closedAt, &exitCode, &closeErr, &errTail, &stopped, &unsettled, &completedAt, &outcome); err != nil {
 			return list, fmt.Errorf("store: read turns: %w", err)
 		}

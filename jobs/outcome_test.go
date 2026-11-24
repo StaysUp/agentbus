@@ -190,6 +190,51 @@ func TestTurnAppliedKept(t *testing.T) {
 	}
 }
 
+// A folder job's finish puts folder.registered into the record: the reference
+// and machine, no path and no session. It is keyed by the reference and
+// machine, not the job, so the many folder jobs of one folder record it once.
+func TestFolderRegisteredKept(t *testing.T) {
+	e := newOutcomeEnv(t)
+	if _, err := e.q.RegisterFolder(queue.DefaultTeam, testConnector, "/home/user/proj"); err != nil {
+		t.Fatal(err)
+	}
+	e.tok = enrollConnector(t, e.srv)
+	res := queue.Result{FolderRef: "fld_0123456789abcdef"}
+	_, base := e.take(t, queue.KindFolder)
+	if code := e.finish(t, base, queue.Finished, "", res); code != 200 {
+		t.Fatalf("finish: %d", code)
+	}
+	// A second workspace types the same folder: another job, the same reference.
+	if _, err := e.q.RegisterFolder(queue.DefaultTeam, testConnector, "/home/user/proj"); err != nil {
+		t.Fatal(err)
+	}
+	_, base2 := e.take(t, queue.KindFolder)
+	if code := e.finish(t, base2, queue.Finished, "", res); code != 200 {
+		t.Fatalf("finish 2: %d", code)
+	}
+
+	recs, err := e.st.After(0, store.Filter{}, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reg []event.Event
+	for _, r := range recs {
+		var ev event.Event
+		if err := json.Unmarshal(r.Data, &ev); err != nil {
+			t.Fatal(err)
+		}
+		if ev.Kind == event.FolderRegistered {
+			reg = append(reg, ev)
+		}
+	}
+	if len(reg) != 1 {
+		t.Fatalf("folder.registered events: %d, want 1", len(reg))
+	}
+	if reg[0].FolderRef != "fld_0123456789abcdef" || reg[0].Machine != testConnector || reg[0].Folder != "" || reg[0].Session != "" {
+		t.Fatalf("folder.registered: %+v", reg[0])
+	}
+}
+
 func mustJSON(v any) json.RawMessage {
 	b, err := json.Marshal(v)
 	if err != nil {
