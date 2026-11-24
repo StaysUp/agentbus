@@ -19,46 +19,54 @@ import (
 // ?session= is gone. A turn outside the tree is refused, by id or by query.
 func TestTurnTokenReadsTreeTurnsByID(t *testing.T) {
 	e, dir := askEnv(t)
-	p := startTurn(t, e, `{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"parent"}`)
+	psess := e.newSession(t, t.TempDir(), true)
+	p := startTurn(t, e, `{"session":"`+psess+`","agent":"claude","prompt":"parent"}`)
 	ptok := tokenOf(t, dir, "parent")
 	c := ask(t, e, ptok, `{"agent":"claude","prompt":"child"}`)
-	ctok := tokenOf(t, dir, "child")
-	q := startTurn(t, e, `{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"outside"}`)
+	// A separate tree: a turn the person started in its own workspace, so it runs
+	// beside the child.
+	qsess := e.newSession(t, t.TempDir(), true)
+	q := startTurn(t, e, `{"session":"`+qsess+`","agent":"claude","prompt":"outside"}`)
 	tokenOf(t, dir, "outside")
+	// The asked child runs after the asker's turn ends (the workspace lane). Its
+	// own token reads the turns of its tree (the parent's) by id, reaches nothing
+	// outside it, and gets 404 for an unknown id.
+	release(dir, "parent")
+	ctok := tokenOf(t, dir, "child")
 	for _, tc := range []struct {
-		tok, path string
-		want      int
+		path string
+		want int
 	}{
-		{ptok, "/api/v0/turns/" + c.Turn, 200},
-		{ptok, "/api/v0/turns/" + c.Turn + "/diff", 200},
-		{ctok, "/api/v0/turns/" + p.Turn, 200},
-		{ctok, "/api/v0/turns/" + p.Turn + "/diff", 200},
-		{ptok, "/api/v0/turns/" + q.Turn, 403},
-		{ptok, "/api/v0/turns/" + q.Turn + "/diff", 403},
-		{ptok, "/api/v0/turns/" + c.Turn + "?session=" + q.Session, 403},
-		{ptok, "/api/v0/turns/t_0000000000000000", 404},
+		{"/api/v0/turns/" + p.Turn, 200},
+		{"/api/v0/turns/" + p.Turn + "/diff", 200},
+		{"/api/v0/turns/" + q.Turn, 403},
+		{"/api/v0/turns/" + q.Turn + "/diff", 403},
+		{"/api/v0/turns/" + p.Turn + "?session=" + q.Session, 403},
+		{"/api/v0/turns/t_0000000000000000", 404},
 	} {
-		code, out := as(t, e, tc.tok, "GET", tc.path, "")
-		if code != tc.want {
-			t.Errorf("%s GET %s: %d %s, want %d", tc.tok[:8], tc.path, code, out, tc.want)
-		}
-		if code == 200 && strings.HasSuffix(tc.path, c.Turn) {
-			var one OneTurn
-			if json.Unmarshal([]byte(out), &one) != nil || one.Turn.Session != c.Session || one.Turn.Origin == nil || one.Turn.Origin.Turn != p.Turn {
-				t.Errorf("the child's turn read by the parent: %s", out)
-			}
+		if code, out := as(t, e, ctok, "GET", tc.path, ""); code != tc.want {
+			t.Errorf("child GET %s: %d %s, want %d", tc.path, code, out, tc.want)
 		}
 	}
-	for _, n := range []string{"parent", "child", "outside"} {
-		release(dir, n)
+	// The child's own turn, read by id from the record, names who asked it.
+	if code, out := as(t, e, ctok, "GET", "/api/v0/turns/"+c.Turn, ""); code != 200 {
+		t.Errorf("the child reads its own turn: %d %s", code, out)
+	} else {
+		var one OneTurn
+		if json.Unmarshal([]byte(out), &one) != nil || one.Turn.Session != c.Session || one.Turn.Origin == nil || one.Turn.Origin.Turn != p.Turn {
+			t.Errorf("the child's own turn: %s", out)
+		}
 	}
+	release(dir, "child")
+	release(dir, "outside")
 }
 
 // A turn token's search leaves out its own turn, so the search call itself is
 // never a hit. The main token's search finds every turn.
 func TestSearchLeavesOutTheSearchingTurn(t *testing.T) {
 	e, dir := childEnv(t)
-	s := startTurn(t, e, `{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"the first needle"}`)
+	sess := e.newSession(t, t.TempDir(), true)
+	s := startTurn(t, e, `{"session":"`+sess+`","agent":"claude","prompt":"the first needle"}`)
 	tok := childVars(t, dir, 0)["AGENTBUS_TOKEN"]
 	appendAll(t, e.store, event.Event{ID: "prev", Kind: event.TurnStarted, Time: time.Now().UTC(), Session: s.Session, Turn: "t_prev", Text: "an older needle"})
 	turns := func(tok string) []string {
@@ -90,12 +98,15 @@ func TestSearchLeavesOutTheSearchingTurn(t *testing.T) {
 
 // PATCH /sessions/{id} closed true is the retired close: it now archives the
 // session (B14) by recording a session.archived event. Nothing is removed --
-// the copy survives, named after the session -- the session stays resumable
+// the copy survives, named after the workspace -- the session stays resumable
 // and can still take a turn, archiving is never refused for a running turn,
 // and the default list hides it while archived=true still shows it.
 func TestCloseSession(t *testing.T) {
 	e, dir := askEnv(t)
-	s := startTurn(t, e, `{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"hold"}`)
+	ref, machine := e.folderRef(t, t.TempDir())
+	ws := e.makeWorkspace(t, ref, machine, true)
+	sess := e.makeSession(t, ws)
+	s := startTurn(t, e, `{"session":"`+sess+`","agent":"claude","prompt":"hold"}`)
 	tokenOf(t, dir, "hold")
 	// Archive while the turn is still running: it is only a view, so it is
 	// never refused for busy work. closed:true maps to archive; the response
@@ -104,8 +115,8 @@ func TestCloseSession(t *testing.T) {
 		!strings.Contains(out, `"archived":true`) || strings.Contains(out, `"closed":true`) || !strings.Contains(out, `"title":"Done"`) {
 		t.Fatalf("archive while a turn runs: %d %s", code, out)
 	}
-	if !strings.HasSuffix(pwdOf(t, dir, "hold"), filepath.Join("sessions", s.Session)) {
-		t.Errorf("the copy is at %s, want it named after the session", pwdOf(t, dir, "hold"))
+	if !strings.HasSuffix(pwdOf(t, dir, "hold"), filepath.Join("sessions", ws)) {
+		t.Errorf("the copy is at %s, want it named after the workspace %s", pwdOf(t, dir, "hold"), ws)
 	}
 	// The turn runs on and finishes normally: archiving did not stop it.
 	release(dir, "hold")
@@ -113,7 +124,7 @@ func TestCloseSession(t *testing.T) {
 	// It is archived, not closed: the copy is intact and it stays resumable.
 	var one OneSession
 	if code := getJSON(t, e, "/api/v0/sessions/"+s.Session, &one); code != 200 || one.Session.ID != s.Session || one.Session.Copy == nil ||
-		one.Session.Copy.Kind != queue.WorkspaceCopy || one.Session.Copy.Name != s.Session || one.Session.Copy.Removed != nil ||
+		one.Session.Copy.Kind != queue.WorkspaceCopy || one.Session.Copy.Name != ws || one.Session.Copy.Removed != nil ||
 		one.Session.Archived == nil || one.Session.Closed != nil || !one.Session.Resumable {
 		t.Fatalf("GET the archived session: %d %+v %+v", code, one.Session, one.Session.Copy)
 	}

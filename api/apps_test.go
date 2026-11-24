@@ -159,6 +159,63 @@ func TestResolveValue(t *testing.T) {
 	if out, why := resolveValue("A={$inputs.a}; B={$inputs.b}", twoArg, caller, steps); why != "" || out != "A={$inputs.b}; B=value" {
 		t.Fatalf("interpolation re-scanned a substituted value: %q %q", out, why)
 	}
+
+	// A conditional value: "then" when if_present resolves to a non-empty
+	// string, "else" otherwise, each branch interpolated. review_turn uses it so
+	// one app answers a call with a turn and one without.
+	cond := map[string]any{
+		"if_present": "$inputs.turn",
+		"then":       "turn {$inputs.turn}",
+		"else":       "workspace {$steps.start.outputs.turn}",
+	}
+	if out, why := resolveValue(cond, args, caller, steps); why != "" || out != "turn t_1" {
+		t.Fatalf("conditional with a present input: %q %q, want %q", out, why, "turn t_1")
+	}
+	if out, why := resolveValue(cond, map[string]any{"turn": ""}, caller, steps); why != "" || out != "workspace t_9" {
+		t.Fatalf("conditional with an empty input: %q %q, want %q", out, why, "workspace t_9")
+	}
+	if out, why := resolveValue(cond, map[string]any{}, caller, steps); why != "" || out != "workspace t_9" {
+		t.Fatalf("conditional with an absent input: %q %q, want %q", out, why, "workspace t_9")
+	}
+	// A plain object with no if_present key stays a literal, not a conditional.
+	lit := map[string]any{"k": "v"}
+	if out, why := resolveValue(lit, args, caller, steps); why != "" || !reflect.DeepEqual(out, lit) {
+		t.Fatalf("a plain object was not kept as a literal: %v %q", out, why)
+	}
+}
+
+// The review_turn app's prompt adapts to its input: a named turn points the
+// reviewer at that turn's diff; no turn points it at the workspace's whole
+// unapplied set, named by the session step's workspace output.
+func TestReviewTurnAppPrompt(t *testing.T) {
+	a := &API{}
+	var start toolreg.Step
+	for _, s := range reviewTurnApp().Run.App.Steps {
+		if s.StepID == "start" {
+			start = s
+		}
+	}
+	if start.StepID == "" {
+		t.Fatal("review_turn has no start step")
+	}
+	// The session step hands on the asker's workspace, which the no-turn prompt names.
+	stepOut := map[string]map[string]any{"session": {"session": "s_rev", "workspace": "ws_abc"}}
+
+	withTurn, _, why := a.resolveStep(start, map[string]any{"turn": "t_7", "agent": "codex"}, "s_caller", stepOut)
+	if why != "" {
+		t.Fatalf("resolve with a turn: %s", why)
+	}
+	if p, _ := withTurn["prompt"].(string); !strings.Contains(p, "GET /api/v0/turns/t_7/diff") || strings.Contains(p, "/workspaces/") {
+		t.Fatalf("with a turn, the prompt should read the turn diff, not the workspace: %q", p)
+	}
+
+	noTurn, _, why := a.resolveStep(start, map[string]any{"agent": "codex"}, "s_caller", stepOut)
+	if why != "" {
+		t.Fatalf("resolve with no turn: %s", why)
+	}
+	if p, _ := noTurn["prompt"].(string); !strings.Contains(p, "GET /api/v0/workspaces/ws_abc/changes") || strings.Contains(p, "/api/v0/turns/") {
+		t.Fatalf("with no turn, the prompt should read the workspace's unapplied set, not a turn: %q", p)
+	}
 }
 
 func TestJSONPointer(t *testing.T) {

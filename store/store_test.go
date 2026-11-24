@@ -76,6 +76,57 @@ func TestSeqGaplessAndIDKeptAcrossReopen(t *testing.T) {
 	}
 }
 
+// A store from before 0.6.5 keeps its run events under the old names
+// (session.opened, session.closed). Opening it renames them once, in the kind
+// column the folds read and in the stored JSON the events API serves, to
+// run.started and run.ended.
+func TestOldRunEventsRenamedOnOpen(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.db")
+	s := open(t, path)
+	o := hold(event.Kind("session.opened"), "s", "h1")
+	o.Turn, o.Harness, o.Folder = "t1", "claude", "/x"
+	mustAppend(t, s, o)
+	c := hold(event.Kind("session.closed"), "s", "h1")
+	c.Turn = "t1"
+	code := 0
+	c.ExitCode = &code
+	mustAppend(t, s, c)
+	s.Close()
+
+	s2 := open(t, path)
+	rs, err := s2.After(0, Filter{}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kinds []string
+	for _, r := range rs {
+		var e event.Event
+		if err := json.Unmarshal(r.Data, &e); err != nil {
+			t.Fatal(err)
+		}
+		kinds = append(kinds, string(e.Kind))
+	}
+	// The stored JSON (what the events API serves) now reads the new names.
+	if got := strings.Join(kinds, " "); got != "run.started run.ended" {
+		t.Fatalf("after open, served kinds %q, want %q", got, "run.started run.ended")
+	}
+	// The kind column the folds read is renamed too: the hold's run.started
+	// and run.ended pair, so nothing is left looking open.
+	holds, err := s2.OpenHolds(s2.Last())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(holds) != 0 {
+		t.Fatalf("open holds after rename: %+v, want none", holds)
+	}
+	// Opening again renames nothing: no old-named rows remain.
+	s2.Close()
+	s3 := open(t, path)
+	if h, err := s3.OpenHolds(s3.Last()); err != nil || len(h) != 0 {
+		t.Fatalf("second open holds %+v err %v, want none", h, err)
+	}
+}
+
 func TestStoredJSONCarriesSeq(t *testing.T) {
 	s := newStore(t)
 	mustAppend(t, s, ev(event.ModelRequested, "a"))
@@ -305,20 +356,20 @@ func hold(kind event.Kind, session, id string) event.Event {
 func TestOpenCountsHoldsByID(t *testing.T) {
 	s := newStore(t)
 	open := func() bool { snap, _ := s.Snapshot(); return session(t, snap, "s").Open }
-	opened := hold(event.SessionOpened, "s", "h1")
+	opened := hold(event.RunStarted, "s", "h1")
 	opened.Harness, opened.Folder = "claude", "/x"
 	mustAppend(t, s, opened)
 	if !open() {
 		t.Fatal("open hold h1, session closed")
 	}
 	// A next turn's child can start before the store has its previous
-	// child's session.closed: each opened is closed by its own hold.
-	mustAppend(t, s, hold(event.SessionOpened, "s", "h2"))
-	mustAppend(t, s, hold(event.SessionClosed, "s", "h1"))
+	// child's run.ended: each opened is closed by its own hold.
+	mustAppend(t, s, hold(event.RunStarted, "s", "h2"))
+	mustAppend(t, s, hold(event.RunEnded, "s", "h1"))
 	if !open() {
 		t.Fatal("h2 is still open, but the session reads closed: holds must be counted by id")
 	}
-	mustAppend(t, s, hold(event.SessionClosed, "s", "h2"))
+	mustAppend(t, s, hold(event.RunEnded, "s", "h2"))
 	if open() {
 		t.Fatal("every hold closed, session still open")
 	}
@@ -374,9 +425,9 @@ func TestAgentAndFolderFromTurns(t *testing.T) {
 	}
 
 	// A run's child started and has not reached a model call yet.
-	mustAppend(t, s, agentEvent(event.SessionOpened, "run", "codex", "/a"))
+	mustAppend(t, s, agentEvent(event.RunStarted, "run", "codex", "/a"))
 	if a, f := read("run"); a != "codex" || f != "/a" {
-		t.Fatalf("from session.opened: %q %q", a, f)
+		t.Fatalf("from run.started: %q %q", a, f)
 	}
 	mustAppend(t, s, agentEvent(event.TurnStarted, "run", "codex", "/a"))
 	mustAppend(t, s, agentEvent(event.TurnStarted, "run", "", ""))
@@ -405,9 +456,9 @@ func TestAgentAndFolderFromTurns(t *testing.T) {
 func TestRestartClosesStaleHolds(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "events.db")
 	s := open(t, path)
-	mustAppend(t, s, hold(event.SessionOpened, "s", "h1"))
-	mustAppend(t, s, hold(event.SessionOpened, "s", "h2"))
-	mustAppend(t, s, hold(event.SessionClosed, "s", "h2"))
+	mustAppend(t, s, hold(event.RunStarted, "s", "h1"))
+	mustAppend(t, s, hold(event.RunStarted, "s", "h2"))
+	mustAppend(t, s, hold(event.RunEnded, "s", "h2"))
 	s.Close()
 
 	s2 := open(t, path)
@@ -422,7 +473,7 @@ func TestRestartClosesStaleHolds(t *testing.T) {
 	}
 	rs, _ := s2.After(3, Filter{}, 10)
 	var e event.Event
-	if len(rs) != 1 || json.Unmarshal(rs[0].Data, &e) != nil || e.Kind != event.SessionClosed || e.Hold != "h1" {
+	if len(rs) != 1 || json.Unmarshal(rs[0].Data, &e) != nil || e.Kind != event.RunEnded || e.Hold != "h1" {
 		t.Fatalf("stored after restart: %+v", rs)
 	}
 }
@@ -639,11 +690,13 @@ func TestSnapshotSumsCacheWriteLifetimes(t *testing.T) {
 	s := newStore(t)
 	mustAppend(t, s, responded("a", &event.Usage{CacheWriteTokens: 30, CacheWrite5mTokens: 10, CacheWrite1hTokens: 20}))
 	mustAppend(t, s, responded("a", &event.Usage{CacheWriteTokens: 5, CacheWrite1hTokens: 5}))
+	// OpenAI's lifetimes are summed too, each kept apart from Anthropic's.
+	mustAppend(t, s, responded("a", &event.Usage{CacheWriteTokens: 7, CacheWrite30mTokens: 3, CacheWrite12hTokens: 4}))
 	snap, err := s.Snapshot()
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := event.Usage{CacheWriteTokens: 35, CacheWrite5mTokens: 10, CacheWrite1hTokens: 25}
+	want := event.Usage{CacheWriteTokens: 42, CacheWrite5mTokens: 10, CacheWrite1hTokens: 25, CacheWrite30mTokens: 3, CacheWrite12hTokens: 4}
 	if x := session(t, snap, "a"); x.Usage == nil || !reflect.DeepEqual(*x.Usage, want) {
 		t.Errorf("usage = %+v, want %+v", x.Usage, want)
 	}

@@ -74,7 +74,7 @@ func TestOnDelivers(t *testing.T) {
 	if _, _, err := q.Start(r.ID, ca.ID, ca.Number, lease); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil || n != 0 {
+	if n, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil, nil); err != nil || n != 0 {
 		t.Fatalf("before the subject turn ends: %d %v", n, err)
 	}
 	res := `{"session":"` + child.Session + `","state":"finished","folder":"/w/1",` +
@@ -83,7 +83,7 @@ func TestOnDelivers(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil {
+		if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -94,7 +94,7 @@ func TestOnDelivers(t *testing.T) {
 	d := ds[0]
 	// Delivery to the person's root session (parent) is a root-level turn: that
 	// session has no request tree of its own, so no Chain (his rule).
-	if d.State != Queued || d.Spec.Session != parent.Session || d.Spec.Harness != "claude" ||
+	if d.State != Queued || string(d.Spec.Session) != parent.Session || d.Spec.Harness != "claude" ||
 		d.Links.ResultOf.Job != child.ID || d.Links.ResultOf.Turn != child.Turn || d.Links.ResultOf.Agent != "claude" ||
 		d.Links.Chain != nil {
 		t.Fatalf("delivery: %+v %+v", d.Spec, d.Links)
@@ -155,7 +155,7 @@ func TestTwoOnsSamePairBothDeliver(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 3 {
-		if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil {
+		if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -215,7 +215,7 @@ func TestCreateTurnLinkedRecordsOnAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil {
+		if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -319,7 +319,7 @@ func TestOnRemoved(t *testing.T) {
 		Result: json.RawMessage(`{"session":"` + child.Session + `","state":"finished"}`)}); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil || n != 0 {
+	if n, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil, nil); err != nil || n != 0 {
 		t.Fatalf("a removed on delivered: %d %v", n, err)
 	}
 	if ds := deliveriesOf(t, q, parent.Session); len(ds) != 0 {
@@ -368,7 +368,7 @@ func TestOnMainTokenDelivers(t *testing.T) {
 		Result: json.RawMessage(`{"session":"` + child.Session + `","state":"finished"}`)}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil {
+	if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	ds := deliveriesOf(t, q, parent.Session)
@@ -424,7 +424,7 @@ func TestOnSurvivesRestart(t *testing.T) {
 	defer q2.Close()
 	total := 0
 	for range 3 {
-		n, err := q2.FireOns(DefaultTeam, jobEnded(q2), nil, nil)
+		n, err := q2.FireOns(DefaultTeam, jobEnded(q2), nil, nil, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -546,7 +546,7 @@ func TestDeliveryDoesNotPullUnrelatedSessionIntoTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil {
+		if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -596,7 +596,7 @@ func TestTwoSubscriptionsBothDeliver(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 3 {
-		if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil {
+		if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -685,7 +685,7 @@ func TestDeliveryKeepsRecipientTree(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 3 {
-		if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil); err != nil {
+		if _, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}

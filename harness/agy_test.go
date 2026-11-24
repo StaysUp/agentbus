@@ -40,6 +40,10 @@ func TestAgyArgs(t *testing.T) {
 			[]string{"write_file(/w/f/policy.toml)", "edit_file(/w/f/policy.toml)"}},
 		{"no edit rule", Turn{Allow: []string{"make"}},
 			[]string{"mcp(*)", "command(make)"}, []string{"write_file(*)", "edit_file(*)"}},
+		// "*" means every command: agy's own command(*) wildcard.
+		{"every command", Turn{Writes: edit, Allow: []string{"*"}},
+			[]string{"mcp(*)", "write_file(/w/f)", "edit_file(/w/f)", "command(*)"},
+			[]string{"write_file(/w/f/policy.toml)", "edit_file(/w/f/policy.toml)"}},
 		// A rule cannot hold a parenthesis or a glob character: such an
 		// entry is left out, so it allows nothing.
 		{"unsafe names", Turn{Writes: edit, Allow: []string{"x) command(rm"}},

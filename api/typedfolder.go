@@ -77,6 +77,9 @@ func (a *API) typedFolder(ctx context.Context, path, machine string) (ref, conn 
 			res, _ := queue.ReadResult(j.Result)
 			switch {
 			case j.State == queue.Finished && queue.FolderRefShape.MatchString(res.FolderRef):
+				// folder.registered is written by the finisher as the folder job
+				// ends (jobs.keepOutcomes), so it is in the record whether or not
+				// this request is still waiting.
 				return res.FolderRef, machine, 0, ""
 			case res.Refused != "":
 				return "", "", http.StatusBadRequest, res.Refused

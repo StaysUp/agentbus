@@ -113,7 +113,7 @@ func as(t *testing.T, e *env, tok, method, path, body string) (int, string) {
 	return resp.StatusCode, out
 }
 
-func waitSessionClosed(t *testing.T, st *store.Store, session string) {
+func waitRunEnded(t *testing.T, st *store.Store, session string) {
 	t.Helper()
 	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
 		recs, err := st.After(0, store.Filter{Session: session, Only: true}, 1000)
@@ -121,21 +121,22 @@ func waitSessionClosed(t *testing.T, st *store.Store, session string) {
 			t.Fatal(err)
 		}
 		for _, r := range recs {
-			if r.Kind == event.SessionClosed {
+			if r.Kind == event.RunEnded {
 				return
 			}
 		}
 	}
-	t.Fatal("no session.closed")
+	t.Fatal("no run.ended")
 }
 
 // A turn's child gets its own token and the service's address. The token reads
 // its own session on the read routes and nothing else, and stops working once
-// the turn's session.closed is written. The main token is unaffected.
+// the turn's run.ended is written. The main token is unaffected.
 func TestTurnToken(t *testing.T) {
 	e, dir := childEnv(t)
 	folder := t.TempDir()
-	s := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"the first needle"}`)
+	sess := e.newSession(t, folder, true)
+	s := startTurn(t, e, `{"session":"`+sess+`","agent":"claude","prompt":"the first needle"}`)
 	vars := childVars(t, dir, 0)
 	tok := vars["AGENTBUS_TOKEN"]
 	if vars["AGENTBUS_URL"] != e.srv.URL || !strings.HasPrefix(tok, "abt_") || len(tok) != len("abt_")+64 {
@@ -188,9 +189,8 @@ func TestTurnToken(t *testing.T) {
 		{"GET", "/docs/llms.txt", "", 200},
 		// The writes it may not make, and every read beyond its request
 		// tree. Asking other agents is tested in asked_integration_test.go.
-		{"POST", "/api/v0/turns", `{"agent":"claude","session":"` + own + `","prompt":"again"}`, 403},
-		{"POST", "/api/v0/turns", `{"agent":"claude","session":"` + other + `","prompt":"again"}`, 403},
-		{"POST", "/api/v0/turns", `{"agent":"claude","folder":"` + t.TempDir() + `","prompt":"new"}`, 403},
+		{"POST", "/api/v0/turns?wait=false", `{"agent":"claude","session":"` + own + `","prompt":"again"}`, 403},
+		{"POST", "/api/v0/turns?wait=false", `{"agent":"claude","session":"` + other + `","prompt":"again"}`, 403},
 		{"POST", "/api/v0/events", `{"kind":"x.a.b","session":"` + own + `","text":"hi"}`, 403},
 		// Not even its own turn: it stops only work its tree asked for.
 		{"POST", "/api/v0/turns/" + s.Turn + "/stop", "", 403},
@@ -200,8 +200,20 @@ func TestTurnToken(t *testing.T) {
 		{"POST", "/api/v0/agents", `{"harness":"claude","access":"subscription","name":"x"}`, 403},
 		// Only the person closes a session.
 		{"PATCH", "/api/v0/sessions/" + own, `{"closed":true}`, 403},
+		// Workspaces are the main token's: a turn token cannot create one or read
+		// the list. It may open a session, but only in its own workspace (the ask
+		// opens one there), so POST /sessions is allowed and its workspace is the
+		// token's own, whatever the body names.
+		{"GET", "/api/v0/workspaces", "", 403},
+		{"POST", "/api/v0/workspaces", `{"folder":"/tmp"}`, 403},
+		{"POST", "/api/v0/sessions", `{"workspace":"ws_0123456789abcdef"}`, 201},
+		// A turn token previews or applies only its OWN workspace's changes
+		// (changesWorkspaceTok / applyWorkspaceTok). A workspace that is not the
+		// token's own is refused, so a review_turn reviewer cannot read another
+		// workspace's changes.
+		{"GET", "/api/v0/workspaces/ws_0123456789abcdef/changes", "", 403},
+		{"POST", "/api/v0/workspaces/ws_0123456789abcdef/apply", "{}", 403},
 		// Gone from the API.
-		{"GET", "/api/v0/workspaces", "", 404},
 		{"GET", "/api/v0/jobs", "", 404},
 		// Reads that hold no session's data.
 		{"GET", "/api/v0/agents", "", 200},
@@ -230,20 +242,21 @@ func TestTurnToken(t *testing.T) {
 
 	// The session's next turn gets a token of its own.
 	os.WriteFile(filepath.Join(dir, "release"), nil, 0o600)
-	waitSessionClosed(t, e.store, own)
+	waitRunEnded(t, e.store, own)
 	// The refused stop stopped nothing.
 	if end, err := e.store.TurnEnd(own, s.Turn); err != nil || end.Stopped || end.ExitCode == nil || *end.ExitCode != 0 {
 		t.Errorf("the turn after a turn token's stop: %+v %v, want exit 0, not stopped", end, err)
 	}
 	// The 401 says the token ended with its turn.
 	if code, out := as(t, e, tok, "GET", "/api/v0/sessions/"+own+"/events", ""); code != http.StatusUnauthorized || !strings.Contains(out, turnTokenEnded) {
-		t.Fatalf("the token after session.closed: %d %s, want 401 that says it ended", code, out)
+		t.Fatalf("the token after run.ended: %d %s, want 401 that says it ended", code, out)
 	}
 	if n := e.eng.LiveTokens(); n != 0 {
 		t.Errorf("%d live tokens after the turn", n)
 	}
 	os.Remove(filepath.Join(dir, "release"))
-	s2 := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"second"}`)
+	sess2 := e.newSession(t, folder, true)
+	s2 := startTurn(t, e, `{"session":"`+sess2+`","agent":"claude","prompt":"second"}`)
 	tok2 := childVars(t, dir, 1)["AGENTBUS_TOKEN"]
 	if tok2 == "" || tok2 == tok {
 		t.Fatal("the second turn did not get a new token")
@@ -268,7 +281,8 @@ func TestTurnTokenRevokedAtProcessExitNotPipeClose(t *testing.T) {
 	e := resumableEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) {
 		return run.Launch{Path: "/bin/sh", Args: []string{"-c", script, "sh"}, Env: []string{"PATH=/usr/bin:/bin", "D=" + dir}}, nil
 	})
-	s := startTurn(t, e, `{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"x"}`)
+	sess := e.newSession(t, t.TempDir(), true)
+	s := startTurn(t, e, `{"session":"`+sess+`","agent":"claude","prompt":"x"}`)
 	tok := childVars(t, dir, 0)["AGENTBUS_TOKEN"]
 	revoked := false
 	for deadline := time.Now().Add(1500 * time.Millisecond); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
@@ -287,9 +301,9 @@ func TestTurnTokenRevokedAtProcessExitNotPipeClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, r := range recs {
-		if r.Kind == event.SessionClosed {
-			t.Fatal("session.closed already stored; the test no longer holds the pipes open")
+		if r.Kind == event.RunEnded {
+			t.Fatal("run.ended already stored; the test no longer holds the pipes open")
 		}
 	}
-	waitSessionClosed(t, e.store, s.Session)
+	waitRunEnded(t, e.store, s.Session)
 }

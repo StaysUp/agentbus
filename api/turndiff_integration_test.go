@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/isolation"
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
@@ -73,14 +74,85 @@ func waitEnded(t *testing.T, e *env, turn string) queue.Job {
 	return queue.Job{}
 }
 
+// wsOfTurn is the workspace a turn runs in, from the record.
+func wsOfTurn(t *testing.T, e *env, turn string) string {
+	t.Helper()
+	j, err := e.q.JobByTurn(queue.DefaultTeam, turn)
+	if err != nil {
+		t.Fatalf("job of %s: %v", turn, err)
+	}
+	ws, found, err := e.store.WorkspaceOf(ids.SessionID(j.Session))
+	if err != nil || !found {
+		t.Fatalf("workspace of %s: found=%v err=%v", turn, found, err)
+	}
+	return string(ws)
+}
+
+// applyAs applies turn's workspace up to turn, through POST
+// /api/v0/workspaces/{ws}/apply, as tok.
 func applyAs(t *testing.T, e *env, tok, turn string) (int, ApplyState) {
 	t.Helper()
-	code, out := as(t, e, tok, "POST", "/api/v0/turns/"+turn+"/apply", "")
+	return applyWS(t, e, tok, wsOfTurn(t, e, turn), `{"turn":"`+turn+`"}`)
+}
+
+// applyWS posts an apply of ws with the given body (which may be empty).
+func applyWS(t *testing.T, e *env, tok, ws, body string) (int, ApplyState) {
+	t.Helper()
+	code, out := as(t, e, tok, "POST", "/api/v0/workspaces/"+ws+"/apply", body)
 	var st ApplyState
 	if err := json.Unmarshal([]byte(out), &st); err != nil {
-		t.Fatalf("apply %s: %d %s", turn, code, out)
+		t.Fatalf("apply %s: %d %s", ws, code, out)
 	}
 	return code, st
+}
+
+// The workspace apply route: an empty body applies the head turn resolved from
+// the queue's appliable cursor (not store.HeadTurn); a turn of another
+// workspace is 404; an unknown workspace is 404; a direct workspace is 400; a
+// malformed body is 400.
+func TestWorkspaceApplyRoute(t *testing.T) {
+	e, _ := diffEnv(t, filepath.Join(t.TempDir(), settings.PolicyFile))
+	folder := t.TempDir()
+	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\ntwo\n"), 0o644)
+	first := e.firstTurn(t, folder, "claude", "edit1", true)
+	waitEnded(t, e, first.Turn)
+	ws := wsOfTurn(t, e, first.Turn)
+
+	// An empty body applies the workspace's head turn (from the queue cursor).
+	if code, st := applyWS(t, e, token, ws, "{}"); code != 200 || st.State != "applied" || len(st.Files) == 0 {
+		t.Fatalf("empty-body apply: %d %+v", code, st)
+	}
+	// A second empty-body apply has nothing to do: 200 already.
+	if code, st := applyWS(t, e, token, ws, ""); code != 200 || !st.Already {
+		t.Fatalf("second empty-body apply: %d %+v", code, st)
+	}
+
+	// A turn of another workspace is refused here, never applied.
+	other := e.firstTurn(t, t.TempDir(), "claude", "edit2", true)
+	waitEnded(t, e, other.Turn)
+	if code, _ := applyWS(t, e, token, ws, `{"turn":"`+other.Turn+`"}`); code != 404 {
+		t.Fatalf("apply a turn of another workspace: %d, want 404", code)
+	}
+
+	// A malformed or non-object body is 400, not an apply of the head.
+	for _, bad := range []string{"null", "[]", "{}}", `{"turn":"x"}}`, `{"nope":1}`} {
+		if code, _ := applyWS(t, e, token, ws, bad); code != 400 {
+			t.Errorf("malformed body %q: %d, want 400", bad, code)
+		}
+	}
+
+	// An unknown workspace is 404.
+	if code, _ := applyWS(t, e, token, "ws_0000000000000000", "{}"); code != 404 {
+		t.Fatalf("unknown workspace apply: %d, want 404", code)
+	}
+
+	// A direct (non-sandbox) workspace has nothing to apply: 400.
+	direct := e.firstTurn(t, t.TempDir(), "claude", "edit3", false)
+	waitEnded(t, e, direct.Turn)
+	dws := wsOfTurn(t, e, direct.Turn)
+	if code, out := as(t, e, token, "POST", "/api/v0/workspaces/"+dws+"/apply", "{}"); code != 400 || !strings.Contains(out, "folder as it is") {
+		t.Fatalf("direct workspace apply: %d %s, want 400", code, out)
+	}
 }
 
 func diffOf(t *testing.T, e *env, turn string) TurnDiff {
@@ -132,7 +204,7 @@ func TestTurnDiffAndApply(t *testing.T) {
 		return string(b)
 	}
 
-	first := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"edit1"}`)
+	first := startTurn(t, e, `{"session":"`+e.newSession(t, folder, true)+`","agent":"claude","prompt":"edit1"}`)
 	waitEnded(t, e, first.Turn)
 	if read("a.txt") != "one\ntwo\n" || read("b.txt") != "<missing>" {
 		t.Fatal("the turn's edits reached the person's folder before an apply")
@@ -225,16 +297,20 @@ func TestTurnDiffAndApply(t *testing.T) {
 	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\nTWO\n"), 0o644)
 	third := startTurn(t, e, `{"agent":"claude","session":"`+first.Session+`","prompt":"hold"}`)
 	tok := tokenOf(t, dir, "hold")
+	ws := wsOfTurn(t, e, first.Turn)
 	os.WriteFile(perm, []byte("[agent_api]\napply = false\n"), 0o600)
-	if code, out := as(t, e, tok, "POST", "/api/v0/turns/"+second.Turn+"/apply", ""); code != 403 || !strings.Contains(out, "Agents may apply is off in Settings") {
+	if code, out := as(t, e, tok, "POST", "/api/v0/workspaces/"+ws+"/apply", `{"turn":"`+second.Turn+`"}`); code != 403 || !strings.Contains(out, "Agents may apply is off in Settings") {
 		t.Fatalf("apply switched off: %d %s", code, out)
 	}
 	// Off by default too: the person turns it on.
 	os.WriteFile(perm, nil, 0o600)
-	if code, out := as(t, e, tok, "POST", "/api/v0/turns/"+second.Turn+"/apply", ""); code != 403 || !strings.Contains(out, "Agents may apply is off in Settings") {
+	if code, out := as(t, e, tok, "POST", "/api/v0/workspaces/"+ws+"/apply", `{"turn":"`+second.Turn+`"}`); code != 403 || !strings.Contains(out, "Agents may apply is off in Settings") {
 		t.Fatalf("apply by default: %d %s", code, out)
 	}
 	os.WriteFile(perm, []byte("[agent_api]\napply = true\n"), 0o600)
+	// apply is not in the workspace lane (it reads finished checkpoints and the
+	// folder, never the live copy), so a turn token applies an earlier turn's
+	// changes while its own turn runs, at once.
 	code, st = applyAs(t, e, tok, second.Turn)
 	if code != 200 || st.State != "applied" || !slices.Equal(st.Files, []string{"a.txt"}) || read("a.txt") != "one\nthree\n" {
 		t.Fatalf("apply by a turn token: %d %+v, a.txt %q", code, st, read("a.txt"))
@@ -254,7 +330,7 @@ func TestTurnDiffAndApply(t *testing.T) {
 		applied = applied[:0]
 		for _, r := range recs {
 			var ev event.Event
-			if r.Kind == event.TurnApplied && json.Unmarshal(r.Data, &ev) == nil && ev.Applied != nil {
+			if r.Kind == event.WorkspaceApplied && json.Unmarshal(r.Data, &ev) == nil && ev.Applied != nil {
 				applied = append(applied, *ev.Applied)
 			}
 		}
@@ -270,12 +346,12 @@ func TestTurnDiffAndApply(t *testing.T) {
 		t.Errorf("diff after the agent's apply: %+v", d.Apply)
 	}
 	// A running turn cannot be applied.
-	if code, out := as(t, e, token, "POST", "/api/v0/turns/"+third.Turn+"/apply", ""); code != 400 || !strings.Contains(out, applyNotEnded) {
+	if code, out := as(t, e, token, "POST", "/api/v0/workspaces/"+ws+"/apply", `{"turn":"`+third.Turn+`"}`); code != 400 || !strings.Contains(out, applyNotEnded) {
 		t.Errorf("apply of a running turn: %d %s", code, out)
 	}
 	release(dir, "hold")
 	waitEnded(t, e, third.Turn)
-	if code, out := as(t, e, token, "POST", "/api/v0/turns/t_0000000000000000/apply", ""); code != 404 {
+	if code, out := as(t, e, token, "POST", "/api/v0/workspaces/"+ws+"/apply", `{"turn":"t_0000000000000000"}`); code != 404 {
 		t.Errorf("apply of an unknown turn: %d %s", code, out)
 	}
 }
@@ -284,15 +360,9 @@ func TestTurnDiffAndApply(t *testing.T) {
 // setting: the job's result holds what the backend's Diff of the turn's
 // start and end checkpoints answers, and GET /turns/{id}/diff shows the
 // same. In a folder used as it is (none), the folder changes in place and
-// the changes cannot be applied. None of it runs git: git here is a program
-// that only notes it was run, first on the runner's PATH.
+// the changes cannot be applied. (The copy's private git repo tracks the copy
+// for Discard; it never touches the person's folder -- TestDiscardLeavesThePersonsRepo.)
 func TestTurnChangesAreTheCheckpointDiff(t *testing.T) {
-	bin := t.TempDir()
-	mark := filepath.Join(t.TempDir(), "git-ran")
-	if err := os.WriteFile(filepath.Join(bin, "git"), []byte("#!/bin/sh\necho \"$@\" >> "+mark+"\nexit 1\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	for _, setting := range []string{settings.IsolationCopy, settings.IsolationOverlay, settings.IsolationNone} {
 		t.Run(setting, func(t *testing.T) {
 			// Where no overlay can be mounted, the setting falls back to
@@ -313,7 +383,11 @@ func TestTurnChangesAreTheCheckpointDiff(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			first := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"edit1"}`)
+			// The sandbox is the switch for copy-or-folder; the isolation
+			// setting only picks the backend, so "none" is tested as a direct
+			// (sandbox false) workspace, not a sandbox one that ignores it.
+			sandbox := setting != settings.IsolationNone
+			first := startTurn(t, e, `{"session":"`+e.newSession(t, folder, sandbox)+`","agent":"claude","prompt":"edit1"}`)
 			waitEnded(t, e, first.Turn)
 			second := startTurn(t, e, `{"agent":"claude","session":"`+first.Session+`","prompt":"edit2"}`)
 			waitEnded(t, e, second.Turn)
@@ -362,8 +436,5 @@ func TestTurnChangesAreTheCheckpointDiff(t *testing.T) {
 				t.Fatalf("the folder used as it is has a.txt %q, %v", b, err)
 			}
 		})
-	}
-	if b, err := os.ReadFile(mark); err == nil {
-		t.Fatalf("git ran: %s", b)
 	}
 }

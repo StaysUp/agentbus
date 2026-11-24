@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/blobs"
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/workspace"
 )
@@ -57,7 +58,7 @@ func TestRunnerReadsOnlyItsOwnBlobs(t *testing.T) {
 		b, _ := json.Marshal(workspace.Changeset{Space: "s_" + name, Checkpoint: "t", Snapshot: sd.tree, Files: []workspace.FileChange{
 			{Path: "c.txt", Now: &workspace.File{Hash: sd.file, Size: 1, Mode: 0o644}}}})
 		sd.cs = put(b)
-		makeJob(t, q, queue.Spec{Harness: "claude", Prompt: "p", Session: "s_" + name})
+		makeJob(t, q, queue.Spec{Harness: "claude", Prompt: "p", Session: ids.SessionID("s_" + name)})
 		var taken TakenWork
 		if code := send(t, srv, sd.tok, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, &taken); code != 200 || taken.Job == nil {
 			t.Fatalf("take %s: %d", name, code)

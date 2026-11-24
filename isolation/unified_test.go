@@ -169,11 +169,16 @@ func TestDiffHasFileDiffs(t *testing.T) {
 			t.Fatalf("a.txt after the person changed it: %+v", f)
 		}
 	}
-	// A copy whose earlier content was never read, once the person's file
-	// changed, has it left out, never wrong.
+	// A Merkle copy whose earlier content was never read, once the person's
+	// file changed, has it left out, never wrong. A git-backed copy keeps the
+	// Base content in its own repo, so it always shows the right diff and never
+	// depends on the person's folder: this lazy-base limit does not apply.
 	src2 := t.TempDir()
 	fixture(t, src2, map[string]string{"a.txt": "one\ntwo\n"})
 	b2, s2 := open(t, Copy, src2)
+	if s2.hasShadow() {
+		return
+	}
 	fixture(t, s2.Dir, map[string]string{"a.txt": "one\n2\n"})
 	b2.Checkpoint(s2, "t1")
 	fixture(t, src2, map[string]string{"a.txt": "theirs\n"})

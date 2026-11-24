@@ -55,7 +55,7 @@ func runWire(getenv func(string) string, environ func() []string, lookPath func(
 				return engine.Launch{}, engine.Refused(http.StatusBadRequest, "this agent names no variable for its OpenRouter key")
 			}
 			env, pre = h.WireOpenRouter(harness.OpenRouterWire{Base: baseURL + openRouterPrefix,
-				KeyEnv: acc.KeyEnv, Key: acc.Placeholder, Model: acc.Model})
+				KeyEnv: acc.KeyEnv, Key: acc.Placeholder, StandIn: true, Model: acc.Model})
 			env = append(env, acc.KeyEnv+"="+acc.Placeholder)
 		case acc.Kind == harness.API:
 			// The vendor's API key is only ever control's, set in Settings:

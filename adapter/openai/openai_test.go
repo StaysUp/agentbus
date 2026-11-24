@@ -219,12 +219,41 @@ func TestMissingUsageStaysMissing(t *testing.T) {
 
 // OpenAI's input_tokens include the cached tokens; the framework's do not.
 func TestCachedTokensSubtracted(t *testing.T) {
+	// input_tokens counts cache reads and cache writes, so both come out of the
+	// framework's input: 100 - 80 - 5 = 15.
 	body := `{"model":"m","status":"completed","output":[],"usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":80,"cache_write_tokens":5},"output_tokens":3}}`
 	evs := reply(t, 200, "application/json", []byte(body))
-	want := event.Usage{InputTokens: 20, OutputTokens: 3, CacheReadTokens: 80, CacheWriteTokens: 5}
+	want := event.Usage{InputTokens: 15, OutputTokens: 3, CacheReadTokens: 80, CacheWriteTokens: 5}
 	if u := evs[0].Usage; u == nil || !reflect.DeepEqual(*u, want) {
 		t.Errorf("usage = %+v, want %+v", u, want)
 	}
+}
+
+// A codex-exec reply with prompt caching splits cache_write_tokens by write
+// lifetime in cache_write_tokens_details (OpenAI prompt caching guide shape,
+// read 2026-11-23); the two counts reach the usage event and nothing is
+// reported unexpected.
+func TestCacheWriteDetailsSplit(t *testing.T) {
+	body := `{"model":"m","status":"completed","output":[],"usage":{"input_tokens":12000,"input_tokens_details":{"cached_tokens":4000,"cache_write_tokens":7000,"cache_write_tokens_details":{"ttl_30m_tokens":3000,"ttl_12h_tokens":4000}},"output_tokens":5}}`
+	evs := reply(t, 200, "application/json", []byte(body))
+	wantUnexpected(t, evs)
+	// input_tokens counts the reads and the writes, so the framework's input is
+	// 12000 - 4000 - 7000 = 1000.
+	want := event.Usage{
+		InputTokens: 1000, OutputTokens: 5, CacheReadTokens: 4000,
+		CacheWriteTokens: 7000, CacheWrite30mTokens: 3000, CacheWrite12hTokens: 4000,
+	}
+	if u := evs[0].Usage; u == nil || !reflect.DeepEqual(*u, want) {
+		t.Errorf("usage = %+v, want %+v", u, want)
+	}
+}
+
+// A write lifetime this adapter does not know is reported, so a new
+// cache-write price can be added.
+func TestUnknownCacheWriteLifetime(t *testing.T) {
+	body := `{"model":"m","status":"completed","output":[],"usage":{"input_tokens":3,"output_tokens":2,"input_tokens_details":{"cached_tokens":0,"cache_write_tokens":9,"cache_write_tokens_details":{"ttl_30m_tokens":9,"ttl_1w_tokens":0}}}}`
+	evs := reply(t, 200, "application/json", []byte(body))
+	wantUnexpected(t, evs, event.Unexpected{Where: "usage.input_tokens_details.cache_write_tokens_details", Field: "ttl_1w_tokens"})
 }
 
 func TestErrorStatuses(t *testing.T) {

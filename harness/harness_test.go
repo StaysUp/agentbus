@@ -25,7 +25,7 @@ func TestRegistry(t *testing.T) {
 		if len(i.Access) == 0 || i.Access[0].Kind != Subscription {
 			t.Errorf("%q: access %+v does not start with its subscription", i.Name, i.Access)
 		}
-		if i.Replay != "" && i.Replay != FormatAnthropic && i.Replay != FormatOpenAI {
+		if i.Replay != "" && i.Replay != FormatAnthropic && i.Replay != FormatOpenAI && i.Replay != FormatChatCompletions {
 			t.Errorf("%q: replay format %q is not one own replay knows", i.Name, i.Replay)
 		}
 		if g, ok := Get(i.Name); !ok || g.Info().Name != i.Name {

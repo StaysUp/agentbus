@@ -164,6 +164,18 @@ func (s *Store) init() error {
 	if _, err := tx.Exec(consumerSchema); err != nil {
 		return fmt.Errorf("store: create tables: %w", err)
 	}
+	// 0.6.5 renamed the run's two child events: session.opened became
+	// run.started and session.closed became run.ended, so their names no
+	// longer read as the session closing. A store from before keeps the old
+	// names, which no reader folds any more, so rename them once on open, in
+	// both the kind column (the folds read it) and the stored JSON's kind (the
+	// events API serves it). Runs a second time over nothing; no other field
+	// moves.
+	if _, err := tx.Exec(
+		`UPDATE events SET kind = 'run.started', data = json_set(data, '$.kind', 'run.started') WHERE kind = 'session.opened';
+		UPDATE events SET kind = 'run.ended', data = json_set(data, '$.kind', 'run.ended') WHERE kind = 'session.closed';`); err != nil {
+		return fmt.Errorf("store: rename run events: %w", err)
+	}
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
 		return fmt.Errorf("store: make id: %w", err)
@@ -246,6 +258,35 @@ func (s *Store) AppendFirst(e event.Event) (stored bool, err error) {
 	}
 	_, stored, err = s.appendLocked(e)
 	return stored, err
+}
+
+// AppendForKey appends e unless an event of e's kind already carries e's
+// idempotency_key; then nothing is written. idPath names where the created
+// noun's id sits in the event data ($.workspace or $.session), so a retry gets
+// the id and request_hash the key first made, and the caller can refuse a
+// reused key that carries other fields. The check and the write are one step
+// under the store's lock, so two concurrent retries with the same key write one
+// event. With an empty key it is a plain append (stored true).
+func (s *Store) AppendForKey(e event.Event, idPath string) (existingID, existingHash string, stored bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return "", "", false, ErrClosed
+	}
+	if e.IdempotencyKey != "" {
+		var id, hash sql.NullString
+		err = s.w.QueryRow(`SELECT json_extract(data, '`+idPath+`'), json_extract(data, '$.request_hash')
+			FROM events WHERE kind = ? AND json_extract(data, '$.idempotency_key') = ? ORDER BY seq LIMIT 1`,
+			string(e.Kind), e.IdempotencyKey).Scan(&id, &hash)
+		if err == nil {
+			return id.String, hash.String, false, nil
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return "", "", false, fmt.Errorf("store: append for key: %w", err)
+		}
+	}
+	_, stored, err = s.appendLocked(e)
+	return "", "", stored, err
 }
 
 // appendLocked is Append with s.mu held.
@@ -438,10 +479,16 @@ func (s *Store) Page(after int64, f Filter, limit, maxBytes int) (recs []Record,
 
 // Continuation is what a session's next turn needs: the harness and folder of
 // its latest turn or run that names them (agentFrom), the resume_id from its
-// latest session.closed that carries one, and whether a run's child for it is
+// latest run.ended that carries one, and whether a run's child for it is
 // still running.
 type Continuation struct {
-	Known   bool   // the store has events of the session
+	Known bool // the store has events of the session (session.created included)
+	// Ran is true when the session has a prior run (a turn.started or
+	// run.started), so a next turn continues it. A session with only a
+	// session.created and no run has not run: its next turn is its first. It
+	// tells a continuation from a first turn without reading the agent, which a
+	// gateway session leaves empty.
+	Ran     bool
 	Harness string // the harness, such as claude
 	Folder  string
 	// FolderRef: the reference of the person's folder, from the same
@@ -458,7 +505,7 @@ type Continuation struct {
 	// it.
 	Model string
 	// ResumeStale: a turn that got the earlier turns as text (continuity
-	// transcript) started after the session.closed that gave ResumeID. That
+	// transcript) started after the run.ended that gave ResumeID. That
 	// id names a conversation from before the switch, without the turns
 	// since, and maybe another vendor's.
 	ResumeStale bool
@@ -472,6 +519,7 @@ func (s *Store) Continuation(id string) (Continuation, error) {
 				WHERE session = ?1 AND `+agentFrom+` ORDER BY seq DESC LIMIT 1)
 		SELECT
 			EXISTS(SELECT 1 FROM events WHERE session = ?1),
+			EXISTS(SELECT 1 FROM events WHERE session = ?1 AND kind IN ('turn.started', 'run.started')),
 			(SELECT json_extract(data, '$.agent') FROM latest),
 			(SELECT json_extract(data, '$.folder') FROM latest),
 			(SELECT json_extract(data, '$.folder_ref') FROM latest),
@@ -480,13 +528,13 @@ func (s *Store) Continuation(id string) (Continuation, error) {
 			(SELECT json_extract(data, '$.key_env') FROM latest),
 			(SELECT json_extract(data, '$.model') FROM latest),
 			(SELECT json_extract(data, '$.resume_id') FROM events
-				WHERE session = ?1 AND kind = 'session.closed' AND json_extract(data, '$.resume_id') IS NOT NULL
+				WHERE session = ?1 AND kind = 'run.ended' AND json_extract(data, '$.resume_id') IS NOT NULL
 				ORDER BY seq DESC LIMIT 1),
 			EXISTS(SELECT 1 FROM events t WHERE t.session = ?1 AND t.kind = 'turn.started'
 				AND json_extract(t.data, '$.continuity') = 'transcript'
-				AND t.seq > (SELECT seq FROM events WHERE session = ?1 AND kind = 'session.closed'
+				AND t.seq > (SELECT seq FROM events WHERE session = ?1 AND kind = 'run.ended'
 					AND json_extract(data, '$.resume_id') IS NOT NULL ORDER BY seq DESC LIMIT 1))`,
-		id).Scan(&c.Known, &agent, &folder, &folderRef, &agentID, &access, &keyEnv, &model, &resume, &c.ResumeStale)
+		id).Scan(&c.Known, &c.Ran, &agent, &folder, &folderRef, &agentID, &access, &keyEnv, &model, &resume, &c.ResumeStale)
 	if err != nil {
 		return c, fmt.Errorf("store: read session: %w", err)
 	}
@@ -572,13 +620,13 @@ func (s *Store) Known(id string) (bool, error) {
 	return n > 0, nil
 }
 
-// RunOf is the agent and folder of the session's latest session.opened that
+// RunOf is the agent and folder of the session's latest run.started that
 // names them: the run or next turn that started its latest child. Empty for a
 // session no run started.
 func (s *Store) RunOf(session string) (agent, folder string, err error) {
 	var a, f sql.NullString
 	err = s.r.QueryRow(`SELECT json_extract(data, '$.agent'), json_extract(data, '$.folder') FROM events
-		WHERE session = ? AND kind = 'session.opened' AND COALESCE(json_extract(data, '$.agent'), '') <> ''
+		WHERE session = ? AND kind = 'run.started' AND COALESCE(json_extract(data, '$.agent'), '') <> ''
 		ORDER BY seq DESC LIMIT 1`, session).Scan(&a, &f)
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", "", nil
@@ -590,26 +638,26 @@ func (s *Store) RunOf(session string) (agent, folder string, err error) {
 }
 
 // agentFrom picks the events that name a session's agent and folder: a
-// turn.started a run's turn stamped, a run's session.opened, and an older
+// turn.started a run's turn stamped, a run's run.started, and an older
 // store's session.registered. The latest one wins: they agree within one run,
 // and a later run's own values are the current ones.
-const agentFrom = `kind IN ('turn.started', 'session.opened', 'session.registered')
+const agentFrom = `kind IN ('turn.started', 'run.started', 'session.registered')
 	AND COALESCE(json_extract(data, '$.agent'), '') <> ''`
 
-// OpenHold is a hold that has a session.opened and no session.closed: a run's
+// OpenHold is a hold that has a run.started and no run.ended: a run's
 // child still running, or one the previous service left behind.
 type OpenHold struct {
 	Session string
 	Hold    string
-	Turn    string // the turn its session.opened named; empty in an older store
+	Turn    string // the turn its run.started named; empty in an older store
 }
 
 // OpenHolds lists the holds opened and not closed, up to seq hi.
 func (s *Store) OpenHolds(hi int64) ([]OpenHold, error) {
 	rows, err := s.r.Query(`SELECT session, json_extract(data, '$.hold') AS hold, MAX(turn) FROM events
-		WHERE seq <= ? AND kind IN ('session.opened', 'session.closed')
+		WHERE seq <= ? AND kind IN ('run.started', 'run.ended')
 		GROUP BY session, hold
-		HAVING SUM(kind = 'session.opened') > 0 AND SUM(kind = 'session.closed') = 0
+		HAVING SUM(kind = 'run.started') > 0 AND SUM(kind = 'run.ended') = 0
 		ORDER BY MIN(seq)`, hi)
 	if err != nil {
 		return nil, fmt.Errorf("store: read holds: %w", err)
@@ -628,7 +676,7 @@ func (s *Store) OpenHolds(hi int64) ([]OpenHold, error) {
 	return out, rows.Err()
 }
 
-// CloseStaleHolds stores session.closed for every hold still open. The service
+// CloseStaleHolds stores run.ended for every hold still open. The service
 // calls it when it starts: those children were the previous process's, which
 // can no longer report their exit. Each is unsettled: the previous process
 // stopped without confirming that the turn's calls were stored (its event
@@ -640,7 +688,7 @@ func (s *Store) CloseStaleHolds(now time.Time, newID func() string) (int, error)
 		return 0, err
 	}
 	for _, h := range holds {
-		if _, _, err := s.Append(event.Event{ID: newID(), Kind: event.SessionClosed, Time: now,
+		if _, _, err := s.Append(event.Event{ID: newID(), Kind: event.RunEnded, Time: now,
 			Session: h.Session, Turn: h.Turn, Hold: h.Hold, Unsettled: true, State: TurnFailed}); err != nil {
 			return 0, err
 		}

@@ -1,14 +1,14 @@
 // Package run starts one turn of a stock agent CLI and watches it. It
 // prepares the turn (its session, own replay or the vendor's resume, the
 // person's permissions.toml, the guard's forbid list, the gateway path), stores
-// session.opened and turn.started, starts the agent as a child, and stores
-// session.closed with the exit code and the vendor's own session id
+// run.started and turn.started, starts the agent as a child, and stores
+// run.ended with the exit code and the vendor's own session id
 // (resume_id) when it exits. All three carry the turn id. The child's base URL
 // is <service>/s/<session>/t/<turn>, so the gateway gives every event of the
 // child's model calls the same turn id.
 //
 // It knows nothing about jobs or queues: a runner calls it (package runner).
-// A session's next turn continues by own replay for claude and codex (the
+// A session's next turn continues by own replay for claude, codex and opencode (the
 // gateway puts the earlier turn's history in front of its requests); with
 // replay off, or for a session that has no history to replay and never used
 // replay, it continues the vendor's conversation named by its resume_id
@@ -25,7 +25,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -42,7 +41,6 @@ import (
 	"github.com/staysup/agentbus/gateway"
 	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/logfile"
-	"github.com/staysup/agentbus/netjail"
 	"github.com/staysup/agentbus/sandbox"
 	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
@@ -151,15 +149,16 @@ type Config struct {
 	// Wire says how a turn reaches each agent's binary. Nil refuses every
 	// turn.
 	Wire Wire
-	// ReplayBase turns on own replay for claude and codex: it plans how a new
-	// turn of agent's session continues it (replay.Replayer.Base). Nil turns
-	// own replay off, and both continue by the vendor's resume (Continuity).
+	// ReplayBase turns on own replay for a harness that names a replay format
+	// (claude, codex, opencode): it plans how a new turn of agent's session
+	// continues it (replay.Replayer.Base). Nil turns own replay off, and
+	// those harnesses continue by the vendor's resume (Continuity).
 	ReplayBase func(agent, session string) (ReplayPlan, error)
 	// Settle, when set, is called after a turn's child exits and before its
-	// session.closed is stored. It returns once the gateway has written every
+	// run.ended is stored. It returns once the gateway has written every
 	// model call of the turn (gateway.Settle). It reports false when that
-	// could not be confirmed; session.closed then carries unsettled, and own
-	// replay will not continue from that turn. Nil stores session.closed at
+	// could not be confirmed; run.ended then carries unsettled, and own
+	// replay will not continue from that turn. Nil stores run.ended at
 	// once.
 	Settle func(session, turn string) bool
 	// MaxRuns bounds the turns running at once. Past it Start refuses with
@@ -193,6 +192,13 @@ type Config struct {
 	// elsewhere, as on a runner that holds no secrets. Empty runs every turn
 	// in the service's own HOME, with the harness's own sign-in.
 	Homes string
+	// Personal is agentbus up, the personal runner: an ordinary turn runs in
+	// the person's real home (the service's own HOME), so their setup comes
+	// along, and only a turn that needs a clean home — a whole-process wall, a
+	// harness whose relay writes a home file, or a continuation of a session
+	// that already has one — gets one from Homes. A compute runner (Personal
+	// false) runs every turn in a clean per-session home.
+	Personal bool
 	// AgentName names a saved agent by its id in the transcript a turn on
 	// another harness gets; "" or a nil func names it by harness and model.
 	AgentName func(id string) string
@@ -294,9 +300,17 @@ type Request struct {
 	Harness, Folder string
 	// FolderRef is the reference of the person's folder a new session is
 	// started in, for the record; "" when no connector owns it.
-	FolderRef      string
+	FolderRef string
+	// Workspace is the workspace the turn runs in (ws_...); stored on
+	// turn.started so the record resolves a session's workspace, its head turn
+	// and its changes by workspace, not by session id.
+	Workspace      string
 	Prompt, Model  string
 	IdempotencyKey string // stored on turn.started, as the caller's key
+	// Copy is Copy mode: the turn runs in the workspace's sandbox copy, so its
+	// commands are walled to the copy. Stamped on the job from the workspace
+	// record (the runner reads the workspace kind); the engine never derives it.
+	Copy bool
 	// AgentID, Access and KeyEnv: the saved agent and how it reaches its
 	// model (Access). Every turn needs Harness, a next one too (NoAgent):
 	// with Session, the turn runs on that agent in the session's folder.
@@ -349,7 +363,7 @@ type Ended struct {
 	Unsettled bool // the gateway's writes could not be confirmed
 }
 
-// Done is closed once the turn's session.closed is stored.
+// Done is closed once the turn's run.ended is stored.
 func (t *Turn) Done() <-chan struct{} { return t.done }
 
 // Ended is how the turn ended. Read it after Done.
@@ -393,7 +407,7 @@ func PromptOK(prompt string) bool {
 }
 
 // Start starts a turn: a new session's first, or req.Session's next. It
-// returns once the turn's session.opened and turn.started are stored and its
+// returns once the turn's run.started and turn.started are stored and its
 // child has started, or a *Refusal saying why nothing ran.
 func (e *Engine) Start(req Request) (*Turn, error) {
 	if msg := CheckPrompt(req.Prompt, req.Model); msg != "" {
@@ -426,8 +440,14 @@ func (e *Engine) Start(req Request) (*Turn, error) {
 	if code, msg := e.runs.take(id); code != 0 {
 		return nil, refuse(code, msg)
 	}
-	return e.start(turn{harness: req.Harness, folder: req.Folder, folderRef: req.FolderRef, session: id, id: req.Turn,
-		model: req.Model, prompt: req.Prompt, key: req.IdempotencyKey,
+	// With no model of its own, the turn takes the agent's (the same fallback
+	// next applies to a continuation turn).
+	model := req.Model
+	if model == "" {
+		model = req.AgentModel
+	}
+	return e.start(turn{harness: req.Harness, folder: req.Folder, folderRef: req.FolderRef, workspace: req.Workspace, copy: req.Copy, session: id, id: req.Turn,
+		model: model, prompt: req.Prompt, key: req.IdempotencyKey,
 		agentID: req.AgentID, access: req.Access, keyEnv: req.KeyEnv, origin: req.Origin, root: req.Root, depth: req.Depth,
 		token: req.Token, apiURL: req.APIURL, standIn: req.StandIn, signin: req.Signin, allowOnce: req.AllowOnce})
 }
@@ -447,7 +467,7 @@ func (e *Engine) next(req Request) (*Turn, error) {
 	}
 	// The slot and the session are taken before the session is read again,
 	// so a turn that started meanwhile is either refused here as busy or
-	// already shows its open session.opened below.
+	// already shows its open run.started below.
 	if code, msg := e.runs.take(session); code != 0 {
 		return nil, refuse(code, msg)
 	}
@@ -557,7 +577,7 @@ func (e *Engine) next(req Request) (*Turn, error) {
 		return fail(refuse(http.StatusBadRequest, "folder is not this session's folder "+strconv.Quote(c.Folder)+
 			"; leave folder out to use the session's"))
 	}
-	t := turn{harness: agent, folder: c.Folder, folderRef: c.FolderRef, session: session, id: req.Turn, resumeID: c.ResumeID, replayFrom: from,
+	t := turn{harness: agent, folder: c.Folder, folderRef: c.FolderRef, workspace: req.Workspace, copy: req.Copy, session: session, id: req.Turn, resumeID: c.ResumeID, replayFrom: from,
 		recoveredFrom: recovered, recoveredWhy: recoveredWhy, continuity: continuity, model: model,
 		prompt: req.Prompt, context: context, key: req.IdempotencyKey,
 		agentID: agentID, access: access, keyEnv: keyEnv, origin: req.Origin, root: req.Root, depth: req.Depth,
@@ -588,8 +608,8 @@ const (
 
 // Continuity says how agent's next turns continue a session. A harness with a
 // replay format (harness.Info.Replay) uses own replay when ReplayBase is set:
-// claude and codex send the whole conversation on every request, so the
-// gateway can rebuild what the vendor's resume would send. Any other agent,
+// claude, codex and opencode send the whole conversation on every request, so
+// the gateway can rebuild what the vendor's resume would send. Any other agent,
 // and every agent with ReplayBase nil, use the vendor's resume.
 func (e *Engine) Continuity(agent string) string {
 	if h, ok := harness.Get(agent); ok && h.Info().Replay != "" && e.cfg.ReplayBase != nil {
@@ -619,6 +639,8 @@ const replayOnly = "this session cannot be continued from here: it was continued
 // turn is one start of an agent: a new session's first, or a session's next.
 type turn struct {
 	harness, folder, session string
+	workspace                string // the workspace the turn runs in; stored on turn.started
+	copy                     bool   // Copy mode: the folder is a sandbox copy, commands walled to it
 	folderRef                string // the person's folder, by its reference
 	id                       string // the turn id
 	resumeID                 string // a next turn by resume: the conversation it continues; empty for a first
@@ -641,13 +663,13 @@ type turn struct {
 	allowOnce                []string // command lines allowed once for this turn, from an earlier card
 }
 
-// start stores session.opened and turn.started, starts t's child in a slot
-// already taken for t.session, and stores session.closed when it exits. A
-// failed session.opened write starts nothing: the store is the only record of
+// start stores run.started and turn.started, starts t's child in a slot
+// already taken for t.session, and stores run.ended when it exits. A
+// failed run.started write starts nothing: the store is the only record of
 // the child, and of its agent and folder for TurnSink. A child that cannot
-// start after session.opened is stored, or whose turn.started cannot be
-// stored, gets its session.closed with the reason. The slot is freed when
-// nothing started, or once the child's session.closed is stored.
+// start after run.started is stored, or whose turn.started cannot be
+// stored, gets its run.ended with the reason. The slot is freed when
+// nothing started, or once the child's run.ended is stored.
 func (e *Engine) start(t turn) (*Turn, error) {
 	h, _ := harness.Get(t.harness) // Start and next checked it (KnownHarness)
 	started := false
@@ -723,9 +745,38 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	cmd := exec.Command(l.Path)
 	asked := askedBy(t.origin)
 	cmd.Env = turnEnv(l.Env, os.Environ(), apiURL, childTok, e.cfg.APIDir, asked)
-	if e.cfg.Homes != "" {
+	// The host's own environment, before e.home swaps in a clean session home:
+	// Copy mode hides the CLI's real login file, which sits under the host HOME,
+	// not the empty session home (its login file does not exist).
+	hostEnv := append([]string(nil), cmd.Env...)
+	// Personal (agentbus up): an ordinary turn runs in the person's real home,
+	// so their setup comes along. A clean home is still used when the turn needs
+	// one: a whole-process wall has no home of its own to wall (a legacy
+	// toggle), a harness whose relay writes a home file must not write it into
+	// the person's home, and a continuation of a session that already has a
+	// clean home keeps using it (a session created before this change). A
+	// compute runner (Personal false) always runs in a clean per-session home.
+	needsCleanHome := !e.cfg.Personal
+	// makeClean tells e.home to make the home when it is not there. A first turn
+	// always makes its own; a personal continuation that NEWLY needs a clean one
+	// (it ran in the real home, then a later turn runs a harness whose relay
+	// writes a home file) must make it too — e.home leaves a continuation with no
+	// home in the real home.
+	makeClean := t.continuity == ""
+	if e.cfg.Personal {
+		needNew := len(l.HomeFiles) > 0
+		existingClean := false
+		if e.cfg.Homes != "" && t.continuity != "" {
+			if _, err := os.Stat(filepath.Join(e.cfg.Homes, t.session)); err == nil {
+				existingClean = true
+			}
+		}
+		needsCleanHome = needNew || existingClean
+		makeClean = makeClean || needNew
+	}
+	if e.cfg.Homes != "" && needsCleanHome {
 		var made bool
-		cmd.Env, made, err = e.home(t.session, t.continuity == "", h, cmd.Env)
+		cmd.Env, made, err = e.home(t.session, makeClean, h, cmd.Env)
 		// A home made for a turn that does not start goes again: no session
 		// owns it.
 		defer func() {
@@ -762,7 +813,13 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	// The turn may apply as its token may: agent_api.apply is on. A review's
 	// own changes stay in its copy; it never applies them automatically.
 	apply := perm.AgentAPI.Apply != nil && *perm.AgentAPI.Apply
-	hint = withTools(hint, t.session, tools, apply)
+	// The workspace to apply: the turn's, or its session's id when the turn
+	// carries none (a migrated or direct session is its own workspace).
+	ws := t.workspace
+	if ws == "" {
+		ws = t.session
+	}
+	hint = withTools(hint, t.session, ws, tools, apply)
 	// The folder's AGENTS.md, then the instructions, then who asked: the
 	// same for every harness, each once.
 	doc, why := folderDoc(h, t.folder)
@@ -774,13 +831,12 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	hint = joinText(doc, hint, askText)
 	perm = withAPI(perm, e.cfg.APIDir != "")
 	// The gateway decides every shell command of this turn: forbid refused,
-	// ask held for a person, allow run, a command on no list held (or refused
-	// when the person set the unlisted default to refuse), and a command
-	// allowed once on an earlier card run this turn only. For claude and codex
-	// alike (gateway/guard.go, gateway/approvals.go); a harness whose format
-	// the guard does not read refuses a turn with forbid or ask
+	// ask held for a person, allow run, a command on no list held for a person,
+	// and a command allowed once on an earlier card run this turn only. For
+	// claude and codex alike (gateway/guard.go, gateway/approvals.go); a harness
+	// whose format the guard does not read refuses a turn with forbid or ask
 	// (Harness.Refuse). Set after withAPI, so allow carries the API client.
-	e.turnRules.set(t.session, t.id, perm.Allow, perm.Ask, perm.Forbid, t.allowOnce, perm.Unlisted == settings.UnlistedRefuse)
+	e.turnRules.set(t.session, t.id, perm.Allow, perm.Ask, perm.Forbid, t.allowOnce)
 	if hint != "" {
 		if why := h.OwnInstructions(cmd.Env, t.folder); why != "" {
 			hint, added = "", nil
@@ -796,55 +852,58 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	if why != "" {
 		e.cfg.Logf("run.edit session=%s turn=%s left_out=%s", t.session, t.id, why)
 	}
-	// Inside the session's sandbox, or closed off from the network, when the
-	// policy says so: before anything is stored, a runner that cannot do it
-	// refuses the turn. The sandbox closes the network off too.
-	var jail wall
-	forward, pass := reach(e.cfg.BaseURL, apiURL)
-	session, turn := t.session, t.id
-	netSpec := netjail.Spec{Forward: forward, Pass: pass, Allow: perm.Network.Allow,
-		Refused: func(target, why string) {
-			if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.NetworkRefused,
-				Time: e.cfg.Now().UTC(), Session: session, Turn: turn, Host: target, Error: why}); err != nil {
-				e.cfg.Logf("store.error what=network_refused session=%s turn=%s", session, turn)
-			}
-		}}
-	// The wall is built when the sandbox is on, and when contain is on on a
-	// machine whose only way to close an agent off is the wall (macOS): the
-	// person turns contain on, and the runner builds what it needs.
-	autoWall := perm.Sandbox.Mode != settings.SandboxOn && needsWall(perm)
-	if perm.Sandbox.Mode == settings.SandboxOn || autoWall {
-		// A turn that may edit nothing (edit = "none"), of a harness whose
-		// own sandbox kept it from writing, is off in the wall
-		// (harness.Turn.Walled); other turns write their own copy.
-		readOnly := h.Info().OwnSandbox && len(w.Edit) == 0
-		lead := "the sandbox is on in Settings"
-		if autoWall {
-			lead = "Network contain is on in Settings, which on this machine needs the session's sandbox"
-		}
-		box, why, say := e.sandbox(perm, lead, t.session, t.folder, readOnly, readOnly && h.Info().OwnSandbox,
-			append(sandbox.Program(l.Path), e.apiProgram()...), netSpec)
-		if why != "" {
-			e.cfg.Logf("run.refused agent=%s reason=sandbox auto=%t", t.harness, autoWall)
-			return nil, refuse(http.StatusBadRequest, sandboxRefusal(why, say, autoWall))
-		}
-		jail = box
-		cmd.Env = setEnv(cmd.Env, box.Env())
-	} else if on, why := e.contained(perm); why != "" {
-		e.cfg.Logf("run.refused agent=%s reason=network", t.harness)
-		return nil, refuse(http.StatusBadRequest, why)
-	} else if on {
-		j := netjail.New(netSpec)
-		jail = j
-		cmd.Env = setEnv(cmd.Env, j.Env())
-	}
-	defer func() {
-		if !started && jail != nil {
-			jail.Close()
-		}
-	}()
+	// Each shell command is walled by the harness's own per-command sandbox
+	// (Info.CopySandbox) when the turn runs in a Copy workspace: that sandbox
+	// (Turn.Copy, set below) fences writes to the copy and governs the network.
+	// There is no whole-process wall — a Direct turn, and a Copy turn on a
+	// harness without its own command sandbox, run unwrapped.
+	perCommand := t.copy && h.Info().CopySandbox
 	spec := turnSpec(hint, t.resumeID, t.model, w, perm, t.context+t.prompt)
 	spec.Access = t.access
+	// Copy mode: hand the harness its own per-command sandbox for this turn —
+	// the copy writable, its login file hidden (so Connect's stand-in is used),
+	// and the gateway host added to the broad network allow-list (localhost is
+	// reachable through allowLocalBinding; DESIGN_contain_mode, measured
+	// 2026-11-23).
+	if perCommand {
+		// The gateway the child calls, and control's API (AGENTBUS_URL), which on
+		// a remote runner is a non-loopback address the deny-by-default network
+		// would otherwise block; localhost is reachable through allowLocalBinding.
+		var hosts []string
+		for _, raw := range []string{e.cfg.BaseURL, apiURL} {
+			if u, err := url.Parse(raw); err == nil && u.Host != "" && !slices.Contains(hosts, u.Host) {
+				hosts = append(hosts, u.Host)
+			}
+		}
+		// Hide the CLI's real login file (under the host HOME) and, in a clean
+		// session home, that home's too, so neither the host token nor a stale
+		// one is readable and Connect's stand-in is used.
+		deny := harness.LoginFiles(h, hostEnv)
+		for _, f := range harness.LoginFiles(h, cmd.Env) {
+			if !slices.Contains(deny, f) {
+				deny = append(deny, f)
+			}
+		}
+		spec.Copy = harness.Copy{Dir: t.folder, DenyRead: deny, Hosts: hosts}
+		// The whole-process wall was skipped, so the turn is not Walled: a
+		// harness must not also turn its own sandbox off (harness.Turn.Walled).
+		spec.Walled = false
+		// The gateway refuses a structured file-edit tool call whose path is
+		// outside this turn's copy, the same boundary the sandbox fences writes
+		// to (gateway/copyguard.go). The writable set mirrors the sandbox's
+		// allowWrite exactly — the copy and its extra writable paths. Each is
+		// expanded with appendReal, as permissions.go does for the sandbox's own
+		// write list: the copy may sit under a symlinked root (/tmp ->
+		// /private/tmp on macOS) and Claude Code reports the resolved path to the
+		// model, so the gateway must accept both names. The copy dir stays first,
+		// the cwd a relative path resolves against. The symlink work stays here on
+		// the runner side, so gateway/ touches no folder.
+		copyWrite := appendReal(nil, spec.Copy.Dir)
+		for _, p := range spec.Copy.Write {
+			copyWrite = appendReal(copyWrite, p)
+		}
+		e.turnRules.setCopyWrite(t.session, t.id, copyWrite)
+	}
 	// The person's own MCP servers in the turn's home: every turn loads them
 	// now that read-only is retired (harness.Turn.OwnServers). Names only,
 	// in the service log.
@@ -867,6 +926,9 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	// command line (harness.TurnEnver).
 	cmd.Env = setEnv(cmd.Env, harness.TurnEnv(h, spec, cmd.Env))
 	all := append(append([]string{}, l.Args...), args...)
+	// Fold any repeated --settings into one (Claude Code in Copy mode: the
+	// gateway env block from the wire and the sandbox block from Args).
+	all = harness.CombineSettings(h, all)
 	cmd.Args = append([]string{l.Path}, all...)
 	cmd.Dir = t.folder
 	// Stdin stays nil: the child reads an empty stdin. Stdout is read for the
@@ -875,7 +937,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	// RunOutputMax bytes, go to the run's own log and nowhere else.
 	ids := &idScanner{harness: h}
 	out := &logfile.Tail{Max: RunOutputMax}
-	// The end of its stderr alone, for session.closed when it exits with
+	// The end of its stderr alone, for run.ended when it exits with
 	// an error (errtail.go).
 	errs := &logfile.Tail{Max: ErrorTailKept}
 	// Its own session, and so its own process group: stopping it reaches
@@ -886,15 +948,15 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	holdID := "hold_" + randomHex(8)
 	// Before the child starts, so its first model call finds the agent and
 	// folder, and a store that cannot write starts nothing.
-	if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.SessionOpened,
+	if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.RunStarted,
 		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Hold: holdID, Harness: t.harness, Folder: t.folder, FolderRef: t.folderRef,
 		AgentID: t.agentID, Access: t.access, KeyEnv: t.keyEnv, Model: t.model}); err != nil {
 		return nil, storeFailed
 	}
-	// session.opened is stored, so on any failure below the hold must close,
+	// run.started is stored, so on any failure below the hold must close,
 	// or the session would read open until the next restart.
 	closeHoldWhy := func(why string) {
-		if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.SessionClosed,
+		if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.RunEnded,
 			Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Hold: holdID, Error: why, State: store.TurnFailed}); err != nil {
 			e.cfg.Logf("run.unclosed session=%s turn=%s hold=%s reason=store", t.session, t.id, holdID)
 		}
@@ -905,7 +967,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	// turn.started the gateway reads from the child's first model call is the
 	// same (session, turn), so the store keeps this one only.
 	if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.TurnStarted,
-		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Text: t.prompt, Harness: t.harness, Folder: t.folder, FolderRef: t.folderRef,
+		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Text: t.prompt, Harness: t.harness, Folder: t.folder, FolderRef: t.folderRef, Workspace: t.workspace,
 		ReplayFrom: t.replayFrom, Continuity: t.continuity, RecoveredFrom: t.recoveredFrom,
 		RecoveredReason: t.recoveredWhy, IdempotencyKey: t.key, AgentID: t.agentID, Access: t.access, KeyEnv: t.keyEnv,
 		Context: t.context, Model: t.model, Origin: t.origin, SettingsVersion: snap.Revision, Unkept: unkept}); err != nil {
@@ -932,11 +994,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		return nil, storeFailed
 	}
 	cmd.Stdout, cmd.Stderr = pipes.outW, pipes.errW
-	startCmd := cmd.Start
-	if jail != nil {
-		startCmd = func() error { return jail.Start(cmd) }
-	}
-	code, msg, lt := e.runs.start(cmd, startCmd, t.session, t.id)
+	code, msg, lt := e.runs.start(cmd, cmd.Start, t.session, t.id)
 	pipes.closeWriters() // the child holds its own copies
 	if code != 0 {
 		pipes.closeReaders()
@@ -955,7 +1013,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	go func() {
 		err := cmd.Wait()
 		// The token stops working once the child's own process exits, before
-		// its output is collected and before the turn's session.closed is
+		// its output is collected and before the turn's run.ended is
 		// stored: nothing of the turn may read after it.
 		e.turnTokens.revoke(tok)
 		e.turnRules.clear(t.session, t.id)
@@ -981,9 +1039,6 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		copied(OutputGrace)
 		e.keepOutput(t, all[:len(all)-1], code, ended, out)
 		unsettled := e.cfg.Settle != nil && !e.cfg.Settle(t.session, t.id)
-		if jail != nil {
-			jail.Close()
-		}
 		e.cfg.Logf("%s.exit session=%s agent=%s turn=%s hold=%s exit=%d stopped=%t duration=%s", kind, t.session, t.harness, t.id, holdID,
 			code, stopped, ended.Sub(begun).Round(time.Millisecond))
 		// The turn's end, with how it ended and, when it failed, why: the
@@ -1001,7 +1056,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 			tail = errorTail(b, cut, hide...)
 			why = h.Info().Plain(errorReason(b, cut, code, hide...))
 		}
-		if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.SessionClosed,
+		if _, _, err := e.cfg.Store.Append(event.Event{ID: newEventID(), Kind: event.RunEnded,
 			Time: ended.UTC(), Session: t.session, Turn: t.id, Hold: holdID, ExitCode: &code, ResumeID: ids.ID(),
 			Unsettled: unsettled, Stopped: stopped, ErrorTail: tail, State: state, Error: why}); err != nil {
 			// The session reads open until the next start.
@@ -1013,78 +1068,6 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		close(res.done)
 	}()
 	return res, nil
-}
-
-// wall is what a turn starts in: netjail's namespace, or the
-// session's sandbox.
-type wall interface {
-	Start(*exec.Cmd) error
-	Close()
-}
-
-// sandbox builds the wall around one of session's turns in
-// folder (read only when readOnly; with no network beyond its gateway and
-// the API when offline, see wallNet), with read readable too, or says why it cannot (fixed wording),
-// and in plain words too when the sandbox has them (sandbox.Error.Say).
-// lead says why the wall is built, and starts a refusal.
-// It needs the session's own home, which holds the home_files already
-// (copyHomeFiles), so they are readable inside the wall.
-// The network goes through the proxy: the hosts in [network] allow when
-// contain is on, every host when it is off.
-func (e *Engine) sandbox(p settings.Policy, lead, session, folder string, readOnly, offline bool, read []string, net netjail.Spec) (box *sandbox.Box, why, say string) {
-	if e.cfg.Homes == "" || !SessionShape.MatchString(session) {
-		return nil, lead + ", and " + NoHomes, ""
-	}
-	home := filepath.Join(e.cfg.Homes, session)
-	if info, err := os.Lstat(home); err != nil || !info.IsDir() {
-		return nil, lead + ", and this session has no home of its own: it began before homes", ""
-	}
-	net = wallNet(p, offline, net)
-	box, err := sandbox.New(sandbox.Spec{Copy: folder, ReadOnly: readOnly, Home: home, Read: read, Net: net})
-	if err != nil {
-		var se *sandbox.Error
-		if errors.As(err, &se) {
-			say = se.Say
-		}
-		return nil, err.Error(), say
-	}
-	return box, "", ""
-}
-
-// sandboxRefusal is the refusal of a turn whose wall could not be built for
-// why. With say, the sandbox's plain words for a machine that cannot run
-// it, they come first and why stays as the detail. Not for a wall Network
-// contain asked for (autoWall): Sandbox is not the switch to turn off there.
-func sandboxRefusal(why, say string, autoWall bool) string {
-	switch {
-	case autoWall:
-		return why + ", so the turn did not start. Fix it on this runner, or turn Network contain off in the cockpit's Settings (Isolation, Network)."
-	case say != "":
-		return say + " Detail: " + why + "."
-	}
-	return why + ", so the turn did not start. Fix it on this runner, or turn Sandbox off in the cockpit's Settings (Isolation)."
-}
-
-// wallNet is what the proxy of a walled turn lets through: the
-// hosts in [network] allow when contain is on, the public internet when it
-// is off. An offline one reaches its gateway and the API only: a turn of a
-// harness whose own read-only sandbox kept it off the network, which is
-// off in the wall (harness.Info.OwnSandbox).
-func wallNet(p settings.Policy, offline bool, net netjail.Spec) netjail.Spec {
-	if offline {
-		net.Allow, net.Open = nil, false
-		return net
-	}
-	// The sandbox's default allow-list (package registries, git over HTTPS)
-	// so a build's usual fetches work without the person naming each host.
-	// Only for a real sandbox turn with contain on: an autoWall turn (contain
-	// on, sandbox off) keeps exactly the hosts [network] allow names, and
-	// with contain off the proxy already reaches every public host.
-	if p.Sandbox.Mode == settings.SandboxOn && p.Network.Contain == settings.ContainOn {
-		net.Allow = append(append([]string(nil), netjail.DefaultAllow...), net.Allow...)
-	}
-	net.Open = p.Network.Contain != settings.ContainOn
-	return net
 }
 
 // copyHomeFiles copies the policy's home_files into session's own home at
@@ -1128,63 +1111,6 @@ func (e *Engine) apiProgram() []string {
 	return []string{filepath.Join(e.cfg.APIDir, APIClient)}
 }
 
-// needsWall says a turn on policy p is closed off from the network by the
-// session's sandbox, built for it even with the sandbox off: contain is on,
-// and this machine has no network namespace but has the wall (macOS).
-// Linux closes an agent off with netjail alone.
-func needsWall(p settings.Policy) bool {
-	return p.Network.Contain == settings.ContainOn && !netjail.Supported && sandbox.Supported
-}
-
-// contained says whether a turn on policy p runs closed off from the
-// network by netjail, or why it cannot start: the policy asks for it and
-// this runner can do it neither with netjail nor with the wall.
-func (e *Engine) contained(p settings.Policy) (bool, string) {
-	if p.Network.Contain != settings.ContainOn {
-		return false, ""
-	}
-	if !netjail.Supported {
-		return false, "Network contain is on in Settings, and this machine can close an agent off on neither Linux's network namespace nor a sandbox, so the turn did not start. " +
-			"Run the agent on a Linux or macOS runner, or turn Network contain off in the cockpit's Settings (Isolation, Network)."
-	}
-	if err := netjail.Check(); err != nil {
-		return false, err.Error() + ", so the turn did not start. Fix it on this runner, or turn Network contain off in the cockpit's Settings (Isolation, Network) to run agents open."
-	}
-	return true, ""
-}
-
-// reach sorts the addresses a turn's agent is given: loopback ones are
-// forwarded into its namespace as they are, others pass the proxy as
-// host:port.
-func reach(urls ...string) (forward, pass []string) {
-	for _, s := range urls {
-		u, err := url.Parse(s)
-		if err != nil || u.Host == "" {
-			continue
-		}
-		port := u.Port()
-		if port == "" {
-			port = "80"
-			if u.Scheme == "https" {
-				port = "443"
-			}
-		}
-		host := u.Hostname()
-		if host == "localhost" {
-			host = "127.0.0.1"
-		}
-		addr := net.JoinHostPort(host, port)
-		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
-			if !slices.Contains(forward, addr) {
-				forward = append(forward, addr)
-			}
-		} else if !slices.Contains(pass, addr) {
-			pass = append(pass, addr)
-		}
-	}
-	return forward, pass
-}
-
 // setEnv is env with each of set's variables in place of any earlier value.
 func setEnv(env, set []string) []string {
 	out := make([]string, 0, len(env)+len(set))
@@ -1199,7 +1125,7 @@ func setEnv(env, set []string) []string {
 
 // Stop stops a running turn: SIGTERM to its whole process tree, then SIGKILL
 // after the grace period to what still runs. It returns at once; the turn's
-// session.closed, with stopped true, comes once the tree has ended. running
+// run.ended, with stopped true, comes once the tree has ended. running
 // is false when this engine runs no such turn.
 func (e *Engine) Stop(turnID string) (running bool) {
 	lt := e.runs.find(turnID)
@@ -1224,7 +1150,7 @@ func (e *Engine) Stop(turnID string) (running bool) {
 
 // Interrupt ends a running turn the way StopAll ends every turn: SIGTERM to
 // its tree, SIGKILL after the grace period. Unlike Stop it is not a stop by a
-// person: the turn's session.closed does not say stopped, and its exit code
+// person: the turn's run.ended does not say stopped, and its exit code
 // says the signal. running is false when this engine runs no such turn.
 func (e *Engine) Interrupt(turnID string) (running bool) {
 	lt := e.runs.find(turnID)
@@ -1251,7 +1177,7 @@ func (e *Engine) Interrupt(turnID string) (running bool) {
 
 // StopAll refuses new turns, sends every running child's tree SIGTERM, then
 // SIGKILL after the grace period, and returns once each has stored its
-// session.closed. Call it before the store closes.
+// run.ended. Call it before the store closes.
 func (e *Engine) StopAll() {
 	e.runs.mu.Lock()
 	e.runs.stopping = true
@@ -1283,9 +1209,12 @@ func turnSpec(hint, resumeID, model string, w Writes, perm settings.Policy, prom
 	// Temporary glue: mapping tool:subagent to harness NoSubagents until AgentBus's own loop replaces each harness.
 	subDec, _ := gateway.DecideTool(rules, "tool:subagent")
 	noSubagents := subDec != gateway.Allow
+	// Walled is always false now the whole-process wall is retired; the field
+	// and codex's branches on it are vestigial (removed with harness.Turn.Walled
+	// in a follow-up that does not collide with the codex Copy-sandbox work).
 	return harness.Turn{Hint: hint, ResumeID: resumeID, Model: model, Writes: w,
 		Allow: perm.Allow, Ask: perm.Ask, Forbid: perm.Forbid,
-		NoSubagents: noSubagents, Walled: perm.Sandbox.Mode == settings.SandboxOn, Prompt: prompt}
+		NoSubagents: noSubagents, Prompt: prompt}
 }
 
 // withAPI is perm with the agent's way to the API on the allow list, on every
@@ -1505,20 +1434,34 @@ func ExitCode(ps *os.ProcessState, err error) int {
 }
 
 // TurnSink passes every event on to next, first filling agent and folder on
-// each turn.started from the session's latest session.opened in the store.
+// each turn.started from the session's latest run.started in the store.
 // It keeps no state, so nothing grows with the runs, and a turn whose events
 // arrive after its child exited, or after a restart, is still named. A
 // session no turn started, such as one pointed at the gateway by hand, has no
-// session.opened and keeps them empty.
+// run.started and keeps them empty.
 func (e *Engine) TurnSink(next event.Sink) event.Sink { return TurnSink(e.cfg.Store, next) }
 
 // TurnSink is the engine's TurnSink for a service that runs no turns itself,
-// such as a server: the record's sessions are named the same way.
-func TurnSink(st *store.Store, next event.Sink) event.Sink { return turnSink{st, next} }
+// such as a server: the record's sessions are named the same way. Its direct
+// workspaces carry no machine (this service's own), which is right for a server
+// that owns no folders.
+func TurnSink(st *store.Store, next event.Sink) event.Sink { return turnSink{st: st, next: next} }
+
+// TurnSinkMachine is TurnSink that also names the machine a gateway or hook
+// session's direct workspace is created on: the connector that owns this
+// service's folders. machine is read lazily at the turn, because the folder
+// registry opens after the sink is built; nil, or a "" result, means this
+// service's own machine, as on every workspace.created. On a runner or up the
+// gateway's folders are local, so its own machine is the right one for a direct
+// workspace, and a multi-runner apply of it routes to the runner that holds it.
+func TurnSinkMachine(st *store.Store, next event.Sink, machine func() string) event.Sink {
+	return turnSink{st: st, next: next, machine: machine}
+}
 
 type turnSink struct {
-	st   *store.Store
-	next event.Sink
+	st      *store.Store
+	next    event.Sink
+	machine func() string
 }
 
 // Emit implements event.Sink.
@@ -1527,6 +1470,30 @@ func (s turnSink) Emit(ev event.Event) {
 		// A failed read leaves them empty: the sink cannot return an error,
 		// and the turn itself must still be stored.
 		ev.Harness, ev.Folder, _ = s.st.RunOf(ev.Session)
+		// A gateway or hook session (one the gateway records, not one POST
+		// /api/v0/sessions opened) carries no workspace on its turn. It is born
+		// here, so its workspace is created here, direct (sandbox false), before
+		// its turn is stored -- the same explicit creation an API session gets,
+		// so the workspace reader never has a missing case. It carries the
+		// folder's machine, the one source for where its turns run.
+		//
+		// But only for a session with no workspace of its own: an API or asked
+		// session already has one (POST /api/v0/sessions wrote its session.created
+		// naming it), and its agent's model calls reach this sink through the
+		// local gateway carrying no workspace (ev.Workspace == "") -- which must
+		// NOT mint a second, phantom direct workspace keyed on the session id,
+		// pointing at the runner's copy path. session.created, which only an
+		// explicitly created session has, is that one discriminator; a hook or
+		// migrated session has none, so it still gets its direct workspace.
+		if ev.Workspace == "" {
+			if _, _, placed, err := s.st.SessionWorkspace(ev.Session); err == nil && !placed {
+				machine := ""
+				if s.machine != nil {
+					machine = s.machine()
+				}
+				_ = s.st.EnsureDirectWorkspace(ev.Session, ev.Folder, ev.FolderRef, machine)
+			}
+		}
 	}
 	s.next.Emit(ev)
 }

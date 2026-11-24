@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/workspace"
 	_ "modernc.org/sqlite"
 )
@@ -86,6 +87,20 @@ const (
 	// runner of the folder's machine runs the apply's own code and writes
 	// nothing (apply.go). It starts no turn and records no event.
 	KindPreview = "preview"
+	// KindDiscard drops a sandbox workspace's unapplied changes: the runner
+	// holding the copy resets it to the last applied checkpoint, or to base when
+	// nothing was applied, and control records workspace.discarded. It changes
+	// the copy, so it waits in the workspace lane behind a running turn
+	// (laneKinds). It starts no turn.
+	KindDiscard = "discard"
+	// KindUpdate brings the person's folder as it is now into a sandbox
+	// workspace's copy by a three-way merge, so the session's work sits on top
+	// of the folder and the next apply writes only that work (update.go). The
+	// runner holding the copy reads the folder (its own machine, the local fast
+	// path), merges in the private git, and control records workspace.updated.
+	// Like a discard it changes the copy, so it waits in the workspace lane and
+	// at most one apply, discard or update runs per workspace. It starts no turn.
+	KindUpdate = "update"
 	// A "snapshot" job (a folder's snapshot, for a runner that built a copy
 	// from it before 0.5) is retired in 0.5.1: a session runs on its
 	// folder's machine, so nothing asks for one. One stored before is read
@@ -161,7 +176,7 @@ CREATE INDEX IF NOT EXISTS jobs_session ON jobs(session, state);
 CREATE INDEX IF NOT EXISTS jobs_reviews ON jobs(json_extract(links, '$.reviews_job')) WHERE kind = 'review';
 -- A session's workspace lives on one runner: the session's later jobs go to
 -- it. Written by the finish of the session's first job.
-CREATE TABLE IF NOT EXISTS sessions (
+CREATE TABLE IF NOT EXISTS copies (
 	id      TEXT PRIMARY KEY,
 	team    TEXT NOT NULL REFERENCES teams(id),
 	runner  TEXT NOT NULL REFERENCES runners(id),
@@ -174,7 +189,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 	removed INTEGER,
 	removal_error TEXT NOT NULL DEFAULT ''
 );
-CREATE INDEX IF NOT EXISTS sessions_runner ON sessions(runner, closed, removed);
+CREATE INDEX IF NOT EXISTS copies_runner ON copies(runner, closed, removed);
 CREATE TABLE IF NOT EXISTS attempts (
 	id          TEXT PRIMARY KEY,
 	job         TEXT NOT NULL REFERENCES jobs(id),
@@ -269,6 +284,9 @@ var (
 	// ErrSessionBusy: the session has a job that has not ended, so it cannot
 	// be closed.
 	ErrSessionBusy = errors.New("queue: the session has a job that has not ended")
+	// ErrAskedSessionUsed: a turn token started a second turn in an asked
+	// session. An ask is one turn.
+	ErrAskedSessionUsed = errors.New("queue: the asked session already has a turn")
 )
 
 // GapError: an events batch starts after the next expected sequence number.
@@ -307,10 +325,16 @@ type Spec struct {
 	Machine string `json:"machine,omitempty"`
 	Base    string `json:"base,omitempty"`
 	// Labels: a runner takes the job only if it has every one.
-	Labels  []string `json:"labels,omitempty"`
-	Session string   `json:"session,omitempty"`
-	Prompt  string   `json:"prompt"`
-	Model   string   `json:"model,omitempty"`
+	Labels  []string      `json:"labels,omitempty"`
+	Session ids.SessionID `json:"session,omitempty"`
+	// Workspace is where the turn runs: the runner opens or loads its copy at
+	// <workdir>/<workspace>. It is the session's workspace, filled by the
+	// control plane from the record, never by the caller, so it is stripped
+	// for the idempotency hash (asked). An asked turn runs in the asker's
+	// workspace, so its workspace is not its own session's id.
+	Workspace ids.WorkspaceID `json:"workspace,omitempty"`
+	Prompt    string          `json:"prompt"`
+	Model     string          `json:"model,omitempty"`
 	// ModelFromAgent: Model came from the saved agent, not the request. It
 	// is never stored; it only keeps the request's hash what was asked.
 	ModelFromAgent bool `json:"-"`
@@ -324,6 +348,10 @@ type Spec struct {
 	// of it was applied before.
 	ApplyFrom string `json:"apply_from,omitempty"`
 	ApplyTo   string `json:"apply_to,omitempty"`
+	// Restore, for a discard job: the checkpoint the runner resets the copy to
+	// (the last applied turn's end checkpoint). Empty means the copy's base --
+	// the folder as it was first copied, when no turn was applied.
+	Restore string `json:"restore,omitempty"`
 	// Typed and TypedMachine: a new session's folder as the request typed
 	// it, and the machine it named. They are never stored; they only keep
 	// the request's hash what was asked, so a retry with the same key gets
@@ -398,6 +426,9 @@ func (spec Spec) asked() Spec {
 		a.Harness = a.AgentID
 	}
 	a.AgentID, a.Access, a.KeyEnv, a.AgentModel = "", "", "", ""
+	// Workspace is derived from the session by the control plane, so it is not
+	// part of what the caller asked: a retry matches whatever the workspace is.
+	a.Workspace = ""
 	if a.Typed != "" {
 		a.Folder, a.FolderRef, a.Machine = a.Typed, "", a.TypedMachine
 	}
@@ -569,7 +600,7 @@ func CheckFinish(j Job, f Finish) error {
 	if f.Status != Finished && f.Status != Failed && f.Status != Cancelled {
 		return ErrBadState
 	}
-	if j.Kind == KindTurn && f.Session != "" && f.Session == j.Session && f.Workspace != nil && j.Spec.Session == "" {
+	if j.Kind == KindTurn && f.Session != "" && f.Session == j.Session && f.Workspace != nil {
 		w := f.Workspace
 		if w.Kind != WorkspaceWorktree && w.Kind != WorkspaceCopy && w.Kind != WorkspaceFolder {
 			return ErrBadState
@@ -677,6 +708,20 @@ func Open(path string, now func() time.Time) (*Queue, error) {
 	// One connection: every transaction is serialised, so a claim and its
 	// capacity check can never interleave with another.
 	db.SetMaxOpenConns(1)
+	// Migration (his call, 2026-11-21): the per-session copy table became a
+	// per-workspace copies table, keyed by workspace id. Rename an existing
+	// sessions table so its rows and their runner affinity survive; a fresh db
+	// gets copies from the schema. No backward compatibility, so this one-way
+	// rename is enough.
+	var hasSessions, hasCopies int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'sessions'`).Scan(&hasSessions)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'copies'`).Scan(&hasCopies)
+	if hasSessions == 1 && hasCopies == 0 {
+		if _, err := db.Exec(`ALTER TABLE sessions RENAME TO copies`); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("queue: migrate sessions to copies: %w", err)
+		}
+	}
 	if _, err := db.Exec(schema + loginsSchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("queue: create tables: %w", err)
@@ -854,7 +899,7 @@ func scanRunner(s scanner) (Runner, error) {
 // the same fields returns the first job and created false; other fields under
 // the same key get ErrKeyConflict.
 func (q *Queue) Create(team, kind, key string, spec Spec, links Links) (job Job, created bool, err error) {
-	return q.create(team, kind, key, spec, links, Limits{}, spec.Session, nil)
+	return q.create(team, kind, key, spec, links, Limits{}, string(spec.Session), nil)
 }
 
 // HasKey reports whether a job was already made with this idempotency key.
@@ -870,18 +915,46 @@ func (q *Queue) HasKey(team, key string) (bool, error) {
 	return n > 0, nil
 }
 
-// laneTake is Take's one rule of a session's lane, for a job j and another
-// job o: j waits for o. A session's turns are one lane, first in, first out:
-// each waits for one that runs, and for an older one still queued.
-// Apply and folder jobs use no copy and never wait. (B15: the review lane
-// clause retired with the review kind — a review is a turn in its own session.)
-const laneTake = `(o.state IN ('taken','running') AND
-		j.kind = 'turn' AND o.session = j.session AND o.kind = 'turn')
-	OR (o.state = 'queued' AND j.kind = 'turn' AND o.session = j.session AND o.kind = 'turn'
-		AND (o.created < j.created OR (o.created = j.created AND o.id < j.id)))`
+// laneKinds are the job kinds that share a workspace's one ordered lane: the
+// jobs that CHANGE the one copy -- a turn (runs in it), a discard (resets it to
+// the last applied point) and an update (merges the folder into it). They run
+// one at a time on the runner that holds the copy, so neither a discard nor an
+// update ever touches a copy a turn is editing, and what an update merges is
+// computed when it runs (like a discard's dropped turns). apply and preview are
+// NOT here: they read finished checkpoints (published changesets) and the
+// person's folder, never the live copy, so they leave the lane and never wait
+// on a running turn (his call, 2026-11-22). folder and home touch no workspace
+// copy. (B15: a review is a turn in its own session, so no review clause.)
+const laneKinds = `('turn','discard','update')`
 
-// SessionHasWork says the session has a job that has not ended: a turn job
-// of it, or a review whose turn runs in it.
+// jobCopyKey is a job's workspace copy key in SQL, qualified by alias a (e.g.
+// "j"): its workspace, or its session when it names none, exactly as CopyKey
+// keys the copies row. It is the ONE expression wherever a job's copy is keyed,
+// so no `session IS NULL` / `session != ”` proxy can diverge from it -- a
+// session-less job (a discard) is keyed by its workspace, never treated as
+// needing no copy or no affinity.
+func jobCopyKey(a string) string {
+	return `COALESCE(NULLIF(json_extract(` + a + `.spec, '$.workspace'), ''), ` + a + `.session)`
+}
+
+// laneTake is Take's one rule of a WORKSPACE's lane, for a job j and another job
+// o: j waits for o. A workspace's copy-changing jobs (turns and discards) are
+// one line, first in, first out -- an asked session's turns share the asker's
+// line, since both name the one workspace -- so each waits for one that runs,
+// and for an older one still queued. The lane key is the workspace, or the
+// session for a job with no workspace (its own workspace), as CopyKey keys the
+// copy row.
+const laneTake = `j.kind IN ` + laneKinds + ` AND o.kind IN ` + laneKinds + `
+	AND COALESCE(NULLIF(json_extract(o.spec, '$.workspace'), ''), o.session) = COALESCE(NULLIF(json_extract(j.spec, '$.workspace'), ''), j.session)
+	AND (o.state IN ('taken','running')
+		OR (o.state = 'queued' AND (o.created < j.created OR (o.created = j.created AND o.id < j.id))))`
+
+// SessionHasWork says the SESSION has a turn job that has not ended. It is kept
+// session-scoped (not the workspace lane): its callers ask about this one
+// session -- archive, and the open-turn conflict check -- so a workspace id that
+// names no turn's session answers false, never masquerading as a session, and a
+// job of another session in the same workspace does not count. A workspace-lane
+// predicate, if one is ever needed, is a distinct WorkspaceHasWork.
 func (q *Queue) SessionHasWork(team, session string) (bool, error) {
 	var n int
 	err := q.db.QueryRow(`SELECT COUNT(*) FROM jobs o, (SELECT ? AS session) j WHERE o.team = ? AND o.ended IS NULL
@@ -892,14 +965,16 @@ func (q *Queue) SessionHasWork(team, session string) (bool, error) {
 	return n > 0, nil
 }
 
-// TurnsAhead are the jobs the turn job waits behind, oldest
-// first: its session's turn jobs that have not ended and were
-// made before it, and a review whose turn runs in its session. None for a
-// job of no session.
+// TurnsAhead are the jobs the job waits behind in its workspace's lane, oldest
+// first: the lane jobs (turn, apply, preview, discard) of its workspace that
+// have not ended and were made before it. An asked session's turn waits behind
+// the asker's, since both name the one workspace. None for a job of no lane.
 func (q *Queue) TurnsAhead(team, id string) ([]Job, error) {
 	rows, err := q.db.Query(`SELECT o.id FROM jobs o JOIN jobs j ON j.id = ? AND j.team = ?
-		WHERE o.team = j.team AND o.ended IS NULL AND o.id != j.id AND j.session IS NOT NULL
-		AND o.kind = 'turn' AND o.session = j.session AND (o.created < j.created OR (o.created = j.created AND o.id < j.id))
+		WHERE o.team = j.team AND o.ended IS NULL AND o.id != j.id
+		AND j.kind IN `+laneKinds+` AND o.kind IN `+laneKinds+`
+		AND COALESCE(NULLIF(json_extract(o.spec, '$.workspace'), ''), o.session) = COALESCE(NULLIF(json_extract(j.spec, '$.workspace'), ''), j.session)
+		AND (o.created < j.created OR (o.created = j.created AND o.id < j.id))
 		ORDER BY o.created, o.id`, id, team)
 	if err != nil {
 		return nil, fmt.Errorf("queue: list turns ahead: %w", err)
@@ -966,11 +1041,17 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, lim Limit
 				return fmt.Errorf("queue: read job: %w", err)
 			}
 		}
-		if session != "" {
+		// A job runs on the runner that holds its workspace's copy, so its
+		// affinity is the workspace's, not the session's: an asked session goes to
+		// the runner holding the asker's copy, and a discard -- which names no
+		// session -- to the runner holding its workspace's copy. Keyed by the
+		// copy key (CopyKey), so a job with a workspace but no session still finds
+		// it (not `session != ""`, which would skip a discard).
+		if copyID := CopyKey(spec.Workspace, session); copyID != "" {
 			var closed, removed sql.NullInt64
 			var machine string
-			err := tx.QueryRow(`SELECT s.closed, r.removed, r.name FROM sessions s JOIN runners r ON r.id = s.runner
-				WHERE s.id = ? AND s.team = ?`, session, team).Scan(&closed, &removed, &machine)
+			err := tx.QueryRow(`SELECT s.closed, r.removed, r.name FROM copies s JOIN runners r ON r.id = s.runner
+				WHERE s.id = ? AND s.team = ?`, string(copyID), team).Scan(&closed, &removed, &machine)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return fmt.Errorf("queue: read session: %w", err)
 			}
@@ -992,6 +1073,20 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, lim Limit
 		}
 		if err := checkAsked(tx, team, links, lim); err != nil {
 			return err
+		}
+		// An ask is one turn: an asked session (its job links name an asker) takes
+		// only its first turn. A second turn to it is a continuation, which a turn
+		// token may not do. Checked here, in the create transaction, so two asks
+		// racing to the same asked session cannot both pass (the askChecks read
+		// outside the transaction could).
+		if kind == KindTurn && session != "" && links.Chain != nil && links.Chain.By != "" {
+			var n int
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND session = ? AND kind = 'turn'`, team, session).Scan(&n); err != nil {
+				return fmt.Errorf("queue: count asked session turns: %w", err)
+			}
+			if n > 0 {
+				return ErrAskedSessionUsed
+			}
 		}
 		if kind == KindTurn && session == "" {
 			session = NewID("") // the new session its first turn opens
@@ -1233,25 +1328,44 @@ func (w *Workspace) setWhere(v string) {
 // the one its finish recorded, or for a review the reviewed job's. Nil when
 // the queue knows none.
 func workspaceOf(db querier, j Job) (*Workspace, error) {
-	session := j.Session
-	if session == "" {
+	// The copy belongs to the workspace, so it is keyed by the workspace id; a
+	// hook or legacy turn with no workspace keys it by its session, its own.
+	key := CopyKey(j.Spec.Workspace, j.Session)
+	if key == "" {
 		return nil, nil
 	}
-	w, err := scanWorkspace(db.QueryRow(`SELECT `+workspaceCols+` FROM sessions WHERE id = ? AND team = ?`, session, j.Team))
+	w, err := scanWorkspace(db.QueryRow(`SELECT `+workspaceCols+` FROM copies WHERE id = ? AND team = ?`, string(key), j.Team))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("queue: read session: %w", err)
+		return nil, fmt.Errorf("queue: read workspace: %w", err)
 	}
-	// As appliableTurns orders them: the last to end.
-	// The turn's end checkpoint: Result.Checkpoint, or in a result from
-	// before 0.5 its changes' to.
-	err = db.QueryRow(`SELECT COALESCE(json_extract(result, '$.checkpoint'), json_extract(result, '$.changes.to'), '') FROM jobs WHERE team = ? AND session = ? AND kind = 'turn'
-		AND ended IS NOT NULL AND attempt IS NOT NULL AND COALESCE(json_extract(result, '$.changeset'), '') != ''
-		ORDER BY ended DESC, rowid DESC LIMIT 1`, j.Team, session).Scan(&w.DiffFrom)
+	// The checkpoint the copy is at now, so the workspace's next turn diffs from
+	// the copy as it is, not from base: the latest of the workspace's turns that
+	// ended with a changeset (its end checkpoint is Result.Checkpoint, or in a
+	// result from before 0.5 its changes' to), its finished discards (which reset
+	// the copy to Restore -- empty means base), and its finished clean updates
+	// (which advance the copy to the merge, Result.Update.MergedCheckpoint). A
+	// discard after the latest turn moves the copy back, so the dropped turns are
+	// not diffed from again; an update after the latest turn moves it forward to
+	// the merge, so the next turn's diff does not include the folder's own changes
+	// that the update merged in as if the turn had made them.
+	err = db.QueryRow(`SELECT checkpoint FROM (
+		SELECT ended, rowid, COALESCE(json_extract(result, '$.checkpoint'), json_extract(result, '$.changes.to'), '') AS checkpoint
+			FROM jobs WHERE team = ? AND kind = 'turn' AND COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), session) = ?
+			AND ended IS NOT NULL AND attempt IS NOT NULL AND COALESCE(json_extract(result, '$.changeset'), '') != ''
+		UNION ALL
+		SELECT ended, rowid, COALESCE(json_extract(spec, '$.restore'), '') AS checkpoint
+			FROM jobs WHERE team = ? AND kind = 'discard' AND COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), session) = ?
+			AND ended IS NOT NULL AND state = 'finished'
+		UNION ALL
+		SELECT ended, rowid, json_extract(result, '$.update.merged_checkpoint') AS checkpoint
+			FROM jobs WHERE team = ? AND kind = 'update' AND COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), session) = ?
+			AND ended IS NOT NULL AND state = 'finished' AND COALESCE(json_extract(result, '$.update.merged_checkpoint'), '') != '')
+		ORDER BY ended DESC, rowid DESC LIMIT 1`, j.Team, key, j.Team, key, j.Team, key).Scan(&w.DiffFrom)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("queue: read session: %w", err)
+		return nil, fmt.Errorf("queue: read workspace head: %w", err)
 	}
 	return &w, nil
 }
@@ -1315,9 +1429,9 @@ func (q *Queue) Take(runnerID string, lease time.Duration, folders bool) (job Jo
 		var id string
 		err = tx.QueryRow(`SELECT j.id FROM jobs j, runners r WHERE r.id = ? AND j.team = ? AND j.state = 'queued'
 			AND `+kinds+` AND COALESCE(json_extract(r.caps, '$.role'), '') = ''
-			AND (j.kind IN `+folderKinds+` OR j.session IS NULL OR NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team)
-				OR EXISTS (SELECT 1 FROM sessions s WHERE s.id = j.session AND s.team = j.team AND s.runner = r.id AND s.closed IS NULL))
-			AND (j.session IS NULL OR NOT EXISTS (SELECT 1 FROM jobs o WHERE o.team = j.team AND o.id != j.id AND (`+laneTake+`)))
+			AND (j.kind IN `+folderKinds+` OR `+jobCopyKey("j")+` IS NULL OR NOT EXISTS (SELECT 1 FROM copies s WHERE s.id = `+jobCopyKey("j")+` AND s.team = j.team)
+				OR EXISTS (SELECT 1 FROM copies s WHERE s.id = `+jobCopyKey("j")+` AND s.team = j.team AND s.runner = r.id AND s.closed IS NULL))
+			AND (j.kind NOT IN `+laneKinds+` OR NOT EXISTS (SELECT 1 FROM jobs o WHERE o.team = j.team AND o.id != j.id AND (`+laneTake+`)))
 			AND (`+machineTake+`) AND (`+labelsTake+`) AND (`+harnessTake+`)
 			ORDER BY j.created, j.id LIMIT 1`, runnerID, team, nanos(now.Add(-RunnerFresh))).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1496,13 +1610,18 @@ var ErrSessionEnded = errors.New("queue: the session ended with its first turn")
 // SessionEnded is why a turn of an ended session is refused or ended.
 const SessionEnded = "this session's first turn ended before the session was set up (it was stopped, its runner stopped, or it did not start), so the session is ended; start a new session"
 
-// sessionEnded is the rule, as SQL over a session id named by sess (a
-// column or a "?" bound twice, once per use).
+// sessionEnded is the rule, as SQL over a session id named by sess (a column or
+// a bound "?1", used once). The session's first turn -- the one that opened it,
+// so its spec names no session -- ended, and its WORKSPACE holds no copy: the
+// copy row is keyed by the workspace (CopyKey), so a session whose workspace id
+// is not its own id (an explicit ws_ workspace) still resolves, not only a
+// migrated one whose workspace is its session id.
 func sessionEnded(sess string) string {
-	return `(NOT EXISTS (SELECT 1 FROM sessions s WHERE s.id = ` + sess + `)
-		AND EXISTS (SELECT 1 FROM jobs f WHERE f.session = ` + sess + ` AND f.kind = 'turn' AND f.ended IS NOT NULL
-			AND COALESCE(json_extract(f.spec, '$.session'), '') = ''
-			AND f.rowid = (SELECT MIN(g.rowid) FROM jobs g WHERE g.session = f.session)))`
+	return `EXISTS (SELECT 1 FROM jobs f WHERE f.session = ` + sess + ` AND f.kind = 'turn' AND f.ended IS NOT NULL
+		AND COALESCE(json_extract(f.spec, '$.session'), '') = ''
+		AND f.rowid = (SELECT MIN(g.rowid) FROM jobs g WHERE g.session = f.session)
+		AND NOT EXISTS (SELECT 1 FROM copies s WHERE s.team = f.team
+			AND s.id = COALESCE(NULLIF(json_extract(f.spec, '$.workspace'), ''), f.session)))`
 }
 
 // endSessionsTx ends every queued turn of an ended session, with why.
@@ -1894,13 +2013,18 @@ func (q *Queue) End(runnerID, attemptID string, number int, f Finish) (Job, erro
 			f.Status, f.Reason, result, nanos(now), nanos(now), j.ID); err != nil {
 			return fmt.Errorf("queue: write job: %w", err)
 		}
-		// A session's first job ties the session to this runner. A later
-		// finish naming the same session changes nothing.
-		if j.Kind == KindTurn && f.Session != "" && f.Session == j.Session && f.Workspace != nil && j.Spec.Session == "" {
+		// A turn that ran in a copy records the copy for its WORKSPACE (one row
+		// per workspace, keyed by the workspace id), so apply and changes find
+		// the one copy every session of the workspace shares. The first turn of
+		// the workspace writes it; a later turn, in the same or an asked session,
+		// changes nothing (ON CONFLICT DO NOTHING). A turn with no workspace (a
+		// hook or legacy session) keys the row by its session, its own workspace.
+		if j.Kind == KindTurn && f.Session != "" && f.Session == j.Session && f.Workspace != nil {
+			id := CopyKey(j.Spec.Workspace, f.Session)
 			w := f.Workspace
-			if _, err := tx.Exec(`INSERT INTO sessions(id, team, runner, kind, folder, repo, base, snapshot, created) VALUES(?,?,?,?,?,?,?,?,?)
-				ON CONFLICT DO NOTHING`, f.Session, j.Team, runnerID, w.Kind, w.where(), w.Repo, w.Base, w.Snapshot, nanos(now)); err != nil {
-				return fmt.Errorf("queue: write session: %w", err)
+			if _, err := tx.Exec(`INSERT INTO copies(id, team, runner, kind, folder, repo, base, snapshot, created) VALUES(?,?,?,?,?,?,?,?,?)
+				ON CONFLICT DO NOTHING`, string(id), j.Team, runnerID, w.Kind, w.where(), w.Repo, w.Base, w.Snapshot, nanos(now)); err != nil {
+				return fmt.Errorf("queue: write workspace: %w", err)
 			}
 		}
 		return nil
@@ -1986,17 +2110,70 @@ func (q *Queue) jobsWhere(query string, args ...any) ([]Job, error) {
 	return out, rows.Err()
 }
 
-// Workspace reads the workspace of a session of team; ok is false when the
-// queue holds none.
-func (q *Queue) Workspace(team, session string) (w Workspace, ok bool, err error) {
-	w, err = scanWorkspace(q.db.QueryRow(`SELECT `+workspaceCols+` FROM sessions WHERE id = ? AND team = ?`, session, team))
+// Workspace reads the copy row of the workspace ws of team; ok is false when
+// the queue holds none. The caller resolves a session to its workspace first
+// (workspaceID), so this never takes a session.
+func (q *Queue) Workspace(team string, ws ids.WorkspaceID) (w Workspace, ok bool, err error) {
+	w, err = scanWorkspace(q.db.QueryRow(`SELECT `+workspaceCols+` FROM copies WHERE id = ? AND team = ?`, string(ws), team))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Workspace{}, false, nil
 	}
 	if err != nil {
-		return Workspace{}, false, fmt.Errorf("queue: read session: %w", err)
+		return Workspace{}, false, fmt.Errorf("queue: read workspace: %w", err)
 	}
 	return w, true, nil
+}
+
+// CopyKey is the id a job's copy is keyed by in the copies table: its
+// workspace, or its session for a job with no workspace (a hook or legacy
+// session, which is its own workspace). It is the ONE door that turns a job's
+// session into its workspace id, so routing, affinity, the copy row and the
+// workspace.applied event all agree; nothing else casts a session to a
+// workspace. It takes a job's own recorded session, never an unvalidated id.
+func CopyKey(workspace ids.WorkspaceID, session string) ids.WorkspaceID {
+	if workspace != "" {
+		return workspace
+	}
+	return ids.WorkspaceID(session)
+}
+
+// workspaceID is the workspace a session's turns run in, read from its latest
+// turn job's spec, so a caller that knows only a session finds the one copy the
+// session's workspace holds. A session with no workspace on its jobs (a hook or
+// legacy session) is its own workspace, as the migration records it.
+func (q *Queue) workspaceID(team string, session ids.SessionID) (ids.WorkspaceID, error) {
+	var ws sql.NullString
+	err := q.db.QueryRow(`SELECT json_extract(spec, '$.workspace') FROM jobs
+		WHERE team = ? AND session = ? AND kind = 'turn' AND COALESCE(json_extract(spec, '$.workspace'), '') <> ''
+		ORDER BY rowid DESC LIMIT 1`, team, string(session)).Scan(&ws)
+	if errors.Is(err, sql.ErrNoRows) || ws.String == "" {
+		return ids.WorkspaceID(session), nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("queue: read session workspace: %w", err)
+	}
+	return ids.WorkspaceID(ws.String), nil
+}
+
+// SessionWorkspace is the workspace a session's turns run in, and whether the
+// queue holds any turn of the session. found is false for an id no turn job
+// names as its session -- a workspace id among them -- so a caller resolving a
+// session the store does not yet know (its turn ran through the queue before its
+// events landed) still answers, while a workspace id stays unknown and cannot
+// pass as a session. The workspace is the one door's (CopyKey): the turn's
+// spec workspace, or the session itself.
+func (q *Queue) SessionWorkspace(team string, session ids.SessionID) (ids.WorkspaceID, bool, error) {
+	var ws sql.NullString
+	err := q.db.QueryRow(`SELECT json_extract(spec, '$.workspace') FROM jobs
+		WHERE team = ? AND session = ? AND kind = 'turn' ORDER BY rowid DESC LIMIT 1`,
+		team, string(session)).Scan(&ws)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("queue: read session workspace: %w", err)
+	}
+	return CopyKey(ids.WorkspaceID(ws.String), string(session)), true, nil
 }
 
 // JobByTurn reads the job of team that runs the turn with this id.
@@ -2045,7 +2222,7 @@ func (q *Queue) Cancel(team, id string) (Job, error) {
 
 // Sessions lists team's sessions, newest first.
 func (q *Queue) Sessions(team string, limit int) ([]Workspace, error) {
-	rows, err := q.db.Query(`SELECT `+workspaceCols+` FROM sessions WHERE team = ? ORDER BY created DESC, id LIMIT ?`, team, limit)
+	rows, err := q.db.Query(`SELECT `+workspaceCols+` FROM copies WHERE team = ? ORDER BY created DESC, id LIMIT ?`, team, limit)
 	if err != nil {
 		return nil, fmt.Errorf("queue: list sessions: %w", err)
 	}
@@ -2061,21 +2238,23 @@ func (q *Queue) Sessions(team string, limit int) ([]Workspace, error) {
 	return out, rows.Err()
 }
 
-// Closed reads when each closed session of team was closed, by session id.
-func (q *Queue) Closed(team string) (map[string]time.Time, error) {
-	rows, err := q.db.Query(`SELECT id, closed FROM sessions WHERE team = ? AND closed IS NOT NULL`, team)
+// Closed reads when each closed workspace of team was closed, by workspace id
+// (the copies table's key). A migrated session, whose workspace is its own id,
+// is read under that id.
+func (q *Queue) Closed(team string) (map[ids.WorkspaceID]time.Time, error) {
+	rows, err := q.db.Query(`SELECT id, closed FROM copies WHERE team = ? AND closed IS NOT NULL`, team)
 	if err != nil {
 		return nil, fmt.Errorf("queue: list closed sessions: %w", err)
 	}
 	defer rows.Close()
-	out := map[string]time.Time{}
+	out := map[ids.WorkspaceID]time.Time{}
 	for rows.Next() {
 		var id string
 		var closed int64
 		if err := rows.Scan(&id, &closed); err != nil {
 			return nil, fmt.Errorf("queue: list closed sessions: %w", err)
 		}
-		out[id] = fromNanos(closed)
+		out[ids.WorkspaceID(id)] = fromNanos(closed)
 	}
 	return out, rows.Err()
 }
@@ -2088,31 +2267,35 @@ func (q *Queue) Closed(team string) (map[string]time.Time, error) {
 // nothing calls this; Take no longer hands a closed session's cleanup to a
 // runner. It is kept for release, which will reuse the runner cleanup path
 // under its own guard, and for the queue tests that cover it.
-func (q *Queue) CloseSession(team, id string) (Workspace, error) {
+func (q *Queue) CloseSession(team string, id ids.WorkspaceID) (Workspace, error) {
+	// The copy belongs to the workspace, so closing it closes the workspace's
+	// row and refuses while any session of the workspace still has an open job.
+	// The caller passes the workspace id; a session is resolved first.
+	key := string(id)
 	var w Workspace
 	err := q.tx(func(tx *sql.Tx) error {
 		var closed sql.NullInt64
-		err := tx.QueryRow(`SELECT closed FROM sessions WHERE id = ? AND team = ?`, id, team).Scan(&closed)
+		err := tx.QueryRow(`SELECT closed FROM copies WHERE id = ? AND team = ?`, key, team).Scan(&closed)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNotFound
 		}
 		if err != nil {
-			return fmt.Errorf("queue: read session: %w", err)
+			return fmt.Errorf("queue: read workspace: %w", err)
 		}
 		if !closed.Valid {
 			var open int
-			if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE session = ? AND team = ? AND state IN ('queued','taken','running')`,
-				id, team).Scan(&open); err != nil {
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND state IN ('queued','taken','running')
+				AND COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), session) = ?`, team, key).Scan(&open); err != nil {
 				return fmt.Errorf("queue: count jobs: %w", err)
 			}
 			if open > 0 {
 				return ErrSessionBusy
 			}
-			if _, err := tx.Exec(`UPDATE sessions SET closed = ? WHERE id = ?`, nanos(q.now()), id); err != nil {
-				return fmt.Errorf("queue: write session: %w", err)
+			if _, err := tx.Exec(`UPDATE copies SET closed = ? WHERE id = ?`, nanos(q.now()), key); err != nil {
+				return fmt.Errorf("queue: write workspace: %w", err)
 			}
 		}
-		w, err = scanWorkspace(tx.QueryRow(`SELECT `+workspaceCols+` FROM sessions WHERE id = ?`, id))
+		w, err = scanWorkspace(tx.QueryRow(`SELECT `+workspaceCols+` FROM copies WHERE id = ?`, key))
 		return err
 	})
 	if err == nil {
@@ -2147,14 +2330,14 @@ func (q *Queue) RunnerBeat(runnerID string, capacity int, labels []string, caps 
 // Removed records that the runner dealt with a closed session's workspace:
 // removed it, or, with removalErr, could not.
 func (q *Queue) Removed(runnerID, session, removalErr string) error {
-	res, err := q.db.Exec(`UPDATE sessions SET removed = ?, removal_error = ? WHERE id = ? AND runner = ? AND closed IS NOT NULL AND removed IS NULL`,
+	res, err := q.db.Exec(`UPDATE copies SET removed = ?, removal_error = ? WHERE id = ? AND runner = ? AND closed IS NOT NULL AND removed IS NULL`,
 		nanos(q.now()), removalErr, session, runnerID)
 	if err != nil {
 		return fmt.Errorf("queue: write session: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		var one int
-		err := q.db.QueryRow(`SELECT 1 FROM sessions WHERE id = ? AND runner = ? AND removed IS NOT NULL`, session, runnerID).Scan(&one)
+		err := q.db.QueryRow(`SELECT 1 FROM copies WHERE id = ? AND runner = ? AND removed IS NOT NULL`, session, runnerID).Scan(&one)
 		if err != nil {
 			return ErrNotFound
 		}

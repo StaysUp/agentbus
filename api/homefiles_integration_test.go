@@ -18,7 +18,8 @@ import (
 func TestFolderHomeFiles(t *testing.T) {
 	e, _ := diffEnv(t, filepath.Join(t.TempDir(), settings.PolicyFile))
 	folder := t.TempDir()
-	first := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"edit1"}`)
+	sess := e.newSession(t, folder, true)
+	first := startTurn(t, e, `{"session":"`+sess+`","agent":"claude","prompt":"edit1"}`)
 
 	home := t.TempDir()
 	for p, c := range map[string]string{".claude/settings.json": "{}", ".claude/skills/a/SKILL.md": "abc", ".claude/.credentials.json": "x",

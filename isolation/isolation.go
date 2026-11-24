@@ -26,15 +26,17 @@
 // over the session's own read-only copy of the folder or snapshot
 // (overlay_linux.go). git makes a git worktree of the folder's repo at its
 // HEAD and carries the folder's uncommitted edits into it, on the local fast
-// path only; it is the only code that runs git (git.go). A fourth, none,
-// makes no copy: it checkpoints a folder used as it is for one job, so that
-// every job's changes come from checkpoints (none.go). All keep checkpoints
-// the same way: a Merkle tree of every file's size, modification time, mode
-// and hash, and a copy of each file a checkpoint saw change. Hashes are
-// taken only where a file's size or time says it changed (checkpoint), and
-// a copy made by clone records its base by size, time and mode only, as the
-// clone keeps each file's time: hashing every file of a 50,000-file folder
-// costs about 2 s on an APFS Mac (measured 2026-11-10), more than the clone.
+// path only (git.go). A fourth, none, makes no copy: it checkpoints a folder
+// used as it is for one job, so that every job's changes come from checkpoints
+// (none.go). A local copy keeps its checkpoints as commits in a private git
+// repo of its own, invisible to the person, which also computes its diffs and
+// resets it on a discard (gitshadow.go); the git worktree, overlay, none and a
+// snapshot-built copy keep checkpoints the Merkle way: a tree of every file's
+// size, modification time, mode and hash, and a copy of each file a checkpoint
+// saw change. Hashes are taken only where a file's size or time says it changed
+// (checkpoint), and a copy made by clone records its base by size, time and
+// mode only, as the clone keeps each file's time: hashing every file of a
+// 50,000-file folder costs about 2 s on an APFS Mac (measured 2026-11-10).
 // A checkpoint whose files are all hashed has a snapshot id (Checkpoint.Root):
 // the same on any machine for the same files. For picks a backend for the
 // isolation setting; auto is the fastest one this machine has. A VM backend
@@ -94,9 +96,53 @@ type Backend interface {
 	Checkpoints(s *Space) ([]Checkpoint, error)
 	// Diff is what changed from one checkpoint to a later one.
 	Diff(s *Space, from, to string) (workspace.Changes, error)
+	// RestoreTo resets the space's working files to checkpoint name (Base for
+	// the copy as it was first made): a file changed since name goes back to
+	// it, a file added since is removed, a file removed since returns. It is
+	// the copy side of Discard. A backend that cannot do it yet returns
+	// ErrNoRestore, and the person's real folder is never touched.
+	RestoreTo(s *Space, name string) error
+	// UpdateFrom brings the person's folder as it is now (at path folder) into
+	// the copy by a three-way merge: base is the checkpoint the folder last
+	// matched (the last applied one, or Base), the copy's head is "ours", and a
+	// fresh snapshot of the folder is "theirs". A clean merge records the folder
+	// state and the merge as two new checkpoints (UpdateResult.Theirs and
+	// .Merged) and leaves the copy holding the merge; a real conflict changes
+	// nothing and names the files (UpdateResult.Conflicts). The person's folder
+	// is only read, never written. A backend that cannot do it returns
+	// ErrNoUpdate.
+	UpdateFrom(s *Space, base, folder string) (UpdateResult, error)
 	// Close removes the copy and everything the space kept.
 	Close(s *Space) error
 }
+
+// UpdateResult is what an UpdateFrom did. On a clean merge Clean is true,
+// Theirs names the checkpoint recorded for the folder's current state (the new
+// baseline the folder matches) and Merged names the checkpoint the copy now
+// holds (the merge of the session's work and the folder). On a real conflict
+// Clean is false, Conflicts names the folder-relative files that conflicted
+// (sorted), and nothing changed.
+type UpdateResult struct {
+	Clean     bool
+	Theirs    string
+	Merged    string
+	Conflicts []string
+	// PriorHead is the copy's head checkpoint before the merge (ours). On a
+	// clean merge the copy is advanced to Merged; a caller whose own later step
+	// fails (publishing the changesets, say) resets the copy to PriorHead to undo
+	// the merge, so the copy matches control's unchanged view.
+	PriorHead string
+}
+
+// ErrNoRestore: this backend cannot reset a copy to a checkpoint yet, so a
+// Discard of a workspace on it is refused with a plain message for the person.
+var ErrNoRestore = errors.New("Discard is not available for this workspace yet")
+
+// ErrNoUpdate: this backend cannot update a copy from the folder (it keeps no
+// private git repo -- a snapshot-built or overlay copy, or one from before the
+// shadow landed), so an update of a workspace on it is refused with a plain
+// message for the person.
+var ErrNoUpdate = errors.New("Update from your folder is not available for this workspace")
 
 // Request is the copy a session asks for.
 type Request struct {
@@ -140,6 +186,13 @@ type Space struct {
 	// Method, for copy: clone (copy-on-write), reflink, or copy (a plain
 	// copy); overlay for overlay.
 	Method string `json:"method,omitempty"`
+	// Shadow, for a local copy: the copy carries a private git repo that
+	// records its checkpoints, computes its diffs and resets it on a discard
+	// (gitshadow.go). It is set once the repo and its Base commit are made,
+	// and space.json is written only then, so a copy with a record always has
+	// a working shadow. A copy built from a snapshot, or one made before this,
+	// has none: it keeps checkpoints the Merkle way and cannot be reset.
+	Shadow bool `json:"shadow,omitempty"`
 	// Fallback: why the backend asked for could not be used, and which one
 	// was, as For's choice fell back. Empty when it was used.
 	Fallback string `json:"fallback,omitempty"`
@@ -289,6 +342,10 @@ func (f fallback) Checkpoint(s *Space, name string) (Checkpoint, error) {
 	return f.own(s).Checkpoint(s, name)
 }
 func (f fallback) Checkpoints(s *Space) ([]Checkpoint, error) { return f.own(s).Checkpoints(s) }
+func (f fallback) RestoreTo(s *Space, name string) error      { return f.own(s).RestoreTo(s, name) }
+func (f fallback) UpdateFrom(s *Space, base, folder string) (UpdateResult, error) {
+	return f.own(s).UpdateFrom(s, base, folder)
+}
 func (f fallback) Diff(s *Space, from, to string) (workspace.Changes, error) {
 	return f.own(s).Diff(s, from, to)
 }

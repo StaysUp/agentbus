@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,20 +14,17 @@ import (
 
 	"github.com/staysup/agentbus/body"
 	"github.com/staysup/agentbus/event"
-	"github.com/staysup/agentbus/folders"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 )
 
-// A turn whose folder is on a machine other than this control plane's own
-// (a remote runner): control holds the folder by reference only and no path
-// of it. askChecks must still let a sub-agent name the session's own folder
-// by reference (no path check needed), filling in the folder's machine; a
-// request that needs a path check on that machine is refused here, since
-// control cannot answer it.
-func TestAskChecksRemoteFolderByReference(t *testing.T) {
+// askChecks lets a turn token run an asked turn only in a session its own tree
+// opened (POST /api/v0/sessions records the asker). A session another token
+// opened, the asker's own session, or no session, is refused, so a turn token
+// neither continues a conversation nor writes into another's.
+func TestAskChecksSessionTheAskerOpened(t *testing.T) {
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "events.db"))
 	if err != nil {
@@ -40,57 +36,42 @@ func TestAskChecksRemoteFolderByReference(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
-	// Control's own folders are on a different machine than the session's.
-	fp := filepath.Join(dir, "folders.json")
-	if err := os.WriteFile(fp, []byte(`{"connector":"con_0123456789abcdef","folders":{}}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	fr, err := folders.Open(fp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	const remote = "con_aaaaaaaaaaaaaaaa" // the session's machine, not control's own
-	const sessRef = "fld_fedcba9876543210"
-	lim := queue.Limits{MaxDepth: 2, MaxPerTurn: 10, MaxPerTree: 30}
-	j, _, err := q.CreateTurnLinked(queue.DefaultTeam, "",
-		queue.Spec{Harness: "claude", FolderRef: sessRef, Machine: remote, Prompt: "hi", Isolate: true}, queue.Links{}, lim, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	a := &API{cfg: Config{Queue: q, Store: st, Folders: fr}}
-	g := run.Grant{Session: j.Session, Root: j.Session, Turn: j.Turn}
-	perm := settings.DefaultPolicy()
-	// check runs askChecks for a new sub-session and returns the refusal
-	// status (0 when allowed) and the body the request was filled with.
-	check := func(body *TurnRequest) (int, *TurnRequest) {
-		w := httptest.NewRecorder()
-		if _, ok := a.askChecks(w, g, perm, body, false); ok {
-			return 0, body
+	// asker names the session that opened this one; "" is a session the person
+	// opened (no asker).
+	mk := func(session, asker string) {
+		e := event.Event{ID: "sc_" + session, Kind: event.SessionCreated,
+			Session: session, Workspace: "ws_a", Time: time.Now().UTC()}
+		if asker != "" {
+			e.Origin = &event.Origin{Kind: event.OriginAsked, Session: asker, Turn: "t_" + asker}
 		}
-		return w.Code, body
+		if _, err := st.AppendOnce(e); err != nil {
+			t.Fatal(err)
+		}
 	}
-
-	// The session's own folder by reference, on its machine: allowed, kept.
-	if code, b := check(&TurnRequest{FolderRef: sessRef, Machine: remote, Prompt: "go"}); code != 0 ||
-		b.FolderRef != sessRef || b.Machine != remote {
-		t.Fatalf("same ref on the remote runner refused: %d (ref %q, connector %q)", code, b.FolderRef, b.Machine)
+	mk("s_asker", "")            // the asker's own session, opened by the person
+	mk("s_mine", "s_asker")      // a session the asker opened
+	mk("s_other", "s_elsewhere") // a session another token opened
+	a := &API{cfg: Config{Queue: q, Store: st}}
+	g := run.Grant{Session: "s_asker", Root: "s_asker", Turn: "t1"}
+	perm := settings.DefaultPolicy()
+	check := func(session string) int {
+		w := httptest.NewRecorder()
+		if _, ok := a.askChecks(w, g, perm, &TurnRequest{Session: session, Agent: "claude", Prompt: "go"}); ok {
+			return 0
+		}
+		return w.Code
 	}
-	// Its reference without a connector: allowed, the folder's machine filled in.
-	if code, b := check(&TurnRequest{FolderRef: sessRef, Prompt: "go"}); code != 0 || b.Machine != remote {
-		t.Fatalf("ref without connector: %d, connector %q, want %q", code, b.Machine, remote)
+	if code := check("s_mine"); code != 0 {
+		t.Fatalf("a session the asker opened was refused: %d", code)
 	}
-	// No folder at all: the session's own folder by reference, on its machine.
-	if code, b := check(&TurnRequest{Prompt: "go"}); code != 0 || b.FolderRef != sessRef || b.Machine != remote {
-		t.Fatalf("no folder: %d (ref %q, connector %q)", code, b.FolderRef, b.Machine)
+	if code := check("s_other"); code != http.StatusForbidden {
+		t.Fatalf("a session another token opened was not refused: %d", code)
 	}
-	// A reference on another machine than the session's: refused.
-	if code, _ := check(&TurnRequest{FolderRef: sessRef, Machine: "con_bbbbbbbbbbbbbbbb", Prompt: "go"}); code != http.StatusForbidden {
-		t.Fatalf("a folder on another machine was not refused: %d", code)
+	if code := check("s_asker"); code != http.StatusForbidden {
+		t.Fatalf("the asker's own session was not refused: %d", code)
 	}
-	// A path, which only the folder's machine can check: refused here, since
-	// the folder is remote and control holds no path of it.
-	if code, _ := check(&TurnRequest{Folder: dir, Prompt: "go"}); code != http.StatusForbidden {
-		t.Fatalf("a path on the remote runner was not refused: %d", code)
+	if code := check(""); code != http.StatusForbidden {
+		t.Fatalf("no session was not refused: %d", code)
 	}
 }
 
@@ -99,7 +80,7 @@ func TestTurnTokenRevokedWhenChildDoesNotStart(t *testing.T) {
 	e := resumableEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) {
 		return run.Launch{Path: filepath.Join(t.TempDir(), "missing")}, nil
 	})
-	resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"x"}`)))
+	resp, out := e.startFlow(t, t.TempDir(), "claude", "x")
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Fatalf("%d %s", resp.StatusCode, out)
 	}

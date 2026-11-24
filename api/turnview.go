@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/store"
 )
@@ -374,42 +375,51 @@ type SessionCopy struct {
 
 // GET /api/v0/sessions/<id>
 func (a *API) getSession(w http.ResponseWriter, _ *http.Request, id string) {
+	// The one door: resolve the session to its workspace and answer 404 for an id
+	// the record knows no session by, so a workspace id cannot masquerade as a
+	// session and be shown with its copy.
+	ws, found, err := a.workspaceOf(id)
+	if err != nil {
+		a.internal(w)
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "no such session")
+		return
+	}
 	snap, err := a.cfg.Store.Snapshot()
 	if err != nil {
 		a.internal(w)
 		return
 	}
 	out := OneSession{Store: snap.Store, Seq: snap.Seq}
-	var rec store.Session
-	found := false
+	// A known session the snapshot lists carries its archived view; one known
+	// only through its turns (no session.created row) is shown by its id and its
+	// resolved workspace, so its closed state still reads.
+	rec := store.Session{ID: id, Workspace: string(ws)}
 	for _, s := range snap.Sessions {
 		if s.ID == id {
-			rec, found = s, true
+			rec = s
 			break
 		}
 	}
-	closed := map[string]time.Time{}
+	closed := map[ids.WorkspaceID]time.Time{}
 	var cp *SessionCopy
 	if a.cfg.Queue != nil {
-		ws, ok, err := a.cfg.Queue.Workspace(queue.DefaultTeam, id)
+		// The copy is the workspace's, so a session with no turn of its own still
+		// shows its workspace's copy.
+		wsp, ok, err := a.cfg.Queue.Workspace(queue.DefaultTeam, ws)
 		if err != nil {
 			a.internal(w)
 			return
 		}
 		if ok {
-			cp = &SessionCopy{Runner: ws.Runner, Kind: ws.Kind, Name: ws.Space, Folder: ws.FolderRef,
-				Closed: ws.Closed, Removed: ws.Removed, Error: ws.RemovalError}
-			if ws.Closed != nil {
-				closed[id] = *ws.Closed
-			}
-			if !found {
-				rec, found = store.Session{ID: id}, true
+			cp = &SessionCopy{Runner: wsp.Runner, Kind: wsp.Kind, Name: wsp.Space, Folder: wsp.FolderRef,
+				Closed: wsp.Closed, Removed: wsp.Removed, Error: wsp.RemovalError}
+			if wsp.Closed != nil {
+				closed[ws] = *wsp.Closed
 			}
 		}
-	}
-	if !found {
-		writeError(w, http.StatusNotFound, "no such session")
-		return
 	}
 	// Archived comes from rec (the store snapshot's session.archived); closed
 	// is annotated from the queue.

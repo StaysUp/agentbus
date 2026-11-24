@@ -49,7 +49,7 @@ func TestReadPolicy(t *testing.T) {
 		*def.Limits.MaxCostUSDPerTree != 0 {
 		t.Fatalf("defaults: %+v", def.Limits)
 	}
-	if !slices.Equal(def.Allow, []string{"tool:*", "tool:edit"}) || !slices.Equal(def.Forbid, []string{"tool:subagent"}) {
+	if !slices.Equal(def.Allow, []string{"*", "tool:*"}) || !slices.Equal(def.Forbid, []string{"tool:subagent"}) {
 		t.Fatalf("default rules: allow %v forbid %v", def.Allow, def.Forbid)
 	}
 	// The starter parses and writes out every default.
@@ -105,8 +105,6 @@ func TestReadPolicy(t *testing.T) {
 		{"tab", "allow = [\"go\\ttest\"]\n", "control character"},
 		{"isolation unknown", "isolation = \"everywhere\"\n", `isolation must be`},
 		{"isolation not a string", "isolation = true\n", "wrong type"},
-		{"unlisted unknown", "unlisted = \"everywhere\"\n", `unlisted must be`},
-		{"unlisted not a string", "unlisted = true\n", "wrong type"},
 		{"limit negative", "[limits]\nmax_depth = -1\n", "max_depth must be 0 or more"},
 		{"limit not a number", "[limits]\nmax_jobs_per_turn = \"10\"\n", "wrong type"},
 		{"cost negative", "[limits]\nmax_cost_usd_per_tree = -0.5\n", "max_cost_usd_per_tree must be 0"},
@@ -141,89 +139,18 @@ func TestReadPolicy(t *testing.T) {
 	}
 }
 
-// [network]: contain and allow, read from TOML and JSON, refused when out of
-// shape, and written back by FormatPolicy.
-func TestNetworkPolicy(t *testing.T) {
-	p, err := ParsePolicy([]byte("[network]\ncontain = \"on\"\nallow = [\"github.com\", \"*.npmjs.org\", \"10.0.0.5\"]\n"))
-	if err != nil {
-		t.Fatal(err)
+// home_files: empty by default, entries only under ~, written back by
+// FormatPolicy.
+func TestHomeFilesPolicy(t *testing.T) {
+	if p := DefaultPolicy(); p.HomeFiles == nil || len(p.HomeFiles) != 0 {
+		t.Fatalf("default home_files: %v", p.HomeFiles)
 	}
-	if p.Network.Contain != ContainOn || !slices.Equal(p.Network.Allow, []string{"github.com", "*.npmjs.org", "10.0.0.5"}) {
-		t.Fatalf("network: %+v", p.Network)
+	p, err := ParsePolicy([]byte("home_files = [\"~/.aws/config\"]\n"))
+	if err != nil || len(p.HomeFiles) != 1 {
+		t.Fatalf("home_files: %v %v", p.HomeFiles, err)
 	}
-	if d := DefaultPolicy(); d.Network.Contain != ContainOff || d.Network.Allow == nil || len(d.Network.Allow) != 0 {
-		t.Fatalf("default network: %+v", d.Network)
-	}
-	again, err := ParsePolicy(FormatPolicy(p))
-	if err != nil || again.Network.Contain != ContainOn || !slices.Equal(again.Network.Allow, p.Network.Allow) {
-		t.Fatalf("format and read back: %+v %v", again.Network, err)
-	}
-	if j, err := DecodePolicy([]byte(`{"network":{"allow":["github.com"]}}`)); err != nil || j.Network.Contain != ContainOff {
-		t.Fatalf("JSON: %+v %v", j.Network, err)
-	}
-	for _, bad := range []string{
-		"[network]\ncontain = \"yes\"\n",
-		"[network]\nallow = [\"https://github.com\"]\n",
-		"[network]\nallow = [\"github.com:443\"]\n",
-		"[network]\nallow = [\"github.com/x\"]\n",
-		"[network]\nallow = [\"\"]\n",
-		"[network]\nallow = [\"*\"]\n",
-		"[network]\nallow = [\"-a.com\"]\n",
-		"[network]\nhosts = []\n",
-	} {
-		if _, err := ParsePolicy([]byte(bad)); err == nil {
-			t.Errorf("accepted %q", bad)
-		}
-	}
-}
-
-// A missing contain reads as "off": no [network] table, a table with allow
-// only, and the starter file all leave agents open.
-func TestNetworkContainMissingIsOff(t *testing.T) {
-	for _, src := range []string{"", "edit = \"session\"\n", "[network]\nallow = [\"github.com\"]\n", PolicyStarter} {
-		p, err := ParsePolicy([]byte(src))
-		if err != nil {
-			t.Fatalf("%q: %v", src, err)
-		}
-		if p.Network.Contain != ContainOff {
-			t.Errorf("%q: contain %q, want %q", src, p.Network.Contain, ContainOff)
-		}
-	}
-}
-
-// "auto" was a value before 0.3 shipped; it is refused, in words that name
-// the two values left.
-func TestNetworkContainAutoRefused(t *testing.T) {
-	_, err := ParsePolicy([]byte("[network]\ncontain = \"auto\"\n"))
-	if err == nil {
-		t.Fatal("accepted contain = \"auto\"")
-	}
-	if msg := err.Error(); !strings.Contains(msg, `[network] contain must be "off" or "on"`) {
-		t.Errorf("error: %s", msg)
-	}
-	if _, err := DecodePolicy([]byte(`{"network":{"contain":"auto"}}`)); err == nil {
-		t.Error("JSON accepted contain \"auto\"")
-	}
-}
-
-// [sandbox]: off by default, on when asked. home_files: empty by default,
-// entries only under ~, written back by FormatPolicy outside [sandbox].
-func TestSandboxPolicy(t *testing.T) {
-	if p := DefaultPolicy(); p.Sandbox.Mode != SandboxOff || p.HomeFiles == nil {
-		t.Fatalf("default: %+v %v", p.Sandbox, p.HomeFiles)
-	}
-	p, err := ParsePolicy([]byte("home_files = [\"~/.aws/config\"]\n[sandbox]\nmode = \"on\"\n"))
-	if err != nil || p.Sandbox.Mode != SandboxOn || len(p.HomeFiles) != 1 {
-		t.Fatalf("on: %+v %v %v", p.Sandbox, p.HomeFiles, err)
-	}
-	if back, err := ParsePolicy(FormatPolicy(p)); err != nil || back.Sandbox.Mode != SandboxOn || back.HomeFiles[0] != "~/.aws/config" {
-		t.Errorf("FormatPolicy lost a value: %+v %v %v", back.Sandbox, back.HomeFiles, err)
-	}
-	if _, sb, _ := strings.Cut(string(FormatPolicy(p)), "\n[sandbox]\n"); strings.Contains(sb, "read =") {
-		t.Error("FormatPolicy wrote sandbox.read")
-	}
-	if _, err := ParsePolicy([]byte("[sandbox]\nmode = \"yes\"\n")); err == nil || !strings.Contains(err.Error(), "[sandbox]") {
-		t.Errorf("mode yes: %v, want a refusal naming [sandbox]", err)
+	if back, err := ParsePolicy(FormatPolicy(p)); err != nil || len(back.HomeFiles) != 1 || back.HomeFiles[0] != "~/.aws/config" {
+		t.Errorf("FormatPolicy lost home_files: %v %v", back.HomeFiles, err)
 	}
 	for _, bad := range []string{`"/etc/passwd"`, `"~/../x"`, `"~/"`, `"~"`} {
 		if _, err := ParsePolicy([]byte("home_files = [" + bad + "]\n")); err == nil || !strings.Contains(err.Error(), "home_files") {
@@ -232,7 +159,7 @@ func TestSandboxPolicy(t *testing.T) {
 		if _, err := DecodePolicy([]byte(`{"home_files":[` + bad + `]}`)); err == nil || !strings.Contains(err.Error(), "home_files") {
 			t.Errorf("JSON %s: %v, want a refusal naming home_files", bad, err)
 		}
-		// The old name reads as home_files, and is refused as it.
+		// The old [sandbox] read name reads as home_files, and is refused as it.
 		if _, err := ParsePolicy([]byte("[sandbox]\nread = [" + bad + "]\n")); err == nil || !strings.Contains(err.Error(), "home_files") {
 			t.Errorf("old %s: %v, want a refusal naming home_files", bad, err)
 		}
@@ -244,15 +171,17 @@ func TestSandboxPolicy(t *testing.T) {
 
 // sandbox.read moved to home_files in 0.5.2: a permissions.toml or a PUT
 // body that still holds it reads with its value as home_files, unless it
-// sets home_files too, which wins. A wrong type is still refused.
+// sets home_files too, which wins. A wrong type is still refused. The old
+// [sandbox] mode and [network], retired at the Copy level, are dropped
+// without error.
 func TestSandboxReadMoved(t *testing.T) {
 	p, err := ParsePolicy([]byte("[sandbox]\nmode = \"on\"\nread = [\"~/.aws/config\"]\n"))
-	if err != nil || p.Sandbox.Mode != SandboxOn || len(p.HomeFiles) != 1 || p.HomeFiles[0] != "~/.aws/config" {
-		t.Fatalf("file: %+v %v %v", p.Sandbox, p.HomeFiles, err)
+	if err != nil || len(p.HomeFiles) != 1 || p.HomeFiles[0] != "~/.aws/config" {
+		t.Fatalf("file: %v %v", p.HomeFiles, err)
 	}
 	p, err = DecodePolicy([]byte(`{"sandbox":{"mode":"on","read":["~/.aws/config"]}}`))
-	if err != nil || p.Sandbox.Mode != SandboxOn || len(p.HomeFiles) != 1 || p.HomeFiles[0] != "~/.aws/config" {
-		t.Fatalf("body: %+v %v %v", p.Sandbox, p.HomeFiles, err)
+	if err != nil || len(p.HomeFiles) != 1 || p.HomeFiles[0] != "~/.aws/config" {
+		t.Fatalf("body: %v %v", p.HomeFiles, err)
 	}
 	p, err = ParsePolicy([]byte("home_files = [\"~/.gitconfig\"]\n[sandbox]\nread = [\"~/.aws/config\"]\n"))
 	if err != nil || len(p.HomeFiles) != 1 || p.HomeFiles[0] != "~/.gitconfig" {
@@ -305,6 +234,24 @@ func TestCommandsKeyRetired(t *testing.T) {
 	}
 	if _, err := DecodePolicy([]byte(`{"command":true}`)); err == nil {
 		t.Error("JSON accepted an unknown key")
+	}
+}
+
+// unlisted is retired in 0.6.5: a permissions.toml or a PUT body that still
+// holds it reads as if it did not, whatever its value, and the policy written
+// back has no such key. A command or tool on no list is always held now.
+func TestUnlistedKeyRetired(t *testing.T) {
+	for _, src := range []string{"unlisted = \"ask\"\n", "unlisted = \"refuse\"\n", "unlisted = true\n"} {
+		p, err := ParsePolicy([]byte(src))
+		if err != nil {
+			t.Fatalf("%q: %v", src, err)
+		}
+		if strings.Contains(string(FormatPolicy(p)), "\nunlisted =") {
+			t.Errorf("%q: the policy written back holds unlisted", src)
+		}
+	}
+	if _, err := DecodePolicy([]byte(`{"unlisted":"refuse"}`)); err != nil {
+		t.Errorf("JSON with unlisted: %v", err)
 	}
 }
 
@@ -376,6 +323,11 @@ func TestDecodePolicyLegacySwitchesConverted(t *testing.T) {
 	if slices.Contains(pol.Allow, "tool:*") {
 		t.Fatalf("tools false: tool:* should be removed from Allow, got %v", pol.Allow)
 	}
+	// Editing is not taken away with tools off (the old default allowed it, and
+	// no explicit edit was set), so it stays allowed and out of forbid.
+	if !slices.Contains(pol.Allow, "tool:edit") || slices.Contains(pol.Forbid, "tool:edit") {
+		t.Fatalf("tools false should keep editing allowed: allow %v, forbid %v", pol.Allow, pol.Forbid)
+	}
 
 	// PATCH edit: none
 	pEditNone, err := DecodePolicyChange([]byte(`{"edit":"none"}`))
@@ -435,6 +387,34 @@ func TestDecodePolicyLegacySwitchesConverted(t *testing.T) {
 	}
 	if !slices.Contains(pol.Ask, "deploy") {
 		t.Fatalf("mixed patch: want deploy in Ask, got %v", pol.Ask)
+	}
+}
+
+// A legacy tools-off PATCH preserves the existing edit permission: it keeps
+// editing allowed where it was (under tool:* or an explicit tool:edit), and
+// does not grant it where the allow list did not have it.
+func TestToolsOffPreservesEditPermission(t *testing.T) {
+	off := func(allow []string) Policy {
+		t.Helper()
+		base := DefaultPolicy()
+		base.Allow = allow
+		patch, err := DecodePolicyChange([]byte(`{"agent_api":{"tools":false}}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := patch.over(base)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return res
+	}
+	// Default allow has tool:*, so editing was allowed and stays allowed.
+	if p := off([]string{"*", "tool:*"}); !slices.Contains(p.Allow, "tool:edit") || slices.Contains(p.Allow, "tool:*") {
+		t.Errorf("tools off under tool:*: editing should stay allowed, got allow %v", p.Allow)
+	}
+	// An empty allow did not allow editing, so tools off must not grant it.
+	if p := off([]string{}); slices.Contains(p.Allow, "tool:edit") {
+		t.Errorf("tools off with empty allow: editing must not be granted, got allow %v", p.Allow)
 	}
 }
 

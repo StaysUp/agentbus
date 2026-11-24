@@ -270,7 +270,16 @@ func (q *Queue) ListOns(team string) ([]On, error) {
 // deliveries. on_fires remains the idempotency key: a replay or a second tick
 // fires each (on, subject) once. Reading the subject's job for its reply
 // (deliverResult) stays: that is the delivered content, not the ended trigger.
-func (q *Queue) FireOns(team string, ended func(turn string) (bool, error), name func(id string) string, agent AgentOf) (int, error) {
+// DeliverTo is where a delivery runs: the receiving session's workspace, from
+// the record, so a delivered turn carries the same folder, machine and mode as
+// any turn of that session. The caller (control) resolves it from the store; it
+// is false for a session the record places in no workspace.
+type DeliverTo struct {
+	Workspace, FolderRef, Machine string
+	Isolate                       bool
+}
+
+func (q *Queue) FireOns(team string, ended func(turn string) (bool, error), to func(session string) (DeliverTo, bool, error), name func(id string) string, agent AgentOf) (int, error) {
 	if ended == nil {
 		return 0, nil // nothing can be known to have ended
 	}
@@ -330,7 +339,7 @@ func (q *Queue) FireOns(team string, ended func(turn string) (bool, error), name
 		if err != nil {
 			return n, err
 		}
-		did, why, err := q.deliverResult(team, p.id, p.session, mk.Turn, j, name, agent)
+		did, why, err := q.deliverResult(team, p.id, p.session, mk.Turn, j, to, name, agent)
 		if errors.Is(err, ErrFull) {
 			return n, nil // the queue is full: try again later, the on is still live
 		}

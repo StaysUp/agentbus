@@ -26,8 +26,8 @@ type BlobRoots struct {
 func (q *Queue) BlobRoots() (BlobRoots, error) {
 	var out BlobRoots
 	rows, err := q.db.Query(`SELECT j.spec, j.result FROM jobs j
-		WHERE NOT EXISTS (SELECT 1 FROM sessions s WHERE s.closed IS NOT NULL AND s.id = COALESCE(j.session,
-			(SELECT t.session FROM attempts a JOIN jobs t ON t.id = a.job
+		WHERE NOT EXISTS (SELECT 1 FROM copies s WHERE s.closed IS NOT NULL AND s.id = COALESCE(NULLIF(json_extract(j.spec, '$.workspace'), ''), j.session,
+			(SELECT COALESCE(NULLIF(json_extract(t.spec, '$.workspace'), ''), t.session) FROM attempts a JOIN jobs t ON t.id = a.job
 				WHERE j.kind = 'snapshot' AND a.id = substr(j.idem_key, length('snapshot/') + 1))))`)
 	if err != nil {
 		return out, fmt.Errorf("queue: read blob roots: %w", err)
@@ -36,7 +36,7 @@ func (q *Queue) BlobRoots() (BlobRoots, error) {
 		return out, err
 	}
 	// A session's own snapshot id, for a session made from one.
-	srows, err := q.db.Query(`SELECT snapshot FROM sessions WHERE closed IS NULL AND snapshot <> ''`)
+	srows, err := q.db.Query(`SELECT snapshot FROM copies WHERE closed IS NULL AND snapshot <> ''`)
 	if err != nil {
 		return out, fmt.Errorf("queue: read blob roots: %w", err)
 	}
@@ -52,25 +52,32 @@ func (q *Queue) BlobRoots() (BlobRoots, error) {
 func (q *Queue) RunnerBlobRoots(runnerID string, recent time.Duration) (BlobRoots, error) {
 	var out BlobRoots
 	since := nanos(q.now().Add(-recent))
-	const held = `WITH held AS (SELECT j.id, COALESCE(j.session, (SELECT t.session FROM attempts sa JOIN jobs t ON t.id = sa.job
-			WHERE j.kind = 'snapshot' AND sa.id = substr(j.idem_key, length('snapshot/') + 1))) AS session
+	// copy is the workspace a job's blobs belong to (its spec workspace, or its
+	// session, its own workspace), so the roots keep every blob of the one copy
+	// a workspace shares -- the snapshots and jobs of an asked session included,
+	// not only the held session's. A snapshot job has no spec workspace; its
+	// copy is its attempt's turn's.
+	const held = `WITH held AS (SELECT j.id,
+			COALESCE(NULLIF(json_extract(j.spec, '$.workspace'), ''), j.session,
+				(SELECT COALESCE(NULLIF(json_extract(t.spec, '$.workspace'), ''), t.session) FROM attempts sa JOIN jobs t ON t.id = sa.job
+					WHERE j.kind = 'snapshot' AND sa.id = substr(j.idem_key, length('snapshot/') + 1))) AS copy
 		FROM attempts r JOIN jobs j ON j.id = r.job WHERE r.runner = ? AND (r.ended IS NULL OR r.ended >= ?)),
-	ss AS (SELECT DISTINCT session FROM held WHERE session IS NOT NULL) `
+	cc AS (SELECT DISTINCT copy FROM held WHERE copy IS NOT NULL) `
 	rows, err := q.db.Query(held+`
 		SELECT spec, result FROM jobs WHERE id IN (SELECT id FROM held)
 		UNION ALL
-		SELECT spec, result FROM jobs WHERE session IN (SELECT session FROM ss)
+		SELECT spec, result FROM jobs WHERE `+jobWorkspace+` IN (SELECT copy FROM cc)
 		UNION ALL
 		SELECT s.spec, s.result FROM jobs t JOIN attempts a ON a.job = t.id
 			JOIN jobs s ON s.team = t.team AND s.idem_key = 'snapshot/' || a.id AND s.kind = 'snapshot'
-			WHERE t.session IN (SELECT session FROM ss)`, runnerID, since)
+			WHERE COALESCE(NULLIF(json_extract(t.spec, '$.workspace'), ''), t.session) IN (SELECT copy FROM cc)`, runnerID, since)
 	if err != nil {
 		return out, fmt.Errorf("queue: read blob roots: %w", err)
 	}
 	if err := out.addJobs(rows); err != nil {
 		return out, err
 	}
-	srows, err := q.db.Query(held+`SELECT snapshot FROM sessions WHERE id IN (SELECT session FROM ss) AND snapshot <> ''`, runnerID, since)
+	srows, err := q.db.Query(held+`SELECT snapshot FROM copies WHERE id IN (SELECT copy FROM cc) AND snapshot <> ''`, runnerID, since)
 	if err != nil {
 		return out, fmt.Errorf("queue: read blob roots: %w", err)
 	}
@@ -95,6 +102,13 @@ func (out *BlobRoots) addJobs(rows *sql.Rows) error {
 		}
 		res, _ := ReadResult(json.RawMessage(*result))
 		out.Changesets = appendSet(out.Changesets, res.Changeset)
+		if u := res.Update; u != nil {
+			// An update's folder baseline (from) and merge (to) changesets are
+			// named by a later apply, which may come after the retention grace
+			// period, so they are roots until then -- or the sweep removes them
+			// and the apply fails.
+			out.Changesets = appendSet(out.Changesets, u.From, u.To)
+		}
 		if s := res.Snapshot; s != nil {
 			out.Trees = appendSet(out.Trees, s.ID, s.Git)
 			out.Blobs = appendSet(out.Blobs, s.Times)

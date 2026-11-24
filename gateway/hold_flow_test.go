@@ -44,7 +44,7 @@ func heldGuard(t *testing.T, ctx context.Context, stream string, ask []string, d
 	g := New(&url.URL{}, anthropic.Adapter{}, mem)
 	g.SetDecider(d)
 	g.SetHoldTiming(120*time.Millisecond, 30*time.Millisecond, 10*time.Millisecond)
-	b := g.guardReply(ctx, &exchange{id: "x1", session: "s1", turn: "t_1"}, Rules{Ask: ask}, nil,
+	b := g.guardReply(ctx, &exchange{id: "x1", session: "s1", turn: "t_1"}, Rules{Ask: ask}, nil, nil,
 		io.NopCloser(strings.NewReader(stream)), func() {})
 	return b, g, mem
 }
@@ -290,7 +290,7 @@ func TestHoldCloseRecordsDecision(t *testing.T) {
 	g.SetDecider(&fakeDecider{}) // never decided
 	g.SetHoldTiming(5*time.Second, 20*time.Millisecond, 100*time.Millisecond)
 	b := g.guardReply(context.Background(), &exchange{id: "x1", session: "s1", turn: "t_1"},
-		Rules{Ask: []string{"git push"}}, nil, io.NopCloser(strings.NewReader(anthropicAskStream)), func() {})
+		Rules{Ask: []string{"git push"}}, nil, nil, io.NopCloser(strings.NewReader(anthropicAskStream)), func() {})
 	// Read until a ping shows the hold is live, in this one goroutine.
 	buf := make([]byte, 4096)
 	var got string
@@ -328,7 +328,7 @@ func TestInlineRefusalCloseRecordsNoDecision(t *testing.T) {
 			g := New(&url.URL{}, anthropic.Adapter{}, mem)
 			// No SetDecider: an Ask call is refused inline, never held.
 			b := g.guardReply(context.Background(), &exchange{id: "x1", session: "s1", turn: "t_1"},
-				Rules{Ask: []string{"git push"}}, nil, io.NopCloser(strings.NewReader(tc.stream)), func() {})
+				Rules{Ask: []string{"git push"}}, nil, nil, io.NopCloser(strings.NewReader(tc.stream)), func() {})
 			raw, _ := io.ReadAll(b)
 			b.Close()
 			if !strings.Contains(string(raw), RefusedPrefix) {

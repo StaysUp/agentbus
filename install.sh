@@ -8,8 +8,8 @@
 #   AGENTBUS_INSTALL_DIR  where to put the binary; ~/.local/bin when unset
 #
 # On Linux systems that restrict unprivileged user namespaces (Ubuntu 24.04
-# and later), agentbus needs an AppArmor profile for the session wall,
-# [network] contain and overlay copies without root. A profile is given only
+# and later), agentbus needs an AppArmor profile for a Copy session's command
+# wall, its network allow-list and overlay copies without root. A profile is given only
 # to a binary that only root can change, so it is never written for one in
 # ~/.local/bin. Installing as root on such a system puts the binary in
 # /usr/local/bin (unless AGENTBUS_INSTALL_DIR says otherwise), offers the
@@ -115,8 +115,8 @@ $home/.local/bin/agentbus"
 apparmor_profile() {
   cat <<PROFILE
 # AppArmor profile for agentbus, written by its install.sh: lets it make
-# user namespaces, for the session wall, [network] contain and overlay
-# copies without root. Its path must be one only root can change.
+# user namespaces, for a Copy session's command wall, its network allow-list
+# and overlay copies without root. Its path must be one only root can change.
 
 abi <abi/4.0>,
 include <tunables/global>
@@ -234,7 +234,7 @@ profiled=
 if [ "$os" = linux ] && needs_apparmor; then
   say ""
   say "This system's AppArmor allows user namespaces only to a program with a profile. Without one,"
-  say "agentbus cannot build the session wall or [network] contain, and a copy is a plain copy."
+  say "agentbus cannot build a Copy session's command wall or its network allow-list, and a copy is a plain copy."
   # The path checked, printed and given the profile is one: the binary's
   # own, links resolved, so a command printed here is the one that passed.
   bin=$(readlink -f "$dir/agentbus" 2>/dev/null) || bin=

@@ -100,7 +100,7 @@ func TestUpStartsWithNoAgents(t *testing.T) {
 		t.Fatalf("a turn naming codex: %d %s", code, raw)
 	}
 	if c := waitClosed(t, svc.store, out["session"].(string)); c.ExitCode == nil || *c.ExitCode != 0 {
-		t.Fatalf("session.closed %+v, want exit_code 0", c)
+		t.Fatalf("run.ended %+v, want exit_code 0", c)
 	}
 	job := waitEnded(t, svc, out["turn"].(string))
 	if job.Spec.Harness != "codex" || job.Spec.Access != "subscription" {

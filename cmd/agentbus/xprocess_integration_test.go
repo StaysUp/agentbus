@@ -115,9 +115,16 @@ type xproc struct {
 // agents' calls.
 func startServer(t *testing.T, harnesses ...string) *xproc {
 	t.Helper()
+	return startServerEnv(t, nil, harnesses...)
+}
+
+// startServerEnv is startServer with more variables in control's environment,
+// such as a HOME of its own, so control and a runner stand for two machines.
+func startServerEnv(t *testing.T, extra []string, harnesses ...string) *xproc {
+	t.Helper()
 	x := &xproc{t: t, bin: agentbusBinary(t), serverHome: t.TempDir()}
 	connectFake(t, x.serverHome, harnesses...)
-	env := append(os.Environ(), "AGENTBUS_HOME="+x.serverHome)
+	env := append(append(os.Environ(), "AGENTBUS_HOME="+x.serverHome), extra...)
 	addr := x.spawn(t, "server", []string{"server", "-listen", "127.0.0.1:0"}, env, reListening)
 	x.base = "http://" + addr
 	x.tok = readToken(t, x.serverHome)
@@ -321,10 +328,49 @@ type turnStart struct {
 	State   string `json:"state"`
 }
 
-// startTurnX sends POST /api/v0/turns and returns its status and answer. The
-// turn runs on whichever runner owns its folder.
+// startTurnX starts a turn. A first turn (a folder or folder_ref, no session)
+// runs the 3-call flow first: create the workspace (its folder and sandbox
+// mode) and a session in it, then post the turn naming the session. A body that
+// already names a session is posted as-is. The turn runs on whichever runner
+// owns its folder.
 func (x *xproc) startTurnX(body map[string]any) (int, turnStart) {
 	x.t.Helper()
+	if body["session"] == nil && (body["folder_ref"] != nil || body["folder"] != nil) {
+		wsBody := map[string]any{"sandbox": true}
+		if v, ok := body["isolate"].(bool); ok {
+			wsBody["sandbox"] = v
+		}
+		for from, to := range map[string]string{"folder": "folder", "folder_ref": "folder_ref", "machine": "machine", "connector": "machine"} {
+			if v, ok := body[from]; ok {
+				wsBody[to] = v
+			}
+		}
+		code, wb := x.post("/api/v0/workspaces", wsBody)
+		if code/100 != 2 {
+			return code, turnStart{}
+		}
+		var ws struct {
+			Workspace string `json:"workspace"`
+		}
+		json.Unmarshal(wb, &ws)
+		code, sb := x.post("/api/v0/sessions", map[string]any{"workspace": ws.Workspace})
+		if code/100 != 2 {
+			return code, turnStart{}
+		}
+		var sc struct {
+			Session string `json:"session"`
+		}
+		json.Unmarshal(sb, &sc)
+		nb := map[string]any{"session": sc.Session}
+		for k, v := range body {
+			switch k {
+			case "folder", "folder_ref", "machine", "connector", "isolate", "read_only":
+			default:
+				nb[k] = v
+			}
+		}
+		body = nb
+	}
 	code, b := x.post("/api/v0/turns", body)
 	var st turnStart
 	_ = json.Unmarshal(b, &st)
@@ -391,10 +437,10 @@ func TestXProcRunnerForwardsRecord(t *testing.T) {
 	// start and close, and, at the job's end, control's own turn.changed.
 	waitFor(t, "the runner's turn in control's record", func() bool {
 		k := x.recordKinds(st.Session)
-		return hasKind(k, "session.closed") && hasKind(k, "turn.changed")
+		return hasKind(k, "run.ended") && hasKind(k, "turn.changed")
 	})
 	k := x.recordKinds(st.Session)
-	for _, want := range []string{"session.opened", "turn.started", "session.closed", "turn.changed"} {
+	for _, want := range []string{"run.started", "turn.started", "run.ended", "turn.changed"} {
 		if !hasKind(k, want) {
 			t.Fatalf("control's record lacks %s: %v", want, k)
 		}

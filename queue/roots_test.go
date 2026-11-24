@@ -2,6 +2,7 @@ package queue
 
 import (
 	"encoding/json"
+	"github.com/staysup/agentbus/ids"
 	"slices"
 	"testing"
 	"time"
@@ -55,7 +56,7 @@ func TestBlobRoots(t *testing.T) {
 			}
 		}
 	}
-	if _, err := q.CloseSession(DefaultTeam, s1); err != nil {
+	if _, err := q.CloseSession(DefaultTeam, ids.WorkspaceID(s1)); err != nil {
 		t.Fatal(err)
 	}
 	roots, _ = q.BlobRoots()

@@ -195,7 +195,10 @@ func New(cfg Config) (*Server, error) {
 // removes its copy and its home. A session with a job that has not ended is
 // refused (queue.ErrSessionBusy).
 func (s *Server) CloseSession(session string) (queue.Workspace, error) {
-	ws, err := s.cfg.Queue.CloseSession(queue.DefaultTeam, session)
+	// Deprecated (B14): the close path is keyed by the copy, which is the
+	// workspace id; a migrated session is its own workspace. Nothing calls this
+	// now. The session-to-workspace step goes through the one door (CopyKey).
+	ws, err := s.cfg.Queue.CloseSession(queue.DefaultTeam, queue.CopyKey("", session))
 	if err == nil {
 		s.cfg.Sweeper.Kick() // its blobs may go now
 	}

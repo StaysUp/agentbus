@@ -81,7 +81,7 @@ func TestUpgradeSteps(t *testing.T) {
 	}
 	wantRetired := "commands,subscriptions_on_runners,agent_api.continue,sandbox.read," +
 		"agent_api.scope,agent_api.read,agent_api.list_agents,agent_api.start,agent_api.review,agent_api.cancel,agent_api.rename,share_read_only,read_folders," +
-		"agent_api.tools,subagents,edit"
+		"agent_api.tools,subagents,edit,sandbox.mode,network.contain,network.allow,unlisted"
 	if strings.Join(retiredKeys, ",") != wantRetired {
 		t.Errorf("retired keys %v, want %s", retiredKeys, wantRetired)
 	}
@@ -295,12 +295,12 @@ func TestChangeAndEventSavedTogether(t *testing.T) {
 // PUT can replace it.
 func TestDBBrokenPolicy(t *testing.T) {
 	d := openTestDB(t, t.TempDir())
-	if _, err := d.db.Exec(`INSERT INTO settings(name, value, updated) VALUES ('permissions', '{"unlisted":"everywhere"}', '')`); err != nil {
+	if _, err := d.db.Exec(`INSERT INTO settings(name, value, updated) VALUES ('permissions', '{"isolation":"everywhere"}', '')`); err != nil {
 		t.Fatal(err)
 	}
 	_, v, err := d.Policy()
 	var se *Error
-	if !errors.As(err, &se) || !strings.Contains(se.Why, "unlisted") || v == "" {
+	if !errors.As(err, &se) || !strings.Contains(se.Why, "isolation") || v == "" {
 		t.Fatalf("broken: %q %v", v, err)
 	}
 	if _, err := Read(d); !errors.As(err, &se) {
@@ -397,7 +397,7 @@ func TestChangePolicyOnlyKeysSent(t *testing.T) {
 	if _, err := DecodePolicyChange([]byte(`{"nope":1}`)); err == nil {
 		t.Error("an unknown key was read")
 	}
-	bad := Policy{Unlisted: "everywhere"}
+	bad := Policy{Isolation: "everywhere"}
 	if _, _, err := d.ChangePolicy(bad, Any); err == nil {
 		t.Error("a value out of range was stored")
 	}

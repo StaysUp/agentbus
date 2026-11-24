@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,7 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/store"
 )
 
 // A session starts in a folder the person types, on a server with a runner
@@ -26,9 +29,10 @@ func TestTypedFolderOnServer(t *testing.T) {
 	sp := startProc(t, bin, serverHome, bins, "server", "-listen", addr, "-replay=false")
 	c := waitService(t, sp, addr, serverHome)
 	folder := personFolder(t)
+	// The folder is checked when its workspace is created, before any turn.
 	post := func(path string) (int, string) {
 		var e struct{ Error string }
-		code, _ := c.call("POST", "/api/v0/turns", map[string]any{"agent": "claude", "folder": path, "prompt": "hi", "isolate": true}, &e)
+		code, _ := c.call("POST", "/api/v0/workspaces", map[string]any{"folder": path, "sandbox": true}, &e)
 		return code, e.Error
 	}
 
@@ -71,8 +75,8 @@ func TestTypedFolderOnServer(t *testing.T) {
 		t.Fatalf("another missing folder: %d %q", code, msg)
 	}
 	// A machine named that is not online.
-	if code, _ := c.call("POST", "/api/v0/turns", map[string]any{"agent": "claude", "folder": folder, "prompt": "hi",
-		"connector": "con_0123456789abcdef"}, nil); code != http.StatusServiceUnavailable {
+	if code, _ := c.call("POST", "/api/v0/workspaces", map[string]any{"folder": folder,
+		"machine": "con_0123456789abcdef", "sandbox": true}, nil); code != http.StatusServiceUnavailable {
 		t.Fatalf("an unknown machine: %d", code)
 	}
 
@@ -93,8 +97,10 @@ func TestTypedFolderOnServer(t *testing.T) {
 	}
 
 	// A retry with the same idempotency key gets the same turn, without the
-	// folder being checked again: here it has moved away since.
-	retry := map[string]any{"agent": "claude", "folder": folder, "prompt": "again", "isolate": true, "idempotency_key": "typed-1"}
+	// folder being checked again: here it has moved away since. The turn names
+	// its session; the retry is the same turn in it.
+	sess := c.newWorkspaceSession(map[string]any{"folder": folder, "isolate": true})
+	retry := map[string]any{"session": sess, "agent": "claude", "prompt": "again", "idempotency_key": "typed-1"}
 	first := c.turn(retry)
 	if err := os.Rename(folder, folder+".moved"); err != nil {
 		t.Fatal(err)
@@ -110,9 +116,9 @@ func TestTypedFolderOnServer(t *testing.T) {
 	if code != http.StatusAccepted || second.Turn != first.Turn || !second.Existing {
 		t.Fatalf("its retry: %d %s, want turn %s again", code, out, first.Turn)
 	}
-	// The same key with another folder is another request.
-	if code, out := c.call("POST", "/api/v0/turns", merge(retry, map[string]any{"folder": missing}), nil); code != http.StatusConflict {
-		t.Fatalf("the key with another folder: %d %s", code, out)
+	// The same key with another prompt is another request.
+	if code, out := c.call("POST", "/api/v0/turns", merge(retry, map[string]any{"prompt": "different"}), nil); code != http.StatusConflict {
+		t.Fatalf("the key with another prompt: %d %s", code, out)
 	}
 
 	// With a second machine, a typed folder must name one. The missing
@@ -157,6 +163,37 @@ func TestTypedFolderOnServer(t *testing.T) {
 	}
 	if kinds[queue.KindFolder] < 5 {
 		t.Errorf("folder jobs: %v", kinds)
+	}
+
+	// The record holds the folder becoming known: one folder.registered, with
+	// its reference and machine and no path, however many folder jobs ran.
+	st, err := store.Open(filepath.Join(serverHome, "events.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	recs, err := st.After(0, store.Filter{}, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reg []event.Event
+	for _, r := range recs {
+		var e event.Event
+		if err := json.Unmarshal(r.Data, &e); err != nil {
+			t.Fatal(err)
+		}
+		if e.Kind == event.FolderRegistered {
+			reg = append(reg, e)
+		}
+	}
+	if len(reg) != 1 {
+		t.Fatalf("folder.registered events: %d, want 1", len(reg))
+	}
+	if reg[0].FolderRef != fs.Folders[0].Ref || reg[0].Machine != fs.Folders[0].Machine {
+		t.Fatalf("folder.registered: %+v, want ref %s machine %s", reg[0], fs.Folders[0].Ref, fs.Folders[0].Machine)
+	}
+	if reg[0].Folder != "" || reg[0].Session != "" {
+		t.Fatalf("folder.registered carries a path or a session: %+v", reg[0])
 	}
 	files, _ := filepath.Glob(filepath.Join(serverHome, "jobs.db*"))
 	records, _ := filepath.Glob(filepath.Join(serverHome, "events.db*"))

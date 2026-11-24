@@ -49,7 +49,7 @@ func TestRecordRoute(t *testing.T) {
 		return b
 	}
 	ev := func(id string, kind event.Kind, turn string) json.RawMessage { return evIn(id, kind, session, turn) }
-	batch := RecordBatch{Number: 1, Events: []json.RawMessage{ev("evt_1", event.TurnStarted, turn), ev("evt_2", event.SessionClosed, turn)}}
+	batch := RecordBatch{Number: 1, Events: []json.RawMessage{ev("evt_1", event.TurnStarted, turn), ev("evt_2", event.RunEnded, turn)}}
 	var ack RecordAck
 	if code := send(t, srv, a.Token, "POST", path, batch, &ack); code != 200 || ack.Stored != 2 {
 		t.Fatalf("record: %d %+v", code, ack)
@@ -181,12 +181,12 @@ func TestRunnerApprovalDecisionOwnership(t *testing.T) {
 	if state, err := s.approvalState(taken.Attempt.ID + "-ap-legacy"); err != nil || state != DecisionPending {
 		t.Fatalf("the legacy approval bound state: %q %v, want pending (stored)", state, err)
 	}
-	// A whole legacy batch — a raw-id request AND the turn's session.closed —
+	// A whole legacy batch — a raw-id request AND the turn's run.ended —
 	// stores (both events new), so an old protocol-5 runner is not stuck after
 	// an Ask (the P2): binding scoped the raw id rather than rejecting the batch.
 	legacy := RecordBatch{Number: 1, Events: []json.RawMessage{
 		ev("evt_legacy2", event.ApprovalRequested, session, turn, "ap-legacy2", "git push"),
-		ev("evt_legacy_close", event.SessionClosed, session, turn, "", ""),
+		ev("evt_legacy_close", event.RunEnded, session, turn, "", ""),
 	}}
 	var ack RecordAck
 	if code := send(t, srv, a.Token, "POST", path, legacy, &ack); code != 200 || ack.Stored != 2 {
@@ -230,7 +230,7 @@ func TestCloseLost(t *testing.T) {
 		if _, _, err := q.Start(rn.ID, a.ID, a.Number, 30*time.Second); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := st.Append(event.Event{ID: queue.NewID("evt_"), Kind: event.SessionOpened, Time: now, Session: j.Session, Turn: j.Turn}); err != nil {
+		if _, _, err := st.Append(event.Event{ID: queue.NewID("evt_"), Kind: event.RunStarted, Time: now, Session: j.Session, Turn: j.Turn}); err != nil {
 			t.Fatal(err)
 		}
 		attempts = append(attempts, a.ID)

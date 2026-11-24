@@ -1,8 +1,9 @@
 # AppArmor profile for agentbus. Ubuntu 23.10 and later
 # (kernel.apparmor_restrict_unprivileged_userns=1) let an unconfined program
 # make a user namespace only with no capabilities in it. agentbus needs
-# them: for the session wall (bubblewrap), for [network] contain (loopback
-# in the agent's network namespace) and for overlay copies without root.
+# them: for a Copy session's command wall (bubblewrap), for its network
+# allow-list (loopback in the agent's network namespace) and for overlay
+# copies without root.
 # This profile allows user namespaces and nothing else changes, the way
 # Ubuntu's own profiles do it for chrome and flatpak. The programs agentbus
 # starts, bubblewrap and the agents among them, keep this profile, so

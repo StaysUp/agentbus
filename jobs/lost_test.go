@@ -13,7 +13,7 @@ import (
 // finish) gets its turn.applied, once: failed, naming the lost runner.
 // The job then names the event, and a write that fails is tried again on
 // the next call (0.5.1).
-func TestLostApplyGetsTurnApplied(t *testing.T) {
+func TestLostApplyGetsWorkspaceApplied(t *testing.T) {
 	e, rec, clock := newFailingEnv(t)
 	spec := queue.Spec{Session: "s_1", Machine: testConnector, FolderRef: "fld_0123456789abcdef", ApplyTo: "blob2"}
 	links := queue.Links{AppliesTurn: "t_1", AppliesTurns: []string{"t_1"}}
@@ -41,7 +41,7 @@ func TestLostApplyGetsTurnApplied(t *testing.T) {
 	if n, err := CloseLostApplies(e.q, rec); err == nil || n != 0 {
 		t.Fatalf("with the record failing: %d %v", n, err)
 	}
-	if k := e.kinds(t, "s_1"); k[event.TurnApplied] != 0 {
+	if k := e.kinds(t, "s_1"); k[event.WorkspaceApplied] != 0 {
 		t.Fatalf("the record holds %v", k)
 	}
 	if n, err := CloseLostApplies(e.q, rec); err != nil || n != 1 {
@@ -50,7 +50,7 @@ func TestLostApplyGetsTurnApplied(t *testing.T) {
 	if n, err := CloseLostApplies(e.q, rec); err != nil || n != 0 {
 		t.Fatalf("closed %d again, %v", n, err)
 	}
-	if k := e.kinds(t, "s_1"); k[event.TurnApplied] != 1 {
+	if k := e.kinds(t, "s_1"); k[event.WorkspaceApplied] != 1 {
 		t.Fatalf("the record holds %v, want one turn.applied", k)
 	}
 	j, _ = e.q.Get(queue.DefaultTeam, j.ID)

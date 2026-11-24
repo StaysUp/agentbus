@@ -75,7 +75,7 @@ func guardOut(t *testing.T, stream string, ask []string) (string, *Gateway, *eve
 	t.Helper()
 	mem := &event.Memory{}
 	g := New(&url.URL{}, anthropic.Adapter{}, mem)
-	b := g.guardReply(context.Background(), &exchange{id: "x1", session: "s1", turn: "t_1"}, Rules{Ask: ask}, nil,
+	b := g.guardReply(context.Background(), &exchange{id: "x1", session: "s1", turn: "t_1"}, Rules{Ask: ask}, nil, nil,
 		io.NopCloser(strings.NewReader(stream)), func() {})
 	raw, _ := io.ReadAll(b)
 	b.Close()
@@ -165,7 +165,7 @@ func TestAskUnstreamedRefusesAndRecords(t *testing.T) {
 func TestAskRecordsMatchedRuleNotRawCommand(t *testing.T) {
 	mem := &event.Memory{}
 	g := New(&url.URL{}, anthropic.Adapter{}, mem)
-	b := g.guardReply(context.Background(), &exchange{id: "x1", session: "s1", turn: "t_1"}, Rules{Ask: []string{"git push"}}, nil,
+	b := g.guardReply(context.Background(), &exchange{id: "x1", session: "s1", turn: "t_1"}, Rules{Ask: []string{"git push"}}, nil, nil,
 		io.NopCloser(strings.NewReader("")), func() {}).(*guardBody)
 	item := map[string]any{"name": "Bash", "input": map[string]any{"command": "git push origin main"}}
 	b.decide("0", "toolu_1", "Bash", json.RawMessage(`{"command":"git push origin main"}`), item)
@@ -186,7 +186,7 @@ func TestAskRecordsMatchedRuleNotRawCommand(t *testing.T) {
 // the forbid message (it is refused in place, not through fixHistory).
 func TestAskLocalShellCallUsesAskText(t *testing.T) {
 	g := New(&url.URL{}, openai.Adapter{}, &event.Memory{})
-	b := g.guardReply(context.Background(), &exchange{id: "x1", session: "s1", turn: "t_1"}, Rules{Ask: []string{"git push"}}, nil,
+	b := g.guardReply(context.Background(), &exchange{id: "x1", session: "s1", turn: "t_1"}, Rules{Ask: []string{"git push"}}, nil, nil,
 		io.NopCloser(strings.NewReader("")), func() {}).(*guardBody)
 	item := map[string]any{"type": "local_shell_call", "call_id": "c1",
 		"action": map[string]any{"type": "exec", "command": []any{"/bin/zsh", "-lc", "git push"}}}
@@ -230,7 +230,7 @@ func TestAskNoTerminalEventNoApproval(t *testing.T) {
 	} {
 		mem := &event.Memory{}
 		g := New(&url.URL{}, anthropic.Adapter{}, mem)
-		b := g.guardReply(context.Background(), &exchange{id: "x1", session: "s1", turn: "t_1"}, Rules{Ask: []string{"git push"}}, nil, src, func() {})
+		b := g.guardReply(context.Background(), &exchange{id: "x1", session: "s1", turn: "t_1"}, Rules{Ask: []string{"git push"}}, nil, nil, src, func() {})
 		io.ReadAll(b)
 		b.Close()
 		g.Close()

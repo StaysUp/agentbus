@@ -34,7 +34,8 @@ type route struct {
 	// doc is the description. Its first sentence says what the route does.
 	doc     string
 	query   []param
-	body    any // a zero value of the request body's type; nil for none
+	body    any  // a zero value of the request body's type; nil for none
+	bodyOpt bool // the body is optional (an empty request is valid)
 	replies []reply
 	// public routes need no token. The router skips them: public answers
 	// them before the token check.
@@ -109,7 +110,20 @@ var (
 	badRequest  = fail(http.StatusBadRequest, "The request is refused; error says why.")
 	noSession   = fail(http.StatusNotFound, "No such session.")
 	mismatch    = ok(http.StatusConflict, StoreMismatch{}, "The cursor belongs to another store. Start over from the snapshot.")
+
+	// idempotentConflictReply is the 409 every store-backed create POST can
+	// give when an idempotency_key is reused with other fields.
+	idempotentConflictReply = fail(http.StatusConflict, "idempotency_key already made this with other fields; send a new key.")
 )
+
+// createReplies are the responses every store-backed create POST can give: its
+// success, plus the ones the shared idempotency guard returns (400, 409, 500).
+// A route that resolves a typed folder adds its own (404, 429, 503) as extra.
+// Deriving them from one place keeps a returnable status from going
+// undocumented (his rule, 2026-11-21: one shared pipeline, not per-handler).
+func createReplies(success reply, extra ...reply) []reply {
+	return slices.Concat([]reply{success, badRequest, idempotentConflictReply, storeFailed}, extra)
+}
 
 // startTurn's 400 and 500, saying what each means for a turn.
 var (
@@ -118,6 +132,9 @@ var (
 		"and nothing is stored. GET /api/v0/harnesses shows which harnesses the service finds.")
 	turnFailed = fail(http.StatusInternalServerError, "The store could not be written, or the agent's program would not start.")
 )
+
+// elsewhere is the file routes' 409: they act on control's disk only.
+var elsewhere = fail(http.StatusConflict, "The session's folder is on a machine other than control's: these routes act on control's disk only.")
 
 // streamDoc is the one description of the event stream's framing.
 const streamDoc = "Server-sent events. Every stored event after the cursor, in order, then new ones as they land. " +
@@ -133,7 +150,8 @@ var tags = []struct {
 	runner    bool
 }{
 	{name: "Turns", doc: "A turn is one message to an agent, its reply and its changes. Every action is on a turn: start it, stop it, read its diff, apply its changes to the person's folder, ask another agent to review it, and read its model calls."},
-	{name: "Sessions", doc: "A session is a conversation: its turns, in order. Read its history, search it, name it or close it."},
+	{name: "Sessions", doc: "A session is a conversation: its turns, in order. Read its history, search it, name it or close it. Create one in a workspace, then run its turns."},
+	{name: "Workspaces", doc: "A workspace is where turns run: it owns the folder, the machine and the sandbox mode (a copy behind a wall, or the folder as it is). Create one, then create a session in it, then run the session's turns. The folder and the mode are the workspace's; a session carries neither."},
 	{name: "Agents", doc: "Saved agents: a harness, how it reaches its model, the model and a name. A turn names one. And the harnesses, runners and folders a turn can use."},
 	{name: "Tools", doc: "The tools control serves to agents: the built-in ones and the person's own, in one stored format. List, add and remove them. The main token only."},
 	{name: "Files", doc: "Access to files and folders outside the session copy, gated on control."},
@@ -337,26 +355,9 @@ var routes = slices.Concat([]route{
 		turns:     true,
 		wrappable: true,
 		serve:     (*API).turnContext},
-	{method: "POST", path: "/api/v0/turns/{id}/apply", op: "applyTurn",
-		idDoc:   turnIDDoc,
-		tag:     "Turns",
-		summary: "Apply a turn's changes",
-		doc: "Put a turn's file changes into the person's folder: the folder its session's copy was made from. A turn works in its own copy, so its changes reach the person's folder only by an apply. No body is read.\n\n" +
-			"The apply writes the session's changes up to and including this turn: each file added or changed, and removes each one deleted. " +
-			"Before it writes anything it checks every file in the folder: one that is neither as it was at the turn's start nor already as the turn left it refuses the whole apply, " +
-			"with 409, state refused, and each file in conflicts with why. Nothing is written then, so the agent can read why and make another turn. " +
-			"Applying the same turn again is a no-op: 200 with already true and the files the first apply wrote. " +
-			"An apply that was refused may be asked for again. " +
-			"It runs on the runner of the folder's machine, in a place of its own, so it does not wait behind running turns. " +
-			"The reply waits up to 30 seconds; past that it is 202 with state queued or running, and GET /api/v0/turns/{id}/diff shows how it ended.",
-		replies: []reply{ok(200, ApplyState{}, "Applied: files lists what was written. already true: applied before, and nothing more was written."),
-			ok(202, ApplyState{}, "The apply has not finished yet."),
-			badRequest,
-			fail(404, "This service keeps no queue, or no turn of this service has this id."),
-			ok(409, ApplyState{}, "Refused or failed: error says why, and conflicts names each file in your folder that changed. Nothing was written on a conflict."),
-			tooMany, fail(503, "The runner of the folder's machine has not been seen for a minute. Nothing was written and no apply was made."), storeFailed},
-		turn:  applyTurnTok,
-		serve: (*API).applyTurn},
+	// Apply is a workspace operation, on POST /api/v0/workspaces/{id}/apply: a
+	// turn works in its workspace's copy, so its changes reach the folder only
+	// by an apply of the workspace. There is no per-turn apply route.
 	// B15: the review route is removed. Review is a default app (review_turn,
 	// apps.go) — ask_agent with a review prompt — so core holds no review route,
 	// kind, verdict or recipe. A review is a normal turn.
@@ -380,6 +381,114 @@ var routes = slices.Concat([]route{
 		turn:  treeTurn,
 		serve: callOfTurn((*API).callPiece)},
 
+	{method: "POST", path: "/api/v0/workspaces", op: "createWorkspace",
+		tag:     "Workspaces",
+		summary: "Create a workspace",
+		doc: "Create a workspace: where turns run. Send folder (an absolute path) or folder_ref, optionally machine, and sandbox (true by default: turns run in a copy of the folder behind a wall; false: in the folder as it is). The reply names the workspace; create a session in it (POST /api/v0/sessions), then run the session's turns.\n\n" +
+			"A typed folder's machine checks and registers it, and the workspace keeps only its reference. With idempotency_key a retry returns the same workspace and makes nothing new.",
+		body:    WorkspaceRequest{},
+		replies: createReplies(ok(201, store.Workspace{}, "The workspace."), fail(404, "This service keeps no queue, or no such machine."), tooMany, stopping),
+		serve:   plain((*API).createWorkspace)},
+	{method: "GET", path: "/api/v0/workspaces", op: "listWorkspaces",
+		tag:     "Workspaces",
+		summary: "List workspaces",
+		doc:     "Every workspace, newest first, each with its folder, machine, sandbox mode and apply state.",
+		replies: []reply{ok(200, WorkspacesPage{}, "The workspaces."), storeFailed},
+		serve:   plain((*API).listWorkspaces)},
+	{method: "GET", path: "/api/v0/workspaces/{id}", op: "getWorkspace",
+		tag:     "Workspaces",
+		summary: "Get a workspace",
+		idDoc:   "A workspace id (ws_ and 16 hex digits), as POST /api/v0/workspaces named it. Another shape gets 404.",
+		doc:     "One workspace: its folder, folder reference, machine, sandbox mode, when it was created, its head turn (the latest with a changeset), the turn its latest apply went up to, and when its latest action was a discard.",
+		replies: []reply{ok(200, store.Workspace{}, "The workspace."), fail(404, "No such workspace."), storeFailed},
+		serve:   (*API).getWorkspace},
+	{method: "POST", path: "/api/v0/workspaces/{id}/discard", op: "discardWorkspace",
+		tag:     "Workspaces",
+		summary: "Discard a workspace's unapplied changes",
+		idDoc:   "A workspace id (ws_ and 16 hex digits). Another shape gets 404.",
+		doc: "Drop a sandbox workspace's unapplied changes: reset its copy to the last applied state, or to the folder as it was first copied when nothing was applied. The person's folder is never touched, and the conversation stays so the agent can try another way. No body is read.\n\n" +
+			"One apply or discard runs per workspace, so a discard while an apply or discard of the workspace is still running or waiting is refused with 409. A running TURN does not refuse it: the discard waits behind the turn in the lane, and what it drops is worked out when it runs, so a turn that ran while it waited is dropped and marked too. The reply waits up to 30 seconds; past that it is 202 with state queued or running. Nothing unapplied answers 200 with already true.",
+		replies: []reply{ok(200, DiscardState{}, "Discarded: dropped_turns lists the turns whose changes were dropped. already true: nothing was unapplied."),
+			ok(202, DiscardState{}, "The discard has not finished yet (it waits behind a running turn)."),
+			badRequest,
+			fail(404, "This service keeps no queue, or no such workspace."),
+			ok(409, DiscardState{}, "Refused: an apply or discard of the workspace is still running or waiting. Nothing was dropped."),
+			tooMany, fail(503, "The runner holding the copy has not been seen for a minute. Nothing was discarded."), storeFailed},
+		serve: (*API).discardWorkspace},
+	{method: "POST", path: "/api/v0/workspaces/{id}/update", op: "updateWorkspace",
+		tag:     "Workspaces",
+		summary: "Update a workspace's copy",
+		idDoc:   "A workspace id (ws_ and 16 hex digits). Another shape gets 404.",
+		doc: "Bring the person's folder as it is now into a sandbox workspace's copy, so the session's unapplied work sits on top of the folder and a later apply writes only that work. Use it when an apply was refused because the folder changed since the copy was made (another session applied, or the person edited). It is a three-way merge in the copy's private git: the last applied state as the base, the copy's work as one side, the folder now as the other. The person's folder is never written, only read. No body is read.\n\n" +
+			"A clean merge answers 200 with state updated: the copy now holds both the folder's changes and the session's, and the next apply writes just the session's work. A real conflict (the same lines changed on both sides) answers 200 with state conflict and the files in conflicts; nothing changed, and the person can ask the agent to resolve them in a turn. Ignored files (node_modules and the like) are not merged.\n\n" +
+			"One apply, discard or update runs per workspace, so an update while one of them is still running or waiting is refused with 409. A running TURN does not refuse it: the update waits behind the turn in the lane, and what it folds is worked out when it runs. The reply waits up to 30 seconds; past that it is 202 with state queued or running. A workspace that works in the folder as it is answers 400.",
+		replies: []reply{ok(200, UpdateState{}, "updated: the folder was merged into the copy. conflict: conflicts lists the files; nothing changed."),
+			ok(202, UpdateState{}, "The update has not finished yet (it waits behind a running turn)."),
+			badRequest,
+			fail(404, "This service keeps no queue, or no such workspace."),
+			ok(409, UpdateState{}, "Refused: an apply, discard or update of the workspace is still running or waiting. Nothing changed."),
+			tooMany, fail(503, "The runner holding the copy has not been seen for a minute. Nothing changed."), storeFailed},
+		serve: (*API).updateWorkspace},
+	{method: "GET", path: "/api/v0/workspaces/{id}/changes", op: "workspaceChanges",
+		tag:     "Workspaces",
+		summary: "Preview a workspace's changes",
+		idDoc:   "A workspace id (ws_ and 16 hex digits). Another shape gets 404.",
+		doc: "A page of what applying the workspace's changes would do to the person's folder now, without writing anything: a preview of POST /api/v0/workspaces/{id}/apply, which applies every turn not applied yet.\n\n" +
+			"The preview is made by the apply's own code, on the runner of the folder's machine, and stops before the apply would write. Control stores it as a changes.previewed event, the one source, and this route serves and pages that event. A later request reuses the stored preview until the workspace changes (a new turn or apply) or ?fresh=true asks for a new one; previewed_at says when it was taken. An apply always re-checks the folder itself.\n\n" +
+			"files is a page, sorted by path: each file the apply would write or remove, with its change (added, modified or deleted) against the folder now, how many lines it adds and removes, and its unified diff for small text files; a file with no diff says diff_left_out. count is every file. Page the rest with before set to the previous page's next_before and event set to the event id, so every page is of the same preview. truncated is set only when the stored preview kept fewer files than count because they were too many to send (some are not in the record at all); that is distinct from a page simply holding fewer than count, which next_before continues. " +
+			"conflicts lists each file the apply would refuse, with why: a file in the folder that is neither as it was at the start of the changes nor already as they leave it. Those files are in files too. " +
+			"unapplied is true when files or conflicts is not empty; turn is the turn to apply. When every change is applied, or the folder already holds them, unapplied is false and files is empty. " +
+			"A workspace that works in the folder as it is, not in an isolated copy, answers isolated false, with why; so does a closed workspace, whose copy is gone. The reply waits up to 30 seconds for the folder's machine when a fresh preview is run.",
+		query: []param{
+			{name: "fresh", doc: "true runs a new preview instead of reusing the stored one: the Refresh on the changes view, and opening the apply view."},
+			{name: "event", doc: "The event id of a changes.previewed from a previous page: pages the same preview."},
+			{name: "before", doc: "Only files before this position: the previous page's next_before.", integer: true, min: 1},
+			{name: "limit", doc: "Files per page. 100 when absent.", integer: true, min: 1, max: maxTurnLimit}},
+		replies: []reply{ok(200, WorkspaceChangesPage{}, "A page of the preview."),
+			badRequest, fail(404, "No such workspace."),
+			fail(409, "An apply of the workspace has not ended (ask again once it has), or the preview could not be made: error says why. Nothing was written."),
+			tooMany, fail(503, "The runner of the folder's machine has not been seen for a minute. Nothing was written."),
+			fail(504, "The folder's machine did not answer within 30 seconds. Nothing was written."), storeFailed},
+		turn:  changesWorkspaceTok,
+		serve: (*API).workspaceChanges},
+	{method: "POST", path: "/api/v0/workspaces/{id}/apply", op: "applyWorkspace",
+		tag:     "Workspaces",
+		summary: "Apply a workspace's changes",
+		idDoc:   "A workspace id (ws_ and 16 hex digits). Another shape gets 404.",
+		doc: "Put the workspace's unapplied file changes into the person's folder: the folder its copy was made from. A turn works in the workspace's copy, so its changes reach the person's folder only by an apply. The body is optional: {turn} applies up to that turn (it and every earlier unapplied turn); no body, or {}, applies up to the workspace's head turn.\n\n" +
+			"The apply writes each file the unapplied turns added or changed, and removes each one they deleted. " +
+			"Before it writes anything it checks every file in the folder: one that is neither as it was at the changes' start nor already as they leave it refuses the whole apply, " +
+			"with 409, state refused, and each file in conflicts with why. Nothing is written then, so the agent can read why and make another turn. " +
+			"A file is never looked up through a link in the folder. A turn may put a folder where a link was, or change only the case of a name. " +
+			"Applying again when nothing is unapplied is a no-op: 200 with already true. " +
+			"An apply that was refused may be asked for again. " +
+			"It runs on the runner of the folder's machine, in a place of its own, so it does not wait behind running turns. " +
+			"The reply waits up to 30 seconds; past that it is 202 with state queued or running, and GET /api/v0/workspaces/{id}/changes shows the state.",
+		body:    ApplyRequest{},
+		bodyOpt: true,
+		replies: []reply{ok(200, ApplyState{}, "Applied: files lists what was written. already true: nothing was unapplied, and nothing more was written."),
+			ok(202, ApplyState{}, "The apply has not finished yet."),
+			badRequest,
+			fail(404, "This service keeps no queue, or no such workspace, or the named turn is not this service's."),
+			ok(409, ApplyState{}, "Refused or failed: error says why, and conflicts names each file in your folder that changed. Nothing was written on a conflict."),
+			tooMany, fail(503, "The runner of the folder's machine has not been seen for a minute. Nothing was written and no apply was made."), storeFailed},
+		turn:  applyWorkspaceTok,
+		serve: (*API).applyWorkspace},
+	{method: "POST", path: "/api/v0/sessions", op: "createSession",
+		tag:     "Sessions",
+		summary: "Create a session",
+		doc: "Create a session in a workspace: a conversation whose turns run there. Send workspace (from POST /api/v0/workspaces) and optionally title. The reply names the session; run its turns with POST /api/v0/turns.\n\n" +
+			"A session owns only its title and its archived view; its folder and mode are its workspace's. With idempotency_key a retry returns the same session and makes nothing new.",
+		body: SessionRequest{},
+		replies: createReplies(ok(201, SessionCreated{}, "The session."), fail(404, "No such workspace."),
+			fail(403, "A turn token with no workspace to create a session in.")),
+		// A turns token may open a session in an EXISTING workspace (then run its
+		// turns), the same as an ask: choosing a folder and the Sandbox switch --
+		// POST /api/v0/workspaces -- stays with the main token (his ruling,
+		// 2026-11-22). The handler checks the named workspace exists (404).
+		turn:  createSessionTok,
+		turns: true,
+		serve: plain((*API).createSession)},
 	{method: "GET", path: "/api/v0/sessions", op: "listSessions",
 		tag:     "Sessions",
 		summary: "List sessions",
@@ -414,27 +523,6 @@ var routes = slices.Concat([]route{
 			fail(403, "A turn token's request is refused: error says why."), noSession, storeFailed},
 		turn:  renameSession,
 		serve: (*API).updateSession},
-	{method: "GET", path: "/api/v0/sessions/{id}/changes", op: "sessionChanges",
-		tag:     "Sessions",
-		summary: "Preview a session's changes",
-		doc: "A page of what applying the session's changes would do to the person's folder now, without writing anything: a preview of POST /api/v0/turns/{id}/apply for the session's latest ended turn with changes, which applies every turn not applied yet.\n\n" +
-			"The preview is made by the apply's own code, on the runner of the folder's machine, and stops before the apply would write. Control stores it as a changes.previewed event, the one source, and this route serves and pages that event. A later request reuses the stored preview until the session changes (a new turn or apply) or ?fresh=true asks for a new one; previewed_at says when it was taken. An apply always re-checks the folder itself.\n\n" +
-			"files is a page, sorted by path: each file the apply would write or remove, with its change (added, modified or deleted) against the folder now, how many lines it adds and removes, and its unified diff for small text files; a file with no diff says diff_left_out. count is every file. Page the rest with before set to the previous page's next_before and event set to the event id, so every page is of the same preview. truncated is set only when the stored preview kept fewer files than count because they were too many to send (some are not in the record at all); that is distinct from a page simply holding fewer than count, which next_before continues. " +
-			"conflicts lists each file the apply would refuse, with why: a file in the folder that is neither as it was at the start of the changes nor already as they leave it. Those files are in files too. " +
-			"unapplied is true when files or conflicts is not empty; turn is the turn to apply. When every change is applied, or the folder already holds them, unapplied is false and files is empty. " +
-			"A session that works in the folder as it is, not in an isolated copy, answers isolated false, with why; so does a closed session, whose copy is gone. The reply waits up to 30 seconds for the folder's machine when a fresh preview is run.",
-		query: []param{
-			{name: "fresh", doc: "true runs a new preview instead of reusing the stored one: the Refresh on the changes view, and opening the apply view."},
-			{name: "event", doc: "The event id of a changes.previewed from a previous page: pages the same preview."},
-			{name: "before", doc: "Only files before this position: the previous page's next_before.", integer: true, min: 1},
-			{name: "limit", doc: "Files per page. 100 when absent.", integer: true, min: 1, max: maxTurnLimit}},
-		replies: []reply{ok(200, SessionChangesPage{}, "A page of the preview."),
-			badRequest, noSession,
-			fail(409, "An apply of the session has not ended (ask again once it has), or the preview could not be made: error says why. Nothing was written."),
-			tooMany, fail(503, "The runner of the folder's machine has not been seen for a minute. Nothing was written."),
-			fail(504, "The folder's machine did not answer within 30 seconds. Nothing was written."), storeFailed},
-		turn:  treeSessionPath,
-		serve: (*API).sessionChanges},
 	{method: "GET", path: "/api/v0/sessions/{id}/events", op: "sessionEvents",
 		tag:     "Sessions",
 		summary: "Read a session's events",
@@ -631,47 +719,32 @@ var routes = slices.Concat([]route{
 	{method: "POST", path: "/api/v0/files/read", op: "readFile",
 		tag:     "Files",
 		summary: "Read an outside file",
-		doc:     "Read a file outside the session copy, on the runner machine.",
+		doc:     "Read a file outside the session copy, on control's machine. Only for a session whose folder is on control's own machine (agentbus up), or a call without a session; a session on another machine's runner gets 409, before any approval card.",
 		body:    ReadFileRequest{},
 		turn:    fileOp,
-		tools: []tool{
-			{name: "read_file",
-				fields:   []string{"path"},
-				required: []string{"path"},
-				doc:      "Read a file outside the session copy on the runner.",
-			},
-		},
-		replies: []reply{ok(200, ReadFileResponse{}, "The file content."), badRequest, fail(404, "File not found.")},
+		// B8 folder tools (read_file, list_folder, write_file) are hidden: not
+		// registered as tools, so no agent can call them (his call, 2026-11-23).
+		// The HTTP route stays for 0.9, when the file tools come back. An agent
+		// reaches files through its CLI's own built-in tools meanwhile.
+		replies: []reply{ok(200, ReadFileResponse{}, "The file content."), badRequest, fail(404, "File not found."), elsewhere, storeFailed},
 		serve:   plain((*API).readFile)},
 	{method: "POST", path: "/api/v0/files/list", op: "listFolder",
 		tag:     "Files",
 		summary: "List an outside folder",
-		doc:     "List entries of a folder outside the session copy, on the runner machine.",
+		doc:     "List entries of a folder outside the session copy, on control's machine. Only for a session whose folder is on control's own machine (agentbus up), or a call without a session; a session on another machine's runner gets 409, before any approval card.",
 		body:    ListFolderRequest{},
 		turn:    fileOp,
-		tools: []tool{
-			{name: "list_folder",
-				fields:   []string{"path"},
-				required: []string{"path"},
-				doc:      "List a folder outside the session copy on the runner.",
-			},
-		},
-		replies: []reply{ok(200, ListFolderResponse{}, "The folder entries."), badRequest, fail(404, "Folder not found.")},
+		// Hidden folder tool: not registered (see read_file above).
+		replies: []reply{ok(200, ListFolderResponse{}, "The folder entries."), badRequest, fail(404, "Folder not found."), elsewhere, storeFailed},
 		serve:   plain((*API).listFolder)},
 	{method: "POST", path: "/api/v0/files/write", op: "writeFile",
 		tag:     "Files",
 		summary: "Write an outside file",
-		doc:     "Write a file outside the session copy, on the runner machine.",
+		doc:     "Write a file outside the session copy, on control's machine. Only for a session whose folder is on control's own machine (agentbus up), or a call without a session; a session on another machine's runner gets 409, before any approval card.",
 		body:    WriteFileRequest{},
 		turn:    fileOp,
-		tools: []tool{
-			{name: "write_file",
-				fields:   []string{"path", "content"},
-				required: []string{"path", "content"},
-				doc:      "Write a file outside the session copy on the runner.",
-			},
-		},
-		replies: []reply{ok(200, WriteFileResponse{}, "File written."), badRequest},
+		// Hidden folder tool: not registered (see read_file above).
+		replies: []reply{ok(200, WriteFileResponse{}, "File written."), badRequest, elsewhere, storeFailed},
 		serve:   plain((*API).writeFile)},
 
 	{method: "GET", path: "/api/v0/approvals", op: "listApprovals",

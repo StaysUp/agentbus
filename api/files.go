@@ -12,10 +12,52 @@ import (
 	"syscall"
 
 	"github.com/staysup/agentbus/gateway"
+	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 )
 
 type toolGatedKey struct{}
+
+// filesElsewhere refuses a file tool to a session whose folder is on another
+// machine: these routes open files in the process that serves the API, which
+// is control, so they would act on control's disk, not the session's machine.
+const filesElsewhere = "read_file, list_folder and write_file work only for a session whose folder is on control's own machine; this session's folder is on another machine"
+
+// refuseFilesElsewhere answers w with 409 and says true when g's session has
+// its folder on a machine other than control's own (agentbus up's). The
+// folder's machine lives on the session's workspace record, which is written
+// when the workspace is created, so the check does not wait for a turn to
+// finish (the queue's folder row is). A call without a session (the main token,
+// the turns token) is not refused, and nor is one on a service with no queue,
+// which runs every session itself.
+func (a *API) refuseFilesElsewhere(w http.ResponseWriter, g *run.Grant) bool {
+	if g == nil || g.Session == "" || a.cfg.Queue == nil || a.cfg.Store == nil {
+		return false
+	}
+	ws, found, err := a.workspaceOf(g.Session)
+	if err != nil {
+		a.internal(w)
+		return true
+	}
+	if !found {
+		return false
+	}
+	rec, found, err := a.cfg.Store.Workspace(ws)
+	if err != nil {
+		a.internal(w)
+		return true
+	}
+	// An empty machine is control's own (the workspace record's convention); so
+	// is one equal to control's machine id.
+	if !found || rec.Machine == "" {
+		return false
+	}
+	if own := a.cfg.Folders; own != nil && rec.Machine == own.Machine() {
+		return false
+	}
+	writeError(w, http.StatusConflict, filesElsewhere)
+	return true
+}
 
 // ReadFileRequest is the body of POST /api/v0/files/read.
 type ReadFileRequest struct {
@@ -101,12 +143,15 @@ func resolveSymlinkPathBounded(p string, hops int) (string, error) {
 }
 
 func (a *API) openFolderAccess(w http.ResponseWriter, r *http.Request, path, toolName string) (*os.Root, string, string, bool) {
+	g := grantOf(r)
+	if a.refuseFilesElsewhere(w, g) {
+		return nil, "", "", false
+	}
 	resolved, err := resolveSymlinkPath(path)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid path: "+err.Error())
 		return nil, "", "", false
 	}
-	g := grantOf(r)
 	if g == nil || g.Session == "" {
 		root, err := os.OpenRoot("/")
 		if err != nil {

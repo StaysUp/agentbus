@@ -59,6 +59,7 @@ import (
 	"github.com/staysup/agentbus/folders"
 	"github.com/staysup/agentbus/gateway"
 	"github.com/staysup/agentbus/harness"
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/logfile"
 	"github.com/staysup/agentbus/models"
@@ -195,7 +196,7 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	case c.mode == modeRunner:
 	case !cockpit.Packed():
 		// No cockpit to sign in to: no code is made.
-		fmt.Fprintf(stdout, "\nThe cockpit is not packed in this build. The API's docs: http://%s/docs\n\n", linkHost(svc.addr))
+		fmt.Fprintf(stdout, "\n%s\n\n", notPackedLine(svc.addr))
 	default:
 		// The cockpit's one-time sign-in link: printed, never the token.
 		link := signInLink(svc.addr, svc.api.NewSignInCode())
@@ -446,7 +447,15 @@ func start(c config) (*service, error) {
 	var blobSweep *jobs.Sweeper   // and what cleans it
 	// Every model.responded is priced, and every turn.started of a run's
 	// session gets the run's agent and folder, before it is stored.
-	sink := cost.Sink{Table: cost.Default(), Next: engine.TurnSink(st, st)}
+	// A gateway or hook session's direct workspace is born in the TurnSink; it
+	// carries this service's own machine (the folder registry's), read lazily
+	// because fr opens below. "" on a server with no folders, which is right.
+	sink := cost.Sink{Table: cost.Default(), Next: engine.TurnSinkMachine(st, st, func() string {
+		if fr != nil {
+			return fr.Machine()
+		}
+		return ""
+	})}
 	// The relay's gateways, which record the runners' calls it carries.
 	var relayGws []*gateway.Gateway
 	if c.hasEngine() {
@@ -478,6 +487,47 @@ func start(c config) (*service, error) {
 		// folders keep them, and the jobs keep references.
 		if issuer != nil {
 			if _, err := q.MigrateFolders(issuer); err != nil {
+				closeQ()
+				st.Close()
+				return nil, err
+			}
+		}
+		// Every existing session gets a workspace.created, so a workspace's
+		// folder, machine and sandbox mode have one source from the first
+		// start of this build. The session's own id becomes its workspace id,
+		// so its on-disk copy and checkpoints keep resolving without a rename.
+		// The queue's sessions give the sandbox mode (a copy or worktree is a
+		// sandbox); a session with no queue row -- hook or gateway traffic --
+		// is a direct workspace. Idempotent: a migrated session is skipped.
+		if sessions, err := q.Sessions(queue.DefaultTeam, 1<<30); err != nil {
+			closeQ()
+			st.Close()
+			return nil, err
+		} else {
+			seeds := make([]store.WorkspaceSeed, 0, len(sessions))
+			for _, w := range sessions {
+				// The queue holds the authoritative folder reference and
+				// machine of the session (the same SessionFolder askChecks
+				// reads); the folder registry resolves the reference to the
+				// person's real folder when this machine owns it. The
+				// session's own events are not used: for an isolated session
+				// they name the runner's scratch copy path, not the folder.
+				ref, machine, _, err := q.SessionFolder(queue.DefaultTeam, w.Session)
+				if err != nil {
+					closeQ()
+					st.Close()
+					return nil, err
+				}
+				folder := queue.DisplayFolder(issuer, ref, machine)
+				seeds = append(seeds, store.WorkspaceSeed{
+					Session:   w.Session,
+					Sandbox:   w.Kind == queue.WorkspaceCopy || w.Kind == queue.WorkspaceWorktree,
+					Machine:   machine,
+					FolderRef: ref,
+					Folder:    folder,
+				})
+			}
+			if _, err := st.MigrateWorkspaces(seeds); err != nil {
 				closeQ()
 				st.Close()
 				return nil, err
@@ -609,7 +659,7 @@ func start(c config) (*service, error) {
 		svcLog.Close()
 		st.Close()
 		closeQ()
-		return nil, fmt.Errorf("-listen %s: %w", c.listen, err)
+		return nil, listenError(c.listen, err)
 	}
 	addr := ln.Addr().String()
 	_, port, _ := net.SplitHostPort(addr)
@@ -622,18 +672,23 @@ func start(c config) (*service, error) {
 	if c.lookPath == nil {
 		c.lookPath = exec.LookPath
 	}
-	// Own replay: claude's and codex's next turns start fresh, and each
-	// vendor's gateway puts the earlier turn's history in front of their
+	// Own replay: claude's, codex's and opencode's next turns start fresh, and
+	// each vendor's gateway puts the earlier turn's history in front of their
 	// requests.
-	var claudeReplay, codexReplay *replay.Replayer
+	var claudeReplay, codexReplay, chatReplay *replay.Replayer
 	var replayBase func(string, string) (engine.ReplayPlan, error)
 	if !c.noReplay {
-		claudeReplay, codexReplay = replay.New(st), replay.NewCodex(st)
+		claudeReplay, codexReplay, chatReplay = replay.New(st), replay.NewCodex(st), replay.NewChatCompletions(st)
 		replayBase = func(agent, session string) (engine.ReplayPlan, error) {
 			// Each harness names the history format own replay uses for it.
 			r := claudeReplay
-			if h, ok := harness.Get(agent); ok && h.Info().Replay == harness.FormatOpenAI {
-				r = codexReplay
+			if h, ok := harness.Get(agent); ok {
+				switch h.Info().Replay {
+				case harness.FormatOpenAI:
+					r = codexReplay
+				case harness.FormatChatCompletions:
+					r = chatReplay
+				}
 			}
 			p, err := r.Base(session)
 			var no *replay.NoBase
@@ -665,13 +720,17 @@ func start(c config) (*service, error) {
 				return a.Name
 			}
 		}
-		// A runner that holds no secrets, agentbus up's built-in one too,
-		// runs each session in a home of its own: its agents' credentials
-		// come from control, so nothing of this user's home is needed. Every
-		// runner with an engine is such a runner now (noSecrets == hasEngine),
-		// so this block, inside hasEngine, always makes the homes dir.
+		// Runner profiles (his call, 2026-11-23). A compute runner (joined for
+		// work, holds no secrets) runs each session in a clean home of its own.
+		// agentbus up is the PERSONAL runner: its ordinary sessions run in the
+		// person's real home, so their setup (CLAUDE.md, hooks, plugins, aws,
+		// ssh, gitconfig) comes along (Config.Personal). The clean home dir is
+		// still made, because a personal turn that needs one — a whole-process
+		// wall (a legacy toggle), a harness whose relay writes a home file, or a
+		// continuation of a session that already has a clean home — still uses
+		// it (run/run.go decides per turn).
 		homes := filepath.Join(c.home, homesDir)
-		eng, err = engine.New(engine.Config{Store: st, BaseURL: baseURL, MaxRuns: c.maxRuns, ReplayBase: replayBase, AgentName: agentName, Homes: homes,
+		eng, err = engine.New(engine.Config{Store: st, BaseURL: baseURL, MaxRuns: c.maxRuns, ReplayBase: replayBase, AgentName: agentName, Homes: homes, Personal: c.mode == modeUp,
 			Settings: cfgStore, Protect: protect, APIDir: apiLink(c.home, c.self, svcLog), Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace, Logf: svcLog.Printf,
 			RunLog: func(session string, data []byte) {
 				// The session id is the service's own hex, so it is a plain
@@ -801,7 +860,7 @@ func start(c config) (*service, error) {
 			}
 		}
 	}
-	// A turn's session.closed waits for the gateway to write all of the
+	// A turn's run.ended waits for the gateway to write all of the
 	// turn's calls: their events and replies are written off the reply's
 	// path and can land after the child has exited.
 	if eng != nil {
@@ -851,9 +910,9 @@ func start(c config) (*service, error) {
 		if c.mode == modeUp && relayBase != "" {
 			g.SetCredential(runnerJobs.TurnGate())
 		}
-		// The command rules of permissions.toml (allow, ask, forbid and the
-		// unlisted default), applied to each run turn's replies: refuse, hold
-		// for a person, or run.
+		// The command rules of permissions.toml (allow, ask, forbid), applied
+		// to each run turn's replies: refuse, hold for a person, or run. A
+		// command on none of the lists is held for a person.
 		if eng != nil {
 			g.SetGuard(eng)
 			// A held Ask reply (H1) learns its decision from control's record
@@ -875,6 +934,7 @@ func start(c config) (*service, error) {
 		orAnth.SetRewriter(claudeReplay)
 		oai.SetRewriter(codexReplay)
 		orOAI.SetRewriter(codexReplay)
+		orChat.SetRewriter(chatReplay)
 	}
 	host, _, _ := net.SplitHostPort(c.listen)
 	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: append(gws, relayGws...), api: a, eng: eng, store: st, blobs: bs, blobSwp: blobSweep, jobsSrv: runnerJobs,
@@ -1026,9 +1086,9 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 				}
 				// Record that each ended turn job ended, AFTER the steps above
 				// that end jobs (Sweep expires leases; CloseLost writes a lost
-				// turn's session.closed) and BEFORE FireOns, so a turn ended
+				// turn's run.ended) and BEFORE FireOns, so a turn ended
 				// this tick has its turn.ended in the record — after its
-				// session.closed — and is delivered this tick. Idempotent by
+				// run.ended — and is delivered this tick. Idempotent by
 				// job id; the finisher also writes it on its own path.
 				if n, last, err := jobs.RecordTurnEnds(s.queue, s.store, endedCursor, time.Now().Add(-jobs.TurnEndedGrace), 200); err != nil {
 					svcLog.Printf("record.turn_ends_failed")
@@ -1051,7 +1111,18 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 				// for each undelivered asked job, and backfill chain.by/by_session
 				// from asker) would close both; for this dev milestone the store
 				// is drained before upgrade instead.
-				if n, err := s.queue.FireOns(queue.DefaultTeam, s.store.TurnEnded, name, s.deliveredAgent); err != nil {
+				deliverTo := func(session string) (queue.DeliverTo, bool, error) {
+					ws, found, err := s.store.WorkspaceOf(ids.SessionID(session))
+					if err != nil || !found {
+						return queue.DeliverTo{}, false, err
+					}
+					w, ok, err := s.store.Workspace(ws)
+					if err != nil || !ok {
+						return queue.DeliverTo{}, false, err
+					}
+					return queue.DeliverTo{Workspace: w.ID, FolderRef: w.FolderRef, Machine: w.Machine, Isolate: w.Sandbox}, true, nil
+				}
+				if n, err := s.queue.FireOns(queue.DefaultTeam, s.store.TurnEnded, deliverTo, name, s.deliveredAgent); err != nil {
 					svcLog.Printf("queue.fire_ons_failed")
 				} else if n > 0 {
 					svcLog.Printf("queue.results_delivered n=%d", n)
@@ -1359,7 +1430,7 @@ func subscriptionLogins(c config, subs *credentials.Subscriptions) *credentials.
 	return m
 }
 
-// settleTimeout bounds how long a turn's session.closed waits for the
+// settleTimeout bounds how long a turn's run.ended waits for the
 // gateway to write the turn's calls.
 const settleTimeout = 30 * time.Second
 
@@ -1578,7 +1649,7 @@ func (s *service) shutdown() {
 		s.stopRunner()
 		<-s.runnerDone
 	}
-	// Turns next: each stores its session.closed, and new ones are refused.
+	// Turns next: each stores its run.ended, and new ones are refused.
 	if s.eng != nil {
 		s.eng.StopAll()
 	}
@@ -1612,6 +1683,12 @@ func (s *service) shutdown() {
 func freshFolder(home string) bool {
 	entries, err := os.ReadDir(home)
 	return len(entries) == 0 && (err == nil || errors.Is(err, fs.ErrNotExist))
+}
+
+// notPackedLine is what a source build prints instead of a sign-in link.
+// Release binaries pack the cockpit; go install and go build do not.
+func notPackedLine(listen string) string {
+	return "The cockpit is not packed in this build. Install a release to get it (brew install staysup/tap/agentbus, or the install script in the README), or from a clone run tools/pack-cockpit.sh. The API's docs: http://" + linkHost(listen) + "/docs"
 }
 
 // dataFolderLine is what agentbus up says about its data folder when it
@@ -1738,6 +1815,15 @@ func withPort(addr string) string {
 		return addr
 	}
 	return net.JoinHostPort(host, defaultPort)
+}
+
+// listenError is the refusal when net.Listen fails: fixed wording, never
+// Go's own message.
+func listenError(addr string, err error) error {
+	if errors.Is(err, syscall.EADDRINUSE) {
+		return errors.New("-listen " + addr + " is in use. Stop the other process, or pick another port with -listen")
+	}
+	return errors.New("-listen " + addr + " could not be bound")
 }
 
 // checkListen accepts an IP literal and a port, or a port alone (":8787",

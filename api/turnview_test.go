@@ -30,8 +30,8 @@ func getJSON(t *testing.T, e *env, path string, v any) int {
 // GET /turns lists it first, and a stop makes it read stopped at once.
 func TestQueuedTurnIsKnownAndStops(t *testing.T) {
 	e := newJobsEnv(t)
-	ref, conn := e.folderRef(t, "/tmp")
-	resp, raw := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"agent":"claude","folder_ref":"`+ref+`","connector":"`+conn+`","prompt":"wait for a runner"}`)))
+	sess := e.newSession(t, "/tmp", true)
+	resp, raw := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"session":"`+sess+`","agent":"claude","prompt":"wait for a runner"}`)))
 	var st Started
 	if resp.StatusCode != 202 || json.Unmarshal([]byte(raw), &st) != nil || st.State != "queued" || st.Turn == "" || st.Session == "" || st.BaseURL != "" {
 		t.Fatalf("POST /turns: %d %s", resp.StatusCode, raw)
@@ -79,8 +79,8 @@ func TestQueuedTurnIsKnownAndStops(t *testing.T) {
 // exactly one page.
 func TestStoppedQueuedTurnIsListed(t *testing.T) {
 	e := newJobsEnv(t)
-	ref, conn := e.folderRef(t, "/tmp")
-	resp, raw := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"agent":"claude","folder_ref":"`+ref+`","connector":"`+conn+`","prompt":"stop me"}`)))
+	sess := e.newSession(t, "/tmp", true)
+	resp, raw := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"session":"`+sess+`","agent":"claude","prompt":"stop me"}`)))
 	var st Started
 	if resp.StatusCode != 202 || json.Unmarshal([]byte(raw), &st) != nil || st.State != "queued" {
 		t.Fatalf("POST /turns: %d %s", resp.StatusCode, raw)
@@ -89,7 +89,11 @@ func TestStoppedQueuedTurnIsListed(t *testing.T) {
 		t.Fatalf("stop: %d %s", resp.StatusCode, raw)
 	}
 	// It has no changes to apply, and the refusal says it never started.
-	if resp, raw := do(t, e.req(t, "POST", "/api/v0/turns/"+st.Turn+"/apply", nil)); resp.StatusCode != 400 || !strings.Contains(raw, applyNeverStarted) {
+	j, err := e.q.JobByTurn(queue.DefaultTeam, st.Turn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp, raw := do(t, e.req(t, "POST", "/api/v0/workspaces/"+string(j.Spec.Workspace)+"/apply", strings.NewReader(`{"turn":"`+st.Turn+`"}`))); resp.StatusCode != 400 || !strings.Contains(raw, applyNeverStarted) {
 		t.Errorf("apply of a turn that never started: %d %s", resp.StatusCode, raw)
 	}
 	now := time.Now().UTC()
@@ -136,8 +140,8 @@ func TestStoppedQueuedTurnIsListed(t *testing.T) {
 // page of the unfiltered list (agy review round 2, 2026-11-11).
 func TestNeverStartedOnOnePageAcrossClocks(t *testing.T) {
 	e := newJobsEnv(t)
-	ref, conn := e.folderRef(t, "/tmp")
-	resp, raw := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"agent":"claude","folder_ref":"`+ref+`","connector":"`+conn+`","prompt":"stop me"}`)))
+	sess := e.newSession(t, "/tmp", true)
+	resp, raw := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"session":"`+sess+`","agent":"claude","prompt":"stop me"}`)))
 	var st Started
 	if resp.StatusCode != 202 || json.Unmarshal([]byte(raw), &st) != nil {
 		t.Fatalf("POST /turns: %d %s", resp.StatusCode, raw)

@@ -71,8 +71,8 @@ func newJobsEnvAt(t *testing.T, now func() time.Time) *env {
 // still starts a fresh turn.
 func TestTurnWaitInvalidQueuesNothing(t *testing.T) {
 	e := newJobsEnv(t)
-	ref, conn := e.folderRef(t, "/tmp")
-	body := `{"agent":"claude","folder_ref":"` + ref + `","connector":"` + conn + `","prompt":"hi","idempotency_key":"k-wait-1"}`
+	sess := e.newSession(t, "/tmp", true)
+	body := `{"session":"` + sess + `","agent":"claude","prompt":"hi","idempotency_key":"k-wait-1"}`
 	if resp, raw := do(t, e.req(t, "POST", "/api/v0/turns?wait=bogus", strings.NewReader(body))); resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("POST ?wait=bogus: %d %s, want 400", resp.StatusCode, raw)
 	}
@@ -91,13 +91,13 @@ func TestTurnWaitInvalidQueuesNothing(t *testing.T) {
 }
 
 // Archiving a session whose first turn is still queued (no runner has started
-// it, so it is not in the record and has no workspace row) SUCCEEDS and hides
-// it: archive is only a view, found through the queue as well as the store, and
-// never refused for busy work (his call, 2026-11-19). The turn runs on.
+// it) SUCCEEDS and hides it: archive is only a view, found through the queue as
+// well as the store, and never refused for busy work (his call, 2026-11-19).
+// The turn runs on.
 func TestArchiveQueuedFirstTurnSucceeds(t *testing.T) {
 	e := newJobsEnv(t)
-	ref, conn := e.folderRef(t, "/tmp")
-	body := `{"agent":"claude","folder_ref":"` + ref + `","connector":"` + conn + `","prompt":"hi"}`
+	sess := e.newSession(t, "/tmp", true)
+	body := `{"session":"` + sess + `","agent":"claude","prompt":"hi"}`
 	resp, raw := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(body)))
 	var st Started
 	if resp.StatusCode != http.StatusAccepted || json.Unmarshal([]byte(raw), &st) != nil || st.Session == "" {
@@ -141,8 +141,8 @@ func TestArchiveQueuedFirstTurnSucceeds(t *testing.T) {
 // turn's real state.
 func TestTurnWaitFalseRetryAfterStop(t *testing.T) {
 	e := newJobsEnv(t)
-	ref, conn := e.folderRef(t, "/tmp")
-	body := `{"agent":"claude","folder_ref":"` + ref + `","connector":"` + conn + `","prompt":"hi","idempotency_key":"k-stop-1"}`
+	sess := e.newSession(t, "/tmp", true)
+	body := `{"session":"` + sess + `","agent":"claude","prompt":"hi","idempotency_key":"k-stop-1"}`
 	resp, raw := do(t, e.req(t, "POST", "/api/v0/turns?wait=false", strings.NewReader(body)))
 	var st Started
 	if resp.StatusCode != http.StatusAccepted || json.Unmarshal([]byte(raw), &st) != nil || st.State != "queued" || st.Turn == "" {
@@ -159,14 +159,14 @@ func TestTurnWaitFalseRetryAfterStop(t *testing.T) {
 
 func TestRunnerProtocolOnTheOneAPI(t *testing.T) {
 	e := newJobsEnv(t)
-	ref, conn := e.folderRef(t, "/tmp")
-	resp, raw := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"agent":"claude","folder_ref":"`+ref+`","connector":"`+conn+`","prompt":"hi"}`)))
+	sess := e.newSession(t, "/tmp", true)
+	resp, raw := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"session":"`+sess+`","agent":"claude","prompt":"hi"}`)))
 	var st Started
 	if resp.StatusCode != http.StatusAccepted || json.Unmarshal([]byte(raw), &st) != nil || st.State != "queued" || st.Turn == "" {
 		t.Fatalf("POST /api/v0/turns with no runner: %d %s, want queued with its turn", resp.StatusCode, raw)
 	}
 	noToken(t, resp, raw)
-	for _, p := range []string{"/api/v0/jobs", "/api/v0/workspaces", "/api/v0/attempts/t_1/events"} {
+	for _, p := range []string{"/api/v0/jobs", "/api/v0/attempts/t_1/events"} {
 		if resp, raw := do(t, e.req(t, "GET", p, nil)); resp.StatusCode != http.StatusNotFound {
 			t.Errorf("GET %s: %d %s, want 404: no such route", p, resp.StatusCode, raw)
 		}
@@ -268,6 +268,9 @@ func TestRemovedRunnerRefusesNextTurnAndReview(t *testing.T) {
 	if err := e.q.RemoveRunner(queue.DefaultTeam, r.ID); err != nil {
 		t.Fatal(err)
 	}
+	// The session exists in the store (as POST /api/v0/sessions would have left
+	// it): its workspace is a sandbox copy on the removed machine.
+	seedWorkspaceOn(t, e.store, j.Session, "", "fld_0123456789abcdef", machine, true)
 	want := queue.RunnerRemovedWhy("studio mac")
 	resp, raw := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"agent":"claude","session":"`+j.Session+`","prompt":"again"}`)))
 	var got struct{ Error string }

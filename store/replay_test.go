@@ -96,7 +96,7 @@ func TestReplayQueries(t *testing.T) {
 	if closed, err := s.TurnClosed("s", "t1"); err != nil || closed {
 		t.Errorf("t1 closed %v %v, want false", closed, err)
 	}
-	if _, _, err := s.Append(event.Event{ID: "13", Kind: event.SessionClosed, Session: "s", Turn: "t1", Time: now}); err != nil {
+	if _, _, err := s.Append(event.Event{ID: "13", Kind: event.RunEnded, Session: "s", Turn: "t1", Time: now}); err != nil {
 		t.Fatal(err)
 	}
 	if closed, err := s.TurnClosed("s", "t1"); err != nil || !closed {
@@ -105,7 +105,7 @@ func TestReplayQueries(t *testing.T) {
 }
 
 // A drop naming the session after the turn started, a drop for every
-// session, or an unsettled session.closed make a turn incomplete; a drop
+// session, or an unsettled run.ended make a turn incomplete; a drop
 // before the turn or for another session does not.
 func TestTurnIncomplete(t *testing.T) {
 	now := time.Unix(1793858039, 0)
@@ -122,7 +122,7 @@ func TestTurnIncomplete(t *testing.T) {
 		"drop after, every session": {[]event.Event{{ID: "a", Kind: event.TurnStarted, Session: "s", Turn: "t1"},
 			{ID: "d", Kind: event.EventsDropped, Dropped: 1, AllSessions: true}}, true},
 		"unsettled": {[]event.Event{{ID: "a", Kind: event.TurnStarted, Session: "s", Turn: "t1"},
-			{ID: "c", Kind: event.SessionClosed, Session: "s", Turn: "t1", Unsettled: true}}, true},
+			{ID: "c", Kind: event.RunEnded, Session: "s", Turn: "t1", Unsettled: true}}, true},
 	} {
 		s := open(t, filepath.Join(t.TempDir(), "events.db"))
 		evs := tc.evs
@@ -141,13 +141,13 @@ func TestTurnIncomplete(t *testing.T) {
 	}
 }
 
-// TurnEnd reads stopped from the turn's newest session.closed.
+// TurnEnd reads stopped from the turn's newest run.ended.
 func TestTurnEndStopped(t *testing.T) {
 	s := open(t, filepath.Join(t.TempDir(), "events.db"))
 	code := 143
 	for _, e := range []event.Event{
-		{ID: "c1", Kind: event.SessionClosed, Time: time.Unix(1, 0), Session: "s", Turn: "t_a", ExitCode: &code, Stopped: true},
-		{ID: "c2", Kind: event.SessionClosed, Time: time.Unix(2, 0), Session: "s", Turn: "t_b", ExitCode: &code},
+		{ID: "c1", Kind: event.RunEnded, Time: time.Unix(1, 0), Session: "s", Turn: "t_a", ExitCode: &code, Stopped: true},
+		{ID: "c2", Kind: event.RunEnded, Time: time.Unix(2, 0), Session: "s", Turn: "t_b", ExitCode: &code},
 	} {
 		if _, _, err := s.Append(e); err != nil {
 			t.Fatal(err)

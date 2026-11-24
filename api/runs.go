@@ -10,17 +10,16 @@ package api
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"github.com/staysup/agentbus/agents"
 	"io"
 	"net/http"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"time"
 
 	"github.com/staysup/agentbus/harness"
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
@@ -39,28 +38,17 @@ const DefaultTurnWait = 30 * time.Second
 
 var runModel = run.ModelShape
 
-const badRun = "the body must be one JSON object with prompt, agent and folder (or session, and optionally agent), and optionally model, isolate and idempotency_key, at most 2 MiB"
+const badRun = "the body must be one JSON object with session, agent and prompt, and optionally model, delivery and idempotency_key, at most 2 MiB"
 
-// TurnRequest is the body of POST /api/v0/turns. omitempty marks a field as
-// optional in the API's description.
+// TurnRequest is the body of POST /api/v0/turns. A turn names the session it
+// runs in and its agent, and nothing about where it runs: the folder and the
+// mode are the session's workspace's, set when the workspace was created. The
+// three calls are POST /api/v0/workspaces, POST /api/v0/sessions, then this.
 type TurnRequest struct {
-	Session   string `json:"session,omitempty" doc:"A session the snapshot calls resumable: this turn is its next one. Absent: a new session."`
-	Agent     string `json:"agent,omitempty" doc:"A saved agent's id, from GET /api/v0/agents: its harness, access and model run the turn. A removed agent, a default one (claude, codex, agy) too, is refused: pick another. Required on every turn, a session's next one too (400 without it): a session keeps no agent of its own. The agent is read as it is when the turn is asked for, and its model is the turn's unless model is sent. A removed agent is refused: pick another. With session the turn runs in the session's folder. On the same harness as the latest turn the conversation continues by own replay; on another harness the turn gets the earlier turns as plain text (continuity transcript)."`
-	Folder    string `json:"folder,omitempty" doc:"An absolute path to a directory on the machine named by machine, that the user its runner runs as can read. Typing it is the grant for this session: that machine's runner checks it and registers it (agentbus up's own; on agentbus server the machine named by machine, or the only one online), and the session runs on that machine for its whole life. The queue keeps only the folder's reference, and GET /api/v0/folders lists the folder from then on. Without session, folder or folder_ref is required. With session it is the session's own; if sent it must match."`
-	FolderRef string `json:"folder_ref,omitempty" doc:"A folder's reference, fld_ and 16 hex digits, from GET /api/v0/folders: the turn runs in that folder, on the runner of the machine that holds it. For a new session, instead of folder."`
-	Machine   string `json:"machine,omitempty" doc:"The machine the session runs on (con_ and 16 hex digits): a runner's machine in GET /api/v0/runners, or a folder's in GET /api/v0/folders. Only the runner on that machine takes the session's work. With folder_ref: the machine that holds the folder. With folder: the machine whose runner checks and registers it. Absent: this service's own machine (agentbus up), or else the only one online; with several online, it is required for folder."`
-	// compat 0.6: drop connector. A client of a build before 0.6 sends the
-	// machine under the old key; decode folds it into Machine when Machine
-	// is absent. Removed next release.
-	Connector string `json:"connector,omitempty" doc:"Deprecated alias of machine, read for one release. Send machine."`
-	Isolate   *bool  `json:"isolate,omitempty" doc:"True unless false, for a new session. True: the session runs in its own copy of folder, exactly as folder is now, uncommitted edits included, made as the isolation setting says (auto, overlay, copy, git or none). False: always folder as it is. Not sent with session."`
-	Prompt    string `json:"prompt" doc:"From 1 byte to 256 KiB, no NUL byte. Always passed after --."`
-	Model     string `json:"model,omitempty" doc:"Passed only as the value of --model, for this turn only. Absent: the named agent's model, as it is when the turn is asked for; an agent with none runs on its harness's own default."`
-	// compat 0.6: read-only turns retired (B12). A client of a build before
-	// 0.6 may still send read_only; it is read and dropped, so the request is
-	// not refused. A review is a normal turn now, in its own copy, and never
-	// applied automatically. Removed next release.
-	ReadOnly *bool `json:"read_only,omitempty" doc:"Deprecated and ignored: read-only turns were retired in 0.6. A review runs like any turn, in its own copy of the folder, and its changes are never applied automatically. Accepted for one release so an older client is not refused."`
+	Session string `json:"session" doc:"The session the turn runs in, from POST /api/v0/sessions. Its workspace is where the turn runs (the folder and the mode), and its earlier turns are the conversation this turn continues. Required."`
+	Agent   string `json:"agent" doc:"A saved agent's id, from GET /api/v0/agents: its harness, access and model run the turn. A removed agent, or a default one (claude, codex, agy), is refused: pick another. Required on every turn (400 without it): a session keeps no agent of its own. The agent is read as it is when the turn is asked for, and its model is the turn's unless model is sent. On the same harness as the latest turn the conversation continues by own replay; on another harness the turn gets the earlier turns as plain text (continuity transcript)."`
+	Prompt  string `json:"prompt" doc:"From 1 byte to 256 KiB, no NUL byte. Always passed after --."`
+	Model   string `json:"model,omitempty" doc:"Passed only as the value of --model, for this turn only. Absent: the named agent's model, as it is when the turn is asked for; an agent with none runs on its harness's own default."`
 	// IdempotencyKey makes a retry safe: a client whose request timed out
 	// sends it again with the same key and gets the same turn.
 	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"Optional, 1 to 128 characters of A-Z, a-z, 0-9 and . _ : -. A retry with the same key and the same fields answers 202 with the turn the key first started, existing true, and starts nothing. The same key with other fields gets 409. A request refused with 400 used no key."`
@@ -116,30 +104,6 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, badRun)
 		return
 	}
-	// compat 0.6: drop connector. A client before 0.6 names the machine
-	// under the old key; prefer machine, then read it. Code below reads
-	// Machine only.
-	if body.Machine == "" {
-		body.Machine = body.Connector
-	}
-	body.Connector = ""
-	// compat 0.6: read_only is retired (B12); read and dropped so an older
-	// client's request is not refused. The turn runs as any turn does.
-	// TODO(B12 P2): a job created before 0.6 with read_only:true stored a
-	// request hash that included it; an identical retry now hashes without it
-	// and gets a key conflict instead of the existing turn. This only bites a
-	// retry that spans the upgrade; a new key, or a fresh request, is unaffected.
-	body.ReadOnly = nil
-	// Only a body without session starts a new session. A session sent as
-	// "" or null is refused, never read as absent: that would start a new
-	// session in place of the one the caller meant.
-	var sent struct {
-		Session json.RawMessage `json:"session"`
-	}
-	if json.Unmarshal(data, &sent) != nil {
-		writeError(w, http.StatusBadRequest, badRun)
-		return
-	}
 	if msg := checkIdempotencyKey(body.IdempotencyKey); msg != "" {
 		writeError(w, http.StatusBadRequest, msg)
 		return
@@ -156,136 +120,97 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		}
 		noWait = !b
 	}
-	// A turn token asks another agent: its checks (tokens.go) fill the new
-	// session's folder, and the job names the asking turn.
+	// A turn token asks another agent: its checks (tokens.go) verify the
+	// session is one it created in its own workspace, and name the asking turn.
 	var links queue.Links
 	if g := grantOf(r); g != nil {
+		// The asked turn runs in the asker's workspace, which holds one ordered
+		// lane, so it waits for the asker's (running) turn to end. A wait here
+		// would stall the asker's turn behind a turn that cannot start until the
+		// asker's turn is over. An ask is async: the answer comes back as a later
+		// turn (mail), so a turn token cannot wait for a turn it starts.
+		if !noWait {
+			writeError(w, http.StatusBadRequest, "a turn token cannot wait for a turn it starts: the turn runs in your workspace after your own turn ends, and its answer comes back to your session as a later turn; send it with wait=false")
+			return
+		}
 		var ok bool
-		if links, ok = a.askChecks(w, *g, policyOf(r), &body, sent.Session != nil); !ok {
+		if links, ok = a.askChecks(w, *g, policyOf(r), &body); !ok {
 			return
 		}
 	}
-	spec := queue.Spec{Prompt: body.Prompt, Model: body.Model}
-	if sent.Session != nil {
-		if !sessionID.MatchString(body.Session) {
-			writeError(w, http.StatusBadRequest, "session must match "+sessionID.String())
-			return
-		}
-		if msg := run.CheckPrompt(body.Prompt, body.Model); msg != "" {
-			writeError(w, http.StatusBadRequest, msg)
-			return
-		}
-		// The session decides its folder. One sent that differs is refused,
-		// never quietly replaced. The record of this service knows the
-		// sessions its own runner ran. An agent sent runs this turn: a switch.
-		c, err := a.cfg.Store.Continuation(body.Session)
+	if !sessionID.MatchString(body.Session) {
+		writeError(w, http.StatusBadRequest, "session is required and must match "+sessionID.String())
+		return
+	}
+	if msg := run.CheckPrompt(body.Prompt, body.Model); msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	}
+	// Every turn names its agent (his rule, 2026-11-12): it is read here, once,
+	// as it is now, and the turn's tool and credential both come from it.
+	if body.Agent == "" {
+		writeError(w, http.StatusBadRequest, run.NoAgent)
+		return
+	}
+	ag, ok := a.turnAgent(w, body.Agent, body.IdempotencyKey)
+	if !ok {
+		return
+	}
+	// The turn runs in its session's workspace: the folder, the machine and the
+	// sandbox mode are the workspace's, the one source (his API rules,
+	// 2026-11-21). The session must already exist (POST /api/v0/sessions).
+	ws, found, err := a.cfg.Store.WorkspaceOf(ids.SessionID(body.Session))
+	if err != nil {
+		a.internal(w)
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "no such session")
+		return
+	}
+	wsp, wok, err := a.cfg.Store.Workspace(ws)
+	if err != nil {
+		a.internal(w)
+		return
+	}
+	if !wok {
+		// A session the record knows but places in no workspace (no
+		// workspace.created): every session is created in a workspace (POST
+		// /api/v0/sessions, or the gateway/hook at the session's birth), so this
+		// is a session recorded without one. It cannot run a turn until it has a
+		// workspace, and nothing here guesses one (his rule: nothing implicit).
+		writeError(w, http.StatusInternalServerError, "this session has no workspace to run in")
+		return
+	}
+	spec := queue.Spec{Prompt: body.Prompt, Model: body.Model, Session: ids.SessionID(body.Session),
+		Workspace: ids.WorkspaceID(wsp.ID), FolderRef: wsp.FolderRef, Machine: wsp.Machine, Isolate: wsp.Sandbox}
+	spec.Harness, spec.AgentID, spec.Access, spec.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
+	if spec.Model == "" {
+		spec.AgentModel = ag.Model
+	}
+	// A session whose turn runs takes the next one too: its job waits in the
+	// queue behind the turns before it. A session the record shows open with no
+	// job of this queue behind it (a turn this service did not start) cannot be
+	// waited for, so it is refused, before the key is used; a retry of a known
+	// key goes on to the queue, which returns its job.
+	c, err := a.cfg.Store.Continuation(body.Session)
+	if err != nil {
+		a.internal(w)
+		return
+	}
+	if c.Open {
+		busy, err := a.cfg.Queue.SessionHasWork(queue.DefaultTeam, body.Session)
 		if err != nil {
 			a.internal(w)
 			return
 		}
-		if body.Isolate != nil {
-			writeError(w, http.StatusBadRequest, "isolate is for a new session; a session keeps its own copy")
+		known, err := a.cfg.Queue.HasKey(queue.DefaultTeam, body.IdempotencyKey)
+		if err != nil {
+			a.internal(w)
 			return
 		}
-		if body.FolderRef != "" || body.Machine != "" {
-			writeError(w, http.StatusBadRequest, "folder_ref and machine are for a new session; a session keeps its own folder")
-			return
-		}
-		// Every turn names its agent, a next one too (his rule,
-		// 2026-11-12): it is read here, once, as it is now, and the turn's
-		// tool and its credential both come from this one answer.
-		if body.Agent == "" {
-			writeError(w, http.StatusBadRequest, run.NoAgent)
-			return
-		}
-		ag, ok := a.turnAgent(w, body.Agent, body.IdempotencyKey)
-		if !ok {
-			return
-		}
-		spec.Harness, spec.AgentID, spec.Access, spec.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
-		if spec.Model == "" {
-			spec.AgentModel = ag.Model
-		}
-		if c.Known && body.Folder != "" && filepath.Clean(body.Folder) != filepath.Clean(c.Folder) {
-			writeError(w, http.StatusBadRequest, "folder is not this session's folder "+strconv.Quote(c.Folder)+
-				"; leave folder out to use the session's")
-			return
-		}
-		// A session whose turn runs takes the next one too: its job waits in
-		// the queue behind the turns before it and runs next, in order. A
-		// session the record shows open with no job of this queue behind it
-		// (a turn this service did not start) cannot be waited for, so it is
-		// refused, before the key is used; a retry of a known key goes on to
-		// the queue, which returns its job.
-		if c.Open {
-			busy, err := a.cfg.Queue.SessionHasWork(queue.DefaultTeam, body.Session)
-			if err != nil {
-				a.internal(w)
-				return
-			}
-			known, err := a.cfg.Queue.HasKey(queue.DefaultTeam, body.IdempotencyKey)
-			if err != nil {
-				a.internal(w)
-				return
-			}
-			if !busy && !known {
-				writeError(w, http.StatusConflict, run.TurnRunning)
-				return
-			}
-		}
-		spec.Session = body.Session
-	} else {
-		ag, ok := a.turnAgent(w, body.Agent, body.IdempotencyKey)
-		if !ok {
-			return
-		}
-		if body.FolderRef == "" && (len(body.Folder) > run.MaxFolder || !filepath.IsAbs(body.Folder)) {
-			writeError(w, http.StatusBadRequest, "folder must be an absolute path to an existing directory, at most 4096 bytes")
-			return
-		}
-		if msg := run.CheckPrompt(body.Prompt, body.Model); msg != "" {
-			writeError(w, http.StatusBadRequest, msg)
-			return
-		}
-		spec.Harness, spec.AgentID, spec.Access, spec.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
-		if spec.Model == "" && ag.Model != "" {
-			spec.Model, spec.ModelFromAgent = ag.Model, true
-		}
-		spec.Folder, spec.FolderRef, spec.Machine = body.Folder, body.FolderRef, body.Machine
-		spec.Isolate = body.Isolate == nil || *body.Isolate
-		if body.Folder != "" && body.FolderRef == "" {
-			// A typed folder: its machine's runner checks and registers it, and the
-			// session goes on by its reference. A retry of a key already used
-			// is not checked again: the queue answers with the key's turn, or
-			// 409 when the request differs.
-			spec.Typed, spec.TypedMachine = body.Folder, body.Machine
-			known := false
-			if body.IdempotencyKey != "" {
-				if known, err = a.cfg.Queue.HasKey(queue.DefaultTeam, body.IdempotencyKey); err != nil {
-					a.internal(w)
-					return
-				}
-			}
-			ref, conn := "", ""
-			if !known {
-				var status int
-				var msg string
-				ref, conn, status, msg = a.typedFolder(r.Context(), body.Folder, body.Machine)
-				switch {
-				case status == 0 && msg != "":
-					return // the caller went away
-				case status == http.StatusInternalServerError:
-					a.internal(w)
-					return
-				case msg != "":
-					writeError(w, status, msg)
-					return
-				}
-			}
-			spec.Folder, spec.FolderRef, spec.Machine = "", ref, conn
-		}
-		if msg := queue.ResolveFolders(&spec, a.cfg.Folders); msg != "" {
-			writeError(w, http.StatusBadRequest, msg)
+		if !busy && !known {
+			writeError(w, http.StatusConflict, run.TurnRunning)
 			return
 		}
 	}
@@ -318,6 +243,9 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		return
 	case errors.As(err, &removed):
 		writeError(w, http.StatusConflict, removed.Error())
+		return
+	case errors.Is(err, queue.ErrAskedSessionUsed):
+		writeError(w, http.StatusForbidden, turnContinueRefused)
 		return
 	case errors.Is(err, queue.ErrKeyConflict):
 		writeError(w, http.StatusConflict, "idempotency_key already started a turn with other fields; send a new key for a new turn")

@@ -108,6 +108,16 @@ func TestOpencodeTurnEnv(t *testing.T) {
 	}
 }
 
+// "*" in allow means every command: bash's catch-all flips from deny to allow,
+// so OpenCode runs any command (the gateway still gates forbid and ask).
+func TestOpencodeAllowEveryCommand(t *testing.T) {
+	perm := opencodePermission(Turn{Allow: []string{"*", "git status"}})
+	bash := perm["bash"].(orderedRules)
+	if bash["*"] != "allow" {
+		t.Errorf(`bash["*"] = %v, want allow (every command): %v`, bash["*"], bash)
+	}
+}
+
 func TestOpencodeArgs(t *testing.T) {
 	h, _ := Get("opencode")
 	if got, want := h.Args(Turn{Prompt: "hi", Model: "m"}), []string{"run", "--format", "json", "--agent", "agentbus", "--", "hi"}; !slices.Equal(got, want) {
@@ -193,7 +203,8 @@ func TestOpencodeContext(t *testing.T) {
 	if h.OwnInstructions(nil, "/f") == "" {
 		t.Error("a hint would be given")
 	}
-	if h.Info().ToolServer || h.Info().Replay != "" || harnessOffers(h, Subscription) || harnessOffers(h, API) || !harnessOffers(h, OpenRouter) {
+	if h.Info().ToolServer || h.Info().Replay != FormatChatCompletions || !h.Info().ReplayOnOpenRouter ||
+		harnessOffers(h, Subscription) || harnessOffers(h, API) || !harnessOffers(h, OpenRouter) {
 		t.Errorf("info %+v", h.Info())
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/harness"
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/workspace"
 )
 
@@ -110,6 +111,248 @@ func runKind(t *testing.T, q *Queue, r Runner, res Result, folders bool) Job {
 
 func hexOf(c byte) string { return strings.Repeat(string(c), 64) }
 
+// A discard resets the copy to the LAST APPLIED checkpoint, not base, and drops
+// the turns after it. One apply-or-discard runs per workspace: while a discard
+// is in flight, a second discard and an apply are both refused with ErrApplyBusy
+// (a plain 409 at the API), before they run.
+func TestDiscardTargetsAppliedPointAndExcludesOthers(t *testing.T) {
+	q, _ := open(t)
+	rn := capsRunner(t, q, nil, &Capabilities{Connector: conA})
+	conn := rn
+	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
+	turns := []Job{run(t, q, rn, Result{Changeset: hexOf('1'), Checkpoint: "cp1"})}
+	for _, c := range []byte{'2', '3'} {
+		makeJob(t, q, Spec{Session: ids.SessionID(first.Session)})
+		turns = append(turns, run(t, q, rn, Result{Changeset: hexOf(c), Checkpoint: "cp" + string(c)}))
+	}
+	ws := ids.WorkspaceID(first.Session)
+
+	// Apply turn 1, so the applied point is its checkpoint cp1.
+	if _, created, err := q.Apply(DefaultTeam, turns[0].Turn); err != nil || !created {
+		t.Fatalf("apply turn 1: created %v err %v", created, err)
+	}
+	runKind(t, q, conn, Result{Apply: &ApplyResult{Files: []string{"a.txt"}}}, true)
+
+	// A discard resets to cp1 (not base) and drops turns 2 and 3.
+	d, created, err := q.Discard(DefaultTeam, ws, conA, nil)
+	if err != nil || !created || d.Spec.Restore != "cp1" {
+		t.Fatalf("discard after apply: restore=%q created=%v err=%v", d.Spec.Restore, created, err)
+	}
+	// The dropped turns are worked out when the discard RUNS, not frozen on the
+	// job; they are turns 2 and 3 (after the applied turn 1).
+	if dropped, err := q.DroppedTurns(DefaultTeam, ws); err != nil ||
+		fmt.Sprint(dropped) != fmt.Sprint([]string{turns[1].Turn, turns[2].Turn}) {
+		t.Fatalf("dropped: %v err %v", dropped, err)
+	}
+
+	// While that discard is in flight (queued), a second discard is refused.
+	if _, _, err := q.Discard(DefaultTeam, ws, conA, nil); !errors.Is(err, ErrApplyBusy) {
+		t.Fatalf("second discard during a discard: %v, want ErrApplyBusy", err)
+	}
+	// And an apply is refused while a discard is in flight.
+	if _, _, err := q.Apply(DefaultTeam, turns[2].Turn); !errors.Is(err, ErrApplyBusy) {
+		t.Fatalf("apply during a discard: %v, want ErrApplyBusy", err)
+	}
+}
+
+// After a discard finishes, the turns it dropped are no longer appliable,
+// previewable or droppable: applying one is refused, and a second discard has
+// nothing to drop.
+func TestDiscardMakesDroppedTurnsUnappliable(t *testing.T) {
+	q, _ := open(t)
+	rn := capsRunner(t, q, nil, &Capabilities{Connector: conA})
+	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
+	t1 := run(t, q, rn, Result{Changeset: hexOf('1'), Checkpoint: "cp1"})
+	makeJob(t, q, Spec{Session: ids.SessionID(first.Session)})
+	run(t, q, rn, Result{Changeset: hexOf('2'), Checkpoint: "cp2"})
+	ws := ids.WorkspaceID(first.Session)
+
+	// Discard to base, then finish it as the finisher does: record its dropped
+	// turns on the job (MarkDiscarded) and end it.
+	d, _, err := q.Discard(DefaultTeam, ws, conA, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dj, da := take(t, q, rn)
+	if dj.ID != d.ID {
+		t.Fatalf("took %s, not the discard %s", dj.ID, d.ID)
+	}
+	if _, _, err := q.Start(rn.ID, da.ID, da.Number, lease); err != nil {
+		t.Fatal(err)
+	}
+	dropped, err := q.DroppedTurns(DefaultTeam, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := q.MarkDiscarded(DefaultTeam, dj.ID, dropped); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.End(rn.ID, da.ID, da.Number, Finish{Status: Finished}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The dropped turn's changes are gone from the copy, so applying it is refused
+	// (it writes nothing of the dropped work to the folder).
+	if _, _, err := q.Apply(DefaultTeam, t1.Turn); !errors.Is(err, ErrNotApplicable) {
+		t.Fatalf("apply of a dropped turn: %v, want ErrNotApplicable", err)
+	}
+	// And a second discard finds nothing unapplied.
+	if _, _, err := q.Discard(DefaultTeam, ws, conA, nil); !errors.Is(err, ErrAllApplied) {
+		t.Fatalf("second discard: %v, want ErrAllApplied", err)
+	}
+}
+
+// A session-less discard is routed by its workspace COPY key to the runner that
+// holds the copy: another runner on the same machine, which does not hold it,
+// cannot take it (Take keys affinity by the copy key, not `session IS NULL`).
+func TestDiscardRoutesToTheCopyRunner(t *testing.T) {
+	q, _ := open(t)
+	a := capsRunner(t, q, nil, &Capabilities{Connector: conA})
+	b := capsRunner(t, q, nil, &Capabilities{Connector: conA}) // same machine, no copy
+	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
+	run(t, q, a, Result{Changeset: hexOf('1'), Checkpoint: "cp1"}) // the copy lands on runner a
+	ws := ids.WorkspaceID(first.Session)
+	if _, created, err := q.Discard(DefaultTeam, ws, conA, nil); err != nil || !created {
+		t.Fatalf("discard: created %v err %v", created, err)
+	}
+	if got := takes(t, q, b); got != "" {
+		t.Fatalf("runner b, which holds no copy, took the discard %s", got)
+	}
+	if got := takes(t, q, a); got == "" {
+		t.Fatal("runner a, which holds the copy, did not take the discard")
+	}
+}
+
+// A discard while only a turn is running -- with no earlier UNAPPLIED ended turn
+// -- is not "already" (nothing to do): it queues, waits for the turn, and drops
+// it. A running turn's changes count as unapplied even before it ends.
+func TestDiscardWhileOnlyTurnRunsIsNotAlready(t *testing.T) {
+	q, _ := open(t)
+	rn := capsRunner(t, q, nil, &Capabilities{Connector: conA})
+	conn := rn
+	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
+	t1 := run(t, q, rn, Result{Changeset: hexOf('1'), Checkpoint: "cp1"})
+	ws := ids.WorkspaceID(first.Session)
+	// Apply turn 1, so there is NO unapplied ended turn.
+	if _, _, err := q.Apply(DefaultTeam, t1.Turn); err != nil {
+		t.Fatal(err)
+	}
+	runKind(t, q, conn, Result{Apply: &ApplyResult{Files: []string{"a.txt"}}}, true)
+	// Turn 2 is running; no ended unapplied turn exists.
+	makeJob(t, q, Spec{Session: ids.SessionID(first.Session)})
+	_, a2 := take(t, q, rn)
+	if _, _, err := q.Start(rn.ID, a2.ID, a2.Number, lease); err != nil {
+		t.Fatal(err)
+	}
+	// The discard is not refused as "already": it is created, to wait for turn 2.
+	if _, created, err := q.Discard(DefaultTeam, ws, conA, nil); err != nil || !created {
+		t.Fatalf("discard while only a turn runs: created=%v err=%v, want created with no error", created, err)
+	}
+}
+
+// Discard reports the copy runner's real state with the right error: a removed
+// runner is RunnerRemovedError (not "offline"), a closed workspace is
+// ErrSessionClosed -- one query over copies+runners, so they are not conflated.
+func TestDiscardReportsRemovedRunner(t *testing.T) {
+	q, c := open(t)
+	rn := capsRunner(t, q, nil, &Capabilities{Connector: conA})
+	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
+	run(t, q, rn, Result{Changeset: hexOf('1'), Checkpoint: "cp1"})
+	c.add(2 * RunnerFresh) // the runner goes offline, so it can be removed
+	if err := q.RemoveRunner(DefaultTeam, rn.ID); err != nil {
+		t.Fatal(err)
+	}
+	var removed *RunnerRemovedError
+	if _, _, err := q.Discard(DefaultTeam, ids.WorkspaceID(first.Session), conA, nil); !errors.As(err, &removed) {
+		t.Fatalf("discard on a removed runner: %v, want RunnerRemovedError", err)
+	}
+}
+
+func TestDiscardReportsClosedWorkspace(t *testing.T) {
+	q, _ := open(t)
+	rn := capsRunner(t, q, nil, &Capabilities{Connector: conA})
+	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
+	run(t, q, rn, Result{Changeset: hexOf('1'), Checkpoint: "cp1"})
+	if _, err := q.CloseSession(DefaultTeam, ids.WorkspaceID(first.Session)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := q.Discard(DefaultTeam, ids.WorkspaceID(first.Session), conA, nil); !errors.Is(err, ErrSessionClosed) {
+		t.Fatalf("discard on a closed workspace: %v, want ErrSessionClosed", err)
+	}
+}
+
+// A discard job names no session: its workspace.discarded event then names only
+// the workspace, so a workspace id is never written where a session id belongs
+// (no phantom session). Its copy affinity still routes it (CopyKey).
+func TestDiscardJobHasNoSession(t *testing.T) {
+	q, _ := open(t)
+	rn := capsRunner(t, q, nil, &Capabilities{Connector: conA})
+	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
+	run(t, q, rn, Result{Changeset: hexOf('1'), Checkpoint: "cp1"})
+	ws := ids.WorkspaceID(first.Session)
+	d, created, err := q.Discard(DefaultTeam, ws, conA, nil)
+	if err != nil || !created {
+		t.Fatalf("discard: created %v err %v", created, err)
+	}
+	if d.Session != "" {
+		t.Fatalf("discard job session = %q, want empty", d.Session)
+	}
+	if d.Spec.Workspace != ws {
+		t.Fatalf("discard workspace = %q, want %q", d.Spec.Workspace, ws)
+	}
+}
+
+// A discard queued while a turn runs is not refused: it waits in the lane, and
+// when it runs it drops that turn too -- the dropped turns are read at the
+// finish, not frozen when the discard was queued, so nothing is silently wiped.
+func TestDiscardQueuedWhileTurnRunsDropsBoth(t *testing.T) {
+	q, _ := open(t)
+	rn := capsRunner(t, q, nil, &Capabilities{Connector: conA})
+	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
+	t1 := run(t, q, rn, Result{Changeset: hexOf('1'), Checkpoint: "cp1"})
+	ws := ids.WorkspaceID(first.Session)
+
+	// Turn 2 is running (taken, started, not ended) when the discard is queued.
+	makeJob(t, q, Spec{Session: ids.SessionID(first.Session)})
+	j2, a2 := take(t, q, rn)
+	if _, _, err := q.Start(rn.ID, a2.ID, a2.Number, lease); err != nil {
+		t.Fatal(err)
+	}
+	// A running turn does not refuse the discard; it is queued behind it.
+	if _, created, err := q.Discard(DefaultTeam, ws, conA, nil); err != nil || !created {
+		t.Fatalf("discard while a turn runs: created %v err %v", created, err)
+	}
+	// Turn 2 finishes, unapplied.
+	b, _ := json.Marshal(Result{Changeset: hexOf('2'), Checkpoint: "cp2"})
+	if _, err := q.End(rn.ID, a2.ID, a2.Number, Finish{Status: Finished, Result: b}); err != nil {
+		t.Fatal(err)
+	}
+	// When the discard runs, it drops BOTH turns, turn 2 included.
+	if dropped, err := q.DroppedTurns(DefaultTeam, ws); err != nil ||
+		fmt.Sprint(dropped) != fmt.Sprint([]string{t1.Turn, j2.Turn}) {
+		t.Fatalf("dropped %v err %v, want both turns", dropped, err)
+	}
+}
+
+// With nothing applied, a discard resets the copy to base and drops every turn.
+func TestDiscardToBaseDropsEveryTurn(t *testing.T) {
+	q, _ := open(t)
+	rn := capsRunner(t, q, nil, &Capabilities{Connector: conA})
+	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
+	turns := []Job{run(t, q, rn, Result{Changeset: hexOf('1'), Checkpoint: "cp1"})}
+	makeJob(t, q, Spec{Session: ids.SessionID(first.Session)})
+	turns = append(turns, run(t, q, rn, Result{Changeset: hexOf('2'), Checkpoint: "cp2"}))
+	ws := ids.WorkspaceID(first.Session)
+	d, created, err := q.Discard(DefaultTeam, ws, conA, nil)
+	if err != nil || !created || d.Spec.Restore != "" {
+		t.Fatalf("discard to base: restore=%q created=%v err=%v", d.Spec.Restore, created, err)
+	}
+	if dropped, err := q.DroppedTurns(DefaultTeam, ws); err != nil ||
+		fmt.Sprint(dropped) != fmt.Sprint([]string{turns[0].Turn, turns[1].Turn}) {
+		t.Fatalf("dropped: %v err %v", dropped, err)
+	}
+}
+
 // An apply up to a turn starts from the last turn applied, and covers every
 // turn before it: asking for an earlier one answers the apply that did it.
 func TestApplyUpToATurn(t *testing.T) {
@@ -124,7 +367,7 @@ func TestApplyUpToATurn(t *testing.T) {
 	var turns []Job
 	turns = append(turns, t1)
 	for _, c := range []byte{'2', '3'} {
-		makeJob(t, q, Spec{Session: first.Session})
+		makeJob(t, q, Spec{Session: ids.SessionID(first.Session)})
 		turns = append(turns, run(t, q, rn, Result{Changeset: hexOf(c)}))
 	}
 	a2, created, err := q.Apply(DefaultTeam, turns[1].Turn)
@@ -183,7 +426,7 @@ func TestTakeRoutesByMachine(t *testing.T) {
 		t.Fatalf("the folder's machine took %q, want %s", got, turn.ID)
 	}
 	// A next turn of the session stays on the session's runner.
-	makeJob(t, q, Spec{Session: turn.Session})
+	makeJob(t, q, Spec{Session: ids.SessionID(turn.Session)})
 	if got := takes(t, q, onB); got != "" {
 		t.Fatalf("another machine took the next turn %s", got)
 	}
@@ -217,7 +460,7 @@ func TestSessionFromBeforeKeepsItsRunner(t *testing.T) {
 		Workspace: &Workspace{Kind: WorkspaceCopy, Space: j.ID}}); err != nil {
 		t.Fatal(err)
 	}
-	next := makeJob(t, q, Spec{Session: first.Session})
+	next := makeJob(t, q, Spec{Session: ids.SessionID(first.Session)})
 	if got := takes(t, q, home); got != "" {
 		t.Fatalf("the folder's machine took the next turn of a session another runner holds: %s", got)
 	}
@@ -233,6 +476,36 @@ func TestSessionFromBeforeKeepsItsRunner(t *testing.T) {
 	}
 	if got := takesFolder(t, q, home); got != ap.ID {
 		t.Fatalf("the folder's machine took %q, want the apply %s", got, ap.ID)
+	}
+}
+
+// W3: apply is NOT in the workspace lane -- it reads finished checkpoints and
+// the folder, never the live copy -- so an apply of an ended turn is taken at
+// once while a later turn of the same workspace is still running (his call,
+// 2026-11-22). Only turns and discards (which change the copy) share the lane.
+func TestApplyDoesNotWaitForRunningTurn(t *testing.T) {
+	q, _ := open(t)
+	rn := capsRunner(t, q, nil, &Capabilities{Connector: conA})
+	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
+	t1 := run(t, q, rn, Result{Changeset: hexOf('1')})
+	if t1.ID != first.ID {
+		t.Fatalf("ran %s", t1.ID)
+	}
+	// A second turn of the same workspace is running (taken and started).
+	next := makeJob(t, q, Spec{Session: ids.SessionID(first.Session)})
+	nj, na := take(t, q, rn)
+	if nj.ID != next.ID {
+		t.Fatalf("took %s, want the next turn %s", nj.ID, next.ID)
+	}
+	if _, _, err := q.Start(rn.ID, na.ID, na.Number, lease); err != nil {
+		t.Fatal(err)
+	}
+	ap, created, err := q.Apply(DefaultTeam, t1.Turn)
+	if err != nil || !created {
+		t.Fatalf("apply: %v %v", created, err)
+	}
+	if got := takesFolder(t, q, rn); got != ap.ID {
+		t.Fatalf("the apply waited behind a running turn: took %q, want the apply %s", got, ap.ID)
 	}
 }
 
@@ -281,7 +554,7 @@ func TestApplyAtOnce(t *testing.T) {
 	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
 	turns := []Job{run(t, q, rn, Result{Changeset: hexOf('1')})}
 	for _, c := range []byte{'2', '3'} {
-		makeJob(t, q, Spec{Session: first.Session})
+		makeJob(t, q, Spec{Session: ids.SessionID(first.Session)})
 		turns = append(turns, run(t, q, rn, Result{Changeset: hexOf(c)}))
 	}
 	type answer struct {
@@ -304,7 +577,7 @@ func TestApplyAtOnce(t *testing.T) {
 			t.Fatal(a.err)
 		}
 	}
-	applies, _ := q.sessionApplies(DefaultTeam, first.Session)
+	applies, _ := q.sessionApplies(DefaultTeam, ids.WorkspaceID(first.Session))
 	if made != 1 || len(applies) != 1 {
 		t.Fatalf("%d made, %d applies", made, len(applies))
 	}
@@ -350,7 +623,7 @@ func TestApplyNeedsItsMachine(t *testing.T) {
 	if _, _, err := q.Apply(DefaultTeam, j.Turn); !errors.Is(err, ErrMachineOffline) {
 		t.Fatalf("apply with its machine offline: %v", err)
 	}
-	if applies, _ := q.sessionApplies(DefaultTeam, j.Session); len(applies) != 0 {
+	if applies, _ := q.sessionApplies(DefaultTeam, ids.WorkspaceID(j.Session)); len(applies) != 0 {
 		t.Fatalf("%d applies made", len(applies))
 	}
 	if _, err := q.RunnerBeat(rn.ID, 1, nil, nil); err != nil {
@@ -373,7 +646,7 @@ func TestDiffFromIsTheLastTurnControlHolds(t *testing.T) {
 	if t1.ID != first.ID {
 		t.Fatalf("ran %s", t1.ID)
 	}
-	makeJob(t, q, Spec{Session: first.Session})
+	makeJob(t, q, Spec{Session: ids.SessionID(first.Session)})
 	_, a := take(t, q, rn)
 	if _, _, err := q.Start(rn.ID, a.ID, a.Number, lease); err != nil {
 		t.Fatal(err)
@@ -386,7 +659,7 @@ func TestDiffFromIsTheLastTurnControlHolds(t *testing.T) {
 	if _, err := q.End(rn.ID, a.ID, a.Number, Finish{Status: Finished, Result: b}); err == nil {
 		t.Fatal("the finish after the lease ran out was taken")
 	}
-	makeJob(t, q, Spec{Session: first.Session})
+	makeJob(t, q, Spec{Session: ids.SessionID(first.Session)})
 	j, _ := take(t, q, rn)
 	if j.Workspace == nil || j.Workspace.DiffFrom != "t_end1" {
 		t.Fatalf("workspace %+v", j.Workspace)
@@ -430,7 +703,7 @@ func TestSessionEndsWithItsFirstTurn(t *testing.T) {
 				t.Fatal(err)
 			}
 			clk.add(time.Millisecond) // made after the first, as on a real clock
-			next, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: first.Session, Prompt: "next"}, Links{})
+			next, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: ids.SessionID(first.Session), Prompt: "next"}, Links{})
 			if err != nil {
 				t.Fatalf("behind the first turn: %v", err)
 			}
@@ -443,7 +716,7 @@ func TestSessionEndsWithItsFirstTurn(t *testing.T) {
 			if got.State != Failed || got.Reason != ReasonSetup || r.Refused != SessionEnded {
 				t.Fatalf("the queued next turn: %s %s %q", got.State, got.Reason, r.Refused)
 			}
-			if _, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: first.Session, Prompt: "again"}, Links{}); !errors.Is(err, ErrSessionEnded) {
+			if _, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: ids.SessionID(first.Session), Prompt: "again"}, Links{}); !errors.Is(err, ErrSessionEnded) {
 				t.Fatalf("a new turn: %v", err)
 			}
 		})
@@ -456,7 +729,7 @@ func TestSessionGoesOnAfterItsFirstFinish(t *testing.T) {
 	rn := capsRunner(t, q, nil, nil)
 	first := makeJob(t, q, Spec{Harness: "claude", Folder: "/x"})
 	run(t, q, rn, Result{})
-	if _, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: first.Session, Prompt: "next"}, Links{}); err != nil {
+	if _, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: ids.SessionID(first.Session), Prompt: "next"}, Links{}); err != nil {
 		t.Fatal(err)
 	}
 	if j, _ := take(t, q, rn); j.Workspace == nil {
@@ -481,7 +754,7 @@ func TestDropPreviews(t *testing.T) {
 	q, _ := open(t)
 	mk := func(session string) Job {
 		t.Helper()
-		j, _, err := q.create(DefaultTeam, KindPreview, "", Spec{Session: session}, Links{}, Limits{}, session, nil)
+		j, _, err := q.create(DefaultTeam, KindPreview, "", Spec{Session: ids.SessionID(session)}, Links{}, Limits{}, session, nil)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -530,19 +803,19 @@ func TestAppliableCursor(t *testing.T) {
 	}
 	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
 	t1 := run(t, q, rn, Result{Changeset: hexOf('1')})
-	turn, applied, ok, err := q.AppliableCursor(DefaultTeam, first.Session)
+	turn, applied, ok, err := q.AppliableCursor(DefaultTeam, ids.WorkspaceID(first.Session))
 	if err != nil || !ok || turn != t1.Turn || applied != 0 {
 		t.Fatalf("after t1: turn %q applied %d ok %v err %v", turn, applied, ok, err)
 	}
 	// A second turn that has not ended is not appliable: cursor unchanged (R2).
-	makeJob(t, q, Spec{Session: first.Session})
-	if turn2, applied2, _, _ := q.AppliableCursor(DefaultTeam, first.Session); turn2 != t1.Turn || applied2 != 0 {
+	makeJob(t, q, Spec{Session: ids.SessionID(first.Session)})
+	if turn2, applied2, _, _ := q.AppliableCursor(DefaultTeam, ids.WorkspaceID(first.Session)); turn2 != t1.Turn || applied2 != 0 {
 		t.Fatalf("a not-ended turn moved the cursor: turn %q applied %d", turn2, applied2)
 	}
 	// End that turn with no changeset -- a failed upload: still not appliable,
 	// cursor unchanged (R4).
 	run(t, q, rn, Result{})
-	if turn3, applied3, _, _ := q.AppliableCursor(DefaultTeam, first.Session); turn3 != t1.Turn || applied3 != 0 {
+	if turn3, applied3, _, _ := q.AppliableCursor(DefaultTeam, ids.WorkspaceID(first.Session)); turn3 != t1.Turn || applied3 != 0 {
 		t.Fatalf("a no-changeset turn moved the cursor: turn %q applied %d", turn3, applied3)
 	}
 }
@@ -574,7 +847,7 @@ func TestAppliableCursorCountsApplies(t *testing.T) {
 		return q, rn, first.Session, t1.Turn
 	}
 	count := func(t *testing.T, q *Queue, session string) int {
-		_, n, ok, err := q.AppliableCursor(DefaultTeam, session)
+		_, n, ok, err := q.AppliableCursor(DefaultTeam, ids.WorkspaceID(session))
 		if err != nil || !ok {
 			t.Fatalf("cursor: ok %v err %v", ok, err)
 		}

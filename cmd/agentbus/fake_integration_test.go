@@ -45,6 +45,47 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
+// fakePost sends body to $AGENTBUS_URL+path with the agent's own token and
+// writes "<status> <body>" to out, when out is set.
+func fakePost(path, body, out string) {
+	req, _ := http.NewRequest("POST", os.Getenv("AGENTBUS_URL")+path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+os.Getenv("AGENTBUS_TOKEN"))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return
+	}
+	b, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if out != "" {
+		os.WriteFile(out, []byte(fmt.Sprintf("%d %s", resp.StatusCode, b)), 0o600)
+	}
+}
+
+// claudeGatewayEnv reads a variable AgentBus now passes to Claude Code inside a
+// --settings argument's "env" block (the gateway URL, the Connect stand-in, and
+// the stand-in auth token on every relayed path), falling back to a process env
+// var for the one case that still sets one: the person's own real OpenRouter key
+// (non-relay). The real Claude Code reads its settings "env" the same way; the
+// fake mirrors it, as it already parses codex's -c arguments.
+func claudeGatewayEnv(name string) string {
+	args := os.Args[1:]
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] != "--settings" {
+			continue
+		}
+		var v struct {
+			Env map[string]string `json:"env"`
+		}
+		if json.Unmarshal([]byte(args[i+1]), &v) == nil {
+			if val, ok := v.Env[name]; ok {
+				return val
+			}
+		}
+	}
+	return os.Getenv(name)
+}
+
 func fakeAgent() {
 	if a := os.Args[1:]; len(a) == 1 && a[0] == "--version" {
 		fmt.Println(os.Getenv("AGENTBUS_FAKE_VERSION"))
@@ -64,7 +105,7 @@ func fakeAgent() {
 	if p := os.Getenv("AGENTBUS_FAKE_MARK"); p != "" {
 		os.WriteFile(p, []byte("ran"), 0o600)
 	}
-	fmt.Printf("url=%s\n", os.Getenv("ANTHROPIC_BASE_URL"))
+	fmt.Printf("url=%s\n", claudeGatewayEnv("ANTHROPIC_BASE_URL"))
 	fmt.Printf("args=%s\n", strings.Join(os.Args[1:], " "))
 	fmt.Print(os.Getenv("AGENTBUS_FAKE_STDOUT"))
 	// With AGENTBUS_FAKE_CALL=1, one model call through the base URL, as
@@ -79,13 +120,15 @@ func fakeAgent() {
 		calls = []string{b}
 	}
 	for _, body := range calls {
-		req, _ := http.NewRequest("POST", os.Getenv("ANTHROPIC_BASE_URL")+"/v1/messages", strings.NewReader(body))
+		req, _ := http.NewRequest("POST", claudeGatewayEnv("ANTHROPIC_BASE_URL")+"/v1/messages", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		// As Claude Code sends a gateway credential, or the OAuth token of
-		// claude setup-token.
-		if tok := os.Getenv("ANTHROPIC_AUTH_TOKEN"); tok != "" {
+		// claude setup-token. claudeGatewayEnv reads it from --settings on every
+		// relayed path (subscription, API, OpenRouter stand-in) and from env only
+		// for a real OpenRouter key.
+		if tok := claudeGatewayEnv("ANTHROPIC_AUTH_TOKEN"); tok != "" {
 			req.Header.Set("Authorization", "Bearer "+tok)
-		} else if tok := os.Getenv("CLAUDE_CODE_OAUTH_TOKEN"); tok != "" {
+		} else if tok := claudeGatewayEnv("CLAUDE_CODE_OAUTH_TOKEN"); tok != "" {
 			req.Header.Set("Authorization", "Bearer "+tok)
 			req.Header.Set("anthropic-beta", "oauth-2025-04-20")
 		}
@@ -223,8 +266,8 @@ func fakeAgent() {
 			}
 			hdr.Set("Authorization", "Bearer "+os.Getenv("AGENTBUS_OPENAI_TOKEN"))
 		default:
-			base = os.Getenv("ANTHROPIC_BASE_URL")
-			hdr.Set("Authorization", "Bearer "+os.Getenv("ANTHROPIC_AUTH_TOKEN"))
+			base = claudeGatewayEnv("ANTHROPIC_BASE_URL")
+			hdr.Set("Authorization", "Bearer "+claudeGatewayEnv("ANTHROPIC_AUTH_TOKEN"))
 		}
 		req, _ := http.NewRequest(method, base+path, nil)
 		req.Header = hdr
@@ -236,12 +279,32 @@ func fakeAgent() {
 	}
 	// With AGENTBUS_FAKE_ASK, a turn whose prompt is "ask someone" asks
 	// another agent through the API, with its own token, as the ask_agent app
-	// does (B15): POST /api/v0/turns to start the turn, then POST /api/v0/ons to
-	// register the on that delivers its reply to this session.
+	// does (B15): create a session in this turn's own workspace (POST
+	// /api/v0/sessions; the turn token derives the workspace), start the asked
+	// turn in it (POST /api/v0/turns), then register the on that delivers its
+	// reply to this session (POST /api/v0/ons).
 	if b := os.Getenv("AGENTBUS_FAKE_ASK"); b != "" && len(os.Args) > 1 && os.Args[len(os.Args)-1] == "ask someone" {
-		req, _ := http.NewRequest("POST", os.Getenv("AGENTBUS_URL")+"/api/v0/turns", strings.NewReader(b))
+		url, tok := os.Getenv("AGENTBUS_URL"), os.Getenv("AGENTBUS_TOKEN")
+		sreq, _ := http.NewRequest("POST", url+"/api/v0/sessions", strings.NewReader("{}"))
+		sreq.Header.Set("Content-Type", "application/json")
+		sreq.Header.Set("Authorization", "Bearer "+tok)
+		var sess struct {
+			Session string `json:"session"`
+		}
+		if sresp, err := http.DefaultClient.Do(sreq); err == nil {
+			sout, _ := io.ReadAll(sresp.Body)
+			sresp.Body.Close()
+			json.Unmarshal(sout, &sess)
+		}
+		var ask map[string]any
+		json.Unmarshal([]byte(b), &ask)
+		ask["session"] = sess.Session
+		bb, _ := json.Marshal(ask)
+		// An ask is async: a turn token cannot wait for a turn it starts (it runs
+		// in the asker's workspace lane after the asker's turn ends), so wait=false.
+		req, _ := http.NewRequest("POST", url+"/api/v0/turns?wait=false", strings.NewReader(string(bb)))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Authorization", "Bearer "+os.Getenv("AGENTBUS_TOKEN"))
+		req.Header.Set("Authorization", "Bearer "+tok)
 		if resp, err := http.DefaultClient.Do(req); err == nil {
 			out, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
@@ -260,6 +323,19 @@ func fakeAgent() {
 				os.WriteFile(p, []byte(fmt.Sprintf("%d %s", resp.StatusCode, out)), 0o600)
 			}
 		}
+	}
+	// With AGENTBUS_FAKE_MCP, one tools/call to control's tool server
+	// ($AGENTBUS_URL/api/v0/mcp) with its own token, as Claude Code calls an
+	// AgentBus tool: the value is the call's params. "<status> <body>" goes to
+	// AGENTBUS_FAKE_MCP_OUT.
+	if p := os.Getenv("AGENTBUS_FAKE_MCP"); p != "" {
+		fakePost("/api/v0/mcp", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":`+p+`}`, os.Getenv("AGENTBUS_FAKE_MCP_OUT"))
+	}
+	// With AGENTBUS_FAKE_POST ("<path> <JSON body>"), one POST to control's
+	// API with its own token, as agentbus-api sends it. "<status> <body>"
+	// goes to AGENTBUS_FAKE_POST_OUT.
+	if p, b, ok := strings.Cut(os.Getenv("AGENTBUS_FAKE_POST"), " "); ok {
+		fakePost(p, b, os.Getenv("AGENTBUS_FAKE_POST_OUT"))
 	}
 	// AGENTBUS_FAKE_STDERR goes to stderr, AGENTBUS_FAKE_STDERR_REPEAT times
 	// (once when unset), as an agent reports a failure.

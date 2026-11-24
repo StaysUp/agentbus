@@ -43,7 +43,8 @@ as `gNN/dN/fNNN.txt`). Each run clones the fixture into a new folder (`cp -c` on
    internal, not in the client API.
 2. `POST /api/v0/turns` with that session: the later turn.
 3. `GET /api/v0/turns/{id}/diff` for each turn.
-4. `POST /api/v0/turns/{id}/apply` for the first turn, then the later one. The bench checks the
+4. `POST /api/v0/workspaces/{id}/apply` with `{turn}` for the first turn, then the later one (apply
+   is a workspace operation; both turns share the session's one workspace). The bench checks the
    folder ends without the file the first turn added and the later one removed.
 
 The service runs with `-replay=false`. Own replay continues a session from its stored model calls,

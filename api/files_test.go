@@ -76,105 +76,31 @@ func TestFilesDirectOperations(t *testing.T) {
 }
 
 // B8 tool gate tests: read_file through MCP with once, always for this folder, and refuse.
-func TestFolderToolsGateWithHold(t *testing.T) {
-	dir := t.TempDir()
-	outsideFile := filepath.Join(dir, "outside.txt")
-	if err := os.WriteFile(outsideFile, []byte("outside content"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	secondFile := filepath.Join(dir, "second.txt")
-	if err := os.WriteFile(secondFile, []byte("second content"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	// 1. Ask on read_file holds, person answers "once":
-	// The call completes in the same turn. Next call to the same folder asks again.
-	{
-		e := toolGateEnv(t, 5*time.Second, 0, nil)
-		call := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"read_file","arguments":{"path":%q}}}`, outsideFile)
-
-		done := make(chan map[string]any, 1)
-		go func() {
-			_, v := rpc(t, e, mcpWriteTok, call)
-			done <- v
-		}()
-
-		id := waitForApproval(t, e)
-		answerApproval(t, e, id, "once")
-
-		select {
-		case v := <-done:
-			if text := resultText(v); !strings.Contains(text, "outside content") {
-				t.Fatalf("once allow did not return content: %v", text)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatal("tools/call timed out waiting for answer")
+func TestFolderToolsHidden(t *testing.T) {
+	// B8 folder tools are hidden in 0.6.5: not registered, so tools/list does
+	// not name them and tools/call cannot reach them. The HTTP routes stay for
+	// 0.9 (see TestDirectTokenFileAccessRequiresGrant), but no agent can call
+	// the tools (his call, 2026-11-23).
+	e := toolGateEnv(t, 5*time.Second, 0, nil)
+	for _, name := range []string{"read_file", "list_folder", "write_file"} {
+		if _, ok := e.api.servedByName(name); ok {
+			t.Errorf("%s is still served as a tool", name)
 		}
-
-		// A second call to another file in the folder is NOT pre-granted: it asks again!
-		done2 := make(chan map[string]any, 1)
-		call2 := fmt.Sprintf(`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"path":%q}}}`, secondFile)
-		go func() {
-			_, v := rpc(t, e, mcpWriteTok, call2)
-			done2 <- v
-		}()
-		id2 := waitForApproval(t, e)
-		if id2 == "" {
-			t.Fatal("second call was not held")
+		call := fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":%q,"arguments":{"path":"/tmp/x"}}}`, name)
+		_, v := rpc(t, e, mcpWriteTok, call)
+		if dig(v, "error") == nil {
+			t.Errorf("tools/call for the hidden tool %s did not error: %v", name, v)
 		}
-		answerApproval(t, e, id2, "refuse")
-		v2 := <-done2
-		if !strings.Contains(resultText(v2), "refused this call") {
-			t.Fatalf("second call was not refused: %v", v2)
-		}
-	}
-
-	// 2. Ask on read_file holds, person answers "always for this folder":
-	// A grant row is written to control's folder_grants table (never a repo file).
-	// The first call succeeds, and a second call to another file in that folder succeeds immediately!
-	{
-		e := toolGateEnv(t, 5*time.Second, 0, nil)
-		call := fmt.Sprintf(`{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"read_file","arguments":{"path":%q}}}`, outsideFile)
-
-		done := make(chan map[string]any, 1)
-		go func() {
-			_, v := rpc(t, e, mcpWriteTok, call)
-			done <- v
-		}()
-
-		id := waitForApproval(t, e)
-		// Check the suggested rule is the target folder:
-		h, exists, _, err := e.api.approvalByID(id)
-		if err != nil || !exists || len(h.rules) == 0 || (h.rules[0] != dir && strings.TrimPrefix(h.rules[0], "/private") != strings.TrimPrefix(dir, "/private")) {
-			t.Fatalf("approval rule: %+v, want folder %s", h, dir)
-		}
-
-		answerApproval(t, e, id, "always for this folder")
-
-		select {
-		case v := <-done:
-			if text := resultText(v); !strings.Contains(text, "outside content") {
-				t.Fatalf("always allow did not return content: %v", text)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatal("tools/call timed out")
-		}
-
-		// Check folder_grants row on control:
-		grants, err := e.store.ListFolderGrants("s1")
-		if err != nil || len(grants) != 1 || (grants[0].Folder != dir && strings.TrimPrefix(grants[0].Folder, "/private") != strings.TrimPrefix(dir, "/private")) {
-			t.Fatalf("ListFolderGrants: %v %v", grants, err)
-		}
-
-		// Second call to another file in the granted folder runs immediately without asking!
-		call2 := fmt.Sprintf(`{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"read_file","arguments":{"path":%q}}}`, secondFile)
-		_, v2 := rpc(t, e, mcpWriteTok, call2)
-		if text := resultText(v2); !strings.Contains(text, "second content") {
-			t.Fatalf("second call with grant did not return content: %v", text)
-		}
-		// Confirm no approval was requested for second call:
 		if pending := pendingIDs(t, e); len(pending) != 0 {
-			t.Fatalf("approval pending when already granted: %v", pending)
+			t.Errorf("a hidden tool call was held: %v", pending)
+		}
+	}
+	// tools/list names none of them.
+	_, v := rpc(t, e, mcpWriteTok, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
+	listed := fmt.Sprintf("%v", v)
+	for _, name := range []string{"read_file", "list_folder", "write_file"} {
+		if strings.Contains(listed, name) {
+			t.Errorf("tools/list names the hidden tool %s", name)
 		}
 	}
 }
@@ -285,32 +211,13 @@ func TestDirectTokenFileAccessRequiresGrant(t *testing.T) {
 		t.Fatalf("reading /dev/null was not rejected: %d %s", resp.StatusCode, out)
 	}
 
-	// Codex Round 5 P1 tests:
-	// 1. Cyclic symlink in MCP call is rejected immediately without holding
-	{
-		eMCP := toolGateEnv(t, 5*time.Second, 0, nil)
-		cycleA := filepath.Join(dir, "mcp_cycle_a")
-		cycleB := filepath.Join(dir, "mcp_cycle_b")
-		_ = os.Symlink(cycleB, cycleA)
-		_ = os.Symlink(cycleA, cycleB)
-		call := fmt.Sprintf(`{"jsonrpc":"2.0","id":10,"method":"tools/call","params":{"name":"read_file","arguments":{"path":%q}}}`, cycleA)
-		_, v := rpc(t, eMCP, mcpWriteTok, call)
-		if text := resultText(v); !strings.Contains(text, "symbolic links") {
-			t.Fatalf("cyclic symlink in MCP was not rejected immediately: %v", v)
-		}
-		if pending := pendingIDs(t, eMCP); len(pending) != 0 {
-			t.Fatalf("cyclic symlink was held: %v", pending)
-		}
-	}
-
-	// 2. Directory swap cannot escape granted folder
+	// The folder tools are reached only through the HTTP route now (they are
+	// hidden as tools), so the route's own checks are what protect it; the
+	// cyclic-symlink, grant and forbid checks above cover that route.
+	// A directory swapped for a symlink cannot escape the granted folder.
 	{
 		subDir := filepath.Join(dir, "sub_swap")
 		if err := os.Mkdir(subDir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		subFile := filepath.Join(subDir, "file.txt")
-		if err := os.WriteFile(subFile, []byte("sub file"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.RemoveAll(subDir); err != nil {
@@ -327,7 +234,7 @@ func TestDirectTokenFileAccessRequiresGrant(t *testing.T) {
 		}
 	}
 
-	// 3. FIFO read and list do not block
+	// A FIFO is a non-regular file: read and list refuse it, they do not block.
 	{
 		fifoPath := filepath.Join(dir, "test_fifo")
 		if err := unix.Mkfifo(fifoPath, 0666); err == nil {
@@ -337,7 +244,6 @@ func TestDirectTokenFileAccessRequiresGrant(t *testing.T) {
 			if resp.StatusCode != 400 || !strings.Contains(out, "not a regular file") {
 				t.Fatalf("FIFO read did not fail with 400: %d %s", resp.StatusCode, out)
 			}
-
 			req = e.req(t, "POST", "/api/v0/files/list", strings.NewReader(fmt.Sprintf(`{"path":%q}`, fifoPath)))
 			req.Header.Set("Authorization", "Bearer "+mcpWriteTok)
 			resp, out = do(t, req)
@@ -347,13 +253,14 @@ func TestDirectTokenFileAccessRequiresGrant(t *testing.T) {
 		}
 	}
 
-	// 4. MCP write to nested missing directory under existing folder grant succeeds
+	// A write creates missing parent directories under the granted folder.
 	{
 		nestedFile := filepath.Join(dir, "new", "nested", "file.txt")
-		call := fmt.Sprintf(`{"jsonrpc":"2.0","id":20,"method":"tools/call","params":{"name":"write_file","arguments":{"path":%q,"content":"nested hello"}}}`, nestedFile)
-		_, v := rpc(t, e, mcpWriteTok, call)
-		if text := resultText(v); strings.Contains(text, "Error") || strings.Contains(text, "failed") {
-			t.Fatalf("MCP write to nested directory failed: %v", v)
+		req = e.req(t, "POST", "/api/v0/files/write", strings.NewReader(fmt.Sprintf(`{"path":%q,"content":"nested hello"}`, nestedFile)))
+		req.Header.Set("Authorization", "Bearer "+mcpWriteTok)
+		resp, out = do(t, req)
+		if resp.StatusCode != 200 {
+			t.Fatalf("write to nested directory failed: %d %s", resp.StatusCode, out)
 		}
 		data, err := os.ReadFile(nestedFile)
 		if err != nil || string(data) != "nested hello" {
@@ -361,7 +268,7 @@ func TestDirectTokenFileAccessRequiresGrant(t *testing.T) {
 		}
 	}
 
-	// 5. Valid file names starting with .. (e.g. ..notes) are not refused
+	// Valid file names starting with .. (e.g. ..notes) are not refused.
 	{
 		dotdotFile := filepath.Join(dir, "..notes")
 		if err := os.WriteFile(dotdotFile, []byte("dotdot content"), 0o600); err != nil {
@@ -375,7 +282,7 @@ func TestDirectTokenFileAccessRequiresGrant(t *testing.T) {
 		}
 	}
 
-	// 6. Refused write does not truncate the destination file
+	// A refused (ungranted) write does not truncate the destination file.
 	{
 		origFile := filepath.Join(dir, "no_trunc.txt")
 		if err := os.WriteFile(origFile, []byte("important content"), 0o600); err != nil {
@@ -391,63 +298,6 @@ func TestDirectTokenFileAccessRequiresGrant(t *testing.T) {
 		content, _ := os.ReadFile(origFile)
 		if string(content) != "important content" {
 			t.Fatalf("refused write truncated file! content: %q", string(content))
-		}
-	}
-
-	// 7. "always for this folder" when parent directories do not exist on disk yet
-	{
-		eHold := toolGateEnv(t, 5*time.Second, 0, nil)
-		deepMissing := filepath.Join(dir, "brand_new_folder", "sub", "test.txt")
-		call := fmt.Sprintf(`{"jsonrpc":"2.0","id":30,"method":"tools/call","params":{"name":"write_file","arguments":{"path":%q,"content":"deep hello"}}}`, deepMissing)
-		done := make(chan map[string]any, 1)
-		go func() {
-			_, v := rpc(t, eHold, mcpWriteTok, call)
-			done <- v
-		}()
-
-		id := waitForApproval(t, eHold)
-		answerApproval(t, eHold, id, "always for this folder")
-
-		select {
-		case v := <-done:
-			if text := resultText(v); strings.Contains(text, "Error") || strings.Contains(text, "failed") {
-				t.Fatalf("always for missing folder failed: %v", text)
-			}
-		case <-time.After(10 * time.Second):
-			t.Fatal("timed out waiting for approval execution")
-		}
-		data, err := os.ReadFile(deepMissing)
-		if err != nil || string(data) != "deep hello" {
-			t.Fatalf("deep missing file not created: %s %v", string(data), err)
-		}
-	}
-
-	// 8. A changed symlink target between hold and approval is refused
-	{
-		eSym := toolGateEnv(t, 5*time.Second, 0, nil)
-		targetA := filepath.Join(dir, "target_a.txt")
-		targetB := filepath.Join(dir, "target_b.txt")
-		_ = os.WriteFile(targetA, []byte("A"), 0o600)
-		_ = os.WriteFile(targetB, []byte("B"), 0o600)
-		linkPath := filepath.Join(dir, "dynamic_link.txt")
-		_ = os.Symlink(targetA, linkPath)
-
-		call := fmt.Sprintf(`{"jsonrpc":"2.0","id":40,"method":"tools/call","params":{"name":"read_file","arguments":{"path":%q}}}`, linkPath)
-		done := make(chan map[string]any, 1)
-		go func() {
-			_, v := rpc(t, eSym, mcpWriteTok, call)
-			done <- v
-		}()
-
-		id := waitForApproval(t, eSym)
-		// Change the symlink to targetB during hold:
-		_ = os.Remove(linkPath)
-		_ = os.Symlink(targetB, linkPath)
-
-		answerApproval(t, eSym, id, "once")
-		v := <-done
-		if text := resultText(v); !strings.Contains(text, "path changed to ungranted target") {
-			t.Fatalf("changed symlink was not refused: %v", v)
 		}
 	}
 }

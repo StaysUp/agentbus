@@ -25,13 +25,13 @@ func turnCost(session, turn string, cost float64, complete bool) event.Event {
 }
 
 func runOpened(session, turn, holdID string) event.Event {
-	e := inTurn(event.SessionOpened, session, turn)
+	e := inTurn(event.RunStarted, session, turn)
 	e.Hold, e.Harness, e.Folder = holdID, "claude", "/f"
 	return e
 }
 
 func runClosed(session, turn, holdID string, code *int) event.Event {
-	e := inTurn(event.SessionClosed, session, turn)
+	e := inTurn(event.RunEnded, session, turn)
 	e.Hold, e.ExitCode = holdID, code
 	return e
 }
@@ -149,6 +149,55 @@ func TestTurnsStateCostAndOrder(t *testing.T) {
 	if fmt.Sprint(paged) != "[t_e t_d t_c t_b t_a]" {
 		t.Errorf("paged %v", paged)
 	}
+}
+
+func startedIn(session, turn, ws string) event.Event {
+	e := started(session, turn, "x")
+	e.Workspace = ws
+	return e
+}
+
+func discardDropping(ws string, turns ...string) event.Event {
+	e := ev(event.WorkspaceDiscarded, "")
+	e.Workspace = ws
+	e.Discarded = &event.Discarded{DroppedTurns: turns}
+	return e
+}
+
+// A turn a discard dropped carries discarded, matched to the turn's own
+// workspace (not by id alone, since a turn id may recur across sessions), and a
+// migrated workspace (no workspace field) matches by its session id.
+func TestTurnDiscardedMark(t *testing.T) {
+	s := newStore(t)
+	mustAppend(t, s, startedIn("s1", "t_a", "ws1"))
+	mustAppend(t, s, startedIn("s1", "t_b", "ws1"))
+	mustAppend(t, s, startedIn("s2", "t_b", "ws2")) // same turn id, another workspace
+	mustAppend(t, s, started("s3", "t_c", "x"))     // migrated: no workspace field
+	mustAppend(t, s, discardDropping("ws1", "t_b"))
+	mustAppend(t, s, discardDropping("s3", "t_c"))
+
+	m1 := byID(mustTurns(t, s, TurnQuery{Session: "s1", Limit: 100}))
+	if !m1["t_b"].Discarded {
+		t.Error("ws1's t_b should be marked discarded")
+	}
+	if m1["t_a"].Discarded {
+		t.Error("t_a was not dropped, so it must not be marked")
+	}
+	if byID(mustTurns(t, s, TurnQuery{Session: "s2", Limit: 100}))["t_b"].Discarded {
+		t.Error("ws2's t_b must not be marked by ws1's discard (turn-id collision)")
+	}
+	if !byID(mustTurns(t, s, TurnQuery{Session: "s3", Limit: 100}))["t_c"].Discarded {
+		t.Error("a migrated workspace's t_c should be marked by a discard keyed on the session id")
+	}
+}
+
+func mustTurns(t *testing.T, s *Store, q TurnQuery) TurnList {
+	t.Helper()
+	l, err := s.Turns(q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return l
 }
 
 // One turn's events, oldest first, and no other turn's, nor drops.

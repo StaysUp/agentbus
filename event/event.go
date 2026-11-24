@@ -30,10 +30,10 @@ const (
 	// registered the session with its agent and folder. Nothing writes it now;
 	// old stores keep theirs and readers still accept them.
 	SessionRegistered Kind = "session.registered"
-	// SessionOpened and SessionClosed: a run's child started or exited. Hold
-	// names that child, so each opened has its own closed.
-	SessionOpened Kind = "session.opened"
-	SessionClosed Kind = "session.closed"
+	// RunStarted and RunEnded: a run's child started or exited. Hold
+	// names that child, so each run.started has its own run.ended.
+	RunStarted Kind = "run.started"
+	RunEnded   Kind = "run.ended"
 
 	// SchemaUnexpected: the vendor sent a shape the adapter does not know, such
 	// as a new block type or usage field. Unexpected says what, as names only.
@@ -62,6 +62,13 @@ const (
 	// Text says how it ended and who answered.
 	ApprovalDecided Kind = "approval.decided"
 
+	// SessionCreated: a session was created in a workspace (POST
+	// /api/v0/sessions), before any turn of it. Session is its id, Workspace
+	// the workspace its turns run in, and Title its name when one was given. A
+	// session groups turns; it owns only a title and its archived view, never a
+	// folder or a mode -- those are the workspace's. A session may have no turn
+	// yet: created and then left, which is harmless.
+	SessionCreated Kind = "session.created"
 	// SessionRenamed: the person, or a turn of the session's request tree,
 	// gave the session a name (PATCH /api/v0/sessions/{id}). Title is the new
 	// name and OldTitle the one it replaced. The latest names the session.
@@ -127,8 +134,55 @@ const (
 	// cut: truncated says it is not complete.
 	// TurnApplied: an apply of a session's turns to the person's folder
 	// ended. Applied says which turns, who asked, how it ended and the files.
+	// Pre-workspace records keep theirs; the workspace reader reads them as the
+	// apply history of the turn's workspace. Nothing writes it now.
 	TurnChanged Kind = "turn.changed"
 	TurnApplied Kind = "turn.applied"
+
+	// WorkspaceCreated, WorkspaceApplied and WorkspaceDiscarded are a
+	// workspace's own events. A workspace is where turns run: it owns the
+	// folder, the machine, the sandbox mode (copy + wall, or the real folder),
+	// its checkpoints, Apply and Discard. One workspace backs one session.
+	//
+	// WorkspaceCreated is written by control when a workspace is created,
+	// before any turn job of it is queued. Workspace is its id, FolderRef (and
+	// Folder on a local agentbus up) the folder, Machine the connector, and
+	// Sandbox the mode (always present: true for a copy behind a wall, false
+	// for the person's real folder). It is the single source of the
+	// workspace's folder, machine and mode. Stored once per workspace
+	// (AppendOnce with event id wc_<workspace>).
+	//
+	// WorkspaceApplied is written when an apply job of the workspace ends on
+	// the folder's machine. Workspace, Session and Turn name it; Applied holds
+	// the turns carried, the from/to changesets, the result, the files and who
+	// asked. Old turn.applied events are read by the same reader for
+	// pre-workspace turns.
+	//
+	// WorkspaceDiscarded is written when the unapplied changes of a sandbox
+	// workspace are dropped. Workspace and Session name it; Discarded holds the
+	// changeset it was reset to (or "base" when never applied), the turns whose
+	// file changes were dropped, and who asked. The conversation stays.
+	//
+	// WorkspaceUpdated is written when an update job of the workspace ends: the
+	// person's folder as it is now is merged into the copy, so the session's
+	// work sits on top of it and the next Apply writes only that work. Workspace
+	// and Session name it; Updated holds the result (updated or conflict), the
+	// new baseline (from, the folder's current state) and target (to, the merge)
+	// changesets on a clean update, the folded turns, the conflicting files on a
+	// conflict, and who asked.
+	WorkspaceCreated   Kind = "workspace.created"
+	WorkspaceApplied   Kind = "workspace.applied"
+	WorkspaceDiscarded Kind = "workspace.discarded"
+	WorkspaceUpdated   Kind = "workspace.updated"
+
+	// FolderRegistered is control's record that a folder a person typed was
+	// checked and registered on its machine's runner (queue.KindFolder), so a
+	// folder becoming known to control is in the record and not only in the
+	// folder registry. FolderRef is its reference and Machine the connector
+	// that holds it. The path is not carried: it is kept off control's disk
+	// (queue/folder.go). No session. Stored once per folder reference and
+	// machine, as the folder is first registered.
+	FolderRegistered Kind = "folder.registered"
 
 	// TurnEnded: control's record that a turn job ended, written for every
 	// ended turn job whatever its outcome (finished, failed, stopped,
@@ -141,10 +195,11 @@ const (
 	// The changes and the reply are elsewhere (turn.changed, the job result).
 	TurnEnded Kind = "turn.ended"
 
-	// ChangesPreviewed: what applying the session's changes to the person's
-	// folder would do now, the dry run's result, stored so GET /sessions/{id}/
-	// changes serves it from the record (one source) and pages it. Previewed
-	// holds it. Stored when a preview runs; reused until the session changes.
+	// ChangesPreviewed: what applying a workspace's changes to the person's
+	// folder would do now, the dry run's result, stored so GET
+	// /workspaces/{id}/changes serves it from the record (one source) and pages
+	// it. Previewed holds it. It is keyed by its workspace (its session field is
+	// empty). Stored when a preview runs; reused until the workspace changes.
 	ChangesPreviewed Kind = "changes.previewed"
 
 	// PlanUsage: how much of a subscription's plan is used in one of its
@@ -176,8 +231,8 @@ var Kinds = []KindInfo{
 		"waiting on tools (stop reason tool_use), stopped (an error or a non-200 reply), or left behind (a later turn started).", []string{"outcome"}},
 	{EventsDropped, "Events were lost because the output did not keep up: dropped, and sessions or all_sessions.", []string{"dropped"}},
 	{SessionRegistered, "Older stores only: a launcher or a run registered the session, with agent and folder. Nothing writes it now.", []string{"session"}},
-	{SessionOpened, "A run's child is starting: hold names it; agent and folder say what and where; turn is the turn it runs. Stored just before the child starts.", []string{"session", "hold"}},
-	{SessionClosed, "A run's turn ended: its child exited, or could not start. hold, exit_code, resume_id, turn, state (finished, failed or stopped), error when it failed (the agent's own error line from its stderr, or plain words in its place for a failure its harness knows, else its exit code, or why it could not start), stopped when the person stopped the turn, error_tail (the last lines the agent wrote to stderr, when it exited with an error), and unsettled when the gateway could not confirm all of the turn's calls were stored. Also stored at start, with unsettled and state failed, for a child the previous service left running, and by control for a turn whose runner stopped answering.", []string{"session"}},
+	{RunStarted, "A run's child is starting: hold names it; agent and folder say what and where; turn is the turn it runs. Stored just before the child starts.", []string{"session", "hold"}},
+	{RunEnded, "A run's turn ended: its child exited, or could not start. hold, exit_code, resume_id, turn, state (finished, failed or stopped), error when it failed (the agent's own error line from its stderr, or plain words in its place for a failure its harness knows, else its exit code, or why it could not start), stopped when the person stopped the turn, error_tail (the last lines the agent wrote to stderr, when it exited with an error), and unsettled when the gateway could not confirm all of the turn's calls were stored. Also stored at start, with unsettled and state failed, for a child the previous service left running, and by control for a turn whose runner stopped answering.", []string{"session"}},
 	{SchemaUnexpected, "The vendor sent a shape the adapter does not know: unexpected, as names only. Show it as a quiet warning.", []string{"unexpected"}},
 	{ReplayFailed, "A model request of a replayed turn (a turn.started with replay_from) could not be given the earlier turn's history: error says why, such as the harness's request layout not being one the gateway knows. The gateway refused that request with 400 and did not send it to the vendor, so the turn fails rather than continue without its history. Show it as an error.", []string{"error"}},
 	{ToolRefused, "The gateway refused a tool call before the agent could run it, because its command matched a forbid entry of permissions.toml: tool_id, tool_name, tool_input, rule (the entry), and text (what the model is told in place of the output). The call's tool.requested is still stored, and its tool.completed carries that text. Show it as a warning.", []string{"tool_id", "rule"}},
@@ -201,12 +256,18 @@ var Kinds = []KindInfo{
 	{RunnerRemoved, "The person removed a runner that was offline (POST /api/v0/runners/{id}/remove): runner is its id. Its token works no more and it is no longer listed; its sessions, jobs and their events stay, but its sessions take no more turns or reviews. No session.", []string{"runner"}},
 	{SettingsChanged, "The settings changed, through the API or by the one-time import of the settings files: setting is permissions, instructions or agents; keys names what changed (a policy key such as limits.max_depth, text for the instructions, an agent id or id.field such as a_1234.model); settings_version is the settings version the change made. On an import, file is the file the setting came from. A build that changed a default writes the old value into the person's policy on its first start: a change of permissions with no file, whose keys are those defaults. Names only: never a value, so never a secret. The change and this event are stored together: the settings database keeps the event until the record has it. No session.", []string{"setting", "settings_version"}},
 	{TurnChanged, "What the turn changed in its session's copy, or in the folder it ran in, from its start to its end. Stored by control once it accepts the turn's end, at most once per turn: changes holds the changed files (path, change, size, sha256 at the end, sha256_before at the start) and, for small text files, each one's unified diff (at most 1 MiB for the whole turn; diffs_cut says some were left out) and content. A binary file has its path, size and hashes only. The file list can be cut: truncated says it is not complete, because files were left out (past 1,000, or when the whole was too large to send; count still counts them) or because the copy held more files than a checkpoint keeps (then count misses some too). GET /api/v0/turns/{id}/changes lists it, and /diff summarises it. Absent for a turn that ran in no folder, and for turns from before 0.5, whose changes are in their job.", []string{"session", "turn", "changes"}},
-	{TurnApplied, "An apply of the session's turns to the person's folder ended (POST /api/v0/turns/{id}/apply): turn is the turn asked for, and applied holds every turn whose changes it carried, who asked (by: the person or an agent, never a token), the result (applied, refused or failed), the files written or removed, and on a refusal the files that refused it, each with why. Stored once per apply. Show a refusal as a warning.", []string{"session", "turn", "applied"}},
+	{TurnApplied, "An apply of the session's turns to the person's folder ended (POST /api/v0/turns/{id}/apply): turn is the turn asked for, and applied holds every turn whose changes it carried, who asked (by: the person or an agent, never a token), the result (applied, refused or failed), the files written or removed, and on a refusal the files that refused it, each with why. Stored once per apply. Pre-workspace records only; the workspace reader reads it as an apply of the turn's workspace. Show a refusal as a warning.", []string{"session", "turn", "applied"}},
+	{WorkspaceCreated, "A workspace was created, before any turn of it ran: workspace is its id, folder_ref (and folder on a local agentbus up) the folder it runs in, machine the connector that owns the folder, and sandbox the mode (true for a copy behind a wall, false for the person's real folder; always present). It is the single source of the workspace's folder, machine and mode. Stored once per workspace, keyed on the event id wc_<workspace>.", []string{"workspace", "sandbox"}},
+	{WorkspaceApplied, "An apply of a workspace's changes to the person's folder ended (POST /api/v0/workspaces/{id}/apply): workspace and session name it, turn is the turn applied up to, and applied holds every turn whose changes it carried, the from and to changesets, who asked (by: the person or an agent, never a token), the result (applied, refused or failed), the files written or removed, and on a refusal the files that refused it, each with why. Stored once per apply. Show a refusal as a warning.", []string{"workspace", "applied"}},
+	{WorkspaceDiscarded, "The unapplied changes of a sandbox workspace were dropped (POST /api/v0/workspaces/{id}/discard): workspace and session name it, and discarded holds the changeset it was reset to (the last applied one, or base when never applied), the turns whose file changes were dropped, and who asked. The conversation stays in the record. Stored once per discard.", []string{"workspace", "discarded"}},
+	{FolderRegistered, "A folder a person typed was checked and registered on its machine's runner (POST /api/v0/workspaces with folder): folder_ref is the reference its machine issued, and machine the connector that holds it. The path is not carried; it is kept off control's disk. No session. Stored once per folder reference and machine, as the folder is first registered, so a folder becoming known is in the record and not only in the folder listing (GET /api/v0/folders).", []string{"folder_ref", "machine"}},
+	{WorkspaceUpdated, "The person's folder as it is now was merged into a sandbox workspace's copy (POST /api/v0/workspaces/{id}/update), so the session's work sits on top of it and the next Apply writes only that work: workspace and session name it, and updated holds the result (updated or conflict), on a clean update the new baseline changeset (from, the folder now) and the merged changeset (to) with the folded turns, on a conflict the files that conflicted, and who asked. Nothing is written to the folder; the copy's private git does the three-way merge. Stored once per update.", []string{"workspace", "updated"}},
 	{TurnEnded, "A turn job ended, whatever its outcome: control writes it once per turn job for every ended turn (finished, failed, stopped, cancelled or its runner lost), so a reactor (a delivery) learns a turn ended from the record, not from the scheduler's job table. It is keyed on the turn and carries no session -- a reactor trigger, not part of a session's event stream. state is how it ended and error says why. The changes and the reply are not here: those are turn.changed and the job's result.", []string{"turn", "state"}},
-	{ChangesPreviewed, "What applying the session's changes to the person's folder would do now, the dry run of POST /api/v0/turns/{id}/apply computed on the folder's machine, nothing written: previewed holds the files it would write or remove (with diffs), the conflicts it would refuse, the turn it would apply up to and the turns it would carry. Stored so GET /api/v0/sessions/{id}/changes serves and pages it from the record, as of this event's time; a new one is stored when a preview runs again (the session changed, or a fresh one was asked for). The file list can be cut (truncated) when too many to send; count still counts them all.", []string{"session", "previewed"}},
+	{ChangesPreviewed, "What applying a workspace's changes to the person's folder would do now, the dry run of POST /api/v0/workspaces/{id}/apply computed on the folder's machine, nothing written: previewed holds the files it would write or remove (with diffs), the conflicts it would refuse, the turn it would apply up to and the turns it would carry. workspace names the workspace it is of (its session field is empty, so it never enters the session namespace). Stored so GET /api/v0/workspaces/{id}/changes serves and pages it from the record, as of this event's time; a new one is stored when a preview runs again (the workspace changed, or a fresh one was asked for). The file list can be cut (truncated) when too many to send; count still counts them all.", []string{"workspace", "previewed"}},
 	{PlanUsage, "How much of a subscription's plan is used in one of its windows, as the vendor said in the headers of a model reply that carried control's credential for that subscription: plan holds the subscription (the harness, such as claude), the connect its credential came from, the window, its length in minutes, the percent used, when it resets and the vendor's status word. " +
 		"exchange names the call it was read from. Stored when the reading changes, and again every 10 minutes at most while calls keep it the same. " +
 		"The latest per subscription, connect and window is kept; GET /api/v0/subscriptions shows those of the subscription's current connect. Only control's own gateway stores it: a runner's record is refused it. Read from a fixed list of the vendor's usage headers only; no other header. No session.", []string{"plan"}},
+	{SessionCreated, "A session was created in a workspace with POST /api/v0/sessions, before any turn of it: session is its id, workspace the workspace its turns run in, and title its name when one was given. A session groups turns and owns only its title and archived view; its folder and mode are its workspace's. Stored once per session, keyed on the event id sc_<session>. A session may be created and left with no turn, which is harmless.", []string{"session", "workspace"}},
 	{SessionRenamed, "The session was given a name with PATCH /api/v0/sessions/{id}: title is the new name, old_title the one it had before (absent when it had none). The latest names the session in GET /api/v0/sessions; earlier names stay in the record.", []string{"session", "title"}},
 	{SessionArchived, "The session was archived or un-archived with PATCH /api/v0/sessions/{id}: archived true hid it from the default list, false (absent) un-hid it. The latest decides. Only a view: nothing is removed and the session still takes turns.", []string{"session", "archived"}},
 }
@@ -245,6 +306,11 @@ type Usage struct {
 	// unknown lifetime.
 	CacheWrite5mTokens int `json:"cache_write_5m_tokens,omitempty" doc:"The part of cache_write_tokens with a 5 minute lifetime, when the vendor said."`
 	CacheWrite1hTokens int `json:"cache_write_1h_tokens,omitempty" doc:"The part of cache_write_tokens with a 1 hour lifetime, when the vendor said."`
+	// CacheWrite30mTokens and CacheWrite12hTokens are OpenAI's two write
+	// lifetimes, from input_tokens_details.cache_write_tokens_details. Each has
+	// its own price.
+	CacheWrite30mTokens int `json:"cache_write_30m_tokens,omitempty" doc:"The part of cache_write_tokens with a 30 minute lifetime, when the vendor said."`
+	CacheWrite12hTokens int `json:"cache_write_12h_tokens,omitempty" doc:"The part of cache_write_tokens with a 12 hour lifetime, when the vendor said."`
 	// ServiceTier and Speed are the tier and speed the vendor reports it
 	// served the call at, in its own words. Empty when it reported none.
 	ServiceTier string `json:"service_tier,omitempty" doc:"The tier the vendor says served the call, in its own words."`
@@ -280,7 +346,7 @@ type Event struct {
 	Client   string    `json:"client,omitempty" doc:"The harness, from its User-Agent, such as claude-cli/2.1.318."`
 	Turn     string    `json:"turn,omitempty" doc:"The turn this event belongs to. A turn started by POST /api/v0/turns: the id its reply named, on every event of it. Traffic no run started: a hash of the conversation up to the person's message."`
 
-	Model        string   `json:"model,omitempty" doc:"On model.requested: the model asked for. On a run's turn.started and session.opened: the model the run was started with, absent for the harness's default; a session's next turn that names no agent and no model keeps it."`
+	Model        string   `json:"model,omitempty" doc:"On model.requested: the model asked for. On a run's turn.started and run.started: the model the run was started with, absent for the harness's default; a session's next turn that names no agent and no model keeps it."`
 	Text         string   `json:"text,omitempty" doc:"The person's words on turn.started, the reply on model.responded, a program's text."`
 	ToolsOffered []string `json:"tools_offered,omitempty" doc:"On model.requested: the tools the harness offered."`
 	StopReason   string   `json:"stop_reason,omitempty" doc:"The vendor's own word for how the reply ended."`
@@ -359,48 +425,62 @@ type Event struct {
 	// report can list, so every session counts as affected. Sessions is empty.
 	AllSessions bool `json:"all_sessions,omitempty" doc:"On events.dropped: too many sessions to list, so every session counts as affected."`
 
-	// Harness and Folder, on turn.started and session.opened: the harness a
+	// Harness and Folder, on turn.started and run.started: the harness a
 	// run started, such as claude, and the folder it started in. On
 	// turn.started they are empty for a session no run started, such as one
 	// pointed at the gateway by hand. The JSON name stays agent, for the
 	// records already kept.
-	Harness string `json:"agent,omitempty" doc:"On turn.started and session.opened: the run's agent, such as claude. Empty on a turn of a session no run started."`
-	Folder  string `json:"folder,omitempty" doc:"On turn.started and session.opened: the folder the run's agent started in. Empty on a turn of a session no run started."`
+	Harness string `json:"agent,omitempty" doc:"On turn.started and run.started: the run's agent, such as claude. Empty on a turn of a session no run started."`
+	Folder  string `json:"folder,omitempty" doc:"On turn.started and run.started: the folder the run's agent started in. Empty on a turn of a session no run started."`
 	// FolderRef: the reference of the person's folder the session was
 	// started in, issued by its connector. The path stays there.
-	FolderRef string `json:"folder_ref,omitempty" doc:"On turn.started and session.opened: the reference (fld_ and 16 hex digits) of the folder the session was started in, as its connector issued it. Absent for a session started before references, or in a folder no connector owns."`
-	// AgentID, Access and KeyEnv, on a run's turn.started and session.opened:
+	FolderRef string `json:"folder_ref,omitempty" doc:"On turn.started, run.started, workspace.created and folder.registered: the reference (fld_ and 16 hex digits) of the folder, as its connector issued it. Absent for a session started before references, or in a folder no connector owns."`
+	// Workspace, Machine and Sandbox name a workspace and its mode.
+	// Workspace is on workspace.created, workspace.applied,
+	// workspace.discarded and every turn.started (the workspace the turn ran
+	// in). Machine is the connector that owns the workspace's folder. Sandbox
+	// is the workspace's mode, only on workspace.created: a pointer so its
+	// false (the person's real folder) is always present, told apart from a
+	// kind that carries no mode at all.
+	Workspace string `json:"workspace,omitempty" doc:"On workspace.created, workspace.applied, workspace.discarded and turn.started: the workspace the turn ran in (ws_ and 16 hex digits)."`
+	Machine   string `json:"machine,omitempty" doc:"On workspace.created and folder.registered: the connector that owns the folder (con_ and 16 hex digits). Absent when no connector owns the folder, as for hook or gateway traffic."`
+	Sandbox   *bool  `json:"sandbox,omitempty" doc:"On workspace.created: the workspace's mode, true for a copy behind a wall and false for the person's real folder. Always present on workspace.created; absent on every other kind."`
+	// AgentID, Access and KeyEnv, on a run's turn.started and run.started:
 	// the saved agent the run started, how it reaches its model, and for an
 	// OpenRouter agent the name of the variable that holds its key. Never
 	// the key itself. A session's next turn reads them back.
-	AgentID string `json:"agent_id,omitempty" doc:"On a run's turn.started and session.opened: the saved agent the run started, as GET /api/v0/agents names it. Absent for a turn started by harness name alone."`
-	Access  string `json:"access,omitempty" doc:"On a run's turn.started and session.opened: how the agent reaches its model: subscription, openrouter or api. Absent means subscription."`
-	KeyEnv  string `json:"key_env,omitempty" doc:"On a run's turn.started and session.opened of an OpenRouter agent: the name of the environment variable that holds the key. Never the key."`
-	Hold    string `json:"hold,omitempty" doc:"On session.opened and session.closed: names one run's child."`
-	// ExitCode, only on session.closed from a run: the child's exit code, or
+	AgentID string `json:"agent_id,omitempty" doc:"On a run's turn.started and run.started: the saved agent the run started, as GET /api/v0/agents names it. Absent for a turn started by harness name alone."`
+	Access  string `json:"access,omitempty" doc:"On a run's turn.started and run.started: how the agent reaches its model: subscription, openrouter or api. Absent means subscription."`
+	KeyEnv  string `json:"key_env,omitempty" doc:"On a run's turn.started and run.started of an OpenRouter agent: the name of the environment variable that holds the key. Never the key."`
+	Hold    string `json:"hold,omitempty" doc:"On run.started and run.ended: names one run's child."`
+	// ExitCode, only on run.ended from a run: the child's exit code, or
 	// 128 plus the signal that ended it. Nil for a child closed by a service
 	// restart.
-	ExitCode *int `json:"exit_code,omitempty" doc:"On a run's session.closed: the child's exit code, or 128 plus its signal."`
-	// ResumeID, only on session.closed from a run or a turn: the vendor's own
+	ExitCode *int `json:"exit_code,omitempty" doc:"On a run's run.ended: the child's exit code, or 128 plus its signal."`
+	// ResumeID, only on run.ended from a run or a turn: the vendor's own
 	// session id, read from the child's stdout (claude's session_id, codex's
 	// thread_id). It is what the session's next turn continues.
-	ResumeID string `json:"resume_id,omitempty" doc:"On a run's session.closed: the vendor's own session id, which the next turn continues."`
+	ResumeID string `json:"resume_id,omitempty" doc:"On a run's run.ended: the vendor's own session id, which the next turn continues."`
 
-	// ErrorTail, only on a run's session.closed of a child that exited with
+	// ErrorTail, only on a run's run.ended of a child that exited with
 	// an error and was not stopped: the last lines it wrote to stderr,
 	// bounded, with anything shaped like a secret hidden.
-	ErrorTail string `json:"error_tail,omitempty" doc:"On a run's session.closed of an agent that exited with an error: the last lines it wrote to stderr, at most 20 lines and 2 KiB, with anything shaped like a token or key replaced by [hidden]. Absent when it exited 0, was stopped, or wrote nothing there, and when all it kept is one line whose start was cut (it may begin inside a secret)."`
-	// State, only on a run's session.closed: how the turn ended, as the
+	ErrorTail string `json:"error_tail,omitempty" doc:"On a run's run.ended of an agent that exited with an error: the last lines it wrote to stderr, at most 20 lines and 2 KiB, with anything shaped like a token or key replaced by [hidden]. Absent when it exited 0, was stopped, or wrote nothing there, and when all it kept is one line whose start was cut (it may begin inside a secret)."`
+	// State, only on a run's run.ended: how the turn ended, as the
 	// turn list says it (finished, failed or stopped). With failed, Error
 	// says why (ErrorLine).
-	State string `json:"state,omitempty" doc:"On a run's session.closed: how the turn ended: finished (its agent exited 0), stopped (someone stopped it) or failed (anything else). A failed turn's error says why: the agent's own error line from its stderr, else its exit code, or why it could not start. Absent on records from before 0.5.7."`
+	State string `json:"state,omitempty" doc:"On a run's run.ended: how the turn ended: finished (its agent exited 0), stopped (someone stopped it) or failed (anything else). A failed turn's error says why: the agent's own error line from its stderr, else its exit code, or why it could not start. Absent on records from before 0.5.7."`
 
 	// Changes, only on turn.changed: what the turn changed.
 	Changes *TurnChanges `json:"changes,omitempty" doc:"On turn.changed: every file the turn added, modified or deleted, with diffs."`
-	// Applied, only on turn.applied: what the apply did.
-	Applied *Applied `json:"applied,omitempty" doc:"On turn.applied: the turns applied, who asked, the result and the files."`
+	// Applied, on turn.applied and workspace.applied: what the apply did.
+	Applied *Applied `json:"applied,omitempty" doc:"On turn.applied and workspace.applied: the turns applied, the from/to changesets, who asked, the result and the files."`
+	// Discarded, only on workspace.discarded: what the discard dropped.
+	Discarded *Discarded `json:"discarded,omitempty" doc:"On workspace.discarded: the changeset the workspace was reset to, the turns dropped, and who asked."`
+	// Updated, only on workspace.updated: what the update from the folder did.
+	Updated *Updated `json:"updated,omitempty" doc:"On workspace.updated: the result, the new baseline (from) and merged (to) changesets on a clean update, the folded turns, the conflicting files on a conflict, and who asked."`
 	// Previewed, only on changes.previewed: the apply dry run's result.
-	Previewed *Previewed `json:"previewed,omitempty" doc:"On changes.previewed: what applying the session's changes would do to the folder now, listed and paged by GET /api/v0/sessions/{id}/changes."`
+	Previewed *Previewed `json:"previewed,omitempty" doc:"On changes.previewed: what applying the workspace's changes would do to the folder now, listed and paged by GET /api/v0/workspaces/{id}/changes."`
 	// Plan, only on plan.usage: the reading.
 	Plan *Plan `json:"plan,omitempty" doc:"On plan.usage: how much of the subscription's plan is used in one window."`
 
@@ -409,13 +489,13 @@ type Event struct {
 	// in place of the vendor's own resume. Empty when the turn continues by
 	// the vendor's resume, or is a session's first.
 	ReplayFrom string `json:"replay_from,omitempty" doc:"On turn.started: the session's earlier turn whose history the gateway replays in front of every model request of this turn, in place of the vendor's resume. Absent for a first turn and for a turn continued by the vendor's resume."`
-	// Unsettled, only on a run's session.closed: the gateway could not
+	// Unsettled, only on a run's run.ended: the gateway could not
 	// confirm that all of the turn's model calls were stored (it gave up
 	// waiting, or a queue was full), so the turn may be missing calls.
-	Unsettled bool `json:"unsettled,omitempty" doc:"On a run's session.closed: the gateway could not confirm that every model call of the turn was stored, so the turn may be missing calls. Own replay does not continue from such a turn."`
-	// Stopped, only on a run's session.closed: the person stopped the turn
+	Unsettled bool `json:"unsettled,omitempty" doc:"On a run's run.ended: the gateway could not confirm that every model call of the turn was stored, so the turn may be missing calls. Own replay does not continue from such a turn."`
+	// Stopped, only on a run's run.ended: the person stopped the turn
 	// (POST /api/v0/turns/{id}/stop) while its child ran.
-	Stopped bool `json:"stopped,omitempty" doc:"On a run's session.closed: the person stopped the turn with POST /api/v0/turns/{id}/stop while its child ran. The session's next turn continues after it, told that the person stopped it."`
+	Stopped bool `json:"stopped,omitempty" doc:"On a run's run.ended: the person stopped the turn with POST /api/v0/turns/{id}/stop while its child ran. The session's next turn continues after it, told that the person stopped it."`
 	// Continuity, only on a next turn's turn.started: how it reaches the
 	// session's earlier turns, "replay", "resume" or "transcript".
 	Continuity string `json:"continuity,omitempty" doc:"On the turn.started of a session's next turn started by POST /api/v0/turns: replay (own replay, see replay_from), resume (the vendor's resume_id) or transcript (the turn's harness differs from the previous turn's, so it got the earlier turns as plain text, see context). Absent on a first turn."`
@@ -514,9 +594,14 @@ type Plan struct {
 	Status        string     `json:"status,omitempty" doc:"The vendor's own word for the window, such as allowed or rejected (claude). Absent when it sent none."`
 }
 
-// Applied is what one apply did (turn.applied).
+// Applied is what one apply did (turn.applied and workspace.applied).
 type Applied struct {
-	Turns     []string      `json:"turns" doc:"Every turn whose changes the apply carried to the folder, oldest first: the turns after the session's last apply, up to the one asked for."`
+	Turns []string `json:"turns" doc:"Every turn whose changes the apply carried to the folder, oldest first: the turns after the workspace's last apply, up to the one asked for."`
+	// From and To are the changeset range the apply carried, on
+	// workspace.applied: from the last applied (or discarded) baseline to the
+	// turn's end. Empty on a pre-workspace turn.applied.
+	From      string        `json:"from,omitempty" doc:"On workspace.applied: the baseline changeset the apply started from (the last applied or discarded one, or base). Absent on a pre-workspace turn.applied."`
+	To        string        `json:"to,omitempty" doc:"On workspace.applied: the changeset the apply carried up to. Absent on a pre-workspace turn.applied."`
 	By        *By           `json:"by,omitempty" doc:"Who asked for the apply. Absent for an apply made before 0.5."`
 	Result    string        `json:"result" doc:"applied, refused (a file in the folder changed, or the turn cannot be applied: error says why), or failed (the apply did not finish)."`
 	Files     []string      `json:"files,omitempty" doc:"The files the apply wrote or removed in the person's folder, sorted."`
@@ -533,6 +618,34 @@ type RefusedFile struct {
 	Why  string `json:"why"`
 }
 
+// Discarded is what one discard dropped (workspace.discarded).
+type Discarded struct {
+	// ResetTo is the checkpoint the workspace's copy was reset to: the last
+	// applied turn's end checkpoint, or "base" when the workspace was never
+	// applied.
+	ResetTo string `json:"reset_to,omitempty" doc:"The checkpoint the workspace's copy was reset to: the last applied turn's, or base when never applied."`
+	// DroppedTurns are the unapplied turns whose file changes were dropped,
+	// oldest first. Their conversation stays in the record.
+	DroppedTurns []string `json:"dropped_turns,omitempty" doc:"The unapplied turns whose file changes the discard dropped, oldest first. The conversation stays."`
+	By           *By      `json:"by,omitempty" doc:"Who asked for the discard, by the kind of token it came with. Never the token itself."`
+}
+
+// Updated is what one update from the folder did (workspace.updated). On a
+// clean merge From is the new baseline changeset (the folder's current state,
+// which the next Apply diffs against) and To the merged changeset (the copy's
+// new head); FoldedTurns are the turns whose changes the merge folded into To,
+// so they are no longer applied on their own. On a conflict Conflicts names the
+// files and nothing changed.
+type Updated struct {
+	Result      string   `json:"result" doc:"updated (the folder was merged into the copy) or conflict (the same lines changed on both sides; nothing changed)."`
+	From        string   `json:"from,omitempty" doc:"On a clean update: the new baseline changeset, the folder as it is now. A later Apply diffs the session's work against it."`
+	To          string   `json:"to,omitempty" doc:"On a clean update: the merged changeset the copy now holds."`
+	FoldedTurns []string `json:"folded_turns,omitempty" doc:"The turns whose changes the merge folded into the copy's new head, oldest first; they are no longer applied on their own."`
+	By          *By      `json:"by,omitempty" doc:"Who asked for the update, by the kind of token it came with. Never the token itself."`
+	Conflicts   []string `json:"conflicts,omitempty" doc:"On a conflict: the folder-relative files that conflicted, sorted. Nothing changed; the agent can be asked to resolve them in a turn."`
+	Error       string   `json:"error,omitempty" doc:"Why the update failed."`
+}
+
 // Previewed is an apply's dry run (changes.previewed): what applying the
 // session's changes would do to the person's folder now, nothing written.
 type Previewed struct {
@@ -543,7 +656,7 @@ type Previewed struct {
 	// one) retakes it, while a not-yet-ended turn or a failed upload -- neither
 	// of which is appliable -- does not.
 	Applies   int             `json:"applies,omitempty" doc:"How many apply jobs the session had when the preview was taken; part of the cursor it is reused against."`
-	Turn      string          `json:"turn,omitempty" doc:"The turn an apply would go up to; POST /api/v0/turns/{id}/apply of it applies the session's changes."`
+	Turn      string          `json:"turn,omitempty" doc:"The turn an apply would go up to; POST /api/v0/workspaces/{id}/apply applies the workspace's changes up to it."`
 	Turns     []string        `json:"turns,omitempty" doc:"Every turn whose changes that apply would carry, oldest first."`
 	Count     int             `json:"count" doc:"Every file the apply would write or remove, and every conflict, counted whole; files may list fewer, with truncated."`
 	Truncated bool            `json:"truncated,omitempty" doc:"files is not every file: too many to send, so later ones were left out; count still counts them, so count minus the files listed is how many are not here."`

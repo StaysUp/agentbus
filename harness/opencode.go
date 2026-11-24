@@ -39,9 +39,11 @@ func (opencode) Info() Info {
 			{Kind: Subscription, Label: "OpenCode's own sign-in", Disabled: true, Models: []string{}},
 			{Kind: OpenRouter, Label: "OpenRouter key", Models: OpenRouterModels, AnyModel: true},
 		},
-		// No own replay reads Chat Completions yet: a next turn continues
-		// the session by OpenCode's own --session.
-		Replay: "",
+		// Own replay reads Chat Completions (replay.NewChatCompletions): a
+		// next turn starts fresh, without --session, and the OpenRouter
+		// gateway puts the earlier turn's history in front of each request.
+		Replay:             FormatChatCompletions,
+		ReplayOnOpenRouter: true,
 		// OpenCode keeps its global config in $XDG_CONFIG_HOME/opencode, and
 		// its sessions in $XDG_DATA_HOME/opencode (global/index.ts, through
 		// xdg-basedir); a session's home unsets the XDG variables, so both
@@ -146,7 +148,12 @@ func (opencode) TurnEnv(t Turn, env []string) []string {
 func opencodePermission(t Turn) map[string]any {
 	bash := map[string]any{"*": "deny"}
 	for _, c := range t.Allow {
-		if c = strings.TrimSpace(c); c == "" || strings.HasPrefix(c, "tool:") || strings.HasPrefix(c, "api:") || !ruleSafe(c) {
+		c = strings.TrimSpace(c)
+		if c == "*" {
+			bash["*"] = "allow" // every command; the gateway still gates forbid and ask
+			continue
+		}
+		if c == "" || strings.HasPrefix(c, "tool:") || strings.HasPrefix(c, "api:") || !ruleSafe(c) {
 			continue
 		}
 		bash[c+" *"] = "allow"

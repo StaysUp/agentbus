@@ -37,13 +37,13 @@ jobs:
         run: make gate
 
   # Ubuntu 24.04 refuses user namespaces with capabilities to a program
-  # without an AppArmor profile, so the gate above skips the wall and
-  # contain tests there. This job installs the profile with install.sh, for
-  # test binaries put where only root can change them (install.sh refuses
-  # any other path), and runs those tests with AGENTBUS_TEST_WALL=required,
-  # so a skip fails.
+  # without an AppArmor profile, so the gate above skips the per-command
+  # sandbox and network-jail tests there. This job installs the profile with
+  # install.sh, for test binaries put where only root can change them
+  # (install.sh refuses any other path), and runs those tests with
+  # AGENTBUS_TEST_WALL=required, so a skip fails.
   apparmor:
-    name: Wall and contain under AppArmor (ubuntu-24.04)
+    name: Copy sandbox and network jail under AppArmor (ubuntu-24.04)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7

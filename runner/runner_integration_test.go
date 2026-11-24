@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"github.com/staysup/agentbus/blobs"
 	"github.com/staysup/agentbus/connector"
+	"github.com/staysup/agentbus/ids"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
+	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 	"github.com/staysup/agentbus/workspace"
 )
@@ -99,6 +101,10 @@ type world struct {
 	folder string // a folder for first jobs
 	log    string // the fake agent's log
 	r      *Runner
+	// settings the runner reads for each turn's isolation. Empty dir, so it
+	// answers the default (auto) unless a test writes a policy; a test can
+	// SetPolicy to pin a backend (e.g. copy) before it queues turns.
+	settings *settings.Files
 }
 
 func newWorld(t *testing.T, capacity int, record ...bool) *world {
@@ -150,13 +156,18 @@ func newWorld(t *testing.T, capacity int, record ...bool) *world {
 	ctx, cancel := context.WithCancel(context.Background())
 	// One runner holds the folders and does their jobs, as on every machine.
 	conn := &connector.Connector{Folders: fr, Store: bs, State: filepath.Join(dir, "connector")}
+	setDir := filepath.Join(dir, "settings")
+	if err := os.MkdirAll(setDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	set := settings.NewFiles(setDir)
 	r, err := Enroll(ctx, Config{Queue: plane.URL, EnrollToken: enrollTok, Name: "test", Capacity: capacity,
 		Engine: eng, Store: st, StopWait: 5 * time.Second, Logf: t.Logf, Workdir: filepath.Join(dir, "worktrees"), Folders: fr,
-		FolderSide: connector.Jobs{Connector: conn}, Lender: conn, Blobs: bs, BlobSink: bs})
+		FolderSide: connector.Jobs{Connector: conn}, Lender: conn, Blobs: bs, BlobSink: bs, Settings: set})
 	if err != nil {
 		t.Fatal(err)
 	}
-	w.q, w.st, w.eng, w.plane, w.cancel, w.done, w.folder, w.log, w.r = q, st, eng, plane, cancel, make(chan struct{}), t.TempDir(), log, r
+	w.q, w.st, w.eng, w.plane, w.cancel, w.done, w.folder, w.log, w.r, w.settings = q, st, eng, plane, cancel, make(chan struct{}), t.TempDir(), log, r, set
 	go func() { r.Run(ctx); close(w.done) }()
 	t.Cleanup(func() {
 		w.release()
@@ -315,7 +326,7 @@ func TestUnknownKindIsRefused(t *testing.T) {
 	first := w.create(t, queue.Spec{Harness: "claude", Prompt: "hi"})
 	waitFor(t, "the first turn", func() bool { return w.job(t, first.ID).Ended != nil })
 	runs := len(w.runs())
-	j, _, err := w.q.Create(queue.DefaultTeam, "command", "", queue.Spec{Session: first.Session}, queue.Links{})
+	j, _, err := w.q.Create(queue.DefaultTeam, "command", "", queue.Spec{Session: ids.SessionID(first.Session)}, queue.Links{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -374,7 +385,7 @@ func TestWorktreeSession(t *testing.T) {
 	first := w.create(t, queue.Spec{Harness: "claude", Repo: repo, Base: "main", Prompt: "write app.txt v2\nwrite test.log ran\nhold"})
 	waitFor(t, "a turn", func() bool { return len(w.runs()) == 1 })
 	// The next job of the session is queued now, and waits for the first.
-	next := w.create(t, queue.Spec{Session: first.Session, Harness: "claude", Prompt: "write second.txt two"})
+	next := w.create(t, queue.Spec{Session: ids.SessionID(first.Session), Harness: "claude", Prompt: "write second.txt two"})
 	time.Sleep(300 * time.Millisecond)
 	if got := w.job(t, next.ID); got.State != queue.Queued || len(w.runs()) != 1 {
 		t.Fatalf("the next job did not wait: %s, %d turns", got.State, len(w.runs()))
@@ -414,7 +425,7 @@ func TestWorktreeSession(t *testing.T) {
 		t.Fatalf("second: %s, ran in %q, changes %+v", n.State, w.runs()[1].Cwd, res2.Changes)
 	}
 
-	if _, err := w.q.CloseSession(queue.DefaultTeam, first.Session); err != nil {
+	if _, err := w.q.CloseSession(queue.DefaultTeam, ids.WorkspaceID(first.Session)); err != nil {
 		t.Fatal(err)
 	}
 	// Close is retired (B14): it marks the session closed and wakes the runner,
@@ -434,6 +445,112 @@ func sameDir(a, b string) bool {
 	ra, _ := filepath.EvalSymlinks(a)
 	rb, _ := filepath.EvalSymlinks(b)
 	return ra != "" && ra == rb
+}
+
+// A continuation whose source folder was removed still loads its workspace copy
+// and records its changeset. The copy is self-contained, so it needs no source
+// folder: prepare loads it before it stats the folder the turn names (P2 #1).
+// Without the fix the continuation fails setup when it stats the gone folder.
+func TestContinuationWhoseSourceFolderIsGone(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "a.txt"), "v1\n")
+	w := newWorld(t, 2)
+	// Pin the copy backend so the test reads one way on every platform (auto
+	// picks overlay on Linux). Either backend makes an independent copy -- the
+	// copy backend duplicates the folder, overlay snapshots it into its own
+	// layer -- so neither needs the source once the copy is made.
+	p := settings.DefaultPolicy()
+	p.Isolation = settings.IsolationCopy
+	if _, _, err := w.settings.SetPolicy(p, settings.Any); err != nil {
+		t.Fatal(err)
+	}
+	first := w.create(t, queue.Spec{Harness: "claude", Folder: src, Isolate: true, Prompt: "write b.txt two\nhold"})
+	waitFor(t, "a turn", func() bool { return len(w.runs()) == 1 })
+	// The continuation names the same folder and sandbox mode, as control stamps
+	// them from the workspace record; it waits behind the first in the lane.
+	next := w.create(t, queue.Spec{Session: ids.SessionID(first.Session), Harness: "claude", Folder: src, Isolate: true, Prompt: "write c.txt three"})
+	// The copy exists now (the first turn made it), so the source folder is no
+	// longer needed. Remove it before the continuation runs.
+	if err := os.RemoveAll(src); err != nil {
+		t.Fatal(err)
+	}
+	w.release()
+	waitFor(t, "the continuation finished", func() bool { return w.job(t, next.ID).Ended != nil })
+	n := w.job(t, next.ID)
+	var res struct {
+		Changeset string            `json:"changeset"`
+		Changes   workspace.Changes `json:"changes"`
+	}
+	_ = json.Unmarshal(n.Result, &res)
+	if n.State != queue.Finished {
+		t.Fatalf("continuation state %s (reason %s): %s", n.State, n.Reason, n.Result)
+	}
+	if res.Changeset == "" || res.Changes.Count != 1 || len(res.Changes.Files) == 0 || res.Changes.Files[0].Path != "c.txt" {
+		t.Fatalf("continuation changeset %q changes %+v", res.Changeset, res.Changes)
+	}
+}
+
+// A discard whose workspace never made a copy (a lost or stopped first turn) is
+// refused, not finished: so control records no workspace.discarded for a discard
+// that reset nothing.
+func TestDiscardWithNoCopyIsRefused(t *testing.T) {
+	w := newWorld(t, 1)
+	ws := ids.WorkspaceID("ws_0000000000000001")
+	dj, _, err := w.q.Create(queue.DefaultTeam, queue.KindDiscard, "",
+		queue.Spec{Workspace: ws, Session: ids.SessionID(ws)}, queue.Links{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the discard ended", func() bool { return w.job(t, dj.ID).Ended != nil })
+	if d := w.job(t, dj.ID); d.State == queue.Finished {
+		t.Fatalf("a discard with no copy finished (it would record a spurious workspace.discarded): %s", d.Result)
+	}
+}
+
+// A discard resets the workspace's copy to base (nothing applied), through the
+// copy's private git repo, dropping the turn's unapplied changes, and never
+// touches the person's folder.
+func TestDiscardResetsTheCopyAndLeavesTheFolder(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "a.txt"), "a1")
+	w := newWorld(t, 2)
+	p := settings.DefaultPolicy()
+	p.Isolation = settings.IsolationCopy
+	if _, _, err := w.settings.SetPolicy(p, settings.Any); err != nil {
+		t.Fatal(err)
+	}
+	first := w.create(t, queue.Spec{Harness: "claude", Folder: src, Isolate: true, Prompt: "write a.txt a2\nwrite b.txt b1\nhold"})
+	waitFor(t, "a turn", func() bool { return len(w.runs()) == 1 })
+	w.release()
+	waitFor(t, "the turn finished", func() bool { return w.job(t, first.ID).Ended != nil })
+
+	dj, _, err := w.q.Create(queue.DefaultTeam, queue.KindDiscard, "",
+		queue.Spec{Session: ids.SessionID(first.Session), Workspace: ids.WorkspaceID(first.Session)},
+		queue.Links{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the discard finished", func() bool { return w.job(t, dj.ID).Ended != nil })
+	if d := w.job(t, dj.ID); d.State != queue.Finished {
+		t.Fatalf("discard %s: %s", d.State, d.Result)
+	}
+
+	rd := func(p string) string {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			return "<missing>"
+		}
+		return string(b)
+	}
+	// The copy is reset to base: the turn's edits are gone.
+	copyDir := filepath.Join(w.r.cfg.Workdir, first.Session)
+	if a, b := rd(filepath.Join(copyDir, "a.txt")), rd(filepath.Join(copyDir, "b.txt")); a != "a1" || b != "<missing>" {
+		t.Fatalf("copy not reset to base: a=%q b=%q", a, b)
+	}
+	// The person's folder is untouched.
+	if a, b := rd(filepath.Join(src, "a.txt")), rd(filepath.Join(src, "b.txt")); a != "a1" || b != "<missing>" {
+		t.Fatalf("the discard touched the person's folder: a=%q b=%q", a, b)
+	}
 }
 
 // A base that does not exist fails the job as setup, before any turn.
@@ -495,7 +612,7 @@ func TestCopyWrittenBetweenTurnsIsInTheNextDiff(t *testing.T) {
 		t.Fatalf("first: %s %s", f.State, f.Reason)
 	}
 	write(t, filepath.Join(w.r.cfg.Workdir, first.Session, "stray.txt"), "left behind\n")
-	next := w.create(t, queue.Spec{Session: first.Session, Harness: "claude", Prompt: "write second.txt two"})
+	next := w.create(t, queue.Spec{Session: ids.SessionID(first.Session), Harness: "claude", Prompt: "write second.txt two"})
 	waitFor(t, "finished", func() bool { return w.job(t, next.ID).Ended != nil })
 	var res struct {
 		Changes workspace.Changes `json:"changes"`

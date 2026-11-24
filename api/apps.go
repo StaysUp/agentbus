@@ -52,35 +52,56 @@ func defaultApps() []toolreg.Tool {
 func reviewTurnApp() toolreg.Tool {
 	return toolreg.Tool{
 		Name: "review_turn",
-		Description: "Ask a saved AgentBus agent (any vendor) to review a turn. " +
-			"The reviewer reads the turn and its diff through agentbus-api and replies with its findings. " +
+		Description: "Ask a saved AgentBus agent (any vendor) to review your changes. " +
+			"With no turn it reviews your workspace's whole unapplied set (every change applying would write to the person's folder, across turns) — this is what you want for \"review my changes\". " +
+			"With a turn (its id) it reviews that one turn's diff instead. " +
+			"The reviewer reads the changes through agentbus-api and replies with its findings. " +
 			"The reply comes back to your session as a later turn: do not wait or poll for it. " +
-			"Review with a different vendor than wrote the turn, so a reviewer does not share the author's blind spots.",
+			"Review with a different vendor than wrote the work, so a reviewer does not share the author's blind spots.",
 		Inputs: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"turn":  map[string]any{"type": "string", "description": "The turn to review (its id)."},
+				"turn":  map[string]any{"type": "string", "description": "Optional. One turn to review (its id). Omit to review your workspace's whole unapplied set."},
 				"agent": map[string]any{"type": "string", "description": "The saved agent to review it (from GET /api/v0/agents)."},
 			},
-			"required":             []any{"turn", "agent"},
+			"required":             []any{"agent"},
 			"additionalProperties": false,
 		},
 		Where: toolreg.WhereControl,
 		Run: toolreg.Run{Kind: toolreg.RunApp, App: &toolreg.App{
 			Steps: []toolreg.Step{
-				// ONE step (his call (a), 2026-11-19): startTurn records the delivery
-				// on in the same write (delivery=$caller.session), so start and deliver
-				// are atomic under one authorization — no separate registerOn step to
-				// lose. wait=false returns once the turn is recorded.
+				// Two calls in sequence (his API rules, 2026-11-21): a session in
+				// the reviewer's workspace (the asker's, by the grant), then a turn
+				// in it. The reviewer reads the changes through agentbus-api, not a
+				// copy. The session step hands on its workspace (the asker's own, by
+				// the grant) so the no-turn prompt can name it. startTurn records the
+				// delivery on in the same write. wait=false returns once recorded.
+				{StepID: "session", OperationID: "createSession",
+					RequestBody: map[string]any{},
+					Outputs:     map[string]string{"session": "$response.body#/session", "workspace": "$response.body#/workspace"}},
 				{StepID: "start", OperationID: "startTurn",
 					Parameters: map[string]any{"wait": "false"},
 					RequestBody: map[string]any{
+						"session":  "$steps.session.outputs.session",
 						"agent":    "$inputs.agent",
 						"delivery": "$caller.session",
-						"prompt": "Review a change another agent made in turn {$inputs.turn}. Read the turn at " +
-							"GET /api/v0/turns/{$inputs.turn} and its diff at GET /api/v0/turns/{$inputs.turn}/diff through " +
-							"agentbus-api (its base URL is $AGENTBUS_URL, its token $AGENTBUS_TOKEN). " +
-							"Reply with your findings, most serious first, and say plainly whether the change is safe to apply.",
+						// A named turn reviews that turn's diff; no turn reviews the
+						// workspace's whole unapplied set (the same GET the Apply panel
+						// shows). The reviewer's token may read its own workspace's
+						// changes (changesWorkspaceTok), and its workspace is the asker's.
+						"prompt": map[string]any{
+							"if_present": "$inputs.turn",
+							"then": "Review a change another agent made in turn {$inputs.turn}. Read the turn at " +
+								"GET /api/v0/turns/{$inputs.turn} and its diff at GET /api/v0/turns/{$inputs.turn}/diff through " +
+								"agentbus-api (its base URL is $AGENTBUS_URL, its token $AGENTBUS_TOKEN). " +
+								"Reply with your findings, most serious first, and say plainly whether the change is safe to apply.",
+							"else": "Review the changes another agent made in your workspace and has not applied yet — " +
+								"the whole set applying would write to the person's folder. Read them at " +
+								"GET /api/v0/workspaces/{$steps.session.outputs.workspace}/changes through " +
+								"agentbus-api (its base URL is $AGENTBUS_URL, its token $AGENTBUS_TOKEN): " +
+								"each changed file with its diff, across every unapplied turn. " +
+								"Reply with your findings, most serious first, and say plainly whether the changes are safe to apply.",
+						},
 					},
 					Outputs: map[string]string{"turn": "$response.body#/turn", "session": "$response.body#/session"}},
 			},
@@ -96,7 +117,7 @@ func askAgentApp() toolreg.Tool {
 	return toolreg.Tool{
 		Name: "ask_agent",
 		Description: "Ask a saved AgentBus agent (from GET /api/v0/agents, any vendor) to do work. " +
-			"It starts a new session on that agent, in its own copy of your folder. " +
+			"It starts a new session on that agent, in your workspace's copy of your folder (the same copy your turn runs in). " +
 			"The reply names the new turn and session at once; its result comes back to your session as a later turn: do not wait or poll for it. " +
 			"This is not your harness's own subagent: it is recorded, and can be another vendor. " +
 			"Each ask is a new session: to follow up, ask again with what the result said.",
@@ -112,14 +133,20 @@ func askAgentApp() toolreg.Tool {
 		Where: toolreg.WhereControl,
 		Run: toolreg.Run{Kind: toolreg.RunApp, App: &toolreg.App{
 			Steps: []toolreg.Step{
-				// ONE step (his call (a), 2026-11-19): startTurn records the delivery
-				// on in the same write (delivery=$caller.session), so start and deliver
-				// are atomic under one authorization — no separate registerOn step to
-				// lose. wait=false returns once the turn is recorded.
+				// Two calls in sequence (his API rules, 2026-11-21): create a
+				// session in the asker's workspace, then run a turn in it. A turn
+				// token's createSession takes the workspace from the grant, so the
+				// asked session shares the asker's copy. startTurn records the
+				// delivery on in the same write (delivery=$caller.session), so
+				// start and deliver stay atomic. wait=false returns once recorded.
+				{StepID: "session", OperationID: "createSession",
+					RequestBody: map[string]any{},
+					Outputs:     map[string]string{"session": "$response.body#/session"}},
 				{StepID: "start", OperationID: "startTurn",
-					Parameters:  map[string]any{"wait": "false"},
-					RequestBody: map[string]any{"agent": "$inputs.agent", "prompt": "$inputs.prompt", "delivery": "$caller.session"},
-					Outputs:     map[string]string{"turn": "$response.body#/turn", "session": "$response.body#/session"}},
+					Parameters: map[string]any{"wait": "false"},
+					RequestBody: map[string]any{"session": "$steps.session.outputs.session",
+						"agent": "$inputs.agent", "prompt": "$inputs.prompt", "delivery": "$caller.session"},
+					Outputs: map[string]string{"turn": "$response.body#/turn", "session": "$response.body#/session"}},
 			},
 			Outputs: map[string]string{"turn": "$steps.start.outputs.turn", "session": "$steps.start.outputs.session"},
 		}},
@@ -382,6 +409,20 @@ func (a *API) resolveStep(s toolreg.Step, args map[string]any, caller string, st
 // that is one whole expression resolves to that expression's value (any type);
 // a string with {$...} parts has each substituted as text.
 func resolveValue(v any, args map[string]any, caller string, stepOut map[string]map[string]any) (any, string) {
+	// A conditional value chooses "then" or "else" by whether "if_present"
+	// resolves to a non-empty string (toolreg's grammar). review_turn uses it:
+	// a named turn picks the turn's diff, an absent one the workspace's whole
+	// unapplied set.
+	if c, ok := toolreg.AsConditional(v); ok {
+		cond, why := resolveValue(c["if_present"], args, caller, stepOut)
+		if why != "" {
+			return nil, why
+		}
+		if s, ok := cond.(string); ok && s != "" {
+			return resolveValue(c["then"], args, caller, stepOut)
+		}
+		return resolveValue(c["else"], args, caller, stepOut)
+	}
 	s, ok := v.(string)
 	if !ok {
 		return v, ""

@@ -54,6 +54,22 @@ func TestCheckAppInterpolatedPromptValid(t *testing.T) {
 	}
 }
 
+// A conditional value (if_present / then / else) is valid when every branch's
+// references are in scope, and each branch may embed its own {$...}.
+func TestCheckAppConditionalValid(t *testing.T) {
+	tool := askAgentApp()
+	tool.Name = "review_turn"
+	tool.Inputs = objInputs("turn", "agent")
+	tool.Run.App.Steps[0].RequestBody["prompt"] = map[string]any{
+		"if_present": "$inputs.turn",
+		"then":       "Review turn {$inputs.turn}.",
+		"else":       "Review {$inputs.agent}'s whole workspace.",
+	}
+	if why := Check(&tool); why != "" {
+		t.Fatalf("a valid conditional prompt was refused: %s", why)
+	}
+}
+
 func TestCheckAppInvalid(t *testing.T) {
 	cases := []struct {
 		name string
@@ -86,6 +102,13 @@ func TestCheckAppInvalid(t *testing.T) {
 		}},
 		{"bad interpolation", func(t *Tool) {
 			t.Run.App.Steps[0].RequestBody["prompt"] = "see {$inputs.missing}"
+		}},
+		{"bad ref in a conditional branch", func(t *Tool) {
+			t.Run.App.Steps[0].RequestBody["prompt"] = map[string]any{
+				"if_present": "$inputs.agent",
+				"then":       "ok {$inputs.missing}",
+				"else":       "ok",
+			}
 		}},
 	}
 	for _, c := range cases {

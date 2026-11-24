@@ -36,7 +36,7 @@ func endedID(jobID string) string { return "evt_tn_" + jobID }
 //
 // turn.ended carries NO session, on purpose: it is control's reactor-trigger
 // record, keyed on the turn, not part of a session's event stream. A session is
-// established by session.opened / turn.started, never by a turn.ended. So a
+// established by run.started / turn.started, never by a turn.ended. So a
 // turn refused before it ever ran (no such session, missing agent) cannot
 // conjure a phantom session or shift a real one's snapshot, because every
 // session-derived view keys on the session and this event has none (review P1,

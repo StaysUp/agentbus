@@ -84,7 +84,8 @@ type Call struct {
 
 	// InputTokens counts input tokens that were neither read from nor written
 	// to a cache. Anthropic reports it that way. OpenAI's input_tokens
-	// includes cached tokens, so the caller subtracts them first.
+	// includes both cache reads and cache writes, so the caller subtracts both
+	// first.
 	InputTokens         int64
 	OutputTokens        int64
 	CacheReadTokens     int64

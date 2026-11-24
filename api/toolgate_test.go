@@ -24,7 +24,7 @@ import (
 // it. This is the two-process proof — one HTTP request held open on control,
 // released by another.
 func TestToolCallHeldUntilPersonAnswers(t *testing.T) {
-	e := toolGateEnv(t, 5*time.Second, 0, nil)
+	e := toolGateEnv(t, 5*time.Second, 0, askAgentAsked)
 
 	// The agent calls a does-tool: the gate holds it (no rule, effect does).
 	done := make(chan map[string]any, 1)
@@ -54,7 +54,7 @@ func TestToolCallHeldUntilPersonAnswers(t *testing.T) {
 // A person's refuse ends the hold with a plain refusal, and the call does not
 // run.
 func TestToolCallRefusedByPerson(t *testing.T) {
-	e := toolGateEnv(t, 5*time.Second, 0, nil)
+	e := toolGateEnv(t, 5*time.Second, 0, askAgentAsked)
 	done := make(chan map[string]any, 1)
 	go func() {
 		_, v := rpc(t, e, mcpWriteTok, askCall)
@@ -76,7 +76,7 @@ func TestToolCallRefusedByPerson(t *testing.T) {
 // No answer in the hold window refuses the call with a plain message, and
 // records approval.decided so nothing is left pending (no next turn).
 func TestToolCallTimesOutWithNoAnswer(t *testing.T) {
-	e := toolGateEnv(t, 120*time.Millisecond, 0, nil)
+	e := toolGateEnv(t, 120*time.Millisecond, 0, askAgentAsked)
 	_, v := rpc(t, e, mcpWriteTok, askCall)
 	if dig(v, "result", "isError") != true || !strings.Contains(resultText(v), "no one answered") {
 		t.Errorf("timeout: %v", v)
@@ -151,7 +151,7 @@ func TestToolCallAlwaysMovesTheMatchedRule(t *testing.T) {
 // agent cannot pin control's resources. With the cap at one, a first call holds
 // and a second is refused at once.
 func TestToolCallAdmissionCapRefusesExtras(t *testing.T) {
-	e := toolGateEnv(t, 5*time.Second, 1, nil)
+	e := toolGateEnv(t, 5*time.Second, 1, askAgentAsked)
 	// The first call takes the one slot and holds.
 	held := make(chan map[string]any, 1)
 	go func() {
@@ -199,7 +199,7 @@ func approvalRule(t *testing.T, e *env, id string) string {
 // HELD, not pre-rejected; once allowed, the route — not the gate — decides it
 // and returns its own error.
 func TestToolCallEmptyInputHeldThenRouteRejects(t *testing.T) {
-	e := toolGateEnv(t, 5*time.Second, 0, nil)
+	e := toolGateEnv(t, 5*time.Second, 0, askAgentAsked)
 	call := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ask_agent","arguments":{"agent":"a_x","prompt":""}}}`
 	done := make(chan map[string]any, 1)
 	go func() { _, v := rpc(t, e, mcpWriteTok, call); done <- v }()
@@ -241,7 +241,11 @@ func TestToolCallAlwaysClearsEveryMatchingAskEntry(t *testing.T) {
 // A built-in tool and a custom tool are gated by the same code: both are held
 // at the one dispatch point, then time out for want of an answer.
 func TestToolCallGatesBuiltinAndCustomAlike(t *testing.T) {
-	e := toolGateEnv(t, 120*time.Millisecond, 0, nil)
+	// Both tools on the ask list, so the gate holds each one (under the default
+	// tool:* allow a tool runs; a hold needs an ask rule).
+	e := toolGateEnv(t, 120*time.Millisecond, 0, func(p *settings.Policy) {
+		p.Ask = append(p.Ask, "ask_agent", "ask_twin")
+	})
 	// A custom tool on the same does-route as ask_agent, same effect.
 	base, ok := e.api.servedByName("ask_agent")
 	if !ok {
@@ -423,13 +427,18 @@ func hasEvent(t *testing.T, e *env, k event.Kind, tool string) bool {
 	return false
 }
 
+// askAgentAsked puts ask_agent on the ask list, so the gate holds the call for
+// a person. Under the default tool:* allow a tool runs without a hold (0.6.5);
+// a hold now needs an explicit ask rule, which this shape adds.
+func askAgentAsked(p *settings.Policy) { p.Ask = append(p.Ask, "ask_agent") }
+
 // toolGateEnv is an API like mcpEnv (one write turn token of session s1, tools
 // on) with the tool-hold window set short for a test, and an optional shaper
 // for the policy the gate reads (to set a forbid or allow entry).
 func toolGateEnv(t *testing.T, timeout time.Duration, max int, shape func(*settings.Policy)) *env {
 	t.Helper()
 	dir := t.TempDir()
-	p := settings.FirstInstallPolicy() // a fresh install's policy
+	p := settings.DefaultPolicy() // a fresh install's policy (allows every command and tool)
 	if shape != nil {
 		shape(&p)
 	}

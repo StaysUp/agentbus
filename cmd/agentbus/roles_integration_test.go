@@ -128,6 +128,9 @@ type client struct {
 	t     *testing.T
 	base  string
 	token string
+	// ws maps a session this client created to its workspace, so apply can
+	// reach the workspace route (apply moved from the turn to the workspace).
+	ws map[string]string
 }
 
 // waitService waits for the service at addr with data folder home to answer.
@@ -182,10 +185,54 @@ type started struct {
 	Session, Turn string
 }
 
+// newWorkspaceSession creates a workspace from body's folder/folder_ref/machine
+// and sandbox mode (isolate), and a session in it, returning the session id:
+// the first two of the three calls a turn now needs.
+func (c *client) newWorkspaceSession(body map[string]any) string {
+	c.t.Helper()
+	wsBody := map[string]any{"sandbox": true}
+	if v, ok := body["isolate"].(bool); ok {
+		wsBody["sandbox"] = v
+	}
+	for from, to := range map[string]string{"folder": "folder", "folder_ref": "folder_ref", "machine": "machine", "connector": "machine"} {
+		if v, ok := body[from]; ok {
+			wsBody[to] = v
+		}
+	}
+	var ws struct {
+		Workspace string `json:"workspace"`
+	}
+	if code, out := c.call("POST", "/api/v0/workspaces", wsBody, &ws); code/100 != 2 || ws.Workspace == "" {
+		c.t.Fatalf("POST /api/v0/workspaces %v: %d %s", wsBody, code, out)
+	}
+	var sc struct {
+		Session string `json:"session"`
+	}
+	if code, out := c.call("POST", "/api/v0/sessions", map[string]any{"workspace": ws.Workspace}, &sc); code/100 != 2 || sc.Session == "" {
+		c.t.Fatalf("POST /api/v0/sessions: %d %s", code, out)
+	}
+	if c.ws == nil {
+		c.ws = map[string]string{}
+	}
+	c.ws[sc.Session] = ws.Workspace
+	return sc.Session
+}
+
 // turn starts a turn and waits for it to end, finished, with its changes
-// recorded.
+// recorded. A first turn (a folder, no session) runs the 3-call flow first.
 func (c *client) turn(body map[string]any) started {
 	c.t.Helper()
+	if body["session"] == nil && (body["folder"] != nil || body["folder_ref"] != nil) {
+		nb := map[string]any{"session": c.newWorkspaceSession(body)}
+		for k, v := range body {
+			switch k {
+			case "folder", "folder_ref", "machine", "connector", "isolate", "read_only":
+			default:
+				nb[k] = v
+			}
+		}
+		body = nb
+	}
 	var s started
 	if code, out := c.call("POST", "/api/v0/turns", body, &s); code/100 != 2 || s.Turn == "" {
 		c.t.Fatalf("POST /api/v0/turns %v: %d %s", body, code, out)
@@ -256,9 +303,13 @@ type applyAnswer struct {
 	Error     string
 }
 
-func (c *client) apply(turn string) (int, applyAnswer) {
+func (c *client) apply(s started) (int, applyAnswer) {
 	var a applyAnswer
-	code, _ := c.call("POST", "/api/v0/turns/"+turn+"/apply", nil, &a)
+	ws := c.ws[s.Session]
+	if ws == "" {
+		c.t.Fatalf("apply: no workspace known for session %s", s.Session)
+	}
+	code, _ := c.call("POST", "/api/v0/workspaces/"+ws+"/apply", map[string]any{"turn": s.Turn}, &a)
 	return code, a
 }
 
@@ -298,20 +349,20 @@ func filesFlow(t *testing.T, c *client, folder string, body map[string]any) {
 	}; !equalMaps(got, want) {
 		t.Fatalf("second turn's diff %q, want %q", got, want)
 	}
-	if code, a := c.apply(t1.Turn); code != 200 || a.State != "applied" || strings.Join(a.Files, ",") != "a.txt,new.txt" {
+	if code, a := c.apply(t1); code != 200 || a.State != "applied" || strings.Join(a.Files, ",") != "a.txt,new.txt" {
 		t.Fatalf("apply of the first turn: %d %+v", code, a)
 	}
 	if got := fileText(t, filepath.Join(folder, "a.txt")) + fileText(t, filepath.Join(folder, "new.txt")); got != "one\np1\np1\n" {
 		t.Fatalf("after the first apply: %q", got)
 	}
-	if code, a := c.apply(t2.Turn); code != 200 || a.State != "applied" || strings.Join(a.Files, ",") != "a.txt,new.txt" {
+	if code, a := c.apply(t2); code != 200 || a.State != "applied" || strings.Join(a.Files, ",") != "a.txt,new.txt" {
 		t.Fatalf("apply of the second turn: %d %+v", code, a)
 	}
 	if got := fileText(t, filepath.Join(folder, "a.txt")) + fileText(t, filepath.Join(folder, "new.txt")); got != "one\np1\np2\n<missing>" {
 		t.Fatalf("after the second apply: %q", got)
 	}
 	// Asked again: the same apply, and nothing written.
-	if code, a := c.apply(t2.Turn); code != 200 || !a.Already {
+	if code, a := c.apply(t2); code != 200 || !a.Already {
 		t.Fatalf("apply asked again: %d %+v", code, a)
 	}
 	// A new session; the person changes a.txt before applying it: refused,
@@ -320,7 +371,7 @@ func filesFlow(t *testing.T, c *client, folder string, body map[string]any) {
 	if err := os.WriteFile(filepath.Join(folder, "a.txt"), []byte("mine\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	code, a := c.apply(t3.Turn)
+	code, a := c.apply(t3)
 	if code != http.StatusConflict || a.State != "refused" || len(a.Conflicts) != 1 || a.Conflicts[0].Path != "a.txt" ||
 		a.Conflicts[0].Why != "changed in your folder since the checkpoint" {
 		_, d := c.call("GET", "/api/v0/turns/"+t3.Turn+"/diff", nil, nil)
@@ -338,11 +389,11 @@ func filesFlow(t *testing.T, c *client, folder string, body map[string]any) {
 func restoreFlow(t *testing.T, c *client, folder string, body map[string]any) {
 	t.Helper()
 	t1 := c.turn(merge(body, map[string]any{"agent": "claude", "prompt": "p1"}))
-	if code, a := c.apply(t1.Turn); code != 200 || a.State != "applied" {
+	if code, a := c.apply(t1); code != 200 || a.State != "applied" {
 		t.Fatalf("apply of the first turn: %d %+v", code, a)
 	}
 	t2 := c.turn(map[string]any{"session": t1.Session, "agent": "claude", "prompt": "restore"})
-	if code, a := c.apply(t2.Turn); code != 200 || a.State != "applied" {
+	if code, a := c.apply(t2); code != 200 || a.State != "applied" {
 		t.Fatalf("apply of the turn that puts a.txt back: %d %+v", code, a)
 	}
 	if got := fileText(t, filepath.Join(folder, "a.txt")); got != "one\n" {
@@ -480,7 +531,7 @@ func TestSessionRunsOnItsFolderMachine(t *testing.T) {
 	}
 	for _, se := range ss.Sessions {
 		code, out := c.call("GET", "/api/v0/sessions/"+se.ID+"/events?after=0&limit=1000&store="+ss.Store, nil, nil)
-		if code != 200 || strings.Contains(out, homeB) || !strings.Contains(out, "turn.started") || !strings.Contains(out, "session.closed") {
+		if code != 200 || strings.Contains(out, homeB) || !strings.Contains(out, "turn.started") || !strings.Contains(out, "run.ended") {
 			t.Fatalf("the server's record of %s: %d %s", se.ID, code, out)
 		}
 	}

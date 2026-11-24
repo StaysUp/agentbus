@@ -17,19 +17,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 	"github.com/staysup/agentbus/workspace"
 )
 
-func changesOf(t *testing.T, e *env, session string) SessionChangesPage {
+func changesOf(t *testing.T, e *env, session string) WorkspaceChangesPage {
 	t.Helper()
-	code, out := as(t, e, token, "GET", "/api/v0/sessions/"+session+"/changes", "")
+	ws, found, err := e.store.WorkspaceOf(ids.SessionID(session))
+	if err != nil || !found {
+		t.Fatalf("workspace of %s: found=%v err=%v", session, found, err)
+	}
+	code, out := as(t, e, token, "GET", "/api/v0/workspaces/"+string(ws)+"/changes", "")
 	if code != 200 {
 		t.Fatalf("changes of %s: %d %s", session, code, out)
 	}
-	var c SessionChangesPage
+	var c WorkspaceChangesPage
 	if err := json.Unmarshal([]byte(out), &c); err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +70,7 @@ func TestSessionChangesPreview(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	first := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"edit1"}`)
+	first := e.firstTurn(t, folder, "claude", "edit1", true)
 	waitEnded(t, e, first.Turn)
 
 	before := snapshotOf(t, folder)
@@ -125,8 +131,8 @@ func TestSessionChangesPreview(t *testing.T) {
 		t.Fatalf("apply after the preview: %d %+v, preview %+v", code, st, c.Conflicts)
 	}
 
-	if code, out := as(t, e, token, "GET", "/api/v0/sessions/s_0000000000000000/changes", ""); code != 404 {
-		t.Errorf("an unknown session: %d %s", code, out)
+	if code, out := as(t, e, token, "GET", "/api/v0/workspaces/ws_0000000000000000/changes", ""); code != 404 {
+		t.Errorf("an unknown workspace: %d %s", code, out)
 	}
 	// Each preview was read, so none of their jobs is kept.
 	if js, err := e.q.List(queue.DefaultTeam, queue.Filter{Kind: queue.KindPreview}, 100); err != nil || len(js) != 0 {
@@ -141,16 +147,73 @@ func TestSessionChangesClosedSkipsCache(t *testing.T) {
 	e, _ := diffEnv(t, filepath.Join(t.TempDir(), settings.PolicyFile))
 	folder := t.TempDir()
 	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\ntwo\n"), 0o644)
-	first := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"edit1"}`)
+	first := e.firstTurn(t, folder, "claude", "edit1", true)
 	waitEnded(t, e, first.Turn)
 	if c := changesOf(t, e, first.Session); !c.Isolated || !c.Unapplied || c.Count == 0 {
 		t.Fatalf("preview before close: %+v", c)
 	}
-	if _, err := e.q.CloseSession(queue.DefaultTeam, first.Session); err != nil {
+	ws, _, err := e.store.WorkspaceOf(ids.SessionID(first.Session))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.q.CloseSession(queue.DefaultTeam, ws); err != nil {
 		t.Fatal(err)
 	}
 	if c := changesOf(t, e, first.Session); c.Isolated || c.Unapplied || c.Why != applySessionClosed || len(c.Files) != 0 {
 		t.Fatalf("changes after close reused the cache: %+v", c)
+	}
+}
+
+// A workspace id is not a session: the session routes (GET and PATCH
+// /sessions/{id}) answer 404 for a workspace id and write nothing, so a
+// workspace id cannot masquerade as a session and mint a phantom session in the
+// record (his rule, 2026-11-22). The workspace's own routes (its /changes) take
+// a workspace id and are the one way to reach it.
+func TestWorkspaceIDIsNotASession(t *testing.T) {
+	e, _ := diffEnv(t, filepath.Join(t.TempDir(), settings.PolicyFile))
+	folder := t.TempDir()
+	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\ntwo\n"), 0o644)
+	first := e.firstTurn(t, folder, "claude", "edit1", true)
+	waitEnded(t, e, first.Turn)
+	ws, found, err := e.store.WorkspaceOf(ids.SessionID(first.Session))
+	if err != nil || !found {
+		t.Fatalf("resolve workspace: found=%v err=%v", found, err)
+	}
+	if string(ws) == first.Session {
+		t.Fatalf("workspace id equals the session id, so the test cannot tell them apart: %s", ws)
+	}
+	// The session routes read it as no session: 404, never a synthesized 200.
+	if code, out := as(t, e, token, "GET", "/api/v0/sessions/"+string(ws), ""); code != 404 {
+		t.Fatalf("GET /sessions/{workspace id}: %d %s, want 404", code, out)
+	}
+	// Its own changes route takes the workspace id and works -- and storing that
+	// preview (keyed by the workspace id) must not add the workspace as a phantom
+	// session to the session list.
+	if code, out := as(t, e, token, "GET", "/api/v0/workspaces/"+string(ws)+"/changes", ""); code != 200 {
+		t.Fatalf("GET /workspaces/{workspace id}/changes: %d %s, want 200", code, out)
+	}
+	code, out := as(t, e, token, "GET", "/api/v0/sessions", "")
+	var list struct {
+		Sessions []struct {
+			ID string `json:"id"`
+		} `json:"sessions"`
+	}
+	if code != 200 || json.Unmarshal([]byte(out), &list) != nil {
+		t.Fatalf("GET /sessions: %d %s", code, out)
+	}
+	for _, s := range list.Sessions {
+		if s.ID == string(ws) {
+			t.Fatalf("GET /sessions lists the workspace id as a phantom session: %s", out)
+		}
+	}
+	// Archiving a workspace id as a session is 404 too, and writes no
+	// session.archived -- SessionHasWork is session-scoped, so the workspace's
+	// open jobs do not make its id pass as a session.
+	if code, out := as(t, e, token, "PATCH", "/api/v0/sessions/"+string(ws), `{"archived":true}`); code != 404 {
+		t.Fatalf("PATCH /sessions/{workspace id} archived: %d %s, want 404", code, out)
+	}
+	if known, err := e.store.Known(string(ws)); err != nil || known {
+		t.Fatalf("the workspace id became a known session after archive: known=%v err=%v", known, err)
 	}
 }
 
@@ -169,11 +232,16 @@ func TestSessionChangesRerunsAfterRefusedApply(t *testing.T) {
 	e, _ := diffEnv(t, filepath.Join(t.TempDir(), settings.PolicyFile))
 	folder := t.TempDir()
 	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\ntwo\n"), 0o644)
-	first := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"edit1"}`)
+	first := e.firstTurn(t, folder, "claude", "edit1", true)
 	waitEnded(t, e, first.Turn)
-	// Cache a preview before any apply: its cursor has no applies yet.
+	// Cache a preview before any apply: its cursor has no applies yet. The
+	// preview is keyed by the workspace it previews.
+	ws, _, err := e.store.WorkspaceOf(ids.SessionID(first.Session))
+	if err != nil {
+		t.Fatal(err)
+	}
 	changesOf(t, e, first.Session)
-	_, seq1, found, err := e.store.LatestPreview(first.Session)
+	_, seq1, found, err := e.store.LatestPreview(string(ws))
 	if err != nil || !found {
 		t.Fatalf("no cached preview: %v", err)
 	}
@@ -184,7 +252,7 @@ func TestSessionChangesRerunsAfterRefusedApply(t *testing.T) {
 		t.Fatalf("apply should be refused: %d", code)
 	}
 	changesOf(t, e, first.Session)
-	if _, seq2, _, _ := e.store.LatestPreview(first.Session); seq2 == seq1 {
+	if _, seq2, _, _ := e.store.LatestPreview(string(ws)); seq2 == seq1 {
 		t.Fatalf("the preview was reused after a refused apply (seq %d) instead of re-run", seq1)
 	}
 }
@@ -192,14 +260,11 @@ func TestSessionChangesRerunsAfterRefusedApply(t *testing.T) {
 // A session in the person's folder as it is has nothing to apply, and says
 // so.
 func TestSessionChangesNotIsolated(t *testing.T) {
-	perm := filepath.Join(t.TempDir(), settings.PolicyFile)
-	if err := os.WriteFile(perm, []byte("isolation = \""+settings.IsolationNone+"\"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	e, _ := diffEnv(t, perm)
+	e, _ := diffEnv(t, "")
 	folder := t.TempDir()
 	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\ntwo\n"), 0o644)
-	first := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"edit1"}`)
+	// A direct workspace (sandbox false) works in the folder as it is.
+	first := e.firstTurn(t, folder, "claude", "edit1", false)
 	waitEnded(t, e, first.Turn)
 	c := changesOf(t, e, first.Session)
 	if c.Isolated || c.Unapplied || c.Why != changesNotIsolated || len(c.Files) != 0 {
@@ -208,16 +273,17 @@ func TestSessionChangesNotIsolated(t *testing.T) {
 }
 
 // A session whose first turn has not ended has nothing to apply yet, and is
-// isolated as that turn asked: a copy, unless the isolation setting is none
-// or the turn asked for the folder as it is (isolate false).
+// isolated as its workspace's sandbox says: a copy when sandbox is true, the
+// folder as it is when false. The isolation setting only chooses the backend,
+// so "none" does not turn a sandbox workspace's wall off (his rule, 2026-11-21).
 func TestSessionChangesFirstTurnRunning(t *testing.T) {
 	for _, tc := range []struct {
-		name, policy, isolate string
-		isolated              bool
+		name, policy      string
+		sandbox, isolated bool
 	}{
-		{"a copy", "", "", true},
-		{"isolation none", "isolation = \"" + settings.IsolationNone + "\"\n", "", false},
-		{"isolate false", "", `"isolate":false,`, false},
+		{"a copy", "", true, true},
+		{"the folder as it is", "", false, false},
+		{"sandbox ignores isolation none", "isolation = \"" + settings.IsolationNone + "\"\n", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			perm := filepath.Join(t.TempDir(), settings.PolicyFile)
@@ -229,7 +295,7 @@ func TestSessionChangesFirstTurnRunning(t *testing.T) {
 			e, dir := diffEnv(t, perm)
 			folder := t.TempDir()
 			os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\n"), 0o644)
-			first := startTurn(t, e, `{"agent":"claude",`+tc.isolate+`"folder":"`+folder+`","prompt":"hold"}`)
+			first := e.firstTurn(t, folder, "claude", "hold", tc.sandbox)
 			tokenOf(t, dir, "hold") // the turn is running
 			c := changesOf(t, e, first.Session)
 			why := ""
@@ -287,6 +353,14 @@ func changesQueue(t *testing.T, waits ...time.Duration) (e *env, q *queue.Queue,
 	}
 	endJob(t, q, r, false, queue.Finish{Status: queue.Finished, Session: j.Session,
 		Workspace: &queue.Workspace{Kind: queue.WorkspaceCopy, Space: j.ID}, Result: []byte(`{"changeset":"` + strings.Repeat("1", 64) + `"}`)})
+	// The workspace changes route reads the workspace from the store, so record
+	// one for this session the way the migration does: its id is its own
+	// workspace id (migrated-style), sandbox true.
+	sb := true
+	if _, _, err := st.Append(event.Event{ID: "wc_" + j.Session, Kind: event.WorkspaceCreated, Time: time.Now().UTC(),
+		Workspace: j.Session, FolderRef: "fld_0123456789abcdef", Machine: con, Sandbox: &sb}); err != nil {
+		t.Fatal(err)
+	}
 	return &env{srv: srv, api: a, store: st, port: port, q: q}, q, r, j.Session, j.Turn, func(d time.Duration) { skew.Add(int64(d)) }
 }
 
@@ -315,14 +389,14 @@ func TestSessionChangesAnswers(t *testing.T) {
 		if _, _, err := q.Apply(queue.DefaultTeam, turn); err != nil {
 			t.Fatal(err)
 		}
-		if code, out := as(t, e, token, "GET", "/api/v0/sessions/"+session+"/changes", ""); code != 409 || !strings.Contains(out, applyBusy) {
+		if code, out := as(t, e, token, "GET", "/api/v0/workspaces/"+session+"/changes", ""); code != 409 || !strings.Contains(out, applyBusy) {
 			t.Fatalf("%d %s", code, out)
 		}
 	})
 	t.Run("offline", func(t *testing.T) {
 		e, _, _, session, _, later := changesQueue(t)
 		later(queue.RunnerFresh + time.Second)
-		if code, out := as(t, e, token, "GET", "/api/v0/sessions/"+session+"/changes", ""); code != 503 || !strings.Contains(out, applyOffline) {
+		if code, out := as(t, e, token, "GET", "/api/v0/workspaces/"+session+"/changes", ""); code != 503 || !strings.Contains(out, applyOffline) {
 			t.Fatalf("%d %s", code, out)
 		}
 	})
@@ -334,7 +408,7 @@ func TestSessionChangesAnswers(t *testing.T) {
 		}
 		got := make(chan answer, 1)
 		go func() {
-			code, out := as(t, e, token, "GET", "/api/v0/sessions/"+session+"/changes", "")
+			code, out := as(t, e, token, "GET", "/api/v0/workspaces/"+session+"/changes", "")
 			got <- answer{code, out}
 		}()
 		p := queue.PreviewResult{Files: []queue.PreviewFile{{Path: "a.txt", Change: "modified", DiffLeftOut: true}},
@@ -347,7 +421,7 @@ func TestSessionChangesAnswers(t *testing.T) {
 			}
 		}
 		a := <-got
-		var c SessionChangesPage
+		var c WorkspaceChangesPage
 		if a.code != 200 || json.Unmarshal([]byte(a.out), &c) != nil {
 			t.Fatalf("%d %s", a.code, a.out)
 		}
@@ -369,7 +443,7 @@ func TestSessionChangesServesCachedWhenOffline(t *testing.T) {
 	// Cache a preview by running the one preview job the first GET plans.
 	got := make(chan int, 1)
 	go func() {
-		code, _ := as(t, e, token, "GET", "/api/v0/sessions/"+session+"/changes", "")
+		code, _ := as(t, e, token, "GET", "/api/v0/workspaces/"+session+"/changes", "")
 		got <- code
 	}()
 	p := queue.PreviewResult{Files: []queue.PreviewFile{{Path: "a.txt", Change: "modified"}}, Count: 1}
@@ -390,8 +464,8 @@ func TestSessionChangesServesCachedWhenOffline(t *testing.T) {
 	// The runner goes offline; ?fresh forces a re-run that cannot run, so the
 	// stored preview is served marked stale.
 	later(queue.RunnerFresh + time.Second)
-	code, out := as(t, e, token, "GET", "/api/v0/sessions/"+session+"/changes?fresh=true", "")
-	var c SessionChangesPage
+	code, out := as(t, e, token, "GET", "/api/v0/workspaces/"+session+"/changes?fresh=true", "")
+	var c WorkspaceChangesPage
 	if code != 200 || json.Unmarshal([]byte(out), &c) != nil {
 		t.Fatalf("stale GET: %d %s", code, out)
 	}
@@ -410,7 +484,7 @@ func TestSessionChangesBusyNotReused(t *testing.T) {
 	// Cache a preview by running the one preview job the first GET plans.
 	got := make(chan int, 1)
 	go func() {
-		code, _ := as(t, e, token, "GET", "/api/v0/sessions/"+session+"/changes", "")
+		code, _ := as(t, e, token, "GET", "/api/v0/workspaces/"+session+"/changes", "")
 		got <- code
 	}()
 	p := queue.PreviewResult{Files: []queue.PreviewFile{{Path: "a.txt", Change: "modified"}}, Count: 1}
@@ -433,7 +507,7 @@ func TestSessionChangesBusyNotReused(t *testing.T) {
 	if _, _, err := q.Apply(queue.DefaultTeam, turn); err != nil {
 		t.Fatal(err)
 	}
-	if code, out := as(t, e, token, "GET", "/api/v0/sessions/"+session+"/changes", ""); code != 409 || !strings.Contains(out, applyBusy) {
+	if code, out := as(t, e, token, "GET", "/api/v0/workspaces/"+session+"/changes", ""); code != 409 || !strings.Contains(out, applyBusy) {
 		t.Fatalf("a pending apply with a cached preview: %d %s", code, out)
 	}
 }
@@ -445,7 +519,7 @@ func TestSessionChangesPinnedPageReportsStale(t *testing.T) {
 	e, _ := diffEnv(t, filepath.Join(t.TempDir(), settings.PolicyFile))
 	folder := t.TempDir()
 	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\ntwo\n"), 0o644)
-	first := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"edit1"}`)
+	first := e.firstTurn(t, folder, "claude", "edit1", true)
 	waitEnded(t, e, first.Turn)
 	c := changesOf(t, e, first.Session)
 	if c.Event == "" {
@@ -456,8 +530,9 @@ func TestSessionChangesPinnedPageReportsStale(t *testing.T) {
 		t.Fatalf("apply: %d %+v", code, st)
 	}
 	// Paging that now out-of-date preview by its event id reports it stale.
-	code, out := as(t, e, token, "GET", "/api/v0/sessions/"+first.Session+"/changes?event="+c.Event, "")
-	var p SessionChangesPage
+	ws, _, _ := e.store.WorkspaceOf(ids.SessionID(first.Session))
+	code, out := as(t, e, token, "GET", "/api/v0/workspaces/"+string(ws)+"/changes?event="+c.Event, "")
+	var p WorkspaceChangesPage
 	if code != 200 || json.Unmarshal([]byte(out), &p) != nil {
 		t.Fatalf("pinned GET: %d %s", code, out)
 	}
@@ -478,7 +553,7 @@ func TestSessionChangesConcurrentGetsRunOnePreview(t *testing.T) {
 	got := make(chan ans, 2)
 	for i := 0; i < 2; i++ {
 		go func() {
-			code, out := getRaw(e, token, "/api/v0/sessions/"+session+"/changes")
+			code, out := getRaw(e, token, "/api/v0/workspaces/"+session+"/changes")
 			got <- ans{code, out}
 		}()
 	}
@@ -501,7 +576,7 @@ func TestSessionChangesConcurrentGetsRunOnePreview(t *testing.T) {
 	}
 	for i := 0; i < 2; i++ {
 		a := <-got
-		var c SessionChangesPage
+		var c WorkspaceChangesPage
 		if a.code != 200 || json.Unmarshal([]byte(a.out), &c) != nil || c.Count != 1 || len(c.Files) != 1 {
 			t.Fatalf("concurrent GET %d: %d %s", i, a.code, a.out)
 		}
@@ -519,7 +594,7 @@ func TestSessionChangesFreshRunStaleIfChangedWhileRunning(t *testing.T) {
 	e, q, r, session, turn, _ := changesQueue(t)
 	got := make(chan string, 1)
 	go func() {
-		_, out := as(t, e, token, "GET", "/api/v0/sessions/"+session+"/changes?fresh=true", "")
+		_, out := as(t, e, token, "GET", "/api/v0/workspaces/"+session+"/changes?fresh=true", "")
 		got <- out
 	}()
 	// While the preview runs, an apply moves the cursor off what it recorded.
@@ -538,7 +613,7 @@ func TestSessionChangesFreshRunStaleIfChangedWhileRunning(t *testing.T) {
 	if !ran {
 		t.Fatal("no preview job appeared")
 	}
-	var c SessionChangesPage
+	var c WorkspaceChangesPage
 	if json.Unmarshal([]byte(<-got), &c) != nil {
 		t.Fatal("decode")
 	}
@@ -553,7 +628,7 @@ func TestSessionChangesFreshRunStaleIfChangedWhileRunning(t *testing.T) {
 func TestSessionChangesGateWaitBounded(t *testing.T) {
 	e, q, _, session, _, _ := changesQueue(t, 300*time.Millisecond)
 	// The first GET holds the gate on a preview that never finishes.
-	go getRaw(e, token, "/api/v0/sessions/"+session+"/changes?fresh=true")
+	go getRaw(e, token, "/api/v0/workspaces/"+session+"/changes?fresh=true")
 	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(10 * time.Millisecond) {
 		if js, _ := q.List(queue.DefaultTeam, queue.Filter{Kind: queue.KindPreview}, 1); len(js) == 1 {
 			break
@@ -564,7 +639,7 @@ func TestSessionChangesGateWaitBounded(t *testing.T) {
 	}
 	// The second GET waits for the gate and, within the budget, answers 504.
 	start := time.Now()
-	code, out := as(t, e, token, "GET", "/api/v0/sessions/"+session+"/changes?fresh=true", "")
+	code, out := as(t, e, token, "GET", "/api/v0/workspaces/"+session+"/changes?fresh=true", "")
 	if code != 504 || !strings.Contains(out, changesSlow) {
 		t.Fatalf("a bounded gate wait: %d %s", code, out)
 	}

@@ -59,9 +59,12 @@ const (
 	anyRead
 	// renameSession: {id} is a session in the token's scope, to rename.
 	renameSession
-	// applyTurnTok: {id} is a turn of a session in the token's scope, whose
-	// changes to apply.
-	applyTurnTok
+	// changesWorkspaceTok: {id} is the token's own workspace, whose changes to
+	// preview.
+	changesWorkspaceTok
+	// applyWorkspaceTok: {id} is the token's own workspace, whose changes to
+	// apply, allowed only when Agents may apply is on.
+	applyWorkspaceTok
 	// toolList: POST /api/v0/mcp, the API as tools. Each tool call is sent
 	// through its own route and checked there (tools.go).
 	toolList
@@ -74,6 +77,11 @@ const (
 	onPath
 	// fileOp: POST /api/v0/files/read, list, write.
 	fileOp
+	// createSessionTok: POST /api/v0/sessions. A turn token may create a
+	// session only in its own workspace; the handler sets the workspace from
+	// the grant and ignores the body's, so an ask opens a session beside the
+	// asker, in the same copy.
+	createSessionTok
 )
 
 // Refusals a turn token gets. Fixed wording: they never quote the request.
@@ -85,10 +93,8 @@ const (
 	turnCallRefused     = "a turn token reads only the calls of its own session and the sessions its request tree started"
 	turnContinueRefused = "a turn token does not continue sessions: ask_agent starts a new one, and its result comes back to your session " +
 		"as a later turn; to follow up, ask again with what the result said"
-	turnFolderRefused = "a turn token starts sessions only in its own session's folder, or a folder inside it; " +
-		"leave folder out to start in your own session's folder"
-	turnIsolateRefused = "a session a turn token starts always gets its own isolated copy of its folder; leave isolate out"
-	turnAskedRefused   = "a turn token stops only turns its request tree asked for"
+	turnAskedRefused = "a turn token stops only turns its request tree asked for"
+	turnNoSession    = "a turn needs a session: create one in your workspace with POST /api/v0/sessions, then run its turn"
 )
 
 // The refusal when [agent_api] turns a kind of call off, naming the
@@ -238,17 +244,16 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 		} else if !ok {
 			return refuse(turnSessionRefused)
 		}
-	case applyTurnTok:
-		if a.cfg.Queue == nil {
-			return failed(queue.ErrNotFound)
-		}
-		j, err := a.cfg.Queue.JobByTurn(queue.DefaultTeam, id)
+	case changesWorkspaceTok, applyWorkspaceTok:
+		// A turn token reads or applies only its OWN workspace: the workspace of
+		// the token's session must be the id in the path. g.Session is always in
+		// the token's tree, so inScope is not needed.
+		ws, found, err := a.workspaceOf(g.Session)
 		if err != nil {
-			return failed(err)
+			a.internal(w)
+			return nil, false
 		}
-		if ok, err := inScope(turnSession(j)); err != nil {
-			return failed(err)
-		} else if !ok {
+		if !found || string(ws) != id {
 			return refuse(turnSessionRefused)
 		}
 	case askedTurn:
@@ -262,9 +267,10 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 		if j.Links.Chain == nil || j.Links.Chain.By == "" || j.Links.Chain.Root != g.Root {
 			return refuse(turnAskedRefused)
 		}
-	case askTurn, anyRead, toolList, onRegister, onPath, fileOp:
+	case askTurn, anyRead, toolList, onRegister, onPath, fileOp, createSessionTok:
 		// The handler checks the rest: onRegister reads the subject turn from
-		// the body and the session it delivers to; onPath reads the on's maker.
+		// the body and the session it delivers to; onPath reads the on's maker;
+		// createSession sets the workspace from the grant.
 	default:
 		return refuse(turnWriteRefused)
 	}
@@ -276,7 +282,7 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 }
 
 // turnRefusal says why a turn token may not call a route under the person's
-// rules and switches, or "": applyTurn and tools. Reading, listing agents, starting,
+// rules and switches, or "": applyWorkspace and tools. Reading, listing agents, starting,
 // reviewing, stopping and renaming have no switch: within its request tree a
 // turn token always may (0.5.2). The rest of the check needs the request
 // (allowTurn). The tool list (tools.go) asks it too, so a tool is listed only
@@ -286,8 +292,8 @@ func turnRefusal(rt *route, rules gateway.Rules, applyAllowed bool) string {
 	switch {
 	case rt.turn == mainOnly:
 		return turnWriteRefused
-	case rt.turn == applyTurnTok && !applyAllowed:
-		return turnSwitchedOff("apply a turn's changes", "Agents may apply")
+	case rt.turn == applyWorkspaceTok && !applyAllowed:
+		return turnSwitchedOff("apply a workspace's changes", "Agents may apply")
 	case (rt.turn == toolList || rt.turn == fileOp) && toolDec == gateway.Refuse:
 		return turnSwitchedOff("use the agentbus MCP tools", "AgentBus tools")
 	}
@@ -353,18 +359,16 @@ func (a *API) inTree(g run.Grant, session string) (bool, error) {
 	return err == nil && root != "" && root == g.Root, err
 }
 
-// askChecks checks a turn token's POST /api/v0/turns body and fills what the
-// token decides: for a new session its folder, and the links of the work. It
-// says why not, and has then answered.
-func (a *API) askChecks(w http.ResponseWriter, g run.Grant, perm settings.Policy, body *TurnRequest, continues bool) (queue.Links, bool) {
+// askChecks checks a turn token's POST /api/v0/turns body: the asked turn runs
+// in a session the asker created in its own workspace (POST /api/v0/sessions
+// {workspace: the asker's}), so the turn's session must resolve to the asker's
+// workspace. Then the asked agent shares the asker's folder and its sandbox
+// wall by construction, with no folder on the turn. It says why not, and has
+// then answered.
+func (a *API) askChecks(w http.ResponseWriter, g run.Grant, perm settings.Policy, body *TurnRequest) (queue.Links, bool) {
 	refuse := func(msg string) (queue.Links, bool) {
 		writeError(w, http.StatusForbidden, msg)
 		return queue.Links{}, false
-	}
-	// A turn's token never continues a session (his call, 2026-11-12):
-	// ask_agent starts a new one, and its result comes back on its own.
-	if continues {
-		return refuse(turnContinueRefused)
 	}
 	if msg, err := a.overBudget(g, perm, body.IdempotencyKey); err != nil {
 		a.internal(w)
@@ -372,85 +376,27 @@ func (a *API) askChecks(w http.ResponseWriter, g run.Grant, perm settings.Policy
 	} else if msg != "" {
 		return refuse(msg)
 	}
-	if body.Isolate != nil && !*body.Isolate {
-		return refuse(turnIsolateRefused)
+	if body.Session == "" {
+		return refuse(turnNoSession)
 	}
-	// The folder is compared by reference: the control plane holds no
-	// path. Whether a path is inside a folder is for the folder's machine
-	// to say (queue.FolderIssuer). The new session names the same machine,
-	// so it runs where this one does.
-	ref, machine, repo, err := a.cfg.Queue.SessionFolder(queue.DefaultTeam, g.Session)
+	// A turn token may start a turn only in a session its own tree opened (POST
+	// /api/v0/sessions set the asker on it): the asker names this token's
+	// session. This is the one check, and it implies the workspace, since the
+	// session was created in the asker's workspace. It is not the asker's own
+	// session (opened by the person, no asker) nor a sibling's (a different
+	// asker), so a turn token neither continues a conversation nor writes into
+	// another's -- the boundary the shared workspace would otherwise lose.
+	asker, found, err := a.cfg.Store.SessionAsker(body.Session)
 	if err != nil {
 		a.internal(w)
 		return queue.Links{}, false
 	}
-	if ref == "" {
-		return refuse(turnFolderRefused)
+	if !found || asker != g.Session {
+		return refuse(turnSessionRefused)
 	}
-	// local is true when the session's folder is on this control plane's own
-	// machine (agentbus up). Only then can control answer whether a path or a
-	// folder child is inside the session's folder: it needs the folder here.
-	// A remote runner holds the folder, and control holds no path of a remote
-	// session (jobs/record.go drops it), so a request that needs a path check
-	// is left to that machine, never answered from here.
-	local := a.cfg.Folders != nil && a.cfg.Folders.Machine() == machine
-	switch {
-	case body.Folder == "" && body.FolderRef == "" && repo && local:
-		// A worktree's session: the new session works on the worktree as
-		// this one left it, its base and edits, in a copy of its own.
-		c, err := a.cfg.Store.Continuation(g.Session)
-		if err != nil {
-			a.internal(w)
-			return queue.Links{}, false
-		}
-		if c.Folder == "" {
-			return refuse(turnFolderRefused)
-		}
-		body.Folder = c.Folder
-	case body.Folder == "" && body.FolderRef == "":
-		// The folder the person picked, so the new session gets a copy of
-		// its own beside this one, not inside it.
-		body.FolderRef, body.Machine = ref, machine
-	case body.FolderRef != "":
-		// A folder named by reference. It must be on the session's machine
-		// (machine), whichever machine that is. The same reference as the
-		// session's own folder is in scope with no path check, so it is
-		// allowed on a remote runner too. A different reference is inside the
-		// session's folder only if the folder's machine says so, which control
-		// can ask only when that machine is its own.
-		if body.Machine == "" {
-			body.Machine = machine
-		}
-		if body.Machine != machine {
-			return refuse(turnFolderRefused)
-		}
-		if body.FolderRef != ref && (!local || !a.cfg.Folders.WithinRef(body.FolderRef, ref)) {
-			return refuse(turnFolderRefused)
-		}
-	default:
-		// The session's own folder or one inside it, or the folder its turns
-		// run in (its copy, as the record names it), or one inside that.
-		if !local {
-			return refuse(turnFolderRefused)
-		}
-		if !a.cfg.Folders.Within(body.Folder, ref) {
-			c, err := a.cfg.Store.Continuation(g.Session)
-			if err != nil {
-				a.internal(w)
-				return queue.Links{}, false
-			}
-			if c.Folder == "" || !a.cfg.Folders.WithinDir(body.Folder, c.Folder) {
-				return refuse(turnFolderRefused)
-			}
-		}
-	}
-	// A path was checked on this service's own machine, so it goes there
-	// and nowhere else: never to another machine.
-	if body.Folder != "" {
-		if body.Machine != "" && body.Machine != machine {
-			return refuse(turnFolderRefused)
-		}
-		body.Machine = machine
-	}
+	// An ask is one turn: a turn token opens a session and starts its single
+	// turn. A second turn to the same asked session is refused as a continuation
+	// inside the create transaction (queue.ErrAskedSessionUsed), so two asks
+	// racing to one session cannot both pass; run() maps it to the same 403.
 	return askedLinks(g), true
 }

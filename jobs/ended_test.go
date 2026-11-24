@@ -113,7 +113,7 @@ func TestRecordTurnEndsEveryStateIdempotent(t *testing.T) {
 }
 
 // turn.ended is keyed on the turn and carries no session, so a turn refused
-// before it ran (recorded only as turn.ended, with no session.opened or
+// before it ran (recorded only as turn.ended, with no run.started or
 // turn.started) does NOT make its job's session "known" and does NOT appear as
 // a phantom session in the snapshot (review P1, 2026-11-19).
 func TestTurnEndedDoesNotCreateSession(t *testing.T) {
@@ -155,13 +155,13 @@ func TestFailedTurnStillDelivers(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Before the end is recorded, FireOns reads no end and delivers nothing.
-	if n, err := q.FireOns(queue.DefaultTeam, st.TurnEnded, nil, nil); err != nil || n != 0 {
+	if n, err := q.FireOns(queue.DefaultTeam, st.TurnEnded, nil, nil, nil); err != nil || n != 0 {
 		t.Fatalf("before reconcile: n=%d err=%v; want 0", n, err)
 	}
 	if _, _, err := RecordTurnEnds(q, st, nil, time.Now().Add(time.Hour), 50); err != nil {
 		t.Fatal(err)
 	}
-	if n, err := q.FireOns(queue.DefaultTeam, st.TurnEnded, nil, nil); err != nil || n != 1 {
+	if n, err := q.FireOns(queue.DefaultTeam, st.TurnEnded, nil, nil, nil); err != nil || n != 1 {
 		t.Fatalf("after reconcile: n=%d err=%v; want 1 (the failed turn delivers)", n, err)
 	}
 	list, err := q.List(queue.DefaultTeam, queue.Filter{Session: "s_target"}, 10)

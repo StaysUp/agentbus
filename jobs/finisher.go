@@ -148,6 +148,48 @@ func (f *finisher) await(ctx context.Context, team, id, attempt string, wait tim
 // first (keepOutcomes), from the saved finish alone, then the job's end
 // (queue.End), the commit point. Only the finisher calls it.
 func endAccepted(rec Recorder, q *queue.Queue, a queue.AcceptedFinish) (queue.Job, error) {
+	// A finished discard's dropped turns are read NOW, when it runs, not frozen
+	// when it was queued: a turn that ran while the discard waited in the lane is
+	// dropped too, so it is listed and marked. Keyed by the workspace (CopyKey),
+	// as a discard carries no session. This discard is not finished yet, so it
+	// does not exclude its own drops from the appliable turns.
+	if a.Job.Kind == queue.KindDiscard && a.Finish.Status == queue.Finished {
+		if ws := queue.CopyKey(a.Job.Spec.Workspace, a.Job.Session); ws != "" {
+			dropped, derr := q.DroppedTurns(a.Job.Team, ws)
+			if derr != nil {
+				return queue.Job{}, errOutcome
+			}
+			// For the workspace.discarded event (keepOutcomes reads the job), and
+			// persisted on the job so those turns stop being appliable once the
+			// discard is finished (appliableTurns excludes them).
+			a.Job.Links.AppliesTurns = dropped
+			if derr := q.MarkDiscarded(a.Job.Team, a.Job.ID, dropped); derr != nil {
+				return queue.Job{}, errOutcome
+			}
+		}
+	}
+	// A finished clean update's head and folded turns are read NOW, when it runs,
+	// not frozen when it was queued: a turn that ran while the update waited in
+	// the lane is folded too. A conflict folds nothing (it changed nothing). The
+	// runner's result says clean (update.to set) or conflict.
+	if a.Job.Kind == queue.KindUpdate && a.Finish.Status == queue.Finished {
+		if res, _ := queue.ReadResult(a.Finish.Result); res.Update.Clean() {
+			if ws := queue.CopyKey(a.Job.Spec.Workspace, a.Job.Session); ws != "" {
+				head, folded, ferr := q.UpdateFolds(a.Job.Team, ws)
+				if ferr != nil {
+					return queue.Job{}, errOutcome
+				}
+				// On the job so a later apply targets the head as the merge and the
+				// folded turns stop being appliable (keepOutcomes and appliableTurns
+				// read the job).
+				a.Job.Links.AppliesTurn = head
+				a.Job.Links.AppliesTurns = folded
+				if ferr := q.MarkUpdated(a.Job.Team, a.Job.ID, head, folded); ferr != nil {
+					return queue.Job{}, errOutcome
+				}
+			}
+		}
+	}
 	kept, err := keepOutcomes(rec, a.Job, a.Finish)
 	if err != nil {
 		return queue.Job{}, errOutcome

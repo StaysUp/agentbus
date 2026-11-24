@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/folders"
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/store"
@@ -52,7 +53,7 @@ func startTurn(t *testing.T, svc *service, tok string, body map[string]any) (int
 	var st struct {
 		Session, Turn, State string
 	}
-	code := callAPI(t, svc, tok, "POST", "/api/v0/turns", body, &st)
+	code := callAPI(t, svc, tok, "POST", "/api/v0/turns", firstTurnBody(t, svc, tok, body), &st)
 	if code/100 != 2 {
 		return code, queue.Job{}
 	}
@@ -93,6 +94,33 @@ func queueTurn(t *testing.T, svc *service, tok string, spec map[string]any) queu
 		if msg := queue.ResolveFolders(&sp, svc.folders); msg != "" {
 			t.Fatal(msg)
 		}
+	}
+	// A turn runs in a session's workspace, recorded on control before the job
+	// (the 3-call flow). A continuation names its session; resolve its workspace.
+	// A first turn creates both from the spec's folder and mode, and names them.
+	if sp.Session != "" {
+		if ws, found, err := svc.store.WorkspaceOf(sp.Session); err == nil && found {
+			sp.Workspace = ws
+		}
+	} else {
+		wsBody := map[string]any{"sandbox": sp.Isolate}
+		switch {
+		case spec["folder_ref"] != nil:
+			wsBody["folder_ref"] = spec["folder_ref"]
+			if spec["connector"] != nil {
+				wsBody["machine"] = spec["connector"]
+			}
+		case spec["folder"] != nil:
+			wsBody["folder"] = spec["folder"]
+		}
+		ws := newWorkspaceOf(t, svc, tok, wsBody)
+		var sc struct {
+			Session string `json:"session"`
+		}
+		if code := callAPI(t, svc, tok, "POST", "/api/v0/sessions", map[string]any{"workspace": ws}, &sc); code != http.StatusCreated {
+			t.Fatalf("POST /api/v0/sessions in %s: %d", ws, code)
+		}
+		sp.Workspace, sp.Session = ids.WorkspaceID(ws), ids.SessionID(sc.Session)
 	}
 	j, _, err := svc.queue.Create(queue.DefaultTeam, queue.KindTurn, "", sp, queue.Links{})
 	if err != nil {
@@ -164,7 +192,7 @@ func TestUpRunsAJobOnItsOwnRunner(t *testing.T) {
 	for _, e := range runEvents(t, svc.store, res.Session) {
 		kinds = append(kinds, e.Kind)
 	}
-	if len(kinds) < 4 || kinds[len(kinds)-2] != "session.closed" || kinds[len(kinds)-1] != "turn.changed" {
+	if len(kinds) < 4 || kinds[len(kinds)-2] != "run.ended" || kinds[len(kinds)-1] != "turn.changed" {
 		t.Fatalf("record of the job's session: %v", kinds)
 	}
 	// The data folder holds the queue beside the record, and the runner's
@@ -210,10 +238,10 @@ func TestServerAndRunner(t *testing.T) {
 	t.Setenv("AGENTBUS_FAKE_MARK", filepath.Join(folder, "made.txt"))
 
 	// The server has no folders of its own, and no connector is connected
-	// yet to check a path: it is refused. The runner owns the folder
-	// (-folder), and the server knows it by its reference.
-	if code, _ := startTurn(t, server, tok, map[string]any{"agent": "claude", "folder": folder, "prompt": "hello"}); code != 503 {
-		t.Fatalf("POST /api/v0/turns with a path on the server and no connector: %d, want 503", code)
+	// yet to check a path: creating the workspace is refused. The runner owns
+	// the folder (-folder), and the server knows it by its reference.
+	if code, _, _ := postAPI(t, server, tok, "/api/v0/workspaces", []byte(`{"folder":`+jsonStr(folder)+`}`)); code != 503 {
+		t.Fatalf("POST /api/v0/workspaces with a path on the server and no connector: %d, want 503", code)
 	}
 	fr, err := folders.Open(filepath.Join(runnerHome, "folders.json"))
 	if err != nil {
@@ -221,9 +249,11 @@ func TestServerAndRunner(t *testing.T) {
 	}
 	ref, connector := folders.Ref(folder), fr.Machine()
 
-	// With no runner yet, a turn waits in the server's queue.
-	code, queued := startTurn(t, server, tok, map[string]any{"agent": "claude", "folder_ref": ref, "connector": connector,
-		"prompt": "hello", "model": "haiku", "isolate": false})
+	// With no runner yet, a turn waits in the server's queue. Its workspace is
+	// the folder by reference (no path resolved on the server), direct mode.
+	sess := newSessionOf(t, server, tok, map[string]any{"folder_ref": ref, "machine": connector, "sandbox": false})
+	code, queued := startTurn(t, server, tok, map[string]any{"session": sess, "agent": "claude",
+		"prompt": "hello", "model": "haiku"})
 	if code != 202 {
 		t.Fatalf("POST /api/v0/turns: %d", code)
 	}
@@ -272,8 +302,9 @@ func TestServerAndRunner(t *testing.T) {
 		t.Fatalf("the server's record of the runner's turn: %+v", list.Turns)
 	}
 	// POST /api/v0/turns on the server runs on the runner too, and answers
-	// with the turn.
-	code, out, raw := postRun(t, server, tok, map[string]any{"agent": "claude", "folder_ref": ref, "connector": connector, "prompt": "again"})
+	// with the turn. Its workspace is the folder by reference.
+	sess2 := newSessionOf(t, server, tok, map[string]any{"folder_ref": ref, "machine": connector, "sandbox": false})
+	code, out, raw := postRun(t, server, tok, map[string]any{"session": sess2, "agent": "claude", "prompt": "again"})
 	if code != 202 || out["turn"] == "" || out["state"] != "running" {
 		t.Fatalf("POST /api/v0/turns on the server: %d %s", code, raw)
 	}
@@ -288,7 +319,7 @@ func TestServerAndRunner(t *testing.T) {
 	}
 	// The runner's own service keeps no queue: it takes no turns itself.
 	rtok := readToken(t, runnerHome)
-	if code, _, raw := postRun(t, r, rtok, map[string]any{"agent": "claude", "folder": folder, "prompt": "x"}); code != 404 {
+	if code, _, raw := postAPI(t, r, rtok, "/api/v0/turns", []byte(`{"session":"s_none","agent":"claude","prompt":"x"}`)); code != 404 {
 		t.Fatalf("POST /api/v0/turns on the runner: %d %s, want 404", code, raw)
 	}
 }

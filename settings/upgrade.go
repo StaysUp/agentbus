@@ -451,18 +451,11 @@ func (d *DB) importFiles(dir string, readAgents func([]byte) ([]AgentRow, error)
 		}
 		files = append(files, PolicyFile)
 		cs = append(cs, Change{Setting: SettingPermissions, Keys: changedKeys(defaultPolicy(), p), File: PolicyFile})
-	} else if fresh {
-		// A fresh install with no permissions.toml: seed the small read-only
-		// starter allow list, so a first session is not a card for every
-		// command (FirstInstallPolicy). The stored overlay holds only the allow
-		// list; every other key stays at its default. Upgrade steps are already
-		// marked done for a fresh database (openDB in Run).
-		first := FirstInstallPolicy()
-		if err := putSetting(tx, SettingPermissions, overlayOf(defaultPolicy(), first), now); err != nil {
-			return nil, false, err
-		}
-		cs = append(cs, Change{Setting: SettingPermissions, Keys: changedKeys(defaultPolicy(), first), File: ""})
 	}
+	// A fresh install with no permissions.toml needs no seed: the defaults
+	// allow every command and tool (DefaultPolicy), so a first session is not a
+	// card for every command and nothing is stored. (fresh is still taken for
+	// the signature the caller uses.)
 	if exists(filepath.Join(dir, InstructionsFile)) {
 		text, _, err := old.Instructions()
 		if err != nil {

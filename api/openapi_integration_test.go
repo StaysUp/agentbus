@@ -54,8 +54,8 @@ func fill(t *testing.T, st *store.Store) {
 		// An older store's registration: nothing writes it now, readers
 		// still meet it.
 		{ID: "evt_0", Kind: event.SessionRegistered, Time: now, Session: "s1", Harness: "claude", Folder: "/Users/ana/app"},
-		{ID: "evt_4", Kind: event.SessionOpened, Time: now, Session: "s1", Hold: "hold_2", Harness: "claude", Folder: "/Users/ana/app"},
-		{ID: "evt_5", Kind: event.SessionClosed, Time: now, Session: "s1", Hold: "hold_2", ExitCode: &code, ResumeID: "abc-2"},
+		{ID: "evt_4", Kind: event.RunStarted, Time: now, Session: "s1", Hold: "hold_2", Harness: "claude", Folder: "/Users/ana/app"},
+		{ID: "evt_5", Kind: event.RunEnded, Time: now, Session: "s1", Hold: "hold_2", ExitCode: &code, ResumeID: "abc-2"},
 	} {
 		if _, _, err := st.Append(e); err != nil {
 			t.Fatal(err)
@@ -76,7 +76,8 @@ func TestOpenAPIResponsesMatch(t *testing.T) {
 	fill(t, e.store)
 
 	check(t, doc, e, "POST", "/api/v0/events", `{"kind":"x.review.finding","session":"s1","text":"Line 12.","data":{"line":12}}`, true, 201)
-	check(t, doc, e, "POST", "/api/v0/turns", `{"agent":"claude","folder":"`+folder+`","prompt":"hi"}`, true, 202)
+	sess := e.newSession(t, folder, true)
+	check(t, doc, e, "POST", "/api/v0/turns", `{"session":"`+sess+`","agent":"claude","prompt":"hi"}`, true, 202)
 
 	var snap store.Snapshot
 	if err := json.Unmarshal(check(t, doc, e, "GET", "/api/v0/sessions", "", true, 200), &snap); err != nil {
@@ -92,7 +93,7 @@ func TestOpenAPIResponsesMatch(t *testing.T) {
 		kinds[ev["kind"].(string)] = true
 	}
 	for _, k := range []string{"turn.started", "model.requested", "model.responded", "tool.requested", "tool.completed",
-		"turn.completed", "session.registered", "session.opened", "session.closed", "events.dropped", "schema.unexpected", "x.review.finding"} {
+		"turn.completed", "session.registered", "run.started", "run.ended", "events.dropped", "schema.unexpected", "x.review.finding"} {
 		if !kinds[k] {
 			t.Errorf("the page has no %s to check", k)
 		}
@@ -154,7 +155,7 @@ func TestOpenAPIResponsesMatch(t *testing.T) {
 	check(t, doc, e, "GET", "/api/v0/sessions/s1/events?store=st_other&after=0", "", true, 409)
 	check(t, doc, e, "GET", "/api/v0/sessions/s1/events?store=x", "", true, 400)
 	check(t, doc, e, "POST", "/api/v0/turns", `{"agent":"claude","session":"nobody","prompt":"next"}`, true, 404)
-	check(t, doc, e, "POST", "/api/v0/turns", `{"agent":"other","folder":"/","prompt":"hi"}`, true, 400)
+	check(t, doc, e, "POST", "/api/v0/turns", `{"session":"s1","agent":"other","prompt":"hi"}`, true, 400)
 
 	// The stream: every message is framed as the spec says, and its data
 	// is an Event.

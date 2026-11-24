@@ -148,6 +148,9 @@ func TestLaunchGolden(t *testing.T) {
 	}
 	allowOnly := "allow = [\"go test\", \"git commit\"]\n"
 	cases = append(cases,
+		// Copy mode: Claude Code's own per-command sandbox, folded into the
+		// gateway --settings; no whole-process wall (Info.CopySandbox).
+		launchCase{name: "claude copy", turns: []engine.Request{with(first("claude"), func(r *engine.Request) { r.Copy = true })}},
 		launchCase{name: "agy subscription, then resume", turns: []engine.Request{first("agy"), next("t_2")}},
 		launchCase{name: "agy lists, model, own instructions", perm: allowOnly, instr: strp("Be brief in {session}.\n"),
 			turns: []engine.Request{with(first("agy"), func(r *engine.Request) { r.Model = "gemini-3.8-flash-medium" })}},
@@ -190,6 +193,8 @@ func TestLaunchGolden(t *testing.T) {
 		launchCase{name: "opencode subscription", turns: []engine.Request{first("opencode")}},
 		launchCase{name: "opencode api key, relayed", turns: []engine.Request{with(first("opencode"), apiKey)}},
 		launchCase{name: "opencode openrouter, then resume", env: orKey,
+			turns: []engine.Request{with(first("opencode"), ocOR), next("t_2")}},
+		launchCase{name: "opencode openrouter replay", replay: true, env: orKey,
 			turns: []engine.Request{with(first("opencode"), ocOR), next("t_2")}},
 		launchCase{name: "opencode openrouter, key not set", turns: []engine.Request{with(first("opencode"), ocOR)}},
 		launchCase{name: "opencode openrouter, relayed, then resume", turns: []engine.Request{
@@ -508,8 +513,8 @@ func runLaunchCase(t *testing.T, self string, c launchCase) string {
 				case event.TurnStarted:
 					fmt.Fprintf(&b, "turn.started agent=%q continuity=%q replay_from=%q model=%q context=%s\n",
 						ev.Harness, ev.Continuity, ev.ReplayFrom, ev.Model, strconv.Quote(ev.Context))
-				case event.SessionClosed:
-					fmt.Fprintf(&b, "session.closed resume_id=%q\n", ev.ResumeID)
+				case event.RunEnded:
+					fmt.Fprintf(&b, "run.ended resume_id=%q\n", ev.ResumeID)
 				case event.ContextAdded:
 					fmt.Fprintf(&b, "context.added")
 					for _, p := range ev.Added {

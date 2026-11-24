@@ -261,6 +261,10 @@ type exchange struct {
 	// earlier card (approvals.go).
 	rules     Rules
 	allowOnce []string
+	// copyWrite: the writable set of a turn that runs in a session's copy (the
+	// copy dir and any extra writable paths). A file-edit tool call whose path
+	// is outside it is refused (copyguard.go). Empty when the turn has no copy.
+	copyWrite []string
 	// relayed: control's relay took the call for a runner's turn
 	// (ServeRelayed).
 	relayed bool
@@ -353,7 +357,7 @@ func (g *Gateway) Settle(session, turn string, timeout time.Duration) bool {
 	// The deadline is set before the timer, so the timer never fires before
 	// it, and the timer broadcasts holding openMu, so its wakeup cannot fall
 	// between the deadline check and Wait (a lost wakeup left Settle, and
-	// with it session.closed and shutdown, waiting on a stalled sink for
+	// with it run.ended and shutdown, waiting on a stalled sink for
 	// ever).
 	deadline := time.Now().Add(timeout)
 	timer := time.AfterFunc(time.Until(deadline), func() {
@@ -601,6 +605,7 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, session, runTurn
 				Unlisted: g.guard.Unlisted(session, runTurn),
 			}
 			ex.allowOnce = g.guard.AllowOnce(session, runTurn)
+			ex.copyWrite = g.guard.CopyWrite(session, runTurn)
 		}
 		var replayed int
 		if g.rewrite != nil && runTurn != "" && rl == nil {
@@ -697,7 +702,7 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 	// for no encoding (Accept-Encoding is dropped); a reply compressed anyway
 	// is not guarded.
 	guarded := false
-	if (ex.rules.guards() || len(ex.allowOnce) > 0) && !ex.probe && status == http.StatusOK {
+	if (ex.rules.guards() || len(ex.allowOnce) > 0 || len(ex.copyWrite) > 0) && !ex.probe && status == http.StatusOK {
 		switch strings.ToLower(strings.TrimSpace(header.Get("Content-Encoding"))) {
 		case "", "identity":
 			guarded = true
@@ -751,7 +756,7 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 	if guarded {
 		// The agent gets the reply with each refused call renamed; the
 		// adapter reads the tee, so it sees the calls as the model wrote them.
-		resp.Body = g.guardReply(resp.Request.Context(), ex, ex.rules, ex.allowOnce, resp.Body, guardEnd)
+		resp.Body = g.guardReply(resp.Request.Context(), ex, ex.rules, ex.allowOnce, ex.copyWrite, resp.Body, guardEnd)
 		resp.Header.Del("Content-Length")
 		resp.ContentLength = -1
 	}

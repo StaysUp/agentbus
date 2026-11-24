@@ -473,6 +473,9 @@ func matchWords(rule, words []string) bool {
 	if len(rule) == 0 || len(words) == 0 {
 		return false
 	}
+	if len(rule) == 1 && rule[0] == "*" {
+		return true // every command
+	}
 	if strings.HasPrefix(rule[0], "tool:") || strings.HasPrefix(rule[0], "api:") {
 		return false
 	}

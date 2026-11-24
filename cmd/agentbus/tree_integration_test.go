@@ -94,9 +94,9 @@ func TestStoppedTurnEndsItsTools(t *testing.T) {
 			}
 			c := waitClosed(t, svc.store, id)
 			if c.ExitCode == nil || *c.ExitCode != 143 {
-				t.Fatalf("session.closed %+v, want exit 143", c)
+				t.Fatalf("run.ended %+v, want exit 143", c)
 			}
-			// session.closed is stored after the tree has ended.
+			// run.ended is stored after the tree has ended.
 			if alive(tool) {
 				t.Fatalf("the tool (pid %d) outlived its stopped agent", tool)
 			}
@@ -124,7 +124,7 @@ func TestServiceStopEndsToolsOfRuns(t *testing.T) {
 	}
 	defer st.Close()
 	if c := closedEvent(runEvents(t, st, id)); c == nil || c.ExitCode == nil || *c.ExitCode != 143 {
-		t.Fatalf("session.closed %+v, want exit 143", c)
+		t.Fatalf("run.ended %+v, want exit 143", c)
 	}
 }
 
@@ -166,7 +166,7 @@ func turnOf(t *testing.T, svc *service, tok, session string) store.Turn {
 }
 
 // POST /api/v0/turns/{id}/stop ends the turn's whole tree, a tool in a
-// session of its own included, and nothing else. Its session.closed and the
+// session of its own included, and nothing else. Its run.ended and the
 // turn list say the person stopped it. A child that ignores SIGTERM gets
 // SIGKILL after the grace period. Once it has ended, a stop gets 409; a turn
 // no event names gets 404.
@@ -221,7 +221,7 @@ func TestStopRouteEndsTheTurnsTree(t *testing.T) {
 				t.Errorf("the turn closed %s after the stop, want about the 1s grace", took)
 			}
 			if c.ExitCode == nil || *c.ExitCode != tc.want || !c.Stopped {
-				t.Fatalf("session.closed %+v, want exit %d and stopped", c, tc.want)
+				t.Fatalf("run.ended %+v, want exit %d and stopped", c, tc.want)
 			}
 			if alive(agent) || alive(tool) {
 				t.Fatalf("the agent (pid %d) or its tool (pid %d) outlived the stop", agent, tool)

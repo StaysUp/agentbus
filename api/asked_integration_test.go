@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/event"
-	"github.com/staysup/agentbus/folders"
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
@@ -44,7 +43,7 @@ func askEnvCap(t *testing.T, perm string, maxRuns int) (*env, string) {
 	t.Helper()
 	dir := t.TempDir()
 	script := `for a; do p="$a"; done; echo '{"type":"result","session_id":"sid-'$$'"}'; ` +
-		`case "$p" in "[AgentBus]"*) printf '%s' "$p" > "$D/delivered-$$"; exit 0;; quick|"Review a change"*) exit 0;; esac; ` +
+		`case "$p" in "[AgentBus]"*) printf '%s' "$p" > "$D/delivered-$$"; exit 0;; quick|"Review a change"*|"Review the changes"*) exit 0;; esac; ` +
 		`printf '%s\n' "$@" > "$D/args-$p"; env > "$D/env-$p.tmp"; pwd > "$D/pwd-$p"; mv "$D/env-$p.tmp" "$D/env-$p"; ` +
 		`i=0; while [ ! -e "$D/release-$p" ] && [ $i -lt 1500 ]; do sleep 0.02; i=$((i+1)); done`
 	wire := func(agent, baseURL string, _ run.Access) (run.Launch, error) {
@@ -52,6 +51,16 @@ func askEnvCap(t *testing.T, perm string, maxRuns int) (*env, string) {
 			Env: []string{"PATH=/usr/bin:/bin", "D=" + dir, "ANTHROPIC_BASE_URL=" + baseURL}}, nil
 	}
 	return stackEnv(t, stack{wire: wire, maxRuns: maxRuns, permissions: perm}), dir
+}
+
+// firstTurn runs the three calls a first turn now needs (POST /workspaces, POST
+// /sessions, POST /turns) and returns the started turn, for an integration test
+// that used one-call POST /turns with a folder. sandbox picks the workspace
+// mode (true: a copy behind a wall; false: the folder as it is).
+func (e *env) firstTurn(t *testing.T, folder, agent, prompt string, sandbox bool) Started {
+	t.Helper()
+	sess := e.newSession(t, folder, sandbox)
+	return startTurn(t, e, fmt.Sprintf(`{"session":%q,"agent":%q,"prompt":%q}`, sess, agent, prompt))
 }
 
 // tokenOf waits for the turn with this prompt and returns its token.
@@ -81,11 +90,16 @@ func release(dir, prompt string) { os.WriteFile(filepath.Join(dir, "release-"+pr
 
 func pwdOf(t *testing.T, dir, prompt string) string {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(dir, "pwd-"+prompt))
-	if err != nil {
-		t.Fatal(err)
+	p := filepath.Join(dir, "pwd-"+prompt)
+	for deadline := time.Now().Add(10 * time.Second); ; {
+		if b, err := os.ReadFile(p); err == nil {
+			return strings.TrimSpace(string(b))
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("turn %q wrote no working folder", prompt)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	return strings.TrimSpace(string(b))
 }
 
 // gitRepo is a folder in a git repo with one commit.
@@ -132,7 +146,7 @@ func deliverUntil(t *testing.T, e *env, session string, want int) []store.Turn {
 		if _, _, err := jobs.RecordTurnEnds(e.q, e.store, nil, time.Now().Add(time.Hour), 200); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := e.q.FireOns(queue.DefaultTeam, e.store.TurnEnded, nil, nil); err != nil {
+		if _, err := e.q.FireOns(queue.DefaultTeam, e.store.TurnEnded, nil, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 		list, err := e.store.Turns(store.TurnQuery{Session: session, Limit: 100})
@@ -159,11 +173,38 @@ func deliverUntil(t *testing.T, e *env, session string, want int) []store.Turn {
 // turn token may register an on for the turn its own ask just started, so this
 // is exactly the app's two steps, here spelled out. TestAskAgentApp drives the
 // real app through MCP end to end.
+// ask drives the two steps ask_agent runs (his API rules, 2026-11-21): a turn
+// token opens a session in its own workspace, then starts the asked turn in it,
+// so the asked agent shares the asker's copy. body is the turn body with its
+// agent and prompt; ask injects the session it opened. It then registers a
+// delivery on, as the app does, and returns the asked turn.
 func ask(t *testing.T, e *env, tok, body string) Started {
 	t.Helper()
-	code, out := as(t, e, tok, "POST", "/api/v0/turns", body)
+	// A turn's idempotency key covers both steps, so a retry reuses the same
+	// session and the same turn, as the ask_agent app does.
+	var fields struct {
+		IdempotencyKey string `json:"idempotency_key"`
+	}
+	_ = json.Unmarshal([]byte(body), &fields)
+	sessBody := `{}`
+	if fields.IdempotencyKey != "" {
+		sessBody = `{"idempotency_key":"` + fields.IdempotencyKey + `:s"}`
+	}
+	code, out := as(t, e, tok, "POST", "/api/v0/sessions", sessBody)
+	if code != 201 {
+		t.Fatalf("ask: open a session in the asker's workspace: %d %s", code, out)
+	}
+	var sc SessionCreated
+	if err := json.Unmarshal([]byte(out), &sc); err != nil {
+		t.Fatal(err)
+	}
+	turnBody := strings.Replace(body, "{", `{"session":"`+sc.Session+`",`, 1)
+	// An ask is async: a turn token cannot wait for a turn it starts (it runs in
+	// the asker's workspace lane after the asker's turn ends), so wait=false, as
+	// the ask_agent app sends it.
+	code, out = as(t, e, tok, "POST", "/api/v0/turns?wait=false", turnBody)
 	if code != 202 {
-		t.Fatalf("ask %s: %d %s", body, code, out)
+		t.Fatalf("ask %s: %d %s", turnBody, code, out)
 	}
 	var s Started
 	if err := json.Unmarshal([]byte(out), &s); err != nil {
@@ -173,6 +214,23 @@ func ask(t *testing.T, e *env, tok, body string) Started {
 		t.Fatalf("register delivery on for %s: %d %s", s.Turn, code, out)
 	}
 	return s
+}
+
+// askRaw does ask's two steps but returns the turn POST's status and body
+// instead of asserting it started, for a test that expects the start to be
+// capped (depth, per-turn jobs, cost): the cap fires when the turn is created,
+// so the session is opened first and the turn refused.
+func askRaw(t *testing.T, e *env, tok, body string) (int, string) {
+	t.Helper()
+	code, out := as(t, e, tok, "POST", "/api/v0/sessions", `{}`)
+	if code != 201 {
+		t.Fatalf("askRaw: open a session: %d %s", code, out)
+	}
+	var sc SessionCreated
+	if err := json.Unmarshal([]byte(out), &sc); err != nil {
+		t.Fatal(err)
+	}
+	return as(t, e, tok, "POST", "/api/v0/turns?wait=false", strings.Replace(body, "{", `{"session":"`+sc.Session+`",`, 1))
 }
 
 // callAskAgent drives the ask_agent app through the MCP endpoint with a turn's
@@ -215,7 +273,7 @@ func TestAskAgentAppDelivers(t *testing.T) {
 	}
 	e, dir := askEnvWith(t, perm)
 	repo := gitRepo(t)
-	root := startTurn(t, e, `{"agent":"claude","folder":"`+repo+`","prompt":"root"}`)
+	root := e.firstTurn(t, repo, "claude", "root", true)
 	tok := tokenOf(t, dir, "root")
 
 	call := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ask_agent","arguments":{"agent":"claude","prompt":"quick"}}}`
@@ -223,13 +281,8 @@ func TestAskAgentAppDelivers(t *testing.T) {
 	if turn == "" || session == "" {
 		t.Fatalf("ask_agent returned turn=%q session=%q", turn, session)
 	}
-	// startTurn no longer waits (wait=false, (d)): the asked turn is queued at
-	// return, so wait for the runner to start it before reading its event.
-	asked := waitAskedTurn(t, e, session)
-	if o := asked.Origin; o == nil || o.Kind != event.OriginAsked || o.Turn != root.Turn {
-		t.Errorf("asked turn origin %+v, want asked by %s", o, root.Turn)
-	}
 	// A retry (the SAME JSON-RPC id) returns the same turn, not a second one.
+	// This is API idempotency: the asked turn is only queued, not yet run.
 	if turn2, _ := callAskAgent(t, e, tok, call); turn2 != turn {
 		t.Fatalf("a retry started a new turn: %s vs %s", turn2, turn)
 	}
@@ -240,9 +293,14 @@ func TestAskAgentAppDelivers(t *testing.T) {
 	if turn3 == turn {
 		t.Fatalf("a fresh ask with the same args reused the completed turn: %s", turn3)
 	}
-	// Each app registered its on, so BOTH asked replies come back to the asking
-	// session as later turns.
+	// The asked turns run in the asker's workspace lane, after the asker's turn
+	// ends, so release root; then the runner starts the first asked turn (check
+	// its origin) and BOTH replies come back to the asking session as later turns.
 	release(dir, "root")
+	asked := waitAskedTurn(t, e, session)
+	if o := asked.Origin; o == nil || o.Kind != event.OriginAsked || o.Turn != root.Turn {
+		t.Errorf("asked turn origin %+v, want asked by %s", o, root.Turn)
+	}
 	got := deliverUntil(t, e, root.Session, 2)
 	delivered := map[string]bool{}
 	for _, tn := range got {
@@ -267,7 +325,7 @@ func TestReviewTurnAppDelivers(t *testing.T) {
 	folder := t.TempDir()
 	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\n"), 0o644)
 	// The turn to review: a normal turn that ends with a change.
-	w := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"work"}`)
+	w := e.firstTurn(t, folder, "claude", "work", true)
 	tokenOf(t, dir, "work")
 	os.WriteFile(filepath.Join(pwdOf(t, dir, "work"), "a.txt"), []byte("two\n"), 0o644)
 	release(dir, "work")
@@ -306,6 +364,54 @@ func TestReviewTurnAppDelivers(t *testing.T) {
 	}
 }
 
+// review_turn with no turn reviews the asker's workspace's whole unapplied set:
+// the app still starts a review turn and delivers its reply, with no turn id in
+// the call. The reviewer's prompt points at the workspace changes route.
+func TestReviewTurnAppNoTurnDelivers(t *testing.T) {
+	perm := filepath.Join(t.TempDir(), settings.PolicyFile)
+	if err := os.WriteFile(perm, []byte("allow = [\"review_turn\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e, dir := askEnvWith(t, perm)
+	folder := t.TempDir()
+	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\n"), 0o644)
+	// A turn that ends with a change, then a live follow-up turn drives the review.
+	w := e.firstTurn(t, folder, "claude", "work", true)
+	tokenOf(t, dir, "work")
+	os.WriteFile(filepath.Join(pwdOf(t, dir, "work"), "a.txt"), []byte("two\n"), 0o644)
+	release(dir, "work")
+	waitEnded(t, e, w.Turn)
+
+	startTurn(t, e, `{"agent":"claude","session":"`+w.Session+`","prompt":"drive"}`)
+	tok := tokenOf(t, dir, "drive")
+	// No turn argument: the whole unapplied set is reviewed.
+	call := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"review_turn","arguments":{"agent":"codex"}}}`
+	code, out := as(t, e, tok, "POST", "/api/v0/mcp", call)
+	if code != 200 {
+		t.Fatalf("review_turn call: %d %s", code, out)
+	}
+	var env struct {
+		Result struct {
+			Content []struct {
+				Text string `json:"text"`
+			} `json:"content"`
+			IsError bool `json:"isError"`
+		} `json:"result"`
+	}
+	if json.Unmarshal([]byte(out), &env) != nil || env.Result.IsError || len(env.Result.Content) == 0 {
+		t.Fatalf("review_turn (no turn) failed: %s", out)
+	}
+	var r struct{ Turn, Session string }
+	if json.Unmarshal([]byte(env.Result.Content[0].Text), &r) != nil || r.Turn == "" {
+		t.Fatalf("review_turn (no turn) output %q", env.Result.Content[0].Text)
+	}
+	release(dir, "drive")
+	got := deliverUntil(t, e, w.Session, 1)
+	if got[0].Origin == nil || got[0].Origin.Turn != r.Turn {
+		t.Fatalf("the review reply was not delivered: %+v", got)
+	}
+}
+
 // ask_agent's startTurn step does not wait for a runner (wait=false, his (d)
 // rule 2026-11-19): it returns once the turn is recorded, so registerOn runs in
 // the same tool call even while the turn is only queued. Here the root turn
@@ -319,7 +425,7 @@ func TestAskAgentAppQueuedStillGetsOn(t *testing.T) {
 	}
 	e, dir := askEnvCap(t, perm, 1) // one runner slot: root occupies it
 	repo := gitRepo(t)
-	root := startTurn(t, e, `{"agent":"claude","folder":"`+repo+`","prompt":"root"}`)
+	root := e.firstTurn(t, repo, "claude", "root", true)
 	tok := tokenOf(t, dir, "root") // root is running now, holding the slot
 
 	turn, _ := callAskAgent(t, e, tok,
@@ -366,7 +472,7 @@ func TestAskAgentDisconnectStillDelivers(t *testing.T) {
 	}
 	e, dir := askEnvWith(t, perm)
 	repo := gitRepo(t)
-	root := startTurn(t, e, `{"agent":"claude","folder":"`+repo+`","prompt":"root"}`)
+	root := e.firstTurn(t, repo, "claude", "root", true)
 	tok := tokenOf(t, dir, "root")
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // the client is gone before the handler runs
@@ -401,7 +507,7 @@ func TestAskAgentCallerStoppedStillDelivers(t *testing.T) {
 	}
 	e, dir := askEnvWith(t, perm)
 	repo := gitRepo(t)
-	root := startTurn(t, e, `{"agent":"claude","folder":"`+repo+`","prompt":"root"}`)
+	root := e.firstTurn(t, repo, "claude", "root", true)
 	tok := tokenOf(t, dir, "root")
 	turn, _ := callAskAgent(t, e, tok,
 		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ask_agent","arguments":{"agent":"claude","prompt":"quick"}}}`)
@@ -422,9 +528,9 @@ func TestAskAgentCallerStoppedStillDelivers(t *testing.T) {
 // is a new on each time — several may watch one turn.)
 func TestOnAPIAuth(t *testing.T) {
 	e, dir := askEnv(t)
-	p := startTurn(t, e, `{"agent":"claude","folder":"`+gitRepo(t)+`","prompt":"parent"}`)
+	p := e.firstTurn(t, gitRepo(t), "claude", "parent", true)
 	ptok := tokenOf(t, dir, "parent")
-	other := startTurn(t, e, `{"agent":"claude","folder":"`+gitRepo(t)+`","prompt":"other"}`)
+	other := e.firstTurn(t, gitRepo(t), "claude", "other", true)
 	child := ask(t, e, ptok, `{"agent":"claude","prompt":"child"}`)
 
 	// In-tree: the session is forced to the token's own, so one it sends is ignored.
@@ -474,9 +580,12 @@ func TestOnAPIAuth(t *testing.T) {
 	if resp, out := do(t, e.req(t, "POST", "/api/v0/ons", strings.NewReader(`{"turn":"`+child.Turn+`","session":"`+p.Session+`"}`))); resp.StatusCode != 201 {
 		t.Fatalf("main deliver: %d %s, want 201", resp.StatusCode, out)
 	}
-	// A different turn cannot remove the parent's on; the maker can.
-	ctok := tokenOf(t, dir, "child")
-	if code, out := as(t, e, ctok, "DELETE", "/api/v0/ons/"+ov.ID, ""); code != 403 {
+	// A different turn cannot remove the parent's on; the maker can. "other" runs
+	// in its own workspace beside the asker, so its token is a valid different
+	// turn -- the asked "child" cannot run while the asker's turn is parked (the
+	// workspace lane), so its token is not available here.
+	otok := tokenOf(t, dir, "other")
+	if code, out := as(t, e, otok, "DELETE", "/api/v0/ons/"+ov.ID, ""); code != 403 {
 		t.Fatalf("remove another's on: %d %s, want 403", code, out)
 	}
 	if code, out := as(t, e, ptok, "DELETE", "/api/v0/ons/"+ov.ID, ""); code != 204 {
@@ -492,18 +601,63 @@ func TestOnAPIAuth(t *testing.T) {
 func TestAskFanOutAndDeliver(t *testing.T) {
 	e, dir := askEnv(t)
 	repo := gitRepo(t)
-	p := startTurn(t, e, `{"agent":"claude","folder":"`+repo+`","prompt":"parent"}`)
+	p := e.firstTurn(t, repo, "claude", "parent", true)
 	ptok := tokenOf(t, dir, "parent")
 
 	c1 := ask(t, e, ptok, `{"agent":"claude","prompt":"one"}`)
 	c2 := ask(t, e, ptok, `{"agent":"codex","prompt":"two"}`)
-	ctok := tokenOf(t, dir, "one")
-	tokenOf(t, dir, "two")
-	w0, w1, w2 := pwdOf(t, dir, "parent"), pwdOf(t, dir, "one"), pwdOf(t, dir, "two")
-	if w0 == w1 || w1 == w2 || w0 == w2 || w1 == repo || w2 == repo {
-		t.Fatalf("folders not each their own: parent %s, one %s, two %s, repo %s", w0, w1, w2, repo)
+	w0 := pwdOf(t, dir, "parent")
+	if w0 == repo {
+		t.Fatalf("the parent ran in the repo itself")
 	}
-	// The asked turns say who asked.
+	// The asker's token reads across its tree, and a turn carries no folder or
+	// mode of its own.
+	for _, tc := range []struct {
+		method, path, body string
+		want               int
+	}{
+		{"GET", "/api/v0/sessions/" + c1.Session + "/events", "", 200},
+		{"GET", "/api/v0/turns?session=" + c2.Session, "", 200},
+		{"GET", "/api/v0/turns/" + c1.Turn, "", 200},
+		{"GET", "/api/v0/sessions/" + c1.Session, "", 200},
+		{"POST", "/api/v0/turns?wait=false", `{"agent":"claude","prompt":"x","isolate":false}`, 400},
+		{"POST", "/api/v0/turns?wait=false", `{"agent":"claude","prompt":"x","folder":"` + filepath.Dir(repo) + `"}`, 400},
+	} {
+		if code, out := as(t, e, ptok, tc.method, tc.path, tc.body); code != tc.want {
+			t.Errorf("parent %s %s: %d %s, want %d", tc.method, tc.path, code, out, tc.want)
+		}
+	}
+
+	// The children run one at a time in the asker's copy, after the asker's turn
+	// ends (the workspace lane). While "one" runs, its token reads across the
+	// tree but writes to no other session and does not stop the person's work.
+	release(dir, "parent")
+	ctok := tokenOf(t, dir, "one")
+	w1 := pwdOf(t, dir, "one")
+	for _, tc := range []struct {
+		method, path, body string
+		want               int
+	}{
+		{"GET", "/api/v0/sessions/" + p.Session + "/events", "", 200},
+		{"GET", "/api/v0/sessions/" + c2.Session + "/events", "", 200},
+		// It writes to no session but one its own tree opened: not its asker's,
+		// and not its own (it did not open its own session).
+		{"POST", "/api/v0/turns?wait=false", `{"agent":"claude","session":"` + p.Session + `","prompt":"x"}`, 403},
+		{"POST", "/api/v0/turns?wait=false", `{"agent":"claude","session":"` + c1.Session + `","prompt":"x"}`, 403},
+		// It may not stop the person's work.
+		{"POST", "/api/v0/turns/" + p.Turn + "/stop", "", 403},
+	} {
+		if code, out := as(t, e, ctok, tc.method, tc.path, tc.body); code != tc.want {
+			t.Errorf("child %s %s: %d %s, want %d", tc.method, tc.path, code, out, tc.want)
+		}
+	}
+	release(dir, "one")
+	w2 := pwdOf(t, dir, "two")
+	release(dir, "two")
+	if w1 != w0 || w2 != w0 {
+		t.Fatalf("asked turns not in the asker's copy: parent %s, one %s, two %s", w0, w1, w2)
+	}
+	// Both asked turns ran; each names who asked it.
 	for _, c := range []Started{c1, c2} {
 		list, err := e.store.Turns(store.TurnQuery{Session: c.Session, Limit: 5})
 		if err != nil || len(list.Turns) != 1 {
@@ -513,33 +667,6 @@ func TestAskFanOutAndDeliver(t *testing.T) {
 			t.Errorf("child %s origin %+v", c.Session, o)
 		}
 	}
-	// Reads across the tree work both ways; nothing outside it.
-	for _, tc := range []struct {
-		tok, method, path, body string
-		want                    int
-	}{
-		{ptok, "GET", "/api/v0/sessions/" + c1.Session + "/events", "", 200},
-		{ptok, "GET", "/api/v0/turns?session=" + c2.Session, "", 200},
-		{ptok, "GET", "/api/v0/turns/" + c1.Turn, "", 200},
-		{ptok, "GET", "/api/v0/sessions/" + c1.Session, "", 200},
-		{ctok, "GET", "/api/v0/sessions/" + p.Session + "/events", "", 200},
-		{ctok, "GET", "/api/v0/sessions/" + c2.Session + "/events", "", 200},
-		// The asked turn never writes to its asker's session, nor its own.
-		{ctok, "POST", "/api/v0/turns", `{"agent":"claude","session":"` + p.Session + `","prompt":"x"}`, 403},
-		{ctok, "POST", "/api/v0/turns", `{"agent":"claude","session":"` + c1.Session + `","prompt":"x"}`, 403},
-		// It may not stop the person's work.
-		{ctok, "POST", "/api/v0/turns/" + p.Turn + "/stop", "", 403},
-		{ptok, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"x","isolate":false}`, 403},
-		{ptok, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"x","folder":"` + filepath.Dir(repo) + `"}`, 403},
-	} {
-		if code, out := as(t, e, tc.tok, tc.method, tc.path, tc.body); code != tc.want {
-			t.Errorf("%s %s %s: %d %s, want %d", tc.tok[:8], tc.method, tc.path, code, out, tc.want)
-		}
-	}
-
-	release(dir, "parent")
-	release(dir, "one")
-	release(dir, "two")
 	got := deliverUntil(t, e, p.Session, 2)
 	byTurn := map[string]store.Turn{}
 	for _, tn := range got {
@@ -556,10 +683,11 @@ func TestAskFanOutAndDeliver(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		// Each copy is named after its session.
+		// The asked turn ran in the asker's copy (w == w0, checked above), and
+		// the delivered result names the asked turn, not any copy path.
 		if tn.Origin.Session != c.Session || tn.Origin.TurnKind != "turn" ||
 			!strings.HasPrefix(prompt, "[AgentBus]") || !strings.Contains(prompt, "Turn: "+c.Turn+", finished") ||
-			strings.Contains(prompt, "sessions/") || !strings.HasSuffix(w, "sessions/"+c.Session) {
+			strings.Contains(prompt, "sessions/") || w != w0 {
 			t.Errorf("result of %s in %s: %+v\n%s", c.Turn, w, tn.Origin, prompt)
 		}
 		// On the parent's own agent.
@@ -586,37 +714,45 @@ func TestAskFanOutAndDeliver(t *testing.T) {
 }
 
 // A chain of asks stops at the depth cap, and one turn's asks stop at the
-// per-turn cap; each refusal says why. read_only is accepted and ignored
-// (retired in 0.6, B12), so a turn that sends it runs and acts normally.
+// per-turn cap; each refusal says why. A turn's own token may rename its own
+// session.
 func TestAskCaps(t *testing.T) {
 	e, dir := askEnv(t)
 	folder := t.TempDir()
-	startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"root"}`)
-	tok := tokenOf(t, dir, "root")
-	ask(t, e, tok, `{"agent":"claude","prompt":"d1"}`)
+	// Depth: a chain root -> d1 -> d2, and d2's ask of d3 is refused at the depth
+	// cap. The chain shares one workspace and runs one at a time, so release each
+	// asker to let the next run and get its token.
+	e.firstTurn(t, folder, "claude", "root", true)
+	ask(t, e, tokenOf(t, dir, "root"), `{"agent":"claude","prompt":"d1"}`)
+	release(dir, "root")
 	ask(t, e, tokenOf(t, dir, "d1"), `{"agent":"claude","prompt":"d2"}`)
-	code, out := as(t, e, tokenOf(t, dir, "d2"), "POST", "/api/v0/turns", `{"agent":"claude","prompt":"d3"}`)
+	release(dir, "d1")
+	code, out := askRaw(t, e, tokenOf(t, dir, "d2"), `{"agent":"claude","prompt":"d3"}`)
 	if code != 403 || !strings.Contains(out, "levels") || !strings.Contains(out, "(Depth in Settings, Limits)") {
 		t.Errorf("depth 3: %d %s", code, out)
 	}
-	for i := 1; i < settings.DefaultMaxJobsPerTurn; i++ {
-		ask(t, e, tok, `{"agent":"claude","prompt":"quick"}`)
+	release(dir, "d2")
+	// Per-turn cap: an asker's asks are counted when recorded, so a parked turn
+	// reaches the cap without any asked turn running. A fresh turn, so the depth
+	// chain's asks do not count against it.
+	e.firstTurn(t, folder, "claude", "capper", true)
+	ctok := tokenOf(t, dir, "capper")
+	for i := 1; i <= settings.DefaultMaxJobsPerTurn; i++ {
+		ask(t, e, ctok, `{"agent":"claude","prompt":"quick"}`)
 	}
-	code, out = as(t, e, tok, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"quick"}`)
+	code, out = askRaw(t, e, ctok, `{"agent":"claude","prompt":"quick"}`)
 	if code != 403 || !strings.Contains(out, fmt.Sprint(settings.DefaultMaxJobsPerTurn)) {
 		t.Errorf("past the per-turn cap: %d %s", code, out)
 	}
+	release(dir, "capper")
 
-	// Read-only turns retired (B12): read_only is accepted and ignored, so the
-	// turn runs normally and its token may rename its own session.
-	ro := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"ro","read_only":true}`)
+	// A turn's own token may rename its own session.
+	ro := e.firstTurn(t, folder, "claude", "ro", true)
 	code, out = as(t, e, tokenOf(t, dir, "ro"), "PATCH", "/api/v0/sessions/"+ro.Session, `{"title":"x"}`)
 	if code != 200 {
-		t.Errorf("a turn that sent read_only could not rename its own session: %d %s", code, out)
+		t.Errorf("a turn could not rename its own session: %d %s", code, out)
 	}
-	for _, p := range []string{"root", "d1", "d2", "ro"} {
-		release(dir, p)
-	}
+	release(dir, "ro")
 }
 
 // permissions.toml decides what a turn token may do, read for each request:
@@ -637,21 +773,51 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 	write("[limits]\nmax_jobs_per_turn = 2\n")
 	e, dir := askEnvWith(t, perm)
 	folder := t.TempDir()
-	root := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"root"}`)
+	root := e.firstTurn(t, folder, "claude", "root", true)
 	tok := tokenOf(t, dir, "root")
 	ask(t, e, tok, `{"agent":"claude","prompt":"quick"}`)
 	ask(t, e, tok, `{"agent":"claude","prompt":"child"}`)
-	code, out := as(t, e, tok, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"quick"}`)
+	code, out := askRaw(t, e, tok, `{"agent":"claude","prompt":"quick"}`)
 	if code != 403 || !strings.Contains(out, "at most 2 turns or reviews") || !strings.Contains(out, "(Turns per request in Settings, Limits)") {
 		t.Fatalf("past max_jobs_per_turn = 2: %d %s", code, out)
 	}
 	// The file is read again for the next request.
 	write("[limits]\nmax_jobs_per_turn = 3\n")
 	ask(t, e, tok, `{"agent":"claude","prompt":"quick"}`)
+	// Phase 1 checks that need the asker's own live token: a broken file, and
+	// the routes that stay closed to a turn token (they take the main token),
+	// while rename in its own tree is allowed.
+	write("[agent_api]\napply = all\n")
+	if code, out := as(t, e, tok, "GET", "/api/v0/harnesses", ""); code != 503 || !strings.Contains(out, "cannot be used") {
+		t.Errorf("broken file: %d %s", code, out)
+	}
+	write("")
+	if code, out := as(t, e, tok, "PATCH", "/api/v0/sessions/"+root.Session, `{"title":"Named by a turn"}`); code != 200 || !strings.Contains(out, "Named by a turn") {
+		t.Errorf("rename in the tree: %d %s", code, out)
+	}
+	for _, r := range [][3]string{
+		{"POST", "/api/v0/agents", `{"name":"x","harness":"claude","access":"subscription"}`},
+		{"PUT", "/api/v0/agents/a_x", `{"name":"x","harness":"claude","access":"subscription"}`},
+		{"DELETE", "/api/v0/agents/a_x", ""},
+		// The settings: a turn token neither reads nor writes them.
+		{"GET", "/api/v0/settings/permissions", ""},
+		{"PUT", "/api/v0/settings/permissions", `{"forbid":[]}`},
+		{"GET", "/api/v0/settings/instructions", ""},
+		{"PUT", "/api/v0/settings/instructions", `{"text":"x"}`},
+	} {
+		if code, out := as(t, e, tok, r[0], r[1], r[2]); code != 403 || !strings.Contains(out, "main token") {
+			t.Errorf("%s %s: %d %s, want 403", r[0], r[1], code, out)
+		}
+	}
 
+	// Phase 2: the asked "child" runs once the asker's turn ends; its own token
+	// reads and renames within its tree with the retired switches off, and
+	// reaches nothing outside it.
+	release(dir, "root")
 	child := tokenOf(t, dir, "child")
-	// Another tree: a session the person started on their own.
-	other := startTurn(t, e, `{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"other"}`)
+	// Another tree: a session the person started on their own, in its own
+	// workspace, so it runs beside the child.
+	other := e.firstTurn(t, t.TempDir(), "claude", "other", true)
 	// Every retired switch off, scope "session": the file reads, and the
 	// child's token still reads, lists, starts, reviews, stops and renames
 	// within its tree, the person's session included.
@@ -673,7 +839,7 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 	if code, out := as(t, e, child, "POST", "/api/v0/turns/"+started.Turn+"/stop", ""); code == 403 {
 		t.Errorf("stop a turn its tree asked for: %d %s", code, out)
 	}
-	// Outside its tree, nothing: not to read, rename, review or stop.
+	// Outside its tree, nothing: not to read, rename or stop.
 	for _, tc := range []struct {
 		name, method, path, body, want string
 	}{
@@ -681,38 +847,9 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 		{"read another tree by query", "GET", "/api/v0/turns?session=" + other.Session, "", "only its own session"},
 		{"rename another tree's session", "PATCH", "/api/v0/sessions/" + other.Session, `{"title":"x"}`, "only its own session"},
 		{"stop another tree's turn", "POST", "/api/v0/turns/" + other.Turn + "/stop", "", "request tree asked for"},
-		{"stop its tree's own root", "POST", "/api/v0/turns/" + root.Turn + "/stop", "", "request tree asked for"},
 	} {
-		for _, k := range []string{tok, child} {
-			if code, out := as(t, e, k, tc.method, tc.path, tc.body); code != 403 || !strings.Contains(out, tc.want) {
-				t.Errorf("%s: %d %s, want 403 with %q", tc.name, code, out, tc.want)
-			}
-		}
-	}
-	// A broken file refuses every turn token's request.
-	write("[agent_api]\napply = all\n")
-	if code, out := as(t, e, tok, "GET", "/api/v0/harnesses", ""); code != 503 || !strings.Contains(out, "cannot be used") {
-		t.Errorf("broken file: %d %s", code, out)
-	}
-	// Every switch on, the routes that change agents stay closed to a turn
-	// token: they take the main token, always. rename is on by default, in
-	// the tree.
-	write("")
-	if code, out := as(t, e, tok, "PATCH", "/api/v0/sessions/"+root.Session, `{"title":"Named by a turn"}`); code != 200 || !strings.Contains(out, "Named by a turn") {
-		t.Errorf("rename in the tree: %d %s", code, out)
-	}
-	for _, r := range [][3]string{
-		{"POST", "/api/v0/agents", `{"name":"x","harness":"claude","access":"subscription"}`},
-		{"PUT", "/api/v0/agents/a_x", `{"name":"x","harness":"claude","access":"subscription"}`},
-		{"DELETE", "/api/v0/agents/a_x", ""},
-		// The settings: a turn token neither reads nor writes them.
-		{"GET", "/api/v0/settings/permissions", ""},
-		{"PUT", "/api/v0/settings/permissions", `{"forbid":[]}`},
-		{"GET", "/api/v0/settings/instructions", ""},
-		{"PUT", "/api/v0/settings/instructions", `{"text":"x"}`},
-	} {
-		if code, out := as(t, e, tok, r[0], r[1], r[2]); code != 403 || !strings.Contains(out, "main token") {
-			t.Errorf("%s %s: %d %s, want 403", r[0], r[1], code, out)
+		if code, out := as(t, e, child, tc.method, tc.path, tc.body); code != 403 || !strings.Contains(out, tc.want) {
+			t.Errorf("%s: %d %s, want 403 with %q", tc.name, code, out, tc.want)
 		}
 	}
 	// A cost cap: once the tree has spent it, asking stops; 0 is off. A
@@ -725,7 +862,7 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 		t.Fatal(err)
 	}
 	write("[limits]\nmax_cost_usd_per_tree = 0.25\n")
-	code, out = as(t, e, child, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"quick"}`)
+	code, out = as(t, e, child, "POST", "/api/v0/turns?wait=false", `{"agent":"claude","prompt":"quick"}`)
 	if code != 403 || !strings.Contains(out, "(Cost per request tree in Settings, Limits)") || !strings.Contains(out, "$0.30") {
 		t.Errorf("past the cost cap: %d %s", code, out)
 	}
@@ -739,59 +876,89 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 	}
 }
 
-// A turn may start a session in the folder it runs in (its copy) or one
-// inside it, as well as in its session's own folder; never elsewhere. The
-// connector says whether a path is inside, where the folders are.
+// An ask runs in the asker's workspace, so the asked agent shares the asker's
+// copy (his decision, 2026-11-21: asks edit the same copy). A turn carries no
+// folder of its own.
 func TestAskInOwnCopy(t *testing.T) {
 	e, dir := askEnv(t)
 	folder := t.TempDir()
 	os.MkdirAll(filepath.Join(folder, "sub"), 0o755)
 	os.WriteFile(filepath.Join(folder, "sub", "x.txt"), []byte("x"), 0o644)
-	startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"root"}`)
+	e.firstTurn(t, folder, "claude", "root", true)
 	tok := tokenOf(t, dir, "root")
 	copyDir := pwdOf(t, dir, "root")
 	if copyDir == folder {
 		t.Fatalf("the root turn ran in the folder itself")
 	}
-	ask(t, e, tok, `{"agent":"claude","prompt":"in-copy","folder":"`+copyDir+`"}`)
-	ask(t, e, tok, `{"agent":"claude","prompt":"in-copy-sub","folder":"`+filepath.Join(copyDir, "sub")+`"}`)
-	ask(t, e, tok, `{"agent":"claude","prompt":"in-folder-sub","folder":"`+filepath.Join(folder, "sub")+`"}`)
-	if code, out := as(t, e, tok, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"x","folder":"`+t.TempDir()+`"}`); code != 403 {
-		t.Errorf("a folder outside: %d %s", code, out)
+	// A turn carries no folder: a turn token naming one is refused (wait=false so
+	// the no-wait rule for asks is not what answers).
+	if code, out := as(t, e, tok, "POST", "/api/v0/turns?wait=false", `{"agent":"claude","prompt":"x","folder":"`+t.TempDir()+`"}`); code != 400 {
+		t.Errorf("a turn naming a folder: %d %s, want 400", code, out)
 	}
-	// A folder inside, checked here, never goes to another connector.
-	if code, out := as(t, e, tok, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"x","folder":"`+filepath.Join(folder, "sub")+
-		`","connector":"con_0123456789abcdef"}`); code != 403 {
-		t.Errorf("a folder inside, on another connector: %d %s", code, out)
+	// The asked turn runs in the asker's copy, not a copy of its own and not the
+	// person's folder. It waits in the workspace lane for the asker's turn, so
+	// release root first; the copy outlives the turn.
+	ask(t, e, tok, `{"agent":"claude","prompt":"in-copy"}`)
+	release(dir, "root")
+	if got := pwdOf(t, dir, "in-copy"); got != copyDir {
+		t.Errorf("the asked turn ran in %q, want the asker's copy %q", got, copyDir)
 	}
-	for _, p := range []string{"root", "in-copy", "in-copy-sub", "in-folder-sub"} {
-		release(dir, p)
-	}
+	release(dir, "in-copy")
 }
 
-// A worktree's session asks with no folder: the new session works on the
-// worktree as it is (its base and its edits), not on the repo.
-func TestAskFromAWorktree(t *testing.T) {
+// A turn token cannot wait for a turn it starts: the asked turn runs in the
+// asker's workspace lane after the asker's turn ends, so a wait would stall it
+// (his rule, 2026-11-22). The ask is async -- wait=false is required, and the
+// answer comes back as a later turn.
+func TestAskCannotWait(t *testing.T) {
 	e, dir := askEnv(t)
-	repo := gitRepo(t)
-	// No route takes a repo and base any more; the queue still does.
-	spec := queue.Spec{Harness: "claude", Repo: repo, Base: "HEAD", Prompt: "root"}
-	if msg := queue.ResolveFolders(&spec, e.api.cfg.Folders); msg != "" {
-		t.Fatal(msg)
-	}
-	if _, _, err := e.q.Create(queue.DefaultTeam, queue.KindTurn, "", spec, queue.Links{}); err != nil {
-		t.Fatal(err)
-	}
+	e.firstTurn(t, t.TempDir(), "claude", "root", true)
 	tok := tokenOf(t, dir, "root")
-	child := ask(t, e, tok, `{"agent":"claude","prompt":"child"}`)
-	j, err := e.q.JobByTurn(queue.DefaultTeam, child.Turn)
-	if err != nil {
+	code, out := as(t, e, tok, "POST", "/api/v0/sessions", `{}`)
+	if code != 201 {
+		t.Fatalf("open a session: %d %s", code, out)
+	}
+	var sc SessionCreated
+	if err := json.Unmarshal([]byte(out), &sc); err != nil {
 		t.Fatal(err)
 	}
-	if j.Spec.FolderRef == "" || j.Spec.FolderRef == folders.Ref(repo) {
-		t.Fatalf("the child's folder is %q, the repo's is %q", j.Spec.FolderRef, folders.Ref(repo))
+	body := `{"session":"` + sc.Session + `","agent":"claude","prompt":"q"}`
+	// A wait (the default) and an explicit wait=true are both refused.
+	for _, path := range []string{"/api/v0/turns", "/api/v0/turns?wait=true"} {
+		if code, out := as(t, e, tok, "POST", path, body); code != 400 {
+			t.Errorf("%s: a turn token waiting: %d %s, want 400", path, code, out)
+		}
+	}
+	// wait=false is accepted: the ask is recorded and runs later.
+	if code, out := as(t, e, tok, "POST", "/api/v0/turns?wait=false", body); code != 202 {
+		t.Errorf("wait=false: %d %s, want 202", code, out)
 	}
 	release(dir, "root")
+}
+
+// A session in a git repo with the git backend runs in a worktree, not the
+// repo. An asked agent shares the asker's worktree (the one copy), so it works
+// on the worktree as it is, not on the repo.
+func TestAskFromAWorktree(t *testing.T) {
+	perm := filepath.Join(t.TempDir(), settings.PolicyFile)
+	if err := os.WriteFile(perm, []byte("isolation = \""+settings.IsolationGit+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e, dir := askEnvWith(t, perm)
+	repo := gitRepo(t)
+	e.firstTurn(t, repo, "claude", "root", true)
+	tok := tokenOf(t, dir, "root")
+	worktree := pwdOf(t, dir, "root")
+	if worktree == repo {
+		t.Fatalf("the root turn ran in the repo itself")
+	}
+	ask(t, e, tok, `{"agent":"claude","prompt":"child"}`)
+	// The asked turn waits in the workspace lane for the asker's turn, so release
+	// root first; the worktree outlives the turn.
+	release(dir, "root")
+	if got := pwdOf(t, dir, "child"); got != worktree {
+		t.Errorf("the asked turn ran in %q, want the asker's worktree %q", got, worktree)
+	}
 	release(dir, "child")
 }
 
@@ -803,10 +970,14 @@ func TestAskedAgentReadsTheAskersChanges(t *testing.T) {
 	e, dir := askEnv(t)
 	folder := t.TempDir()
 	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\n"), 0o644)
-	root := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"root"}`)
+	root := e.firstTurn(t, folder, "claude", "root", true)
 	tok := tokenOf(t, dir, "root")
 	os.WriteFile(filepath.Join(pwdOf(t, dir, "root"), "a.txt"), []byte("two\n"), 0o644)
 	ask(t, e, tok, `{"agent":"claude","prompt":"child"}`)
+	// The asked child runs in the asker's copy, after the asker's turn ends (the
+	// workspace lane). Release root; its edit and its diff outlive the turn, and
+	// the child reads both once it runs.
+	release(dir, "root")
 	childTok := tokenOf(t, dir, "child")
 	b, _ := os.ReadFile(filepath.Join(dir, "env-child"))
 	for _, want := range []string{"AGENTBUS_ASKED_BY_SESSION=" + root.Session + "\n", "AGENTBUS_ASKED_BY_TURN=" + root.Turn + "\n"} {
@@ -815,14 +986,18 @@ func TestAskedAgentReadsTheAskersChanges(t *testing.T) {
 		}
 	}
 	args, _ := os.ReadFile(filepath.Join(dir, "args-child"))
-	// Read-only turns and the read-tool copies retired (B12): the line points
-	// the agent at the changes route through agentbus-api (curl form here, no
-	// API client on PATH in the test), not at a turn_changes tool.
+	// The line points the agent at the changes route through agentbus-api (curl
+	// form here, no API client on PATH in the test), not at a turn_changes tool.
 	if want := "/api/v0/turns/" + root.Turn + "/changes?session=" + root.Session; !strings.Contains(string(args), want) {
 		t.Errorf("the child's instructions do not name %s: %s", want, args)
 	}
-	if got, _ := os.ReadFile(filepath.Join(pwdOf(t, dir, "child"), "a.txt")); string(got) != "one\n" {
-		t.Errorf("the child's copy holds %q, want the person's folder", got)
+	// The asked agent shares the asker's copy (his decision, 2026-11-21), so it
+	// reads the asker's uncommitted edit directly, in the same folder.
+	if cp, rp := pwdOf(t, dir, "child"), pwdOf(t, dir, "root"); cp != rp {
+		t.Errorf("the child ran in %q, want the asker's copy %q", cp, rp)
+	}
+	if got, _ := os.ReadFile(filepath.Join(pwdOf(t, dir, "child"), "a.txt")); string(got) != "two\n" {
+		t.Errorf("the child's copy holds %q, want the asker's edit", got)
 	}
 	// The record says the same, from the asking turn's token: the child's
 	// own turn names who asked it.
@@ -839,7 +1014,6 @@ func TestAskedAgentReadsTheAskersChanges(t *testing.T) {
 	if b, _ := os.ReadFile(filepath.Join(dir, "env-root")); strings.Contains(string(b), "AGENTBUS_ASKED_BY") {
 		t.Error("the person's own turn says it was asked")
 	}
-	release(dir, "root")
 	diffPath := "/api/v0/turns/" + root.Turn + "/diff?session=" + root.Session
 	changesPath := "/api/v0/turns/" + root.Turn + "/changes?session=" + root.Session
 	for deadline := time.Now().Add(15 * time.Second); ; time.Sleep(50 * time.Millisecond) {

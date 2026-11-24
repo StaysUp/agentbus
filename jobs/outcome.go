@@ -12,6 +12,8 @@ package jobs
 // its result, which is read as it is. Nothing older is moved or rewritten.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"time"
@@ -33,6 +35,52 @@ var ErrOutcomeMissing = errors.New("jobs: the job's outcome is not in the record
 // again stores each once.
 func changedID(j queue.Job) string { return "evt_tc_" + j.ID }
 func appliedID(j queue.Job) string { return "evt_ta_" + j.ID }
+func discardID(j queue.Job) string { return "evt_wd_" + j.ID }
+func updateID(j queue.Job) string  { return "evt_wu_" + j.ID }
+
+// registeredID is the id of a folder's folder.registered, by its reference and
+// machine rather than by the job, so the many folder jobs of one folder (one
+// per workspace that types it) record it once.
+func registeredID(ref, machine string) string {
+	sum := sha256.Sum256([]byte(ref + "\x00" + machine))
+	return "evt_fr_" + hex.EncodeToString(sum[:8])
+}
+
+// DiscardedOf is what a discard job dropped, from the job alone: the checkpoint
+// its copy was reset to (the job's Restore, or "base" when none was applied),
+// the unapplied turns it dropped (its AppliesTurns), and who asked (ApplyBy).
+func DiscardedOf(j queue.Job) *event.Discarded {
+	d := &event.Discarded{ResetTo: j.Spec.Restore, DroppedTurns: j.Links.AppliesTurns}
+	if d.ResetTo == "" {
+		d.ResetTo = "base"
+	}
+	if b := j.Links.ApplyBy; b != nil {
+		d.By = &event.By{Kind: b.Kind, Session: b.Session, Turn: b.Turn}
+	}
+	return d
+}
+
+// UpdatedOf is what an update job did, from the job and its result res: the
+// workspace.updated it is recorded as. A clean merge carries the new baseline
+// (from) and merged (to) changesets and the folded turns; a conflict carries
+// the files that conflicted and nothing else.
+func UpdatedOf(j queue.Job, res queue.Result) *event.Updated {
+	u := &event.Updated{}
+	if b := j.Links.ApplyBy; b != nil {
+		u.By = &event.By{Kind: b.Kind, Session: b.Session, Turn: b.Turn}
+	}
+	if res.Update.Clean() {
+		u.Result = "updated"
+		u.From, u.To = res.Update.From, res.Update.To
+		u.FoldedTurns = j.Links.AppliesTurns
+	} else {
+		u.Result = "conflict"
+		if res.Update != nil {
+			u.Conflicts = res.Update.Conflicts
+		}
+	}
+	return u
+}
 
 // errOutcome: the job's outcome could not be written to the record. Its
 // finish is saved (queue.Accept), so it is ended later.
@@ -85,12 +133,61 @@ func keepOutcomes(rec Recorder, j queue.Job, f queue.Finish) (kept json.RawMessa
 		if res.AppliedEvent != "" || j.Links.AppliesTurn == "" {
 			break
 		}
-		e := event.Event{ID: appliedID(j), Kind: event.TurnApplied, Time: now, Session: j.Session,
+		// workspace.applied names the workspace the apply ran in, so a
+		// workspace's applied turn resolves by workspace id even when its applying
+		// session is not its own id (an asked session's apply). A job with no
+		// workspace (a pre-workspace apply) keys it by its session, its workspace.
+		ws := queue.CopyKey(j.Spec.Workspace, j.Session)
+		e := event.Event{ID: appliedID(j), Kind: event.WorkspaceApplied, Time: now, Workspace: string(ws), Session: j.Session,
 			Turn: j.Links.AppliesTurn, Applied: AppliedOf(j, res)}
 		if _, err := rec.AppendOnce(e); err != nil {
 			return nil, err
 		}
 		res.Apply, res.Refused, res.AppliedEvent, moved = nil, "", e.ID, true
+	case queue.KindDiscard:
+		if res.DiscardedEvent != "" || j.State != queue.Finished {
+			break
+		}
+		// workspace.discarded names the workspace whose copy was reset, keyed by
+		// the workspace id, so a workspace's discard resolves by it even when the
+		// discarding job has no session of its own.
+		ws := queue.CopyKey(j.Spec.Workspace, j.Session)
+		e := event.Event{ID: discardID(j), Kind: event.WorkspaceDiscarded, Time: now, Workspace: string(ws), Session: j.Session,
+			Discarded: DiscardedOf(j)}
+		if _, err := rec.AppendOnce(e); err != nil {
+			return nil, err
+		}
+		res.Refused, res.DiscardedEvent, moved = "", e.ID, true
+	case queue.KindFolder:
+		// A folder a person typed was checked and registered on its machine's
+		// runner. folder.registered records it becoming known to control,
+		// keyed by its reference and machine (not the job), so repeated
+		// registrations of the same folder store it once. Written here, before
+		// End, it survives the request that typed the folder going away. No
+		// path: it is kept off control's disk. The result is left as it is, so
+		// the caller still reads the reference from it.
+		if j.State != queue.Finished || !queue.FolderRefShape.MatchString(res.FolderRef) {
+			break
+		}
+		e := event.Event{ID: registeredID(res.FolderRef, j.Spec.Machine), Kind: event.FolderRegistered,
+			Time: now, FolderRef: res.FolderRef, Machine: j.Spec.Machine}
+		if _, err := rec.AppendOnce(e); err != nil {
+			return nil, err
+		}
+	case queue.KindUpdate:
+		if res.UpdatedEvent != "" || j.State != queue.Finished {
+			break
+		}
+		// workspace.updated names the workspace whose copy was merged, keyed by the
+		// workspace id, so it resolves by it even when the update job has no session
+		// of its own. Recorded on a clean merge and on a conflict alike.
+		ws := queue.CopyKey(j.Spec.Workspace, j.Session)
+		e := event.Event{ID: updateID(j), Kind: event.WorkspaceUpdated, Time: now, Workspace: string(ws), Session: j.Session,
+			Updated: UpdatedOf(j, res)}
+		if _, err := rec.AppendOnce(e); err != nil {
+			return nil, err
+		}
+		res.UpdatedEvent, moved = e.ID, true
 	}
 	if !moved {
 		return nil, nil
@@ -207,7 +304,7 @@ func Applied(rd Finder, j queue.Job) (*event.Applied, error) {
 	switch {
 	case err != nil:
 		return nil, err
-	case !ok || e.Kind != event.TurnApplied || e.Applied == nil:
+	case !ok || (e.Kind != event.WorkspaceApplied && e.Kind != event.TurnApplied) || e.Applied == nil:
 		return nil, ErrOutcomeMissing
 	}
 	return e.Applied, nil

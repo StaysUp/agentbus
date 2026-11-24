@@ -324,9 +324,18 @@ type usage struct {
 	OutputTokens       int `json:"output_tokens"`
 	InputTokensDetails struct {
 		CachedTokens int `json:"cached_tokens"`
-		// Sent by chatgpt.com's backend (0 in every capture), not in OpenAI's
-		// public reference. Whether input_tokens include it is unmeasured.
-		CacheWriteTokens int `json:"cache_write_tokens"`
+		// CacheWriteTokens is the tokens written to the cache this call.
+		// CacheWriteDetails splits it by write lifetime when OpenAI sent the
+		// breakdown: ttl_30m_tokens (the default write, 1.25x input) and
+		// ttl_12h_tokens (2.5x), which sum to CacheWriteTokens. Seen on
+		// codex-exec 0.164.0 replies with prompt caching (OpenAI prompt
+		// caching guide, read 2026-11-23); input_tokens include these, as they
+		// include cached_tokens.
+		CacheWriteTokens  int `json:"cache_write_tokens"`
+		CacheWriteDetails struct {
+			TTL30m int `json:"ttl_30m_tokens"`
+			TTL12h int `json:"ttl_12h_tokens"`
+		} `json:"cache_write_tokens_details"`
 	} `json:"input_tokens_details"`
 	// Cost is OpenRouter's charge for the call, in US dollars (its credits).
 	// cost_details next to it splits the upstream cost and is not read.
@@ -354,6 +363,12 @@ func (u *usage) UnmarshalJSON(b []byte) error {
 	if json.Unmarshal(b, &raw) == nil {
 		if len(raw.In) > 0 {
 			u.unknown = adapter.UnknownFields(raw.In, "usage.input_tokens_details", knownInputDetails, u.unknown)
+			var in struct {
+				Writes json.RawMessage `json:"cache_write_tokens_details"`
+			}
+			if json.Unmarshal(raw.In, &in) == nil && len(in.Writes) > 0 {
+				u.unknown = adapter.UnknownFields(in.Writes, "usage.input_tokens_details.cache_write_tokens_details", knownCacheWriteDetails, u.unknown)
+			}
 		}
 		if len(raw.Out) > 0 {
 			u.unknown = adapter.UnknownFields(raw.Out, "usage.output_tokens_details", knownOutputDetails, u.unknown)
@@ -429,8 +444,11 @@ var (
 	// knownUsage and the details: all seen. attribution, total_tokens and
 	// OpenRouter's cost_details are not read.
 	knownUsage         = adapter.Names("input_tokens", "input_tokens_details", "output_tokens", "output_tokens_details", "total_tokens", "attribution", "cost", "cost_details")
-	knownInputDetails  = adapter.Names("cached_tokens", "cache_write_tokens")
+	knownInputDetails  = adapter.Names("cached_tokens", "cache_write_tokens", "cache_write_tokens_details")
 	knownOutputDetails = adapter.Names("reasoning_tokens")
+	// knownCacheWriteDetails: the write lifetimes in cache_write_tokens_details.
+	// A new lifetime is reported, so a new cache-write price can be added.
+	knownCacheWriteDetails = adapter.Names("ttl_30m_tokens", "ttl_12h_tokens")
 )
 
 func checkName(u *adapter.Unknowns, known adapter.Set, where, name string) {
@@ -583,13 +601,17 @@ func fromResponse(r response, problem string) []event.Event {
 	// input_tokens include the cached tokens; the framework's do not.
 	if u := r.Usage; u != nil {
 		resp.Usage = &event.Usage{
-			InputTokens:      u.InputTokens - u.InputTokensDetails.CachedTokens,
-			OutputTokens:     u.OutputTokens,
-			CacheReadTokens:  u.InputTokensDetails.CachedTokens,
-			CacheWriteTokens: u.InputTokensDetails.CacheWriteTokens,
-			ServiceTier:      r.ServiceTier,
-			ServerToolUse:    hostedCalls(r.Output),
-			CostUSD:          u.Cost,
+			// input_tokens counts cache reads and cache writes too; the
+			// framework's input is neither, so both come out.
+			InputTokens:         u.InputTokens - u.InputTokensDetails.CachedTokens - u.InputTokensDetails.CacheWriteTokens,
+			OutputTokens:        u.OutputTokens,
+			CacheReadTokens:     u.InputTokensDetails.CachedTokens,
+			CacheWriteTokens:    u.InputTokensDetails.CacheWriteTokens,
+			CacheWrite30mTokens: u.InputTokensDetails.CacheWriteDetails.TTL30m,
+			CacheWrite12hTokens: u.InputTokensDetails.CacheWriteDetails.TTL12h,
+			ServiceTier:         r.ServiceTier,
+			ServerToolUse:       hostedCalls(r.Output),
+			CostUSD:             u.Cost,
 		}
 	}
 	evs := []event.Event{resp}

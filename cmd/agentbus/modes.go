@@ -114,7 +114,7 @@ func parse(args []string, home string, stderr io.Writer) (config, bool) {
 		listenDefault = "127.0.0.1:0"
 	}
 	listen := fl.String("listen", listenDefault, "address to listen on: an IP, with or without a port (8787 if none); 0.0.0.0 is reachable from the network, with the token guarding the API")
-	replayOn := fl.Bool("replay", true, "continue claude and codex sessions by own replay (the gateway sends the earlier turn's history); false uses the vendor's resume")
+	replayOn := fl.Bool("replay", true, "continue claude, codex and opencode sessions by own replay (the gateway sends the earlier turn's history); false uses the vendor's resume")
 	var origin *string
 	var hostList folderFlags
 	if c.mode != modeRunner {

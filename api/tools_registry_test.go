@@ -89,12 +89,43 @@ func getToolDef(t *testing.T, e *env, name string) toolreg.Tool {
 // B3's done-when: a built-in removed and re-added as a custom tool behaves the
 // same. The tool's list entry (schema, annotations, description) and a call's
 // result are byte-identical before removing it and after re-adding it.
+// A folder tool persisted in the registry from before 0.6.5 (removed and
+// re-added as a custom tool) is dropped on serve: its route ships no tool and
+// is not wrappable, so resolveServed rejects it the same way createTool rejects
+// a new one. Without this an upgraded install would keep serving read_file.
+func TestPersistedFolderToolNotServed(t *testing.T) {
+	e := mcpEnv(t)
+	// Inject it straight into the registry, as a stored overlay would, past the
+	// createTool check that now refuses it.
+	if _, err := e.api.registry.Add(toolreg.Tool{
+		Name:        "read_file",
+		Description: "Read a file outside the session copy.",
+		Inputs: map[string]any{
+			"type":       "object",
+			"properties": map[string]any{"path": map[string]any{"type": "string"}},
+			"required":   []any{"path"},
+		},
+		Where: toolreg.WhereControl,
+		Run:   toolreg.Run{Kind: toolreg.RunAPI, Method: "POST", Path: "/api/v0/files/read", Body: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e.api.rebuildTools()
+	if _, ok := e.api.servedByName("read_file"); ok {
+		t.Error("a persisted read_file tool is still served after rebuild")
+	}
+	if got := len(listToolSummaries(t, e)); got != 2 {
+		t.Errorf("%d served tools, want 2 (the persisted folder tool must not show)", got)
+	}
+}
+
 func TestDefaultRemovedAndReaddedBehavesTheSame(t *testing.T) {
 	e := mcpEnv(t)
-	// The built-in apps: ask_agent and folder access tools (read_file,
-	// list_folder, write_file) in B8.
-	if got := len(listToolSummaries(t, e)); got != 5 {
-		t.Fatalf("%d built-in tools, want 5", got)
+	// The built-in tools are the two apps, ask_agent and review_turn. The B8
+	// folder tools (read_file, list_folder, write_file) are hidden in 0.6.5,
+	// so they are not served.
+	if got := len(listToolSummaries(t, e)); got != 2 {
+		t.Fatalf("%d built-in tools, want 2", got)
 	}
 	before := toolEntry(t, e, mcpWriteTok, "ask_agent")
 	if before == nil {

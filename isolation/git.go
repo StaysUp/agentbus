@@ -13,10 +13,10 @@ import (
 	"github.com/staysup/agentbus/workspace"
 )
 
-// This file is the one place AgentBus runs git: the git backend, used only
-// when the isolation setting is git, and the removal of a worktree made
-// before the backends kept a record. Every other backend, and every diff,
-// reads the folder's files only.
+// This file is the git worktree backend, used when the isolation setting is
+// git, and the removal of a worktree made before the backends kept a record.
+// A local copy backend runs git too, against its own private repo (gitshadow.go);
+// overlay and none read the folder's files only.
 
 // gitBackend makes a detached git worktree of the folder's repo at its HEAD,
 // and runs turns in the same folder inside it. The folder's uncommitted
@@ -121,6 +121,16 @@ func (gitBackend) learn(*Space, string, workspace.File) (string, bool, bool) { r
 func (gitBackend) Checkpoints(s *Space) ([]Checkpoint, error)                { return checkpoints(s) }
 func (gitBackend) Diff(s *Space, from, to string) (workspace.Changes, error) {
 	return diff(s, from, to)
+}
+
+// RestoreTo is not built for the git worktree backend yet (W3.4 follow-up:
+// git reset --hard + clean to the worktree commit of the checkpoint).
+func (gitBackend) RestoreTo(s *Space, name string) error { return ErrNoRestore }
+
+// UpdateFrom is not built for the git worktree backend: it keeps no private
+// shadow repo, so there is no three-way merge to run.
+func (gitBackend) UpdateFrom(s *Space, base, folder string) (UpdateResult, error) {
+	return UpdateResult{}, ErrNoUpdate
 }
 
 func (gitBackend) Close(s *Space) error {

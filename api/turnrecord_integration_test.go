@@ -28,7 +28,8 @@ func TestTurnRecordBothHalves(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	turn := startTurn(t, e, `{"agent":"claude","folder":"`+folder+`","prompt":"edit1"}`)
+	sess := e.newSession(t, folder, true)
+	turn := startTurn(t, e, `{"session":"`+sess+`","agent":"claude","prompt":"edit1"}`)
 	waitEnded(t, e, turn.Turn)
 
 	// The machine half's tool calls and a network refusal, as the gateway
@@ -98,7 +99,8 @@ func TestTurnRecordBothHalves(t *testing.T) {
 func TestTurnRecordRunningState(t *testing.T) {
 	perm := filepath.Join(t.TempDir(), settings.PolicyFile)
 	e, dir := diffEnv(t, perm)
-	turn := startTurn(t, e, `{"agent":"claude","folder":"`+t.TempDir()+`","prompt":"hold"}`)
+	sess := e.newSession(t, t.TempDir(), true)
+	turn := startTurn(t, e, `{"session":"`+sess+`","agent":"claude","prompt":"hold"}`)
 	tokenOf(t, dir, "hold") // the turn is running, paused in its copy
 	defer release(dir, "hold")
 

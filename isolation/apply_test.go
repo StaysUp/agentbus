@@ -180,6 +180,41 @@ func TestCopyFromSnapshot(t *testing.T) {
 	}
 }
 
+// A turn that puts a copy of a folder where a link to it was applies as its
+// checkpoint has it, and the next turn's changes apply over that.
+func TestApplyReplacesALink(t *testing.T) {
+	src := t.TempDir()
+	fixture(t, src, map[string]string{"v1/a": "a", "v1/b": "b"})
+	os.Symlink("v1", filepath.Join(src, "cur"))
+	b, s := open(t, Copy, src)
+	if err := os.Remove(filepath.Join(s.Dir, "cur")); err != nil {
+		t.Fatal(err)
+	}
+	fixture(t, s.Dir, map[string]string{"cur/a": "a", "cur/b": "b"})
+	b.Checkpoint(s, "t1")
+	fixture(t, s.Dir, map[string]string{"cur/a": "a2"})
+	b.Checkpoint(s, "t2")
+	same := func(want map[string]string) {
+		t.Helper()
+		for p, w := range want {
+			if got := read(t, filepath.Join(src, filepath.FromSlash(p))); got != w {
+				t.Errorf("%s: %q, want %q", p, got, w)
+			}
+		}
+	}
+	if _, err := applyIn(t, s, src, Base, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	if fi, err := os.Lstat(filepath.Join(src, "cur")); err != nil || !fi.IsDir() {
+		t.Fatalf("cur is not a folder: %v %v", fi, err)
+	}
+	same(map[string]string{"cur/a": "a", "cur/b": "b", "v1/a": "a", "v1/b": "b"})
+	if _, err := applyIn(t, s, src, "t1", "t2"); err != nil {
+		t.Fatal(err)
+	}
+	same(map[string]string{"cur/a": "a2", "cur/b": "b", "v1/a": "a", "v1/b": "b"})
+}
+
 // A turn that puts a file and a link back as the Base had them, after an
 // earlier turn's change was applied, applies: the Base's content of each is
 // kept (a link always, a file read through the connector).

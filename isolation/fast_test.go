@@ -82,6 +82,9 @@ func TestBaseHashesOnlyRecentFiles(t *testing.T) {
 			age(t, src)
 			fixture(t, src, map[string]string{"new.txt": "new"})
 			_, s := open(t, name, src)
+			if s.hasShadow() {
+				t.Skip("a git-backed copy keeps no Merkle base to hash on demand")
+			}
 			snap := base(t, s)
 			for rel, hashed := range map[string]bool{"old.txt": false, "sub/old2.txt": false, "link": true, "new.txt": true} {
 				f, ok := snap.File(rel)

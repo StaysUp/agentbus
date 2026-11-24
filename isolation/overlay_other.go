@@ -43,4 +43,8 @@ func (overlayBackend) Checkpoints(s *Space) ([]Checkpoint, error) { return check
 func (overlayBackend) Diff(*Space, string, string) (workspace.Changes, error) {
 	return workspace.Changes{}, errOverlayLinux
 }
+func (overlayBackend) RestoreTo(*Space, string) error { return errOverlayLinux }
+func (overlayBackend) UpdateFrom(*Space, string, string) (UpdateResult, error) {
+	return UpdateResult{}, errOverlayLinux
+}
 func (overlayBackend) Close(*Space) error { return errOverlayLinux }

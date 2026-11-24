@@ -63,8 +63,7 @@ func TestRunTurnIDOnEveryEvent(t *testing.T) {
 	t.Setenv("AGENTBUS_FAKE_CALL", "2")
 	t.Setenv("AGENTBUS_FAKE_STDOUT", claudeResultA)
 	t.Setenv("AGENTBUS_FAKE_EXIT", "0")
-	b, _ := json.Marshal(map[string]any{"agent": "claude", "folder": t.TempDir(), "prompt": "first words"})
-	code, out, raw := postAPI(t, svc, tok, turnsPath, b)
+	code, out, raw := postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": t.TempDir(), "prompt": "first words"})
 	if code != http.StatusAccepted {
 		t.Fatalf("start %d %s", code, raw)
 	}
@@ -80,6 +79,9 @@ func TestRunTurnIDOnEveryEvent(t *testing.T) {
 		t.Errorf("the reply %s has no turn id", raw)
 	}
 	for _, e := range evs {
+		if e.Kind == "session.created" {
+			continue // a session-level event, not a turn's: it carries no turn id
+		}
 		if e.Turn == "" || e.Turn != turn {
 			t.Errorf("%s carries turn %q, want the reply's %q", e.Kind, e.Turn, turn)
 		}
@@ -95,7 +97,7 @@ func TestRunTurnIDOnEveryEvent(t *testing.T) {
 
 	// The session's next turn gets a new id of its own.
 	t.Setenv("AGENTBUS_FAKE_CALL", "1")
-	b, _ = json.Marshal(map[string]any{"session": session, "agent": "claude", "prompt": "second words"})
+	b, _ := json.Marshal(map[string]any{"session": session, "agent": "claude", "prompt": "second words"})
 	code, out, raw = postAPI(t, svc, tok, turnsPath, b)
 	if code != http.StatusAccepted || out["session"] != session {
 		t.Fatalf("next %d %s", code, raw)
@@ -115,6 +117,9 @@ func TestRunTurnIDOnEveryEvent(t *testing.T) {
 	})
 	seen := map[string]int{}
 	for _, e := range evs {
+		if e.Turn == "" {
+			continue // the session.created of the session, not a turn's event
+		}
 		seen[e.Turn]++
 	}
 	if len(seen) != 2 || seen[turn] == 0 || seen[second] == 0 {

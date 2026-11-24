@@ -85,6 +85,14 @@ func (t *Table) Event(e event.Event) Result {
 		c.CacheWrite1hTokens = int64(u.CacheWrite1hTokens)
 		unknown -= int64(split)
 	}
+	// OpenAI's write lifetimes, kept separate from Anthropic's: a vendor fills
+	// only its own pair, so a call subtracts at most one.
+	if split := u.CacheWrite30mTokens + u.CacheWrite12hTokens; u.CacheWrite30mTokens >= 0 &&
+		u.CacheWrite12hTokens >= 0 && split <= u.CacheWriteTokens {
+		c.CacheWrite30mTokens = int64(u.CacheWrite30mTokens)
+		c.CacheWrite12hTokens = int64(u.CacheWrite12hTokens)
+		unknown -= int64(split)
+	}
 	r := t.Price(c)
 	if unknownGeo {
 		r.Complete = false

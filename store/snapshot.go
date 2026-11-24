@@ -32,7 +32,7 @@ type Session struct {
 	Folder  string    `json:"folder" doc:"From the session's latest turn.started or run that names one. Empty for a session no run started."`
 	Started time.Time `json:"started"`
 	Last    time.Time `json:"last"`
-	Open    bool      `json:"open" doc:"A run's child for this session is running: a session.opened without its session.closed."`
+	Open    bool      `json:"open" doc:"A run's child for this session is running: a run.started without its run.ended."`
 	Turns   int       `json:"turns"`
 	// FirstAgent stays put when a later turn runs on another harness, so a
 	// list grouped by it keeps the session in one place.
@@ -52,7 +52,7 @@ type Session struct {
 	// session; CostUSD is then a lower bound.
 	CostUSD      float64 `json:"cost_usd" doc:"Sums cost_usd over the session's model.responded events."`
 	CostComplete bool    `json:"cost_complete" doc:"False when a reply lacks a complete cost, or a drop names the session."`
-	// Resumable: the session has a resume_id on a session.closed and is not
+	// Resumable: the session has a resume_id on a run.ended and is not
 	// open, so POST /api/v0/turns with this session can run its next turn.
 	Resumable bool `json:"resumable" doc:"POST /api/v0/turns accepts it as session."`
 	// Title is the title of the session's latest session.renamed, else the
@@ -64,6 +64,13 @@ type Session struct {
 	// it). Archive is only a view: it hides the session from the default list
 	// and removes nothing.
 	Archived *time.Time `json:"archived,omitempty" doc:"When the session was archived (PATCH archived:true); absent when not archived. Only a view: the list hides archived sessions unless archived=true, and the session still takes a turn."`
+	// Workspace is where the session's turns run, and Sandbox is that
+	// workspace's mode, folded in so a list need not read each workspace. The
+	// workspace is the one the session's turn.started events name, or the
+	// session's own id for a session migrated from before workspaces. The
+	// mode comes from the workspace's workspace.created.
+	Workspace string `json:"workspace,omitempty" doc:"The session's workspace, where its turns run (ws_ and 16 hex digits, or the session's own id for a migrated session)."`
+	Sandbox   bool   `json:"sandbox" doc:"The session's workspace mode: true for a copy behind a wall, false for the person's real folder."`
 
 	// LastSeq is the seq of the session's latest activity (the same events that
 	// set last, so not a rename or a stored preview). Sessions are ordered by
@@ -105,6 +112,8 @@ func (s *Store) snapshotAt(hi int64) (Snapshot, error) {
 			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_tokens') END), 0),
 			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_5m_tokens') END), 0),
 			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_1h_tokens') END), 0),
+			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_30m_tokens') END), 0),
+			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_12h_tokens') END), 0),
 			COALESCE(MAX(kind = 'model.responded' AND json_extract(data, '$.usage.output_incomplete') = 1), 0),
 			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.cost_usd') END), 0),
 			SUM(kind = 'model.responded' AND COALESCE(json_extract(data, '$.cost_complete'), 0) <> 1),
@@ -124,8 +133,8 @@ func (s *Store) snapshotAt(hi int64) (Snapshot, error) {
 		var client sql.NullString
 		if err := rows.Scan(&x.ID, &first, &last, &x.LastSeq, &x.Turns, &withUsage, &x.UsageMissing,
 			&u.InputTokens, &u.OutputTokens, &u.CacheReadTokens, &u.CacheWriteTokens,
-			&u.CacheWrite5mTokens, &u.CacheWrite1hTokens, &x.OutputIncomplete,
-			&x.CostUSD, &x.CostMissing, &client); err != nil {
+			&u.CacheWrite5mTokens, &u.CacheWrite1hTokens, &u.CacheWrite30mTokens, &u.CacheWrite12hTokens,
+			&x.OutputIncomplete, &x.CostUSD, &x.CostMissing, &client); err != nil {
 			rows.Close()
 			return snap, fmt.Errorf("store: snapshot: %w", err)
 		}
@@ -225,6 +234,35 @@ func (s *Store) snapshotAt(hi int64) (Snapshot, error) {
 	}
 	rows.Close()
 
+	// An asked session (POST /api/v0/sessions by a turn token) carries the
+	// asker's origin on session.created, so it names who asked even before its
+	// turn starts. A turn.started origin above wins where it exists.
+	rows, err = s.r.Query(`SELECT session, json_extract(data, '$.origin') FROM events
+		WHERE seq <= ? AND kind = 'session.created' AND COALESCE(json_extract(data, '$.origin'), '') <> ''`, hi)
+	if err != nil {
+		return snap, fmt.Errorf("store: snapshot: %w", err)
+	}
+	for rows.Next() {
+		var id, origin string
+		if err := rows.Scan(&id, &origin); err != nil {
+			rows.Close()
+			return snap, fmt.Errorf("store: snapshot: %w", err)
+		}
+		x := byID[id]
+		if x == nil || x.Origin != nil {
+			continue
+		}
+		var o event.Origin
+		if json.Unmarshal([]byte(origin), &o) == nil {
+			x.Origin = &o
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return snap, fmt.Errorf("store: snapshot: %w", err)
+	}
+	rows.Close()
+
 	holds, err := s.OpenHolds(hi)
 	if err != nil {
 		return snap, err
@@ -239,7 +277,9 @@ func (s *Store) snapshotAt(hi int64) (Snapshot, error) {
 	// check, marked probe: true) never does. SQLite takes the bare column
 	// from the row MAX(seq) or MIN(seq) picked. The first query runs first,
 	// so a rename wins.
-	for i, q := range []string{firstText + ` AND seq <= ? GROUP BY session`, latestRename + ` AND seq <= ? GROUP BY session`} {
+	for i, q := range []string{firstText + ` AND seq <= ? GROUP BY session`,
+		createdTitle + ` AND seq <= ? GROUP BY session`,
+		latestRename + ` AND seq <= ? GROUP BY session`} {
 		rows, err = s.r.Query(q, hi)
 		if err != nil {
 			return snap, fmt.Errorf("store: snapshot: %w", err)
@@ -289,7 +329,7 @@ func (s *Store) snapshotAt(hi int64) (Snapshot, error) {
 
 	// A session with a resume_id can be continued.
 	rows, err = s.r.Query(`SELECT DISTINCT session FROM events
-		WHERE seq <= ? AND kind = 'session.closed' AND json_extract(data, '$.resume_id') IS NOT NULL`, hi)
+		WHERE seq <= ? AND kind = 'run.ended' AND json_extract(data, '$.resume_id') IS NOT NULL`, hi)
 	if err != nil {
 		return snap, fmt.Errorf("store: snapshot: %w", err)
 	}
@@ -313,10 +353,63 @@ func (s *Store) snapshotAt(hi int64) (Snapshot, error) {
 		return snap, err
 	}
 
+	// Each session's workspace: the latest workspace its session.created or
+	// turn.started events name, or (none named) the session's own id, which is
+	// a migrated session's workspace id. session.created carries it for a
+	// session with no turn yet. The mode is that workspace's workspace.created
+	// sandbox.
+	wsBySession := map[string]string{}
+	rows, err = s.r.Query(`SELECT session, json_extract(data, '$.workspace'), MAX(seq) FROM events
+		WHERE seq <= ? AND kind IN ('session.created', 'turn.started') AND COALESCE(json_extract(data, '$.workspace'), '') <> ''
+		GROUP BY session`, hi)
+	if err != nil {
+		return snap, fmt.Errorf("store: snapshot: %w", err)
+	}
+	for rows.Next() {
+		var id, ws string
+		var seq int64
+		if err := rows.Scan(&id, &ws, &seq); err != nil {
+			rows.Close()
+			return snap, fmt.Errorf("store: snapshot: %w", err)
+		}
+		wsBySession[id] = ws
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return snap, fmt.Errorf("store: snapshot: %w", err)
+	}
+	rows.Close()
+
+	sandboxByWS := map[string]bool{}
+	rows, err = s.r.Query(`SELECT json_extract(data, '$.workspace'), COALESCE(json_extract(data, '$.sandbox'), 0) FROM events
+		WHERE seq <= ? AND kind = 'workspace.created'`, hi)
+	if err != nil {
+		return snap, fmt.Errorf("store: snapshot: %w", err)
+	}
+	for rows.Next() {
+		var ws string
+		var sandbox int
+		if err := rows.Scan(&ws, &sandbox); err != nil {
+			rows.Close()
+			return snap, fmt.Errorf("store: snapshot: %w", err)
+		}
+		sandboxByWS[ws] = sandbox != 0
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return snap, fmt.Errorf("store: snapshot: %w", err)
+	}
+	rows.Close()
+
 	for id, x := range byID {
 		x.Open = held[id]
 		x.Resumable = withResume[id] && !x.Open
 		x.EventsDropped = all || named[id]
+		ws := wsBySession[id]
+		if ws == "" {
+			ws = id // a migrated session's workspace is its own id
+		}
+		x.Workspace, x.Sandbox = ws, sandboxByWS[ws]
 		// A call without a complete cost covers no usage, an incomplete
 		// output count and a model without a price: the cost step marks
 		// each of those incomplete.
@@ -399,6 +492,11 @@ const (
 			AND COALESCE(json_extract(data, '$.text'), '') <> ''`
 	latestRename = `SELECT session, COALESCE(json_extract(data, '$.title'), ''), MAX(seq) FROM events
 		WHERE kind = 'session.renamed'`
+	// A session created with a title (POST /api/v0/sessions) keeps it until a
+	// rename: it wins over the first message (the person named the session) and
+	// loses to a later rename.
+	createdTitle = `SELECT session, COALESCE(json_extract(data, '$.title'), ''), MAX(seq) FROM events
+		WHERE kind = 'session.created' AND COALESCE(json_extract(data, '$.title'), '') <> ''`
 	// The session's latest session.archived: its archived flag and time, from
 	// the row MAX(seq) picks. archived 1 means archived at that time, 0 (the
 	// un-archive, which omits the field) means not.
@@ -417,7 +515,7 @@ func (s *Store) Rename(e event.Event) (event.Event, error) {
 		return e, ErrClosed
 	}
 	old := ""
-	for i, q := range []string{firstText, latestRename} {
+	for i, q := range []string{firstText, createdTitle, latestRename} {
 		var id, text string
 		var seq int64
 		err := s.r.QueryRow(q+` AND session = ? GROUP BY session`, e.Session).Scan(&id, &text, &seq)

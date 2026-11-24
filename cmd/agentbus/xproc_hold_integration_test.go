@@ -162,13 +162,13 @@ func TestXProcHoldReleasedByAnswer(t *testing.T) {
 	}
 	// Prove the hold RELEASED on the allow, by a signal after the hold, not the
 	// relay's pre-hold tool.requested. The agent's model call blocks inside the
-	// hold until it ends; the turn's session.closed cannot land until that call
+	// hold until it ends; the turn's run.ended cannot land until that call
 	// returns and the agent finishes. The hold here is the full 60 s (no
-	// AGENTBUS_TEST_HOLD_MS), so a session.closed within seconds can ONLY mean
+	// AGENTBUS_TEST_HOLD_MS), so a run.ended within seconds can ONLY mean
 	// the decision poll reached control and the allow released the reply — a
 	// broken poll would hold until the 60 s timeout and fail this wait.
 	waitFor(t, "the released turn finished", func() bool {
-		return hasKind(x.recordKinds(st.Session), "session.closed")
+		return hasKind(x.recordKinds(st.Session), "run.ended")
 	})
 	if a := x.listedApproval(); a != "" {
 		t.Fatalf("the answered approval still lists: %s", a)

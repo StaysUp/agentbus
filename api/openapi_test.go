@@ -247,11 +247,12 @@ func served(t *testing.T, e *env, method, path string) bool {
 }
 
 // One endpoint starts every turn: POST /api/v0/turns, with session for a
-// session's next turn. /sessions is read-only but for PATCH /sessions/{id},
-// which renames or closes and starts no turn; POST /sessions/{id}/commands,
-// the person's "!" of 0.4, is gone (a "!" is a message to the agent now).
-// Every other action is on a turn.
-// /runs, /jobs, /attempts, /workspaces and /calls are gone with no alias.
+// session's next turn. /sessions takes POST to create a session in a workspace
+// and PATCH /sessions/{id} to rename or archive it; neither starts a turn.
+// POST /sessions/{id}/commands, the person's "!" of 0.4, is gone (a "!" is a
+// message to the agent now). Every other action is on a turn.
+// /runs, /jobs, /attempts and /calls are gone with no alias; /workspaces is
+// the workspace noun now (where turns run), not the old runner-side view.
 // A new data folder starts with no agents, under up as under server
 // (87f63b2): the agents list says so, not the starters it had before.
 func TestOpenAPIAgentsStartEmpty(t *testing.T) {
@@ -267,8 +268,9 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 	for p, item := range doc.Paths.Map() {
 		for m := range item.Operations() {
 			ops = append(ops, m+" "+p)
-			if strings.HasPrefix(p, "/api/v0/sessions") && m != http.MethodGet && m+" "+p != "PATCH /api/v0/sessions/{id}" {
-				t.Errorf("%s %s: /sessions takes only GET, and PATCH to rename or close", m, p)
+			if strings.HasPrefix(p, "/api/v0/sessions") && m != http.MethodGet &&
+				m+" "+p != "PATCH /api/v0/sessions/{id}" && m+" "+p != "POST /api/v0/sessions" {
+				t.Errorf("%s %s: /sessions takes GET, POST to create a session in a workspace, and PATCH to rename or archive", m, p)
 			}
 		}
 	}
@@ -281,7 +283,7 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 	// /api/v0/harnesses/{id}/models, which lists a harness's models, 46
 	// with POST /api/v0/signin, the cockpit's one-time sign-in link, and 52
 	// with PUT and DELETE of the anthropic, openai and gemini API keys, and
-	// 53 with GET /api/v0/sessions/{id}/changes, an apply's preview, which
+	// 53 with GET /api/v0/workspaces/{id}/changes, an apply's preview, which
 	// writes nothing, and 54 with GET /api/v0/folders/{id}/home-files, which
 	// lists a home's config files and starts no turn, and 56 with GET
 	// /api/v0/approvals and POST /api/v0/approvals/{id}, which list and answer
@@ -304,19 +306,36 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 	// POST /api/v0/files/write, folder access through tools (B8). Plus GET
 	// /api/v0/turns/{id}/record, a turn's two halves (the machine half it ran
 	// and the agent half it called) in one read, which reads the record and
-	// starts no turn (machine-record step 1).
-	if len(ops) != 72 {
-		t.Errorf("%d endpoints, want 72: %v", len(ops), ops)
+	// starts no turn (machine-record step 1). 76 with the three workspace
+	// routes POST and GET /api/v0/workspaces and GET /api/v0/workspaces/{id},
+	// which create, list and read a workspace (where turns run: a folder and a
+	// sandbox mode), and POST /api/v0/sessions, which creates a session in a
+	// workspace. All four start no turn: a workspace, then a session in it,
+	// then the session's turns. 77 with POST /api/v0/workspaces/{id}/discard,
+	// which drops a sandbox workspace's unapplied changes by resetting its copy,
+	// and POST /api/v0/workspaces/{id}/apply, which applies them to the person's
+	// folder (apply and the changes preview above moved from the turn and the
+	// session to the workspace, so the count is unchanged). 78 with POST
+	// /api/v0/workspaces/{id}/update, which merges the person's folder into the
+	// copy so the next apply writes only the session's work.
+	if len(ops) != 78 {
+		t.Errorf("%d endpoints, want 78: %v", len(ops), ops)
 	}
 	for _, want := range []string{"POST /api/v0/turns", "GET /api/v0/turns", "GET /api/v0/turns/{id}", "POST /api/v0/turns/{id}/stop",
-		"GET /api/v0/turns/{id}/diff", "POST /api/v0/turns/{id}/apply",
+		"GET /api/v0/turns/{id}/diff", "GET /api/v0/workspaces/{id}/changes", "POST /api/v0/workspaces/{id}/apply",
 		"GET /api/v0/turns/{id}/calls/{call}", "GET /api/v0/turns/{id}/calls/{call}/pieces/{n}", "GET /api/v0/sessions/{id}/events"} {
 		if !slices.Contains(ops, want) {
 			t.Errorf("%s is not in the description", want)
 		}
 	}
+	// The per-turn apply and per-session changes routes moved to the workspace.
+	for _, gone := range []string{"POST /api/v0/turns/{id}/apply", "GET /api/v0/sessions/{id}/changes"} {
+		if slices.Contains(ops, gone) {
+			t.Errorf("%s should have moved to the workspace", gone)
+		}
+	}
 	for p := range doc.Paths.Map() {
-		for _, gone := range []string{"/api/v0/runs", "/api/v0/jobs", "/api/v0/attempts", "/api/v0/workspaces", "/api/v0/calls", "/api/v0/runner", "/api/v0/blobs", "/api/v0/packs"} {
+		for _, gone := range []string{"/api/v0/runs", "/api/v0/jobs", "/api/v0/attempts", "/api/v0/calls", "/api/v0/runner", "/api/v0/blobs", "/api/v0/packs"} {
 			if p == gone || strings.HasPrefix(p, gone+"/") {
 				t.Errorf("%s is still described in the client API", p)
 			}
@@ -330,8 +349,8 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 		t.Error("POST /api/v0/turns is not startTurn, or does not describe the 404 and 409 of a session's next turn")
 	}
 	req := doc.Components.Schemas["TurnRequest"].Value
-	if !slices.Equal(req.Required, []string{"prompt"}) {
-		t.Errorf("TurnRequest requires %v, want only prompt: agent and folder come from the session when it is sent", req.Required)
+	if !slices.Equal(req.Required, []string{"session", "agent", "prompt"}) {
+		t.Errorf("TurnRequest requires %v, want session, agent and prompt: the folder and the mode come from the session's workspace", req.Required)
 	}
 	e := newEnv(t)
 	if resp, body := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"prompt":"x"}`))); resp.StatusCode != http.StatusNotFound {

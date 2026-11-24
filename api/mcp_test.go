@@ -41,7 +41,7 @@ func mcpEnvTools(t *testing.T, tools bool) *env {
 func mcpEnvGrants(t *testing.T, tools bool, grants map[string]run.Grant) *env {
 	t.Helper()
 	dir := t.TempDir()
-	p := settings.FirstInstallPolicy() // a fresh install's policy
+	p := settings.DefaultPolicy() // a fresh install's policy (allows every command and tool)
 	if tools {
 		p.Allow = append(p.Allow, "tool:*")
 		p.Forbid = slices.DeleteFunc(p.Forbid, func(s string) bool { return s == "tool:*" })
@@ -307,7 +307,7 @@ func TestOpenAPINamesTools(t *testing.T) {
 		}
 	}
 	// The removed write route copies no longer name a tool.
-	op = doc.Paths.Value("/api/v0/turns/{id}/apply").Post
+	op = doc.Paths.Value("/api/v0/workspaces/{id}/apply").Post
 	b, _ = json.Marshal(op.Extensions["x-agentbus-tools"])
 	if strings.Contains(string(b), "apply_turn") {
 		t.Errorf("apply still names apply_turn: %s", b)

@@ -40,12 +40,12 @@ const (
 )
 
 // Init writes each file that is missing, with mode 0600: the starter
-// permissions.toml, with every default written out and the small read-only
-// StarterAllow list (FirstInstallPolicy), and instructions.md, with the
-// default text. An existing file is never written: it is the person's.
+// permissions.toml, with every default written out (DefaultPolicy, which
+// allows every command and tool), and instructions.md, with the default text.
+// An existing file is never written: it is the person's.
 func (f *Files) Init() error {
 	for _, s := range []struct{ file, text, name string }{
-		{PolicyFile, string(FormatPolicy(FirstInstallPolicy())), "permissions"},
+		{PolicyFile, string(FormatPolicy(DefaultPolicy())), "permissions"},
 		{InstructionsFile, DefaultInstructions, "instructions"},
 	} {
 		if err := makeStarter(filepath.Join(f.dir, s.file), s.text, s.name); err != nil {
