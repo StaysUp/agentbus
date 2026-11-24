@@ -107,10 +107,7 @@ func TestOpenRouterAgentTurnGoesThroughTheGateway(t *testing.T) {
 	report := filepath.Join(t.TempDir(), "report")
 	t.Setenv("AGENTBUS_FAKE_OUT", report)
 	t.Setenv("AGENTBUS_FAKE_CALL", "1")
-	code, out, raw := postRun(t, svc, tok, map[string]any{"agent": id, "folder": t.TempDir(), "prompt": "hi"})
-	if code != http.StatusAccepted {
-		t.Fatalf("turn: %d %s", code, raw)
-	}
+	out, _ := postRunRunning(t, svc, tok, map[string]any{"agent": id, "folder": t.TempDir(), "prompt": "hi"})
 	session, base := out["session"].(string), out["base_url"].(string)
 	waitClosed(t, svc.store, session)
 
@@ -306,10 +303,7 @@ func TestOpenRouterCodexArgs(t *testing.T) {
 	}
 	report := filepath.Join(t.TempDir(), "report")
 	t.Setenv("AGENTBUS_FAKE_OUT", report)
-	code, out, raw := postRun(t, svc, tok, map[string]any{"agent": ag["id"], "folder": t.TempDir(), "prompt": "hi"})
-	if code != http.StatusAccepted {
-		t.Fatalf("turn: %d %s", code, raw)
-	}
+	out, _ := postRunRunning(t, svc, tok, map[string]any{"agent": ag["id"], "folder": t.TempDir(), "prompt": "hi"})
 	waitClosed(t, svc.store, out["session"].(string))
 	args := strings.Join(readReport(t, report).Args, " ")
 	base := out["base_url"].(string)

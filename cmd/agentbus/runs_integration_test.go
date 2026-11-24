@@ -182,11 +182,8 @@ func TestRunSetsBaseURLInChildOnlyAndClosesWithExitCode(t *testing.T) {
 	folder := t.TempDir()
 
 	// isolate false: the turn runs in folder itself, which events name.
-	code, out, raw := postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": folder, "isolate": false,
+	out, raw := postRunRunning(t, svc, tok, map[string]any{"agent": "claude", "folder": folder, "isolate": false,
 		"prompt": "--dangerously-skip-permissions hello", "model": "haiku"})
-	if code != http.StatusAccepted {
-		t.Fatalf("status %d: %s", code, raw)
-	}
 	id, _ := out["session"].(string)
 	turn, _ := out["turn"].(string)
 	base, _ := out["base_url"].(string)
@@ -375,10 +372,7 @@ func TestRunReadOnlyRetired(t *testing.T) {
 			if readOnly != nil {
 				body["read_only"] = readOnly
 			}
-			code, out, raw := postRun(t, svc, tok, body)
-			if code != http.StatusAccepted {
-				t.Fatalf("%s read_only %v: status %d: %s", tc.agent, readOnly, code, raw)
-			}
+			out, _ := postRunRunning(t, svc, tok, body)
 			want := strings.ReplaceAll(tc.want, "BASE", out["base_url"].(string))
 			rep := readReport(t, report)
 			if got := argsOf(t, rep.Args, out["session"].(string)); got != want {
@@ -549,7 +543,9 @@ func TestRunConcurrencyBound(t *testing.T) {
 	// workspace and session are made first, so only the turn is measured.
 	fifth := newWorkspaceSession(t, svc, tok, t.TempDir(), true)
 	before := svc.store.Last()
-	code, out, raw := postRun(t, svc, tok, map[string]any{"session": fifth, "agent": "claude", "prompt": "hi"})
+	// Posted as is (not postRun): the runner-wait answer is what is measured.
+	fifthBody, _ := json.Marshal(map[string]any{"session": fifth, "agent": "claude", "prompt": "hi"})
+	code, out, raw := postAPI(t, svc, tok, "/api/v0/turns", fifthBody)
 	if code != http.StatusAccepted || out["state"] != "queued" || out["turn"] == "" || out["session"] == "" {
 		t.Fatalf("fifth run: %d %s, want 202 queued", code, raw)
 	}

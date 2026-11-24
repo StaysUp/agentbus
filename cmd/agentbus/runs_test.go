@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func postAPI(t *testing.T, svc *service, tok, path string, body []byte) (int, map[string]any, string) {
@@ -33,8 +36,44 @@ func postAPI(t *testing.T, svc *service, tok, path string, body []byte) (int, ma
 
 func postRun(t *testing.T, svc *service, tok string, body map[string]any) (int, map[string]any, string) {
 	t.Helper()
-	b, _ := json.Marshal(firstTurnBody(t, svc, tok, body))
-	return postAPI(t, svc, tok, "/api/v0/turns", b)
+	return postTurn(t, svc, tok, firstTurnBody(t, svc, tok, body))
+}
+
+// postTurn posts a turn body and answers the turn's outcome. POST
+// /api/v0/turns waits only turnWait for a runner to take the turn, then
+// answers 202 queued, with no ahead and no base_url (the Started contract).
+// Under load the built-in runner can take longer than a test service's 2s,
+// and that answer says nothing yet: not whether the turn runs, nor the
+// runner's refusal. So the body carries an idempotency_key (a fresh one
+// unless it names its own), and postTurn asks again with it, which answers
+// for the same turn and starts no second one, until the reply is anything
+// else. A turn queued behind its session's earlier turns (ahead) is an
+// answer. A test of the runner-wait answer itself posts with postAPI.
+func postTurn(t *testing.T, svc *service, tok string, body map[string]any) (int, map[string]any, string) {
+	t.Helper()
+	with := map[string]any{"idempotency_key": testKey(t)}
+	for k, v := range body {
+		with[k] = v
+	}
+	b, _ := json.Marshal(with)
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		code, out, raw := postAPI(t, svc, tok, "/api/v0/turns", b)
+		if code != http.StatusAccepted || out["state"] != "queued" || out["ahead"] != nil || time.Now().After(deadline) {
+			return code, out, raw
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// testKey is a fresh idempotency_key.
+func testKey(t *testing.T) string {
+	t.Helper()
+	b := make([]byte, 12)
+	if _, err := rand.Read(b); err != nil {
+		t.Fatal(err)
+	}
+	return "test-" + hex.EncodeToString(b)
 }
 
 // firstTurnBody turns a one-call turn body (a folder, no session) into a turn
