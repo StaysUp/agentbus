@@ -48,6 +48,12 @@ func TestCallsOfEachAdapter(t *testing.T) {
 		{openai.Adapter{}, "GET", "/backend-api/codex/models/gpt-5.5", "", false, false, false},
 		{openai.Adapter{}, "POST", "/v1/chat/completions", "", false, false, false},
 		{openai.Adapter{}, "GET", "/backend-api/codex/responses", "", false, false, false},
+		{openai.Adapter{}, "POST", "/backend-api/codex/alpha/search", "", true, true, true},
+		{openai.Adapter{}, "POST", "/v1/alpha/search", "", true, true, true},
+		{openai.Adapter{}, "POST", "/backend-api/codex/alpha/search", "x=1", true, false, true},
+		{openai.Adapter{}, "GET", "/backend-api/codex/alpha/search", "", false, false, false},
+		{openai.Adapter{}, "POST", "/backend-api/codex/alpha/other", "", false, false, false},
+		{openai.Adapter{}, "POST", "/backend-api/alpha/search", "", false, false, false},
 
 		{gemini.Adapter{}, "POST", "/v1internal:streamGenerateContent", "alt=sse", true, true, false},
 		{gemini.Adapter{}, "POST", "/v1internal:streamGenerateContent", "", true, true, false},
