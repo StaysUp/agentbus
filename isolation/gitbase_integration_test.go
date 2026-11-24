@@ -125,3 +125,33 @@ func TestGitAtABaseSkipsACarriedLink(t *testing.T) {
 		t.Errorf(".env: %q", got)
 	}
 }
+
+// carry_files reads the person's folder through a root: a pattern that goes
+// through a link to a folder outside it carries nothing from there, while a
+// link to a folder inside it still works. The secret is a dummy.
+func TestGitAtABaseCarriesNothingFromOutside(t *testing.T) {
+	r, feature := baseRepo(t)
+	src := filepath.Join(r, "sub")
+	outside := t.TempDir()
+	fixture(t, outside, map[string]string{"prod.env": "OUTSIDE=dummy"})
+	if err := os.Symlink(outside, filepath.Join(src, "config")); err != nil {
+		t.Fatal(err)
+	}
+	fixture(t, src, map[string]string{"real/local.env": "INSIDE=1"})
+	if err := os.Symlink("real", filepath.Join(src, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := Get(Git)
+	s, err := b.Open(Request{ID: "job_1", Workdir: filepath.Join(t.TempDir(), "w"), Folder: src, Base: feature,
+		Carry: []string{"config/*.env", "linked/*.env"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close(s)
+	if got := read(t, filepath.Join(s.Dir, "config", "prod.env")); got != "<missing>" {
+		t.Errorf("a file outside the folder was carried: %q", got)
+	}
+	if got := read(t, filepath.Join(s.Dir, "linked", "local.env")); got != "INSIDE=1" {
+		t.Errorf("a file through a link inside the folder was not carried: %q", got)
+	}
+}

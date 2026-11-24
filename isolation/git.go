@@ -211,6 +211,11 @@ func carry(ctx context.Context, repo, folder, root string) error {
 		return err
 	}
 	defer rt.Close()
+	src, err := os.OpenRoot(repo)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
 	for _, e := range strings.Split(string(out), "\x00") {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -225,7 +230,7 @@ func carry(ctx context.Context, repo, folder, root string) error {
 			}
 			continue
 		}
-		if err := carryFile(rt, filepath.Join(repo, rel), rel); err != nil {
+		if err := carryFile(src, rt, rel, rel); err != nil {
 			return err
 		}
 	}
@@ -249,9 +254,16 @@ func carryNamed(folder, dir string, patterns []string) error {
 		return err
 	}
 	defer rt.Close()
-	src := os.DirFS(folder)
+	// The folder is read through a root too: a symbolic link to a folder
+	// outside it (config -> ~/secrets) must not carry what it points at.
+	// os.DirFS would follow it, and a Lstat sees only the last name.
+	src, err := os.OpenRoot(folder)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
 	for _, pat := range patterns {
-		names, err := fs.Glob(src, pat)
+		names, err := fs.Glob(src.FS(), pat)
 		if err != nil {
 			continue // the setting's check refuses a bad pattern
 		}
@@ -259,15 +271,14 @@ func carryNamed(folder, dir string, patterns []string) error {
 			if name == ".git" || strings.HasPrefix(name, ".git/") || strings.Contains(name, "/.git/") {
 				continue
 			}
-			from := filepath.Join(folder, filepath.FromSlash(name))
-			if info, err := os.Lstat(from); err != nil || !info.Mode().IsRegular() {
+			rel := filepath.FromSlash(name)
+			if info, err := src.Lstat(rel); err != nil || !info.Mode().IsRegular() {
 				continue
 			}
-			rel := filepath.FromSlash(name)
 			if _, err := rt.Lstat(rel); err == nil || !errors.Is(err, fs.ErrNotExist) {
 				continue
 			}
-			if err := carryFile(rt, from, rel); err != nil {
+			if err := carryFile(src, rt, rel, rel); err != nil {
 				return err
 			}
 		}
@@ -275,10 +286,12 @@ func carryNamed(folder, dir string, patterns []string) error {
 	return nil
 }
 
-// carryFile writes the person's file src at rel of rt: a regular file or a
-// symbolic link. Anything else, and a file gone since git status, is left.
-func carryFile(rt *os.Root, src, rel string) error {
-	info, err := os.Lstat(src)
+// carryFile writes the person's file at from of the root src at rel of rt:
+// a regular file or a symbolic link. Anything else, a file gone since git
+// status, and a path that leaves src through a link, is left. Both sides go
+// through their roots.
+func carryFile(src, rt *os.Root, from, rel string) error {
+	info, err := src.Lstat(from)
 	if err != nil {
 		return nil
 	}
@@ -292,13 +305,13 @@ func carryFile(rt *os.Root, src, rel string) error {
 	}
 	switch {
 	case info.Mode()&fs.ModeSymlink != 0:
-		target, err := os.Readlink(src)
+		target, err := src.Readlink(from)
 		if err != nil {
 			return nil
 		}
 		return rt.Symlink(target, rel)
 	case info.Mode().IsRegular():
-		in, err := os.Open(src)
+		in, err := src.Open(from)
 		if err != nil {
 			return nil
 		}
