@@ -5,26 +5,49 @@ All notable changes to AgentBus. Full notes for each release are on the
 
 ## Unreleased
 
+## 0.6.5 (2026-11-24)
+
+### Added
+- **Update from my folder.** When a Copy session's copy has fallen behind your folder (another session applied,
+  or you edited), Update brings your folder into the copy by a three-way merge, so the session's work sits on top
+  and the next Apply writes only that work. It never touches your folder.
+- **Merge.** When Update finds files changed on both sides, Merge puts both sides into those files in the copy and
+  asks the agent, in one goal sentence, to combine them. Apply refuses a file that still holds conflict markers.
+- **Review the whole workspace.** `review_turn` with no turn reviews everything not yet applied, across turns.
+  The turn instructions now point agents at the full API description.
+- OpenCode sessions continue from AgentBus's own record, like Claude Code and Codex. Thanks to Alfred
+  (`alfred-pithu`, #73).
+- Codex cache-write tokens are read into usage and cost. Folder registration is recorded as `folder.registered`
+  (the reference and the machine, never the path).
+- A folder typed as `~` or `~/...` is the runner's home. Thanks to Suraj (`Suraj-Upadhyay`, #84).
+- Codex's web search is recorded as a service call. Thanks to `akpor-kofi` (#78).
+
 ### Changed
-- **Rules allow everything by default except subagents.** The default Allow list is now `*` (every
-  command) and `tool:*` (every tool), Ask is empty, and Forbid holds `tool:subagent`. `*` matches
-  every command and `tool:*` allows every tool; Forbid still wins over Ask, Ask over Allow. A command
-  or tool on none of the lists is held for a person. Narrow the lists to hold or refuse what you
-  choose. The redundant `tool:edit` default is gone (editing runs under `tool:*`).
-- **The `unlisted` setting is retired.** A command or tool on none of the lists is always held for a
-  person now. An older `permissions.toml` or stored policy that still sets `unlisted` keeps working,
-  with the key left out.
-- The folder tools `read_file`, `list_folder` and `write_file` are hidden: they are no longer offered
-  to agents or listed in Settings or the turn view. The HTTP routes stay for a later release.
-- When a runner stops answering mid-turn, the turn ends with a plain message: "The runner stopped
-  answering; send the turn again."
-- **The runners API no longer reports `sandbox`.** It said whether a machine could build the
-  whole-agent wall retired in 0.6.4, and decided nothing. A Copy session walls each command through
-  the vendor's own sandbox. A runner of an older build may still send the field; control ignores it.
+- **Rules allow everything by default except subagents.** The default Allow list is now `*` (every command) and
+  `tool:*` (every tool), Ask is empty, and Forbid holds `tool:subagent`. Forbid wins over Ask, Ask over Allow. A
+  command or tool on none of the lists is held for a person. The redundant `tool:edit` default is gone.
+- **The `unlisted` setting is retired.** An older `permissions.toml` or stored policy that still sets it keeps
+  working, with the key left out.
+- **Direct keeps no record of file changes.** A Direct session works in your folder as it is; AgentBus no longer
+  hashes the folder at each turn. Its Changes tab says so.
+- The folder tools `read_file`, `list_folder` and `write_file` are hidden from agents, Settings and the turn
+  view. The HTTP routes stay for a later release.
+- When a runner stops answering mid-turn, the turn ends with "The runner stopped answering; send the turn again."
+- `-listen` on a busy port says to stop the other process or pick another port. Thanks to Alfred (#69).
+- A source build without a packed cockpit says how to get one. Thanks to Alfred (#67).
+
+### Breaking
+- The events `session.opened` and `session.closed` are renamed `run.started` and `run.ended`: they mark one
+  run of an agent, not the session. `session.registered` is retired. Old stores are read as before.
+- The runners API no longer reports `sandbox`. It described the whole-agent wall retired in 0.6.4 and decided
+  nothing; that wall's code is removed. A runner of an older build may still send the field; control ignores it.
 
 ### Fixed
-- `tools/bench` applies through `POST /api/v0/workspaces/{id}/apply`, the route that replaced the
-  removed per-turn apply.
+- **Apply lost files on a case-only rename or through a link** (#65). An apply now looks each path up as the
+  checkpoint lists it. Thanks to `atropos0902` for the report and the fix (#72).
+- The gateway suggests no allow rule for a line the shell cannot parse. Thanks to `akpor-kofi` (#79).
+- `tools/bench` applies through `POST /api/v0/workspaces/{id}/apply`.
+- A test helper that read a queued run reply as finished made the integration tests fail under load.
 
 ## 0.6.4 (2026-11-23)
 
