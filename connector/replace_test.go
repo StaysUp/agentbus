@@ -126,15 +126,33 @@ func caseBlind(t *testing.T, dir string) bool {
 	return err == nil
 }
 
-// A turn may put a folder where a link was, or change only the case of a
-// name. The folder the turn started from takes it: the folder then holds what
-// the turn left, and the preview lists what the apply wrote.
+// A turn may put one kind of thing where another was, or change only the
+// case of a name. The folder the turn started from takes it: the folder then
+// holds what the turn left, and the preview lists what the apply wrote.
 func TestApplyReplaces(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		base, now map[string]string
 		caseBlind bool
 	}{
+		{name: "a file by a folder",
+			base: map[string]string{"conf": "x"},
+			now:  map[string]string{"conf/main": "n"}},
+		{name: "a file by a deep folder",
+			base: map[string]string{"conf": "x"},
+			now:  map[string]string{"conf/a/b/main": "n", "conf/a/c": "m"}},
+		{name: "a folder by a file",
+			base: map[string]string{"conf/a": "x"},
+			now:  map[string]string{"conf": "n"}},
+		{name: "a folder of folders by a file",
+			base: map[string]string{"conf/a/b": "x", "conf/a/c/d": "y", "conf/e/": ""},
+			now:  map[string]string{"conf": "n"}},
+		{name: "an empty folder by a file",
+			base: map[string]string{"conf/": "", "keep": "k"},
+			now:  map[string]string{"conf": "n", "keep": "k"}},
+		{name: "a folder by a link",
+			base: map[string]string{"conf/a": "x", "other/a": "x"},
+			now:  map[string]string{"conf": "-> other", "other/a": "x"}},
 		{name: "a link by a copy of what it named",
 			base: map[string]string{"v1/a": "a", "v1/b/c": "c", "cur": "-> v1"},
 			now:  map[string]string{"v1/a": "a", "v1/b/c": "c", "cur/a": "a", "cur/b/c": "c"}},
@@ -144,6 +162,9 @@ func TestApplyReplaces(t *testing.T) {
 		{name: "a link out of the folder by a folder",
 			base: map[string]string{"cur": "-> /etc"},
 			now:  map[string]string{"cur/hostname": "n"}},
+		{name: "a link and its folder swapped",
+			base: map[string]string{"v1/a": "a", "cur": "-> v1"},
+			now:  map[string]string{"cur/a": "a", "v1": "-> cur"}},
 		{name: "a name's case", caseBlind: true,
 			base: map[string]string{"button.tsx": "x", "keep": "k"},
 			now:  map[string]string{"Button.tsx": "x", "keep": "k"}},
@@ -156,6 +177,9 @@ func TestApplyReplaces(t *testing.T) {
 		{name: "a name's accent, written in another way",
 			base: map[string]string{"caf\u00e9": "x"},
 			now:  map[string]string{"cafe\u0301": "x"}},
+		{name: "a folder by a file, in another case", caseBlind: true,
+			base: map[string]string{"conf/a": "x"},
+			now:  map[string]string{"Conf": "n"}},
 		{name: "a link by a folder, in another case", caseBlind: true,
 			base: map[string]string{"v1/a": "a", "cur": "-> v1"},
 			now:  map[string]string{"v1/a": "a", "Cur/a": "a"}},
@@ -212,10 +236,8 @@ func TestApplyReplaces(t *testing.T) {
 	}
 }
 
-// What the person put in the way is kept: the apply is refused, whole. So is
-// one that puts a folder where a file was, or the other way round, though
-// nobody touched the folder: a limit (isolation, TestFileBecomesFolder).
-func TestApplyReplacesNothingElse(t *testing.T) {
+// What the person put in the way is kept: the apply is refused, whole.
+func TestApplyReplacesNothingOfThePersons(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
 		base, now, mine map[string]string // mine: the person's, after base
@@ -223,45 +245,42 @@ func TestApplyReplacesNothingElse(t *testing.T) {
 		caseBlind       bool
 		want            map[string]string // the conflicts
 	}{
-		{name: "a file by a folder",
-			base: map[string]string{"conf": "x"},
-			now:  map[string]string{"conf/a/main": "n"},
-			want: map[string]string{"conf/a/main": WhyNoFolder}},
-		{name: "a file by a folder, in another case", caseBlind: true,
-			base: map[string]string{"conf": "x"},
-			now:  map[string]string{"Conf/main": "n"},
-			want: map[string]string{"Conf/main": WhyNoFolder}},
-		{name: "a folder by a file",
-			base: map[string]string{"conf/a": "x"},
-			now:  map[string]string{"conf": "n"},
-			want: map[string]string{"conf": WhyNotFile}},
-		{name: "a folder by a file, in another case", caseBlind: true,
-			base: map[string]string{"conf/a": "x"},
-			now:  map[string]string{"Conf": "n"},
-			want: map[string]string{"Conf": WhyNotFile}},
-		{name: "a folder by a link",
-			base: map[string]string{"conf/a": "x", "other/a": "x"},
-			now:  map[string]string{"conf": "-> other", "other/a": "x"},
-			want: map[string]string{"conf": WhyNotFile}},
-		{name: "a link and its folder swapped",
-			base: map[string]string{"v1/a": "a", "cur": "-> v1"},
-			now:  map[string]string{"cur/a": "a", "v1": "-> cur"},
-			want: map[string]string{"v1": WhyNotFile}},
 		{name: "a file added to the folder a file replaces",
 			base: map[string]string{"conf/a": "x"},
 			now:  map[string]string{"conf": "n"},
 			mine: map[string]string{"conf/mine": "m"},
 			want: map[string]string{"conf": WhyNotFile}},
+		{name: "a link added to the folder a file replaces",
+			base: map[string]string{"conf/a": "x", "k": "k"},
+			now:  map[string]string{"conf": "n", "k": "k"},
+			mine: map[string]string{"conf/mine": "-> ../k"},
+			want: map[string]string{"conf": WhyNotFile}},
+		{name: "a file added deep in the folder a link replaces",
+			base: map[string]string{"conf/a": "x", "other/a": "x"},
+			now:  map[string]string{"conf": "-> other", "other/a": "x"},
+			mine: map[string]string{"conf/b/c/mine": "m"},
+			want: map[string]string{"conf": WhyNotFile}},
+		{name: "a file added to the folder a file replaces, in another case", caseBlind: true,
+			base: map[string]string{"conf/a": "x"},
+			now:  map[string]string{"Conf": "n"},
+			mine: map[string]string{"conf/mine": "m"},
+			want: map[string]string{"Conf": WhyNotFile}},
+		{name: "the file a folder replaces, made a link",
+			base: map[string]string{"conf": "x", "k": "k"},
+			now:  map[string]string{"conf/main": "n", "k": "k"},
+			gone: []string{"conf"},
+			mine: map[string]string{"conf": "-> k"},
+			want: map[string]string{"conf": WhyChanged}},
 		{name: "a file changed in the folder a file replaces",
 			base: map[string]string{"conf/a": "x"},
 			now:  map[string]string{"conf": "n"},
 			mine: map[string]string{"conf/a": "m"},
-			want: map[string]string{"conf": WhyNotFile, "conf/a": WhyChanged}},
+			want: map[string]string{"conf/a": WhyChanged}},
 		{name: "the file a folder replaces, changed",
 			base: map[string]string{"conf": "x"},
 			now:  map[string]string{"conf/main": "n"},
 			mine: map[string]string{"conf": "m"},
-			want: map[string]string{"conf": WhyChanged, "conf/main": WhyNoFolder}},
+			want: map[string]string{"conf": WhyChanged}},
 		{name: "the link a folder replaces, pointed elsewhere",
 			base: map[string]string{"v1/a": "a", "v2/a": "a", "cur": "-> v1"},
 			now:  map[string]string{"v1/a": "a", "v2/a": "a", "cur/a": "a"},
@@ -408,6 +427,61 @@ func TestApplyRemovesWhatIsThere(t *testing.T) {
 	want := map[string]string{"a/mine": "m", "d": "m", "k": "K"}
 	if now := held(t, folder); !reflect.DeepEqual(now, want) {
 		t.Fatalf("the folder holds %v, want %v", now, want)
+	}
+}
+
+// A file that shows up in an emptied folder after the check is kept: placing
+// a file over the folder removes folders only.
+func TestPlaceStagedKeepsAFile(t *testing.T) {
+	folder := t.TempDir()
+	rt, err := os.OpenRoot(folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rt.Close()
+	tree(t, folder, map[string]string{"staged": "n", "conf/a/": "", "conf/b/late": "m"})
+	if err := placeStaged(rt, "staged", "conf"); err == nil {
+		t.Error("a file was placed over a folder that holds one")
+	}
+	want := map[string]string{"staged": "n", "conf/b/late": "m"}
+	if now := held(t, folder); !reflect.DeepEqual(now, want) {
+		t.Fatalf("the folder holds %v, want %v", now, want)
+	}
+	if err := os.Remove(filepath.Join(folder, "conf", "b", "late")); err != nil {
+		t.Fatal(err)
+	}
+	if err := placeStaged(rt, "staged", "conf"); err != nil {
+		t.Fatalf("placing over empty folders: %v", err)
+	}
+	if now := held(t, folder); !reflect.DeepEqual(now, map[string]string{"conf": "n"}) {
+		t.Fatalf("the folder holds %v", now)
+	}
+}
+
+// A folder that cannot be read may hold a file, so it does not make way.
+func TestApplyOverAnUnreadableFolder(t *testing.T) {
+	if os.Geteuid() <= 0 {
+		t.Skip("every folder can be read here")
+	}
+	folder := t.TempDir()
+	base := map[string]string{"conf/a": "x"}
+	tree(t, folder, base)
+	tree(t, folder, map[string]string{"conf/private/mine": "m"})
+	c, ref := newConnector(t, folder)
+	h := turnChanges(t, c, base, map[string]string{"conf": "n"})
+	private := filepath.Join(folder, "conf", "private")
+	if err := os.Chmod(private, 0); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(private, 0o755)
+	var cf *Conflict
+	if _, err := c.Apply(context.Background(), ref, "", h); !errors.As(err, &cf) || cf.Files[0] != (ConflictFile{"conf", WhyNotFile}) {
+		t.Fatalf("apply over a folder that cannot be read: %v", err)
+	}
+	os.Chmod(private, 0o755)
+	want := map[string]string{"conf/a": "x", "conf/private/mine": "m"}
+	if now := held(t, folder); !reflect.DeepEqual(now, want) {
+		t.Fatalf("a refused apply wrote: %v", now)
 	}
 }
 

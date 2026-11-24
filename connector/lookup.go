@@ -64,10 +64,8 @@ func (l *lookup) at(st workspace.Step) (there bool, respelt, why string) {
 			return false, "", WhyNotFile
 		case fi.IsDir():
 			l.dirs[p] = true
-		case st.To == nil:
+		case st.To == nil || l.removed(p, fi) != "":
 			return false, "", "" // a file or a link, and no file under it
-		case fi.Mode()&fs.ModeSymlink != 0 && l.removed(p, fi) != "":
-			return false, "", "" // a link, which makes way
 		default:
 			return false, "", WhyNoFolder
 		}
@@ -78,8 +76,8 @@ func (l *lookup) at(st workspace.Step) (there bool, respelt, why string) {
 		return false, "", ""
 	case err != nil:
 		return false, "", WhyNotFile
-	case fi.IsDir() && st.To == nil:
-		return false, "", "" // no file to remove
+	case fi.IsDir() && (st.To == nil || st.From == nil && l.emptied(st.Path)):
+		return false, "", "" // no file to remove, or a folder that makes way
 	case fi.IsDir():
 		return false, "", WhyNotFile
 	case st.To == nil && l.other(st.Path, fi) != "":
@@ -169,6 +167,24 @@ func (l *lookup) listed(p string) bool {
 		}
 	}
 	return true
+}
+
+// emptied says whether the folder dir holds no file once the changes have
+// removed theirs.
+func (l *lookup) emptied(dir string) bool {
+	return fs.WalkDir(l.rt.FS(), dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		fi, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if l.removed(p, fi) == "" {
+			return errHolds
+		}
+		return nil
+	}) == nil
 }
 
 // errHolds: a folder holds a file.
