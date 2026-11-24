@@ -47,7 +47,7 @@ func loginControl(t *testing.T) (*httptest.Server, *jobs.Server, *queue.Queue) {
 func testDeps(srv *httptest.Server, ctx context.Context) loginDeps {
 	return loginDeps{http: srv.Client(), self: "/opt/agentbus/agentbus", poll: 20 * time.Millisecond,
 		caps: func() *queue.Capabilities {
-			return &queue.Capabilities{OS: "linux", Sandbox: &queue.SandboxReport{Can: false, Why: "bwrap is missing"}}
+			return &queue.Capabilities{OS: "linux"}
 		},
 		signals: func(context.Context) (context.Context, context.CancelFunc) { return context.WithCancel(ctx) }}
 }

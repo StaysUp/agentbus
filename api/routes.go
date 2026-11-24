@@ -656,7 +656,7 @@ var routes = slices.Concat([]route{
 		tag:     "Agents",
 		summary: "List runners",
 		doc: "The runners control knows, one per machine, for a person: each one's name, id, machine, role, labels, whether it is online, " +
-			"when it was last seen, its last probe of each harness with its version, and whether it can build a session's wall (sandbox). Online means it asked for work in the last minute. " +
+			"when it was last seen, its last probe of each harness with its version. Online means it asked for work in the last minute. " +
 			"pending lists the machines that ran agentbus login and wait for the person's approval. " +
 			"A runner that stopped stays listed, offline, until removed. A connector of a build before 0.5 is listed only while no runner reports its machine. No token is in the answer. Takes the main token only. No body is read.",
 		replies: []reply{ok(200, RunnerList{}, "The runners."), badRequest, storeFailed},

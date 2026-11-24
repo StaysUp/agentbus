@@ -13,8 +13,8 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/staysup/agentbus/homefiles"
 	"github.com/staysup/agentbus/queue"
-	"github.com/staysup/agentbus/sandbox"
 	"github.com/staysup/agentbus/settings"
 )
 
@@ -65,7 +65,7 @@ func ListHome(home string, paths []string) []queue.HomeFile {
 		switch {
 		case info.Mode().IsRegular() && !wantDir:
 			f := queue.HomeFile{Path: p, Kind: "file", Size: info.Size()}
-			if p == sandbox.ClaudeJSON {
+			if p == homefiles.ClaudeJSON {
 				f.Part = "mcpServers"
 			}
 			out = append(out, f)
@@ -84,7 +84,7 @@ func ListHome(home string, paths []string) []queue.HomeFile {
 				}
 				f.Files++
 				f.Size += i.Size()
-				if f.Files > sandbox.MaxGrantFiles || f.Size > sandbox.MaxGrant {
+				if f.Files > homefiles.MaxGrantFiles || f.Size > homefiles.MaxGrant {
 					f.Over = true
 					return fs.SkipAll
 				}

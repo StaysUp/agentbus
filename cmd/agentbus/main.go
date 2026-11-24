@@ -1159,7 +1159,7 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 		Engine:  s.eng, Store: s.store, Logf: svcLog.Printf, Labels: c.labels,
 		LookPath: c.lookPath, Environ: c.environ,
 		Workdir: filepath.Join(c.home, copiesDir), OldWorkdir: filepath.Join(c.home, oldCopiesDir), StateFile: filepath.Join(c.home, runnerState), Settings: s.settings,
-		Forward: c.mode == modeRunner, NoSecrets: c.noSecrets(), Sandbox: c.canSandbox}
+		Forward: c.mode == modeRunner, NoSecrets: c.noSecrets()}
 	// A runner of a server keeps its own store, which its folder side
 	// shares: one handle, so its sweep and the folder side's touches share
 	// one lock.

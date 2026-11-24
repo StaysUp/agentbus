@@ -1,11 +1,10 @@
-package sandbox
+package homefiles
 
 import (
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -81,50 +80,6 @@ func TestCopyGrantsRefuses(t *testing.T) {
 	_ = CopyGrants(home, home+".grants", user, []string{"~/.aws/config"}, signIns)
 	if _, err := os.Stat(filepath.Join(outside, "config")); err == nil {
 		t.Error("the grant was written through a symlink out of the home")
-	}
-}
-
-// Program grants a program's folder, but never one that holds the home.
-func TestProgram(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
-	write(t, filepath.Join(home, "bin", "tool"), "")
-	write(t, filepath.Join(home, "tool"), "")
-	if got := Program(filepath.Join(home, "bin", "tool")); len(got) != 2 || !strings.HasSuffix(got[1], "bin") {
-		t.Errorf("Program: %v, want the file and its folder", got)
-	}
-	write(t, filepath.Join(home, "lib", "node_modules", "pkg", "package.json"), "{}")
-	write(t, filepath.Join(home, "lib", "node_modules", "pkg", "bin", "cli.js"), "")
-	if got := Program(filepath.Join(home, "lib", "node_modules", "pkg", "bin", "cli.js")); len(got) != 2 || !strings.HasSuffix(got[1], "pkg") {
-		t.Errorf("Program of an npm package's program: %v, want the file and the package", got)
-	}
-	if got := Program(filepath.Join(home, "tool")); len(got) != 1 {
-		t.Errorf("Program of a file in the home: %v, want the file alone", got)
-	}
-}
-
-// A script's interpreter is readable too: by its path, or found on PATH
-// through env, as npm's CLIs name node.
-func TestProgramInterpreter(t *testing.T) {
-	dir := t.TempDir()
-	node := filepath.Join(dir, "nvm", "bin", "node")
-	write(t, node, "")
-	if err := os.Chmod(node, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", filepath.Dir(node)+":/usr/bin:/bin")
-	for _, line := range []string{"#!/usr/bin/env node\n", "#!/usr/bin/env -S node --flag\n", "#!" + node + "\n"} {
-		cli := filepath.Join(dir, "pkg", "cli.js")
-		write(t, cli, line+"code\n")
-		got := Program(cli)
-		if !slices.Contains(got, node) {
-			t.Errorf("%q: Program = %v, want the interpreter %s", line, got, node)
-		}
-	}
-	plain := filepath.Join(dir, "plain")
-	write(t, plain, "\x7fELF")
-	if got := Program(plain); len(got) != 2 {
-		t.Errorf("a binary: Program = %v, want the file and its folder", got)
 	}
 }
 
@@ -255,7 +210,7 @@ func TestCopyGrantsFilesOnly(t *testing.T) {
 	}
 }
 
-// signIns stands for settings.SignInFile, which sandbox may not use: the
+// signIns stands for settings.SignInFile, which homefiles may not use: the
 // same paths.
 func signIns(rel string) string {
 	return map[string]string{".claude/.credentials.json": "Claude Code's sign-in", ".claude/.claude.json": "Claude Code's account file",

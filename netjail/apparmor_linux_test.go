@@ -7,8 +7,6 @@ import (
 	"syscall"
 	"testing"
 	"time"
-
-	"github.com/staysup/agentbus/queue"
 )
 
 // fakeInfo is a file's owner and mode, as Lstat would give them.
@@ -117,23 +115,6 @@ func TestAppArmorAdvice(t *testing.T) {
 		// A profile command is offered only for a path install.sh accepts.
 		if (c.a.open != "" || !ProfilePathPlain(c.a.bin)) && strings.Contains(got, "sh -s apparmor") {
 			t.Errorf("%s: offers a profile for a path others can change: %q", c.name, got)
-		}
-	}
-}
-
-// Every advice fits whole in the runner's report, after the longest reason
-// it follows, for a binary at the usual path: a cut would lose the command.
-func TestAppArmorAdviceFitsTheReport(t *testing.T) {
-	reason := (&Error{Why: "loopback could not be brought up in the agent's namespace (operation not permitted)"}).Error()
-	bin := "/usr/local/bin/agentbus"
-	for _, a := range []appArmor{
-		{restricted: true, label: "unconfined", bin: bin},
-		{restricted: true, label: "unconfined", bin: bin, open: bin},
-		{restricted: true, label: "unconfined", bin: "/opt/a b/agentbus"},
-		{restricted: true, label: "unconfined"},
-	} {
-		if why := reason + appArmorAdvice(a); len(why) > queue.MaxSandboxWhy {
-			t.Errorf("%d bytes, over %d: %s", len(why), queue.MaxSandboxWhy, why)
 		}
 	}
 }

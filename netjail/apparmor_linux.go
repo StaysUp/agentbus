@@ -89,8 +89,7 @@ func appArmorAdvice(a appArmor) string {
 	if a.label != "unconfined" && !strings.HasPrefix(a.label, "unprivileged_userns") && a.label != "" {
 		return ""
 	}
-	// Short: the runner reports it to control within queue.MaxSandboxWhy,
-	// after the reason it follows.
+	// Short: it follows the reason the namespace was refused.
 	why := "; AppArmor (Ubuntu 24.04) gives user namespaces only to a program with a profile, and agentbus has none"
 	install := "; install it with one, once: curl -fsSL " + installScript + " | sudo AGENTBUS_INSTALL_DIR=/usr/local/bin sh"
 	// A profile is offered only for a path install.sh accepts: one only

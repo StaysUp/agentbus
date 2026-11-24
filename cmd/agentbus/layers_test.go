@@ -86,10 +86,10 @@ func TestPackageLayers(t *testing.T) {
 		// nothing of the module.
 		{[]string{"netjail"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
 			"cost", "replay", "store", "body", "logfile", "settings", "cmd", "folders", "connector", "blobs", "credentials"}, jobSide...)},
-		// sandbox, which builds a wall around a session, uses netjail and
-		// nothing else of the module.
-		{[]string{"sandbox"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
-			"cost", "replay", "store", "body", "logfile", "settings", "cmd", "folders", "connector", "blobs", "credentials"}, jobSide...)},
+		// homefiles, which copies the policy's home_files into a session's
+		// home, uses nothing of the module.
+		{[]string{"homefiles"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
+			"cost", "replay", "store", "body", "logfile", "settings", "cmd", "folders", "connector", "blobs", "credentials", "netjail"}, jobSide...)},
 		{[]string{"blobs"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
 			"cost", "replay", "store", "body", "logfile", "settings", "cmd", "folders", "connector"}, jobSide...)},
 	} {

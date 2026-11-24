@@ -101,7 +101,9 @@ func TestListRunners(t *testing.T) {
 
 // A machine that ran agentbus login is listed as pending, with no code and no
 // token, until the person types its code to approve it, or refuses it. Only
-// the main token decides; a turns token or the machine's own is refused.
+// the main token decides; a turns token or the machine's own is refused. The
+// machine asks as a runner of a build before 0.6.5 does, with its report of
+// the retired wall: control accepts it and lists nothing of it.
 func TestPendingMachines(t *testing.T) {
 	e := newJobsEnv(t)
 	ask := func() jobs.LoginStarted {
@@ -128,7 +130,7 @@ func TestPendingMachines(t *testing.T) {
 		}
 	}
 	p := list.Pending[0]
-	if p.ID != a.Login || p.Name != "vm" || p.OS != "linux" || p.Sandbox == nil || p.Sandbox.Can || p.Sandbox.Why != "AppArmor refuses user namespaces" || p.Expires.IsZero() {
+	if p.ID != a.Login || p.Name != "vm" || p.OS != "linux" || strings.Contains(raw, "sandbox") || p.Expires.IsZero() {
 		t.Fatalf("pending %+v", p)
 	}
 	post := func(path, body, tok string) (int, string) {
@@ -163,7 +165,7 @@ func TestPendingMachines(t *testing.T) {
 	}
 	code, raw := post(approve, `{"code":"`+strings.ToLower(a.Code)+`"}`, "")
 	var rn RunnerInfo
-	if code != 200 || json.Unmarshal([]byte(raw), &rn) != nil || rn.Name != "vm" || rn.Sandbox == nil || rn.Sandbox.Why == "" {
+	if code != 200 || json.Unmarshal([]byte(raw), &rn) != nil || rn.Name != "vm" || rn.OS != "linux" || strings.Contains(raw, "sandbox") {
 		t.Fatalf("approve: %d %s", code, raw)
 	}
 	if code, _ := post(approve, `{"code":"`+a.Code+`"}`, ""); code != http.StatusConflict {

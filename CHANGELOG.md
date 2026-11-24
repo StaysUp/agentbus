@@ -18,6 +18,9 @@ All notable changes to AgentBus. Full notes for each release are on the
   to agents or listed in Settings or the turn view. The HTTP routes stay for a later release.
 - When a runner stops answering mid-turn, the turn ends with a plain message: "The runner stopped
   answering; send the turn again."
+- **The runners API no longer reports `sandbox`.** It said whether a machine could build the
+  whole-agent wall retired in 0.6.4, and decided nothing. A Copy session walls each command through
+  the vendor's own sandbox. A runner of an older build may still send the field; control ignores it.
 
 ### Fixed
 - `tools/bench` applies through `POST /api/v0/workspaces/{id}/apply`, the route that replaced the

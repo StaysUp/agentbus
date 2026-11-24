@@ -1,30 +1,10 @@
-// Package sandbox builds a wall around one session's agent: the whole
-// harness process and everything it starts. Inside it a
-// session reads and writes its own folder (its copy) and its own home, reads
-// the system folders and the paths it is given (the agent's own program),
-// and reaches the network only through the runner's proxy. Nothing else of
-// the person's home, and no other session.
+// Package homefiles copies the policy's home_files (a person's config
+// files, such as ~/.gitconfig or ~/.claude/skills/) from their home into a
+// session's own home on a runner, at the start of each turn, and takes back
+// the ones the policy no longer lists. A vendor sign-in never goes.
 //
-// One Spec, an adapter per OS:
-//
-//   - macOS: Seatbelt, /usr/bin/sandbox-exec with a deny-by-default profile.
-//     The proxy listens on this machine's loopback (netjail.NewHost), and
-//     the profile lets the agent connect only to it and to the forwarded
-//     loopback ports (the gateway, the local API).
-//   - Linux: bubblewrap, a new mount view with an empty root and only the
-//     paths above bound in, run inside netjail's network namespace.
-//
-// A proof of concept, not a hardened wall. It leaves open: file metadata
-// on macOS (a session can learn a file exists), the copy's .git (writable),
-// renames of the walled folders, Landlock on Linux, and the browser bridge.
-// It hides the person's secret folders (secretPaths) and any .env outside
-// the copy even inside a Read grant on macOS; on Linux an ungranted secret
-// is invisible (nothing binds it in), but one that a Read grant DOES bind in
-// is not yet hidden there -- a known gap, left to a later step (TODO.md).
-// Every error is fixed wording,
-// safe to show, and New fails before anything starts: a session that asks
-// for the wall never runs without it.
-package sandbox
+// Every error is fixed wording, safe to show.
+package homefiles
 
 import (
 	"encoding/json"
@@ -32,222 +12,16 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
-
-	"github.com/staysup/agentbus/netjail"
 )
 
-// Spec is what one session may reach.
-type Spec struct {
-	// Copy is the session's folder, read and write. The agent starts there.
-	Copy string
-	// ReadOnly keeps Copy read only.
-	ReadOnly bool
-	// Home is the session's own home, read and write. Its tmp folder is the
-	// agent's TMPDIR.
-	Home string
-	// Read are files and folders the agent may read and run, such as its
-	// own program. A symlink is followed: the link and what it names are
-	// both readable.
-	Read []string
-	// Net is what the agent may reach: Forward are loopback addresses it
-	// reaches as they are, and the proxy lets through Pass, Allow, or every
-	// host when Open.
-	Net netjail.Spec
-}
+// Error is why the home_files could not be copied. Its text is fixed
+// wording, safe to show.
+type Error struct{ Why string }
 
-// Error is why a wall could not be built. Its text is fixed wording, safe
-// to show. Say, when set, is the same in plain words that say what to do,
-// for a failure the person cannot fix on this machine.
-type Error struct{ Why, Say string }
-
-func (e *Error) Error() string { return "the session's sandbox could not be built: " + e.Why }
-
-// Box is one wall: New builds it, Start starts a command in it, Close ends
-// its proxy once the command exited.
-type Box struct {
-	copy, home, tmp string
-	readOnly        bool
-	read            []path
-	secret          []string // paths the wall hides even from a Read grant (secretPaths)
-	jail            *netjail.Jail
-	plat            platform
-}
-
-// path is a path the agent may read: real is it with every symlink
-// followed, link the path as given when it differs.
-type path struct {
-	real, link string
-	dir        bool
-}
-
-// TmpDir is the folder in the session's home that is the agent's TMPDIR.
-const TmpDir = "tmp"
-
-// New builds the wall for s, or says why it cannot. Nothing runs yet; a
-// check run in the wall (a program that does nothing) has proved it starts.
-func New(s Spec) (*Box, error) {
-	if !Supported {
-		return nil, &Error{Why: "this platform has no sandbox; it is built on macOS and Linux"}
-	}
-	b := &Box{readOnly: s.ReadOnly}
-	var err error
-	if b.copy, err = realDir(s.Copy); err != nil {
-		return nil, &Error{Why: "the session's folder is not there"}
-	}
-	if b.home, err = realDir(s.Home); err != nil {
-		return nil, &Error{Why: "the session has no home of its own on this runner"}
-	}
-	b.tmp = filepath.Join(b.home, TmpDir)
-	if err := os.MkdirAll(b.tmp, 0o700); err != nil {
-		return nil, &Error{Why: "the session's tmp folder could not be made"}
-	}
-	for _, r := range s.Read {
-		p, err := readable(r)
-		if err != nil {
-			return nil, &Error{Why: "a path the agent needs to read is not there: " + filepath.Base(r) + " — it must exist on this runner"}
-		}
-		b.read = append(b.read, p)
-	}
-	// The person's keys and sign-ins, hidden from the agent even inside a
-	// Read grant (on macOS; see the package doc for the Linux limit). The
-	// default allow-list is added a layer up, in run.wallNet, where an
-	// offline turn can be told apart; the git defaults are in Env.
-	b.secret = secretPaths()
-	if err := b.build(s.Net); err != nil {
-		return nil, err
-	}
-	return b, nil
-}
-
-// Env is what the agent's environment needs: its tmp folder in its home,
-// the proxy, and the git defaults -- ssh remotes rewritten to HTTPS, ssh
-// itself ruled out -- so a fetch goes through the proxy instead of ssh.
-func (b *Box) Env() []string {
-	env := []string{"TMPDIR=" + b.tmp, "CLAUDE_CODE_TMPDIR=" + b.tmp}
-	env = append(env, b.jail.Env()...)
-	return append(env, gitDefaultsEnv()...)
-}
-
-// Close ends the wall's proxy and what still uses it.
-func (b *Box) Close() { b.jail.Close() }
-
-// realDir is dir with every symlink followed; it must be a folder.
-func realDir(dir string) (string, error) {
-	if dir == "" {
-		return "", errors.New("empty")
-	}
-	r, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		return "", err
-	}
-	info, err := os.Stat(r)
-	if err != nil || !info.IsDir() {
-		return "", errors.New("not a folder")
-	}
-	return r, nil
-}
-
-// readable is p as a path the agent may read.
-func readable(p string) (path, error) {
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return path{}, err
-	}
-	r, err := filepath.EvalSymlinks(abs)
-	if err != nil {
-		return path{}, err
-	}
-	info, err := os.Stat(r)
-	if err != nil {
-		return path{}, err
-	}
-	out := path{real: r, dir: info.IsDir()}
-	if abs != r {
-		out.link = abs
-	}
-	return out, nil
-}
-
-// Program is what to make readable for a program at p: its file, through
-// any symlink, and the folder that holds it, where its other files live (as
-// codex keeps its helpers beside it). For a program in the bin folder of an
-// npm package, the package: its node_modules hold the real program (codex
-// from npm, 2026-11-11). Never a folder that holds the person's home: then
-// the file alone. A script's interpreter, from its #! line, is a program
-// too (node under nvm, for a CLI installed with npm).
-func Program(p string) []string {
-	return program(p, 0)
-}
-
-// program is Program, following interpreters depth levels deep at most.
-func program(p string, depth int) []string {
-	out := []string{p}
-	if depth < 2 {
-		if in := interpreter(p); in != "" {
-			out = append(out, program(in, depth+1)...)
-		}
-	}
-	r, err := filepath.EvalSymlinks(p)
-	if err != nil {
-		return out
-	}
-	dir := filepath.Dir(r)
-	if filepath.Base(dir) == "bin" {
-		if info, err := os.Stat(filepath.Join(filepath.Dir(dir), "package.json")); err == nil && info.Mode().IsRegular() {
-			dir = filepath.Dir(dir)
-		}
-	}
-	home, _ := os.UserHomeDir()
-	if home != "" {
-		if h, err := filepath.EvalSymlinks(home); err == nil {
-			home = h
-		}
-		if dir == home || strings.HasPrefix(home+string(filepath.Separator), dir+string(filepath.Separator)) || dir == "/" {
-			return out
-		}
-	}
-	return append(out, dir)
-}
-
-// interpreter is the program a script at p names on its #! line, found on
-// PATH for "#!/usr/bin/env name", or "" when p is not a script or the
-// program is not found.
-func interpreter(p string) string {
-	f, err := os.Open(p)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	b := make([]byte, 256)
-	n, _ := io.ReadFull(f, b)
-	line, ok := strings.CutPrefix(string(b[:n]), "#!")
-	if !ok {
-		return ""
-	}
-	line, _, _ = strings.Cut(line, "\n")
-	f2 := strings.Fields(line)
-	if len(f2) == 0 {
-		return ""
-	}
-	if filepath.Base(f2[0]) != "env" {
-		return f2[0]
-	}
-	// env's own flags (-S) are left out: the first word that is not one
-	// is the program.
-	for _, w := range f2[1:] {
-		if !strings.HasPrefix(w, "-") {
-			if found, err := exec.LookPath(w); err == nil {
-				return found
-			}
-			return ""
-		}
-	}
-	return ""
-}
+func (e *Error) Error() string { return "the session's home files could not be copied: " + e.Why }
 
 // MaxGrant bounds the home_files' files in all, in bytes, and MaxGrantFiles
 // their number: a folder such as ~/.claude/skills is walked at every turn.
@@ -603,49 +377,4 @@ func copyFile(root *os.Root, src, to string, size int64) error {
 		return err
 	}
 	return out.Close()
-}
-
-// runCheck runs cmd, a do-nothing program in the wall, and says whether it
-// ran.
-func runCheck(cmd *exec.Cmd) bool {
-	cmd.Env = []string{"PATH=/usr/bin:/bin"}
-	return cmd.Run() == nil
-}
-
-// Can says whether this machine can build a session's wall, and when not,
-// why, in a plain sentence: it builds one around an empty folder, which
-// starts a program that does nothing in it, and takes it down. A runner
-// reports the answer when it starts (queue.SandboxReport), so a turn is not
-// refused by surprise.
-func Can() (bool, string) { return can(New, systemHint) }
-
-// hint is the system setting that refuses the wall, as a word the reason
-// names it by and a sentence to follow the reason; both empty when none.
-type hint func() (word, text string)
-
-func can(build func(Spec) (*Box, error), h hint) (bool, string) {
-	dir, err := os.MkdirTemp("", "agentbus-sandbox-check-")
-	if err != nil {
-		return false, "the check could not make a folder to build a wall around"
-	}
-	defer os.RemoveAll(dir)
-	copy, home := filepath.Join(dir, "copy"), filepath.Join(dir, "home")
-	if os.Mkdir(copy, 0o700) != nil || os.Mkdir(home, 0o700) != nil {
-		return false, "the check could not make a folder to build a wall around"
-	}
-	b, err := build(Spec{Copy: copy, Home: home})
-	if err != nil {
-		why := "the sandbox could not be built"
-		var se *Error
-		if errors.As(err, &se) {
-			why = se.Why
-		}
-		// A reason that names the setting already says it.
-		if word, text := h(); word != "" && !strings.Contains(why, word) {
-			why += text
-		}
-		return false, why
-	}
-	b.Close()
-	return true, ""
 }

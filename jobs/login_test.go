@@ -51,8 +51,7 @@ func startLogin(t *testing.T, srv *httptest.Server) LoginStarted {
 	t.Helper()
 	var l LoginStarted
 	body := EnrollRequest{Name: "laptop", Capacity: 2, Protocol: ProtocolVersion, Capabilities: &queue.Capabilities{OS: "linux",
-		Connector: testConnector, Folders: []queue.FolderInfo{{Ref: "fld_0123456789abcdef", Name: "app"}},
-		Sandbox: &queue.SandboxReport{Can: false, Why: "bwrap is missing"}}}
+		Connector: testConnector, Folders: []queue.FolderInfo{{Ref: "fld_0123456789abcdef", Name: "app"}}}}
 	if code := send(t, srv, "", "POST", "/api/v0/runner/login", body, &l); code != 201 {
 		t.Fatalf("login: %d", code)
 	}
@@ -97,7 +96,7 @@ func TestLoginNeedsApproval(t *testing.T) {
 		t.Fatalf("a waiting machine's folders are listed: %v", fs)
 	}
 	pend, _ := q.PendingLogins(queue.DefaultTeam)
-	if len(pend) != 1 || pend[0].Name != "laptop" || pend[0].Caps == nil || pend[0].Caps.Sandbox == nil || pend[0].Caps.Sandbox.Why != "bwrap is missing" {
+	if len(pend) != 1 || pend[0].Name != "laptop" || pend[0].Caps == nil || pend[0].Caps.MachineID() != testConnector {
 		t.Fatalf("pending: %+v", pend)
 	}
 

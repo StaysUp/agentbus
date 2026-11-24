@@ -288,6 +288,11 @@ func (c *components) finish() error {
 	}
 	for name, t := range c.types {
 		sr := c.schemas[name]
+		if (sr == nil || sr.Value == nil) && t.NumField() == 0 {
+			// openapi3gen refers to an empty struct but makes no schema for it.
+			c.schemas[name] = &openapi3.SchemaRef{Value: openapi3.NewObjectSchema()}
+			continue
+		}
 		if sr == nil || sr.Value == nil {
 			return fmt.Errorf("api: no schema for %s", name)
 		}

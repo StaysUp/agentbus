@@ -1,6 +1,6 @@
 //go:build unix
 
-package sandbox
+package homefiles
 
 import "syscall"
 

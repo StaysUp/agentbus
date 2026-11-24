@@ -86,10 +86,6 @@ type Config struct {
 	// them can only use the local fast path, and records no changeset.
 	Blobs    isolation.BlobSource
 	BlobSink blobs.Sink
-	// Sandbox says whether this machine can build a session's wall, and why
-	// not (sandbox.Can). It is asked once, when the runner enrolls, and
-	// reported with the runner's capabilities. Nil reports nothing.
-	Sandbox func() (bool, string)
 	// LookPath and Environ are how the runner probes its harnesses for its
 	// report (caps.go). Nil LookPath probes nothing.
 	LookPath func(string) (string, error)
@@ -142,8 +138,6 @@ type Runner struct {
 	probed  []harness.Report
 	// beatMu keeps one report in flight at a time (beat).
 	beatMu sync.Mutex
-	// sandbox is Config.Sandbox's answer, nil without one.
-	sandbox *queue.SandboxReport
 	// attempts are the running attempts by their turn, under attemptsMu, so the
 	// gateway's hold can find the attempt a held reply's turn runs in and poll
 	// its decision (decide.go). A turn runs one attempt at a time.
@@ -194,10 +188,6 @@ func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 	r := &Runner{cfg: cfg,
 		// Shorter than a lease, so one slow call cannot outlast it.
 		short: &http.Client{Timeout: 10 * time.Second, Transport: cfg.HTTP.Transport}}
-	if cfg.Sandbox != nil {
-		can, why := cfg.Sandbox()
-		r.sandbox = queue.NewSandboxReport(can, why)
-	}
 	// A saved identity is used again when the control plane still knows it.
 	if st, ok := loadState(cfg.StateFile); ok {
 		var rn jobs.RunnerBeatReply

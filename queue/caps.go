@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"regexp"
 	"time"
-	"unicode/utf8"
 
 	"github.com/staysup/agentbus/harness"
 )
@@ -39,10 +38,12 @@ type Capabilities struct {
 	// longer served. Read through MachineID, never directly.
 	Machine string       `json:"machine,omitempty"`
 	Folders []FolderInfo `json:"folders,omitempty"`
-	// Sandbox: whether the runner can build a session's wall (package
-	// sandbox), and why not. Nil from a runner of a build before it reported
-	// it.
-	Sandbox *SandboxReport `json:"sandbox,omitempty"`
+	// Sandbox was a runner's report of the whole-agent wall, retired on
+	// 2026-11-22 for each vendor's per-command sandbox. compat 0.6.5: drop
+	// sandbox. A runner of a build before 0.6.5 still sends it, and the
+	// runner-wire decode is strict, so control accepts the key and keeps
+	// nothing of it (Retired).
+	Sandbox Retired `json:"sandbox,omitzero" doc:"Retired in 0.6.5. A runner of an older build sends its report of the whole-agent wall here; control ignores it."`
 	// Role was RoleConnector for a connector of a build before 0.5. A
 	// runner stored with it is listed as such; none may report it now.
 	Role string `json:"role,omitempty"`
@@ -57,30 +58,15 @@ func (c *Capabilities) MachineID() string {
 	return c.Connector
 }
 
-// SandboxReport is whether a runner can build a session's wall: the system's
-// sandbox program is there (sandbox-exec on macOS, bwrap on Linux) and starts
-// a program in a wall, which on Linux needs unprivileged user namespaces.
-type SandboxReport struct {
-	Can bool `json:"can"`
-	// Why says, in a plain sentence, why it cannot. Empty when it can.
-	Why string `json:"why,omitempty"`
-}
+// Retired is a key a runner of an older build still sends: a strict decode
+// accepts it, nothing of it is read or kept, and it is never sent.
+type Retired struct{}
 
-// MaxSandboxWhy bounds SandboxReport.Why.
-const MaxSandboxWhy = 500
+// UnmarshalJSON reads nothing.
+func (*Retired) UnmarshalJSON([]byte) error { return nil }
 
-// NewSandboxReport is the report a runner sends: why cut to MaxSandboxWhy
-// bytes, on a character's edge, so a long reason never stops it enrolling.
-func NewSandboxReport(can bool, why string) *SandboxReport {
-	if len(why) > MaxSandboxWhy {
-		cut := MaxSandboxWhy - len("…")
-		for cut > 0 && !utf8.RuneStart(why[cut]) {
-			cut--
-		}
-		why = why[:cut] + "…"
-	}
-	return &SandboxReport{Can: can, Why: why}
-}
+// IsZero is always true, so omitzero never sends the key.
+func (Retired) IsZero() bool { return true }
 
 // RoleConnector is the Capabilities.Role of a connector of a build before
 // 0.5, when a machine's folders had a program of their own.
@@ -132,9 +118,6 @@ func (c Capabilities) Check() string {
 		if len(h.Name) > 64 || len(h.Version) > 64 {
 			return "a harness's name and version are at most 64 bytes"
 		}
-	}
-	if c.Sandbox != nil && len(c.Sandbox.Why) > MaxSandboxWhy {
-		return "capabilities.sandbox.why is at most 500 bytes"
 	}
 	for _, b := range c.Isolation {
 		if len(b) > 32 {
