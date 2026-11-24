@@ -315,10 +315,17 @@ func (a *API) discardWorkspace(w http.ResponseWriter, r *http.Request, id string
 // UpdateState is the state of a workspace update (POST
 // /api/v0/workspaces/{id}/update): the person's folder merged into the copy.
 type UpdateState struct {
-	State     string   `json:"state,omitempty" doc:"queued, running, updated (the folder was merged in), conflict (the files in conflicts changed on both sides; nothing changed), or failed (error says why)."`
-	Updated   bool     `json:"updated,omitempty" doc:"The folder was merged into the copy; the next apply writes only the session's work."`
-	Conflicts []string `json:"conflicts,omitempty" doc:"On a conflict: the files that changed on both sides, sorted. Nothing changed; ask the agent to resolve them in a turn."`
-	Error     string   `json:"error,omitempty" doc:"Why the update failed."`
+	State       string   `json:"state,omitempty" doc:"queued, running, updated (the folder was merged in), conflict (the files in conflicts changed on both sides; nothing changed), or failed (error says why)."`
+	Updated     bool     `json:"updated,omitempty" doc:"The folder was merged into the copy; the next apply writes only the session's work."`
+	Conflicts   []string `json:"conflicts,omitempty" doc:"On a conflict: the files that changed on both sides, sorted. Nothing changed; ask the agent to resolve them in a turn."`
+	Unresolved  []string `json:"unresolved,omitempty" doc:"On a merge (state merged): the files that changed on both sides, sorted. The copy now holds each with both sides between conflict markers, for the agent to combine in its next turn; an apply refuses any file that still holds them."`
+	Unmergeable []string `json:"unmergeable,omitempty" doc:"On a merge that changed nothing (state conflict): the conflicting files conflict markers cannot show -- not text, a link, or removed on one side -- sorted. error says so in a sentence. The agent can still be asked to combine them in a turn."`
+	Error       string   `json:"error,omitempty" doc:"Why the update failed, or (a merge that changed nothing) why it could not merge."`
+}
+
+// UpdateRequest is the optional body of POST /api/v0/workspaces/{id}/update.
+type UpdateRequest struct {
+	Mode string `json:"mode,omitempty" doc:"Absent or update: a conflict changes nothing. merge: a conflict leaves the conflicting files in the copy with both sides between conflict markers and moves the folder baseline, so the agent's next turn combines them and Apply then writes only the session's work. A merge is refused with 409 while a turn of the workspace runs or waits."`
 }
 
 // updateStateOf reads an update job's state and the HTTP status that reports it:
@@ -333,12 +340,20 @@ func (a *API) updateStateOf(j queue.Job) (UpdateState, int) {
 		return UpdateState{State: "running"}, http.StatusAccepted
 	case j.State == queue.Finished:
 		r, _ := queue.ReadResult(j.Result)
+		if r.Update.Clean() && len(r.Update.Unresolved) > 0 {
+			return UpdateState{State: "merged", Updated: true, Unresolved: r.Update.Unresolved}, http.StatusOK
+		}
 		if r.Update.Clean() {
 			return UpdateState{State: "updated", Updated: true}, http.StatusOK
 		}
 		st := UpdateState{State: "conflict"}
 		if r.Update != nil {
 			st.Conflicts = r.Update.Conflicts
+			if len(r.Update.Unmergeable) > 0 {
+				st.Unmergeable = r.Update.Unmergeable
+				st.Error = "some files cannot be merged with conflict markers (not text, a link, or removed on one side): " +
+					strings.Join(r.Update.Unmergeable, ", ") + "; nothing changed"
+			}
 		}
 		return st, http.StatusOK
 	default:
@@ -377,11 +392,22 @@ func (a *API) updateWorkspace(w http.ResponseWriter, r *http.Request, id string)
 		writeError(w, http.StatusBadRequest, "this session works directly in your folder; there is nothing to update into a copy")
 		return
 	}
-	j, created, err := a.cfg.Queue.Update(queue.DefaultTeam, wsID, ws.Machine, askedBy(r))
+	body, ok := decodeOptional[UpdateRequest](w, r, "the body must be a JSON object with an optional mode (update or merge), or empty")
+	if !ok {
+		return
+	}
+	if body.Mode != "" && body.Mode != "update" && body.Mode != "merge" {
+		writeError(w, http.StatusBadRequest, "mode must be update or merge")
+		return
+	}
+	j, created, err := a.cfg.Queue.Update(queue.DefaultTeam, wsID, ws.Machine, askedBy(r), body.Mode == "merge")
 	var removed *queue.RunnerRemovedError
 	switch {
 	case errors.Is(err, queue.ErrApplyBusy):
 		writeJSON(w, http.StatusConflict, UpdateState{State: "failed", Error: "an apply, discard or update of this workspace is still running or waiting; wait for it to end before updating"})
+		return
+	case errors.Is(err, queue.ErrTurnBusy):
+		writeJSON(w, http.StatusConflict, UpdateState{State: "failed", Error: "a turn of this workspace is running or waiting; merge once it ends"})
 		return
 	case errors.Is(err, queue.ErrSessionClosed):
 		writeError(w, http.StatusBadRequest, "this workspace is closed, so its copy cannot be updated")
@@ -511,7 +537,14 @@ func (a *API) applyWorkspace(w http.ResponseWriter, r *http.Request, id string) 
 // non-empty one must be a JSON object. It writes the 400 and returns false on a
 // malformed body.
 func decodeApplyBody(w http.ResponseWriter, r *http.Request) (ApplyRequest, bool) {
-	var body ApplyRequest
+	return decodeOptional[ApplyRequest](w, r, "the body must be a JSON object with an optional turn, or empty")
+}
+
+// decodeOptional reads an optional JSON object body into a T: an empty body is
+// the zero T. It writes the 400 with refusal and returns false on a malformed
+// body.
+func decodeOptional[T any](w http.ResponseWriter, r *http.Request, refusal string) (T, bool) {
+	var body T
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "the body could not be read")
@@ -524,7 +557,7 @@ func decodeApplyBody(w http.ResponseWriter, r *http.Request) (ApplyRequest, bool
 		dec := json.NewDecoder(bytes.NewReader(data))
 		dec.DisallowUnknownFields()
 		if t[0] != '{' || dec.Decode(&body) != nil || dec.More() || dec.Decode(&struct{}{}) != io.EOF {
-			writeError(w, http.StatusBadRequest, "the body must be a JSON object with an optional turn, or empty")
+			writeError(w, http.StatusBadRequest, refusal)
 			return body, false
 		}
 	}

@@ -352,6 +352,17 @@ type Spec struct {
 	// (the last applied turn's end checkpoint). Empty means the copy's base --
 	// the folder as it was first copied, when no turn was applied.
 	Restore string `json:"restore,omitempty"`
+	// Merge, for an update job: on a conflict, leave the conflicting files in
+	// the copy between conflict markers and record the merge (the folder
+	// baseline moves), rather than change nothing. The person's Merge asks for
+	// it, and the agent's next turn resolves the markers.
+	Merge bool `json:"merge,omitempty"`
+	// CheckMarkers, for an apply or preview job: a merge left conflict
+	// markers in the copy since the last finished apply or discard, so the
+	// folder side refuses any file to write that still holds them. Off in a
+	// workspace with no such merge, so a file that only shows the markers (a
+	// doc) applies there.
+	CheckMarkers bool `json:"check_markers,omitempty"`
 	// Typed and TypedMachine: a new session's folder as the request typed
 	// it, and the machine it named. They are never stored; they only keep
 	// the request's hash what was asked, so a retry with the same key gets

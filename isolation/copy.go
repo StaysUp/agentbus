@@ -143,9 +143,9 @@ func (copyBackend) RestoreTo(s *Space, name string) error {
 // UpdateFrom brings the person's folder into the copy by a three-way merge in
 // the copy's private git repo (gitupdate.go). Only a shadow copy can do it; a
 // snapshot-built or legacy copy has no private git and is refused.
-func (copyBackend) UpdateFrom(s *Space, base, folder string) (UpdateResult, error) {
+func (copyBackend) UpdateFrom(s *Space, base, folder string, merge bool) (UpdateResult, error) {
 	if s.hasShadow() {
-		return s.updateFromFolder(context.Background(), base, folder)
+		return s.updateFromFolder(context.Background(), base, folder, merge)
 	}
 	return UpdateResult{}, ErrNoUpdate
 }

@@ -83,7 +83,7 @@ func (noneBackend) RestoreTo(s *Space, name string) error { return ErrNoRestore 
 
 // UpdateFrom: the none backend runs in the person's folder as it is, so there
 // is no copy to update from it.
-func (noneBackend) UpdateFrom(s *Space, base, folder string) (UpdateResult, error) {
+func (noneBackend) UpdateFrom(s *Space, base, folder string, merge bool) (UpdateResult, error) {
 	return UpdateResult{}, ErrNoUpdate
 }
 

@@ -109,9 +109,15 @@ type Backend interface {
 	// state and the merge as two new checkpoints (UpdateResult.Theirs and
 	// .Merged) and leaves the copy holding the merge; a real conflict changes
 	// nothing and names the files (UpdateResult.Conflicts). The person's folder
-	// is only read, never written. A backend that cannot do it returns
+	// is only read, never written. With merge, a conflict does not leave the
+	// copy unchanged: the conflicting files go into the merge holding both sides
+	// between git's conflict markers, the merge is recorded as on a clean merge
+	// (so the folder baseline moves to theirs), and UpdateResult.Unresolved
+	// names them for the agent to resolve. A conflict markers cannot show
+	// (UpdateResult.Unmergeable) makes the merge change nothing, as an update
+	// does, so no side wins silently. A backend that cannot do it returns
 	// ErrNoUpdate.
-	UpdateFrom(s *Space, base, folder string) (UpdateResult, error)
+	UpdateFrom(s *Space, base, folder string, merge bool) (UpdateResult, error)
 	// Close removes the copy and everything the space kept.
 	Close(s *Space) error
 }
@@ -127,6 +133,14 @@ type UpdateResult struct {
 	Theirs    string
 	Merged    string
 	Conflicts []string
+	// Unresolved, on a merge (UpdateFrom with merge) that met a conflict: the
+	// files the merge left holding conflict markers, sorted. Clean is true and
+	// Theirs and Merged are set, as on a clean merge.
+	Unresolved []string
+	// Unmergeable, on a merge that changed nothing: the conflicting files
+	// conflict markers cannot show (binary, a link, removed on one side),
+	// sorted. Clean is false and Conflicts names every conflict.
+	Unmergeable []string
 	// PriorHead is the copy's head checkpoint before the merge (ours). On a
 	// clean merge the copy is advanced to Merged; a caller whose own later step
 	// fails (publishing the changesets, say) resets the copy to PriorHead to undo
@@ -343,8 +357,8 @@ func (f fallback) Checkpoint(s *Space, name string) (Checkpoint, error) {
 }
 func (f fallback) Checkpoints(s *Space) ([]Checkpoint, error) { return f.own(s).Checkpoints(s) }
 func (f fallback) RestoreTo(s *Space, name string) error      { return f.own(s).RestoreTo(s, name) }
-func (f fallback) UpdateFrom(s *Space, base, folder string) (UpdateResult, error) {
-	return f.own(s).UpdateFrom(s, base, folder)
+func (f fallback) UpdateFrom(s *Space, base, folder string, merge bool) (UpdateResult, error) {
+	return f.own(s).UpdateFrom(s, base, folder, merge)
 }
 func (f fallback) Diff(s *Space, from, to string) (workspace.Changes, error) {
 	return f.own(s).Diff(s, from, to)

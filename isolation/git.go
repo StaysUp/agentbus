@@ -129,7 +129,7 @@ func (gitBackend) RestoreTo(s *Space, name string) error { return ErrNoRestore }
 
 // UpdateFrom is not built for the git worktree backend: it keeps no private
 // shadow repo, so there is no three-way merge to run.
-func (gitBackend) UpdateFrom(s *Space, base, folder string) (UpdateResult, error) {
+func (gitBackend) UpdateFrom(s *Space, base, folder string, merge bool) (UpdateResult, error) {
 	return UpdateResult{}, ErrNoUpdate
 }
 

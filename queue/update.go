@@ -9,6 +9,10 @@ import (
 	"github.com/staysup/agentbus/ids"
 )
 
+// ErrTurnBusy: a merge was asked for while a turn of the workspace runs or
+// waits. Nothing was queued.
+var ErrTurnBusy = errors.New("queue: a turn of this workspace is running or waiting")
+
 // Update queues a KindUpdate job that merges the person's folder as it is now
 // into the workspace's copy, so the session's unapplied work sits on top of the
 // folder and the next Apply writes only that work. The runner holding the copy
@@ -23,7 +27,13 @@ import (
 // the applied point is stable). ErrNotApplicable when the applied turn has no
 // checkpoint or the workspace names no folder, ErrMachineOffline when the copy's
 // runner is not seen. The caller (the API) checked the workspace is a sandbox.
-func (q *Queue) Update(team string, ws ids.WorkspaceID, machine string, by *By) (job Job, created bool, err error) {
+//
+// merge asks for a merge (Spec.Merge): on a conflict the copy gets the
+// conflicting files with conflict markers, for the agent's next turn to
+// resolve. Unlike an update it is refused with ErrTurnBusy while a turn of the
+// workspace runs or waits, so the markers land only between turns, before the
+// turn the person sends to resolve them.
+func (q *Queue) Update(team string, ws ids.WorkspaceID, machine string, by *By, merge bool) (job Job, created bool, err error) {
 	q.applyMu.Lock()
 	defer q.applyMu.Unlock()
 	busy, err := q.jobsInFlight(team, ws, `'apply','discard','update'`)
@@ -32,6 +42,13 @@ func (q *Queue) Update(team string, ws ids.WorkspaceID, machine string, by *By) 
 	}
 	if busy {
 		return Job{}, false, ErrApplyBusy
+	}
+	if merge {
+		if busy, err := q.jobsInFlight(team, ws, `'turn'`); err != nil {
+			return Job{}, false, err
+		} else if busy {
+			return Job{}, false, ErrTurnBusy
+		}
 	}
 	// The merge base: the copy checkpoint whose content the folder currently
 	// holds -- the last applied turn's end checkpoint, a prior update's folder
@@ -86,7 +103,7 @@ func (q *Queue) Update(team string, ws ids.WorkspaceID, machine string, by *By) 
 	// Its copy affinity keys by the workspace (CopyKey), so create routes it to
 	// the copy's runner. The head turn and folded turns are filled at the finish,
 	// not here (a turn may run while it waits in the lane).
-	spec := Spec{Workspace: ws, Machine: first.Machine, FolderRef: first.FolderRef, Restore: base}
+	spec := Spec{Workspace: ws, Machine: first.Machine, FolderRef: first.FolderRef, Restore: base, Merge: merge}
 	return q.create(team, KindUpdate, "", spec, Links{ApplyBy: by}, Limits{}, "", nil)
 }
 
@@ -138,6 +155,30 @@ func (q *Queue) activeUpdate(team string, ws ids.WorkspaceID) (info updateBaseli
 	}
 	return updateBaseline{From: r.Update.From, To: r.Update.To, HeadTurn: j.Links.AppliesTurn,
 		TheirsCheckpoint: r.Update.TheirsCheckpoint}, true, nil
+}
+
+// mergedSince reports whether a finished merge of the workspace left conflict
+// markers in its copy (its result names unresolved files) after the last
+// finished apply or discard. Until one ends, every apply and preview checks the
+// files it writes for the markers, whatever their path, so a rename or a later
+// plain update cannot carry one past it. The caller holds applyMu.
+func (q *Queue) mergedSince(team string, ws ids.WorkspaceID) (bool, error) {
+	var n int
+	err := q.db.QueryRow(`SELECT COUNT(*) FROM jobs u
+		WHERE u.team = ? AND `+jobWorkspaceOf("u")+` = ? AND u.kind = 'update' AND u.state = 'finished'
+		AND json_array_length(COALESCE(json_extract(u.result, '$.update.unresolved'), '[]')) > 0
+		AND u.ended > COALESCE((SELECT MAX(d.ended) FROM jobs d WHERE d.team = ? AND `+jobWorkspaceOf("d")+` = ?
+			AND d.kind IN ('apply','discard') AND d.state = 'finished'), -1)`,
+		team, string(ws), team, string(ws)).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("queue: read merges: %w", err)
+	}
+	return n > 0, nil
+}
+
+// jobWorkspaceOf is jobWorkspace for the jobs table under alias a.
+func jobWorkspaceOf(a string) string {
+	return `COALESCE(NULLIF(json_extract(` + a + `.spec, '$.workspace'), ''), ` + a + `.session)`
 }
 
 // checkpointForChangeset is the copy checkpoint whose content is the changeset

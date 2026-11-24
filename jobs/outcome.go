@@ -73,10 +73,15 @@ func UpdatedOf(j queue.Job, res queue.Result) *event.Updated {
 		u.Result = "updated"
 		u.From, u.To = res.Update.From, res.Update.To
 		u.FoldedTurns = j.Links.AppliesTurns
+		if len(res.Update.Unresolved) > 0 {
+			u.Result = "merged"
+			u.Unresolved = res.Update.Unresolved
+		}
 	} else {
 		u.Result = "conflict"
 		if res.Update != nil {
 			u.Conflicts = res.Update.Conflicts
+			u.Unmergeable = res.Update.Unmergeable
 		}
 	}
 	return u
@@ -215,7 +220,7 @@ func AppliedOf(j queue.Job, res queue.Result) *event.Applied {
 	if res.Apply != nil {
 		a.Files, a.Count, a.Truncated, a.Pruned = res.Apply.Files, res.Apply.Count, res.Apply.Truncated, res.Apply.Pruned
 		for _, c := range res.Apply.Conflicts {
-			a.Conflicts = append(a.Conflicts, event.RefusedFile{Path: c.Path, Why: c.Why})
+			a.Conflicts = append(a.Conflicts, event.RefusedFile{Path: c.Path, Why: c.Why, Markers: c.Markers})
 		}
 	}
 	switch {

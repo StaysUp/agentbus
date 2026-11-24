@@ -607,7 +607,7 @@ func (a *API) applyStateOf(j queue.Job) (ApplyState, error) {
 	}
 	st.Files, st.Count, st.Truncated, st.Pruned = ap.Files, ap.Count, ap.Truncated, ap.Pruned
 	for _, c := range ap.Conflicts {
-		st.Conflicts = append(st.Conflicts, queue.ApplyConflict{Path: c.Path, Why: c.Why})
+		st.Conflicts = append(st.Conflicts, queue.ApplyConflict{Path: c.Path, Why: c.Why, Markers: c.Markers})
 	}
 	return st, nil
 }

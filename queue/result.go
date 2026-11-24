@@ -121,6 +121,10 @@ func (a *ApplyResult) Fit(max int) {
 type ApplyConflict struct {
 	Path string `json:"path"`
 	Why  string `json:"why"`
+	// Markers: the file is refused because it still holds the conflict
+	// markers an update's merge left, not because the folder changed. The
+	// agent combining it clears it; an update does not.
+	Markers bool `json:"markers,omitempty" doc:"The file still holds the conflict markers an update's merge left (<<<<<<< this session ... >>>>>>> your folder), rather than having changed in the folder: the agent combining it in a turn clears it, an update does not."`
 }
 
 // UpdateResult is what an update job did: on a clean merge From is the new
@@ -139,6 +143,13 @@ type UpdateResult struct {
 	TheirsCheckpoint string   `json:"theirs_checkpoint,omitempty"`
 	MergedCheckpoint string   `json:"merged_checkpoint,omitempty"`
 	Conflicts        []string `json:"conflicts,omitempty"`
+	// Unresolved, on a merge that met a conflict: the files left holding
+	// conflict markers for the agent to resolve. The merge is still recorded
+	// (From and To set), so Clean is true.
+	Unresolved []string `json:"unresolved,omitempty"`
+	// Unmergeable, on a merge that changed nothing: the conflicting files
+	// conflict markers cannot show (binary, a link, removed on one side).
+	Unmergeable []string `json:"unmergeable,omitempty"`
 }
 
 // Clean reports whether the update merged the folder in (From and To set), as

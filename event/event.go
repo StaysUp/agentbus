@@ -261,7 +261,7 @@ var Kinds = []KindInfo{
 	{WorkspaceApplied, "An apply of a workspace's changes to the person's folder ended (POST /api/v0/workspaces/{id}/apply): workspace and session name it, turn is the turn applied up to, and applied holds every turn whose changes it carried, the from and to changesets, who asked (by: the person or an agent, never a token), the result (applied, refused or failed), the files written or removed, and on a refusal the files that refused it, each with why. Stored once per apply. Show a refusal as a warning.", []string{"workspace", "applied"}},
 	{WorkspaceDiscarded, "The unapplied changes of a sandbox workspace were dropped (POST /api/v0/workspaces/{id}/discard): workspace and session name it, and discarded holds the changeset it was reset to (the last applied one, or base when never applied), the turns whose file changes were dropped, and who asked. The conversation stays in the record. Stored once per discard.", []string{"workspace", "discarded"}},
 	{FolderRegistered, "A folder a person typed was checked and registered on its machine's runner (POST /api/v0/workspaces with folder): folder_ref is the reference its machine issued, and machine the connector that holds it. The path is not carried; it is kept off control's disk. No session. Stored once per folder reference and machine, as the folder is first registered, so a folder becoming known is in the record and not only in the folder listing (GET /api/v0/folders).", []string{"folder_ref", "machine"}},
-	{WorkspaceUpdated, "The person's folder as it is now was merged into a sandbox workspace's copy (POST /api/v0/workspaces/{id}/update), so the session's work sits on top of it and the next Apply writes only that work: workspace and session name it, and updated holds the result (updated or conflict), on a clean update the new baseline changeset (from, the folder now) and the merged changeset (to) with the folded turns, on a conflict the files that conflicted, and who asked. Nothing is written to the folder; the copy's private git does the three-way merge. Stored once per update.", []string{"workspace", "updated"}},
+	{WorkspaceUpdated, "The person's folder as it is now was merged into a sandbox workspace's copy (POST /api/v0/workspaces/{id}/update), so the session's work sits on top of it and the next Apply writes only that work: workspace and session name it, and updated holds the result (updated, merged or conflict), on a clean update or a merge the new baseline changeset (from, the folder now) and the merged changeset (to) with the folded turns, on a merge the files left with conflict markers (unresolved), on a conflict the files that conflicted, and who asked. Nothing is written to the folder; the copy's private git does the three-way merge. Stored once per update.", []string{"workspace", "updated"}},
 	{TurnEnded, "A turn job ended, whatever its outcome: control writes it once per turn job for every ended turn (finished, failed, stopped, cancelled or its runner lost), so a reactor (a delivery) learns a turn ended from the record, not from the scheduler's job table. It is keyed on the turn and carries no session -- a reactor trigger, not part of a session's event stream. state is how it ended and error says why. The changes and the reply are not here: those are turn.changed and the job's result.", []string{"turn", "state"}},
 	{ChangesPreviewed, "What applying a workspace's changes to the person's folder would do now, the dry run of POST /api/v0/workspaces/{id}/apply computed on the folder's machine, nothing written: previewed holds the files it would write or remove (with diffs), the conflicts it would refuse, the turn it would apply up to and the turns it would carry. workspace names the workspace it is of (its session field is empty, so it never enters the session namespace). Stored so GET /api/v0/workspaces/{id}/changes serves and pages it from the record, as of this event's time; a new one is stored when a preview runs again (the workspace changed, or a fresh one was asked for). The file list can be cut (truncated) when too many to send; count still counts them all.", []string{"workspace", "previewed"}},
 	{PlanUsage, "How much of a subscription's plan is used in one of its windows, as the vendor said in the headers of a model reply that carried control's credential for that subscription: plan holds the subscription (the harness, such as claude), the connect its credential came from, the window, its length in minutes, the percent used, when it resets and the vendor's status word. " +
@@ -614,8 +614,9 @@ type Applied struct {
 
 // RefusedFile is one file that refused an apply.
 type RefusedFile struct {
-	Path string `json:"path"`
-	Why  string `json:"why"`
+	Path    string `json:"path"`
+	Why     string `json:"why"`
+	Markers bool   `json:"markers,omitempty" doc:"The file still holds the conflict markers an update's merge left (<<<<<<< this session ... >>>>>>> your folder), rather than having changed in the folder: the agent combining it in a turn clears it, an update does not."`
 }
 
 // Discarded is what one discard dropped (workspace.discarded).
@@ -637,12 +638,14 @@ type Discarded struct {
 // so they are no longer applied on their own. On a conflict Conflicts names the
 // files and nothing changed.
 type Updated struct {
-	Result      string   `json:"result" doc:"updated (the folder was merged into the copy) or conflict (the same lines changed on both sides; nothing changed)."`
+	Result      string   `json:"result" doc:"updated (the folder was merged into the copy), merged (a merge: as updated, with the files in unresolved left holding conflict markers for the agent) or conflict (the same lines changed on both sides; nothing changed)."`
 	From        string   `json:"from,omitempty" doc:"On a clean update: the new baseline changeset, the folder as it is now. A later Apply diffs the session's work against it."`
 	To          string   `json:"to,omitempty" doc:"On a clean update: the merged changeset the copy now holds."`
 	FoldedTurns []string `json:"folded_turns,omitempty" doc:"The turns whose changes the merge folded into the copy's new head, oldest first; they are no longer applied on their own."`
 	By          *By      `json:"by,omitempty" doc:"Who asked for the update, by the kind of token it came with. Never the token itself."`
 	Conflicts   []string `json:"conflicts,omitempty" doc:"On a conflict: the folder-relative files that conflicted, sorted. Nothing changed; the agent can be asked to resolve them in a turn."`
+	Unresolved  []string `json:"unresolved,omitempty" doc:"On a merge: the folder-relative files that changed on both sides, sorted, now in the copy with both sides between conflict markers."`
+	Unmergeable []string `json:"unmergeable,omitempty" doc:"On a merge that changed nothing (result conflict): the conflicting files conflict markers cannot show -- not text, a link, or removed on one side -- sorted."`
 	Error       string   `json:"error,omitempty" doc:"Why the update failed."`
 }
 

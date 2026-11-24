@@ -419,14 +419,17 @@ var routes = slices.Concat([]route{
 		tag:     "Workspaces",
 		summary: "Update a workspace's copy",
 		idDoc:   "A workspace id (ws_ and 16 hex digits). Another shape gets 404.",
-		doc: "Bring the person's folder as it is now into a sandbox workspace's copy, so the session's unapplied work sits on top of the folder and a later apply writes only that work. Use it when an apply was refused because the folder changed since the copy was made (another session applied, or the person edited). It is a three-way merge in the copy's private git: the last applied state as the base, the copy's work as one side, the folder now as the other. The person's folder is never written, only read. No body is read.\n\n" +
-			"A clean merge answers 200 with state updated: the copy now holds both the folder's changes and the session's, and the next apply writes just the session's work. A real conflict (the same lines changed on both sides) answers 200 with state conflict and the files in conflicts; nothing changed, and the person can ask the agent to resolve them in a turn. Ignored files (node_modules and the like) are not merged.\n\n" +
+		doc: "Bring the person's folder as it is now into a sandbox workspace's copy, so the session's unapplied work sits on top of the folder and a later apply writes only that work. Use it when an apply was refused because the folder changed since the copy was made (another session applied, or the person edited). It is a three-way merge in the copy's private git: the last applied state as the base, the copy's work as one side, the folder now as the other. The person's folder is never written, only read. The body is optional: mode merge asks for a merge (below).\n\n" +
+			"A clean merge answers 200 with state updated: the copy now holds both the folder's changes and the session's, and the next apply writes just the session's work. A real conflict (the same lines changed on both sides) answers 200 with state conflict and the files in conflicts; nothing changed. Ignored files (node_modules and the like) are not merged.\n\n" +
+			"With mode merge, a conflict does not stop it: the copy gets each conflicting file with both sides between conflict markers, the folder baseline moves to the folder now, and it answers 200 with state merged and the files in unresolved. The markers are labelled this session and your folder. The agent's next turn combines them; until an apply or discard finishes, an apply refuses, as a conflict, any file that still holds them, whatever its path (a rename or a later update does not carry one past it). A conflict markers cannot show (a file that is not text, a link, or one removed on one side) makes the merge change nothing: state conflict, those files in unmergeable and error saying why, so no side's change is lost. A merge with no conflict is an update. A merge is refused with 409 while a turn of the workspace runs or waits, so the markers land between turns.\n\n" +
 			"One apply, discard or update runs per workspace, so an update while one of them is still running or waiting is refused with 409. A running TURN does not refuse it: the update waits behind the turn in the lane, and what it folds is worked out when it runs. The reply waits up to 30 seconds; past that it is 202 with state queued or running. A workspace that works in the folder as it is answers 400.",
-		replies: []reply{ok(200, UpdateState{}, "updated: the folder was merged into the copy. conflict: conflicts lists the files; nothing changed."),
+		body:    UpdateRequest{},
+		bodyOpt: true,
+		replies: []reply{ok(200, UpdateState{}, "updated: the folder was merged into the copy. conflict: conflicts lists the files; nothing changed. merged: unresolved lists the files left with conflict markers for the agent."),
 			ok(202, UpdateState{}, "The update has not finished yet (it waits behind a running turn)."),
 			badRequest,
 			fail(404, "This service keeps no queue, or no such workspace."),
-			ok(409, UpdateState{}, "Refused: an apply, discard or update of the workspace is still running or waiting. Nothing changed."),
+			ok(409, UpdateState{}, "Refused: an apply, discard or update of the workspace is still running or waiting, or (a merge) a turn of it is. Nothing changed."),
 			tooMany, fail(503, "The runner holding the copy has not been seen for a minute. Nothing changed."), storeFailed},
 		serve: (*API).updateWorkspace},
 	{method: "GET", path: "/api/v0/workspaces/{id}/changes", op: "workspaceChanges",
@@ -460,6 +463,7 @@ var routes = slices.Concat([]route{
 			"Before it writes anything it checks every file in the folder: one that is neither as it was at the changes' start nor already as they leave it refuses the whole apply, " +
 			"with 409, state refused, and each file in conflicts with why. Nothing is written then, so the agent can read why and make another turn. " +
 			"A file is never looked up through a link in the folder. A turn may put a folder where a link was, or change only the case of a name. " +
+			"After an update's merge left conflict markers in the copy, and until an apply or discard finishes, a file that still holds them (<<<<<<< this session ... >>>>>>> your folder) is refused the same way, until the agent combines it; a workspace with no such merge never checks. " +
 			"Applying again when nothing is unapplied is a no-op: 200 with already true. " +
 			"An apply that was refused may be asked for again. " +
 			"It runs on the runner of the folder's machine, in a place of its own, so it does not wait behind running turns. " +

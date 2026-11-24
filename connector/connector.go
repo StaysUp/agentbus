@@ -396,6 +396,9 @@ const (
 	WhyNotFile = "is a folder or cannot be read in your folder"
 	// WhyNoFolder: the file's own folder, or one above it, is no folder.
 	WhyNoFolder = "belongs in a folder that is a file or a link in your folder"
+	// WhyMarkers: a merge left both sides in the file between conflict
+	// markers, and they are still there.
+	WhyMarkers = "still holds conflict markers from the merge; ask the agent to finish combining it"
 )
 
 // More apply refusals, in fixed wording.
@@ -423,7 +426,7 @@ var applyMu sync.Mutex
 // from the store writes nothing either. Only a failure while files are put
 // in place leaves some written; ErrPartial says so, and Applied lists them.
 func (c *Connector) Apply(ctx context.Context, ref, from, to string) (Applied, error) {
-	out, _, err := c.apply(ctx, ref, from, to, false)
+	out, _, err := c.apply(ctx, ref, from, to, false, false)
 	return out, err
 }
 
@@ -433,13 +436,16 @@ func (c *Connector) Apply(ctx context.Context, ref, from, to string) (Applied, e
 // Conflicts are in the preview, not an error. It writes nothing in the
 // folder; it may fetch the small files it shows into this machine's store.
 func (c *Connector) Preview(ctx context.Context, ref, from, to string) (queue.PreviewResult, error) {
-	_, p, err := c.apply(ctx, ref, from, to, true)
+	_, p, err := c.apply(ctx, ref, from, to, true, false)
 	return p, err
 }
 
 // apply is Apply, or with dry its Preview: dry stops after the conflict
-// check, before anything is staged or written.
-func (c *Connector) apply(ctx context.Context, ref, from, to string, dry bool) (Applied, queue.PreviewResult, error) {
+// check, before anything is staged or written. With checkMarkers (a merge left
+// conflict markers in the copy), a file to write that still holds them
+// (workspace.HasMergeMarkers) is a conflict (WhyMarkers), never written: the
+// agent has not combined it.
+func (c *Connector) apply(ctx context.Context, ref, from, to string, dry, checkMarkers bool) (Applied, queue.PreviewResult, error) {
 	var none queue.PreviewResult
 	defer lockRef(ref)()
 	// A dry run writes nothing, so it keeps no other apply out: one into a
@@ -539,6 +545,24 @@ func (c *Connector) apply(ctx context.Context, ref, from, to string, dry bool) (
 			shown = append(shown, shownFile{rel: st.Path, to: fb, exists: exists || why == WhyNotFile, mode: mode, unread: why == WhyNotFile})
 		}
 	}
+	// While a merge's markers may be in the copy, every file to write is read
+	// for them, whatever its path: a rename or a later update cannot carry one
+	// past this check.
+	kept := ops[:0]
+	for _, o := range ops {
+		if checkMarkers && o.to != nil && !o.chmod && o.to.Mode.IsRegular() {
+			marked, err := c.hasMergeMarkers(ctx, o.to.Hash)
+			if err != nil {
+				return Applied{}, none, err
+			}
+			if marked {
+				conflict.Files = append(conflict.Files, ConflictFile{o.rel, WhyMarkers})
+				continue
+			}
+		}
+		kept = append(kept, o)
+	}
+	ops = kept
 	sort.Slice(conflict.Files, func(i, j int) bool { return conflict.Files[i].Path < conflict.Files[j].Path })
 	if dry {
 		p, err := c.preview(ctx, rt, shown, conflict.Files)
@@ -663,7 +687,7 @@ type shownFile struct {
 func (c *Connector) preview(ctx context.Context, rt *os.Root, shown []shownFile, conflicts []ConflictFile) (queue.PreviewResult, error) {
 	p := queue.PreviewResult{Files: make([]queue.PreviewFile, 0, len(shown)), Count: len(shown)}
 	for _, f := range conflicts {
-		p.Conflicts = append(p.Conflicts, queue.ApplyConflict{Path: f.Path, Why: f.Why})
+		p.Conflicts = append(p.Conflicts, queue.ApplyConflict{Path: f.Path, Why: f.Why, Markers: f.Why == WhyMarkers})
 	}
 	small := func(f *workspace.File) bool {
 		return f != nil && f.Mode&fs.ModeSymlink == 0 && f.Size <= workspace.MaxFileDiff
@@ -772,6 +796,33 @@ func (c *Connector) changeset(ctx context.Context, h string) (*workspace.Changes
 		return nil, ErrChangeset
 	}
 	return &cs, nil
+}
+
+// hasMergeMarkers reads blob h from the store as a stream and reports
+// whether it holds an update's merge markers. A blob that cannot be read
+// refuses the apply (ErrChangeset), so a marked file is never written for want
+// of a read.
+func (c *Connector) hasMergeMarkers(ctx context.Context, h string) (bool, error) {
+	src := blobs.Local{Store: c.Store}
+	if c.Remote != nil {
+		src.From = c.Remote
+	}
+	rc, err := src.Open(ctx, h)
+	if err != nil {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		return false, ErrChangeset
+	}
+	defer rc.Close()
+	marked, err := workspace.HasMergeMarkers(rc)
+	if err != nil {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		return false, ErrChangeset
+	}
+	return marked, nil
 }
 
 // stageFile writes the file f, from its blob, as tmp of rt.
@@ -907,20 +958,21 @@ func (j Jobs) FolderJob(ctx context.Context, path string) (string, error) {
 }
 
 // PreviewJob is Preview, for a preview job: Apply's dry run.
-func (j Jobs) PreviewJob(ctx context.Context, ref, from, to string) (queue.PreviewResult, error) {
-	return j.Preview(ctx, ref, from, to)
+func (j Jobs) PreviewJob(ctx context.Context, ref, from, to string, checkMarkers bool) (queue.PreviewResult, error) {
+	_, p, err := j.apply(ctx, ref, from, to, true, checkMarkers)
+	return p, err
 }
 
 // ApplyJob is Apply, for an apply job: the files written, or the conflicts
 // that refused it; partial when not all files could be put in place.
-func (j Jobs) ApplyJob(ctx context.Context, ref, from, to string) (files []string, conflicts []queue.ApplyConflict, partial bool, err error) {
-	done, err := j.Apply(ctx, ref, from, to)
+func (j Jobs) ApplyJob(ctx context.Context, ref, from, to string, checkMarkers bool) (files []string, conflicts []queue.ApplyConflict, partial bool, err error) {
+	done, _, err := j.apply(ctx, ref, from, to, false, checkMarkers)
 	var cf *Conflict
 	switch {
 	case errors.As(err, &cf):
 		out := make([]queue.ApplyConflict, len(cf.Files))
 		for i, x := range cf.Files {
-			out[i] = queue.ApplyConflict{Path: x.Path, Why: x.Why}
+			out[i] = queue.ApplyConflict{Path: x.Path, Why: x.Why, Markers: x.Why == WhyMarkers}
 		}
 		return nil, out, false, nil
 	case errors.Is(err, ErrPartial):

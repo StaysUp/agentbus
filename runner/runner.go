@@ -1222,7 +1222,7 @@ func (r *Runner) updateWork(ctx context.Context, at *attempt) queue.Finish {
 	if !ok {
 		return refuse(folderUnknown, http.StatusBadRequest)
 	}
-	res, err := b.UpdateFrom(s, sp.Restore, folder)
+	res, err := b.UpdateFrom(s, sp.Restore, folder, sp.Merge)
 	if err != nil {
 		if errors.Is(err, isolation.ErrNoUpdate) {
 			return refuse(err.Error(), http.StatusBadRequest)
@@ -1237,7 +1237,7 @@ func (r *Runner) updateWork(ctx context.Context, at *attempt) queue.Finish {
 		// records workspace.updated(result conflict) and the person can ask the
 		// agent to resolve them.
 		return queue.Finish{Status: queue.Finished,
-			Result: mustJSON(queue.Result{Update: &queue.UpdateResult{Conflicts: res.Conflicts}})}
+			Result: mustJSON(queue.Result{Update: &queue.UpdateResult{Conflicts: res.Conflicts, Unmergeable: res.Unmergeable}})}
 	}
 	// Publish the folder's current state (the new apply baseline) and the merge as
 	// changesets, so an apply reads them from the store by blob. UpdateFrom has
@@ -1268,7 +1268,7 @@ func (r *Runner) updateWork(ctx context.Context, at *attempt) queue.Finish {
 		return undo("this runner has no store to save the merge, so nothing was updated")
 	}
 	return queue.Finish{Status: queue.Finished, Result: mustJSON(queue.Result{Update: &queue.UpdateResult{
-		From: fromCS, To: toCS, TheirsCheckpoint: res.Theirs, MergedCheckpoint: res.Merged}})}
+		From: fromCS, To: toCS, TheirsCheckpoint: res.Theirs, MergedCheckpoint: res.Merged, Unresolved: res.Unresolved}})}
 }
 
 // isolate opens a session's first job's copy with b, and its turn starts

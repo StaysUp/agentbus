@@ -330,7 +330,7 @@ func previewedFrom(applies int, turn string, turns []string, p *queue.PreviewRes
 			Diff: f.Diff, DiffLeftOut: f.DiffLeftOut})
 	}
 	for _, c := range p.Conflicts {
-		pv.Conflicts = append(pv.Conflicts, event.RefusedFile{Path: c.Path, Why: c.Why})
+		pv.Conflicts = append(pv.Conflicts, event.RefusedFile{Path: c.Path, Why: c.Why, Markers: c.Markers})
 	}
 	return pv
 }

@@ -348,7 +348,11 @@ func (q *Queue) planApply(team, turn string, by *By) (plan applyPlan, done Job, 
 			to = upd.To
 		}
 	}
-	plan.spec = Spec{Session: ids.SessionID(j.Session), Workspace: j.Spec.Workspace, FolderRef: first.FolderRef, Machine: first.Machine, ApplyFrom: from, ApplyTo: to}
+	marked, err := q.mergedSince(team, ws)
+	if err != nil {
+		return plan, Job{}, false, err
+	}
+	plan.spec = Spec{Session: ids.SessionID(j.Session), Workspace: j.Spec.Workspace, FolderRef: first.FolderRef, Machine: first.Machine, ApplyFrom: from, ApplyTo: to, CheckMarkers: marked}
 	carried := make([]string, 0, at-mark)
 	for _, t := range turns[mark+1 : at+1] {
 		carried = append(carried, t.turn)
