@@ -47,7 +47,7 @@ func twoFolders(t *testing.T, e *env) (one, two, session string) {
 		}
 	}
 	inner := filepath.Join(two, "inner")
-	for _, args := range [][]string{{"init", "-q"}, {"add", "-A"}, {"-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "c"}} {
+	for _, args := range [][]string{{"init", "-q"}, {"add", "-A"}, {"-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-q", "-m", "c"}} {
 		if out, err := exec.Command("git", append([]string{"-C", inner}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v: %v %s", args, err, out)
 		}
@@ -97,5 +97,75 @@ func TestTurnInSeveralFolders(t *testing.T) {
 	if j := waitEnded(t, e, st2.Turn); j.State != "finished" {
 		res := strings.TrimSpace(string(j.Result))
 		t.Fatalf("second turn: %s %s", j.State, res)
+	}
+}
+
+// Review, Apply, Discard and Update of a workspace of several folders cover
+// every folder together. The preview lists each folder's files under its name;
+// a conflict in one folder refuses the whole apply and writes neither; once
+// clear, the apply writes each folder's part into it. A discard resets every
+// folder's copy, and an update brings each folder's own changes in.
+func TestSeveralFoldersReviewApply(t *testing.T) {
+	e := foldersEnv(t)
+	one, two, sess := twoFolders(t, e)
+	st := startTurn(t, e, `{"session":"`+sess+`","agent":"claude","prompt":"edit"}`)
+	outcomeKept(t, e, st.Turn)
+	ws := wsOfTurn(t, e, st.Turn)
+
+	c := changesOf(t, e, sess)
+	var paths []string
+	for _, f := range c.Files {
+		paths = append(paths, f.Path)
+	}
+	if want := []string{"one/a.txt", "two/inner/b.txt", "two/new.txt"}; !slices.Equal(paths, want) || !c.Unapplied || len(c.Conflicts) != 0 {
+		t.Fatalf("preview %v, want %v: %+v", paths, want, c)
+	}
+
+	// The person edits b.txt in the inner repo: the apply is refused, and
+	// one/a.txt is not written either.
+	os.WriteFile(filepath.Join(two, "inner", "b.txt"), []byte("MINE\n"), 0o644)
+	code, ap := applyWS(t, e, token, ws, "")
+	if code != 409 || len(ap.Conflicts) != 1 || ap.Conflicts[0].Path != "two/inner/b.txt" {
+		t.Fatalf("apply over a change in one folder: %d %+v", code, ap)
+	}
+	if b, _ := os.ReadFile(filepath.Join(one, "a.txt")); string(b) != "A1\n" {
+		t.Fatal("a refused apply wrote in another folder")
+	}
+
+	// Put back, the apply writes each folder's part.
+	os.WriteFile(filepath.Join(two, "inner", "b.txt"), []byte("B1\n"), 0o644)
+	if code, ap = applyWS(t, e, token, ws, ""); code != 200 {
+		t.Fatalf("apply: %d %+v", code, ap)
+	}
+	for p, want := range map[string]string{filepath.Join(one, "a.txt"): "A2\n", filepath.Join(two, "inner", "b.txt"): "B2\n", filepath.Join(two, "new.txt"): "new\n"} {
+		if b, _ := os.ReadFile(p); string(b) != want {
+			t.Errorf("%s after the apply: %q, want %q", p, b, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(one, "two")); !os.IsNotExist(err) {
+		t.Error("an apply wrote another folder's files into one")
+	}
+
+	// The person edits one/a.txt; an update brings it into the copy.
+	os.WriteFile(filepath.Join(one, "a.txt"), []byte("PERSON\n"), 0o644)
+	code, out := as(t, e, token, "POST", "/api/v0/workspaces/"+ws+"/update", "")
+	if code != 200 || !strings.Contains(out, `"updated":true`) {
+		t.Fatalf("update: %d %s", code, out)
+	}
+	if c := changesOf(t, e, sess); c.Unapplied {
+		t.Fatalf("after an update with no work of its own: %+v", c)
+	}
+
+	// A second turn, then a discard: every folder's copy goes back.
+	st2 := startTurn(t, e, `{"session":"`+sess+`","agent":"claude","prompt":"edit"}`)
+	outcomeKept(t, e, st2.Turn)
+	if c := changesOf(t, e, sess); !c.Unapplied {
+		t.Fatalf("the second turn's changes: %+v", c)
+	}
+	if code, out := as(t, e, token, "POST", "/api/v0/workspaces/"+ws+"/discard", ""); code != 200 {
+		t.Fatalf("discard: %d %s", code, out)
+	}
+	if c := changesOf(t, e, sess); c.Unapplied {
+		t.Fatalf("after a discard: %+v", c)
 	}
 }

@@ -289,11 +289,11 @@ func TestApplyRefusesMergeMarkers(t *testing.T) {
 		{Path: "renamed.txt", Now: fileOf(ours, 0o644)},
 		{Path: "doc.md", Base: base["doc.md"], Now: fileOf(gits, 0o644)},
 	}}, map[string]string{"m": ours, "g": gits})
-	p, err := j.PreviewJob(context.Background(), ref, "", marked, true)
+	p, err := j.PreviewJob(context.Background(), []workspace.Place{{Ref: ref}}, "", marked, true)
 	if err != nil || len(p.Conflicts) != 1 || p.Conflicts[0].Path != "renamed.txt" || p.Conflicts[0].Why != WhyMarkers || !p.Conflicts[0].Markers {
 		t.Fatalf("preview with markers: conflicts %+v err %v, want renamed.txt %q", p.Conflicts, err, WhyMarkers)
 	}
-	_, conflicts, _, err := j.ApplyJob(context.Background(), ref, "", marked, true)
+	_, conflicts, _, err := j.ApplyJob(context.Background(), []workspace.Place{{Ref: ref}}, "", marked, true)
 	if err != nil || len(conflicts) != 1 || conflicts[0].Path != "renamed.txt" || !conflicts[0].Markers {
 		t.Fatalf("apply with markers: conflicts %+v err %v, want renamed.txt refused", conflicts, err)
 	}
@@ -306,7 +306,7 @@ func TestApplyRefusesMergeMarkers(t *testing.T) {
 		{Path: "renamed.txt", Now: fileOf("OURS\nTHEIRS\n", 0o644)},
 		{Path: "doc.md", Base: base["doc.md"], Now: fileOf(gits, 0o644)},
 	}}, map[string]string{"r": "OURS\nTHEIRS\n", "g": gits})
-	files, conflicts, _, err := j.ApplyJob(context.Background(), ref, "", resolved, true)
+	files, conflicts, _, err := j.ApplyJob(context.Background(), []workspace.Place{{Ref: ref}}, "", resolved, true)
 	if err != nil || len(conflicts) != 0 || len(files) != 3 {
 		t.Fatalf("apply once resolved: files %v conflicts %+v err %v", files, conflicts, err)
 	}
@@ -324,7 +324,7 @@ func TestApplyLargeFileReadForMarkers(t *testing.T) {
 	cs := putChangeset(t, c, workspace.Changeset{Space: "job_1", Checkpoint: "b", Files: []workspace.FileChange{
 		{Path: "big.txt", Now: fileOf(big, 0o644)},
 	}}, map[string]string{"b": big})
-	files, conflicts, _, err := Jobs{Connector: c}.ApplyJob(context.Background(), ref, "", cs, true)
+	files, conflicts, _, err := Jobs{Connector: c}.ApplyJob(context.Background(), []workspace.Place{{Ref: ref}}, "", cs, true)
 	if err != nil || len(conflicts) != 0 || len(files) != 1 {
 		t.Fatalf("apply of a 65 MiB file: files %v conflicts %+v err %v", files, conflicts, err)
 	}
@@ -340,7 +340,7 @@ func TestApplyWithoutMergeIgnoresMarkers(t *testing.T) {
 	cs := putChangeset(t, c, workspace.Changeset{Space: "job_1", Checkpoint: "g", Files: []workspace.FileChange{
 		{Path: "guide.md", Now: fileOf(guide, 0o644)},
 	}}, map[string]string{"g": guide})
-	files, conflicts, _, err := Jobs{Connector: c}.ApplyJob(context.Background(), ref, "", cs, false)
+	files, conflicts, _, err := Jobs{Connector: c}.ApplyJob(context.Background(), []workspace.Place{{Ref: ref}}, "", cs, false)
 	if err != nil || len(conflicts) != 0 || len(files) != 1 {
 		t.Fatalf("apply of a guide with no merge pending: files %v conflicts %+v err %v", files, conflicts, err)
 	}

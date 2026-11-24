@@ -22,7 +22,7 @@ func commitRepo(t *testing.T, dir string, files map[string]string) {
 	for _, args := range [][]string{
 		{"init", "-q"},
 		{"add", "-A"},
-		{"-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "c"},
+		{"-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-q", "-m", "c"},
 	} {
 		if out, err := exec.Command(git, append([]string{"-C", dir}, args...)...).CombinedOutput(); err != nil {
 			t.Fatalf("git %v in %s: %v %s", args, dir, err, out)

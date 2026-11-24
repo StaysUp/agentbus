@@ -5,6 +5,22 @@ All notable changes to AgentBus. Full notes for each release are on the
 
 ## Unreleased
 
+### Added
+- **A session in several folders.** `POST /api/v0/workspaces` takes `folders` (2 to 8, on one
+  machine, Copy only). The copy holds each folder side by side under its name, and the agent works
+  at its top. Review lists every folder's files under its name. Apply checks every folder before it
+  writes any, and a conflict in one refuses the whole apply. Discard and Update cover every folder.
+  A file the agent leaves beside the folders, in none of them, refuses the apply until it is moved
+  or discarded.
+
+### Fixed
+- **Edits inside a repo nested in the folder were lost.** A committed repo inside a session's folder
+  was recorded as a commit pointer only, so the agent's edits inside it never reached Review or
+  Apply, and nothing said so. A new session's copy now records a nested repo's files as its own,
+  found again at every checkpoint, so they are in Review, Apply, Discard and Update like any other.
+  A repo the folder's `.gitignore` ignores stays out, as before. Sessions started earlier keep
+  their old behaviour.
+
 ## 0.6.5 (2026-11-24)
 
 ### Added

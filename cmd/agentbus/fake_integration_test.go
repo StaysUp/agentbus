@@ -381,6 +381,16 @@ func fakeAgent() {
 		}
 		os.WriteFile(filepath.Join(os.Getenv("HOME"), "left-by-a-turn"), nil, 0o600)
 	}
+	// With AGENTBUS_FAKE_WRITE, files the turn writes in its folder: rel=content
+	// pairs, separated by ';'.
+	if w := os.Getenv("AGENTBUS_FAKE_WRITE"); w != "" {
+		for _, kv := range strings.Split(w, ";") {
+			rel, c, _ := strings.Cut(kv, "=")
+			p := filepath.FromSlash(rel)
+			os.MkdirAll(filepath.Dir(p), 0o755)
+			os.WriteFile(p, []byte(c), 0o644)
+		}
+	}
 	// A run keeps the child's output out of every reply, so it reports through a file: its
 	// arguments, environment and folder.
 	if p := os.Getenv("AGENTBUS_FAKE_OUT"); p != "" {
