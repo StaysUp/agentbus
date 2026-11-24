@@ -227,3 +227,35 @@ func TestUnparsedInnerScriptSuggestsNoRule(t *testing.T) {
 		t.Error("a parsed nested script suggested no rule")
 	}
 }
+
+// A codex exec script whose cmd is known only at run time is decided as a
+// shell line's $cmd: held when the lists name no "*", with no rule to suggest,
+// and run when "*" allows every command. Before, the guard read no command
+// from it, so the script ran whatever the lists said. The script is the one
+// codex-cli 0.171.0 wrote in a live turn, 2026-11-23.
+func TestExecRunTimeCmdIsDecided(t *testing.T) {
+	loop := "for (const cmd of [\"uname -a\",\"date\",\"whoami\"]) {\n  const result = await tools.exec_command({cmd});\n" +
+		"  text({cmd, exit_code: result.exit_code, output: result.output});\n}\n"
+	hidden := `const c = "git push"; await tools.exec_command({cmd: c});`
+	for _, c := range []struct {
+		name   string
+		rules  Rules
+		script string
+		held   bool
+	}{
+		{"loop, narrowed lists", Rules{Allow: []string{"ls"}, Unlisted: Ask}, loop, true},
+		{"loop, every command allowed", Rules{Allow: []string{"*"}, Unlisted: Ask}, loop, false},
+		{"a forbidden command in a variable", Rules{Allow: []string{"ls"}, Forbid: []string{"git push"}, Unlisted: Ask}, hidden, true},
+	} {
+		b := decider(t, openai.Adapter{}, c.rules, nil)
+		item := map[string]any{"type": "custom_tool_call", "name": "exec", "input": c.script}
+		b.decide("c1", "c1", "exec", json.RawMessage(`"x"`), item)
+		_, refused := b.refused["c1"]
+		if c.held != (len(b.asked) > 0) || c.held != refused {
+			t.Errorf("%s: held %v, want %v (asked %+v)", c.name, len(b.asked) > 0, c.held, b.asked)
+		}
+		if r := rulesHeld(b); len(r) != 0 {
+			t.Errorf("%s: suggested rules %v for a command known only at run time", c.name, r)
+		}
+	}
+}
