@@ -132,11 +132,31 @@ func parse(line string) (*syntax.File, error) {
 // assignment is stripped, never decided. fn returns false to stop the walk.
 // depth bounds sh -c inside sh -c.
 func eachCommand(line string, depth int, fn func(words []string, soft bool) bool) {
+	walkCommands(line, depth, fn, nil)
+}
+
+// parsedThrough says whether the parser read line and every script it hands
+// to a shell, at every depth: no word of it came from eachToken's fallback.
+// Only such a line suggests rules; a fallback's runs of words are not
+// commands a person chose (2026-11-24: bash -c "echo hi; import sys'"
+// parsed outside, and its inner script suggested "hi import" and "sys").
+func parsedThrough(line string) bool {
+	ok := true
+	walkCommands(line, 0, func([]string, bool) bool { return ok }, func() { ok = false })
+	return ok
+}
+
+// walkCommands is eachCommand; unparsed, when set, is called for each line
+// or inner script the parser cannot read, before its fallback runs.
+func walkCommands(line string, depth int, fn func(words []string, soft bool) bool, unparsed func()) {
 	if depth > maxNesting {
 		return
 	}
 	f, err := parse(line)
 	if err != nil {
+		if unparsed != nil {
+			unparsed()
+		}
 		// A line the parser cannot read: the shell may still run part of it,
 		// so err toward refusing. Every run of words is decided (soft false),
 		// so an unlisted word anywhere holds or refuses the line.
@@ -156,7 +176,7 @@ func eachCommand(line string, depth int, fn func(words []string, soft bool) bool
 		if !ok {
 			return true
 		}
-		if !eachCall(st, call, depth, fn) {
+		if !eachCall(st, call, depth, fn, unparsed) {
 			stop = true
 		}
 		return !stop
@@ -165,7 +185,7 @@ func eachCommand(line string, depth int, fn func(words []string, soft bool) bool
 
 // eachCall decides one simple command and the scripts it hands to a shell.
 // Returns false when fn asked to stop.
-func eachCall(st *syntax.Stmt, call *syntax.CallExpr, depth int, fn func(words []string, soft bool) bool) bool {
+func eachCall(st *syntax.Stmt, call *syntax.CallExpr, depth int, fn func(words []string, soft bool) bool, unparsed func()) bool {
 	words := make([]string, 0, len(call.Args))
 	for _, w := range call.Args {
 		words = append(words, wordText(w))
@@ -211,13 +231,13 @@ func eachCall(st *syntax.Stmt, call *syntax.CallExpr, depth int, fn func(words [
 	emitted := 0
 	for _, s := range innerScripts(st, words) {
 		stop := false
-		eachCommand(s, depth+1, func(w []string, soft bool) bool {
+		walkCommands(s, depth+1, func(w []string, soft bool) bool {
 			emitted++
 			if !fn(w, soft) {
 				stop = true
 			}
 			return !stop
-		})
+		}, unparsed)
 		if stop {
 			return false
 		}

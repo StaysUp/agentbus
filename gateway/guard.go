@@ -746,13 +746,14 @@ func (b *guardBody) decide(key, callID, name string, input json.RawMessage, item
 // and a part with no clean rule are skipped, so an "always allow" adds the
 // command that was actually held — not an earlier allowed part or the wrapper.
 //
-// A line the parser cannot read suggests nothing. eachCommand still decides it
+// A line the parser cannot read, at any depth (a sh -c script inside it too),
+// suggests nothing. eachCommand still decides it
 // by every run of words, so it is held, but those runs are not commands: a
 // stray quote turns code inside quotes into "import", "if isinstance" and the
 // like (codex-cli 0.171.0, 2026-11-23, a live turn). Its card has no rule, so
 // "always allow" adds nothing for it; "allow once" still runs it.
 func (b *guardBody) suggestRules(line string) []string {
-	if _, err := parse(line); err != nil {
+	if !parsedThrough(line) {
 		return nil
 	}
 	var out []string
