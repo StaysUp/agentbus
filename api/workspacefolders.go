@@ -21,7 +21,7 @@ import (
 
 // createMultiWorkspace serves POST /api/v0/workspaces for a body with two or
 // more folders.
-func (a *API) createMultiWorkspace(w http.ResponseWriter, r *http.Request, body WorkspaceRequest) {
+func (a *API) createMultiWorkspace(w http.ResponseWriter, r *http.Request, body WorkspaceRequest, maker *event.Origin) {
 	if a.cfg.Queue == nil {
 		writeError(w, http.StatusNotFound, noTurns)
 		return
@@ -56,7 +56,7 @@ func (a *API) createMultiWorkspace(w http.ResponseWriter, r *http.Request, body 
 		}
 		parts = append(parts, f.Folder, f.FolderRef)
 	}
-	hash := requestHash(parts...)
+	hash := requestHash(withMaker(parts, maker)...)
 	id := queue.NewID("ws_")
 	a.idempotentCreate(w, event.WorkspaceCreated, "$.workspace", body.IdempotencyKey, hash, workspaceConflict, id,
 		func() (event.Event, bool) {
@@ -66,7 +66,7 @@ func (a *API) createMultiWorkspace(w http.ResponseWriter, r *http.Request, body 
 			}
 			sb := true
 			return event.Event{ID: "wc_" + id, Kind: event.WorkspaceCreated, Time: a.cfg.Now().UTC(),
-				Workspace: id, Machine: conn, Sandbox: &sb, Folders: folders}, true
+				Workspace: id, Machine: conn, Sandbox: &sb, Folders: folders, Origin: maker}, true
 		},
 		func(wsID string) {
 			out, ok, err := a.cfg.Store.Workspace(ids.WorkspaceID(wsID))

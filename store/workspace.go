@@ -280,6 +280,22 @@ func (s *Store) SessionAsker(session string) (asker string, found bool, err erro
 	return a.String, a.String != "", nil
 }
 
+// WorkspaceMaker is the session whose turn made workspace id (its
+// workspace.created origin), or "" for a workspace the person made, or none.
+func (s *Store) WorkspaceMaker(id ids.WorkspaceID) (session string, err error) {
+	var m sql.NullString
+	err = s.r.QueryRow(`SELECT json_extract(data, '$.origin.session') FROM events
+		WHERE kind = ? AND json_extract(data, '$.workspace') = ? ORDER BY seq LIMIT 1`,
+		string(event.WorkspaceCreated), string(id)).Scan(&m)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: read workspace maker: %w", err)
+	}
+	return m.String, nil
+}
+
 // WorkspaceSeed is one existing session's facts for the workspace migration,
 // read from the job queue's sessions table by the caller (so the store does not
 // import the queue). Folder and FolderRef are left for the migration to read

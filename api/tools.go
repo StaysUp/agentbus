@@ -85,7 +85,7 @@ func checkTools() error {
 			return fmt.Errorf("api: tool %s must be <verb>_<noun>, in lower case", t.name)
 		case seen[t.name]:
 			return fmt.Errorf("api: tool %s is named twice", t.name)
-		case rt.public || rt.self || rt.turn == mainOnly:
+		case rt.public || rt.self || rt.scope == scopeNone:
 			return fmt.Errorf("api: tool %s is on %s %s, which a turn token cannot call", t.name, rt.method, rt.path)
 		case strings.Contains(rt.path, "{id}") != (t.id != ""):
 			return fmt.Errorf("api: tool %s must name its {id} input, and only on a path with one", t.name)
@@ -110,7 +110,11 @@ func listedRoute(rt *route, g *run.Grant, turnsOnly bool, rules gateway.Rules, a
 	case g == nil:
 		return true
 	}
-	return turnRefusal(rt, rules, applyAllowed) == ""
+	actions := g.Actions
+	if !applyAllowed {
+		actions &^= run.ActApply // only discovery: the route decides per workspace
+	}
+	return turnRefusal(rt, actions, rules) == ""
 }
 
 // toolSchemas are the input schemas of every tool, by name, built from

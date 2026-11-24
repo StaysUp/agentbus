@@ -9,6 +9,7 @@ package api
 
 import (
 	"errors"
+	"github.com/staysup/agentbus/run"
 	"net/http"
 	"path"
 	"sort"
@@ -72,14 +73,14 @@ type ConnectInput struct {
 const noSubscriptions = "this service connects no subscriptions: it is not control"
 
 var subscriptionRoutes = []route{
-	{method: "GET", path: "/api/v0/subscriptions", op: "listSubscriptions",
+	{method: "GET", path: "/api/v0/subscriptions", op: "listSubscriptions", action: run.ActRead,
 		tag:     "Settings",
 		summary: "List subscriptions",
 		doc: "The person's own subscriptions that control can add to the model calls of agents on their runners, which hold no sign-in: " +
 			"for each harness, whether it is connected and until when, and how much of its plan is used (usage, with usage_known false when connected with no reading yet). A connected one is used for every turn, on one machine (agentbus up) as on every approved runner; a turn whose harness is not connected is refused with \"connect your <harness> subscription in Settings\".",
 		replies: []reply{ok(200, SubscriptionList{}, "The subscriptions."), fail(404, noSubscriptions)},
 		serve:   plain((*API).listSubscriptions)},
-	{method: "POST", path: "/api/v0/subscriptions/{id}/connect", op: "connectSubscription",
+	{method: "POST", path: "/api/v0/subscriptions/{id}/connect", op: "connectSubscription", action: run.ActAdmin,
 		idDoc:   "A harness, such as claude. Another shape gets 404.",
 		tag:     "Settings",
 		summary: "Connect a subscription",
@@ -91,14 +92,14 @@ var subscriptionRoutes = []route{
 		replies: []reply{ok(202, credentials.View{}, "The login, running."), badRequest, fail(404, "No login for this harness here."),
 			fail(500, "The login could not be started.")},
 		serve: (*API).connectSubscription},
-	{method: "GET", path: "/api/v0/subscriptions/{id}/connect", op: "getConnect",
+	{method: "GET", path: "/api/v0/subscriptions/{id}/connect", op: "getConnect", action: run.ActRead,
 		idDoc:   "A harness, such as claude. Another shape gets 404.",
 		tag:     "Settings",
 		summary: "Follow a connect",
 		doc:     "The harness's latest login: running, connected or failed. While it runs, the links and one-time code it printed; nothing else it prints is shown. Once it ended, only its state and why it failed.",
 		replies: []reply{ok(200, credentials.View{}, "The login."), fail(404, "No login was started for it since control started.")},
 		serve:   (*API).getConnect},
-	{method: "POST", path: "/api/v0/subscriptions/{id}/connect/input", op: "connectInput",
+	{method: "POST", path: "/api/v0/subscriptions/{id}/connect/input", op: "connectInput", action: run.ActAdmin,
 		idDoc:   "A harness, such as claude. Another shape gets 404.",
 		tag:     "Settings",
 		summary: "Answer a login",
@@ -106,14 +107,14 @@ var subscriptionRoutes = []route{
 		body:    ConnectInput{},
 		replies: []reply{{status: 204, doc: "Sent.", empty: true}, badRequest, fail(409, "No login is running for it.")},
 		serve:   (*API).connectInput},
-	{method: "DELETE", path: "/api/v0/subscriptions/{id}/connect", op: "cancelConnect",
+	{method: "DELETE", path: "/api/v0/subscriptions/{id}/connect", op: "cancelConnect", action: run.ActAdmin,
 		idDoc:   "A harness, such as claude. Another shape gets 404.",
 		tag:     "Settings",
 		summary: "Cancel a connect",
 		doc:     "Stop the harness's running login. The connect then fails, with cancelled set; a new POST .../connect starts again. A token kept from an earlier connect stays. No body is read.",
 		replies: []reply{{status: 204, doc: "Stopped.", empty: true}, badRequest, fail(404, noSubscriptions), fail(409, "No login is running for it.")},
 		serve:   (*API).cancelConnect},
-	{method: "DELETE", path: "/api/v0/subscriptions/{id}", op: "disconnectSubscription",
+	{method: "DELETE", path: "/api/v0/subscriptions/{id}", op: "disconnectSubscription", action: run.ActAdmin,
 		idDoc:   "A harness, such as claude. Another shape gets 404.",
 		tag:     "Settings",
 		summary: "Disconnect a subscription",
@@ -130,7 +131,7 @@ func keyRoutes() []route {
 	for _, name := range credentials.KeyNames {
 		label, use := keyLabel(name), keyUse(name)
 		op, p := keyOp(name), path.Join("/api/v0/subscriptions", name, "key")
-		out = append(out, route{method: "PUT", path: p, op: "set" + op + "Key",
+		out = append(out, route{method: "PUT", path: p, op: "set" + op + "Key", action: run.ActAdmin,
 			tag:     "Settings",
 			summary: "Set the " + label,
 			doc: "Keep the person's " + label + " on control, in place of any set before. It is kept beside the subscriptions, in control's data folder, " +
@@ -138,7 +139,7 @@ func keyRoutes() []route {
 			body:    KeyInput{},
 			replies: []reply{{status: 204, doc: "Kept.", empty: true}, badRequest, fail(404, noSubscriptions), storeFailed},
 			serve:   func(a *API, w http.ResponseWriter, r *http.Request, _ string) { a.setKey(w, r, name) }},
-			route{method: "DELETE", path: p, op: "remove" + op + "Key",
+			route{method: "DELETE", path: p, op: "remove" + op + "Key", action: run.ActAdmin,
 				tag:     "Settings",
 				summary: "Remove the " + label,
 				doc:     "Forget the " + label + " set in Settings. " + keyGone(name) + " No key set is not an error. No body is read.",

@@ -77,15 +77,23 @@ var turnTokenDoc = map[int]string{
 	treeSessionPath:  "A turn token may call this for a session in its request tree: its own, the person's session it started from, or one work in that tree started.",
 	treeSessionQuery: "A turn token may call this for a session in its request tree: without session, its own is used.",
 	treeTurn:         "A turn token may call this for a turn of a session in its request tree, by the turn id alone.",
-	askTurn: "A turn token may call this to ask another agent. " +
-		"A new session must be in the turn's own folder or one inside it (the person's folder when absent), always isolated. " +
-		"A session it continues must be one its request tree started, never its own or the person's. " +
-		"The turn's result comes back to the asking session as a later turn. Caps: " + askCaps,
+	askTurn: "A turn token may call this to start the one turn of a session it opened (POST /api/v0/sessions), " +
+		"in its own workspace or in one its session made. It never continues a session. " +
+		"The result comes back only when asked for: delivery set to its own session, or an on (POST /api/v0/ons). Caps: " + askCaps,
 	askedTurn:           "A turn token may stop only a turn its request tree asked for.",
 	anyRead:             "A turn token may call this too.",
-	changesWorkspaceTok: "A turn token may preview the changes of its own workspace (the workspace of its session).",
-	applyWorkspaceTok:   "A turn token may apply its own workspace's changes (the workspace of its session) only when the Agents may apply switch is on in Settings (Permissions) (off by default).",
-	renameSession:       "A turn token may rename a session in its request tree. It never closes one.",
+	changesWorkspaceTok: "A turn token may preview the changes of its own workspace (the workspace of its session) and of each workspace its session made.",
+	applyWorkspaceTok: "A turn token may apply its own workspace's changes (the workspace of its session) only when the Agents may apply switch is on in Settings (Permissions) (off by default). " +
+		"It may apply a workspace its session made when its own workspace works in the folder as it is (it can already write there), else only when that switch is on.",
+	createSessionTok: "A turn token may open a session in its own workspace (the default when workspace is absent) or in a workspace its session made; " +
+		"it alone may then start that session's turn.",
+	renameSession: "A turn token may rename a session in its request tree. It never closes one.",
+	workspaceTok:  "A turn token may read its own workspace (the workspace of its session) and each workspace its session made.",
+	createWorkspaceTok: "A turn token may make a workspace within its own authority: sandbox true (a copy), never false; on its own workspace's machine; " +
+		"and when its own workspace is a copy, only of folders that workspace holds, named by folder_ref (GET /api/v0/workspaces/{id} of its own workspace lists them). " +
+		"A turn token whose own workspace works in the folder as it is may copy any folder of its machine. " +
+		"Its session may then open sessions in the new workspace (POST /api/v0/sessions) and start their turns, read the new workspace's changes, " +
+		"and apply them when its own workspace works in the folder as it is, or when Agents may apply is on.",
 	toolList: "A turn token may call this: its list holds the tools its turn may call under permissions (none of them when tool:* is refused), " +
 		"and each call is checked by the operation it names.",
 }
@@ -475,8 +483,8 @@ func describe(runner bool) (*openapi3.T, error) {
 		}
 		tagged[rt.tag]++
 		desc := rt.doc
-		if rt.turn != mainOnly {
-			desc = strings.TrimSpace(desc + "\n\n" + turnTokenDoc[rt.turn])
+		if rt.scope != scopeNone {
+			desc = strings.TrimSpace(desc + "\n\n" + turnTokenDoc[rt.scope])
 		}
 		if rt.turns {
 			desc = strings.TrimSpace(desc + "\n\n" + turnsTokenDoc)

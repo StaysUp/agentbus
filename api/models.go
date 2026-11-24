@@ -7,6 +7,7 @@ package api
 
 import (
 	"context"
+	"github.com/staysup/agentbus/run"
 	"net/http"
 	"time"
 
@@ -53,7 +54,7 @@ type ModelSources struct {
 	KeyListed func(ctx context.Context, harness string) ([]byte, error)
 }
 
-var modelsRoute = route{method: "GET", path: "/api/v0/harnesses/{id}/models", op: "listModels",
+var modelsRoute = route{method: "GET", path: "/api/v0/harnesses/{id}/models", op: "listModels", action: run.ActRead,
 	idDoc:   "A harness, such as claude. Another shape gets 404.",
 	tag:     "Agents",
 	summary: "List a harness's models",
@@ -69,7 +70,7 @@ var modelsRoute = route{method: "GET", path: "/api/v0/harnesses/{id}/models", op
 	query: []param{{name: "access", doc: "subscription, openrouter, api or a provider (xai). Required."},
 		{name: "refresh", doc: "true fetches the list again now, rather than the one kept within the hour."}},
 	replies: []reply{ok(200, ModelList{}, "The models, or none with why."), fail(400, "No access was named."), fail(404, "No such harness, or it offers no such access.")},
-	turn:    anyRead,
+	scope:   anyRead,
 	serve:   (*API).listModels}
 
 func (a *API) listModels(w http.ResponseWriter, r *http.Request, id string) {

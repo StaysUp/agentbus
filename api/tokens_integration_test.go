@@ -200,13 +200,16 @@ func TestTurnToken(t *testing.T) {
 		{"POST", "/api/v0/agents", `{"harness":"claude","access":"subscription","name":"x"}`, 403},
 		// Only the person closes a session.
 		{"PATCH", "/api/v0/sessions/" + own, `{"closed":true}`, 403},
-		// Workspaces are the main token's: a turn token cannot create one or read
-		// the list. It may open a session, but only in its own workspace (the ask
-		// opens one there), so POST /sessions is allowed and its workspace is the
-		// token's own, whatever the body names.
+		// A turn token cannot read the list of workspaces. It makes a workspace
+		// only within its own authority (workspace_grant_integration_test.go):
+		// this one runs in a copy, so a typed path is refused. It opens a session
+		// in its own workspace (the default) or one its session made, never in
+		// another (0.6.6: it was silently its own before, which would have run a
+		// builder in the wrong place).
 		{"GET", "/api/v0/workspaces", "", 403},
 		{"POST", "/api/v0/workspaces", `{"folder":"/tmp"}`, 403},
-		{"POST", "/api/v0/sessions", `{"workspace":"ws_0123456789abcdef"}`, 201},
+		{"POST", "/api/v0/sessions", `{"workspace":"ws_0123456789abcdef"}`, 403},
+		{"POST", "/api/v0/sessions", `{}`, 201},
 		// A turn token previews or applies only its OWN workspace's changes
 		// (changesWorkspaceTok / applyWorkspaceTok). A workspace that is not the
 		// token's own is refused, so a review_turn reviewer cannot read another

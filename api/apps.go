@@ -220,7 +220,7 @@ func (a *API) checkApp(def toolreg.Tool) string {
 		if rt == nil {
 			return "step " + strconv.Quote(s.StepID) + ": no API operation named " + s.OperationID
 		}
-		if rt.public || rt.self || rt.turn == mainOnly {
+		if rt.public || rt.self || rt.scope == scopeNone {
 			return "step " + strconv.Quote(s.StepID) + ": operation " + s.OperationID + " cannot be called with a turn's own token"
 		}
 		// The app runtime fills only {id} in a path. An operation with another

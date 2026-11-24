@@ -238,6 +238,9 @@ func New(cfg Config) (*API, error) {
 			return nil, errors.New("api: a host is a name, without a port")
 		}
 	}
+	if err := checkActions(); err != nil {
+		return nil, err
+	}
 	if err := checkTools(); err != nil {
 		return nil, err
 	}
@@ -424,7 +427,7 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if a.self(w, r) {
 		return // the runner protocol checks its own tokens
 	}
-	who, g, ok := a.authorized(r)
+	g, ok := a.authorized(r)
 	if !ok {
 		if a.turnTokenEnded(r) {
 			writeError(w, http.StatusUnauthorized, turnTokenEnded)
@@ -433,48 +436,38 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "a valid bearer token is required")
 		return
 	}
-	switch who {
-	case byMain:
-		a.route(w, r, nil, false)
-	case byTurns:
-		a.route(w, r, nil, true)
-	default:
-		a.route(w, r, &g, false)
-	}
+	a.route(w, r, g)
 }
 
-// Who sent a request, by its token.
-const (
-	byMain  = iota // the main token
-	byTurns        // the turns token (Config.TurnsToken)
-	byTurn         // a live turn token, with its grant
-)
-
-// authorized checks the bearer token: the main token, the turns token, or a
-// live turn token and what it may read.
-func (a *API) authorized(r *http.Request) (who int, g run.Grant, ok bool) {
+// authorized resolves the bearer token to the grant it carries: the owner (main)
+// token to every action in every workspace, the turns token to its fixed set,
+// and a live turn's own token to its turn's actions in its own workspaces. ok is
+// false for any other token. This is the one place a token becomes a grant;
+// everything after reads the grant.
+func (a *API) authorized(r *http.Request) (g run.Grant, ok bool) {
 	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	if !ok {
-		return 0, g, false
+		return g, false
 	}
 	// Hashed first, so the compare takes the same time whatever the length.
 	sum := sha256.Sum256([]byte(got))
 	if subtle.ConstantTimeCompare(sum[:], a.token[:]) == 1 {
-		return byMain, g, true
+		return run.OwnerGrant(), true
 	}
 	if a.hasTurnsToken && subtle.ConstantTimeCompare(sum[:], a.turnsToken[:]) == 1 {
-		return byTurns, g, true
+		return run.TurnsGrant(), true
 	}
 	if a.cfg.Engine != nil {
 		if g, ok = a.cfg.Engine.TokenGrant(got); ok {
-			return byTurn, g, true
+			return run.ForTurn(g), true
 		}
 	}
 	if a.cfg.RunnerTokens != nil {
-		g, ok = a.cfg.RunnerTokens(got)
-		return byTurn, g, ok
+		if g, ok = a.cfg.RunnerTokens(got); ok {
+			return run.ForTurn(g), true
+		}
 	}
-	return byTurn, g, false
+	return run.Grant{}, false
 }
 
 // turnTokenEnded is the 401 for a turn's token once its turn has ended, so
@@ -847,4 +840,18 @@ func noBody(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return true
+}
+
+// checkActions says every route that takes a token names the one action class
+// it needs, so no route is open or closed by an omission.
+func checkActions() error {
+	for _, rt := range routes {
+		if rt.public || rt.self {
+			continue
+		}
+		if c := rt.action; c == 0 || c&(c-1) != 0 || !run.AllActions.Has(c) {
+			return fmt.Errorf("api: %s %s must name one action class", rt.method, rt.path)
+		}
+	}
+	return nil
 }

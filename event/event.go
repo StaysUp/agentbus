@@ -532,10 +532,11 @@ type Event struct {
 	// finds this turn and a different request under it is refused.
 	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"On turn.started: the idempotency_key POST /api/v0/turns was sent with. A retry with the same key returns this turn and starts nothing."`
 	RequestHash    string `json:"request_hash,omitempty" doc:"With idempotency_key: the SHA-256, in hex, of the request's fields. A request with the same key and other fields is refused."`
-	// Origin, only on a run's turn.started: the turn was not typed by the
+	// Origin, on a run's turn.started: the turn was not typed by the
 	// person. Another agent's turn asked for it through the API, or AgentBus
-	// started it to deliver the result of work this session asked for.
-	Origin *Origin `json:"origin,omitempty" doc:"On a run's turn.started: who started this turn when the person did not. Absent for a turn the person started."`
+	// started it to deliver the result of work this session asked for. On a
+	// session.created or workspace.created: the agent's turn that made it.
+	Origin *Origin `json:"origin,omitempty" doc:"On a run's turn.started: who started this turn when the person did not. On session.created and workspace.created: the agent's turn that made it (kind asked). Absent for what the person started or made."`
 	// Replayed, only on model.requested: how many messages of the earlier
 	// turn's history the gateway put in front of this request.
 	Replayed int `json:"replayed,omitempty" doc:"On model.requested: how many messages of the earlier turn's history the gateway put in front of this request. Absent when it put none."`

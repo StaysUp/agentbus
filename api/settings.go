@@ -14,10 +14,11 @@ package api
 // is stored in the record from there (RecordSettings).
 //
 // Only the main token reads or writes settings. A turn token never does:
-// these rows leave route.turn at mainOnly, and the turns token at false.
+// these rows leave route.scope at scopeNone, and the turns token at false.
 
 import (
 	"errors"
+	"github.com/staysup/agentbus/run"
 	"io"
 	"net/http"
 	"strconv"
@@ -87,7 +88,7 @@ var (
 const versionDoc = "Send If-Match with the ETag of your GET, or * to replace whatever is there. "
 
 var settingsRoutes = []route{
-	{method: "GET", path: "/api/v0/settings", op: "getSettings",
+	{method: "GET", path: "/api/v0/settings", op: "getSettings", action: run.ActRead,
 		tag:     "Settings",
 		summary: "Read the settings' state",
 		doc: "The settings database's state: the settings version, when the settings last changed, " +
@@ -101,7 +102,7 @@ var settingsRoutes = []route{
 		replies:   []reply{ok(200, SettingsInfo{}, "The settings' state."), noSettings, fail(http.StatusInternalServerError, "The settings could not be read.")},
 		versioned: true,
 		serve:     plain((*API).getSettings)},
-	{method: "GET", path: "/api/v0/settings/permissions", op: "getPermissions",
+	{method: "GET", path: "/api/v0/settings/permissions", op: "getPermissions", action: run.ActRead,
 		tag:     "Settings",
 		summary: "Read the policy",
 		doc: "The policy: what a turn may do without a person to ask, the limits on work agents ask for, and what a turn token may call. " +
@@ -111,7 +112,7 @@ var settingsRoutes = []route{
 		replies:   []reply{ok(200, settings.Policy{}, "The policy."), settingsBroken, noSettings},
 		versioned: true,
 		serve:     plain((*API).getPermissions)},
-	{method: "PUT", path: "/api/v0/settings/permissions", op: "putPermissions",
+	{method: "PUT", path: "/api/v0/settings/permissions", op: "putPermissions", action: run.ActAdmin,
 		tag:     "Settings",
 		summary: "Change the policy",
 		doc: "Replace the policy whole. A key left out takes its default. The next turn runs under it, and a turn token's next request.\n\n" +
@@ -126,7 +127,7 @@ var settingsRoutes = []route{
 			fail(http.StatusInternalServerError, "The setting could not be written.")},
 		versioned: true,
 		serve:     plain((*API).putPermissions)},
-	{method: "PATCH", path: "/api/v0/settings/permissions", op: "patchPermissions",
+	{method: "PATCH", path: "/api/v0/settings/permissions", op: "patchPermissions", action: run.ActAdmin,
 		tag:     "Settings",
 		summary: "Change some policy keys",
 		doc: "Change only the keys the body holds, as nested JSON such as {\"agent_api\":{\"tools\":false}}. A key left out keeps what it holds now. " +
@@ -141,7 +142,7 @@ var settingsRoutes = []route{
 			fail(http.StatusInternalServerError, "The setting could not be written.")},
 		versioned: true,
 		serve:     plain((*API).patchPermissions)},
-	{method: "GET", path: "/api/v0/settings/instructions", op: "getInstructions",
+	{method: "GET", path: "/api/v0/settings/instructions", op: "getInstructions", action: run.ActRead,
 		tag:     "Settings",
 		summary: "Read the instructions",
 		doc: "The text every turn gets as an instruction of its agent's own (Claude Code's --append-system-prompt, codex's developer_instructions). " +
@@ -149,7 +150,7 @@ var settingsRoutes = []route{
 		replies:   []reply{ok(200, InstructionsBody{}, "The instructions."), settingsBroken, noSettings},
 		versioned: true,
 		serve:     plain((*API).getInstructions)},
-	{method: "PUT", path: "/api/v0/settings/instructions", op: "putInstructions",
+	{method: "PUT", path: "/api/v0/settings/instructions", op: "putInstructions", action: run.ActAdmin,
 		tag:     "Settings",
 		summary: "Change the instructions",
 		doc: "Replace the instructions. The next turn gets them. Keep them the same across a session's turns where you can: " +
@@ -161,7 +162,7 @@ var settingsRoutes = []route{
 			fail(http.StatusInternalServerError, "The setting could not be written.")},
 		versioned: true,
 		serve:     plain((*API).putInstructions)},
-	{method: "GET", path: "/api/v0/settings/compaction", op: "getCompaction",
+	{method: "GET", path: "/api/v0/settings/compaction", op: "getCompaction", action: run.ActRead,
 		tag:     "Settings",
 		summary: "Read the compaction points",
 		doc: "The compaction points: per vendor, the share of a model's context window at which that vendor's harness compacts its context, " +
@@ -172,7 +173,7 @@ var settingsRoutes = []route{
 		replies:   []reply{ok(200, settings.Compaction{}, "The compaction points, every field filled."), settingsBroken, noSettings},
 		versioned: true,
 		serve:     plain((*API).getCompaction)},
-	{method: "PUT", path: "/api/v0/settings/compaction", op: "putCompaction",
+	{method: "PUT", path: "/api/v0/settings/compaction", op: "putCompaction", action: run.ActAdmin,
 		tag:     "Settings",
 		summary: "Change the compaction points",
 		doc: "Change the compaction points. Each field is a share of the window in (0, 1], such as 0.8. A field left out keeps its built-in default. " +

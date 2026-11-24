@@ -159,20 +159,6 @@ func (lt *liveTurn) exit() (stopped bool, killAt time.Time) {
 	return lt.stopped, lt.killAt
 }
 
-// Grant is what a turn's own token is: its session and turn, and the request
-// tree it is in (Root, the session the person's turn ran in, and Depth, how
-// many agents asked in a row before it). The API decides from it what the
-// token may do (api/tokens.go).
-type Grant struct {
-	Session, Turn string
-	Root          string
-	Depth         int
-	// Harness is the turn's harness, such as claude, when the token's
-	// maker knew it; empty for a session's next turn that names no agent,
-	// which runs on the session's latest.
-	Harness string
-}
-
 // turnTokens are the live turns' own tokens. A turn's token reads only its
 // own session, and works from the turn's start until its child exits. Kept as
 // SHA-256, never as the token.

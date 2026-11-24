@@ -94,7 +94,7 @@ func TestCheckAppRefusesMainOnly(t *testing.T) {
 	a := &API{byOp: opIndex()}
 	var mainOp string
 	for op, rt := range a.byOp {
-		if rt.turn == mainOnly && !rt.public && !rt.self {
+		if rt.scope == scopeNone && !rt.public && !rt.self {
 			mainOp = op
 			break
 		}

@@ -21,6 +21,7 @@ import (
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -151,8 +152,18 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
 			body.Folder, body.FolderRef, body.Folders = body.Folders[0].Folder, body.Folders[0].FolderRef, nil
 		}
 	}
+	// An agent's turn token makes a workspace only within its own authority,
+	// checked here, once, for one folder or several; the workspace records the
+	// turn that made it, which is how its session later reaches it.
+	var maker *event.Origin
+	if g := grantOf(r); g != nil {
+		if !a.workspaceAuthority(w, *g, &body) {
+			return
+		}
+		maker = &event.Origin{Kind: event.OriginAsked, Session: g.Session, Turn: g.Turn}
+	}
 	if len(body.Folders) > 0 {
-		a.createMultiWorkspace(w, r, body)
+		a.createMultiWorkspace(w, r, body, maker)
 		return
 	}
 	if (body.Folder == "") == (body.FolderRef == "") {
@@ -168,7 +179,7 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sandbox := body.Sandbox == nil || *body.Sandbox
-	hash := requestHash(body.Folder, body.FolderRef, body.Machine, strconv.FormatBool(sandbox))
+	hash := requestHash(withMaker([]string{body.Folder, body.FolderRef, body.Machine, strconv.FormatBool(sandbox)}, maker)...)
 	id := queue.NewID("ws_")
 	a.idempotentCreate(w, event.WorkspaceCreated, "$.workspace", body.IdempotencyKey, hash, workspaceConflict, id,
 		func() (event.Event, bool) {
@@ -215,7 +226,7 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
 			// (DisplayFolder); on a server the reference is the only pointer.
 			return event.Event{ID: "wc_" + id, Kind: event.WorkspaceCreated, Time: a.cfg.Now().UTC(),
 				Workspace: id, Folder: queue.DisplayFolder(a.cfg.Folders, ref, conn),
-				FolderRef: ref, Machine: conn, Sandbox: &sb}, true
+				FolderRef: ref, Machine: conn, Sandbox: &sb, Origin: maker}, true
 		},
 		func(wsID string) {
 			out, ok, err := a.cfg.Store.Workspace(ids.WorkspaceID(wsID))
@@ -225,6 +236,95 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
 			}
 			writeJSON(w, http.StatusCreated, out)
 		})
+}
+
+// Refusals of a workspace an agent's turn token may not make. Fixed wording.
+const (
+	agentDirectRefused  = "an agent may make only a workspace with sandbox true, a copy behind a wall; a workspace that works in a folder as it is is the person's to make"
+	agentNoWorkspace    = "a turn token has no workspace, so it has no folders to make a workspace of"
+	agentMachineRefused = "an agent makes workspaces only on its own workspace's machine"
+	agentPathRefused    = "an agent working in a copy names folders by folder_ref, from GET /api/v0/workspaces/{id} of its own workspace, never by path"
+	agentFolderRefused  = "an agent working in a copy may make a workspace only of folders its own workspace holds"
+)
+
+// workspaceAuthority checks that the workspace body asks for is within g's
+// authority, and has written the 403 when it is not. The rule (his call,
+// 2026-11-24): the new workspace is a copy (sandbox true), never direct; it is on
+// the machine of g's own workspace (machine is set to it when absent); and each
+// folder is one g can already reach. A direct workspace has no wall, so a copy of
+// any folder of its machine adds no power. A copy reaches only its own folders,
+// so it names them by folder_ref and each must be one of its own; a path is
+// refused before any runner reads it, so a walled agent cannot probe the
+// machine's disk. A workspace made this way is a copy whose folders are within
+// its maker's, so a chain of makes never reaches further than the first.
+func (a *API) workspaceAuthority(w http.ResponseWriter, g run.Grant, body *WorkspaceRequest) bool {
+	refuse := func(msg string) bool {
+		writeError(w, http.StatusForbidden, msg)
+		return false
+	}
+	if body.Sandbox != nil && !*body.Sandbox {
+		return refuse(agentDirectRefused)
+	}
+	ownID, found, err := a.workspaceOf(g.Session)
+	if err != nil {
+		a.internal(w)
+		return false
+	}
+	if !found {
+		return refuse(agentNoWorkspace)
+	}
+	own, found, err := a.cfg.Store.Workspace(ownID)
+	if err != nil {
+		a.internal(w)
+		return false
+	}
+	if !found {
+		return refuse(agentNoWorkspace)
+	}
+	machine := own.Machine
+	if machine == "" && a.cfg.Folders != nil {
+		machine = a.cfg.Folders.Machine()
+	}
+	switch body.Machine {
+	case "":
+		body.Machine = machine
+	case machine:
+	default:
+		return refuse(agentMachineRefused)
+	}
+	if !own.Sandbox {
+		return true
+	}
+	holds := map[string]bool{}
+	for _, f := range own.Folders {
+		if f.FolderRef != "" {
+			holds[f.FolderRef] = true
+		}
+	}
+	asked := body.Folders
+	if len(asked) == 0 {
+		asked = []WorkspaceFolderRequest{{Folder: body.Folder, FolderRef: body.FolderRef}}
+	}
+	for _, f := range asked {
+		if f.Folder != "" {
+			return refuse(agentPathRefused)
+		}
+		if !holds[f.FolderRef] {
+			return refuse(agentFolderRefused)
+		}
+	}
+	return true
+}
+
+// withMaker adds the session of the turn that makes a workspace to its request
+// hash's parts: the same idempotency_key sent by another maker is another
+// request, never the first maker's workspace handed back. The person's
+// requests hash as they always have.
+func withMaker(parts []string, o *event.Origin) []string {
+	if o == nil {
+		return parts
+	}
+	return append(parts, "maker", o.Session)
 }
 
 // getWorkspace serves GET /api/v0/workspaces/{id}.
@@ -617,23 +717,38 @@ func (a *API) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, msg)
 		return
 	}
-	// A turn token creates a session only in its own workspace (the ask opens
-	// one beside the asker, in the same copy); the main token names it. The
+	// A turn token creates a session in its own workspace (the ask opens one
+	// beside the asker, in the same copy) or in one its session made; the main
+	// token names any. The
 	// asker is recorded on the session so only the token that opened a session
 	// may start its turn (askChecks), now that asks share one workspace.
 	wsID := ids.WorkspaceID(body.Workspace)
 	var asker *event.Origin
 	if g := grantOf(r); g != nil {
-		ws, found, err := a.cfg.Store.WorkspaceOf(ids.SessionID(g.Session))
-		if err != nil {
-			a.internal(w)
-			return
+		// Its own workspace when the body names none (an ask opens its session
+		// beside the asker), else one its session made.
+		if body.Workspace == "" {
+			ws, found, err := a.cfg.Store.WorkspaceOf(ids.SessionID(g.Session))
+			if err != nil {
+				a.internal(w)
+				return
+			}
+			if !found {
+				writeError(w, http.StatusForbidden, "a turn token has no workspace to create a session in")
+				return
+			}
+			wsID = ws
+		} else {
+			own, err := a.ownWorkspace(*g, body.Workspace)
+			if err != nil {
+				a.internal(w)
+				return
+			}
+			if own == notOwn {
+				writeError(w, http.StatusForbidden, "a turn token opens sessions only in its own workspace or one its session made")
+				return
+			}
 		}
-		if !found {
-			writeError(w, http.StatusForbidden, "a turn token has no workspace to create a session in")
-			return
-		}
-		wsID = ws
 		asker = &event.Origin{Kind: event.OriginAsked, Session: g.Session, Turn: g.Turn}
 	} else if !sessionID.MatchString(body.Workspace) {
 		writeError(w, http.StatusBadRequest, "workspace must be "+sessionID.String())
