@@ -288,6 +288,9 @@ type config struct {
 	// capacity is a runner's -capacity: the most delegated turns its machine
 	// runs at once. Zero means the settings decide (runner.Config.Capacity).
 	capacity int
+	// passEnv names more variables a turn in a home of its own keeps
+	// (-pass-env, engine.Config.PassEnv).
+	passEnv []string
 	// For tests: how often a runner heartbeats, and how long POST
 	// /api/v0/turns waits for a turn to start. Zero means the defaults.
 	heartbeat, turnWait time.Duration
@@ -809,7 +812,7 @@ func start(c config) (*service, error) {
 		// continuation of a session that already has a clean home — still uses
 		// it (run/run.go decides per turn).
 		homes := filepath.Join(c.home, homesDir)
-		eng, err = engine.New(engine.Config{Store: st, BaseURL: baseURL, ReplayBase: replayBase, AgentName: agentName, Homes: homes, Personal: c.builtin != nil,
+		eng, err = engine.New(engine.Config{Store: st, BaseURL: baseURL, ReplayBase: replayBase, AgentName: agentName, Homes: homes, Personal: c.builtin != nil, PassEnv: c.passEnv,
 			Settings: cfgStore, Protect: protect, APIDir: apiLink(c.home, c.self, svcLog), Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace, Logf: svcLog.Printf,
 			RunLog: func(session string, data []byte) {
 				// The session id is the service's own hex, so it is a plain

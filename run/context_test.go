@@ -90,16 +90,18 @@ func TestJoinText(t *testing.T) {
 func TestHome(t *testing.T) {
 	homes := filepath.Join(t.TempDir(), "homes")
 	e := &Engine{cfg: Config{Homes: homes}}
-	env := []string{"PATH=/bin", "HOME=/home/runner", "XDG_CONFIG_HOME=/home/runner/.config", "CODEX_HOME=/home/runner/.codex", "KEEP=1"}
+	env := []string{"PATH=/bin", "HOME=/home/runner", "XDG_CONFIG_HOME=/home/runner/.config", "CODEX_HOME=/home/runner/.codex", "KEEP=1",
+		"GH_TOKEN=dummy-gh"}
+	keep := []string{"KEEP"}
 	// A next turn of a session started before homes: no home, env as it is.
-	got, made, err := e.home("s0", false, hn("codex"), env)
+	got, made, err := e.home("s0", false, hn("codex"), env, keep)
 	if err != nil || made || !slices.Equal(got, env) {
 		t.Fatalf("an older session: %q %t %v", got, made, err)
 	}
 	if _, err := os.Stat(filepath.Join(homes, "s0")); !os.IsNotExist(err) {
 		t.Fatalf("an older session got a home: %v", err)
 	}
-	got, made, err = e.home("s1", true, hn("codex"), env)
+	got, made, err = e.home("s1", true, hn("codex"), env, keep)
 	if err != nil || !made {
 		t.Fatal(made, err)
 	}
@@ -111,7 +113,7 @@ func TestHome(t *testing.T) {
 	if fi, err := os.Stat(filepath.Join(dir, ".codex")); err != nil || fi.Mode().Perm() != 0o700 {
 		t.Fatalf("codex's folder: %v %v", fi, err)
 	}
-	got, made, err = e.home("s1", false, hn("claude"), env)
+	got, made, err = e.home("s1", false, hn("claude"), env, keep)
 	if err != nil || made || !slices.Contains(got, "CLAUDE_CONFIG_DIR="+filepath.Join(dir, ".claude")) {
 		t.Fatalf("a next turn on claude: %q %t %v", got, made, err)
 	}

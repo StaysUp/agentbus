@@ -30,6 +30,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -197,7 +198,14 @@ func (x *xproc) addRunnerVia(server, name string, folders ...string) {
 		"CODEX_HOME="+t.TempDir(),
 	)
 	env = append(env, x.agentEnv...)
-	args := []string{"runner", "-server", server, "-name", name}
+	// The runner runs each session in a home of its own, which keeps only the
+	// variables named in -pass-env: the fake agent's, and those set here.
+	pass := slices.Clone(fakeEnv)
+	for _, kv := range x.agentEnv {
+		k, _, _ := strings.Cut(kv, "=")
+		pass = append(pass, k)
+	}
+	args := []string{"runner", "-server", server, "-name", name, "-pass-env", strings.Join(pass, ",")}
 	for _, f := range folders {
 		args = append(args, "-folder", f)
 	}

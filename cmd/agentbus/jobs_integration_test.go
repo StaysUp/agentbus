@@ -271,7 +271,7 @@ func TestServerAndRunner(t *testing.T) {
 	}
 
 	signInRunner(t, "http://"+server.addr, tok, runnerHome, "far")
-	r, err := start(config{mode: modeRunner, listen: "127.0.0.1:0", home: runnerHome, upstream: mustURL("http://127.0.0.1:1"),
+	r, err := start(config{mode: modeRunner, passEnv: fakeEnv, listen: "127.0.0.1:0", home: runnerHome, upstream: mustURL("http://127.0.0.1:1"),
 		chatgpt: mustURL("http://127.0.0.1:1"), logf: t.Logf, lookPath: look, noReplay: true,
 		server: "http://" + server.addr, runnerName: "far", folders: []string{folder}})
 	if err != nil {

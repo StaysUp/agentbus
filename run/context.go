@@ -101,11 +101,13 @@ var homeVars = []string{"HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_H
 
 // home returns env with a turn of h pointed at session's home: HOME, and h's
 // own config variable at its config folder there (harness.Info.ConfigEnv).
+// The rest of env is cut to what such a turn keeps (cleanEnv): keep are the
+// variables the harness's wiring set (Launch.Keep).
 // A session's first turn makes the home (first); made says this call made
 // it, so a turn that then does not start removes it. A next turn of a session
 // that has no home, one started before homes were on, gets env as it is: its
 // vendor's transcript is in the service's own home, and its resume needs it.
-func (e *Engine) home(session string, first bool, h harness.Harness, env []string) (out []string, made bool, err error) {
+func (e *Engine) home(session string, first bool, h harness.Harness, env, keep []string) (out []string, made bool, err error) {
 	dir := filepath.Join(e.cfg.Homes, session)
 	if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
 		if !first {
@@ -124,7 +126,7 @@ func (e *Engine) home(session string, first bool, h harness.Harness, env []strin
 		}
 		set = append(set, i.ConfigEnv+"="+conf)
 	}
-	out = slices.DeleteFunc(slices.Clone(env), func(kv string) bool {
+	out = slices.DeleteFunc(cleanEnv(env, keep, e.cfg.PassEnv), func(kv string) bool {
 		k, _, _ := strings.Cut(kv, "=")
 		return slices.Contains(homeVars, k)
 	})

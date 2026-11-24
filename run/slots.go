@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -226,7 +227,7 @@ func turnEnv(env, parent []string, base, tok, apiDir string, asked *event.Origin
 	for _, kv := range env {
 		k, v, _ := strings.Cut(kv, "=")
 		switch {
-		case k == "AGENTBUS_URL" || k == "AGENTBUS_TOKEN" || k == "AGENTBUS_ASKED_BY_SESSION" || k == "AGENTBUS_ASKED_BY_TURN":
+		case slices.Contains(turnVars, k):
 			continue
 		case k == "PATH" && apiDir != "":
 			path = true

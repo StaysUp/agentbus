@@ -26,6 +26,7 @@ import (
 	"io"
 	"net/url"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/staysup/agentbus/jobs"
@@ -123,6 +124,10 @@ func parse(args []string, home string, stderr io.Writer) (config, bool) {
 	capacity := new(int)
 	retiredMaxRuns := new(int)
 	openOn := new(bool)
+	passEnv := new(string)
+	if c.mode != modeServer {
+		fl.StringVar(passEnv, "pass-env", "", "more of this process's variables, by name and comma-separated, that a turn in a home of its own keeps, such as MY_TOOL_HOME,GOPRIVATE; such a turn gets no other of this machine's variables but PATH, the locale, the temp folder and the proxies")
+	}
 	switch c.mode {
 	case modeUp:
 		fl.BoolVar(openOn, "open", false, "also open the cockpit's sign-in link in this desktop's browser; without it the link is only printed")
@@ -166,6 +171,15 @@ func parse(args []string, home string, stderr io.Writer) (config, bool) {
 		}
 	})
 	c.listen, c.noReplay, c.capacity = *listen, !*replayOn, *capacity
+	if *passEnv != "" {
+		for _, n := range strings.Split(*passEnv, ",") {
+			if !envName.MatchString(n) {
+				fmt.Fprintf(stderr, "%s: each of -pass-env is a variable's name: A-Z, a-z, 0-9 and _, not starting with a digit\n", name)
+				return c, false
+			}
+			c.passEnv = append(c.passEnv, n)
+		}
+	}
 	c.noOpen = c.mode == modeUp && !*openOn
 	if origin != nil {
 		c.origin = *origin
@@ -206,6 +220,9 @@ func parse(args []string, home string, stderr io.Writer) (config, bool) {
 	}
 	return c, true
 }
+
+// envName is the shape of a variable's name in -pass-env.
+var envName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]{0,127}$`)
 
 // enrollFileRemoved is what agentbus runner says to -enroll-token-file
 // since 0.5.1: control writes no enrollment token, and a machine joins only
