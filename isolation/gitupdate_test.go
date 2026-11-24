@@ -58,7 +58,7 @@ func TestUpdateCleanMerge(t *testing.T) {
 	// change line3 of a.txt, add theirs.txt, and an ignored dependency folder.
 	fixture(t, src, map[string]string{"a.txt": "line1\nline2\nTHEIRS\n", "theirs.txt": "yours\n", "node_modules/pkg.txt": "junk\n"})
 
-	res, err := b.UpdateFrom(s, "", src, false)
+	res, err := b.UpdateFrom(s, "", at(src), false)
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestUpdateConflictChangesNothing(t *testing.T) {
 	// The folder changed the same line a different way.
 	fixture(t, src, map[string]string{"a.txt": "THEIRS\nline2\n"})
 
-	res, err := b.UpdateFrom(s, "", src, false)
+	res, err := b.UpdateFrom(s, "", at(src), false)
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestUpdateKeepsFolderOnlyModeChange(t *testing.T) {
 	if err := os.Chmod(filepath.Join(src, "keep.txt"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	res, err := b.UpdateFrom(s, "", src, false)
+	res, err := b.UpdateFrom(s, "", at(src), false)
 	if err != nil || !res.Clean {
 		t.Fatalf("update: clean=%v conflicts=%v err=%v", res.Clean, res.Conflicts, err)
 	}
@@ -188,7 +188,7 @@ func TestUpdatePriorHeadUndoesTheMerge(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixture(t, src, map[string]string{"theirs.txt": "yours\n"})
-	res, err := b.UpdateFrom(s, "", src, false)
+	res, err := b.UpdateFrom(s, "", at(src), false)
 	if err != nil || !res.Clean {
 		t.Fatalf("update: clean=%v err=%v", res.Clean, err)
 	}
@@ -228,7 +228,7 @@ func TestUpdateKeepsNewlyIgnoredTrackedFile(t *testing.T) {
 	}
 	// The person adds keep.txt to .gitignore in the folder but keeps the file.
 	fixture(t, src, map[string]string{".gitignore": "keep.txt\n"})
-	res, err := b.UpdateFrom(s, "", src, false)
+	res, err := b.UpdateFrom(s, "", at(src), false)
 	if err != nil || !res.Clean {
 		t.Fatalf("update: clean=%v conflicts=%v err=%v", res.Clean, res.Conflicts, err)
 	}
@@ -255,7 +255,7 @@ func TestUpdateMergeLeavesMarkers(t *testing.T) {
 	fixture(t, src, map[string]string{"a.txt": "THEIRS\nline2\n", "b.txt": "b1\nb2\nTHEIRS\n", "theirs.txt": "yours\n"})
 	before := read(t, filepath.Join(src, "a.txt"))
 
-	res, err := b.UpdateFrom(s, "", src, true)
+	res, err := b.UpdateFrom(s, "", at(src), true)
 	if err != nil {
 		t.Fatalf("merge: %v", err)
 	}
@@ -303,7 +303,7 @@ func TestUpdateMergeCleanIsUpdate(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixture(t, src, map[string]string{"a.txt": "line1\nline2\nTHEIRS\n"})
-	res, err := b.UpdateFrom(s, "", src, true)
+	res, err := b.UpdateFrom(s, "", at(src), true)
 	if err != nil {
 		t.Fatalf("merge: %v", err)
 	}
@@ -343,7 +343,7 @@ func TestUpdateMergeRefusesUnmergeable(t *testing.T) {
 				t.Fatal(err)
 			}
 			folderSide(t, src)
-			res, err := b.UpdateFrom(s, "", src, true)
+			res, err := b.UpdateFrom(s, "", at(src), true)
 			if err != nil {
 				t.Fatalf("merge: %v", err)
 			}
@@ -375,7 +375,7 @@ func TestUpdateMergeKeepsFolderMode(t *testing.T) {
 	if err := os.Chmod(filepath.Join(src, "run.sh"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	res, err := b.UpdateFrom(s, "", src, true)
+	res, err := b.UpdateFrom(s, "", at(src), true)
 	if err != nil || !res.Clean || len(res.Unresolved) != 1 {
 		t.Fatalf("merge: %+v %v", res, err)
 	}
@@ -397,4 +397,9 @@ func TestRegularMode(t *testing.T) {
 			t.Errorf("regularMode(%q) = %v, want %v", m, !want, want)
 		}
 	}
+}
+
+// at finds every folder reference at path: a copy of one folder.
+func at(path string) FolderPaths {
+	return func(string) (string, bool) { return path, true }
 }

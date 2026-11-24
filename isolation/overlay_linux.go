@@ -234,7 +234,7 @@ func (overlayBackend) RestoreTo(s *Space, name string) error { return ErrNoResto
 
 // UpdateFrom is not built for the overlay backend: it keeps no private shadow
 // repo, so there is no three-way merge to run.
-func (overlayBackend) UpdateFrom(s *Space, base, folder string, merge bool) (UpdateResult, error) {
+func (overlayBackend) UpdateFrom(s *Space, base string, folders FolderPaths, merge bool) (UpdateResult, error) {
 	return UpdateResult{}, ErrNoUpdate
 }
 

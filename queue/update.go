@@ -76,7 +76,7 @@ func (q *Queue) Update(team string, ws ids.WorkspaceID, machine string, by *By, 
 	if err != nil {
 		return Job{}, false, err
 	}
-	if first.FolderRef == "" || first.Machine == "" {
+	if len(first.Places()) == 0 || first.Machine == "" {
 		return Job{}, false, ErrNotApplicable
 	}
 	// The update runs on the runner holding the copy (copy affinity routes it),
@@ -103,7 +103,7 @@ func (q *Queue) Update(team string, ws ids.WorkspaceID, machine string, by *By, 
 	// Its copy affinity keys by the workspace (CopyKey), so create routes it to
 	// the copy's runner. The head turn and folded turns are filled at the finish,
 	// not here (a turn may run while it waits in the lane).
-	spec := Spec{Workspace: ws, Machine: first.Machine, FolderRef: first.FolderRef, Restore: base, Merge: merge}
+	spec := Spec{Workspace: ws, Machine: first.Machine, FolderRef: first.FolderRef, Folders: first.Folders, Restore: base, Merge: merge}
 	return q.create(team, KindUpdate, "", spec, Links{ApplyBy: by}, Limits{}, "", nil)
 }
 

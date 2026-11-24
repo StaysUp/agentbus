@@ -938,6 +938,31 @@ func (r *Runner) prepare(ctx context.Context, at *attempt) *queue.Result {
 		at.ref = sp.RepoRef
 		b, _ := isolation.Get(isolation.Git)
 		return r.isolate(at, b, isolation.Request{Repo: repo, Base: sp.Base, Ref: sp.RepoRef})
+	case len(sp.Folders) > 0:
+		// A workspace with several folders: one copy holds each side by side,
+		// made by the copy backend, whatever the isolation setting names (only
+		// it copies several folders). A turn whose copy is made loads it.
+		if w := at.job.Workspace; w != nil && w.Kind == queue.WorkspaceCopy {
+			if res, reused := r.loadCopy(at, *w); reused {
+				return res
+			}
+		}
+		if !sp.Isolate {
+			return &queue.Result{Refused: "a workspace with several folders runs in a copy; it cannot work in its folders directly", Status: http.StatusBadRequest}
+		}
+		places := make([]isolation.Place, len(sp.Folders))
+		for i, p := range sp.Folders {
+			folder, ok := r.folderPath("", p.Ref, sp.Machine)
+			if !ok {
+				return &queue.Result{Refused: folderUnknown, Status: http.StatusBadRequest}
+			}
+			if info, err := os.Stat(folder); err != nil || !info.IsDir() {
+				return &queue.Result{Refused: "a folder of the workspace is not an existing directory", Status: http.StatusBadRequest}
+			}
+			places[i] = isolation.Place{Name: string(p.Name), Folder: folder, Ref: p.Ref}
+		}
+		b, _ := isolation.Get(isolation.Copy)
+		return r.isolate(at, b, isolation.Request{Places: places})
 	case sp.Folder != "" || sp.FolderRef != "":
 		// A continuation whose workspace already has a copy loads it here, before
 		// the source folder is resolved or checked (os.Stat below), so a
@@ -1158,6 +1183,9 @@ func (r *Runner) discardWork(at *attempt) queue.Finish {
 		if errors.Is(err, isolation.ErrNoRestore) {
 			return refuse(err.Error(), http.StatusBadRequest)
 		}
+		if errors.Is(err, isolation.ErrRepoInTheWay) {
+			return refuse(err.Error(), http.StatusConflict)
+		}
 		return refuse("the copy could not be reset to the last applied state, so nothing was discarded", http.StatusInternalServerError)
 	}
 	return queue.Finish{Status: queue.Finished}
@@ -1206,14 +1234,34 @@ func (r *Runner) updateWork(ctx context.Context, at *attempt) queue.Finish {
 	if r.cfg.FolderSide == nil || r.cfg.Folders == nil || sp.Machine != r.cfg.Folders.Machine() {
 		return refuse("update needs the copy and the folder on one machine; it is not available for a copy on another machine yet", http.StatusBadRequest)
 	}
-	folder, ok := r.folderPath("", sp.FolderRef, sp.Machine)
-	if !ok {
+	// Each part of the copy reads its own folder: the workspace's one, or each
+	// of its several. A copy of one folder made before its parts named the
+	// folder's reference is the job's folder.
+	paths := func(ref string) (string, bool) {
+		if ref == "" {
+			ref = sp.FolderRef
+		}
+		return r.folderPath("", ref, sp.Machine)
+	}
+	places := sp.Places()
+	if len(places) == 0 {
 		return refuse(folderUnknown, http.StatusBadRequest)
 	}
-	res, err := b.UpdateFrom(s, sp.Restore, folder, sp.Merge)
+	for _, p := range places {
+		if _, ok := paths(p.Ref); !ok {
+			return refuse(folderUnknown, http.StatusBadRequest)
+		}
+	}
+	res, err := b.UpdateFrom(s, sp.Restore, paths, sp.Merge)
 	if err != nil {
 		if errors.Is(err, isolation.ErrNoUpdate) {
 			return refuse(err.Error(), http.StatusBadRequest)
+		}
+		if errors.Is(err, isolation.ErrNoFolder) {
+			return refuse(folderUnknown, http.StatusBadRequest)
+		}
+		if errors.Is(err, isolation.ErrRepoInTheWay) {
+			return refuse(err.Error(), http.StatusConflict)
 		}
 		if ctx.Err() != nil {
 			return refuse("the update was stopped; nothing was changed", http.StatusConflict)

@@ -101,8 +101,8 @@ type Backend interface {
 	// the copy side of Discard. A backend that cannot do it yet returns
 	// ErrNoRestore, and the person's real folder is never touched.
 	RestoreTo(s *Space, name string) error
-	// UpdateFrom brings the person's folder as it is now (at path folder) into
-	// the copy by a three-way merge: base is the checkpoint the folder last
+	// UpdateFrom brings the person's folders as they are now (folders finds
+	// each by its reference) into the copy by a three-way merge: base is the checkpoint the folder last
 	// matched (the last applied one, or Base), the copy's head is "ours", and a
 	// fresh snapshot of the folder is "theirs". A clean merge records the folder
 	// state and the merge as two new checkpoints (UpdateResult.Theirs and
@@ -116,7 +116,7 @@ type Backend interface {
 	// (UpdateResult.Unmergeable) makes the merge change nothing, as an update
 	// does, so no side wins silently. A backend that cannot do it returns
 	// ErrNoUpdate.
-	UpdateFrom(s *Space, base, folder string, merge bool) (UpdateResult, error)
+	UpdateFrom(s *Space, base string, folders FolderPaths, merge bool) (UpdateResult, error)
 	// Close removes the copy and everything the space kept.
 	Close(s *Space) error
 }
@@ -147,6 +147,13 @@ type UpdateResult struct {
 	PriorHead string
 }
 
+// FolderPaths finds the person's folder of a reference on this machine: the
+// runner's folder registry. ok is false for a folder it does not hold.
+type FolderPaths func(ref string) (path string, ok bool)
+
+// ErrNoFolder: an update found no folder on this machine for a part of the copy.
+var ErrNoFolder = errors.New("isolation: a folder of the copy is not on this machine")
+
 // ErrNoRestore: this backend cannot reset a copy to a checkpoint yet, so a
 // Discard of a workspace on it is refused with a plain message for the person.
 var ErrNoRestore = errors.New("Discard is not available for this workspace yet")
@@ -171,6 +178,10 @@ type Request struct {
 	// Ref is the folder's reference, kept with the space: the Lender reads
 	// the folder by it.
 	Ref string
+	// Places, in place of Folder and Ref, for a workspace with several folders
+	// (copy backend only): each folder, copied under the copy's top in a
+	// folder of its name.
+	Places []Place
 	// Ctx, when not nil, stops a copy built from a snapshot while its
 	// blobs are fetched.
 	Ctx context.Context
@@ -206,6 +217,14 @@ type Space struct {
 	// a working shadow. A copy built from a snapshot, or one made before this,
 	// has none: it keeps checkpoints the Merkle way and cannot be reset.
 	Shadow bool `json:"shadow,omitempty"`
+	// Nested, for a shadow copy made since 0.6.6: its private git records the
+	// files of every committed repo inside it, as its own (nested.go). A copy
+	// made before records such a repo by its commit only, as it always has.
+	Nested bool `json:"nested,omitempty"`
+	// Folders, for a copy of several folders: each folder, in order, by the
+	// name of the folder under the copy's top that holds it, and its
+	// reference. Empty for a copy of one folder, which is the copy's top.
+	Folders []SpaceFolder `json:"folders,omitempty"`
 	// Fallback: why the backend asked for could not be used, and which one
 	// was, as For's choice fell back. Empty when it was used.
 	Fallback string `json:"fallback,omitempty"`
@@ -220,6 +239,22 @@ type Space struct {
 	start time.Time
 	// base, while a copy built from a snapshot takes its Base: its files.
 	base *workspace.Snapshot
+}
+
+// SpaceFolder is one folder of a copy of several: the folder under the copy's
+// top that holds it, and the person's folder it was copied from.
+type SpaceFolder struct {
+	Name string `json:"name"`
+	Ref  string `json:"ref"`
+}
+
+// Place is one folder of a copy of several: the person's folder (on this
+// machine), its reference, and the name of the folder under the copy's top
+// that holds it.
+type Place struct {
+	Name   string
+	Folder string
+	Ref    string
 }
 
 // Checkpoint is one recorded state of a space.
@@ -354,8 +389,8 @@ func (f fallback) Checkpoint(s *Space, name string) (Checkpoint, error) {
 }
 func (f fallback) Checkpoints(s *Space) ([]Checkpoint, error) { return f.own(s).Checkpoints(s) }
 func (f fallback) RestoreTo(s *Space, name string) error      { return f.own(s).RestoreTo(s, name) }
-func (f fallback) UpdateFrom(s *Space, base, folder string, merge bool) (UpdateResult, error) {
-	return f.own(s).UpdateFrom(s, base, folder, merge)
+func (f fallback) UpdateFrom(s *Space, base string, folders FolderPaths, merge bool) (UpdateResult, error) {
+	return f.own(s).UpdateFrom(s, base, folders, merge)
 }
 func (f fallback) Diff(s *Space, from, to string) (workspace.Changes, error) {
 	return f.own(s).Diff(s, from, to)

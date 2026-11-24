@@ -237,7 +237,7 @@ func (q *Queue) deliverResult(team, onID, toSession, askingTurn string, j Job, t
 		if ferr != nil {
 			return "", "", ferr
 		}
-		dt = DeliverTo{Workspace: string(first.Workspace), FolderRef: first.FolderRef, Machine: first.Machine, Isolate: first.Isolate}
+		dt = DeliverTo{Workspace: string(first.Workspace), FolderRef: first.FolderRef, Folders: first.Folders, Machine: first.Machine, Isolate: first.Isolate}
 		if dt.Workspace == "" {
 			// The delivery session's first turn named no workspace, so the session
 			// is its own workspace: take that from the resolver (workspaceID), never
@@ -245,7 +245,7 @@ func (q *Queue) deliverResult(team, onID, toSession, askingTurn string, j Job, t
 			dt.Workspace = string(wsID)
 		}
 	}
-	spec := Spec{Session: ids.SessionID(toSession), Workspace: ids.WorkspaceID(dt.Workspace), FolderRef: dt.FolderRef, Machine: dt.Machine,
+	spec := Spec{Session: ids.SessionID(toSession), Workspace: ids.WorkspaceID(dt.Workspace), FolderRef: dt.FolderRef, Folders: dt.Folders, Machine: dt.Machine,
 		Isolate: dt.Isolate, Prompt: ResultPrompt(j, c, reply, name)}
 	// The reply runs on the asking turn's agent. An on registered by the main
 	// token names no asking turn (askingTurn ""); then it runs on the agent

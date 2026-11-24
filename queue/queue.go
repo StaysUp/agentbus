@@ -316,9 +316,13 @@ type Spec struct {
 	// still hold a path; the runner that takes it registers it.
 	Folder    string `json:"folder,omitempty"`
 	FolderRef string `json:"folder_ref,omitempty"`
-	Isolate   bool   `json:"isolate,omitempty"`
-	Repo      string `json:"repo,omitempty"`
-	RepoRef   string `json:"repo_ref,omitempty"`
+	// Folders, in place of FolderRef, for a workspace with several folders:
+	// each folder's reference and name, as the workspace record holds them.
+	// A workspace with one folder names it in FolderRef, as always.
+	Folders []workspace.Place `json:"folders,omitempty"`
+	Isolate bool              `json:"isolate,omitempty"`
+	Repo    string            `json:"repo,omitempty"`
+	RepoRef string            `json:"repo_ref,omitempty"`
 	// Machine is the only machine-id field. compat 0.6: drop connector. The
 	// old key is read and written only inside MarshalJSON/UnmarshalJSON, never
 	// as a struct field, so a caller cannot set the wrong one.
@@ -374,6 +378,19 @@ type Spec struct {
 	// lets exactly these run, this turn only, and nothing is written to the
 	// settings. Carried on the job so control's record is the only source.
 	AllowOnce []string `json:"allow_once,omitempty"`
+}
+
+// Places are the workspace's folders as the job names them: each of Folders,
+// or the one FolderRef as a place with no name (its copy is the folder
+// itself), or none.
+func (spec Spec) Places() []workspace.Place {
+	if len(spec.Folders) > 0 {
+		return spec.Folders
+	}
+	if spec.FolderRef != "" {
+		return []workspace.Place{{Ref: spec.FolderRef}}
+	}
+	return nil
 }
 
 // asked is spec as the request named it, for the idempotency hash: the

@@ -24,6 +24,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/staysup/agentbus/workspace"
 )
 
 // OnTurnCompleted is B13's only event: the subject turn has ended.
@@ -276,7 +278,9 @@ func (q *Queue) ListOns(team string) ([]On, error) {
 // is false for a session the record places in no workspace.
 type DeliverTo struct {
 	Workspace, FolderRef, Machine string
-	Isolate                       bool
+	// Folders, in place of FolderRef, for a workspace with several folders.
+	Folders []workspace.Place
+	Isolate bool
 }
 
 func (q *Queue) FireOns(team string, ended func(turn string) (bool, error), to func(session string) (DeliverTo, bool, error), name func(id string) string, agent AgentOf) (int, error) {

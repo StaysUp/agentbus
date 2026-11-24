@@ -15,6 +15,8 @@ import (
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/store"
+	"github.com/staysup/agentbus/workspace"
 )
 
 // createMultiWorkspace serves POST /api/v0/workspaces for a body with two or
@@ -150,6 +152,19 @@ func (a *API) resolveFolders(w http.ResponseWriter, r *http.Request, body Worksp
 		out = append(out, event.WorkspaceFolderEntry{Name: name, Folder: display, FolderRef: ref})
 	}
 	return out, conn, true
+}
+
+// Places are a workspace's folders as a job names them, when it has several
+// (queue.Spec.Folders): one folder goes in FolderRef, as always.
+func Places(w store.Workspace) []workspace.Place {
+	if len(w.Folders) < 2 {
+		return nil
+	}
+	out := make([]workspace.Place, len(w.Folders))
+	for i, f := range w.Folders {
+		out[i] = workspace.Place{Name: f.Name, Ref: f.FolderRef}
+	}
+	return out
 }
 
 // lastPart is the last part of a folder's path, as typed or as kept: ~ alone is

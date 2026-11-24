@@ -52,14 +52,6 @@ func TestCreateWorkspaceFolders(t *testing.T) {
 	if err != nil || !ok || len(got.Folders) != 3 || got.Folders[2].Name != "notes" {
 		t.Fatalf("store: %+v %v %v", got, ok, err)
 	}
-	// A turn in it is refused until the runner can copy several folders.
-	_, raw = do(t, e.req(t, "POST", "/api/v0/sessions", strings.NewReader(`{"workspace":"`+ws.ID+`"}`)))
-	var sc SessionCreated
-	_ = json.Unmarshal([]byte(raw), &sc)
-	resp, raw = do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"session":"`+sc.Session+`","agent":"claude","prompt":"hi"}`)))
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("turn in a workspace with several folders: %d %s, want 400", resp.StatusCode, raw)
-	}
 }
 
 // One entry in folders is today's workspace: folder and folder_ref set, one

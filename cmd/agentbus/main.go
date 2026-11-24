@@ -1120,7 +1120,7 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 					if err != nil || !ok {
 						return queue.DeliverTo{}, false, err
 					}
-					return queue.DeliverTo{Workspace: w.ID, FolderRef: w.FolderRef, Machine: w.Machine, Isolate: w.Sandbox}, true, nil
+					return queue.DeliverTo{Workspace: w.ID, FolderRef: w.FolderRef, Folders: api.Places(w), Machine: w.Machine, Isolate: w.Sandbox}, true, nil
 				}
 				if n, err := s.queue.FireOns(queue.DefaultTeam, s.store.TurnEnded, deliverTo, name, s.deliveredAgent); err != nil {
 					svcLog.Printf("queue.fire_ons_failed")
