@@ -392,6 +392,9 @@ type Spec struct {
 	// the remote to fetch it from first.
 	Base   string `json:"base,omitempty"`
 	Remote string `json:"remote,omitempty"`
+	// Branches, on a folder job: list the branches of the folder's repo, or
+	// of Remote, instead of resolving a base.
+	Branches bool `json:"branches,omitempty"`
 	// Labels: a runner takes the job only if it has every one.
 	Labels  []string      `json:"labels,omitempty"`
 	Session ids.SessionID `json:"session,omitempty"`

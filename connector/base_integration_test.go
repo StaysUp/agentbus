@@ -104,3 +104,50 @@ func TestBaseRefusals(t *testing.T) {
 		}
 	}
 }
+
+// The repo's own branches: most recently changed first, the checked-out one
+// named current. A remote's: what it has now, by name, with a branch the
+// clone never fetched; nothing is fetched. Offline, the branches the repo
+// last fetched, marked stale. Listing changes nothing of the repo.
+func TestBranches(t *testing.T) {
+	clone, ahead := remoteAndClone(t)
+	gitT(t, clone, "remote", "add", "zz", filepath.Join(t.TempDir(), "gone.git"))
+	gitT(t, filepath.Join(filepath.Dir(clone), "work"), "push", "-q", "origin", "HEAD:refs/heads/only-online")
+	gitT(t, clone, "branch", "older", "HEAD")
+	c, ref := newConnector(t, clone)
+	ctx := context.Background()
+	before := gitT(t, clone, "for-each-ref")
+
+	local, err := c.Branches(ctx, ref, "")
+	if err != nil || local.Current != "main" || local.Remote != "" || len(local.Branches) != 2 ||
+		strings.Join(local.Remotes, ",") != "origin,zz" {
+		t.Fatalf("local: %+v %v", local, err)
+	}
+	remote, err := c.Branches(ctx, ref, "origin")
+	names := []string{}
+	for _, b := range remote.Branches {
+		names = append(names, b.Name)
+		if b.Name == "feature" && b.Commit != ahead {
+			t.Errorf("origin's feature is %s, want the remote's %s", b.Commit, ahead)
+		}
+	}
+	if err != nil || remote.Stale || remote.Remote != "origin" || strings.Join(names, ",") != "feature,main,only-online" {
+		t.Fatalf("remote: %+v %v", remote, err)
+	}
+	if gitT(t, clone, "for-each-ref") != before {
+		t.Fatal("listing changed the repo's refs")
+	}
+	// An unreachable remote with nothing fetched from it is refused; one with
+	// fetched branches answers them, stale.
+	if _, err := c.Branches(ctx, ref, "zz"); !errors.Is(err, ErrListRemote) {
+		t.Fatalf("unreachable zz: %v", err)
+	}
+	gitT(t, clone, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "moved.git"))
+	stale, err := c.Branches(ctx, ref, "origin")
+	if err != nil || !stale.Stale || len(stale.Branches) != 2 {
+		t.Fatalf("offline origin: %+v %v", stale, err)
+	}
+	if _, err := c.Branches(ctx, ref, "nope"); !errors.Is(err, ErrNoRemote) {
+		t.Fatalf("unknown remote: %v", err)
+	}
+}

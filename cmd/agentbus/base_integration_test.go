@@ -107,6 +107,22 @@ func TestWorkspaceFromABaseAcrossProcesses(t *testing.T) {
 		return ref != ""
 	})
 
+	// The branches the form offers, listed by the folder's machine: the
+	// repo's own, and the remote's as it has them now.
+	var local, online struct {
+		Current  string
+		Remotes  []string
+		Branches []struct{ Name, Commit string }
+	}
+	if code, out := c.call("POST", "/api/v0/folders/branches", map[string]any{"folder_ref": ref, "machine": machine}, &local); code != 200 ||
+		local.Current != "main" || len(local.Remotes) != 1 || local.Remotes[0] != "origin" {
+		t.Fatalf("local branches: %d %s", code, out)
+	}
+	if code, out := c.call("POST", "/api/v0/folders/branches", map[string]any{"folder_ref": ref, "machine": machine, "remote": "origin"}, &online); code != 200 ||
+		len(online.Branches) != 2 || online.Branches[0].Name != "feature" || online.Branches[0].Commit != gitIn(t, filepath.Join(filepath.Dir(folder), "work"), "rev-parse", "HEAD") {
+		t.Fatalf("origin's branches: %d %s", code, out)
+	}
+
 	// A bad base is refused when the workspace is made, before any turn.
 	if code, out := c.call("POST", "/api/v0/workspaces", map[string]any{"folder_ref": ref, "machine": machine, "base": "nope"}, nil); code != http.StatusBadRequest ||
 		!strings.Contains(out, "base is not a branch, tag or commit") {

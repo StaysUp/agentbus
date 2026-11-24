@@ -14,6 +14,7 @@ import (
 
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/harness"
+	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 	"github.com/staysup/agentbus/toolreg"
@@ -412,6 +413,7 @@ var routes = slices.Concat([]route{
 		tag:     "Workspaces",
 		summary: "Create a workspace",
 		doc: "Create a workspace: where turns run. Send folder (an absolute path, or ~/... on the folder's machine) or folder_ref, optionally machine, and sandbox (true by default: turns run in a copy of the folder behind a wall; false: in the folder as it is). The reply names the workspace; create a session in it (POST /api/v0/sessions), then run the session's turns.\n\n" +
+			"A sandbox workspace with one folder may start from a git base instead of the folder as it is: base names a branch, tag or commit of the folder's repo (POST /api/v0/folders/branches lists them), and remote a remote to fetch the branch from first. The folder's machine resolves it now, so a name the repo does not have is refused here; the workspace keeps the commit as base_commit.\n\n" +
 			"A typed folder's machine checks and registers it, and the workspace keeps only its reference. With idempotency_key a retry returns the same workspace and makes nothing new.",
 		body:    WorkspaceRequest{},
 		replies: createReplies(ok(201, store.Workspace{}, "The workspace."), fail(404, "This service keeps no queue, or no such machine."), tooMany, stopping),
@@ -776,6 +778,19 @@ var routes = slices.Concat([]route{
 			"A session's copy is never listed, though a turn may run in one. No body is read.",
 		replies: []reply{ok(200, FolderList{}, "The folders."), badRequest},
 		serve:   plain((*API).listFolders)},
+	{method: "POST", path: "/api/v0/folders/branches", op: "listBranches", action: run.ActWorkspaceCreate,
+		tag:     "Workspaces",
+		summary: "List a folder's branches",
+		doc: "The git branches a workspace may start from (base on POST /api/v0/workspaces): the folder's repo's own, most recently changed first, " +
+			"with the one checked out as current; or, with remote, the branches that remote has now, by name. Both answers list the repo's remotes. " +
+			"The folder's machine lists them, not the server, and changes nothing of the repo: a remote is asked with git ls-remote, nothing is fetched. " +
+			"A remote that cannot be reached answers the branches the repo last fetched from it, marked stale. A typed folder is checked and registered, as POST /api/v0/workspaces does. " +
+			"The reply waits up to 15 seconds for the folder's machine, and 60 more to reach a remote.",
+		body: BranchesRequest{},
+		replies: []reply{ok(200, queue.BranchList{}, "The branches."), badRequest,
+			fail(404, "This service keeps no queue."), tooMany,
+			fail(503, "The folder's machine is offline or did not answer in time."), storeFailed},
+		serve: plain((*API).listBranches)},
 	{method: "GET", path: "/api/v0/folders/{id}/home-files", op: "folderHomeFiles", action: run.ActRead,
 		at:      atBody,
 		idDoc:   "A folder's reference (fld_ and 16 hex digits), from GET /api/v0/folders. Another shape gets 404.",

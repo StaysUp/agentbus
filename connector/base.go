@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 
 	"github.com/staysup/agentbus/queue"
@@ -93,4 +94,99 @@ func gitIn(ctx context.Context, dir string, args ...string) ([]byte, error) {
 // BaseJob is Base, for a folder job that names a base.
 func (j Jobs) BaseJob(ctx context.Context, ref, base, remote string) (string, error) {
 	return j.Base(ctx, ref, base, remote)
+}
+
+// ErrListRemote: the remote's branches could not be listed, and the repo has
+// none fetched from it to show instead.
+var ErrListRemote = errors.New("the remote's branches could not be listed; check that git can reach the remote from this machine")
+
+// maxBranches bounds a listing.
+const maxBranches = 1000
+
+// Branches lists the branches of the repo that holds the folder ref, most
+// recently changed first, or with remote those the remote has now, by name.
+// A remote that cannot be reached answers the branches the repo last fetched
+// from it, marked stale. Listing changes nothing of the repo.
+func (c *Connector) Branches(ctx context.Context, ref, remote string) (queue.BranchList, error) {
+	var out queue.BranchList
+	dir, err := c.path(ref)
+	if err != nil {
+		return out, err
+	}
+	if strings.HasPrefix(remote, "-") {
+		return out, ErrNoRemote
+	}
+	if _, err := gitIn(ctx, dir, "rev-parse", "--verify", "-q", "HEAD^{commit}"); err != nil {
+		return out, ErrNotRepo
+	}
+	rs, err := gitIn(ctx, dir, "remote")
+	if err != nil {
+		return out, ErrNotRepo
+	}
+	out.Remotes = []string{}
+	for _, l := range strings.Split(string(rs), "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			out.Remotes = append(out.Remotes, l)
+		}
+	}
+	sort.Strings(out.Remotes)
+	out.Branches = []queue.Branch{}
+	if remote == "" {
+		if cur, err := gitIn(ctx, dir, "symbolic-ref", "-q", "HEAD"); err == nil {
+			out.Current = strings.TrimPrefix(strings.TrimSpace(string(cur)), "refs/heads/")
+		}
+		refs, err := gitIn(ctx, dir, "for-each-ref", "--sort=-committerdate", "--format=%(objectname)%09%(refname)", "refs/heads/")
+		if err != nil {
+			return out, ErrNotRepo
+		}
+		addBranches(&out, refs, "refs/heads/")
+		return out, nil
+	}
+	if !hasLine(rs, remote) {
+		return out, ErrNoRemote
+	}
+	out.Remote = remote
+	lctx, cancel := context.WithTimeout(ctx, queue.FetchWait)
+	defer cancel()
+	if heads, err := gitIn(lctx, dir, "ls-remote", "--heads", "--", remote); err == nil {
+		addBranches(&out, heads, "refs/heads/")
+	} else {
+		// Offline: what the repo last fetched from it.
+		refs, err := gitIn(ctx, dir, "for-each-ref", "--format=%(objectname)%09%(refname)", "refs/remotes/"+remote+"/")
+		if err != nil {
+			return out, ErrListRemote
+		}
+		addBranches(&out, refs, "refs/remotes/"+remote+"/")
+		if len(out.Branches) == 0 {
+			return out, ErrListRemote
+		}
+		out.Stale = true
+	}
+	sort.Slice(out.Branches, func(i, j int) bool { return out.Branches[i].Name < out.Branches[j].Name })
+	return out, nil
+}
+
+// addBranches appends to l each "<commit>\t<prefix><name>" line of refs, but
+// a remote's HEAD, up to maxBranches.
+func addBranches(l *queue.BranchList, refs []byte, prefix string) {
+	for _, line := range strings.Split(string(refs), "\n") {
+		commit, name, ok := strings.Cut(strings.TrimSpace(line), "\t")
+		if !ok || !strings.HasPrefix(name, prefix) {
+			continue
+		}
+		name = strings.TrimPrefix(name, prefix)
+		if name == "" || name == "HEAD" {
+			continue
+		}
+		if len(l.Branches) == maxBranches {
+			l.Truncated = true
+			return
+		}
+		l.Branches = append(l.Branches, queue.Branch{Name: name, Commit: commit})
+	}
+}
+
+// BranchesJob is Branches, for a folder job that lists branches.
+func (j Jobs) BranchesJob(ctx context.Context, ref, remote string) (queue.BranchList, error) {
+	return j.Branches(ctx, ref, remote)
 }

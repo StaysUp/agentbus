@@ -198,3 +198,18 @@ func TestCreateWorkspaceBaseShape(t *testing.T) {
 		t.Errorf("remote origin refused: %s", msg)
 	}
 }
+
+// POST /api/v0/folders/branches checks its body before any job: one of
+// folder or folder_ref, their shapes, the machine's and the remote's.
+func TestListBranchesValidation(t *testing.T) {
+	e := newEnv(t)
+	for _, body := range []string{`{}`, `[]`, `{"folder":"/tmp","folder_ref":"fld_0123456789abcdef"}`, `{"folder":"rel"}`,
+		`{"folder_ref":"nope"}`, `{"folder_ref":"fld_0123456789abcdef","machine":"x"}`,
+		`{"folder_ref":"fld_0123456789abcdef","remote":"-x"}`, `{"folder_ref":"fld_0123456789abcdef","remote":"a/b"}`,
+		`{"folder_ref":"fld_0123456789abcdef","extra":1}`} {
+		resp, raw := do(t, e.req(t, "POST", "/api/v0/folders/branches", strings.NewReader(body)))
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("POST /folders/branches %s: %d %s, want 400", body, resp.StatusCode, raw)
+		}
+	}
+}

@@ -20,8 +20,9 @@ import (
 // waits this long for the answer, and a job still queued after it ends.
 const FolderWait = 15 * time.Second
 
-// FetchWait bounds the fetch of a folder job whose base names a remote: the
-// API waits this long more for its answer.
+// FetchWait bounds the fetch of a folder job whose base names a remote, and
+// the listing of a remote's branches: the API waits this long more for its
+// answer.
 const FetchWait = 60 * time.Second
 
 // RegisterFolder makes a folder job: the runner of the machine checks the
@@ -36,6 +37,8 @@ func (q *Queue) RegisterFolder(team, machine, path string) (Job, error) {
 // Remote first when that is set.
 type FolderCheck struct {
 	Path, Ref, Base, Remote string
+	// Branches: list the branches of the folder's repo (or of Remote) instead.
+	Branches bool
 }
 
 // CheckFolder makes a folder job for c on the machine's runner: its result
@@ -45,7 +48,7 @@ func (q *Queue) CheckFolder(team, machine string, c FolderCheck) (Job, error) {
 	// hands the job out before its path is here.
 	q.typedMu.Lock()
 	defer q.typedMu.Unlock()
-	spec := Spec{Machine: machine, FolderRef: c.Ref, Base: c.Base, Remote: c.Remote}
+	spec := Spec{Machine: machine, FolderRef: c.Ref, Base: c.Base, Remote: c.Remote, Branches: c.Branches}
 	job, _, err := q.create(team, KindFolder, "", spec, Links{}, nil, "", nil)
 	if err != nil {
 		return Job{}, err

@@ -48,6 +48,10 @@ type FolderSide interface {
 	// holds the folder ref, to its commit id, after fetching the branch
 	// base from remote when remote is set. Its errors are one sentence each.
 	BaseJob(ctx context.Context, ref, base, remote string) (commit string, err error)
+	// BranchesJob lists the branches of the git repo that holds the folder
+	// ref, or of its remote when remote is set. Its errors are one sentence
+	// each.
+	BranchesJob(ctx context.Context, ref, remote string) (queue.BranchList, error)
 }
 
 // errPartial is a partial apply's refusal.
@@ -110,7 +114,13 @@ func (r *Runner) folderWork(ctx context.Context, at *attempt) queue.Finish {
 			return refuse("the folder's path is no longer known; send the turn again", nil)
 		}
 		res := queue.Result{FolderRef: ref}
-		if sp.Base != "" {
+		if sp.Branches {
+			list, err := r.cfg.FolderSide.BranchesJob(ctx, ref, sp.Remote)
+			if err != nil {
+				return bad(err.Error())
+			}
+			res.Branches = &list
+		} else if sp.Base != "" {
 			commit, err := r.cfg.FolderSide.BaseJob(ctx, ref, sp.Base, sp.Remote)
 			if err != nil {
 				return bad(err.Error())

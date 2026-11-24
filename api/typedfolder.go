@@ -30,6 +30,13 @@ func (a *API) typedFolder(ctx context.Context, path, machine string) (ref, conn 
 // typedFolder chooses it) and answers the folder's reference, the machine,
 // and, when c names a base, the commit it resolved to.
 func (a *API) checkFolder(ctx context.Context, machine string, c queue.FolderCheck) (ref, conn, commit string, status int, msg string) {
+	res, conn, status, msg := a.folderJob(ctx, machine, c)
+	return res.FolderRef, conn, res.BaseCommit, status, msg
+}
+
+// folderJob runs the folder job c on the folder's machine, chosen as
+// typedFolder chooses it, and answers its result and the machine.
+func (a *API) folderJob(ctx context.Context, machine string, c queue.FolderCheck) (res queue.Result, conn string, status int, msg string) {
 	// agentbus up's own machine takes the folder job through its built-in
 	// runner, the same KindFolder job a remote runner takes: control never
 	// reads the folder on its own thread. The folder's shape is already
@@ -39,41 +46,41 @@ func (a *API) checkFolder(ctx context.Context, machine string, c queue.FolderChe
 		machine = own.Machine()
 	} else if machine != "" {
 		if !queue.ConnectorShape.MatchString(machine) {
-			return "", "", "", http.StatusBadRequest, "machine must be con_ and 16 hex digits: a machine's id, from GET /api/v0/runners"
+			return queue.Result{}, "", http.StatusBadRequest, "machine must be con_ and 16 hex digits: a machine's id, from GET /api/v0/runners"
 		}
 		seen, err := a.cfg.Queue.MachineSeen(queue.DefaultTeam, machine)
 		if err != nil {
-			return "", "", "", http.StatusInternalServerError, "internal"
+			return queue.Result{}, "", http.StatusInternalServerError, "internal"
 		}
 		if !seen {
-			return "", "", "", http.StatusServiceUnavailable, "machine " + machine + " is offline; start agentbus runner there, or name another"
+			return queue.Result{}, "", http.StatusServiceUnavailable, "machine " + machine + " is offline; start agentbus runner there, or name another"
 		}
 	} else {
 		all, err := a.cfg.Queue.Machines(queue.DefaultTeam)
 		if err != nil {
-			return "", "", "", http.StatusInternalServerError, "internal"
+			return queue.Result{}, "", http.StatusInternalServerError, "internal"
 		}
 		switch len(all) {
 		case 0:
-			return "", "", "", http.StatusServiceUnavailable, "no machine is online, so the folder cannot be reached; start agentbus runner on the folder's machine"
+			return queue.Result{}, "", http.StatusServiceUnavailable, "no machine is online, so the folder cannot be reached; start agentbus runner on the folder's machine"
 		case 1:
 			machine = all[0]
 		default:
-			return "", "", "", http.StatusBadRequest, strconv.Itoa(len(all)) +
+			return queue.Result{}, "", http.StatusBadRequest, strconv.Itoa(len(all)) +
 				" machines are online; name the folder's machine as machine, from GET /api/v0/runners"
 		}
 	}
 	job, err := a.cfg.Queue.CheckFolder(queue.DefaultTeam, machine, c)
 	switch {
 	case errors.Is(err, queue.ErrFull):
-		return "", "", "", http.StatusTooManyRequests, "too many jobs are waiting; wait for some to end and retry"
+		return queue.Result{}, "", http.StatusTooManyRequests, "too many jobs are waiting; wait for some to end and retry"
 	case err != nil:
-		return "", "", "", http.StatusInternalServerError, "internal"
+		return queue.Result{}, "", http.StatusInternalServerError, "internal"
 	}
 	// The path goes from the job whatever happens, once it is read.
 	defer a.cfg.Queue.ForgetFolder(queue.DefaultTeam, job.ID)
 	wait := queue.FolderWait
-	if c.Remote != "" {
+	if c.Remote != "" || c.Branches {
 		wait += queue.FetchWait
 	}
 	deadline := time.NewTimer(wait)
@@ -83,7 +90,7 @@ func (a *API) checkFolder(ctx context.Context, machine string, c queue.FolderChe
 	for {
 		j, err := a.cfg.Queue.Get(queue.DefaultTeam, job.ID)
 		if err != nil {
-			return "", "", "", http.StatusInternalServerError, "internal"
+			return queue.Result{}, "", http.StatusInternalServerError, "internal"
 		}
 		if j.Ended != nil {
 			res, _ := queue.ReadResult(j.Result)
@@ -92,20 +99,23 @@ func (a *API) checkFolder(ctx context.Context, machine string, c queue.FolderChe
 				// folder.registered is written by the finisher as the folder job
 				// ends (jobs.keepOutcomes), so it is in the record whether or not
 				// this request is still waiting.
-				return res.FolderRef, machine, res.BaseCommit, 0, ""
+				return res, machine, 0, ""
 			case res.Refused != "":
-				return "", "", "", http.StatusBadRequest, res.Refused
+				return queue.Result{}, "", http.StatusBadRequest, res.Refused
 			}
-			return "", "", "", http.StatusServiceUnavailable, "the machine's runner could not check the folder; send the turn again"
+			return queue.Result{}, "", http.StatusServiceUnavailable, "the machine's runner could not check the folder; send the turn again"
 		}
 		select {
 		case <-ctx.Done():
-			return "", "", "", 0, "gone"
+			return queue.Result{}, "", 0, "gone"
 		case <-deadline.C:
-			if c.Remote != "" {
-				return "", "", "", http.StatusServiceUnavailable, "the machine's runner did not fetch the branch within 75 seconds; check that git can reach the remote there, and try again"
+			if c.Branches {
+				return queue.Result{}, "", http.StatusServiceUnavailable, "the machine's runner did not list the branches within 75 seconds; check that it runs and that git can reach the remote there, and try again"
 			}
-			return "", "", "", http.StatusServiceUnavailable, "the machine's runner did not check the folder within 15 seconds; check that it runs, and send the turn again"
+			if c.Remote != "" {
+				return queue.Result{}, "", http.StatusServiceUnavailable, "the machine's runner did not fetch the branch within 75 seconds; check that git can reach the remote there, and try again"
+			}
+			return queue.Result{}, "", http.StatusServiceUnavailable, "the machine's runner did not check the folder within 15 seconds; check that it runs, and send the turn again"
 		case <-tick.C:
 		}
 	}
