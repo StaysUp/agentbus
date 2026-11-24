@@ -42,14 +42,31 @@ var (
 	ErrNoFolder   = errors.New("the folder does not exist on the chosen machine")
 	ErrNotDir     = errors.New("the folder is a file, not a directory")
 	ErrUnreadable = errors.New("the folder cannot be read by the user the machine's runner runs as")
+	ErrNoHome     = errors.New("the folder starts with ~, and the home folder of the user the machine's runner runs as is not known")
 )
+
+// Expand is path with a leading ~ or ~/ read as home, the home of the user
+// this machine's runner runs as: a person types ~/project for a folder on
+// that machine, and only that machine knows its home. Any other path comes
+// back as it is, for CheckShape to judge; ~name (another user's home) is not
+// expanded, so it stays a relative path and is refused there.
+func Expand(path, home string) (string, error) {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path, nil
+	}
+	if home == "" {
+		return "", ErrNoHome
+	}
+	return filepath.Join(home, path[1:]), nil
+}
 
 // CheckShape says why path cannot name a folder by its shape alone, or nil:
 // it must be an absolute path of at most MaxPath bytes. It touches no
 // filesystem, so Register uses it to issue a reference without reading the
 // folder; existence and readability are Check's, run on the folder's own
 // machine through the folder job. The control plane cannot import this
-// package, so it makes the same synchronous shape check inline (api/runs.go).
+// package, so it makes the same synchronous shape check inline
+// (api/workspaces.go), letting ~ through for this machine's Expand.
 func CheckShape(path string) error {
 	if len(path) > MaxPath || !filepath.IsAbs(path) {
 		return ErrNotAbsolute

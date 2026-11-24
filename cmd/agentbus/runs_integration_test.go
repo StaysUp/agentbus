@@ -403,11 +403,13 @@ func TestRunRefusals(t *testing.T) {
 	// The folder is the workspace's, so folder refusals belong to POST
 	// /api/v0/workspaces, before any turn, and store nothing.
 	const (
-		badFolder    = "folder must be an absolute path to an existing directory, at most 4096 bytes"
-		badWorkspace = "the body must be one JSON object with folder (an absolute path) or folder_ref, and optionally machine, sandbox and idempotency_key"
+		badFolder    = "folder must be an absolute path or start with ~/, at most 4096 bytes"
+		badWorkspace = "the body must be one JSON object with folder (an absolute path or ~/...) or folder_ref, and optionally machine, sandbox and idempotency_key"
 	)
 	for _, tc := range []struct{ name, body, want string }{
 		{"relative folder", `{"folder":"x/y"}`, badFolder},
+		{"another user's home", `{"folder":"~root/x"}`, badFolder},
+		{"missing folder under ~", `{"folder":"~/agentbus-no-such-folder-71"}`, "the folder does not exist on the chosen machine"},
 		{"missing folder", `{"folder":` + jsonStr(filepath.Join(folder, "nope")) + `}`, "the folder does not exist on the chosen machine"},
 		{"folder is a file", `{"folder":` + jsonStr(file) + `}`, "the folder is a file, not a directory"},
 		{"neither folder nor folder_ref", `{}`, "send folder or folder_ref, not both and not neither"},
@@ -837,5 +839,34 @@ func TestFirstCopyTurnIsSandboxed(t *testing.T) {
 	waitClosed(t, svc.store, out["session"].(string))
 	if d := settingsArg(readReport(t, direct).Args); strings.Contains(d, `"sandbox":`) {
 		t.Fatalf("a Direct turn carries a sandbox block: --settings %q", d)
+	}
+}
+
+// A folder typed as ~ or ~/... is the home of the user the folder's machine's
+// runner runs as: that runner expands it and registers the folder by its
+// expanded path, so the workspace shows the absolute path.
+func TestWorkspaceFolderUnderHome(t *testing.T) {
+	home := t.TempDir()
+	svc := runService(t, home, nil, 0) // sets HOME to a clean temp folder
+	tok := readToken(t, home)
+	userHome := os.Getenv("HOME")
+	project := filepath.Join(userHome, "project")
+	if err := os.Mkdir(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ typed, want string }{
+		{"~/project", project},
+		{"~/project/", project},
+		{"~", userHome},
+	} {
+		b, _ := json.Marshal(map[string]any{"folder": tc.typed})
+		code, out, raw := postAPI(t, svc, tok, "/api/v0/workspaces", b)
+		if code != http.StatusCreated {
+			t.Errorf("folder %q: %d %.200s, want 201", tc.typed, code, raw)
+			continue
+		}
+		if out["folder"] != tc.want {
+			t.Errorf("folder %q: workspace folder %v, want %q", tc.typed, out["folder"], tc.want)
+		}
 	}
 }

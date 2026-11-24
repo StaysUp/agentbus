@@ -887,9 +887,16 @@ func hashIn(rt *os.Root, name string) (hash string, mode fs.FileMode, exists boo
 type Jobs struct{ *Connector }
 
 // FolderJob is Folders.Add, for a folder job: a folder a person typed,
-// checked and registered. Its errors are one sentence each, naming no path.
-// A job stopped while the folder was checked registers nothing.
+// checked and registered. A leading ~ is this machine's home (folders.Expand),
+// and the folder is registered by its expanded path. Its errors are one
+// sentence each, naming no path. A job stopped while the folder was checked
+// registers nothing.
 func (j Jobs) FolderJob(ctx context.Context, path string) (string, error) {
+	home, _ := os.UserHomeDir()
+	path, err := folders.Expand(path, home)
+	if err != nil {
+		return "", err
+	}
 	if err := folders.Check(path); err != nil {
 		return "", err
 	}

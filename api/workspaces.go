@@ -86,13 +86,14 @@ const (
 )
 
 const (
-	badWorkspace = "the body must be one JSON object with folder (an absolute path) or folder_ref, and optionally machine, sandbox and idempotency_key"
+	badWorkspace = "the body must be one JSON object with folder (an absolute path or ~/...) or folder_ref, and optionally machine, sandbox and idempotency_key"
+	badFolder    = "folder must be an absolute path or start with ~/, at most 4096 bytes"
 	badSession   = "the body must be one JSON object with workspace, and optionally title and idempotency_key"
 )
 
 // WorkspaceRequest is the body of POST /api/v0/workspaces.
 type WorkspaceRequest struct {
-	Folder    string `json:"folder,omitempty" doc:"An absolute path to a directory on the machine named by machine, that the runner can read. Typing it is the grant: that machine's runner checks and registers it, and the workspace keeps only its reference. One of folder or folder_ref is required."`
+	Folder    string `json:"folder,omitempty" doc:"An absolute path, or one starting with ~/ for the home of the user that machine's runner runs as, to a directory on the machine named by machine, that the runner can read. Typing it is the grant: that machine's runner checks and registers it, and the workspace keeps only its reference. One of folder or folder_ref is required."`
 	FolderRef string `json:"folder_ref,omitempty" doc:"A folder's reference (fld_ and 16 hex digits), from GET /api/v0/folders, in place of folder."`
 	Machine   string `json:"machine,omitempty" doc:"The machine that holds the folder (con_ and 16 hex digits). With folder: the machine whose runner checks it. Absent: this service's own machine, or the only one online."`
 	Sandbox   *bool  `json:"sandbox,omitempty" doc:"True (the default): turns run in a copy of the folder behind a wall, and their changes are applied on request. False: turns run in the folder as it is."`
@@ -150,8 +151,8 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
 					writeError(w, http.StatusNotFound, noTurns)
 					return event.Event{}, false
 				}
-				if len(body.Folder) > MaxFolder || !filepath.IsAbs(body.Folder) {
-					writeError(w, http.StatusBadRequest, "folder must be an absolute path to an existing directory, at most 4096 bytes")
+				if !typedFolderShape(body.Folder) {
+					writeError(w, http.StatusBadRequest, badFolder)
 					return event.Event{}, false
 				}
 				var status int
@@ -618,4 +619,13 @@ func (a *API) createSession(w http.ResponseWriter, r *http.Request) {
 			}
 			writeJSON(w, http.StatusCreated, SessionCreated{Session: sID, Workspace: sWS, Title: sTitle})
 		})
+}
+
+// typedFolderShape is whether a typed folder has a usable shape: absolute, or
+// ~ or ~/... for the home of the folder's machine. Control only checks the
+// shape and passes ~ on as typed: the folder may be on another machine,
+// whose runner expands it against its own home (folders.Expand) and says
+// whether the folder exists.
+func typedFolderShape(f string) bool {
+	return len(f) <= MaxFolder && (filepath.IsAbs(f) || f == "~" || strings.HasPrefix(f, "~/"))
 }

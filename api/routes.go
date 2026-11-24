@@ -384,7 +384,7 @@ var routes = slices.Concat([]route{
 	{method: "POST", path: "/api/v0/workspaces", op: "createWorkspace",
 		tag:     "Workspaces",
 		summary: "Create a workspace",
-		doc: "Create a workspace: where turns run. Send folder (an absolute path) or folder_ref, optionally machine, and sandbox (true by default: turns run in a copy of the folder behind a wall; false: in the folder as it is). The reply names the workspace; create a session in it (POST /api/v0/sessions), then run the session's turns.\n\n" +
+		doc: "Create a workspace: where turns run. Send folder (an absolute path, or ~/... on the folder's machine) or folder_ref, optionally machine, and sandbox (true by default: turns run in a copy of the folder behind a wall; false: in the folder as it is). The reply names the workspace; create a session in it (POST /api/v0/sessions), then run the session's turns.\n\n" +
 			"A typed folder's machine checks and registers it, and the workspace keeps only its reference. With idempotency_key a retry returns the same workspace and makes nothing new.",
 		body:    WorkspaceRequest{},
 		replies: createReplies(ok(201, store.Workspace{}, "The workspace."), fail(404, "This service keeps no queue, or no such machine."), tooMany, stopping),
