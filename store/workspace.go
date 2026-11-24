@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -23,12 +24,17 @@ import (
 // same way, since a migrated workspace's id is its session's id). head_turn is
 // the workspace's latest turn that recorded a changeset.
 type Workspace struct {
-	ID        string    `json:"workspace"`
-	Folder    string    `json:"folder,omitempty" doc:"The person's folder the workspace runs in."`
-	FolderRef string    `json:"folder_ref,omitempty" doc:"The folder's reference (fld_ and 16 hex digits), as its connector issued it."`
-	Machine   string    `json:"machine,omitempty" doc:"The connector that owns the folder (con_ and 16 hex digits). Absent for this service's own machine."`
-	Sandbox   bool      `json:"sandbox" doc:"The mode: true for a copy behind a wall, false for the person's real folder."`
-	Created   time.Time `json:"created" doc:"When the workspace was created."`
+	ID        string `json:"workspace"`
+	Folder    string `json:"folder,omitempty" doc:"The person's folder the workspace runs in."`
+	FolderRef string `json:"folder_ref,omitempty" doc:"The folder's reference (fld_ and 16 hex digits), as its connector issued it."`
+	Machine   string `json:"machine,omitempty" doc:"The connector that owns the folder (con_ and 16 hex digits). Absent for this service's own machine."`
+	Sandbox   bool   `json:"sandbox" doc:"The mode: true for a copy behind a wall, false for the person's real folder."`
+	// Folders are the workspace's folders, in order: one for a workspace made
+	// with one folder (also in Folder and FolderRef, as before), several for
+	// one made with several (Folder and FolderRef then empty, so nothing reads
+	// one folder as the whole workspace). Empty for a workspace with no folder.
+	Folders []WorkspaceFolder `json:"folders,omitempty" doc:"The workspace's folders, in order. One for a workspace with one folder, which folder and folder_ref also name; several for a workspace made with several, whose folder and folder_ref are then absent."`
+	Created time.Time         `json:"created" doc:"When the workspace was created."`
 	// HeadTurn is the workspace's latest turn that recorded a changeset
 	// (turn.changed), the turn an apply would go up to. Empty when no turn of
 	// the workspace has ended with a changeset.
@@ -41,6 +47,13 @@ type Workspace struct {
 	// was a discard, so its unapplied changes were dropped and no apply has run
 	// since. Nil otherwise.
 	DiscardedAt *time.Time `json:"discarded_at,omitempty" doc:"When the workspace's latest action was a discard. Absent when its latest action was an apply, or it has neither."`
+}
+
+// WorkspaceFolder is one folder of a workspace.
+type WorkspaceFolder struct {
+	Name      ids.FolderName `json:"name" doc:"The folder's name: where it sits under the copy's top when the workspace has several folders, and the group its files are listed under. Empty for a workspace with one folder, whose copy is the folder itself."`
+	Folder    string         `json:"folder,omitempty" doc:"The folder's path, kept only on the machine that owns it."`
+	FolderRef string         `json:"folder_ref,omitempty" doc:"The folder's reference (fld_ and 16 hex digits)."`
 }
 
 // ErrNoWorkspace means no workspace.created names the id.
@@ -56,13 +69,14 @@ const resolvedWorkspace = `COALESCE(NULLIF(json_extract(ts.data, '$.workspace'),
 // workspace.created names it.
 func (s *Store) Workspace(id ids.WorkspaceID) (w Workspace, found bool, err error) {
 	w.ID = string(id)
-	var folder, ref, machine sql.NullString
+	var folder, ref, machine, list sql.NullString
 	var sandbox int
 	var created int64
 	err = s.r.QueryRow(`SELECT json_extract(data, '$.folder'), json_extract(data, '$.folder_ref'),
-			json_extract(data, '$.machine'), COALESCE(json_extract(data, '$.sandbox'), 0), time
+			json_extract(data, '$.machine'), COALESCE(json_extract(data, '$.sandbox'), 0), time,
+			json_extract(data, '$.folders')
 		FROM events WHERE kind = ? AND json_extract(data, '$.workspace') = ? ORDER BY seq LIMIT 1`,
-		string(event.WorkspaceCreated), string(id)).Scan(&folder, &ref, &machine, &sandbox, &created)
+		string(event.WorkspaceCreated), string(id)).Scan(&folder, &ref, &machine, &sandbox, &created, &list)
 	if errors.Is(err, sql.ErrNoRows) {
 		return w, false, nil
 	}
@@ -70,6 +84,19 @@ func (s *Store) Workspace(id ids.WorkspaceID) (w Workspace, found bool, err erro
 		return w, false, fmt.Errorf("store: read workspace: %w", err)
 	}
 	w.Folder, w.FolderRef, w.Machine = folder.String, ref.String, machine.String
+	if list.String != "" {
+		var fs []event.WorkspaceFolderEntry
+		if err := json.Unmarshal([]byte(list.String), &fs); err != nil {
+			return w, false, fmt.Errorf("store: read workspace folders: %w", err)
+		}
+		for _, f := range fs {
+			w.Folders = append(w.Folders, WorkspaceFolder{Name: ids.FolderName(f.Name), Folder: f.Folder, FolderRef: f.FolderRef})
+		}
+	} else if w.Folder != "" || w.FolderRef != "" {
+		// A workspace with one folder, and every one made before several: a list
+		// of one, with no name, as its copy is the folder itself.
+		w.Folders = []WorkspaceFolder{{Folder: w.Folder, FolderRef: w.FolderRef}}
+	}
 	w.Sandbox = sandbox != 0
 	w.Created = time.Unix(0, created).UTC()
 	if err := s.workspaceState(&w); err != nil {

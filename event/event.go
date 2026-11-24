@@ -331,6 +331,14 @@ type Usage struct {
 	CostUSD *float64 `json:"cost_usd,omitempty" doc:"What the vendor says it charged for the call, in US dollars, such as OpenRouter's usage.cost. Absent when it said nothing; then the cost comes from the price table."`
 }
 
+// WorkspaceFolderEntry is one folder of a workspace with several, on its
+// workspace.created.
+type WorkspaceFolderEntry struct {
+	Name      string `json:"name" doc:"The folder's name: its place under the copy's top, and the group its files are listed under. Set when the workspace is made."`
+	Folder    string `json:"folder,omitempty" doc:"The folder's path, kept only on the machine that owns it."`
+	FolderRef string `json:"folder_ref" doc:"The folder's reference (fld_ and 16 hex digits)."`
+}
+
 // Event is one step of an agent's work.
 //
 // The gateway fills ID, Time, Session, Exchange, Vendor and Client. An adapter
@@ -445,6 +453,11 @@ type Event struct {
 	Workspace string `json:"workspace,omitempty" doc:"On workspace.created, workspace.applied, workspace.discarded and turn.started: the workspace the turn ran in (ws_ and 16 hex digits)."`
 	Machine   string `json:"machine,omitempty" doc:"On workspace.created and folder.registered: the connector that owns the folder (con_ and 16 hex digits). Absent when no connector owns the folder, as for hook or gateway traffic."`
 	Sandbox   *bool  `json:"sandbox,omitempty" doc:"On workspace.created: the workspace's mode, true for a copy behind a wall and false for the person's real folder. Always present on workspace.created; absent on every other kind."`
+	// Folders, only on workspace.created of a workspace with several folders:
+	// each folder, in order, with its name. Folder and FolderRef are then
+	// empty, so no reader takes one folder for the whole workspace. A
+	// workspace with one folder keeps it in Folder and FolderRef, as before.
+	Folders []WorkspaceFolderEntry `json:"folders,omitempty" doc:"On workspace.created of a workspace with several folders: each folder, in order. Absent for a workspace with one folder, which names it in folder and folder_ref."`
 	// AgentID, Access and KeyEnv, on a run's turn.started and run.started:
 	// the saved agent the run started, how it reaches its model, and for an
 	// OpenRouter agent the name of the variable that holds its key. Never

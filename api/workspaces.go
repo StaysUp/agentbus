@@ -96,10 +96,23 @@ type WorkspaceRequest struct {
 	Folder    string `json:"folder,omitempty" doc:"An absolute path, or one starting with ~/ for the home of the user that machine's runner runs as, to a directory on the machine named by machine, that the runner can read. Typing it is the grant: that machine's runner checks and registers it, and the workspace keeps only its reference. One of folder or folder_ref is required."`
 	FolderRef string `json:"folder_ref,omitempty" doc:"A folder's reference (fld_ and 16 hex digits), from GET /api/v0/folders, in place of folder."`
 	Machine   string `json:"machine,omitempty" doc:"The machine that holds the folder (con_ and 16 hex digits). With folder: the machine whose runner checks it. Absent: this service's own machine, or the only one online."`
-	Sandbox   *bool  `json:"sandbox,omitempty" doc:"True (the default): turns run in a copy of the folder behind a wall, and their changes are applied on request. False: turns run in the folder as it is."`
+	// Folders, in place of folder and folder_ref: a workspace with several
+	// folders, all on one machine. Its copy holds each folder side by side
+	// under one top, named by the folder's last path part.
+	Folders []WorkspaceFolderRequest `json:"folders,omitempty" doc:"In place of folder and folder_ref: the folders of a workspace with several, 1 to 8, all on the machine named by machine. The workspace keeps each folder in order with a name: the last part of its path, in letters, digits, . _ and - (any other character becomes -), at most 64 bytes, and -2, -3 for a second of the same name. Its turns are to run at the top of one copy that holds each folder side by side under its name. Needs sandbox true."`
+	Sandbox *bool                    `json:"sandbox,omitempty" doc:"True (the default): turns run in a copy of the folder behind a wall, and their changes are applied on request. False: turns run in the folder as it is."`
 	// IdempotencyKey makes a retry safe: the same key returns the same workspace.
 	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"Optional, 1 to 128 characters of A-Z, a-z, 0-9 and . _ : -. A retry with the same key returns the workspace the key first created and makes nothing new."`
 }
+
+// WorkspaceFolderRequest is one folder of POST /api/v0/workspaces' folders.
+type WorkspaceFolderRequest struct {
+	Folder    string `json:"folder,omitempty" doc:"An absolute path, or one starting with ~/, on the workspace's machine. One of folder or folder_ref is required."`
+	FolderRef string `json:"folder_ref,omitempty" doc:"A folder's reference (fld_ and 16 hex digits), from GET /api/v0/folders, in place of folder."`
+}
+
+// MaxWorkspaceFolders bounds a workspace's folders.
+const MaxWorkspaceFolders = 8
 
 // SessionRequest is the body of POST /api/v0/sessions.
 type SessionRequest struct {
@@ -128,6 +141,20 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 	// Cheap validation, before the key check: a bad request is refused whether
 	// or not it reuses a key, and at no side effect.
+	if len(body.Folders) > 0 {
+		if body.Folder != "" || body.FolderRef != "" {
+			writeError(w, http.StatusBadRequest, "send folders, or folder or folder_ref, not both")
+			return
+		}
+		if len(body.Folders) == 1 {
+			// One folder is today's workspace, by whichever field it came in.
+			body.Folder, body.FolderRef, body.Folders = body.Folders[0].Folder, body.Folders[0].FolderRef, nil
+		}
+	}
+	if len(body.Folders) > 0 {
+		a.createMultiWorkspace(w, r, body)
+		return
+	}
 	if (body.Folder == "") == (body.FolderRef == "") {
 		writeError(w, http.StatusBadRequest, "send folder or folder_ref, not both and not neither")
 		return
