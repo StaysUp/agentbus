@@ -163,6 +163,13 @@ func TestExecCommands(t *testing.T) {
 		// Not a cmd key.
 		{`const cmd2 = "git push"; tools.exec_command({mycmd:"git push"})`, nil},
 		{`for (const cmd of list) { text(cmd) }`, nil},
+		// cmd between commas outside braces: an argument or an element, not
+		// a key (2026-11-24, review of #80).
+		{`text(["name", cmd, "done"])`, nil},
+		{`report("name", cmd, "done")`, nil},
+		{`report(a, cmd)`, nil},
+		{`f({a: [x, cmd, y]})`, nil},
+		{`f([{a: 1, cmd}])`, []string{runTimeCommand}},
 		// Not one literal: known only at run time.
 		{`tools.exec_command({cmd: "git " + "push"})`, []string{"git ", runTimeCommand}},
 		{`const c = "git push"; tools.exec_command({cmd: c})`, []string{runTimeCommand}},

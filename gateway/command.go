@@ -558,6 +558,9 @@ func execCommands(script string) []string {
 	// prevWord the last word, to tell a regular expression from a division.
 	var prev byte
 	prevWord := ""
+	// open holds the brackets open at i, innermost last: a shorthand cmd is
+	// one only inside braces, never in a call's arguments or an array.
+	var open []byte
 	for i := 0; i < len(script); {
 		c := script[i]
 		if key && !isJSSpace(c) && !strings.HasPrefix(script[i:], "//") && !strings.HasPrefix(script[i:], "/*") &&
@@ -608,7 +611,8 @@ func execCommands(script string) []string {
 				k++
 			}
 			// The shorthand {cmd} or {…, cmd}: the value of a variable.
-			if script[i:k] == "cmd" && (prev == '{' || prev == ',') && (nextIs(script, k, ',') || nextIs(script, k, '}')) {
+			if script[i:k] == "cmd" && len(open) > 0 && open[len(open)-1] == '{' &&
+				(prev == '{' || prev == ',') && (nextIs(script, k, ',') || nextIs(script, k, '}')) {
 				out = append(out, runTimeCommand)
 			}
 			prev, prevWord = c, script[i:k]
@@ -619,6 +623,14 @@ func execCommands(script string) []string {
 				prev = ':'
 			}
 		default:
+			switch c {
+			case '{', '[', '(':
+				open = append(open, c)
+			case '}', ']', ')':
+				if len(open) > 0 {
+					open = open[:len(open)-1]
+				}
+			}
 			prev, prevWord, key = c, "", false
 			i++
 		}
