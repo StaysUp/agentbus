@@ -2590,8 +2590,8 @@ turn.started agent="claude" continuity="transcript" replay_from="" model="sonnet
 context.added instructions=844 mcp_instructions=327
 run.ended resume_id="sid-1"
 === unknown harness
---- turn t_1 harness="gemini" access="" model=""
-refused 400 agent must be claude, codex, agy or opencode
+--- turn t_1 harness="goose" access="" model=""
+refused 400 agent must be claude, codex, agy, opencode or gemini
 === unknown harness on a next turn
 --- turn t_1 harness="claude" access="" model=""
 arg "--settings"
@@ -2619,8 +2619,8 @@ cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=844 mcp_instructions=327
 run.ended resume_id="sid-0"
---- turn t_2 harness="gemini" access="" model=""
-refused 400 agent must be claude, codex, agy or opencode
+--- turn t_2 harness="goose" access="" model=""
+refused 400 agent must be claude, codex, agy, opencode or gemini
 === opencode subscription
 --- turn t_1 harness="opencode" access="" model=""
 refused 400 OpenCode cannot run on access subscription
@@ -2972,3 +2972,301 @@ cwd <folder>
 turn.started agent="opencode" continuity="transcript" replay_from="" model="z-ai/glm-5.3-flash" context="[AgentBus: this conversation started before you joined it. Earlier turns ran on other agents. Below is each message the person sent and the final reply the agent gave, oldest first. Tool calls are left out. Any files those agents changed are in your current folder.]\n\n--- Turn 1, the person to Claude Code ---\none\n\n--- Turn 1, Claude Code replied ---\n(no reply: the turn ended without one)\n\n[AgentBus: end of the earlier turns. The person's new message to you follows.]\n\n"
 run.ended resume_id="ses_000000000001LaunchFake0001"
 log run.hint session=s1 turn=t_2 left_out=opencode_no_instruction_flag
+=== gemini subscription
+--- turn t_1 harness="gemini" access="" model=""
+refused 400 Gemini CLI cannot run on access subscription
+log run.refused agent=gemini access= reason=wire
+=== gemini subscription, relayed
+--- turn t_1 harness="gemini" access="" model=""
+refused 400 Gemini CLI cannot run on access subscription
+log run.refused agent=gemini access= reason=wire
+=== gemini openrouter
+--- turn t_1 harness="gemini" access="openrouter" model="z-ai/glm-5.3-flash"
+refused 400 Gemini CLI cannot run on access openrouter
+log run.refused agent=gemini access=openrouter reason=wire
+=== gemini api key, not relayed
+--- turn t_1 harness="gemini" access="api" model=""
+refused 400 an agent on an API key runs only where control adds its key; run it on agentbus up or a runner
+log run.refused agent=gemini access=api reason=wire
+=== gemini api key, relayed, no home of its own
+--- turn t_1 harness="gemini" access="api" model="gemini-2.5-flash"
+refused 400 this agent needs a home of its own on a runner that holds no secrets, and this service gives turns none
+log run.refused agent=gemini reason=home_files_no_home
+=== gemini api key, in a home of its own, then resume
+--- turn t_1 harness="gemini" access="api" model="gemini-2.5-flash"
+arg "--output-format"
+arg "stream-json"
+arg "--skip-trust"
+arg "--approval-mode"
+arg "auto_edit"
+arg "--allowed-tools"
+arg "run_shell_command(agentbus-api)"
+arg "--model"
+arg "gemini-2.5-flash"
+arg "--prompt=one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL="
+env "GEMINI_API_KEY=abs_test-standin"
+env "GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1/key/gemini"
+env "HOME=<homes>/s1"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="gemini" continuity="" replay_from="" model="gemini-2.5-flash" context=""
+run.ended resume_id="00000000-0000-4000-8000-000000000000"
+log run.hint session=s1 turn=t_1 left_out=gemini_no_instruction_flag
+--- turn t_2 harness="" access="api" model=""
+arg "--output-format"
+arg "stream-json"
+arg "--skip-trust"
+arg "--approval-mode"
+arg "auto_edit"
+arg "--allowed-tools"
+arg "run_shell_command(agentbus-api)"
+arg "--resume"
+arg "00000000-0000-4000-8000-000000000000"
+arg "--model"
+arg "gemini-2.5-flash"
+arg "--prompt=next t_2"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL="
+env "GEMINI_API_KEY=abs_test-standin"
+env "GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_2/key/gemini"
+env "HOME=<homes>/s1"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="gemini" continuity="resume" replay_from="" model="gemini-2.5-flash" context=""
+run.ended resume_id="00000000-0000-4000-8000-000000000001"
+log run.hint session=s1 turn=t_2 left_out=gemini_no_instruction_flag
+=== gemini api key without a model
+--- turn t_1 harness="gemini" access="api" model=""
+arg "--output-format"
+arg "stream-json"
+arg "--skip-trust"
+arg "--approval-mode"
+arg "auto_edit"
+arg "--allowed-tools"
+arg "run_shell_command(agentbus-api)"
+arg "--prompt=one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL="
+env "GEMINI_API_KEY=abs_test-standin"
+env "GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1/key/gemini"
+env "HOME=<homes>/s1"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="gemini" continuity="" replay_from="" model="" context=""
+run.ended resume_id="00000000-0000-4000-8000-000000000000"
+log run.hint session=s1 turn=t_1 left_out=gemini_no_instruction_flag
+=== gemini allow list, own instructions
+--- turn t_1 harness="gemini" access="api" model="gemini-2.5-flash"
+arg "--output-format"
+arg "stream-json"
+arg "--skip-trust"
+arg "--approval-mode"
+arg "default"
+arg "--allowed-tools"
+arg "run_shell_command(go test)"
+arg "--allowed-tools"
+arg "run_shell_command(git commit)"
+arg "--allowed-tools"
+arg "run_shell_command(agentbus-api)"
+arg "--model"
+arg "gemini-2.5-flash"
+arg "--prompt=one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL="
+env "GEMINI_API_KEY=abs_test-standin"
+env "GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1/key/gemini"
+env "HOME=<homes>/s1"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="gemini" continuity="" replay_from="" model="gemini-2.5-flash" context=""
+run.ended resume_id="00000000-0000-4000-8000-000000000000"
+log run.hint session=s1 turn=t_1 left_out=gemini_no_instruction_flag
+=== gemini edit none
+--- turn t_1 harness="gemini" access="api" model="gemini-2.5-flash"
+arg "--output-format"
+arg "stream-json"
+arg "--skip-trust"
+arg "--approval-mode"
+arg "default"
+arg "--allowed-tools"
+arg "run_shell_command(agentbus-api)"
+arg "--model"
+arg "gemini-2.5-flash"
+arg "--prompt=one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL="
+env "GEMINI_API_KEY=abs_test-standin"
+env "GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1/key/gemini"
+env "HOME=<homes>/s1"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="gemini" continuity="" replay_from="" model="gemini-2.5-flash" context=""
+run.ended resume_id="00000000-0000-4000-8000-000000000000"
+log run.hint session=s1 turn=t_1 left_out=gemini_no_instruction_flag
+=== gemini subagents off
+--- turn t_1 harness="gemini" access="api" model="gemini-2.5-flash"
+arg "--output-format"
+arg "stream-json"
+arg "--skip-trust"
+arg "--approval-mode"
+arg "auto_edit"
+arg "--allowed-tools"
+arg "run_shell_command(agentbus-api)"
+arg "--model"
+arg "gemini-2.5-flash"
+arg "--prompt=one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL="
+env "GEMINI_API_KEY=abs_test-standin"
+env "GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1/key/gemini"
+env "HOME=<homes>/s1"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="gemini" continuity="" replay_from="" model="gemini-2.5-flash" context=""
+run.ended resume_id="00000000-0000-4000-8000-000000000000"
+log run.hint session=s1 turn=t_1 left_out=gemini_no_instruction_flag
+=== gemini forbid
+--- turn t_1 harness="gemini" access="api" model="gemini-2.5-flash"
+refused 400 forbid in permissions.toml is not enforced for gemini yet; remove it, or use claude or codex
+log run.hint session=s1 turn=t_1 left_out=gemini_no_instruction_flag
+log run.refused agent=gemini reason=harness_setting
+=== gemini tools on
+--- turn t_1 harness="gemini" access="api" model="gemini-2.5-flash"
+arg "--output-format"
+arg "stream-json"
+arg "--skip-trust"
+arg "--approval-mode"
+arg "auto_edit"
+arg "--allowed-tools"
+arg "run_shell_command(agentbus-api)"
+arg "--model"
+arg "gemini-2.5-flash"
+arg "--prompt=one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL="
+env "GEMINI_API_KEY=abs_test-standin"
+env "GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1/key/gemini"
+env "HOME=<homes>/s1"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="gemini" continuity="" replay_from="" model="gemini-2.5-flash" context=""
+run.ended resume_id="00000000-0000-4000-8000-000000000000"
+log run.hint session=s1 turn=t_1 left_out=gemini_no_instruction_flag
+=== gemini own endpoint
+--- turn t_1 harness="gemini" access="api" model="gemini-2.5-flash"
+refused 400 the service's environment already sends this agent to another endpoint; unset it and restart agentbus
+=== gemini missing
+--- turn t_1 harness="gemini" access="api" model="gemini-2.5-flash"
+refused 400 agent gemini cannot start: the program gemini is not on the service's PATH. Install the Gemini CLI (npm install -g @google/gemini-cli) and run gemini once to sign in, then try again. If it is installed, start agentbus from a shell where gemini runs.
+log run.refused agent=gemini program=gemini reason=not_on_path
+=== gemini folder holds the data folder
+--- turn t_1 harness="gemini" access="api" model="gemini-2.5-flash"
+arg "--output-format"
+arg "stream-json"
+arg "--skip-trust"
+arg "--approval-mode"
+arg "default"
+arg "--allowed-tools"
+arg "run_shell_command(agentbus-api)"
+arg "--model"
+arg "gemini-2.5-flash"
+arg "--prompt=one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL="
+env "GEMINI_API_KEY=abs_test-standin"
+env "GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1/key/gemini"
+env "HOME=<homes>/s1"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="gemini" continuity="" replay_from="" model="gemini-2.5-flash" context=""
+run.ended resume_id="00000000-0000-4000-8000-000000000000"
+log run.hint session=s1 turn=t_1 left_out=gemini_no_instruction_flag
+log run.edit session=s1 turn=t_1 left_out=data_folder_inside
+=== gemini folder with AGENTS.md, asked by another agent
+--- turn t_1 harness="gemini" access="api" model="gemini-2.5-flash"
+arg "--output-format"
+arg "stream-json"
+arg "--skip-trust"
+arg "--approval-mode"
+arg "auto_edit"
+arg "--allowed-tools"
+arg "run_shell_command(agentbus-api)"
+arg "--model"
+arg "gemini-2.5-flash"
+arg "--prompt=one"
+env "AGENTBUS_ASKED_BY_SESSION=s0"
+env "AGENTBUS_ASKED_BY_TURN=t_0"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL="
+env "GEMINI_API_KEY=abs_test-standin"
+env "GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_1/key/gemini"
+env "HOME=<homes>/s1"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="gemini" continuity="" replay_from="" model="gemini-2.5-flash" context=""
+run.ended resume_id="00000000-0000-4000-8000-000000000000"
+log run.hint session=s1 turn=t_1 left_out=gemini_no_instruction_flag
+=== switch claude to gemini, transcript
+--- turn t_1 harness="claude" access="" model=""
+arg "--settings"
+arg "{\"apiKeyHelper\":\"\",\"env\":{\"ANTHROPIC_API_KEY\":\"\",\"ANTHROPIC_AUTH_TOKEN\":\"\",\"ANTHROPIC_BASE_URL\":\"http://127.0.0.1:8787/s/s1/t/t_1\",\"ANTHROPIC_CUSTOM_HEADERS\":\"\",\"ANTHROPIC_UNIX_SOCKET\":\"\",\"CLAUDE_CODE_OAUTH_TOKEN\":\"abs_test-standin\",\"CLAUDE_CODE_USE_ANTHROPIC_AWS\":\"\",\"CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD\":\"\",\"CLAUDE_CODE_USE_BEDROCK\":\"\",\"CLAUDE_CODE_USE_FOUNDRY\":\"\",\"CLAUDE_CODE_USE_GATEWAY\":\"\",\"CLAUDE_CODE_USE_MANTLE\":\"\",\"CLAUDE_CODE_USE_VERTEX\":\"\",\"NO_PROXY\":\"localhost,127.0.0.1,::1,127.0.0.1:8787\",\"no_proxy\":\"localhost,127.0.0.1,::1,127.0.0.1:8787\"}}"
+arg "-p"
+arg "--output-format"
+arg "json"
+arg "--append-system-prompt"
+arg "You work through AgentBus, in session s1. A turn is one message to you, your reply and your changes.\nYour folder is usually your session's own copy of the person's folder. Your edits stay in the copy. They reach the person's folder only when a turn is applied.\nUse the agentbus MCP tools to ask other saved agents (any vendor) for work (ask_agent) or to have one review a turn (review_turn). AgentBus agents are saved setups across vendors, not your harness's own agents or subagents.\nTo read turns and their diffs, search this session, or stop a turn, use agentbus-api (GET /api/v0/turns, GET /api/v0/turns/T/diff, POST /api/v0/turns/T/stop). A short guide to every route is at agentbus-api GET /docs/llms.txt.\nThe person applies your changes to their folder; you cannot.\nWork you ask for comes back to you as a later turn: do not wait for it."
+arg "--allowedTools"
+arg "Edit(/<folder>/**),Bash,mcp__agentbus"
+arg "--mcp-config"
+arg "{\"mcpServers\":{\"agentbus\":{\"headers\":{\"Authorization\":\"Bearer ${AGENTBUS_TOKEN}\"},\"type\":\"http\",\"url\":\"/api/v0/mcp\"}}}"
+arg "--no-chrome"
+arg "--disallowedTools"
+arg "Edit(/<data>/permissions.toml),Edit(/<data>/instructions.md),Edit(/<data>/agents.json),Task,Agent,Workflow,ListAgents,SendMessage"
+arg "--"
+arg "one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL="
+env "ANTHROPIC_API_KEY="
+env "ANTHROPIC_AUTH_TOKEN="
+env "CLAUDE_CODE_OAUTH_TOKEN="
+env "CLAUDE_CONFIG_DIR=<homes>/s1/.claude"
+env "HOME=<homes>/s1"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="claude" continuity="" replay_from="" model="" context=""
+context.added instructions=844 mcp_instructions=327
+run.ended resume_id="sid-0"
+--- turn t_2 harness="gemini" access="api" model="gemini-2.5-flash"
+arg "--output-format"
+arg "stream-json"
+arg "--skip-trust"
+arg "--approval-mode"
+arg "auto_edit"
+arg "--allowed-tools"
+arg "run_shell_command(agentbus-api)"
+arg "--model"
+arg "gemini-2.5-flash"
+arg "--prompt=[AgentBus: this conversation started before you joined it. Earlier turns ran on other agents. Below is each message the person sent and the final reply the agent gave, oldest first. Tool calls are left out. Any files those agents changed are in your current folder.]\n\n--- Turn 1, the person to Claude Code ---\none\n\n--- Turn 1, Claude Code replied ---\n(no reply: the turn ended without one)\n\n[AgentBus: end of the earlier turns. The person's new message to you follows.]\n\nnext t_2"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL="
+env "GEMINI_API_KEY=abs_test-standin"
+env "GOOGLE_GEMINI_BASE_URL=http://127.0.0.1:8787/s/s1/t/t_2/key/gemini"
+env "HOME=<homes>/s1"
+env "PATH=<data>/bin:/usr/bin:/bin"
+cwd <folder>
+turn.started agent="gemini" continuity="transcript" replay_from="" model="gemini-2.5-flash" context="[AgentBus: this conversation started before you joined it. Earlier turns ran on other agents. Below is each message the person sent and the final reply the agent gave, oldest first. Tool calls are left out. Any files those agents changed are in your current folder.]\n\n--- Turn 1, the person to Claude Code ---\none\n\n--- Turn 1, Claude Code replied ---\n(no reply: the turn ended without one)\n\n[AgentBus: end of the earlier turns. The person's new message to you follows.]\n\n"
+run.ended resume_id="00000000-0000-4000-8000-000000000001"
+log run.hint session=s1 turn=t_2 left_out=gemini_no_instruction_flag
