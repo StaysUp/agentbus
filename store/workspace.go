@@ -106,53 +106,13 @@ func (s *Store) Workspace(id ids.WorkspaceID) (w Workspace, found bool, err erro
 }
 
 // workspaceState fills HeadTurn, AppliedTurn and DiscardedAt from the
-// workspace's turn.changed and its apply/discard history.
+// workspace's applied state (Applied), the one fold the queue reads too.
 func (s *Store) workspaceState(w *Workspace) error {
-	// The workspace's latest turn that recorded a changeset, other than one a
-	// discard dropped (its changes are gone from the copy, so an apply would not
-	// go up to it).
-	var head sql.NullString
-	err := s.r.QueryRow(`SELECT tc.turn FROM events tc
-		JOIN events ts ON ts.kind = 'turn.started' AND ts.session = tc.session AND ts.turn = tc.turn
-		WHERE tc.kind = 'turn.changed' AND `+resolvedWorkspace+` = ?1
-		AND tc.turn NOT IN (
-			SELECT je.value FROM events d, json_each(COALESCE(json_extract(d.data, '$.discarded.dropped_turns'), '[]')) je
-			WHERE d.kind = 'workspace.discarded' AND json_extract(d.data, '$.workspace') = ?1)
-		ORDER BY tc.seq DESC LIMIT 1`, w.ID).Scan(&head)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("store: read workspace head: %w", err)
+	a, err := s.Applied(ids.WorkspaceID(w.ID))
+	if err != nil {
+		return err
 	}
-	w.HeadTurn = head.String
-
-	// The turn the latest successful apply went up to. A pre-workspace
-	// turn.applied of a migrated workspace is keyed by its session, which is
-	// the workspace's id.
-	var applied sql.NullString
-	err = s.r.QueryRow(`SELECT json_extract(data, '$.turn') FROM events
-		WHERE ((kind = 'workspace.applied' AND json_extract(data, '$.workspace') = ?1)
-			OR (kind = 'turn.applied' AND session = ?1))
-			AND json_extract(data, '$.applied.result') = 'applied'
-		ORDER BY seq DESC LIMIT 1`, w.ID).Scan(&applied)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("store: read workspace applied: %w", err)
-	}
-	w.AppliedTurn = applied.String
-
-	// When the latest apply-or-discard action was a discard, the workspace's
-	// unapplied changes were dropped and no apply has run since.
-	var kind sql.NullString
-	var when int64
-	err = s.r.QueryRow(`SELECT kind, time FROM events
-		WHERE (kind IN ('workspace.applied', 'workspace.discarded') AND json_extract(data, '$.workspace') = ?1)
-			OR (kind = 'turn.applied' AND session = ?1)
-		ORDER BY seq DESC LIMIT 1`, w.ID).Scan(&kind, &when)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("store: read workspace action: %w", err)
-	}
-	if kind.String == string(event.WorkspaceDiscarded) {
-		t := time.Unix(0, when).UTC()
-		w.DiscardedAt = &t
-	}
+	w.HeadTurn, w.AppliedTurn, w.DiscardedAt = a.Head(), a.AppliedTurn, a.DiscardedAt
 	return nil
 }
 

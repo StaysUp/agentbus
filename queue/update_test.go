@@ -316,8 +316,8 @@ func TestCheckMarkersOnlyAfterAMerge(t *testing.T) {
 	ws := ids.WorkspaceID(first.Session)
 	t1 := run(t, q, rn, Result{Changeset: hexOf('1'), Checkpoint: "cp1"})
 
-	if marked, err := q.mergedSince(DefaultTeam, ws); err != nil || marked {
-		t.Fatalf("before any merge: %v %v, want no check", marked, err)
+	if rec, err := q.appliedState(ws); err != nil || rec.Markers {
+		t.Fatalf("before any merge: %v %v, want no check", rec.Markers, err)
 	}
 	if _, _, err := q.Update(DefaultTeam, ws, conA, nil, true); err != nil {
 		t.Fatal(err)
@@ -333,7 +333,7 @@ func TestCheckMarkersOnlyAfterAMerge(t *testing.T) {
 	}
 	// The apply finishes: the merge is behind it, and the check is off.
 	endApply(t, q, rn, Finished, "", Result{Apply: &ApplyResult{Files: []string{"a.txt"}}})
-	if marked, err := q.mergedSince(DefaultTeam, ws); err != nil || marked {
-		t.Fatalf("after a finished apply: %v %v, want no check", marked, err)
+	if rec, err := q.appliedState(ws); err != nil || rec.Markers {
+		t.Fatalf("after a finished apply: %v %v, want no check", rec.Markers, err)
 	}
 }

@@ -536,6 +536,14 @@ func start(c config) (*service, error) {
 				return nil, err
 			}
 		}
+		// A workspace recorded before 0.6.6 has part of its applied state in the
+		// queue's job rows only: snapshot it into the record, once, before the
+		// finisher runs, so the record alone answers it (jobs.MigrateApplied).
+		if _, err := jobs.MigrateApplied(st, q); err != nil {
+			closeQ()
+			st.Close()
+			return nil, err
+		}
 		// Every file of a snapshot or of a turn's changes goes through the
 		// control plane's blob store.
 		if bs, err = blobs.Open(filepath.Join(c.home, "blobs")); err != nil {

@@ -33,6 +33,7 @@ func open(t *testing.T) (*Queue, *clock) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { q.Close() })
+	withRecord(t, q)
 	return q, c
 }
 
@@ -626,11 +627,30 @@ func TestTurnsAhead(t *testing.T) {
 	}
 	// One at a time: the runner takes the first, and not the third beside it.
 	r := runner(t, q, 4)
-	if j, _ := take(t, q, r); j.ID != first.ID {
-		t.Fatalf("took %s, want the first", j.ID)
+	fj, fa := take(t, q, r)
+	if fj.ID != first.ID {
+		t.Fatalf("took %s, want the first", fj.ID)
 	}
 	if _, ok, err := takeAny(q, r); ok || err != nil {
 		t.Fatalf("took a second turn of the session beside the first: %v %v", ok, err)
+	}
+	// TurnsAhead is Take's own rule (laneTake), not a second copy of it: what it
+	// shows waiting ahead is what Take waits for. The running first is ahead of
+	// the third; once it ends, nothing is, and the third is what Take hands out.
+	if got := ids(third); len(got) != 1 || got[0] != first.ID {
+		t.Fatalf("ahead of the third while the first runs: %v", got)
+	}
+	if _, _, err := q.Start(r.ID, fa.ID, fa.Number, lease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.End(r.ID, fa.ID, fa.Number, Finish{Status: Finished, Session: fj.Session, Workspace: &Workspace{Kind: WorkspaceCopy, Space: fj.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := ids(third); len(got) != 0 {
+		t.Fatalf("ahead of the third after the first ended: %v", got)
+	}
+	if j, _ := take(t, q, r); j.ID != third.ID {
+		t.Fatalf("took %s, want the third", j.ID)
 	}
 }
 

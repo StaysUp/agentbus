@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/staysup/agentbus/applied"
 	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/workspace"
 	_ "modernc.org/sqlite"
@@ -662,6 +663,9 @@ type Queue struct {
 	// reply reads a turn's whole reply from the record (ReadReplyWith), in
 	// place of a copy in the job result.
 	reply ReplyReader
+	// applied reads a workspace's applied state from the record, its one
+	// owner (ReadAppliedWith). The queue keeps no copy of it.
+	applied AppliedReader
 }
 
 // By says who asked for a job, by the kind of token it came with (the
@@ -688,6 +692,29 @@ type ReplyReader func(session, turn string) (string, error)
 // a review prompt's author reply and an asked result's reply, in place of a
 // copy in the job result. Set it before the queue is used.
 func (q *Queue) ReadReplyWith(r ReplyReader) { q.reply = r }
+
+// AppliedReader reads a workspace's applied state from the record
+// (applied.State): its appliable turns, how far an apply went, the update that
+// sets the folder's baseline.
+type AppliedReader func(ws ids.WorkspaceID) (applied.State, error)
+
+// ReadAppliedWith sets how the queue reads a workspace's applied state from
+// the record. Apply, preview, discard and update read it there and nowhere
+// else: the queue's job rows say only how each job stands (his call,
+// 2026-11-24: one owner per fact).
+func (q *Queue) ReadAppliedWith(r AppliedReader) { q.applied = r }
+
+// ErrNoRecord: the queue was given no record to read a workspace's applied
+// state from (ReadAppliedWith).
+var ErrNoRecord = errors.New("queue: no record to read the applied state from")
+
+// appliedState is the workspace's applied state, read from the record.
+func (q *Queue) appliedState(ws ids.WorkspaceID) (applied.State, error) {
+	if q.applied == nil {
+		return applied.State{}, ErrNoRecord
+	}
+	return q.applied(ws)
+}
 
 // replyOf is the whole text of job j's turn's last reply, read from the
 // record. "" when no reader is set or the turn has no reply.
@@ -994,15 +1021,13 @@ func (q *Queue) SessionHasWork(team, session string) (bool, error) {
 }
 
 // TurnsAhead are the jobs the job waits behind in its workspace's lane, oldest
-// first: the lane jobs (turn, apply, preview, discard) of its workspace that
-// have not ended and were made before it. An asked session's turn waits behind
-// the asker's, since both name the one workspace. None for a job of no lane.
+// first: every job o for which laneTake says the job waits for o -- the one
+// rule Take obeys, so what is shown waiting ahead is what Take waits for. An
+// asked session's turn waits behind the asker's, since both name the one
+// workspace. None for a job of no lane (laneKinds).
 func (q *Queue) TurnsAhead(team, id string) ([]Job, error) {
 	rows, err := q.db.Query(`SELECT o.id FROM jobs o JOIN jobs j ON j.id = ? AND j.team = ?
-		WHERE o.team = j.team AND o.ended IS NULL AND o.id != j.id
-		AND j.kind IN `+laneKinds+` AND o.kind IN `+laneKinds+`
-		AND COALESCE(NULLIF(json_extract(o.spec, '$.workspace'), ''), o.session) = COALESCE(NULLIF(json_extract(j.spec, '$.workspace'), ''), j.session)
-		AND (o.created < j.created OR (o.created = j.created AND o.id < j.id))
+		WHERE o.team = j.team AND o.id != j.id AND (`+laneTake+`)
 		ORDER BY o.created, o.id`, id, team)
 	if err != nil {
 		return nil, fmt.Errorf("queue: list turns ahead: %w", err)

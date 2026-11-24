@@ -13,7 +13,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/staysup/agentbus/applied"
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/store"
 )
@@ -63,6 +65,9 @@ type Recorder interface {
 	// first: the decision read (decision.go) derives a held approval's state
 	// from them.
 	ApprovalEvents() ([]event.Event, error)
+	// Applied is a workspace's applied state, folded from the record, its one
+	// owner: the queue reads it for apply, preview, discard and update.
+	Applied(ws ids.WorkspaceID) (applied.State, error)
 	Finder
 }
 

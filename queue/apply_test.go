@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/staysup/agentbus/applied"
 	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/workspace"
@@ -892,4 +893,53 @@ func TestAppliableCursorCountsApplies(t *testing.T) {
 			t.Fatalf("a partial apply: applies %d, want 1", n)
 		}
 	})
+}
+
+// What is applied and what is appliable has one owner, the record: the queue
+// reads it there (ReadAppliedWith) and keeps no fold of its own job rows, so
+// the two cannot disagree. Here the job rows hold an ended turn with a
+// changeset, but the record says nothing is appliable: the queue follows the
+// record. Then the record names the turn, with its own changeset, and the apply
+// goes to that changeset, not to the job result's (his call, 2026-11-24).
+func TestAppliedStateIsTheRecords(t *testing.T) {
+	q, _ := open(t)
+	rn := capsRunner(t, q, nil, &Capabilities{Connector: conA})
+	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
+	ws := ids.WorkspaceID(first.Session)
+	t1 := run(t, q, rn, Result{Changeset: hexOf('1'), Checkpoint: "cp1"})
+
+	rec := applied.Empty()
+	q.ReadAppliedWith(func(ids.WorkspaceID) (applied.State, error) { return rec, nil })
+	if _, _, ok, err := q.AppliableCursor(DefaultTeam, ws); err != nil || ok {
+		t.Fatalf("cursor with an empty record: ok %v err %v", ok, err)
+	}
+	if _, _, err := q.Apply(DefaultTeam, t1.Turn); !errors.Is(err, ErrNotApplicable) {
+		t.Fatalf("apply of a turn the record does not hold: %v", err)
+	}
+	if _, _, err := q.Discard(DefaultTeam, ws, conA, nil); !errors.Is(err, ErrAllApplied) {
+		t.Fatalf("discard with an empty record: %v", err)
+	}
+	if dropped, err := q.DroppedTurns(DefaultTeam, ws); err != nil || len(dropped) != 0 {
+		t.Fatalf("dropped with an empty record: %v %v", dropped, err)
+	}
+
+	var f applied.Fold
+	f.Changed(t1.Turn, hexOf('9'), "cp9")
+	rec = f.State()
+	if turn, _, ok, err := q.AppliableCursor(DefaultTeam, ws); err != nil || !ok || turn != t1.Turn {
+		t.Fatalf("cursor: %q %v %v", turn, ok, err)
+	}
+	aj, created, err := q.Apply(DefaultTeam, t1.Turn)
+	if err != nil || !created || aj.Spec.ApplyTo != hexOf('9') {
+		t.Fatalf("apply: to %q created %v err %v, want the record's changeset", aj.Spec.ApplyTo, created, err)
+	}
+}
+
+// Without a record the queue cannot say what is appliable, and says so.
+func TestAppliedStateNeedsARecord(t *testing.T) {
+	q, _ := open(t)
+	q.ReadAppliedWith(nil)
+	if _, _, _, err := q.AppliableCursor(DefaultTeam, "ws_x"); !errors.Is(err, ErrNoRecord) {
+		t.Fatalf("no record: %v", err)
+	}
 }

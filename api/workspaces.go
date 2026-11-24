@@ -605,8 +605,8 @@ func (a *API) applyWorkspace(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 	// The target turn and every check are resolved in the queue under one lock
-	// (ApplyWorkspace): the empty-body head comes from the queue's appliable
-	// cursor, the same source the preview uses, not store.HeadTurn.
+	// (ApplyWorkspace): the empty-body head is the record's (store.Applied),
+	// the same fold head_turn shows and the preview reads.
 	j, created, err := a.cfg.Queue.ApplyWorkspace(queue.DefaultTeam, wsID, body.Turn, askedBy(r))
 	switch {
 	case errors.Is(err, queue.ErrAllApplied):

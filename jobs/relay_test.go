@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/adapter/anthropic"
+	"github.com/staysup/agentbus/applied"
 	"github.com/staysup/agentbus/body"
 	"github.com/staysup/agentbus/credentials"
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/gateway"
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/store"
 )
@@ -22,6 +24,7 @@ type calls map[string][2]string
 
 func (c calls) AppendOnce(event.Event) (bool, error)            { return true, nil }
 func (c calls) ApprovalEvents() ([]event.Event, error)          { return nil, nil }
+func (c calls) Applied(ids.WorkspaceID) (applied.State, error)  { return applied.Empty(), nil }
 func (c calls) KeepReply(body.Reply) error                      { return nil }
 func (c calls) Continuation(string) (store.Continuation, error) { return store.Continuation{}, nil }
 func (c calls) CallSession(x string) (string, bool, error)      { v, ok := c[x]; return v[0], ok, nil }

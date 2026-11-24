@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/queue"
 )
 
@@ -148,57 +149,66 @@ func (f *finisher) await(ctx context.Context, team, id, attempt string, wait tim
 // first (keepOutcomes), from the saved finish alone, then the job's end
 // (queue.End), the commit point. Only the finisher calls it.
 func endAccepted(rec Recorder, q *queue.Queue, a queue.AcceptedFinish) (queue.Job, error) {
-	// A finished discard's dropped turns are read NOW, when it runs, not frozen
-	// when it was queued: a turn that ran while the discard waited in the lane is
-	// dropped too, so it is listed and marked. Keyed by the workspace (CopyKey),
-	// as a discard carries no session. This discard is not finished yet, so it
-	// does not exclude its own drops from the appliable turns.
-	if a.Job.Kind == queue.KindDiscard && a.Finish.Status == queue.Finished {
-		if ws := queue.CopyKey(a.Job.Spec.Workspace, a.Job.Session); ws != "" {
-			dropped, derr := q.DroppedTurns(a.Job.Team, ws)
-			if derr != nil {
-				return queue.Job{}, errOutcome
-			}
-			// For the workspace.discarded event (keepOutcomes reads the job), and
-			// persisted on the job so those turns stop being appliable once the
-			// discard is finished (appliableTurns excludes them).
-			a.Job.Links.AppliesTurns = dropped
-			if derr := q.MarkDiscarded(a.Job.Team, a.Job.ID, dropped); derr != nil {
-				return queue.Job{}, errOutcome
-			}
-		}
-	}
-	// A finished clean update's head and folded turns are read NOW, when it runs,
-	// not frozen when it was queued: a turn that ran while the update waited in
-	// the lane is folded too. A conflict folds nothing (it changed nothing). The
-	// runner's result says clean (update.to set) or conflict.
-	if a.Job.Kind == queue.KindUpdate && a.Finish.Status == queue.Finished {
-		if res, _ := queue.ReadResult(a.Finish.Result); res.Update.Clean() {
+	// The outcome goes into the record and the job ends as one step for the
+	// queue's readers of the applied state (queue.Outcome): none sees one
+	// without the other.
+	var j queue.Job
+	var endErr error
+	if err := q.Outcome(func() error {
+		// A finished discard's dropped turns are read NOW, when it runs, not frozen
+		// when it was queued: a turn that ran while the discard waited in the lane is
+		// dropped too, so it is listed and marked. Keyed by the workspace (CopyKey),
+		// as a discard carries no session. This discard is not finished yet, so it
+		// does not exclude its own drops from the appliable turns.
+		if a.Job.Kind == queue.KindDiscard && a.Finish.Status == queue.Finished {
 			if ws := queue.CopyKey(a.Job.Spec.Workspace, a.Job.Session); ws != "" {
-				head, folded, ferr := q.UpdateFolds(a.Job.Team, ws)
-				if ferr != nil {
-					return queue.Job{}, errOutcome
+				dropped, derr := discardDrops(rec, q, a.Job, ws)
+				if derr != nil {
+					return errOutcome
 				}
-				// On the job so a later apply targets the head as the merge and the
-				// folded turns stop being appliable (keepOutcomes and appliableTurns
-				// read the job).
-				a.Job.Links.AppliesTurn = head
-				a.Job.Links.AppliesTurns = folded
-				if ferr := q.MarkUpdated(a.Job.Team, a.Job.ID, head, folded); ferr != nil {
-					return queue.Job{}, errOutcome
+				// For the workspace.discarded event (keepOutcomes reads the job), which
+				// makes them unappliable, and on the job for its own answer.
+				a.Job.Links.AppliesTurns = dropped
+				if derr := q.MarkDiscarded(a.Job.Team, a.Job.ID, dropped); derr != nil {
+					return errOutcome
 				}
 			}
 		}
+		// A finished clean update's head and folded turns are read NOW, when it runs,
+		// not frozen when it was queued: a turn that ran while the update waited in
+		// the lane is folded too. A conflict folds nothing (it changed nothing). The
+		// runner's result says clean (update.to set) or conflict.
+		if a.Job.Kind == queue.KindUpdate && a.Finish.Status == queue.Finished {
+			if res, _ := queue.ReadResult(a.Finish.Result); res.Update.Clean() {
+				if ws := queue.CopyKey(a.Job.Spec.Workspace, a.Job.Session); ws != "" {
+					head, folded, ferr := updateFolds(rec, q, a.Job, ws)
+					if ferr != nil {
+						return errOutcome
+					}
+					// For the workspace.updated event (keepOutcomes reads the job), from
+					// which a later apply targets the head as the merge and the folded
+					// turns stop being appliable; and on the job for its own answer.
+					a.Job.Links.AppliesTurn = head
+					a.Job.Links.AppliesTurns = folded
+					if ferr := q.MarkUpdated(a.Job.Team, a.Job.ID, head, folded); ferr != nil {
+						return errOutcome
+					}
+				}
+			}
+		}
+		kept, kerr := keepOutcomes(rec, a.Job, a.Finish)
+		if kerr != nil {
+			return errOutcome
+		}
+		fin := a.Finish
+		fin.Kept = kept
+		j, endErr = q.End(a.Runner, a.Attempt, a.Number, fin)
+		return nil
+	}); err != nil {
+		return queue.Job{}, err
 	}
-	kept, err := keepOutcomes(rec, a.Job, a.Finish)
-	if err != nil {
-		return queue.Job{}, errOutcome
-	}
-	fin := a.Finish
-	fin.Kept = kept
-	j, err := q.End(a.Runner, a.Attempt, a.Number, fin)
-	if err != nil {
-		return j, err
+	if endErr != nil {
+		return j, endErr
 	}
 	// Record the turn's end AFTER End commits the job's final state, so a
 	// reactor that sees turn.ended (FireOns) always reads the job in its final
@@ -209,6 +219,39 @@ func endAccepted(rec Recorder, q *queue.Queue, a queue.AcceptedFinish) (queue.Jo
 	// is only the reactor trigger.
 	_, _ = recordTurnEnded(rec, a.Job, queue.TurnState(a.Finish.Status), a.Finish.Reason, time.Now().UTC())
 	return j, nil
+}
+
+// EndAs ends attempt number of job j (as it was taken) with finish f the way
+// control's finisher does (endAccepted): its outcome into the record first,
+// then the job's end. For a caller that drives a queue without the runner
+// protocol, as the API's tests do, so the record holds what it would.
+func EndAs(rec Recorder, q *queue.Queue, runner, attempt string, number int, j queue.Job, f queue.Finish) (queue.Job, error) {
+	return endAccepted(rec, q, queue.AcceptedFinish{Runner: runner, Attempt: attempt, Number: number, Job: j, Finish: f})
+}
+
+// discardDrops are the turns discard job j drops, read from the record when it
+// runs. A pass that already wrote the job's workspace.discarded (and stopped
+// before End) takes them from that event: the record already counts them as
+// dropped, so reading the appliable turns again would find none.
+func discardDrops(rec Recorder, q *queue.Queue, j queue.Job, ws ids.WorkspaceID) ([]string, error) {
+	if e, ok, err := rec.EventByID(j.Session, "", discardID(j)); err != nil {
+		return nil, err
+	} else if ok && e.Discarded != nil {
+		return e.Discarded.DroppedTurns, nil
+	}
+	return q.DroppedTurns(j.Team, ws)
+}
+
+// updateFolds are the head and folded turns of clean update job j, read from
+// the record when it runs; from the job's workspace.updated when an earlier
+// pass already wrote it (discardDrops says why).
+func updateFolds(rec Recorder, q *queue.Queue, j queue.Job, ws ids.WorkspaceID) (string, []string, error) {
+	if e, ok, err := rec.EventByID(j.Session, "", updateID(j)); err != nil {
+		return "", nil, err
+	} else if ok && e.Updated != nil {
+		return e.Updated.HeadTurn, e.Updated.FoldedTurns, nil
+	}
+	return q.UpdateFolds(j.Team, ws)
 }
 
 // RunFinisher runs control's one finisher until stop closes (finisher.go).

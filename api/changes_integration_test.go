@@ -19,6 +19,7 @@ import (
 
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/ids"
+	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
@@ -351,8 +352,26 @@ func changesQueue(t *testing.T, waits ...time.Duration) (e *env, q *queue.Queue,
 	if err != nil {
 		t.Fatal(err)
 	}
-	endJob(t, q, r, false, queue.Finish{Status: queue.Finished, Session: j.Session,
-		Workspace: &queue.Workspace{Kind: queue.WorkspaceCopy, Space: j.ID}, Result: []byte(`{"changeset":"` + strings.Repeat("1", 64) + `"}`)})
+	// What is appliable is the record's (store.Applied): the queue reads it
+	// there, and the turn ends the way control's finisher ends it, its
+	// turn.changed in the record first.
+	q.ReadAppliedWith(st.Applied)
+	if _, _, err := st.Append(event.Event{Kind: event.TurnStarted, Time: time.Now().UTC(), Session: j.Session, Turn: j.Turn,
+		Text: "hi", Harness: "claude"}); err != nil {
+		t.Fatal(err)
+	}
+	tj, at, ok, _, err := q.Take(r.ID, 30*time.Second, false)
+	if err != nil || !ok {
+		t.Fatalf("take: %v %v", ok, err)
+	}
+	if _, _, err := q.Start(r.ID, at.ID, at.Number, 30*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := jobs.EndAs(st, q, r.ID, at.ID, at.Number, tj, queue.Finish{Status: queue.Finished, Session: j.Session,
+		Workspace: &queue.Workspace{Kind: queue.WorkspaceCopy, Space: j.ID},
+		Result:    []byte(`{"changeset":"` + strings.Repeat("1", 64) + `","changes":{"kind":"snapshot","from":"cp0","to":"cp1","files":[]}}`)}); err != nil {
+		t.Fatal(err)
+	}
 	// The workspace changes route reads the workspace from the store, so record
 	// one for this session the way the migration does: its id is its own
 	// workspace id (migrated-style), sandbox true.

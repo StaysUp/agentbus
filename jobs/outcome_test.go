@@ -118,6 +118,11 @@ func TestTurnChangedKeptOnce(t *testing.T) {
 	if kept.Changes != nil || kept.ChangesEvent != changedID(j) || kept.Checkpoint != j.Turn || kept.Changeset != "blob1" {
 		t.Fatalf("the job keeps %s", j.Result)
 	}
+	// The event names the turn's changeset and checkpoint apart from its file
+	// list (0.6.6): what an apply up to it writes.
+	if ev, ok, err := e.st.EventByID(j.Session, j.Turn, changedID(j)); err != nil || !ok || ev.Changeset != "blob1" || ev.Checkpoint != j.Turn {
+		t.Fatalf("turn.changed changeset %q checkpoint %q (%v %v)", ev.Changeset, ev.Checkpoint, ok, err)
+	}
 	got, err := Changes(e.st, j)
 	if err != nil || !reflect.DeepEqual(got, EventChanges(changes)) || !got.Isolated || got.Files[0].SHA256Before != "h1" || !got.DiffsCut {
 		t.Fatalf("read back %+v, %v", got, err)
@@ -159,7 +164,8 @@ func TestTurnAppliedKept(t *testing.T) {
 		t.Fatalf("the job keeps %s", j.Result)
 	}
 	got, err := Applied(e.st, j)
-	want := &event.Applied{Turns: []string{"t_1", "t_2"}, By: &event.By{Kind: event.ByAgent, Session: "s_asker", Turn: "t_asker"},
+	// The changesets it went between (0.6.6): the record owns the applied state.
+	want := &event.Applied{Turns: []string{"t_1", "t_2"}, From: j.Spec.ApplyFrom, To: j.Spec.ApplyTo, By: &event.By{Kind: event.ByAgent, Session: "s_asker", Turn: "t_asker"},
 		Result: "refused", Error: "a file in your folder changed", Conflicts: []event.RefusedFile{{Path: "a.txt", Why: "changed since the turn started"}}}
 	if err != nil || !reflect.DeepEqual(got, want) {
 		t.Fatalf("read back %+v, %v", got, err)
