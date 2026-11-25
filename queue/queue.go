@@ -94,6 +94,14 @@ const (
 	// the copy, so it waits in the workspace lane behind a running turn
 	// (laneKinds). It starts no turn.
 	KindDiscard = "discard"
+	// KindClose removes a sandbox workspace's copy to reclaim its disk: the
+	// runner holding the copy removes it, and control records workspace.closed.
+	// The next turn rebuilds a fresh copy from the folder. Like a discard it is a
+	// lane job (laneKinds): it waits behind a running or queued turn, and changes
+	// not applied when it runs are dropped with the copy (the person applies or
+	// discards on the session to keep them). Its workspace.closed resets the
+	// record's applied state. It starts no turn.
+	KindClose = "close"
 	// KindUpdate brings the person's folder as it is now into a sandbox
 	// workspace's copy by a three-way merge, so the session's work sits on top
 	// of the folder and the next apply writes only that work (update.go). The
@@ -983,8 +991,7 @@ func (q *Queue) HasKey(team, key string) (bool, error) {
 }
 
 // laneKinds are the job kinds that share a workspace's one ordered lane: the
-// jobs that CHANGE the one copy -- a turn (runs in it), a discard (resets it to
-// the last applied point) and an update (merges the folder into it). They run
+// jobs that CHANGE the one copy: a turn, discard, update or close. They run
 // one at a time on the runner that holds the copy, so neither a discard nor an
 // update ever touches a copy a turn is editing, and what an update merges is
 // computed when it runs (like a discard's dropped turns). apply and preview are
@@ -992,7 +999,7 @@ func (q *Queue) HasKey(team, key string) (bool, error) {
 // person's folder, never the live copy, so they leave the lane and never wait
 // on a running turn (his call, 2026-11-22). folder and home touch no workspace
 // copy. (B15: a review is a turn in its own session, so no review clause.)
-const laneKinds = `('turn','discard','update')`
+const laneKinds = `('turn','discard','update','close')`
 
 // jobCopyKey is a job's workspace copy key in SQL, qualified by alias a (e.g.
 // "j"): its workspace, or its session when it names none, exactly as CopyKey
@@ -1005,16 +1012,18 @@ func jobCopyKey(a string) string {
 }
 
 // laneTake is Take's one rule of a WORKSPACE's lane, for a job j and another job
-// o: j waits for o. A workspace's copy-changing jobs (turns and discards) are
-// one line, first in, first out -- an asked session's turns share the asker's
-// line, since both name the one workspace -- so each waits for one that runs,
-// and for an older one still queued. The lane key is the workspace, or the
-// session for a job with no workspace (its own workspace), as CopyKey keys the
-// copy row.
+// o: j waits for o. A workspace's copy-changing jobs (laneKinds) are one line,
+// first in, first out -- an asked session's turns share the asker's line, since
+// both name the one workspace -- so each waits for one that runs, and for one
+// made before it that is still queued. "Made before" is the row's order in the
+// jobs table (rowid), the order the jobs were made in, not their created time
+// or id: two jobs made in the same clock tick, or across a clock step back, still
+// run in the order they were made, so a close made after a queued turn always
+// runs after it. The lane key is the workspace, or the session for
+// a job with no workspace (its own workspace), as CopyKey keys the copy row.
 const laneTake = `j.kind IN ` + laneKinds + ` AND o.kind IN ` + laneKinds + `
 	AND COALESCE(NULLIF(json_extract(o.spec, '$.workspace'), ''), o.session) = COALESCE(NULLIF(json_extract(j.spec, '$.workspace'), ''), j.session)
-	AND (o.state IN ('taken','running')
-		OR (o.state = 'queued' AND (o.created < j.created OR (o.created = j.created AND o.id < j.id))))`
+	AND (o.state IN ('taken','running') OR (o.state = 'queued' AND o.rowid < j.rowid))`
 
 // SessionHasWork says the SESSION has a turn job that has not ended. It is kept
 // session-scoped (not the workspace lane): its callers ask about this one
@@ -1040,7 +1049,7 @@ func (q *Queue) SessionHasWork(team, session string) (bool, error) {
 func (q *Queue) TurnsAhead(team, id string) ([]Job, error) {
 	rows, err := q.db.Query(`SELECT o.id FROM jobs o JOIN jobs j ON j.id = ? AND j.team = ?
 		WHERE o.team = j.team AND o.id != j.id AND (`+laneTake+`)
-		ORDER BY o.created, o.id`, id, team)
+		ORDER BY o.rowid`, id, team)
 	if err != nil {
 		return nil, fmt.Errorf("queue: list turns ahead: %w", err)
 	}
@@ -1770,6 +1779,7 @@ func (q *Queue) Start(runnerID, attemptID string, number int, lease time.Duratio
 			if _, err := tx.Exec(`UPDATE jobs SET state = ?, updated = ? WHERE id = ?`, Running, nanos(now), j.ID); err != nil {
 				return fmt.Errorf("queue: write job: %w", err)
 			}
+
 		}
 		cancel = j.CancelRequested
 		att, err = scanAttempt(tx.QueryRow(`SELECT `+attemptCols+` FROM attempts WHERE id = ?`, a.ID))

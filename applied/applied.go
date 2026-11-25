@@ -36,6 +36,8 @@ type State struct {
 	// DiscardedAt is when the latest apply-or-discard was a discard; nil when
 	// it was an apply (of any result), or there was neither.
 	DiscardedAt *time.Time
+	// ClosedAt is the latest close while no later turn has started.
+	ClosedAt *time.Time
 
 	changed         map[string]bool   // every turn that recorded a changeset, dropped or folded too
 	turnCheckpoint  map[string]string // changeset -> the newest turn's end checkpoint
@@ -119,12 +121,26 @@ func (f *Fold) init() {
 // appliable. A turn given again is the same turn.
 func (f *Fold) Changed(turn, changeset, checkpoint string) {
 	f.init()
+	f.Opened()
 	if changeset == "" || f.s.changed[turn] {
 		return
 	}
 	f.turns = append(f.turns, AppliableTurn{Turn: turn, Changeset: changeset, Checkpoint: checkpoint})
 	f.s.turnCheckpoint[changeset] = checkpoint
 	f.s.changed[turn] = true
+}
+
+// Opened records a turn starting on the copy, including one with no changes.
+func (f *Fold) Opened() {
+	f.s.ClosedAt = nil
+}
+
+// Closed removes the copy's entire apply and update state. The record stays,
+// but no checkpoint of the removed copy can be a later baseline.
+func (f *Fold) Closed(when time.Time) {
+	*f = Fold{}
+	f.init()
+	f.s.ClosedAt = &when
 }
 
 // Applied is an apply up to turn that ended: ok when it wrote the folder, up
@@ -200,6 +216,7 @@ type AppliedSnapshot struct {
 	Update      *UpdateInForce  `json:"update,omitempty" doc:"The clean update setting the folder's baseline, when no successful apply or discard came after it."`
 	Markers     bool            `json:"markers,omitempty" doc:"A merge left conflict markers in the copy since the latest successful apply or discard."`
 	DiscardedAt *time.Time      `json:"discarded_at,omitempty" doc:"When the latest apply-or-discard was a discard."`
+	ClosedAt    *time.Time      `json:"closed_at,omitempty" doc:"When the copy was closed, until a later turn starts."`
 	Changed     []string        `json:"changed" doc:"Every turn that recorded a changeset, dropped or folded ones too."`
 	// TurnCheckpoints and MergeCheckpoints map a changeset to the copy
 	// checkpoint holding it, from turns and from updates.
@@ -210,7 +227,7 @@ type AppliedSnapshot struct {
 // Snapshot is s as the record keeps it.
 func (s State) Snapshot() AppliedSnapshot {
 	sn := AppliedSnapshot{Turns: s.Turns, Mark: s.Mark, AppliedTurn: s.AppliedTurn, AppliedTo: s.AppliedTo, Applied: s.Applied,
-		Update: s.Update, Markers: s.Markers, DiscardedAt: s.DiscardedAt, Changed: []string{},
+		Update: s.Update, Markers: s.Markers, DiscardedAt: s.DiscardedAt, ClosedAt: s.ClosedAt, Changed: []string{},
 		TurnCheckpoints: s.turnCheckpoint, MergeCheckpoints: s.mergeCheckpoint}
 	if sn.Turns == nil {
 		sn.Turns = []AppliableTurn{}
@@ -233,6 +250,7 @@ func (f *Fold) Restore(sn AppliedSnapshot) {
 	}
 	f.s.AppliedTurn, f.s.AppliedTo, f.s.Applied = sn.AppliedTurn, sn.AppliedTo, sn.Applied
 	f.s.Update, f.s.Markers, f.s.DiscardedAt = sn.Update, sn.Markers, sn.DiscardedAt
+	f.s.ClosedAt = sn.ClosedAt
 	for _, t := range sn.Changed {
 		f.s.changed[t] = true
 	}

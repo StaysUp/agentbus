@@ -36,7 +36,7 @@ var ErrTurnBusy = errors.New("queue: a turn of this workspace is running or wait
 func (q *Queue) Update(team string, ws ids.WorkspaceID, machine string, by *By, merge bool) (job Job, created bool, err error) {
 	q.applyMu.Lock()
 	defer q.applyMu.Unlock()
-	busy, err := q.jobsInFlight(team, ws, `'apply','discard','update'`)
+	busy, err := q.jobsInFlight(team, ws, `'apply','discard','update','close'`)
 	if err != nil {
 		return Job{}, false, err
 	}
@@ -60,6 +60,9 @@ func (q *Queue) Update(team string, ws ids.WorkspaceID, machine string, by *By, 
 	rec, err := q.appliedState(ws)
 	if err != nil {
 		return Job{}, false, err
+	}
+	if rec.ClosedAt != nil {
+		return Job{}, false, ErrSessionClosed
 	}
 	base := folderBaseCheckpoint(rec)
 	if base == "" && rec.Mark >= 0 {

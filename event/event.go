@@ -176,6 +176,9 @@ const (
 	WorkspaceApplied   Kind = "workspace.applied"
 	WorkspaceDiscarded Kind = "workspace.discarded"
 	WorkspaceUpdated   Kind = "workspace.updated"
+	// WorkspaceClosed records removal of a sandbox copy. The next turn rebuilds
+	// from the folder; the record and conversation stay.
+	WorkspaceClosed Kind = "workspace.closed"
 	// WorkspaceSnapshot is the applied state of a workspace whose record was
 	// written before 0.6.6, when its outcome events did not yet carry it all
 	// (a turn's changeset, an apply's to, an update's head and checkpoints):
@@ -230,6 +233,7 @@ type KindInfo struct {
 // Kinds lists every framework kind. A program's own kind, x.<program>.<name>,
 // is not one of them. A test checks that every Kind constant is listed.
 var Kinds = []KindInfo{
+	{WorkspaceClosed, "A sandbox workspace's copy was removed (POST /api/v0/workspaces/{id}/close). The record and turns stay. The next turn rebuilds from the folder. Resets all apply and update baselines of the removed copy. Stored once per close.", []string{"workspace"}},
 	{TurnStarted, "A person's message started a turn. Stored once per turn id; text holds their words; agent and folder name the run's agent and folder, empty when no run started the session. A turn started by POST /api/v0/turns has its turn.started stored by the API, with the prompt as sent, before its agent starts.", nil},
 	{ModelRequested, "The harness sent a request to the model: model and tools_offered.", nil},
 	{ModelResponded, "The model replied: status, text, stop_reason, usage, latency_ms, cost_usd, or error.", nil},

@@ -127,6 +127,8 @@ func outcomeEvent(j queue.Job) (id, session, turn string) {
 		return discardID(j), j.Session, ""
 	case queue.KindUpdate:
 		return updateID(j), j.Session, ""
+	case queue.KindClose:
+		return closedID(j), "", ""
 	}
 	return "", "", ""
 }
@@ -156,6 +158,10 @@ func recordShort(rec Recorder, jobs []queue.Job) (bool, error) {
 				return true, nil
 			}
 		case queue.KindDiscard:
+			if j.State == queue.Finished && !has {
+				return true, nil
+			}
+		case queue.KindClose:
 			if j.State == queue.Finished && !has {
 				return true, nil
 			}
@@ -198,6 +204,10 @@ func replay(jobs []queue.Job) applied.State {
 		case queue.KindDiscard:
 			if j.State == queue.Finished && j.Ended != nil {
 				f.Discarded(j.Ended.UTC(), j.Links.AppliesTurns)
+			}
+		case queue.KindClose:
+			if j.State == queue.Finished && j.Ended != nil {
+				f.Closed(j.Ended.UTC())
 			}
 		case queue.KindUpdate:
 			if j.State == queue.Finished && res.Update.Clean() {

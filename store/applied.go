@@ -21,9 +21,10 @@ import (
 func (s *Store) Applied(ws ids.WorkspaceID) (applied.State, error) {
 	var f applied.Fold
 	rows, err := s.r.Query(`SELECT e.kind, e.time, e.data FROM events e
-		WHERE (e.kind = 'turn.changed' AND EXISTS (SELECT 1 FROM events ts
+		WHERE (e.kind = 'turn.started' AND COALESCE(NULLIF(json_extract(e.data, '$.workspace'), ''), e.session) = ?1)
+			OR (e.kind = 'turn.changed' AND EXISTS (SELECT 1 FROM events ts
 				WHERE ts.kind = 'turn.started' AND ts.session = e.session AND ts.turn = e.turn AND `+resolvedWorkspace+` = ?1))
-			OR (e.kind IN ('workspace.applied', 'workspace.discarded', 'workspace.updated', 'workspace.snapshot') AND json_extract(e.data, '$.workspace') = ?1)
+			OR (e.kind IN ('workspace.applied', 'workspace.discarded', 'workspace.updated', 'workspace.snapshot', 'workspace.closed') AND json_extract(e.data, '$.workspace') = ?1)
 			OR (e.kind = 'turn.applied' AND e.session = ?1)
 		ORDER BY e.seq`, string(ws))
 	if err != nil {
@@ -41,6 +42,10 @@ func (s *Store) Applied(ws ids.WorkspaceID) (applied.State, error) {
 			return applied.State{}, fmt.Errorf("store: read applied: %w", err)
 		}
 		switch event.Kind(kind) {
+		case event.TurnStarted:
+			f.Opened()
+		case event.WorkspaceClosed:
+			f.Closed(time.Unix(0, when).UTC())
 		case event.TurnChanged:
 			cp := e.Checkpoint
 			if cp == "" && e.Changes != nil {

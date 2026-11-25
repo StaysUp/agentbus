@@ -320,8 +320,9 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 	// copy so the next apply writes only the session's work. 80 with PUT and
 	// DELETE /api/v0/subscriptions/xai/key, the xAI provider's key, which start
 	// no turn.
-	if len(ops) != 80 {
-		t.Errorf("%d endpoints, want 80: %v", len(ops), ops)
+	// 81 with POST /api/v0/workspaces/{id}/close, which removes the copy.
+	if len(ops) != 81 {
+		t.Errorf("%d endpoints, want 81: %v", len(ops), ops)
 	}
 	for _, want := range []string{"POST /api/v0/turns", "GET /api/v0/turns", "GET /api/v0/turns/{id}", "POST /api/v0/turns/{id}/stop",
 		"GET /api/v0/turns/{id}/diff", "GET /api/v0/workspaces/{id}/changes", "POST /api/v0/workspaces/{id}/apply",

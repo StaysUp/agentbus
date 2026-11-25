@@ -37,7 +37,7 @@ func withRecord(t *testing.T, q *Queue) *store.Store {
 func recordOutcomes(t *testing.T, q *Queue, st *store.Store, ws ids.WorkspaceID) {
 	t.Helper()
 	rows, err := q.db.Query(`SELECT id FROM jobs WHERE team = ? AND `+jobWorkspace+` = ?
-		AND kind IN ('turn','apply','discard','update') AND ended IS NOT NULL ORDER BY ended, rowid`, DefaultTeam, string(ws))
+		AND kind IN ('turn','apply','discard','update','close') AND ended IS NOT NULL ORDER BY ended, rowid`, DefaultTeam, string(ws))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func recordOutcomes(t *testing.T, q *Queue, st *store.Store, ws ids.WorkspaceID)
 			if j.Turn == "" || j.Session == "" || j.Attempt == "" {
 				continue
 			}
-			if _, _, err := st.Append(event.Event{Kind: event.TurnStarted, Time: now, Session: j.Session, Turn: j.Turn,
+			if _, err := st.AppendOnce(event.Event{ID: "started_" + j.ID, Kind: event.TurnStarted, Time: now, Session: j.Session, Turn: j.Turn,
 				Workspace: string(ws)}); err != nil {
 				t.Fatal(err)
 			}
@@ -86,6 +86,11 @@ func recordOutcomes(t *testing.T, q *Queue, st *store.Store, ws ids.WorkspaceID)
 			}
 			e = event.Event{ID: "evt_wd_" + j.ID, Kind: event.WorkspaceDiscarded, Time: now, Workspace: string(ws), Session: j.Session,
 				Discarded: &event.Discarded{ResetTo: j.Spec.Restore, DroppedTurns: j.Links.AppliesTurns}}
+		case KindClose:
+			if j.State != Finished {
+				continue
+			}
+			e = event.Event{ID: "evt_wx_" + j.ID, Kind: event.WorkspaceClosed, Time: now, Workspace: string(ws)}
 		case KindUpdate:
 			if j.State != Finished {
 				continue

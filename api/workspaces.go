@@ -434,6 +434,98 @@ func (a *API) discardWorkspace(w http.ResponseWriter, r *http.Request, id string
 	writeJSON(w, status, st)
 }
 
+// CloseState is the state of a workspace close (POST
+// /api/v0/workspaces/{id}/close): the copy removed to reclaim disk.
+type CloseState struct {
+	State   string `json:"state,omitempty" doc:"queued, running, closed, or failed (error says why)."`
+	Already bool   `json:"already,omitempty" doc:"The workspace was already closed, so nothing was removed."`
+	Error   string `json:"error,omitempty" doc:"Why the close failed."`
+}
+
+// closeStateOf reads a close job's state and the HTTP status that reports it:
+// 200 closed, 202 while it is queued or running, and the runner's own status
+// for a failure (else 500).
+func (a *API) closeStateOf(j queue.Job) (CloseState, int) {
+	switch {
+	case j.State == queue.Queued:
+		return CloseState{State: "queued"}, http.StatusAccepted
+	case j.Ended == nil:
+		return CloseState{State: "running"}, http.StatusAccepted
+	case j.State == queue.Finished:
+		return CloseState{State: "closed"}, http.StatusOK
+	default:
+		st := CloseState{State: "failed", Error: "the close did not finish"}
+		status := http.StatusInternalServerError
+		if r, _ := queue.ReadResult(j.Result); r.Refused != "" {
+			st.Error = r.Refused
+			if r.Status != 0 {
+				status = r.Status
+			}
+		}
+		return st, status
+	}
+}
+
+// closeWorkspace serves POST /api/v0/workspaces/{id}/close: remove the
+// workspace's copy to reclaim its disk. The person's folder is never touched,
+// and the next turn rebuilds a fresh copy. Changes not applied when the close
+// runs are dropped with the copy; the cockpit signals unapplied work so the
+// person can apply or discard on the session first. Main token only.
+func (a *API) closeWorkspace(w http.ResponseWriter, r *http.Request, id string) {
+	if a.cfg.Queue == nil {
+		writeError(w, http.StatusNotFound, noTurns)
+		return
+	}
+	wsID := ids.WorkspaceID(id)
+	ws, found, err := a.cfg.Store.Workspace(wsID)
+	if err != nil {
+		a.internal(w)
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "no such workspace")
+		return
+	}
+	if !ws.Sandbox {
+		writeError(w, http.StatusBadRequest, "this session works directly in your folder; only a sandbox copy can be closed")
+		return
+	}
+	j, created, err := a.cfg.Queue.CloseWorkspace(queue.DefaultTeam, wsID, ws.Machine, askedBy(r))
+	var removed *queue.RunnerRemovedError
+	switch {
+	case errors.Is(err, queue.ErrApplyBusy):
+		writeJSON(w, http.StatusConflict, CloseState{State: "failed", Error: "an apply, discard, update or close of this workspace is still running or waiting; wait for it to end before closing"})
+		return
+	case errors.Is(err, queue.ErrSessionClosed):
+		writeJSON(w, http.StatusOK, CloseState{State: "closed", Already: true})
+		return
+	case errors.As(err, &removed):
+		writeError(w, http.StatusServiceUnavailable, "the runner holding this workspace's copy was removed; nothing was closed")
+		return
+	case errors.Is(err, queue.ErrMachineOffline):
+		writeError(w, http.StatusServiceUnavailable, "the runner holding this workspace's copy has not been seen for a minute; nothing was closed")
+		return
+	case errors.Is(err, queue.ErrFull):
+		writeError(w, http.StatusTooManyRequests, "too many turns and applies are waiting; retry later")
+		return
+	case err != nil:
+		a.internal(w)
+		return
+	}
+	_ = created
+	// The close waits behind any queued lane job; await it.
+	if j.Ended == nil {
+		if j, err = a.awaitEnd(r.Context(), j); err != nil {
+			if r.Context().Err() == nil {
+				a.internal(w)
+			}
+			return
+		}
+	}
+	st, status := a.closeStateOf(j)
+	writeJSON(w, status, st)
+}
+
 // UpdateState is the state of a workspace update (POST
 // /api/v0/workspaces/{id}/update): the person's folder merged into the copy.
 type UpdateState struct {

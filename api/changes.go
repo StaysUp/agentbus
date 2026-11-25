@@ -192,9 +192,15 @@ func (a *API) previewStale(ws ids.WorkspaceID, p *event.Previewed) (bool, error)
 }
 
 // sessionClosed says the session's workspace copy is gone, so any stored preview
-// of it is stale. A close writes no store event, so it is read from the queue,
-// keyed by the workspace the copy belongs to.
+// of it is stale. Workspace Close is in the record; permanent session closes
+// from older builds are still held by the queue.
 func (a *API) sessionClosed(ws ids.WorkspaceID) bool {
+	if a.cfg.Store != nil {
+		w, ok, err := a.cfg.Store.Workspace(ws)
+		if err == nil && ok && w.Closed != nil {
+			return true
+		}
+	}
 	if a.cfg.Queue == nil {
 		return false
 	}

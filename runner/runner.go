@@ -797,6 +797,9 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	case job.Kind == queue.KindDiscard:
 		at.finish(ctx, r.discardWork(at))
 		return
+	case job.Kind == queue.KindClose:
+		at.finish(ctx, r.closeWork(at))
+		return
 	case job.Kind == queue.KindUpdate:
 		at.finish(ctx, r.updateWork(ctx, at))
 		return
@@ -1173,6 +1176,19 @@ func (r *Runner) loadCopy(at *attempt, w queue.Workspace) (res *queue.Result, re
 		}
 	}
 	return r.checkpointStart(at), true
+}
+
+// closeWork removes the copy through its backend. A missing copy is success.
+func (r *Runner) closeWork(at *attempt) queue.Finish {
+	w := queue.Workspace{Space: string(at.job.Spec.Workspace)}
+	if at.job.Workspace != nil {
+		w = *at.job.Workspace
+	}
+	if err := r.remove(w); err != nil {
+		return queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup,
+			Result: mustJSON(queue.Result{Refused: "the copy could not be removed, so nothing was closed", Status: http.StatusInternalServerError})}
+	}
+	return queue.Finish{Status: queue.Finished}
 }
 
 // discardWork resets the workspace's copy to the checkpoint the discard names

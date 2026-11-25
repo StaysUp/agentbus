@@ -36,6 +36,7 @@ var ErrOutcomeMissing = errors.New("jobs: the job's outcome is not in the record
 func changedID(j queue.Job) string { return "evt_tc_" + j.ID }
 func appliedID(j queue.Job) string { return "evt_ta_" + j.ID }
 func discardID(j queue.Job) string { return "evt_wd_" + j.ID }
+func closedID(j queue.Job) string  { return "evt_wx_" + j.ID }
 func updateID(j queue.Job) string  { return "evt_wu_" + j.ID }
 
 // registeredID is the id of a folder's folder.registered, by its reference and
@@ -172,6 +173,16 @@ func keepOutcomes(rec Recorder, j queue.Job, f queue.Finish) (kept json.RawMessa
 			return nil, err
 		}
 		res.Refused, res.DiscardedEvent, moved = "", e.ID, true
+	case queue.KindClose:
+		if res.ClosedEvent != "" || j.State != queue.Finished {
+			break
+		}
+		ws := queue.CopyKey(j.Spec.Workspace, j.Session)
+		e := event.Event{ID: closedID(j), Kind: event.WorkspaceClosed, Time: now, Workspace: string(ws)}
+		if _, err := rec.AppendOnce(e); err != nil {
+			return nil, err
+		}
+		res.Refused, res.ClosedEvent, moved = "", e.ID, true
 	case queue.KindFolder:
 		// A folder a person typed was checked and registered on its machine's
 		// runner. folder.registered records it becoming known to control,

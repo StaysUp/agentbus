@@ -160,6 +160,13 @@ func (q *Queue) ApplyWorkspace(team string, ws ids.WorkspaceID, turn string, by 
 			return Job{}, false, err
 		}
 		if !ok {
+			rec, err := q.appliedState(ws)
+			if err != nil {
+				return Job{}, false, err
+			}
+			if rec.ClosedAt != nil {
+				return Job{}, false, ErrSessionClosed
+			}
 			// Nothing the queue can apply up to. Report a closed copy or an
 			// apply-or-discard in flight the way an apply with a turn would, so
 			// an empty-body apply is not silently 200 while a discard runs.
@@ -168,7 +175,7 @@ func (q *Queue) ApplyWorkspace(team string, ws ids.WorkspaceID, turn string, by 
 			} else if found && w.Closed != nil {
 				return Job{}, false, ErrSessionClosed
 			}
-			if busy, berr := q.jobsInFlight(team, ws, `'discard','update'`); berr != nil {
+			if busy, berr := q.jobsInFlight(team, ws, `'discard','update','close'`); berr != nil {
 				return Job{}, false, berr
 			} else if busy {
 				return Job{}, false, ErrApplyBusy
@@ -260,7 +267,7 @@ func (q *Queue) planApply(team, turn string, by *By) (plan applyPlan, done Job, 
 	// runs per workspace: an apply while a discard or an update is in flight is
 	// refused (ErrApplyBusy -> 409), the same way a discard is refused while an
 	// apply runs (his call, 2026-11-22).
-	if busy, err := q.jobsInFlight(team, ws, `'discard','update'`); err != nil {
+	if busy, err := q.jobsInFlight(team, ws, `'discard','update','close'`); err != nil {
 		return plan, Job{}, false, err
 	} else if busy {
 		return plan, Job{}, false, ErrApplyBusy
@@ -378,6 +385,13 @@ func (q *Queue) Preview(team string, wsID ids.WorkspaceID) (job Job, turn string
 	case ws.Closed != nil:
 		return Job{}, "", 0, ErrSessionClosed
 	}
+	rec, err := q.appliedState(wsID)
+	if err != nil {
+		return Job{}, "", 0, err
+	}
+	if rec.ClosedAt != nil {
+		return Job{}, "", 0, ErrSessionClosed
+	}
 	// turn and applies are the workspace's appliable cursor, captured here under
 	// applyMu so the preview this plans and the cursor the API records against
 	// it are of the same moment: a turn or apply that lands after cannot slip
@@ -436,7 +450,7 @@ func (q *Queue) appliableCursor(team string, ws ids.WorkspaceID) (turn string, a
 	// Count applies, discards and updates: each moves the folder's baseline or
 	// the copy, so a new one must retake a stored preview (the preview reuse
 	// cursor is this count).
-	if err := q.db.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND `+jobWorkspace+` = ? AND kind IN ('apply','discard','update')`,
+	if err := q.db.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND `+jobWorkspace+` = ? AND kind IN ('apply','discard','update','close')`,
 		team, string(ws)).Scan(&applies); err != nil {
 		return "", 0, false, fmt.Errorf("queue: count applies: %w", err)
 	}
@@ -458,7 +472,7 @@ func (q *Queue) appliableCursor(team string, ws ids.WorkspaceID) (turn string, a
 func (q *Queue) Discard(team string, ws ids.WorkspaceID, machine string, by *By) (job Job, created bool, err error) {
 	q.applyMu.Lock()
 	defer q.applyMu.Unlock()
-	busy, err := q.jobsInFlight(team, ws, `'apply','discard','update'`)
+	busy, err := q.jobsInFlight(team, ws, `'apply','discard','update','close'`)
 	if err != nil {
 		return Job{}, false, err
 	}
@@ -672,7 +686,7 @@ func (q *Queue) Outcome(fn func() error) error {
 // before the record held it (0.6.6). Only the record's one-time snapshot of
 // that state reads them (jobs.MigrateApplied).
 func (q *Queue) OutcomeJobs(team string) ([]Job, error) {
-	rows, err := q.db.Query(`SELECT id FROM jobs WHERE team = ? AND kind IN ('turn','apply','discard','update')
+	rows, err := q.db.Query(`SELECT id FROM jobs WHERE team = ? AND kind IN ('turn','apply','discard','update','close')
 		AND ended IS NOT NULL ORDER BY ended, rowid`, team)
 	if err != nil {
 		return nil, fmt.Errorf("queue: list outcome jobs: %w", err)
