@@ -281,10 +281,7 @@ func (a *API) workspaceAuthority(w http.ResponseWriter, g run.Grant, body *Works
 	if !found {
 		return refuse(agentNoWorkspace)
 	}
-	machine := own.Machine
-	if machine == "" && a.cfg.Folders != nil {
-		machine = a.cfg.Folders.Machine()
-	}
+	machine := a.machineOf(own)
 	switch body.Machine {
 	case "":
 		body.Machine = machine

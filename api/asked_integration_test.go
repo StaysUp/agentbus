@@ -826,7 +826,8 @@ func TestAskCaps(t *testing.T) {
 // asking once the tree has spent it, and a broken file refuses every turn
 // token's request. Within its request tree a turn token always reads, lists
 // agents, starts, reviews, stops and renames: the switches 0.5.2 retired
-// still read, and change nothing. Outside its tree it reaches nothing. No
+// still read, and change nothing. In a copy, a session of another tree in its
+// own copy is outside its authority, and it reaches nothing there. No
 // setting opens the routes that change agents or tokens.
 func TestAskPolicyFromPermissions(t *testing.T) {
 	perm := filepath.Join(t.TempDir(), settings.PolicyFile)
@@ -909,10 +910,10 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 	for _, tc := range []struct {
 		name, method, path, body, want string
 	}{
-		{"read another tree", "GET", "/api/v0/sessions/" + other.Session + "/search?q=x", "", "only its own session"},
-		{"read another tree by query", "GET", "/api/v0/turns?session=" + other.Session, "", "only its own session"},
-		{"rename another tree's session", "PATCH", "/api/v0/sessions/" + other.Session, `{"title":"x"}`, "only its own session"},
-		{"stop another tree's turn", "POST", "/api/v0/turns/" + other.Turn + "/stop", "", "request tree asked for"},
+		{"read another tree", "GET", "/api/v0/sessions/" + other.Session + "/search?q=x", "", "in its authority"},
+		{"read another tree by query", "GET", "/api/v0/turns?session=" + other.Session, "", "in its authority"},
+		{"rename another tree's session", "PATCH", "/api/v0/sessions/" + other.Session, `{"title":"x"}`, "in its authority"},
+		{"stop another tree's turn", "POST", "/api/v0/turns/" + other.Turn + "/stop", "", "stops only asked work"},
 	} {
 		if code, out := as(t, e, child, tc.method, tc.path, tc.body); code != 403 || !strings.Contains(out, tc.want) {
 			t.Errorf("%s: %d %s, want 403 with %q", tc.name, code, out, tc.want)

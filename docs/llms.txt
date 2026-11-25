@@ -44,9 +44,10 @@ agentbus-api POST /api/v0/turns '{"agent":"<agent id>","prompt":"..."}'  # ask a
 ```
 
 `T` is a turn id (`t_` and 16 hex digits). `S` is a session id. `W` is a workspace id (`ws_` and 16
-hex digits), from `GET /api/v0/workspaces`. Your token reads your own session,
-the person's session you came from, and every session work from it started. It reads a turn of
-those by its id alone.
+hex digits), from `GET /api/v0/workspaces`. Your token reads the sessions of the workspaces in
+your authority. Working in the person's folder as it is (a Direct workspace), that is every
+workspace on your machine. Working in a copy, it is your own workspace and the workspaces your
+session made. It reads a turn of those by its id alone.
 
 ## The routes an agent uses
 
@@ -81,7 +82,7 @@ work, ask for a review of your turn, then end your turn.
 
 ## Refusals
 
-A 403 says why: a session outside your tree; sending
+A 403 says why: a session outside your authority; sending
 `"session"` to continue one (your token never continues a session); a folder outside yours; a call the person switched off in
 `[agent_api]` of the settings; a limit in `[limits]` (depth 2, 10 asks per turn, 30 per tree
 by default). A 404 means no such turn, session or agent. Errors are JSON: `{"error":"..."}`.

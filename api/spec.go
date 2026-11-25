@@ -74,20 +74,20 @@ const runnerTokenDoc = "Runner protocol: called by a runner, never by the cockpi
 // turnTokenDoc is what each turn-token rule adds to an operation's
 // description.
 var turnTokenDoc = map[int]string{
-	treeSessionPath:  "A turn token may call this for a session in its request tree: its own, the person's session it started from, or one work in that tree started.",
-	treeSessionQuery: "A turn token may call this for a session in its request tree: without session, its own is used.",
-	treeTurn:         "A turn token may call this for a turn of a session in its request tree, by the turn id alone.",
+	treeSessionPath:  "A turn token may call this for a session it may read. " + turnReads,
+	treeSessionQuery: "A turn token may call this for a session it may read: without session, its own is used. " + turnReads,
+	treeTurn:         "A turn token may call this for a turn of a session it may read, by the turn id alone. " + turnReads,
 	askTurn: "A turn token may call this to start the one turn of a session it opened (POST /api/v0/sessions), " +
 		"in its own workspace or in one its session made. It never continues a session. " +
 		"The result comes back only when asked for: delivery set to its own session, or an on (POST /api/v0/ons). Caps: " + askCaps,
-	askedTurn:           "A turn token may stop only a turn its request tree asked for.",
+	askedTurn:           "A turn token may stop a turn that a turn asked for (not one the person started), in a session it may read. " + turnReads,
 	anyRead:             "A turn token may call this too.",
 	changesWorkspaceTok: "A turn token may preview the changes of its own workspace (the workspace of its session) and of each workspace its session made.",
 	applyWorkspaceTok: "A turn token may apply its own workspace's changes (the workspace of its session) only when the Agents may apply switch is on in Settings (Permissions) (off by default). " +
 		"It may apply a workspace its session made when its own workspace works in the folder as it is (it can already write there), else only when that switch is on.",
 	createSessionTok: "A turn token may open a session in its own workspace (the default when workspace is absent) or in a workspace its session made; " +
 		"it alone may then start that session's turn.",
-	renameSession: "A turn token may rename a session in its request tree. It never closes one.",
+	renameSession: "A turn token may rename a session it may read. It never closes one. " + turnReads,
 	workspaceTok:  "A turn token may read its own workspace (the workspace of its session) and each workspace its session made.",
 	createWorkspaceTok: "A turn token may make a workspace within its own authority: sandbox true (a copy), never false; on its own workspace's machine; " +
 		"and when its own workspace is a copy, only of folders that workspace holds, named by folder_ref (GET /api/v0/workspaces/{id} of its own workspace lists them). " +
@@ -97,6 +97,12 @@ var turnTokenDoc = map[int]string{
 	toolList: "A turn token may call this: its list holds the tools its turn may call under permissions (none of them when tool:* is refused), " +
 		"and each call is checked by the operation it names.",
 }
+
+// turnReads is the one rule for which sessions a turn token reads. The
+// request tree bounds the caps on asked work only; it decides no read.
+const turnReads = "A turn token reads the sessions of the workspaces in its authority: " +
+	"when its own workspace works in the folder as it is (sandbox false), every workspace on that workspace's machine; " +
+	"when its own workspace is a copy, that workspace and each workspace its session made."
 
 // askCaps names the caps on asked work. A request past one gets 403 saying which.
 var askCaps = fmt.Sprintf("[limits] in the settings (PUT /api/v0/settings/permissions): by default at most %d levels below the person's turn, %d jobs asked by one turn, "+

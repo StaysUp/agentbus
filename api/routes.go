@@ -44,8 +44,8 @@ type route struct {
 	// token's grant must hold it. Every route that takes a token names one;
 	// New refuses a table where one does not.
 	action run.Action
-	// scope says how a request of a grant bound to a request tree (an agent
-	// turn's token) is confined to that tree (tokens.go). The zero value,
+	// scope says how a request of a grant bound to a session (an agent
+	// turn's token) is confined to its authority (tokens.go). The zero value,
 	// scopeNone, refuses such a grant whatever its actions: a route that cannot
 	// say whose workspace it acts on is for a grant of every workspace.
 	scope int

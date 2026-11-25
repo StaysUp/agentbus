@@ -10,13 +10,19 @@ package api
 // What a turn token must never do: read or change the settings (the policy
 // and the instructions: every /api/v0/settings route is main-token only),
 // change or remove saved agents, see or make tokens (none is
-// ever in a reply), close sessions, write program events, or read or write
-// sessions outside its request tree. Its own session and the person's session,
-// the tree's root, are never continued by it: results reach them by delivery
-// only.
+// ever in a reply), close sessions, write program events, or read sessions
+// outside its authority. Its own session and the person's session are never
+// continued by it: results reach them by delivery only.
+//
+// One rule decides what a turn token reads (inAuthority): the sessions of the
+// workspaces in its authority. A Direct session's authority is its machine,
+// since it works in the folders with no wall and can read the same store on
+// disk. A Copy session's is its own workspace and the workspaces its session
+// made. Reads, search, ons, rename and stop of asked work all ask it.
 //
 // A request tree is the person's session (its root) and every session work
-// asked for from it, at any depth (queue.Chain).
+// asked for from it, at any depth (queue.Chain). It bounds the caps on asked
+// work only (depth, jobs, cost); it decides no read.
 //
 // Every token resolves to a grant (run.Grant: workspaces, actions, expiry) at
 // one door (api.go, authorized), and every route names the one action class it
@@ -41,6 +47,7 @@ import (
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/settings"
+	"github.com/staysup/agentbus/store"
 )
 
 // What a turn token may do on a route.
@@ -48,24 +55,25 @@ const (
 	// scopeNone: a turn token is refused. The zero value, so a new route is
 	// closed to turn tokens until it says otherwise.
 	scopeNone = iota
-	// treeSessionPath: {id} is a session id in the token's request tree.
+	// treeSessionPath: {id} is a session in the token's authority
+	// (inAuthority).
 	treeSessionPath
 	// treeSessionQuery: the session query must name a session in the
-	// token's request tree. Absent, it is set to the token's own, so the
+	// token's authority. Absent, it is set to the token's own, so the
 	// reply holds that session only.
 	treeSessionQuery
-	// treeTurn: {id} is a turn of a session in the token's request tree:
+	// treeTurn: {id} is a turn of a session in the token's authority:
 	// the session query's when sent, else the turn's newest.
 	treeTurn
 	// askTurn: POST /api/v0/turns. The handler checks the rest (askChecks).
 	askTurn
-	// askedTurn: {id} is a turn that work in the token's request tree asked
-	// for, to stop.
+	// askedTurn: {id} is a turn some turn asked for (asked work), in a
+	// session in the token's authority, to stop.
 	askedTurn
 	// anyRead: a read that holds no session's data, such as the saved
 	// agents.
 	anyRead
-	// renameSession: {id} is a session in the token's scope, to rename.
+	// renameSession: {id} is a session in the token's authority, to rename.
 	renameSession
 	// changesWorkspaceTok: {id} is the token's own workspace, whose changes to
 	// preview.
@@ -100,13 +108,14 @@ const (
 // Refusals a turn token gets. Fixed wording: they never quote the request.
 const (
 	turnWriteRefused = "a turn token cannot call this route; it takes the main token. " +
-		"A turn token reads its request tree's sessions and turns, lists agents, " +
+		"A turn token reads the sessions and turns of the workspaces in its authority, lists agents, " +
 		"and asks for work with POST /api/v0/turns"
-	turnSessionRefused  = "a turn token reads only its own session and the sessions its request tree started"
-	turnCallRefused     = "a turn token reads only the calls of its own session and the sessions its request tree started"
+	turnSessionRefused = "a turn token reads only the sessions of the workspaces in its authority: " +
+		"its machine when its own workspace works in the folder as it is, else its own workspace and the workspaces its session made"
+	turnCallRefused     = "a turn token reads only the calls of the sessions of the workspaces in its authority"
 	turnContinueRefused = "a turn token does not continue sessions: ask_agent starts a new one, and its result comes back to your session " +
 		"as a later turn; to follow up, ask again with what the result said"
-	turnAskedRefused = "a turn token stops only turns its request tree asked for"
+	turnAskedRefused = "a turn token stops only asked work in the sessions it may read"
 	turnNoSession    = "a turn needs a session: create one in your workspace with POST /api/v0/sessions, then run its turn"
 )
 
@@ -236,10 +245,9 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 	// (depth, jobs, cost) bound it like any asked turn. The old IsReview leaf
 	// check retired with the review kind.
 	//
-	// A turn token reaches its own request tree, always: its own session,
-	// the tree's root and every session work in the tree started. Start and
-	// continue are told apart by the body: askChecks.
-	inScope := func(session string) (bool, error) { return a.inTree(g, session) }
+	// A turn token reads the sessions of the workspaces in its authority
+	// (inAuthority). Start and continue are told apart by the body: askChecks.
+	inScope := func(session string) (bool, error) { return a.inAuthority(g, session) }
 	switch rt.scope {
 	case treeSessionPath, renameSession:
 		if ok, err := inScope(id); err != nil {
@@ -307,13 +315,13 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 		if err != nil {
 			return failed(err)
 		}
-		if j.Links.Chain == nil || j.Links.Chain.By == "" || j.Links.Chain.Root != g.Root {
+		// Asked work only: a turn the person started is the person's to stop.
+		if j.Links.Chain == nil || j.Links.Chain.By == "" {
 			return refuse(turnAskedRefused)
 		}
-		// The same reach as a read: the asked turn's session must be in one of
-		// the token's own workspaces, so a child in a narrower copy cannot stop
+		// The same reach as a read, so a child in a narrower copy cannot stop
 		// work in its parent's folders.
-		if ok, err := a.inTree(g, string(j.Spec.Session)); err != nil {
+		if ok, err := a.inAuthority(g, string(j.Spec.Session)); err != nil {
 			return failed(err)
 		} else if !ok {
 			return refuse(turnAskedRefused)
@@ -335,8 +343,8 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 // turnRefusal says why a turn token may not call a route under its actions and
 // the person's rules, or "". A route that cannot be confined to a request tree
 // (scopeNone) is refused whatever the actions. Reading, listing agents,
-// starting, reviewing, stopping and renaming have no switch: within its request
-// tree a turn token always may (0.5.2). The Agents may apply switch needs the
+// starting, reviewing, stopping and renaming have no switch: within its
+// authority a turn token always may (0.5.2). The Agents may apply switch needs the
 // workspace, so allowTurn checks it. The rest of the check needs the request
 // (allowTurn). The tool list (tools.go) asks it too, so a tool is listed only
 // where its route would take the call.
@@ -352,8 +360,8 @@ func turnRefusal(rt *route, actions run.Action, rules gateway.Rules) string {
 }
 
 // mayReadTurn is the one check of whether g may read turn id: the turn's
-// session (session when sent, else the turn's newest) is in g's reach
-// (inTree). found is false when there is no such turn. Reading a turn
+// session (session when sent, else the turn's newest) is in g's authority
+// (inAuthority). found is false when there is no such turn. Reading a turn
 // (treeTurn) and watching one (POST /api/v0/ons) both ask it, so what a turn
 // token may watch is what it may read, and a wider read widens both.
 func (a *API) mayReadTurn(g run.Grant, id, session string) (found, ok bool, err error) {
@@ -361,7 +369,7 @@ func (a *API) mayReadTurn(g run.Grant, id, session string) (found, ok bool, err 
 	if err != nil || session == "" {
 		return false, false, err
 	}
-	ok, err = a.inTree(g, session)
+	ok, err = a.inAuthority(g, session)
 	return true, ok, err
 }
 
@@ -442,35 +450,60 @@ func (a *API) overBudget(g run.Grant, perm settings.Policy, key string) (string,
 	return "", nil
 }
 
-// inTree says g reaches session: it is in g's request tree (its own session,
-// the tree's root, or a session work in the tree started) AND in one of g's own
-// workspaces (ownWorkspace). The tree alone was the reach while every session
-// of a tree shared one workspace; a session may now make a narrower copy and
-// run work there, and that work must not reach back into the wider folders'
-// sessions (their recorded tool output, their turns). Every read, rename and
-// stop of a turn token asks this one check.
-func (a *API) inTree(g run.Grant, session string) (bool, error) {
+// inAuthority is the one rule for which sessions g reads: session is g's own,
+// or its workspace is in g's authority (readsWorkspace). The request tree
+// decides nothing here (his call, 2026-11-25): it held reads to one tree, so a
+// Direct coordinator could not read the person's other sessions through the
+// API though it reads the same store on disk, and a reviewer opened beside a
+// coordinator could not read the builder's turn in the copy the coordinator
+// made. Every read, search, on, rename and stop of a turn token asks this.
+func (a *API) inAuthority(g run.Grant, session string) (bool, error) {
 	if session == "" {
 		return false, nil
 	}
 	if session == g.Session {
 		return true, nil
 	}
-	if session != g.Root {
-		if a.cfg.Queue == nil {
-			return false, nil
-		}
-		root, err := a.cfg.Queue.SessionRoot(queue.DefaultTeam, session)
-		if err != nil || root == "" || root != g.Root {
-			return false, err
-		}
-	}
 	ws, found, err := a.workspaceOf(session)
 	if err != nil || !found {
 		return false, err
 	}
-	own, err := a.ownWorkspace(g, string(ws))
-	return own != notOwn, err
+	return a.readsWorkspace(g, ws)
+}
+
+// readsWorkspace says ws is in g's authority. When g's own workspace works in
+// the folder as it is (Direct, no wall), its authority is its machine: every
+// workspace on that machine, as POST /api/v0/workspaces already treats it
+// (workspaceAuthority). When g's own workspace is a copy, its authority is that
+// workspace and the workspaces its session made (ownWorkspace), so work in a
+// narrower copy never reaches back into the wider folders' sessions.
+func (a *API) readsWorkspace(g run.Grant, ws ids.WorkspaceID) (bool, error) {
+	ownID, found, err := a.workspaceOf(g.Session)
+	if err != nil || !found {
+		return false, err
+	}
+	own, found, err := a.cfg.Store.Workspace(ownID)
+	if err != nil || !found {
+		return false, err
+	}
+	if own.Sandbox {
+		rel, err := a.ownWorkspace(g, string(ws))
+		return rel != notOwn, err
+	}
+	other, found, err := a.cfg.Store.Workspace(ws)
+	if err != nil || !found {
+		return false, err
+	}
+	return a.machineOf(other) == a.machineOf(own), nil
+}
+
+// machineOf is the machine a workspace's folders are on: its connector, or this
+// service's own machine when the record names none.
+func (a *API) machineOf(ws store.Workspace) string {
+	if ws.Machine == "" && a.cfg.Folders != nil {
+		return a.cfg.Folders.Machine()
+	}
+	return ws.Machine
 }
 
 // askChecks checks a turn token's POST /api/v0/turns body: the asked turn runs
