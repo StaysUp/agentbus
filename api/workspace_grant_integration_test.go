@@ -66,7 +66,7 @@ func TestAgentMakesWorkspaceWithinAuthority(t *testing.T) {
 	}
 	start := func(tok, sess, prompt string) Started {
 		t.Helper()
-		code, out := as(t, e, tok, "POST", "/api/v0/turns?wait=false", `{"session":"`+sess+`","agent":"claude","prompt":"`+prompt+`"}`)
+		code, out := as(t, e, tok, "POST", "/api/v0/turns", `{"session":"`+sess+`","agent":"claude","prompt":"`+prompt+`"}`)
 		if code != 202 {
 			t.Fatalf("start %s: %d %s", prompt, code, out)
 		}

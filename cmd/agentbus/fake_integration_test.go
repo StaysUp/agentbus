@@ -300,9 +300,9 @@ func fakeAgent() {
 		json.Unmarshal([]byte(b), &ask)
 		ask["session"] = sess.Session
 		bb, _ := json.Marshal(ask)
-		// An ask is async: a turn token cannot wait for a turn it starts (it runs
-		// in the asker's workspace lane after the asker's turn ends), so wait=false.
-		req, _ := http.NewRequest("POST", url+"/api/v0/turns?wait=false", strings.NewReader(string(bb)))
+		// An ask answers at once: the asked turn runs in the asker's workspace
+		// lane after the asker's turn ends.
+		req, _ := http.NewRequest("POST", url+"/api/v0/turns", strings.NewReader(string(bb)))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+tok)
 		if resp, err := http.DefaultClient.Do(req); err == nil {

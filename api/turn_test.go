@@ -46,8 +46,8 @@ func postNext(t *testing.T, e *env) (int, string) {
 // turn ahead, and the job runs once the first has ended.
 func TestNextTurnQueuesWhileAnotherIsStarting(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
-	// Only the first caller waits; the queued one is refused at once (its
-	// binary is not found) when its turn comes.
+	// Only the first start waits; the queued one is refused at once (its
+	// binary is not found) when its turn comes. POST answers at once for both.
 	var once sync.Once
 	var starts atomic.Int32
 	e := resumableEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) {
@@ -62,10 +62,13 @@ func TestNextTurnQueuesWhileAnotherIsStarting(t *testing.T) {
 	var releaseOnce sync.Once
 	free := func() { releaseOnce.Do(func() { close(release) }) }
 	t.Cleanup(free)
-	first := make(chan int)
-	go func() { code, _ := postNext(t, e); first <- code }()
-	<-entered
 	code, body := postNext(t, e)
+	var head Started
+	if code != http.StatusAccepted || json.Unmarshal([]byte(body), &head) != nil || head.State != "queued" || head.Ahead != 0 {
+		t.Fatalf("first turn: %d %s, want 202 queued at once with none ahead", code, body)
+	}
+	<-entered
+	code, body = postNext(t, e)
 	var out Started
 	if err := json.Unmarshal([]byte(body), &out); err != nil || code != http.StatusAccepted || out.State != "queued" || out.Ahead != 1 ||
 		out.Turn == "" || out.Session != "s1" || out.BaseURL != "" {
@@ -86,8 +89,8 @@ func TestNextTurnQueuesWhileAnotherIsStarting(t *testing.T) {
 		t.Fatalf("%d starts while the first runs, want 1", n)
 	}
 	free()
-	if code := <-first; code != http.StatusBadRequest {
-		t.Fatalf("first turn: %d, want 400 (its binary was not found)", code)
+	if got := endedTurn(t, e, head.Turn); got.State != "failed" {
+		t.Fatalf("first turn: %+v, want failed (its binary was not found)", got)
 	}
 	// The queued job runs next, and is refused the same way.
 	deadline := time.Now().Add(5 * time.Second)
@@ -115,9 +118,14 @@ func TestNextTurnQueuesWhileAnotherIsStarting(t *testing.T) {
 		one.Turn.State != "failed" || one.Turn.Error == "" || one.Turn.Ended == nil {
 		t.Fatalf("GET the refused turn: %d %s", resp.StatusCode, b)
 	}
-	// Nothing is ahead now: a third turn waits for its own start.
-	if code, body := postNext(t, e); code != http.StatusBadRequest {
-		t.Fatalf("after both ended: %d %s, want 400 again", code, body)
+	// Nothing is ahead now: a third turn is queued with none ahead, and is
+	// refused the same way when it starts.
+	var third Started
+	if code, body := postNext(t, e); code != http.StatusAccepted || json.Unmarshal([]byte(body), &third) != nil || third.Ahead != 0 {
+		t.Fatalf("after both ended: %d %s, want 202 with none ahead", code, body)
+	}
+	if got := endedTurn(t, e, third.Turn); got.State != "failed" {
+		t.Fatalf("third turn: %+v, want failed", got)
 	}
 }
 

@@ -75,12 +75,11 @@ func reviewTurnApp() toolreg.Tool {
 				// in it. The reviewer reads the changes through agentbus-api, not a
 				// copy. The session step hands on its workspace (the asker's own, by
 				// the grant) so the no-turn prompt can name it. startTurn records the
-				// delivery on in the same write. wait=false returns once recorded.
+				// delivery on in the same write, and answers at once.
 				{StepID: "session", OperationID: "createSession",
 					RequestBody: map[string]any{},
 					Outputs:     map[string]string{"session": "$response.body#/session", "workspace": "$response.body#/workspace"}},
 				{StepID: "start", OperationID: "startTurn",
-					Parameters: map[string]any{"wait": "false"},
 					RequestBody: map[string]any{
 						"session":  "$steps.session.outputs.session",
 						"agent":    "$inputs.agent",
@@ -146,12 +145,11 @@ func askAgentApp() toolreg.Tool {
 				// token's createSession takes the workspace from the grant, so the
 				// asked session shares the asker's copy. startTurn records the
 				// delivery on in the same write (delivery=$caller.session), so
-				// start and deliver stay atomic. wait=false returns once recorded.
+				// start and deliver stay atomic.
 				{StepID: "session", OperationID: "createSession",
 					RequestBody: map[string]any{},
 					Outputs:     map[string]string{"session": "$response.body#/session"}},
 				{StepID: "start", OperationID: "startTurn",
-					Parameters: map[string]any{"wait": "false"},
 					RequestBody: map[string]any{"session": "$steps.session.outputs.session",
 						"agent": "$inputs.agent", "prompt": "$inputs.prompt", "delivery": "$caller.session"},
 					Outputs: map[string]string{"turn": "$response.body#/turn", "session": "$response.body#/session"}},

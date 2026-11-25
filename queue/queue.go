@@ -222,7 +222,9 @@ CREATE TABLE IF NOT EXISTS deliveries (
 -- this" (on.go). B13 has one event (a turn completes) and one action (start a
 -- turn in session with the subject turn's reply). It is a row plus the
 -- control loop's check; nothing waits. off is set when it is removed or, for a
--- one-shot, once it has fired.
+-- one-shot, once it has fired. chain is set on an on a turn token registered
+-- through POST /api/v0/ons: who asked, in which tree. It counts as asked work
+-- under the caps (asked.go, countAsked), as a job with that chain does.
 CREATE TABLE IF NOT EXISTS ons (
 	id       TEXT PRIMARY KEY,
 	team     TEXT NOT NULL REFERENCES teams(id),
@@ -232,7 +234,8 @@ CREATE TABLE IF NOT EXISTS ons (
 	maker    TEXT NOT NULL,
 	idem_key TEXT NOT NULL DEFAULT '',
 	off      INTEGER,
-	created  INTEGER NOT NULL
+	created  INTEGER NOT NULL,
+	chain    TEXT
 );
 CREATE INDEX IF NOT EXISTS ons_live ON ons(team, event, off);
 -- B15 (his call, 2026-11-19): an on is deduped by its idempotency_key ONLY, the

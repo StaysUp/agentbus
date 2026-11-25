@@ -8,7 +8,8 @@ package queue
 // ("mail"). The asking turn never waits.
 //
 // The caps, [limits] in permissions.toml, keep a chain of agents asking
-// agents from running away.
+// agents from running away. An on a turn token registers through POST
+// /api/v0/ons counts under the per-turn and per-tree caps too (countAsked).
 
 import (
 	"database/sql"
@@ -54,10 +55,11 @@ type Limits struct {
 	// MaxDepth: work may be asked for at most this many levels below the
 	// person's turn.
 	MaxDepth int
-	// MaxPerTurn: jobs one turn may ask for.
+	// MaxPerTurn: jobs one turn may ask for, with the ons it registers.
 	MaxPerTurn int
 	// MaxPerTree: jobs a whole request tree may ask for, over every level:
-	// everything that started from one person's session.
+	// everything that started from one person's session. The ons its turns
+	// register count too.
 	MaxPerTree int
 }
 
@@ -79,16 +81,32 @@ func checkAsked(tx *sql.Tx, team string, links Links, lim Limits) error {
 	if links.Chain.Depth > lim.MaxDepth {
 		return &LimitError{fmt.Sprintf("work may be asked for at most %d levels below the person's turn, and this would be level %d (Depth in Settings, Limits)", lim.MaxDepth, links.Chain.Depth)}
 	}
+	return countAsked(tx, team, *links.Chain, lim)
+}
+
+// countAsked refuses one more piece of asked work by c.By (a job, or an on a
+// turn token registers through POST /api/v0/ons) when the per-turn or
+// per-tree cap is reached. Both caps count asked jobs and those ons together.
+// An on counts because its delivered turn is not asked work (deliverResult):
+// without it, a turn token could watch an ended turn it may read, get a new
+// turn in its own session at once, and that turn do the same again, a chain
+// no job cap would see (found 2026-11-25). The on that ask_agent records with
+// its job (Delivery) has no chain: its job already counts.
+func countAsked(tx *sql.Tx, team string, c Chain, lim Limits) error {
 	var n int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND json_extract(links, '$.chain.by') = ?
-		AND json_extract(links, '$.chain.by_session') = ?`, team, links.Chain.By, links.Chain.BySession).Scan(&n); err != nil {
+	if err := tx.QueryRow(`SELECT (SELECT COUNT(*) FROM jobs WHERE team = ?1 AND json_extract(links, '$.chain.by') = ?2
+			AND json_extract(links, '$.chain.by_session') = ?3)
+		+ (SELECT COUNT(*) FROM ons WHERE team = ?1 AND json_extract(chain, '$.by') = ?2
+			AND json_extract(chain, '$.by_session') = ?3)`, team, c.By, c.BySession).Scan(&n); err != nil {
 		return fmt.Errorf("queue: count asked: %w", err)
 	}
 	if n >= lim.MaxPerTurn {
 		return &LimitError{fmt.Sprintf("one turn may ask for at most %s, and this turn has asked for %d (Turns per request in Settings, Limits)", turnsOrReviews(lim.MaxPerTurn), n)}
 	}
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND json_extract(links, '$.chain.by') IS NOT NULL
-		AND json_extract(links, '$.chain.root') = ?`, team, links.Chain.Root).Scan(&n); err != nil {
+	if err := tx.QueryRow(`SELECT (SELECT COUNT(*) FROM jobs WHERE team = ?1 AND json_extract(links, '$.chain.by') IS NOT NULL
+			AND json_extract(links, '$.chain.root') = ?2)
+		+ (SELECT COUNT(*) FROM ons WHERE team = ?1 AND json_extract(chain, '$.by') IS NOT NULL
+			AND json_extract(chain, '$.root') = ?2)`, team, c.Root).Scan(&n); err != nil {
 		return fmt.Errorf("queue: count asked: %w", err)
 	}
 	if n >= lim.MaxPerTree {
@@ -278,6 +296,8 @@ func (q *Queue) deliverResult(team, onID, toSession, askingTurn string, j Job, t
 	// tree's cost limit (TreeSessions reads it) and work IT asks for counts
 	// against the tree; it is not itself asked work, though, so the asked-work
 	// caps (checkAsked, keyed on Chain.By) skip it — By is empty on a delivery.
+	// What is counted instead is the on that asked for it, when a turn token
+	// registered it (countAsked); the ask_agent on is covered by its job.
 	// The tree choice is right in every case: the ordinary ask (toSession is the
 	// asking session) carries that session's own root and depth; a main-token
 	// delivery to an unrelated session the person started carries no tree, so it

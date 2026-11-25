@@ -188,12 +188,11 @@ var routes = slices.Concat([]route{
 			"The turn's turn.started, with the prompt, is stored before the reply.\n\n" +
 			"A session runs on one machine, the one that holds its folder, for its whole life: pick the machine (its machine id, from GET /api/v0/runners), " +
 			"then type a folder on it (folder) or name one it holds (folder_ref, from GET /api/v0/folders). Only that machine's runner takes the session's work.\n\n" +
-			"The reply waits up to 30 seconds for a runner to start the turn. A turn no runner starts by then answers 202 with state queued: " +
-			"it runs when a runner is free, and GET /api/v0/turns/{id} follows it.\n\n" +
-			"A session whose turn runs, or has turns waiting, is never refused: the new turn queues behind them and runs next, in order. " +
-			"It answers 202 at once with state queued and ahead, how many of the session's turns are before it.",
+			"The reply comes at once, once the turn is recorded; it never waits for a runner. It answers 202 with state queued: " +
+			"the turn runs when a runner is free, and GET /api/v0/turns/{id} follows it. A retry of a turn already running answers running.\n\n" +
+			"A session whose turn runs, or has turns waiting, is never refused: the new turn queues behind them and runs next, in order, " +
+			"and ahead says how many of the session's turns are before it.",
 		body:  TurnRequest{},
-		query: []param{{name: "wait", doc: "false returns once the turn is recorded (state queued), without waiting for a runner to start it; the reply still names the turn. Absent or true waits up to 30 seconds, as above. The ask_agent and review_turn apps send false, so a turn and the on for its reply are recorded in one call that never blocks."}},
 		scope: askTurn,
 		// B15: ask_agent is no longer a tool on this route; it is a default app
 		// (apps.go, askAgentApp) that calls this operation (startTurn) in ONE step,
@@ -258,13 +257,14 @@ var routes = slices.Concat([]route{
 		summary: "Register an on",
 		doc: "Register a standing instruction: when the turn you name completes, its reply is delivered to a session as that session's next turn.\n\n" +
 			"This is the one primitive every reaction is built on; for now the only event is a turn completing. " +
-			"A turn token may name only a turn its own turn started, and the reply goes to its own session, so it leaves session out. " +
+			"A turn token may watch any turn it may read (the check GET /api/v0/turns/{id} uses), but not a turn of its own session, and the reply goes to its own session, so it leaves session out. " +
+			"An on a turn token registers counts as work its turn asked for, under the caps in Settings, Limits: Turns per request (max_jobs_per_turn) and Turns per request tree (max_jobs_per_tree). A cap reached is 403 and registers nothing; a retry with the key of an on already made returns it without counting again. " +
 			"The main token may watch any turn and names the session to deliver to. " +
 			"It is a row on control plus control's own check: nothing waits, and the reply arrives as a later turn. " +
 			"Dedup is by idempotency_key only: the same key for the same turn and session returns the on already registered, the same key with other fields is 409, and a request with no key always registers a new on (several ons may watch one turn). ask_agent registers one of these for itself.",
 		body: OnRequest{},
 		replies: []reply{ok(201, OnView{}, "The on."), turnRefused,
-			fail(403, "A turn token named a turn its tree did not start, or a session not its own."),
+			fail(403, "A turn token named a turn it may not read, or a turn of its own session, or its turn or request tree reached a cap on asked work (the message says which)."),
 			fail(404, "This service keeps no queue, or no turn has this id."),
 			fail(409, "The idempotency_key was already used to register an on for a different turn or session.")},
 		scope: onRegister,

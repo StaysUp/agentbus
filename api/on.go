@@ -8,8 +8,11 @@ package api
 // on (schedule, gate), one row on control, nothing waiting.
 //
 // The caller's token decides what it may do. A turn token may register an on
-// only for a turn its request tree started, and its result is delivered to its
-// own session; it may remove only an on its own turn made. The main token may
+// for any turn it may read (mayReadTurn, the check GET /api/v0/turns/{id}
+// uses) but one of its own session, and its result is delivered to its own
+// session; it may remove only an on its own turn made. Such an on counts as
+// work its turn asked for, under the per-turn and per-tree caps ([limits]
+// max_jobs_per_turn, max_jobs_per_tree). The main token may
 // register an on for any turn, naming the session to deliver to, and remove
 // any on.
 
@@ -22,7 +25,7 @@ import (
 
 // OnRequest is the body of POST /api/v0/ons.
 type OnRequest struct {
-	Turn    string `json:"turn" doc:"The turn to watch: when it completes, its reply is delivered. A turn token may name only a turn its request tree started."`
+	Turn    string `json:"turn" doc:"The turn to watch: when it completes, its reply is delivered. A turn token may name any turn it may read with GET /api/v0/turns/{id}, but not one of its own session."`
 	Session string `json:"session,omitempty" doc:"The session the reply is delivered to as its next turn. A turn token always delivers to its own session, so it leaves this out; the main token must set it."`
 	// IdempotencyKey is the same mechanism POST /api/v0/turns takes: a key
 	// already used returns the on it made, so a retry does not add a second.
@@ -38,7 +41,8 @@ type OnView struct {
 }
 
 const (
-	turnOnRefused       = "a turn token may register an on only for a turn its own turn started, delivering to its own session"
+	turnOnRefused       = "a turn token may watch only a turn it may read, and the reply goes to its own session"
+	turnOnSelfRefused   = "a turn token may not watch a turn of its own session: its reply would only continue the session"
 	turnOnRemoveRefused = "a turn token may remove only an on its own turn registered"
 )
 
@@ -78,28 +82,55 @@ func (a *API) registerOn(w http.ResponseWriter, r *http.Request) {
 	// B15 (his call, 2026-11-19): an on may watch ANY turn the caller's token
 	// may reach — core does not single out asked work as a kind. What stays is
 	// credential scoping, not a kind check:
-	//   - a turn token may watch only a turn its own turn started (its request
-	//     tree), delivering to its own session. This still implies asked work,
-	//     but as a consequence of the token's reach, not a rule about kinds.
+	//   - a turn token may watch any turn it may read (C2, 2026-11-25: a
+	//     coordinator was refused the review its builder asked for). The check
+	//     is the read's own (mayReadTurn), so a wider read widens this too.
+	//     Delivery stays to the token's own session. One turn it may read is
+	//     still refused: one of its own session. Its reply delivered to that
+	//     same session would be a self-continuation.
+	//     The on counts as asked work under the per-turn and per-tree caps
+	//     (2026-11-25): a delivered turn skips them (deliverResult), so a chain
+	//     of ons over ended turns, each fired at once into a new turn that
+	//     registers the next, stops at the caps here instead.
 	//   - the main token may watch any turn and deliver to any session it names;
 	//     it can already start a turn in any session. A main-token on over a
 	//     person's turn is made safe by the self-retire checks (B13b), not by a
 	//     refusal here.
 	session := body.Session
 	var maker queue.Maker
+	var asked *queue.Chain
 	if g := grantOf(r); g != nil {
-		if j.Links.Chain == nil || j.Links.Chain.By != g.Turn {
+		found, ok, err := a.mayReadTurn(*g, body.Turn, "")
+		switch {
+		case err != nil:
+			a.internal(w)
+			return
+		case !found:
+			writeError(w, http.StatusNotFound, noTurn)
+			return
+		case !ok:
 			writeError(w, http.StatusForbidden, turnOnRefused)
+			return
+		case turnSession(j) == g.Session:
+			writeError(w, http.StatusForbidden, turnOnSelfRefused)
 			return
 		}
 		session = g.Session
 		maker = queue.Maker{Session: g.Session, Turn: g.Turn}
+		// The on counts as asked work by g's turn, under the per-turn and
+		// per-tree caps (queue.countAsked): its delivered turn is not asked work,
+		// so without this a chain of ons over ended turns would pass the caps.
+		asked = askedLinks(*g).Chain
 	} else if session == "" {
 		writeError(w, http.StatusBadRequest, "session is required: where to deliver the turn's reply")
 		return
 	}
-	on, err := a.cfg.Queue.RegisterOn(queue.DefaultTeam, queue.OnTurnCompleted, body.Turn, session, body.IdempotencyKey, maker)
+	on, err := a.cfg.Queue.RegisterOnLinked(queue.DefaultTeam, queue.OnTurnCompleted, body.Turn, session, body.IdempotencyKey, maker, asked, queueLimits(policyOf(r)))
+	var limit *queue.LimitError
 	switch {
+	case errors.As(err, &limit):
+		writeError(w, http.StatusForbidden, limit.Msg)
+		return
 	case errors.Is(err, queue.ErrUnknownEvent):
 		writeError(w, http.StatusBadRequest, "that event is not known")
 		return

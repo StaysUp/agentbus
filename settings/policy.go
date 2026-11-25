@@ -80,8 +80,8 @@ home_files = []      # e.g. ["~/.aws/config"]
 # the request and says which limit.
 [limits]
 max_depth = 2                # levels of asking below the person's turn
-max_jobs_per_turn = 10       # turns and reviews one turn may ask for
-max_jobs_per_tree = 30       # turns and reviews one request tree may ask for in all
+max_jobs_per_turn = 10       # turns and reviews one turn may ask for, ons it registers included
+max_jobs_per_tree = 30       # turns and reviews one request tree may ask for in all, ons included
 max_cost_usd_per_tree = 0.0  # USD one request tree may cost before asking stops; 0 is off
 
 # What a turn's own token may call.
@@ -149,8 +149,8 @@ type AgentAPI struct {
 // left out; once read from a store each is set.
 type Limits struct {
 	MaxDepth          *int     `toml:"max_depth" json:"max_depth,omitempty" doc:"Levels of asking below the person's turn. Absent in a PUT: 2."`
-	MaxJobsPerTurn    *int     `toml:"max_jobs_per_turn" json:"max_jobs_per_turn,omitempty" doc:"Turns and reviews one turn may ask for. Absent in a PUT: 10."`
-	MaxJobsPerTree    *int     `toml:"max_jobs_per_tree" json:"max_jobs_per_tree,omitempty" doc:"Turns and reviews one request tree may ask for in all. Absent in a PUT: 30."`
+	MaxJobsPerTurn    *int     `toml:"max_jobs_per_turn" json:"max_jobs_per_turn,omitempty" doc:"Turns and reviews one turn may ask for. An on the turn registers with POST /api/v0/ons counts as one. Absent in a PUT: 10."`
+	MaxJobsPerTree    *int     `toml:"max_jobs_per_tree" json:"max_jobs_per_tree,omitempty" doc:"Turns and reviews one request tree may ask for in all. An on a turn of the tree registers with POST /api/v0/ons counts as one. Absent in a PUT: 30."`
 	MaxCostUSDPerTree *float64 `toml:"max_cost_usd_per_tree" json:"max_cost_usd_per_tree,omitempty" doc:"USD one request tree may cost before asking stops; 0 is off. Absent in a PUT: 0."`
 }
 

@@ -268,6 +268,7 @@ func addColumns(db *sql.DB) error {
 		{"copies", "snapshot", "TEXT NOT NULL DEFAULT ''"},
 		{"jobs", "turn", "TEXT"},
 		{"ons", "idem_key", "TEXT NOT NULL DEFAULT ''"},
+		{"ons", "chain", "TEXT"},
 	} {
 		var n int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, c.table, c.column).Scan(&n); err != nil {

@@ -15,10 +15,10 @@ package api
 //      the turn number cannot change it, since an ask takes the asker's workspace id, never a turn's Isolate.
 //   #3 a second turn queued before the first starts: TestNextTurnQueuesWhileAnotherIsStarting (turn_test.go) --
 //      a second turn while the first is starting returns 202 queued, ahead 1, and both run in order.
-//   #4 an idempotent retry across the turn's lifecycle: TestTurnWaitFalseRetryAfterStop (jobs_test.go, queued then stopped)
+//   #4 an idempotent retry across the turn's lifecycle: TestTurnRetryAfterStop (jobs_test.go, queued then stopped)
 //      and TestIdempotencyKey (turnsapi_integration, same key same turn; a different session/fields is 409).
 //   #5 a turn after a queued or cancelled first turn: TestNextTurnQueuesWhileAnotherIsStarting (queued first turn, then a
-//      third after both end) and TestTurnWaitFalseRetryAfterStop (a turn stopped while queued, then its retry).
+//      third after both end) and TestTurnRetryAfterStop (a turn stopped while queued, then its retry).
 //   #6 a new session reports sandbox: true while its first turn runs: TestNewSessionReportsSandboxWhileTurnRuns (here).
 //   #7 changes while the first turn runs report isolated by the workspace's sandbox: TestSessionChangesFirstTurnRunning
 //      (changes_integration) -- a sandbox workspace answers isolated: true while its first turn runs, a direct one false.

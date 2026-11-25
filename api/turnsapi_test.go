@@ -182,23 +182,44 @@ func TestTurnsTokenOff(t *testing.T) {
 	}
 }
 
-// A turn the engine refuses answers with the engine's status and words: the
-// job failed with reason setup. A request the API refuses is never queued.
+// endedTurn polls GET /api/v0/turns/{id} until the turn has ended, and
+// returns it. POST /api/v0/turns answers at once, so a turn the runner refuses
+// shows its refusal here.
+func endedTurn(t *testing.T, e *env, turn string) Turn {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var one OneTurn
+		resp, b := do(t, e.req(t, "GET", "/api/v0/turns/"+turn, nil))
+		if resp.StatusCode == 200 && json.Unmarshal([]byte(b), &one) == nil && one.Turn.Ended != nil {
+			return one.Turn
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("turn %s has not ended: %d %s", turn, resp.StatusCode, b)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// A turn the engine refuses is answered queued at once (POST never waits),
+// then reads failed with the engine's words: the job failed with reason setup.
+// A request the API refuses is never queued.
 func TestTurnRefusalsComeFromTheJob(t *testing.T) {
 	e := turnsEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) { return run.Launch{}, run.ErrNotFound })
 	// A valid turn the engine refuses: the runner's setup fails with ErrNotFound,
-	// and the POST answers with the engine's own words and reason setup.
+	// and the turn reads failed with the engine's own words.
+	for i := range 2 {
+		s := e.newSession(t, t.TempDir(), true)
+		resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"session":"`+s+`","agent":"claude","prompt":"x"}`)))
+		var st Started
+		if resp.StatusCode != 202 || json.Unmarshal([]byte(out), &st) != nil || st.State != "queued" || st.Turn == "" {
+			t.Fatalf("turn %d: %d %s, want 202 queued at once", i, resp.StatusCode, out)
+		}
+		if got := endedTurn(t, e, st.Turn); got.State != "failed" || !strings.Contains(got.Error, "is not on the service's PATH") {
+			t.Fatalf("turn %d engine refusal: %+v", i, got)
+		}
+	}
 	s1 := e.newSession(t, t.TempDir(), true)
-	resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"session":"`+s1+`","agent":"claude","prompt":"x"}`)))
-	if resp.StatusCode != 400 || !strings.Contains(out, "is not on the service's PATH") {
-		t.Fatalf("engine refusal: %d %s", resp.StatusCode, out)
-	}
-	// A second valid turn (another session) refuses the same way: two turn jobs,
-	// each failed at setup.
-	s2 := e.newSession(t, t.TempDir(), true)
-	if resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(`{"session":"`+s2+`","agent":"claude","prompt":"x"}`))); resp.StatusCode != 400 {
-		t.Fatalf("second engine refusal: %d %s", resp.StatusCode, out)
-	}
 	jobs, _ := e.q.List(queue.DefaultTeam, queue.Filter{Kind: queue.KindTurn}, 10)
 	if len(jobs) != 2 || jobs[0].Reason != queue.ReasonSetup {
 		t.Fatalf("jobs %+v", jobs)

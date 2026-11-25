@@ -81,8 +81,12 @@ func TestTurnTokenRevokedWhenChildDoesNotStart(t *testing.T) {
 		return run.Launch{Path: filepath.Join(t.TempDir(), "missing")}, nil
 	})
 	resp, out := e.startFlow(t, t.TempDir(), "claude", "x")
-	if resp.StatusCode != http.StatusInternalServerError {
+	var st Started
+	if resp.StatusCode != http.StatusAccepted || json.Unmarshal([]byte(out), &st) != nil {
 		t.Fatalf("%d %s", resp.StatusCode, out)
+	}
+	if got := endedTurn(t, e, st.Turn); got.State != "failed" {
+		t.Fatalf("a child that did not start: %+v, want failed", got)
 	}
 	if n := e.eng.LiveTokens(); n != 0 {
 		t.Errorf("%d live tokens after a child that did not start", n)

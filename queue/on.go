@@ -96,42 +96,86 @@ type On struct {
 // may watch one turn — so a key is never left unbound by a subject collision
 // (the round-3 finding). A keyless on is always a new registration.
 func (q *Queue) RegisterOn(team, event, subject, session, key string, maker Maker) (On, error) {
+	return q.RegisterOnLinked(team, event, subject, session, key, maker, nil, Limits{})
+}
+
+// RegisterOnLinked is RegisterOn for an on a turn token registers: asked is
+// the token's request tree and turn (Root, By, BySession; Depth is not read),
+// and the on counts as asked work under lim's per-turn and per-tree caps,
+// checked in the insert's own transaction (countAsked). A cap reached is a
+// *LimitError and stores nothing. A retry with a key already used returns its
+// on without counting again. nil asked is RegisterOn: no cap.
+func (q *Queue) RegisterOnLinked(team, event, subject, session, key string, maker Maker, asked *Chain, lim Limits) (On, error) {
 	if event != OnTurnCompleted {
 		return On{}, fmt.Errorf("%w: %q", ErrUnknownEvent, event)
 	}
-	if subject == "" || session == "" {
+	if subject == "" || session == "" || (asked != nil && asked.By == "") {
 		return On{}, ErrBadState
 	}
 	mk, err := json.Marshal(maker)
 	if err != nil {
 		return On{}, fmt.Errorf("queue: register on: %w", err)
 	}
+	var chain sql.NullString
+	if asked != nil {
+		c, err := json.Marshal(Chain{Root: asked.Root, By: asked.By, BySession: asked.BySession})
+		if err != nil {
+			return On{}, fmt.Errorf("queue: register on: %w", err)
+		}
+		chain = sql.NullString{String: string(c), Valid: true}
+	}
 	o := On{ID: NewID("on_"), Team: team, Event: event, Subject: subject, Session: session, Maker: maker, Created: nanos(q.now())}
-	// The insert and the dedup are ONE atomic statement: ON CONFLICT on the key
-	// index, not a read-then-insert. Two concurrent requests with the same key
-	// then both land here, one inserts and the other does nothing (never a
-	// uniqueness error, the round-4 finding). A keyless on never conflicts (the
-	// index is partial on idem_key != '') and is always new.
-	res, err := q.db.Exec(`INSERT INTO ons(id, team, event, subject, session, maker, idem_key, created) VALUES(?,?,?,?,?,?,?,?)
-		ON CONFLICT(team, idem_key) WHERE idem_key != '' DO NOTHING`,
-		o.ID, o.Team, o.Event, o.Subject, o.Session, string(mk), key, o.Created)
-	if err != nil {
-		return On{}, fmt.Errorf("queue: register on: %w", err)
-	}
-	if n, _ := res.RowsAffected(); n > 0 {
-		return o, nil // inserted: a new on, or a keyless one
-	}
-	// The key was already used: return that on when it is the same registration
-	// (same subject and session, so a retry is a no-op), else a conflict — the
-	// rule POST /api/v0/turns applies to a key with other fields.
-	existing, err := q.onByKey(team, key)
+	err = q.tx(func(tx *sql.Tx) error {
+		// A key already used returns its on (same subject and session, so a
+		// retry is a no-op) or is a conflict, the rule POST /api/v0/turns applies
+		// to a key with other fields. Read before the caps, so a retry is never
+		// refused for the on it made itself.
+		if key != "" {
+			existing, err := onByKey(tx, team, key)
+			switch {
+			case err == nil:
+				if existing.Subject != subject || existing.Session != session {
+					return ErrKeyConflict
+				}
+				o = existing
+				return nil
+			case !errors.Is(err, ErrNotFound):
+				return err
+			}
+		}
+		if asked != nil {
+			if err := countAsked(tx, team, *asked, lim); err != nil {
+				return err
+			}
+		}
+		// The insert and the dedup are ONE atomic statement: ON CONFLICT on the
+		// key index, not a read-then-insert. Two concurrent requests with the same
+		// key then both land here, one inserts and the other does nothing (never a
+		// uniqueness error, the round-4 finding). A keyless on never conflicts
+		// (the index is partial on idem_key != '') and is always new.
+		res, err := tx.Exec(`INSERT INTO ons(id, team, event, subject, session, maker, idem_key, created, chain) VALUES(?,?,?,?,?,?,?,?,?)
+			ON CONFLICT(team, idem_key) WHERE idem_key != '' DO NOTHING`,
+			o.ID, o.Team, o.Event, o.Subject, o.Session, string(mk), key, o.Created, chain)
+		if err != nil {
+			return fmt.Errorf("queue: register on: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			return nil // inserted: a new on, or a keyless one
+		}
+		existing, err := onByKey(tx, team, key)
+		if err != nil {
+			return err
+		}
+		if existing.Subject != subject || existing.Session != session {
+			return ErrKeyConflict
+		}
+		o = existing
+		return nil
+	})
 	if err != nil {
 		return On{}, err
 	}
-	if existing.Subject != subject || existing.Session != session {
-		return On{}, ErrKeyConflict
-	}
-	return existing, nil
+	return o, nil
 }
 
 // EndedTurns lists turn jobs that ended at or before atOrBefore, oldest end
@@ -167,10 +211,10 @@ func (q *Queue) EndedTurns(after *Job, atOrBefore time.Time, limit int) ([]Job, 
 }
 
 // onByKey reads the on registered with idempotency key, or ErrNotFound.
-func (q *Queue) onByKey(team, key string) (On, error) {
+func onByKey(tx *sql.Tx, team, key string) (On, error) {
 	o := On{Team: team}
 	var mk string
-	switch err := q.db.QueryRow(`SELECT id, event, subject, session, maker, created FROM ons WHERE team = ? AND idem_key = ?`,
+	switch err := tx.QueryRow(`SELECT id, event, subject, session, maker, created FROM ons WHERE team = ? AND idem_key = ?`,
 		team, key).Scan(&o.ID, &o.Event, &o.Subject, &o.Session, &mk, &o.Created); {
 	case errors.Is(err, sql.ErrNoRows):
 		return On{}, ErrNotFound

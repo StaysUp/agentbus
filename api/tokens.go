@@ -77,8 +77,8 @@ const (
 	// through its own route and checked there (tools.go).
 	toolList
 	// onRegister: POST /api/v0/ons. The subject turn is in the body; the
-	// handler checks it is a turn the token's tree started and the delivery
-	// session is the token's own (on.go).
+	// handler checks the token may read it (mayReadTurn) and delivers to the
+	// token's own session (on.go).
 	onRegister
 	// onPath: DELETE /api/v0/ons/{id}. The handler checks the on's maker is
 	// this token's turn (on.go).
@@ -270,18 +270,14 @@ func (a *API) allowTurn(w http.ResponseWriter, r *http.Request, rt *route, id st
 			}
 			session = q.Get("session")
 		}
-		session, err := a.sessionOfTurn(id, session)
-		if err != nil {
-			a.internal(w)
-			return nil, false
-		}
-		if session == "" {
+		found, ok, err := a.mayReadTurn(g, id, session)
+		switch {
+		case err != nil:
+			return failed(err)
+		case !found:
 			writeError(w, http.StatusNotFound, noTurn)
 			return nil, false
-		}
-		if ok, err := inScope(session); err != nil {
-			return failed(err)
-		} else if !ok {
+		case !ok:
 			return refuse(turnSessionRefused)
 		}
 	case changesWorkspaceTok, workspaceTok, applyWorkspaceTok:
@@ -353,6 +349,20 @@ func turnRefusal(rt *route, actions run.Action, rules gateway.Rules) string {
 		return turnSwitchedOff("use the agentbus MCP tools", "AgentBus tools")
 	}
 	return ""
+}
+
+// mayReadTurn is the one check of whether g may read turn id: the turn's
+// session (session when sent, else the turn's newest) is in g's reach
+// (inTree). found is false when there is no such turn. Reading a turn
+// (treeTurn) and watching one (POST /api/v0/ons) both ask it, so what a turn
+// token may watch is what it may read, and a wider read widens both.
+func (a *API) mayReadTurn(g run.Grant, id, session string) (found, ok bool, err error) {
+	session, err = a.sessionOfTurn(id, session)
+	if err != nil || session == "" {
+		return false, false, err
+	}
+	ok, err = a.inTree(g, session)
+	return true, ok, err
 }
 
 // How a workspace stands to a turn token (ownWorkspace).
