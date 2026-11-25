@@ -12,7 +12,6 @@ import (
 	"syscall"
 
 	"github.com/staysup/agentbus/gateway"
-	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -30,8 +29,8 @@ const filesElsewhere = "read_file, list_folder and write_file work only for a se
 // finish (the queue's folder row is). A call without a session (the main token,
 // the turns token) is not refused, and nor is one on a service with no queue,
 // which runs every session itself.
-func (a *API) refuseFilesElsewhere(w http.ResponseWriter, g *run.Grant) bool {
-	if g == nil || g.Session == "" || a.cfg.Queue == nil || a.cfg.Store == nil {
+func (a *API) refuseFilesElsewhere(w http.ResponseWriter, g *caller) bool {
+	if g.Session == "" || a.cfg.Queue == nil || a.cfg.Store == nil {
 		return false
 	}
 	ws, found, err := a.workspaceOf(g.Session)
@@ -143,8 +142,8 @@ func resolveSymlinkPathBounded(p string, hops int) (string, error) {
 }
 
 func (a *API) openFolderAccess(w http.ResponseWriter, r *http.Request, path, toolName string) (*os.Root, string, string, bool) {
-	g := grantOf(r)
-	if a.refuseFilesElsewhere(w, g) {
+	c := callerOf(r)
+	if a.refuseFilesElsewhere(w, c) {
 		return nil, "", "", false
 	}
 	resolved, err := resolveSymlinkPath(path)
@@ -152,57 +151,29 @@ func (a *API) openFolderAccess(w http.ResponseWriter, r *http.Request, path, too
 		writeError(w, http.StatusBadRequest, "invalid path: "+err.Error())
 		return nil, "", "", false
 	}
-	if g == nil || g.Session == "" {
-		root, err := os.OpenRoot("/")
-		if err != nil {
-			a.internal(w)
-			return nil, "", "", false
-		}
-		rel := strings.TrimPrefix(resolved, "/")
-		if rel == "" {
-			rel = "."
-		}
-		return root, rel, "/", true
-	}
-
-	grantFolder := ""
-	if gf, ok, err := a.cfg.Store.MatchingFolderGrant(g.Session, resolved); err == nil && ok {
-		grantFolder = gf
-	} else if approved, ok := r.Context().Value(toolGatedKey{}).(string); ok {
-		if approved == "" || approved == "*" {
-			writeError(w, http.StatusForbidden, "folder access not granted for this session: "+path)
-			return nil, "", "", false
-		}
-		if approved == resolved {
-			if toolName == "list_folder" {
-				grantFolder = resolved
-			} else {
-				dir := filepath.Dir(resolved)
-				for dir != "/" && dir != "." {
-					if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
-						break
-					}
-					parent := filepath.Dir(dir)
-					if parent == dir {
-						break
-					}
-					dir = parent
-				}
-				grantFolder = dir
-			}
-		} else {
-			writeError(w, http.StatusForbidden, "path changed to ungranted target while approval was pending: "+path)
-			return nil, "", "", false
-		}
-	} else {
-		writeError(w, http.StatusForbidden, "folder access not granted for this session: "+path)
+	// The grant's limits say in which folder the path may be opened, and the
+	// rules its tool is held to (none for the owner's own call).
+	grantFolder, nearest, rules, ok := c.limits.folder(a, w, r, resolved, path)
+	if !ok {
 		return nil, "", "", false
 	}
-
-	rules, err := a.toolRules()
-	if err == nil {
-		dec, rule := gateway.DecideTool(rules, toolName)
-		if dec == gateway.Refuse {
+	if nearest && toolName != "list_folder" {
+		// A file a person allowed: its nearest folder that is there.
+		dir := filepath.Dir(resolved)
+		for dir != "/" && dir != "." {
+			if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+				break
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+		grantFolder = dir
+	}
+	if rules != nil {
+		if dec, rule := gateway.DecideTool(*rules, toolName); dec == gateway.Refuse {
 			writeError(w, http.StatusForbidden, "tool forbidden by policy: "+rule)
 			return nil, "", "", false
 		}

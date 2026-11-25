@@ -94,17 +94,7 @@ func (r *Remote) Snapshot() (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	p := s.Permissions
-	if err := p.Check(); err != nil {
-		return Snapshot{}, &Error{Setting: "permissions", Where: remoteWhere, Why: "the server sent a policy this runner refuses: " + err.Error(), Fix: remoteFix}
-	}
-	p.fill()
-	p.where, p.fix = folderWhere, folderFix
-	if err := CheckInstructions([]byte(s.Instructions)); err != nil {
-		return Snapshot{}, &Error{Setting: "instructions", Where: remoteWhere, Why: "the server sent instructions this runner refuses: " + err.Error(), Fix: remoteFix}
-	}
-	return Snapshot{Policy: p, PolicyVersion: s.PermissionsVersion, Instructions: s.Instructions,
-		InstructionsVersion: s.InstructionsVersion, Revision: s.SettingsVersion}, nil
+	return FromRunner(s)
 }
 
 // SetPolicy is refused: a runner's settings are the server's.

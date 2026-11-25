@@ -554,7 +554,11 @@ type attempt struct {
 	cancel, stale chan struct{} // closed when a heartbeat hears it
 	// signin is control's word that the turn's agent can get no
 	// credential from it now (jobs.AttemptStarted.Signin).
-	signin                string
+	signin string
+	// settings are the rules control took for the turn when the attempt
+	// started, or rulesErr why it has none (jobs.AttemptStarted).
+	settings              *settings.RunnerSettings
+	rulesErr              *settings.Error
 	cancelOnce, staleOnce sync.Once
 
 	// The workspace, once known: its folder, and for a session's first job
@@ -767,6 +771,10 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	at.mu.Lock()
 	at.until = time.Now().Add(r.lease)
 	at.token, at.standIn, at.signin = st.Token, st.StandIn, st.Signin
+	at.settings = st.Settings
+	if st.RulesRefused != nil {
+		at.rulesErr = st.RulesRefused.Err()
+	}
 	at.mu.Unlock()
 	done := make(chan struct{})
 	defer close(done)
@@ -865,6 +873,10 @@ func (r *Runner) request(at *attempt) run.Request {
 	// always, and in up too. Its model calls carry the stand-in, not the token.
 	if (r.cfg.Forward || r.cfg.NoSecrets) && at.token != "" {
 		req.Token, req.APIURL = at.token, r.cfg.Queue
+		// The rules control took for the turn with its token: the turn's
+		// commands and tools here are decided by the same rules as its calls
+		// to control's API.
+		req.Settings, req.RulesError = at.settings, at.rulesErr
 	}
 	// Control adds this runner's agents' credentials, and has none for
 	// this agent now: the engine refuses the turn in control's words. The

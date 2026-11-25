@@ -52,7 +52,7 @@ func TestAskChecksSessionTheAskerOpened(t *testing.T) {
 	mk("s_mine", "s_asker")      // a session the asker opened
 	mk("s_other", "s_elsewhere") // a session another token opened
 	a := &API{cfg: Config{Queue: q, Store: st}}
-	g := run.ForTurn(run.Grant{Session: "s_asker", Root: "s_asker", Turn: "t1"})
+	g := run.ForTurn(run.Grant{Session: "s_asker", Root: "s_asker", Turn: "t1"}, "")
 	perm := settings.DefaultPolicy()
 	check := func(session string) int {
 		w := httptest.NewRecorder()

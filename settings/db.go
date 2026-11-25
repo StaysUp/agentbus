@@ -107,6 +107,7 @@ CREATE TABLE IF NOT EXISTS agents(id TEXT PRIMARY KEY, ord INTEGER NOT NULL, dat
 CREATE TABLE IF NOT EXISTS changes(seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, time TEXT NOT NULL,
 	setting TEXT NOT NULL, keys TEXT NOT NULL, file TEXT NOT NULL DEFAULT '', version INTEGER NOT NULL, published TEXT);
 CREATE INDEX IF NOT EXISTS changes_unpublished ON changes(seq) WHERE published IS NULL;
+CREATE TABLE IF NOT EXISTS rules(version TEXT PRIMARY KEY, policy TEXT NOT NULL, kept TEXT NOT NULL);
 `
 
 // OpenDB opens or makes the settings database at path. A new one starts on
@@ -341,6 +342,43 @@ func (d *DB) Snapshot() (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	return out, nil
+}
+
+// KeepRules keeps p under its version v: the rules a turn took at its start.
+// A turn's later requests are decided by them (RulesOf), whatever the policy
+// is by then. Kept once per version; a version already kept keeps its row.
+func (d *DB) KeepRules(p Policy, v Version) error {
+	b, err := json.Marshal(p)
+	if err != nil {
+		return fmt.Errorf("settings: keep rules: %w", err)
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, err := d.db.Exec(`INSERT OR IGNORE INTO rules(version, policy, kept) VALUES(?, ?, ?)`,
+		string(v), string(b), d.now().UTC().Format(time.RFC3339Nano)); err != nil {
+		return fmt.Errorf("settings: keep rules: %w", err)
+	}
+	return nil
+}
+
+// Rules is the policy KeepRules kept under v. found is false when none was.
+func (d *DB) Rules(v Version) (p Policy, found bool, err error) {
+	d.mu.Lock()
+	var b string
+	err = d.db.QueryRow(`SELECT policy FROM rules WHERE version = ?`, string(v)).Scan(&b)
+	d.mu.Unlock()
+	if errors.Is(err, sql.ErrNoRows) {
+		return Policy{}, false, nil
+	}
+	if err != nil {
+		return Policy{}, false, &Error{Setting: SettingPermissions, Where: dbPolicyWhere, Why: "the rules a turn took could not be read", Fix: dbPolicyFix}
+	}
+	if err := json.Unmarshal([]byte(b), &p); err != nil {
+		return Policy{}, false, &Error{Setting: SettingPermissions, Where: dbPolicyWhere, Why: "the rules a turn took could not be read", Fix: dbPolicyFix}
+	}
+	p.fill()
+	p.where, p.fix = dbPolicyWhere, dbPolicyFix
+	return p, true, nil
 }
 
 // Info is the database's state.

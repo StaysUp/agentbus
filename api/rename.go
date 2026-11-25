@@ -75,8 +75,8 @@ func (a *API) updateSession(w http.ResponseWriter, r *http.Request, id string) {
 		yes := true
 		archive = &yes
 	}
-	if archive != nil && grantOf(r) != nil {
-		writeError(w, http.StatusForbidden, "a turn token cannot archive a session; only the person can")
+	if msg := callerOf(r).limits.archives(); archive != nil && msg != "" {
+		writeError(w, http.StatusForbidden, msg)
 		return
 	}
 	var t string

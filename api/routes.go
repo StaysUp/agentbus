@@ -44,11 +44,15 @@ type route struct {
 	// token's grant must hold it. Every route that takes a token names one;
 	// New refuses a table where one does not.
 	action run.Action
-	// scope says how a request of a grant bound to a session (an agent
-	// turn's token) is confined to its authority (tokens.go). The zero value,
-	// scopeNone, refuses such a grant whatever its actions: a route that cannot
-	// say whose workspace it acts on is for a grant of every workspace.
-	scope int
+	// at says where the route acts (authority.go): a session, a turn, a
+	// workspace, none, or the body's. The door asks the grant whether it may do
+	// the route's action there (run.Grant.May). The zero value, atControl, is
+	// control's state as a whole, every workspace: a route that cannot say whose
+	// workspace it acts on is for a grant that reaches every workspace.
+	at int
+	// toolsSwitch marks the AgentBus tools (the tool server and the file
+	// tools): an agent's grant may not call them when tool:* is refused.
+	toolsSwitch bool
 	// turns says the turns token (Config.TurnsToken) may call the route. The
 	// zero value refuses it.
 	turns bool
@@ -192,8 +196,8 @@ var routes = slices.Concat([]route{
 			"the turn runs when a runner is free, and GET /api/v0/turns/{id} follows it. A retry of a turn already running answers running.\n\n" +
 			"A session whose turn runs, or has turns waiting, is never refused: the new turn queues behind them and runs next, in order, " +
 			"and ahead says how many of the session's turns are before it.",
-		body:  TurnRequest{},
-		scope: askTurn,
+		body: TurnRequest{},
+		at:   atBody,
 		// B15: ask_agent is no longer a tool on this route; it is a default app
 		// (apps.go, askAgentApp) that calls this operation (startTurn) in ONE step,
 		// with delivery set so the reply's on is recorded in the same write. The
@@ -220,7 +224,7 @@ var routes = slices.Concat([]route{
 			{name: "before", doc: "Only turns whose started_seq is below it: the next_before of the previous page.", integer: true, min: 1},
 			{name: "limit", doc: "Turns per page. 100 when absent.", integer: true, min: 1, max: maxTurnLimit}},
 		replies:   []reply{ok(200, TurnList{}, "A page of turns."), badRequest, storeFailed},
-		scope:     treeSessionQuery,
+		at:        atSessionQuery,
 		turns:     true,
 		wrappable: true,
 		serve:     plain((*API).turns)},
@@ -232,7 +236,7 @@ var routes = slices.Concat([]route{
 			"Poll it to wait for a turn to end, or stream from its store and seq.",
 		query:     []param{{name: "session", doc: turnSessionDoc}},
 		replies:   []reply{ok(200, OneTurn{}, "The turn."), badRequest, fail(404, "No such turn."), storeFailed},
-		scope:     treeTurn,
+		at:        atTurn,
 		turns:     true,
 		wrappable: true,
 		serve:     (*API).getTurn},
@@ -249,7 +253,7 @@ var routes = slices.Concat([]route{
 			fail(404, "This service keeps no queue, or no turn has this id."),
 			fail(409, "The turn has ended, or it is not a turn of this service."),
 			storeFailed},
-		scope: askedTurn,
+		at:    atJob,
 		turns: true,
 		serve: (*API).stopTurn},
 	{method: "POST", path: "/api/v0/ons", op: "registerOn", action: run.ActRun,
@@ -267,7 +271,7 @@ var routes = slices.Concat([]route{
 			fail(403, "A turn token named a turn it may not read, or a turn of its own session, or its turn or request tree reached a cap on asked work (the message says which)."),
 			fail(404, "This service keeps no queue, or no turn has this id."),
 			fail(409, "The idempotency_key was already used to register an on for a different turn or session.")},
-		scope: onRegister,
+		at:    atBody,
 		serve: plain((*API).registerOn)},
 	{method: "DELETE", path: "/api/v0/ons/{id}", op: "removeOn", action: run.ActRun,
 		idDoc:   "An on's id (on_...), as POST /api/v0/ons named it.",
@@ -277,7 +281,7 @@ var routes = slices.Concat([]route{
 		replies: []reply{{status: 204, doc: "Removed.", empty: true}, turnRefused,
 			fail(403, "A turn token tried to remove an on another turn registered."),
 			fail(404, "This service keeps no queue, or no on has this id.")},
-		scope: onPath,
+		at:    atBody,
 		serve: (*API).removeOn},
 	{method: "GET", path: "/api/v0/turns/{id}/diff", op: "turnDiff", action: run.ActRead,
 		idDoc:   turnIDDoc,
@@ -287,7 +291,7 @@ var routes = slices.Concat([]route{
 			"files is the summary of the changed files (isolated, the checkpoints, the count); the files themselves page at GET /api/v0/turns/{id}/changes. model_calls summarises the model calls (count, usage, cost, per-model); they page at GET /api/v0/turns/{id}/calls. tools is the tool call count; they page at GET /api/v0/turns/{id}/tools, each with the commands it ran. files is null while the turn runs, and for a turn this service did not run.",
 		query:     []param{{name: "session", doc: turnSessionDoc}},
 		replies:   []reply{ok(200, TurnDiff{}, "The turn's diff summary."), badRequest, fail(404, "No such turn, or it has not started."), storeFailed},
-		scope:     treeTurn,
+		at:        atTurn,
 		turns:     true,
 		wrappable: true,
 		serve:     (*API).turnDiff},
@@ -302,7 +306,7 @@ var routes = slices.Concat([]route{
 			{name: "before", doc: "Only files before this position: the next_before of the previous page.", integer: true, min: 1},
 			{name: "limit", doc: "Files per page. 100 when absent.", integer: true, min: 1, max: maxTurnLimit}},
 		replies:   []reply{ok(200, TurnChangesPage{}, "A page of the turn's file changes."), badRequest, fail(404, "No such turn, or it has not started."), storeFailed},
-		scope:     treeTurn,
+		at:        atTurn,
 		turns:     true,
 		wrappable: true,
 		serve:     (*API).turnChanges},
@@ -317,7 +321,7 @@ var routes = slices.Concat([]route{
 			{name: "before", doc: "Only calls before this position: the next_before of the previous page.", integer: true, min: 1},
 			{name: "limit", doc: "Calls per page. 100 when absent.", integer: true, min: 1, max: maxTurnLimit}},
 		replies:   []reply{ok(200, TurnCallsPage{}, "A page of the turn's model calls."), badRequest, fail(404, "No such turn, or it has not started."), storeFailed},
-		scope:     treeTurn,
+		at:        atTurn,
 		turns:     true,
 		wrappable: true,
 		serve:     (*API).turnCalls},
@@ -332,7 +336,7 @@ var routes = slices.Concat([]route{
 			{name: "before", doc: "Only tool calls before this position: the next_before of the previous page.", integer: true, min: 1},
 			{name: "limit", doc: "Tool calls per page. 100 when absent.", integer: true, min: 1, max: maxTurnLimit}},
 		replies:   []reply{ok(200, TurnToolsPage{}, "A page of the turn's tool calls."), badRequest, fail(404, "No such turn, or it has not started."), storeFailed},
-		scope:     treeTurn,
+		at:        atTurn,
 		turns:     true,
 		wrappable: true,
 		serve:     (*API).turnTools},
@@ -345,7 +349,7 @@ var routes = slices.Concat([]route{
 			"The files are the changeset and each command's output is capped, so the read stays small; stream more from the store and seq. This reads the record, so it needs no runner and works after the turn's session is gone.",
 		query:     []param{{name: "session", doc: turnSessionDoc}},
 		replies:   []reply{ok(200, TurnRecord{}, "The turn's record."), badRequest, fail(404, "No such turn, or it has not started."), storeFailed},
-		scope:     treeTurn,
+		at:        atTurn,
 		turns:     true,
 		wrappable: true,
 		serve:     (*API).turnRecord},
@@ -357,7 +361,7 @@ var routes = slices.Concat([]route{
 			"context_tokens is the largest prompt the turn sent, the most one of its calls read: input + cache_read + cache_write, the vendor's own count. cache_read_tokens and fresh_tokens (input + cache_write) are summed over the turn's calls: how much was re-read from the cache against processed afresh, which drives the cost. made_of breaks that largest prompt into its parts from the request's own pieces (system, tools, messages), largest first; its note says what a vendor's request does not separate, such as a file read inside a tool result. made_of is null when no call carried usage or no request body is kept.",
 		query:     []param{{name: "session", doc: turnSessionDoc}},
 		replies:   []reply{ok(200, TurnContext{}, "The turn's context."), badRequest, fail(404, "No such turn, or it has not started."), storeFailed},
-		scope:     treeTurn,
+		at:        atTurn,
 		turns:     true,
 		wrappable: true,
 		serve:     (*API).turnContext},
@@ -375,7 +379,7 @@ var routes = slices.Concat([]route{
 		query:   []param{{name: "full", doc: "false leaves out each piece's json, for sizes and labels only. true when absent."}},
 		replies: []reply{ok(200, store.CallContext{}, "The call's request."), badRequest,
 			fail(404, "The turn has no such call, or no request body is stored for it."), storeFailed},
-		scope: treeTurn,
+		at:    atTurn,
 		serve: callOfTurn((*API).callContext)},
 	{method: "GET", path: "/api/v0/turns/{id}/calls/{call}/pieces/{n}", op: "callPiece", action: run.ActRead,
 		idDoc:   turnIDDoc,
@@ -384,7 +388,7 @@ var routes = slices.Concat([]route{
 		doc:     "One piece of a model call's request, or its reply, byte for byte.\n\n" + callPieceDoc,
 		replies: []reply{{status: 200, doc: "The piece's bytes, exactly as stored.", raw: true},
 			fail(404, "The turn has no such call, no request body is stored for it, it has no piece n, or no reply is kept."), storeFailed},
-		scope: treeTurn,
+		at:    atTurn,
 		serve: callOfTurn((*API).callPiece)},
 
 	{method: "POST", path: "/api/v0/workspaces", op: "createWorkspace", action: run.ActWorkspaceCreate,
@@ -394,7 +398,7 @@ var routes = slices.Concat([]route{
 			"A typed folder's machine checks and registers it, and the workspace keeps only its reference. With idempotency_key a retry returns the same workspace and makes nothing new.",
 		body:    WorkspaceRequest{},
 		replies: createReplies(ok(201, store.Workspace{}, "The workspace."), fail(404, "This service keeps no queue, or no such machine."), tooMany, stopping),
-		scope:   createWorkspaceTok,
+		at:      atBody,
 		serve:   plain((*API).createWorkspace)},
 	{method: "GET", path: "/api/v0/workspaces", op: "listWorkspaces", action: run.ActRead,
 		tag:     "Workspaces",
@@ -408,9 +412,9 @@ var routes = slices.Concat([]route{
 		idDoc:   "A workspace id (ws_ and 16 hex digits), as POST /api/v0/workspaces named it. Another shape gets 404.",
 		doc:     "One workspace: its folder, folder reference, machine, sandbox mode, when it was created, its head turn (the latest with a changeset), the turn its latest apply went up to, and when its latest action was a discard.",
 		replies: []reply{ok(200, store.Workspace{}, "The workspace."), fail(404, "No such workspace."), storeFailed},
-		scope:   workspaceTok,
+		at:      atWorkspace,
 		serve:   (*API).getWorkspace},
-	{method: "POST", path: "/api/v0/workspaces/{id}/discard", op: "discardWorkspace", action: run.ActApply,
+	{method: "POST", path: "/api/v0/workspaces/{id}/discard", op: "discardWorkspace", action: run.ActCopy,
 		tag:     "Workspaces",
 		summary: "Discard a workspace's unapplied changes",
 		idDoc:   "A workspace id (ws_ and 16 hex digits). Another shape gets 404.",
@@ -422,8 +426,9 @@ var routes = slices.Concat([]route{
 			fail(404, "This service keeps no queue, or no such workspace."),
 			ok(409, DiscardState{}, "Refused: an apply or discard of the workspace is still running or waiting. Nothing was dropped."),
 			tooMany, fail(503, "The runner holding the copy has not been seen for a minute. Nothing was discarded."), storeFailed},
+		at:    atWorkspace,
 		serve: (*API).discardWorkspace},
-	{method: "POST", path: "/api/v0/workspaces/{id}/update", op: "updateWorkspace", action: run.ActApply,
+	{method: "POST", path: "/api/v0/workspaces/{id}/update", op: "updateWorkspace", action: run.ActCopy,
 		tag:     "Workspaces",
 		summary: "Update a workspace's copy",
 		idDoc:   "A workspace id (ws_ and 16 hex digits). Another shape gets 404.",
@@ -439,6 +444,7 @@ var routes = slices.Concat([]route{
 			fail(404, "This service keeps no queue, or no such workspace."),
 			ok(409, UpdateState{}, "Refused: an apply, discard or update of the workspace is still running or waiting, or (a merge) a turn of it is. Nothing changed."),
 			tooMany, fail(503, "The runner holding the copy has not been seen for a minute. Nothing changed."), storeFailed},
+		at:    atWorkspace,
 		serve: (*API).updateWorkspace},
 	{method: "GET", path: "/api/v0/workspaces/{id}/changes", op: "workspaceChanges", action: run.ActRead,
 		tag:     "Workspaces",
@@ -460,7 +466,7 @@ var routes = slices.Concat([]route{
 			fail(409, "An apply of the workspace has not ended (ask again once it has), or the preview could not be made: error says why. Nothing was written."),
 			tooMany, fail(503, "The runner of the folder's machine has not been seen for a minute. Nothing was written."),
 			fail(504, "The folder's machine did not answer within 30 seconds. Nothing was written."), storeFailed},
-		scope: changesWorkspaceTok,
+		at:    atWorkspace,
 		serve: (*API).workspaceChanges},
 	{method: "POST", path: "/api/v0/workspaces/{id}/apply", op: "applyWorkspace", action: run.ActApply,
 		tag:     "Workspaces",
@@ -484,7 +490,7 @@ var routes = slices.Concat([]route{
 			fail(404, "This service keeps no queue, or no such workspace, or the named turn is not this service's."),
 			ok(409, ApplyState{}, "Refused or failed: error says why, and conflicts names each file in your folder that changed. Nothing was written on a conflict."),
 			tooMany, fail(503, "The runner of the folder's machine has not been seen for a minute. Nothing was written and no apply was made."), storeFailed},
-		scope: applyWorkspaceTok,
+		at:    atWorkspace,
 		serve: (*API).applyWorkspace},
 	{method: "POST", path: "/api/v0/sessions", op: "createSession", action: run.ActSessionCreate,
 		tag:     "Sessions",
@@ -498,7 +504,7 @@ var routes = slices.Concat([]route{
 		// turns), the same as an ask: choosing a folder and the Sandbox switch --
 		// POST /api/v0/workspaces -- stays with the main token (his ruling,
 		// 2026-11-22). The handler checks the named workspace exists (404).
-		scope: createSessionTok,
+		at:    atBody,
 		turns: true,
 		serve: plain((*API).createSession)},
 	{method: "GET", path: "/api/v0/sessions", op: "listSessions", action: run.ActRead,
@@ -520,7 +526,7 @@ var routes = slices.Concat([]route{
 		doc: "One session, as GET /api/v0/sessions lists it, and its copy: the runner that holds the session's isolated copy of its folder, " +
 			"and whether it is archived, closed and removed. A session that runs in the person's folder as it is has no copy.",
 		replies: []reply{ok(200, OneSession{}, "The session."), noSession, storeFailed},
-		scope:   treeSessionPath,
+		at:      atSession,
 		serve:   (*API).getSession},
 	{method: "PATCH", path: "/api/v0/sessions/{id}", op: "updateSession", action: run.ActRun,
 		tag:     "Sessions",
@@ -533,7 +539,7 @@ var routes = slices.Concat([]route{
 		body: SessionUpdate{},
 		replies: []reply{ok(200, Renamed{}, "Done."), badRequest,
 			fail(403, "A turn token's request is refused: error says why."), noSession, storeFailed},
-		scope: renameSession,
+		at:    atSession,
 		serve: (*API).updateSession},
 	{method: "GET", path: "/api/v0/sessions/{id}/events", op: "sessionEvents", action: run.ActRead,
 		tag:     "Sessions",
@@ -546,7 +552,7 @@ var routes = slices.Concat([]route{
 			{name: "kind", doc: "Only events of these kinds, comma separated, such as turn.started,turn.completed. Ignored with turn."},
 			{name: "limit", doc: "Events per page. 1000 when absent.", integer: true, min: 1, max: maxLimit}},
 		replies: []reply{ok(200, Page{}, "A page."), badRequest, mismatch, storeFailed},
-		scope:   treeSessionPath,
+		at:      atSession,
 		turns:   true,
 		serve:   (*API).sessionEvents},
 	{method: "GET", path: "/api/v0/sessions/{id}/search", op: "searchSession", action: run.ActRead,
@@ -558,7 +564,7 @@ var routes = slices.Concat([]route{
 			{name: "before", doc: "The next_before of the previous page. Absent: start from the newest."},
 			{name: "limit", doc: "Hits per page. 20 when absent.", integer: true, min: 1, max: maxSearchLimit}},
 		replies:   []reply{ok(200, store.SearchResult{}, "A page of hits."), badRequest, storeFailed},
-		scope:     treeSessionPath,
+		at:        atSession,
 		wrappable: true,
 		serve:     (*API).search},
 	{method: "GET", path: "/api/v0/sessions/{id}/context", op: "sessionContext", action: run.ActRead,
@@ -570,7 +576,7 @@ var routes = slices.Concat([]route{
 			{name: "before", doc: "Only turns before this position: the next_before of the previous page.", integer: true, min: 1},
 			{name: "limit", doc: "Turns per page. 100 when absent.", integer: true, min: 1, max: maxTurnLimit}},
 		replies:   []reply{ok(200, SessionContext{}, "The session's context."), badRequest, storeFailed},
-		scope:     treeSessionPath,
+		at:        atSession,
 		wrappable: true,
 		serve:     (*API).sessionContext},
 
@@ -581,7 +587,7 @@ var routes = slices.Concat([]route{
 			"A new data folder starts with none, under agentbus up as under agentbus server: add them from what GET /api/v0/harnesses reports. " +
 			"A data folder that already had agents keeps them.",
 		replies:   []reply{ok(200, AgentList{}, "The agents."), badRequest},
-		scope:     anyRead,
+		at:        atNothing,
 		wrappable: true,
 		serve:     plain((*API).listSaved)},
 	{method: "POST", path: "/api/v0/agents", op: "createAgent", action: run.ActAdmin,
@@ -603,7 +609,7 @@ var routes = slices.Concat([]route{
 		summary: "Get an agent",
 		doc:     "One saved agent.",
 		replies: []reply{ok(200, SavedAgent{}, "The agent."), badRequest, fail(404, "No such agent.")},
-		scope:   anyRead,
+		at:      atNothing,
 		serve:   (*API).getSaved},
 	{method: "PUT", path: "/api/v0/agents/{id}", op: "updateAgent", action: run.ActAdmin,
 		idDoc:   "A saved agent's id. Another shape gets 404.",
@@ -663,7 +669,7 @@ var routes = slices.Concat([]route{
 			"and once a minute after, and reports it; this service never runs an agent's program to answer. " +
 			"Just after a runner starts, the answer waits for its first report, up to 15 seconds.",
 		replies: []reply{ok(200, HarnessList{}, "The harnesses."), badRequest},
-		scope:   anyRead,
+		at:      atNothing,
 		serve:   plain((*API).listHarnesses)},
 	{method: "GET", path: "/api/v0/runners", op: "listRunners", action: run.ActRead,
 		tag:     "Agents",
@@ -734,7 +740,7 @@ var routes = slices.Concat([]route{
 		summary: "Read an outside file",
 		doc:     "Read a file outside the session copy, on control's machine. Only for a session whose folder is on control's own machine (agentbus up), or a call without a session; a session on another machine's runner gets 409, before any approval card.",
 		body:    ReadFileRequest{},
-		scope:   fileOp,
+		at:      atBody, toolsSwitch: true,
 		// B8 folder tools (read_file, list_folder, write_file) are hidden: not
 		// registered as tools, so no agent can call them (his call, 2026-11-23).
 		// The HTTP route stays for 0.9, when the file tools come back. An agent
@@ -746,7 +752,7 @@ var routes = slices.Concat([]route{
 		summary: "List an outside folder",
 		doc:     "List entries of a folder outside the session copy, on control's machine. Only for a session whose folder is on control's own machine (agentbus up), or a call without a session; a session on another machine's runner gets 409, before any approval card.",
 		body:    ListFolderRequest{},
-		scope:   fileOp,
+		at:      atBody, toolsSwitch: true,
 		// Hidden folder tool: not registered (see read_file above).
 		replies: []reply{ok(200, ListFolderResponse{}, "The folder entries."), badRequest, fail(404, "Folder not found."), elsewhere, storeFailed},
 		serve:   plain((*API).listFolder)},
@@ -755,7 +761,7 @@ var routes = slices.Concat([]route{
 		summary: "Write an outside file",
 		doc:     "Write a file outside the session copy, on control's machine. Only for a session whose folder is on control's own machine (agentbus up), or a call without a session; a session on another machine's runner gets 409, before any approval card.",
 		body:    WriteFileRequest{},
-		scope:   fileOp,
+		at:      atBody, toolsSwitch: true,
 		// Hidden folder tool: not registered (see read_file above).
 		replies: []reply{ok(200, WriteFileResponse{}, "File written."), badRequest, elsewhere, storeFailed},
 		serve:   plain((*API).writeFile)},
@@ -808,9 +814,9 @@ var routes = slices.Concat([]route{
 			"Each operation's tools are in its x-agentbus-tools. No session is kept: a token that has stopped working gets 401.",
 		body:    map[string]any{},
 		replies: []reply{{status: 200, doc: "The JSON-RPC answer.", raw: true}, {status: 202, doc: "A notification or a response, taken.", empty: true}, badRequest},
-		scope:   toolList,
-		turns:   true,
-		serve:   plain((*API).mcp)},
+		at:      atBody, toolsSwitch: true,
+		turns: true,
+		serve: plain((*API).mcp)},
 	{method: "GET", path: "/api/v0/version", op: "getVersion", action: run.ActRead,
 		tag:     "Service",
 		summary: "Get the version",

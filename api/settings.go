@@ -14,7 +14,7 @@ package api
 // is stored in the record from there (RecordSettings).
 //
 // Only the main token reads or writes settings. A turn token never does:
-// these rows leave route.scope at scopeNone, and the turns token at false.
+// these rows leave route.at at atControl, and the turns token at false.
 
 import (
 	"errors"
@@ -115,7 +115,7 @@ var settingsRoutes = []route{
 	{method: "PUT", path: "/api/v0/settings/permissions", op: "putPermissions", action: run.ActAdmin,
 		tag:     "Settings",
 		summary: "Change the policy",
-		doc: "Replace the policy whole. A key left out takes its default. The next turn runs under it, and a turn token's next request.\n\n" +
+		doc: "Replace the policy whole. A key left out takes its default. The next turn runs under it: a turn that runs keeps the rules it took when it started, for its commands, its tools and its calls to this API.\n\n" +
 			versionDoc + "The settings database keeps only the keys whose value differs from the defaults. " +
 			"The change and its settings.changed event, which names the keys that changed and never their values, are saved together. " +
 			"A PUT that changes nothing makes no event and no new settings version. " +

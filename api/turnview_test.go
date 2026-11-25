@@ -185,8 +185,14 @@ func TestNeverStartedOnOnePageAcrossClocks(t *testing.T) {
 // starts, without the queue's job id.
 func TestQueuedTurnOrigin(t *testing.T) {
 	e := newJobsEnv(t)
+	// The asking turn is the person's turn in s_ask: who asked is stored once,
+	// as that turn, and its session is read from its own job.
+	asker, _, err := e.q.Create(queue.DefaultTeam, queue.KindTurn, "", queue.Spec{Session: "s_ask", Prompt: "ask"}, queue.Links{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	asked, _, err := e.q.CreateTurnLinked(queue.DefaultTeam, "", queue.Spec{Harness: "claude", Prompt: "asked"},
-		queue.Links{Chain: &queue.Chain{Root: "s_ask", Depth: 1, By: "t_ask", BySession: "s_ask"}},
+		queue.Links{Chain: &queue.Chain{Root: "s_ask", Depth: 1, By: asker.Turn, BySession: "s_ask"}},
 		queue.Limits{MaxDepth: 2, MaxPerTurn: 10, MaxPerTree: 30}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -198,7 +204,7 @@ func TestQueuedTurnOrigin(t *testing.T) {
 	}
 	var one OneTurn
 	if code := getJSON(t, e, "/api/v0/turns/"+asked.Turn, &one); code != 200 || one.Turn.Origin == nil ||
-		*one.Turn.Origin != (event.Origin{Kind: event.OriginAsked, Session: "s_ask", Turn: "t_ask"}) {
+		*one.Turn.Origin != (event.Origin{Kind: event.OriginAsked, Session: "s_ask", Turn: asker.Turn}) {
 		t.Fatalf("an asked turn, queued: %d %+v", code, one.Turn.Origin)
 	}
 	if code := getJSON(t, e, "/api/v0/turns/"+result.Turn, &one); code != 200 || one.Turn.Origin == nil ||

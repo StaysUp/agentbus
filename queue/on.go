@@ -100,8 +100,8 @@ func (q *Queue) RegisterOn(team, event, subject, session, key string, maker Make
 }
 
 // RegisterOnLinked is RegisterOn for an on a turn token registers: asked is
-// the token's request tree and turn (Root, By, BySession; Depth is not read),
-// and the on counts as asked work under lim's per-turn and per-tree caps,
+// the token's request tree and turn (Root and By; Depth is not read), and the
+// on counts as asked work under lim's per-turn and per-tree caps,
 // checked in the insert's own transaction (countAsked). A cap reached is a
 // *LimitError and stores nothing. A retry with a key already used returns its
 // on without counting again. nil asked is RegisterOn: no cap.
@@ -116,13 +116,11 @@ func (q *Queue) RegisterOnLinked(team, event, subject, session, key string, make
 	if err != nil {
 		return On{}, fmt.Errorf("queue: register on: %w", err)
 	}
-	var chain sql.NullString
+	// The on records only that it counts as asked work. Who asked is its
+	// maker, and the maker's tree is its own job's (countAsked): no copy here.
+	var countsAsked any
 	if asked != nil {
-		c, err := json.Marshal(Chain{Root: asked.Root, By: asked.By, BySession: asked.BySession})
-		if err != nil {
-			return On{}, fmt.Errorf("queue: register on: %w", err)
-		}
-		chain = sql.NullString{String: string(c), Valid: true}
+		countsAsked = 1
 	}
 	o := On{ID: NewID("on_"), Team: team, Event: event, Subject: subject, Session: session, Maker: maker, Created: nanos(q.now())}
 	err = q.tx(func(tx *sql.Tx) error {
@@ -153,9 +151,9 @@ func (q *Queue) RegisterOnLinked(team, event, subject, session, key string, make
 		// key then both land here, one inserts and the other does nothing (never a
 		// uniqueness error, the round-4 finding). A keyless on never conflicts
 		// (the index is partial on idem_key != '') and is always new.
-		res, err := tx.Exec(`INSERT INTO ons(id, team, event, subject, session, maker, idem_key, created, chain) VALUES(?,?,?,?,?,?,?,?,?)
+		res, err := tx.Exec(`INSERT INTO ons(id, team, event, subject, session, maker, idem_key, created, asked) VALUES(?,?,?,?,?,?,?,?,?)
 			ON CONFLICT(team, idem_key) WHERE idem_key != '' DO NOTHING`,
-			o.ID, o.Team, o.Event, o.Subject, o.Session, string(mk), key, o.Created, chain)
+			o.ID, o.Team, o.Event, o.Subject, o.Session, string(mk), key, o.Created, countsAsked)
 		if err != nil {
 			return fmt.Errorf("queue: register on: %w", err)
 		}

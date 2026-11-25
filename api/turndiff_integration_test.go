@@ -293,21 +293,28 @@ func TestTurnDiffAndApply(t *testing.T) {
 	}
 
 	// Resolved, and applied by a turn of the session with its own token.
-	// With apply off in [agent_api], the token is refused first.
+	// With apply off in [agent_api] (off by default too), the token is
+	// refused first.
 	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\nTWO\n"), 0o644)
-	third := startTurn(t, e, `{"agent":"claude","session":"`+first.Session+`","prompt":"hold"}`)
+	os.WriteFile(perm, []byte("[agent_api]\napply = false\n"), 0o600)
+	held := startTurn(t, e, `{"agent":"claude","session":"`+first.Session+`","prompt":"hold"}`)
 	tok := tokenOf(t, dir, "hold")
 	ws := wsOfTurn(t, e, first.Turn)
-	os.WriteFile(perm, []byte("[agent_api]\napply = false\n"), 0o600)
 	if code, out := as(t, e, tok, "POST", "/api/v0/workspaces/"+ws+"/apply", `{"turn":"`+second.Turn+`"}`); code != 403 || !strings.Contains(out, "Agents may apply is off in Settings") {
 		t.Fatalf("apply switched off: %d %s", code, out)
 	}
-	// Off by default too: the person turns it on.
-	os.WriteFile(perm, nil, 0o600)
-	if code, out := as(t, e, tok, "POST", "/api/v0/workspaces/"+ws+"/apply", `{"turn":"`+second.Turn+`"}`); code != 403 || !strings.Contains(out, "Agents may apply is off in Settings") {
-		t.Fatalf("apply by default: %d %s", code, out)
-	}
+	// The person turns it on while the turn runs: that reaches the next turn,
+	// never the running one (O2.4).
 	os.WriteFile(perm, []byte("[agent_api]\napply = true\n"), 0o600)
+	if code, out := as(t, e, tok, "POST", "/api/v0/workspaces/"+ws+"/apply", `{"turn":"`+second.Turn+`"}`); code != 403 || !strings.Contains(out, "Agents may apply is off in Settings") {
+		t.Fatalf("apply switched on mid-turn reached the running turn: %d %s", code, out)
+	}
+	release(dir, "hold")
+	waitEnded(t, e, held.Turn)
+	os.Remove(filepath.Join(dir, "release-hold"))
+	os.Remove(filepath.Join(dir, "env-hold"))
+	third := startTurn(t, e, `{"agent":"claude","session":"`+first.Session+`","prompt":"hold"}`)
+	tok = tokenOf(t, dir, "hold")
 	// apply is not in the workspace lane (it reads finished checkpoints and the
 	// folder, never the live copy), so a turn token applies an earlier turn's
 	// changes while its own turn runs, at once.

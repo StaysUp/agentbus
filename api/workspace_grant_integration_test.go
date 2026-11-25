@@ -24,7 +24,7 @@ func TestAgentMakesWorkspaceWithinAuthority(t *testing.T) {
 	os.WriteFile(perm, nil, 0o600) // Agents may apply: off
 	e, dir := askEnvWith(t, perm)
 	defer func() {
-		for _, p := range []string{"direct", "copy", "builder", "nested", "copybuilder", "sibling"} {
+		for _, p := range []string{"direct", "copy", "builder", "nested", "copybuilder", "sibling", "copy2", "copybuilder2"} {
 			release(dir, p)
 		}
 	}()
@@ -148,12 +148,19 @@ func TestAgentMakesWorkspaceWithinAuthority(t *testing.T) {
 	if again := mustWS(dtok, keyed); again.ID != first.ID {
 		t.Fatalf("the maker's retry: %s, want %s", again.ID, first.ID)
 	}
-	// Apply of a workspace a Copy agent made takes the person's switch.
+	// Apply of a workspace a Copy agent made takes the person's switch, as
+	// its turn took it when it started: turned on mid-turn, it reaches the
+	// next turn only (O2.4).
 	start(ctok, session(ctok, cw.ID), "copybuilder")
 	refused(ctok, "POST", "/api/v0/workspaces/"+cw.ID+"/apply", "{}", "Agents may apply is off in Settings")
 	os.WriteFile(perm, []byte("[agent_api]\napply = true\n"), 0o600)
-	if code, out := as(t, e, ctok, "POST", "/api/v0/workspaces/"+cw.ID+"/apply", "{}"); code != 200 {
-		t.Fatalf("a Copy agent's apply with the switch on: %d %s", code, out)
+	refused(ctok, "POST", "/api/v0/workspaces/"+cw.ID+"/apply", "{}", "Agents may apply is off in Settings")
+	e.firstTurn(t, f1, "claude", "copy2", true)
+	c2tok := tokenOf(t, dir, "copy2")
+	cw2 := mustWS(c2tok, `{"folder_ref":"`+ref1+`"}`)
+	start(c2tok, session(c2tok, cw2.ID), "copybuilder2")
+	if code, out := as(t, e, c2tok, "POST", "/api/v0/workspaces/"+cw2.ID+"/apply", "{}"); code != 200 {
+		t.Fatalf("a Copy agent's apply with the switch on when its turn started: %d %s", code, out)
 	}
 	os.WriteFile(perm, nil, 0o600)
 

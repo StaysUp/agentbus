@@ -155,13 +155,11 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
 	// An agent's turn token makes a workspace only within its own authority,
 	// checked here, once, for one folder or several; the workspace records the
 	// turn that made it, which is how its session later reaches it.
-	var maker *event.Origin
-	if g := grantOf(r); g != nil {
-		if !a.workspaceAuthority(w, *g, &body) {
-			return
-		}
-		maker = &event.Origin{Kind: event.OriginAsked, Session: g.Session, Turn: g.Turn}
+	c := callerOf(r)
+	if !c.limits.makes(a, w, &body) {
+		return
 	}
+	maker := c.origin()
 	if len(body.Folders) > 0 {
 		a.createMultiWorkspace(w, r, body, maker)
 		return
@@ -719,38 +717,33 @@ func (a *API) createSession(w http.ResponseWriter, r *http.Request) {
 	// token names any. The
 	// asker is recorded on the session so only the token that opened a session
 	// may start its turn (askChecks), now that asks share one workspace.
+	c := callerOf(r)
 	wsID := ids.WorkspaceID(body.Workspace)
-	var asker *event.Origin
-	if g := grantOf(r); g != nil {
-		// Its own workspace when the body names none (an ask opens its session
-		// beside the asker), else one its session made.
-		if body.Workspace == "" {
-			ws, found, err := a.cfg.Store.WorkspaceOf(ids.SessionID(g.Session))
-			if err != nil {
-				a.internal(w)
-				return
-			}
-			if !found {
-				writeError(w, http.StatusForbidden, "a turn token has no workspace to create a session in")
-				return
-			}
-			wsID = ws
-		} else {
-			own, err := a.ownWorkspace(*g, body.Workspace)
-			if err != nil {
-				a.internal(w)
-				return
-			}
-			if own == notOwn {
-				writeError(w, http.StatusForbidden, "a turn token opens sessions only in its own workspace or one its session made")
-				return
-			}
+	if wsID == "" {
+		// The grant's home when the body names none: an ask opens its session
+		// beside the asker, in its own workspace.
+		home, ok := c.limits.home(a, w)
+		if !ok {
+			return
 		}
-		asker = &event.Origin{Kind: event.OriginAsked, Session: g.Session, Turn: g.Turn}
-	} else if !sessionID.MatchString(body.Workspace) {
+		wsID = home
+	}
+	if wsID != "" {
+		may, err := c.May(run.ActSessionCreate, run.InWorkspace(wsID))
+		if err != nil {
+			a.internal(w)
+			return
+		}
+		if !may {
+			writeError(w, http.StatusForbidden, "a turn token opens sessions only in its own workspace or one its session made")
+			return
+		}
+	}
+	if !sessionID.MatchString(string(wsID)) {
 		writeError(w, http.StatusBadRequest, "workspace must be "+sessionID.String())
 		return
 	}
+	asker := c.origin()
 	title := ""
 	if body.Title != "" {
 		var msg string

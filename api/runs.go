@@ -10,12 +10,13 @@ package api
 import (
 	"bytes"
 	"errors"
-	"github.com/staysup/agentbus/agents"
 	"io"
 	"net/http"
 	"regexp"
 	"strconv"
 	"time"
+
+	"github.com/staysup/agentbus/agents"
 
 	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/ids"
@@ -110,12 +111,10 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 	}
 	// A turn token asks another agent: its checks (tokens.go) verify the
 	// session is one it created in its own workspace, and name the asking turn.
-	var links queue.Links
-	if g := grantOf(r); g != nil {
-		var ok bool
-		if links, ok = a.askChecks(w, *g, policyOf(r), &body); !ok {
-			return
-		}
+	who := callerOf(r)
+	links, ok := who.limits.ask(a, w, who.rules, &body)
+	if !ok {
+		return
 	}
 	if !sessionID.MatchString(body.Session) {
 		writeError(w, http.StatusBadRequest, "session is required and must match "+sessionID.String())
@@ -201,19 +200,13 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 	// reach); the main token may name any session. The turn's key covers the on.
 	var deliver *queue.Delivery
 	if body.Delivery != "" {
-		if g := grantOf(r); g != nil {
-			if body.Delivery != g.Session {
-				writeError(w, http.StatusForbidden, "a turn token may deliver only to its own session")
-				return
-			}
-			deliver = &queue.Delivery{Session: g.Session, Maker: queue.Maker{Session: g.Session, Turn: g.Turn}}
-		} else {
-			deliver = &queue.Delivery{Session: body.Delivery}
+		if deliver, ok = who.limits.deliver(w, body.Delivery); !ok {
+			return
 		}
 	}
 	// Never refused for a busy session: the job waits behind the session's turns
 	// that have not ended, as a delivered result does.
-	job, created, err := a.cfg.Queue.CreateTurnLinked(queue.DefaultTeam, body.IdempotencyKey, spec, links, queueLimits(policyOf(r)), deliver)
+	job, created, err := a.cfg.Queue.CreateTurnLinked(queue.DefaultTeam, body.IdempotencyKey, spec, links, queueLimits(who.rules), deliver)
 	var limit *queue.LimitError
 	var removed *queue.RunnerRemovedError
 	switch {

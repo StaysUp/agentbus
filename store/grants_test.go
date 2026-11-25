@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestFolderGrants(t *testing.T) {
@@ -23,7 +24,7 @@ func TestFolderGrants(t *testing.T) {
 	}
 
 	// Initially no grants exist.
-	has, err := st.HasFolderGrant("s1", filepath.Join(notes, "a.txt"))
+	has, err := st.HasFolderGrant("s1", filepath.Join(notes, "a.txt"), time.Time{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,31 +38,31 @@ func TestFolderGrants(t *testing.T) {
 	}
 
 	// Subpath of notes in s1 is granted.
-	has, err = st.HasFolderGrant("s1", filepath.Join(notes, "a.txt"))
+	has, err = st.HasFolderGrant("s1", filepath.Join(notes, "a.txt"), time.Time{})
 	if err != nil || !has {
 		t.Errorf("expected true for subpath in s1, got %t %v", has, err)
 	}
 
 	// Directory itself in s1 is granted.
-	has, err = st.HasFolderGrant("s1", notes)
+	has, err = st.HasFolderGrant("s1", notes, time.Time{})
 	if err != nil || !has {
 		t.Errorf("expected true for directory in s1, got %t %v", has, err)
 	}
 
 	// Nested subpath in s1 is granted.
-	has, err = st.HasFolderGrant("s1", filepath.Join(notes, "sub", "deep", "b.txt"))
+	has, err = st.HasFolderGrant("s1", filepath.Join(notes, "sub", "deep", "b.txt"), time.Time{})
 	if err != nil || !has {
 		t.Errorf("expected true for nested subpath in s1, got %t %v", has, err)
 	}
 
 	// Another folder in s1 is not granted.
-	has, err = st.HasFolderGrant("s1", filepath.Join(other, "c.txt"))
+	has, err = st.HasFolderGrant("s1", filepath.Join(other, "c.txt"), time.Time{})
 	if err != nil || has {
 		t.Errorf("expected false for other folder in s1, got %t %v", has, err)
 	}
 
 	// Session s2 does not have access to notes.
-	has, err = st.HasFolderGrant("s2", filepath.Join(notes, "a.txt"))
+	has, err = st.HasFolderGrant("s2", filepath.Join(notes, "a.txt"), time.Time{})
 	if err != nil || has {
 		t.Errorf("expected false for notes in s2, got %t %v", has, err)
 	}
@@ -73,7 +74,7 @@ func TestFolderGrants(t *testing.T) {
 
 	// Both s1 and s2 have access to shared.
 	for _, sess := range []string{"s1", "s2", "s3"} {
-		has, err = st.HasFolderGrant(sess, filepath.Join(shared, "doc.md"))
+		has, err = st.HasFolderGrant(sess, filepath.Join(shared, "doc.md"), time.Time{})
 		if err != nil || !has {
 			t.Errorf("expected true for shared in %s, got %t %v", sess, has, err)
 		}
@@ -92,7 +93,7 @@ func TestFolderGrants(t *testing.T) {
 	if err := st.AddFolderGrant("s_root", "/"); err != nil {
 		t.Fatal(err)
 	}
-	has, err = st.HasFolderGrant("s_root", "/tmp/example.txt")
+	has, err = st.HasFolderGrant("s_root", "/tmp/example.txt", time.Time{})
 	if err != nil || !has {
 		t.Errorf("root grant did not cover /tmp/example.txt: got %t %v, want true", has, err)
 	}

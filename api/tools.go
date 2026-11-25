@@ -23,7 +23,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/staysup/agentbus/gateway"
 	"github.com/staysup/agentbus/run"
 )
 
@@ -85,7 +84,7 @@ func checkTools() error {
 			return fmt.Errorf("api: tool %s must be <verb>_<noun>, in lower case", t.name)
 		case seen[t.name]:
 			return fmt.Errorf("api: tool %s is named twice", t.name)
-		case rt.public || rt.self || rt.scope == scopeNone:
+		case rt.public || rt.self || rt.at == atControl || !run.TurnActions.Has(rt.action):
 			return fmt.Errorf("api: tool %s is on %s %s, which a turn token cannot call", t.name, rt.method, rt.path)
 		case strings.Contains(rt.path, "{id}") != (t.id != ""):
 			return fmt.Errorf("api: tool %s must name its {id} input, and only on a path with one", t.name)
@@ -97,24 +96,6 @@ func checkTools() error {
 		seen[t.name] = true
 	}
 	return nil
-}
-
-// listedRoute says a tool on rt is in the list a caller sees: every tool for
-// the main token, the routes it may call for the turns token, and for a turn
-// token the tools its grant, rules and switches allow. Only discovery: the route
-// decides a call.
-func listedRoute(rt *route, g *run.Grant, turnsOnly bool, rules gateway.Rules, applyAllowed bool) bool {
-	switch {
-	case turnsOnly:
-		return rt.turns
-	case g == nil:
-		return true
-	}
-	actions := g.Actions
-	if !applyAllowed {
-		actions &^= run.ActApply // only discovery: the route decides per workspace
-	}
-	return turnRefusal(rt, actions, rules) == ""
 }
 
 // toolSchemas are the input schemas of every tool, by name, built from

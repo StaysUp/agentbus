@@ -96,36 +96,12 @@ func (a *API) registerOn(w http.ResponseWriter, r *http.Request) {
 	//     it can already start a turn in any session. A main-token on over a
 	//     person's turn is made safe by the self-retire checks (B13b), not by a
 	//     refusal here.
-	session := body.Session
-	var maker queue.Maker
-	var asked *queue.Chain
-	if g := grantOf(r); g != nil {
-		found, ok, err := a.mayReadTurn(*g, body.Turn, "")
-		switch {
-		case err != nil:
-			a.internal(w)
-			return
-		case !found:
-			writeError(w, http.StatusNotFound, noTurn)
-			return
-		case !ok:
-			writeError(w, http.StatusForbidden, turnOnRefused)
-			return
-		case turnSession(j) == g.Session:
-			writeError(w, http.StatusForbidden, turnOnSelfRefused)
-			return
-		}
-		session = g.Session
-		maker = queue.Maker{Session: g.Session, Turn: g.Turn}
-		// The on counts as asked work by g's turn, under the per-turn and
-		// per-tree caps (queue.countAsked): its delivered turn is not asked work,
-		// so without this a chain of ons over ended turns would pass the caps.
-		asked = askedLinks(*g).Chain
-	} else if session == "" {
-		writeError(w, http.StatusBadRequest, "session is required: where to deliver the turn's reply")
+	c := callerOf(r)
+	session, maker, asked, ok := c.limits.watch(a, w, j, &body)
+	if !ok {
 		return
 	}
-	on, err := a.cfg.Queue.RegisterOnLinked(queue.DefaultTeam, queue.OnTurnCompleted, body.Turn, session, body.IdempotencyKey, maker, asked, queueLimits(policyOf(r)))
+	on, err := a.cfg.Queue.RegisterOnLinked(queue.DefaultTeam, queue.OnTurnCompleted, body.Turn, session, body.IdempotencyKey, maker, asked, queueLimits(c.rules))
 	var limit *queue.LimitError
 	switch {
 	case errors.As(err, &limit):
@@ -153,20 +129,8 @@ func (a *API) removeOn(w http.ResponseWriter, r *http.Request, id string) {
 		writeError(w, http.StatusNotFound, noOn)
 		return
 	}
-	if g := grantOf(r); g != nil {
-		on, err := a.cfg.Queue.GetOn(queue.DefaultTeam, id)
-		switch {
-		case errors.Is(err, queue.ErrNotFound):
-			writeError(w, http.StatusNotFound, noOn)
-			return
-		case err != nil:
-			a.internal(w)
-			return
-		}
-		if on.Maker.Turn != g.Turn || on.Maker.Session != g.Session {
-			writeError(w, http.StatusForbidden, turnOnRemoveRefused)
-			return
-		}
+	if !callerOf(r).limits.removeOn(a, w, id) {
+		return
 	}
 	switch err := a.cfg.Queue.RemoveOn(queue.DefaultTeam, id); {
 	case errors.Is(err, queue.ErrNotFound):

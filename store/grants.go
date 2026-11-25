@@ -66,14 +66,19 @@ func IsInside(target, folder string) bool {
 }
 
 // MatchingFolderGrant returns the most specific (longest) granted folder for targetPath
-// for session (or folder-wide).
-func (s *Store) MatchingFolderGrant(session, targetPath string) (string, bool, error) {
+// for session (or folder-wide), among the grants made by asOf: a turn holds the
+// grants made before it started, and one made during it applies from the next
+// turn. A zero asOf is every grant.
+func (s *Store) MatchingFolderGrant(session, targetPath string, asOf time.Time) (string, bool, error) {
 	target := filepath.Clean(targetPath)
-
+	until := int64(1<<63 - 1)
+	if !asOf.IsZero() {
+		until = asOf.UnixNano()
+	}
 	rows, err := s.r.Query(`
 		SELECT folder FROM folder_grants
-		WHERE session = ? OR session = ''
-	`, session)
+		WHERE (session = ? OR session = '') AND created <= ?
+	`, session, until)
 	if err != nil {
 		return "", false, err
 	}
@@ -102,9 +107,9 @@ func (s *Store) MatchingFolderGrant(session, targetPath string) (string, bool, e
 }
 
 // HasFolderGrant reports whether targetPath is within a folder granted to
-// session or granted folder-wide (session="").
-func (s *Store) HasFolderGrant(session, targetPath string) (bool, error) {
-	_, ok, err := s.MatchingFolderGrant(session, targetPath)
+// session or granted folder-wide (session=""), by asOf (MatchingFolderGrant).
+func (s *Store) HasFolderGrant(session, targetPath string, asOf time.Time) (bool, error) {
+	_, ok, err := s.MatchingFolderGrant(session, targetPath, asOf)
 	return ok, err
 }
 

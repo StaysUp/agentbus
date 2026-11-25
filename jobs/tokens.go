@@ -39,6 +39,7 @@ import (
 
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
+	"github.com/staysup/agentbus/settings"
 )
 
 // TokenPrefix marks a turn token control minted.
@@ -81,7 +82,7 @@ func (s *Server) attemptJob(msg string) (queue.Job, run.Grant, bool) {
 	if err != nil {
 		return queue.Job{}, run.Grant{}, false
 	}
-	j, err := s.cfg.Queue.Current(parts[0], parts[1], number)
+	j, a, err := s.cfg.Queue.CurrentAttempt(parts[0], parts[1], number)
 	if err != nil {
 		return queue.Job{}, run.Grant{}, false
 	}
@@ -89,7 +90,13 @@ func (s *Server) attemptJob(msg string) (queue.Job, run.Grant, bool) {
 	if session == "" {
 		return queue.Job{}, run.Grant{}, false
 	}
-	g := run.Grant{Session: session, Turn: j.Turn, Root: session, Harness: j.Spec.Harness}
+	// Everything the grant says of the turn is read from its job and attempt,
+	// the one copy: its place in the request tree, and the rules it took when
+	// it started (turnRules).
+	g := run.Grant{Session: session, Turn: j.Turn, Root: session, Harness: j.Spec.Harness, Rules: settings.Version(a.Rules)}
+	if a.Started != nil {
+		g.RulesAt = *a.Started
+	}
 	if c := j.Links.Chain; c != nil {
 		g.Root, g.Depth = c.Root, c.Depth
 	}

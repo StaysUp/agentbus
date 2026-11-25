@@ -146,11 +146,18 @@ func appendSet(to []string, hs ...string) []string {
 // ErrStale and the like otherwise, as the other attempt calls answer. It
 // answers the attempt's job.
 func (q *Queue) Current(runnerID, attemptID string, number int) (Job, error) {
+	j, _, err := q.CurrentAttempt(runnerID, attemptID, number)
+	return j, err
+}
+
+// CurrentAttempt is Current with the attempt itself.
+func (q *Queue) CurrentAttempt(runnerID, attemptID string, number int) (Job, Attempt, error) {
 	var j Job
+	var a Attempt
 	err := q.tx(func(tx *sql.Tx) error {
 		var err error
-		_, j, err = current(tx, q.now(), runnerID, attemptID, number)
+		a, j, err = current(tx, q.now(), runnerID, attemptID, number)
 		return err
 	})
-	return j, err
+	return j, a, err
 }

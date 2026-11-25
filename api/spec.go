@@ -71,31 +71,64 @@ const turnsTokenDoc = "The turns token (the file `turns_token` in the data folde
 // description: it checks its own token.
 const runnerTokenDoc = "Runner protocol: called by a runner, never by the cockpit. Takes the enrollment token (register, the built-in runner of agentbus up only) or the runner's own token (every other call), not the main token."
 
-// turnTokenDoc is what each turn-token rule adds to an operation's
-// description.
-var turnTokenDoc = map[int]string{
-	treeSessionPath:  "A turn token may call this for a session it may read. " + turnReads,
-	treeSessionQuery: "A turn token may call this for a session it may read: without session, its own is used. " + turnReads,
-	treeTurn:         "A turn token may call this for a turn of a session it may read, by the turn id alone. " + turnReads,
-	askTurn: "A turn token may call this to start the one turn of a session it opened (POST /api/v0/sessions), " +
+// The sentences, one per kind of place, shared by the operations that act
+// there.
+var (
+	docSessionQuery = "A turn token may call this for a session it may read: without session, its own is used. " + turnReads
+	docTurn         = "A turn token may call this for a turn of a session it may read, by the turn id alone. " + turnReads
+	docAsk          = "A turn token may call this to start the one turn of a session it opened (POST /api/v0/sessions), " +
 		"in its own workspace or in one its session made. It never continues a session. " +
-		"The result comes back only when asked for: delivery set to its own session, or an on (POST /api/v0/ons). Caps: " + askCaps,
-	askedTurn:           "A turn token may stop a turn that a turn asked for (not one the person started), in a session it may read. " + turnReads,
-	anyRead:             "A turn token may call this too.",
-	changesWorkspaceTok: "A turn token may preview the changes of its own workspace (the workspace of its session) and of each workspace its session made.",
-	applyWorkspaceTok: "A turn token may apply its own workspace's changes (the workspace of its session) only when the Agents may apply switch is on in Settings (Permissions) (off by default). " +
-		"It may apply a workspace its session made when its own workspace works in the folder as it is (it can already write there), else only when that switch is on.",
-	createSessionTok: "A turn token may open a session in its own workspace (the default when workspace is absent) or in a workspace its session made; " +
-		"it alone may then start that session's turn.",
-	renameSession: "A turn token may rename a session it may read. It never closes one. " + turnReads,
-	workspaceTok:  "A turn token may read its own workspace (the workspace of its session) and each workspace its session made.",
-	createWorkspaceTok: "A turn token may make a workspace within its own authority: sandbox true (a copy), never false; on its own workspace's machine; " +
+		"The result comes back only when asked for: delivery set to its own session, or an on (POST /api/v0/ons). Caps: " + askCaps
+	docStop    = "A turn token may stop a turn that a turn asked for (not one the person started), in a session it may read. " + turnReads
+	docAnyRead = "A turn token may call this too."
+	docChanges = "A turn token may preview the changes of its own workspace (the workspace of its session) and of each workspace its session made."
+	docApply   = "A turn token may apply its own workspace's changes (the workspace of its session) only when the Agents may apply switch is on in Settings (Permissions) (off by default). " +
+		"It may apply a workspace its session made when its own workspace works in the folder as it is (it can already write there), else only when that switch is on."
+	docNewSession = "A turn token may open a session in its own workspace (the default when workspace is absent) or in a workspace its session made; " +
+		"it alone may then start that session's turn."
+	docRename       = "A turn token may rename a session it may read. It never closes one. " + turnReads
+	docWorkspace    = "A turn token may read its own workspace (the workspace of its session) and each workspace its session made."
+	docNewWorkspace = "A turn token may make a workspace within its own authority: sandbox true (a copy), never false; on its own workspace's machine; " +
 		"and when its own workspace is a copy, only of folders that workspace holds, named by folder_ref (GET /api/v0/workspaces/{id} of its own workspace lists them). " +
 		"A turn token whose own workspace works in the folder as it is may copy any folder of its machine. " +
 		"Its session may then open sessions in the new workspace (POST /api/v0/sessions) and start their turns, read the new workspace's changes, " +
-		"and apply them when its own workspace works in the folder as it is, or when Agents may apply is on.",
-	toolList: "A turn token may call this: its list holds the tools its turn may call under permissions (none of them when tool:* is refused), " +
-		"and each call is checked by the operation it names.",
+		"and apply them when its own workspace works in the folder as it is, or when Agents may apply is on."
+	docTools = "A turn token may call this: its list holds the tools its turn may call under permissions (none of them when tool:* is refused), " +
+		"and each call is checked by the operation it names."
+	docSession = "A turn token may call this for a session it may read. " + turnReads
+)
+
+// turnTokenDoc is what an operation adds to its description for an agent
+// turn's token, by operationId: what the agent's grant may do there. An
+// operation an agent's grant cannot call adds nothing.
+var turnTokenDoc = map[string]string{
+	"listTurns":        docSessionQuery,
+	"getTurn":          docTurn,
+	"turnDiff":         docTurn,
+	"turnChanges":      docTurn,
+	"turnCalls":        docTurn,
+	"turnTools":        docTurn,
+	"turnRecord":       docTurn,
+	"turnContext":      docTurn,
+	"callContext":      docTurn,
+	"callPiece":        docTurn,
+	"startTurn":        docAsk,
+	"stopTurn":         docStop,
+	"listAgents":       docAnyRead,
+	"getAgent":         docAnyRead,
+	"listHarnesses":    docAnyRead,
+	"listModels":       docAnyRead,
+	"workspaceChanges": docChanges,
+	"applyWorkspace":   docApply,
+	"createSession":    docNewSession,
+	"updateSession":    docRename,
+	"getWorkspace":     docWorkspace,
+	"createWorkspace":  docNewWorkspace,
+	"mcp":              docTools,
+	"getSession":       docSession,
+	"sessionEvents":    docSession,
+	"searchSession":    docSession,
+	"sessionContext":   docSession,
 }
 
 // turnReads is the one rule for which sessions a turn token reads. The
@@ -489,8 +522,8 @@ func describe(runner bool) (*openapi3.T, error) {
 		}
 		tagged[rt.tag]++
 		desc := rt.doc
-		if rt.scope != scopeNone {
-			desc = strings.TrimSpace(desc + "\n\n" + turnTokenDoc[rt.scope])
+		if d := turnTokenDoc[rt.op]; d != "" {
+			desc = strings.TrimSpace(desc + "\n\n" + d)
 		}
 		if rt.turns {
 			desc = strings.TrimSpace(desc + "\n\n" + turnsTokenDoc)

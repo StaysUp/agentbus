@@ -269,6 +269,8 @@ func addColumns(db *sql.DB) error {
 		{"jobs", "turn", "TEXT"},
 		{"ons", "idem_key", "TEXT NOT NULL DEFAULT ''"},
 		{"ons", "chain", "TEXT"},
+		{"attempts", "rules", "TEXT"},
+		{"ons", "asked", "INTEGER"},
 	} {
 		var n int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, c.table, c.column).Scan(&n); err != nil {
@@ -279,6 +281,13 @@ func addColumns(db *sql.DB) error {
 		}
 		if _, err := db.Exec(`ALTER TABLE ` + c.table + ` ADD COLUMN ` + c.column + ` ` + c.decl); err != nil {
 			return fmt.Errorf("queue: add %s.%s: %w", c.table, c.column, err)
+		}
+		if c.table == "ons" && c.column == "asked" {
+			// An on made before 0.6.x said it counted as asked work by holding a
+			// chain, a copy of its maker's tree; the flag replaces it.
+			if _, err := db.Exec(`UPDATE ons SET asked = 1 WHERE chain IS NOT NULL`); err != nil {
+				return fmt.Errorf("queue: add ons.asked: %w", err)
+			}
 		}
 		if c.column == "turn" {
 			// The attempt that started the turn named it then. Expiry clears

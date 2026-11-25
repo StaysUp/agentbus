@@ -138,7 +138,8 @@ type Config struct {
 
 	// Settings hold the policy and the instructions. The policy's
 	// [agent_api] says what a turn token may call and its [limits] cap the
-	// work turns ask for, read for every request a turn token sends. The
+	// work turns ask for, as the rules its turn took at its start say
+	// (rulesOf): a change applies from the next turn. The
 	// settings routes read and write them (settings.go). Nil: the defaults,
 	// and the settings routes answer 404.
 	Settings settings.Store
@@ -439,9 +440,10 @@ func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	a.route(w, r, g)
 }
 
-// authorized resolves the bearer token to the grant it carries: the owner (main)
-// token to every action in every workspace, the turns token to its fixed set,
-// and a live turn's own token to its turn's actions in its own workspaces. ok is
+// authorized resolves the bearer token to the grant it carries, each naming the
+// record's owner: the owner (main) token to every action in every workspace,
+// the turns token to its fixed set, and a live turn's own token to its turn's
+// actions, whose reach the door works out (authority.go). ok is
 // false for any other token. This is the one place a token becomes a grant;
 // everything after reads the grant.
 func (a *API) authorized(r *http.Request) (g run.Grant, ok bool) {
@@ -451,20 +453,21 @@ func (a *API) authorized(r *http.Request) (g run.Grant, ok bool) {
 	}
 	// Hashed first, so the compare takes the same time whatever the length.
 	sum := sha256.Sum256([]byte(got))
+	owner := a.grantOwner()
 	if subtle.ConstantTimeCompare(sum[:], a.token[:]) == 1 {
-		return run.OwnerGrant(), true
+		return run.OwnerGrant(owner), true
 	}
 	if a.hasTurnsToken && subtle.ConstantTimeCompare(sum[:], a.turnsToken[:]) == 1 {
-		return run.TurnsGrant(), true
+		return run.TurnsGrant(owner), true
 	}
 	if a.cfg.Engine != nil {
 		if g, ok = a.cfg.Engine.TokenGrant(got); ok {
-			return run.ForTurn(g), true
+			return run.ForTurn(g, owner), true
 		}
 	}
 	if a.cfg.RunnerTokens != nil {
 		if g, ok = a.cfg.RunnerTokens(got); ok {
-			return run.ForTurn(g), true
+			return run.ForTurn(g, owner), true
 		}
 	}
 	return run.Grant{}, false

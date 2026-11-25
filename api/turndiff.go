@@ -615,9 +615,4 @@ func (a *API) applyStateOf(j queue.Job) (ApplyState, error) {
 // askedBy is who sent request r, as an apply's turn.applied names it: an
 // agent (a turn's token, with its session and turn), else the person (the
 // main token). Never the token.
-func askedBy(r *http.Request) *queue.By {
-	if g := grantOf(r); g != nil {
-		return &queue.By{Kind: event.ByAgent, Session: g.Session, Turn: g.Turn}
-	}
-	return &queue.By{Kind: event.ByPerson}
-}
+func askedBy(r *http.Request) *queue.By { return callerOf(r).actor() }

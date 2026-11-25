@@ -821,10 +821,10 @@ func TestAskCaps(t *testing.T) {
 	release(dir, "ro")
 }
 
-// permissions.toml decides what a turn token may do, read for each request:
-// a cap changed in the file applies to the next request, a cost cap stops
-// asking once the tree has spent it, and a broken file refuses every turn
-// token's request. Within its request tree a turn token always reads, lists
+// permissions.toml decides what a turn token may do, as the turn took it when
+// it started (O2.4): a cap changed in the file, or a broken file, applies from
+// the next turn and never reaches a running one, and a cost cap stops asking
+// once the tree has spent it. Within its request tree a turn token always reads, lists
 // agents, starts, reviews, stops and renames: the switches 0.5.2 retired
 // still read, and change nothing. In a copy, a session of another tree in its
 // own copy is outside its authority, and it reaches nothing there. No
@@ -848,15 +848,17 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 	if code != 403 || !strings.Contains(out, "at most 2 turns or reviews") || !strings.Contains(out, "(Turns per request in Settings, Limits)") {
 		t.Fatalf("past max_jobs_per_turn = 2: %d %s", code, out)
 	}
-	// The file is read again for the next request.
+	// A cap raised while the turn runs reaches the next turn, not this one.
 	write("[limits]\nmax_jobs_per_turn = 3\n")
-	ask(t, e, tok, `{"agent":"claude","prompt":"quick"}`)
-	// Phase 1 checks that need the asker's own live token: a broken file, and
-	// the routes that stay closed to a turn token (they take the main token),
-	// while rename in its own tree is allowed.
+	if code, out := askRaw(t, e, tok, `{"agent":"claude","prompt":"quick"}`); code != 403 || !strings.Contains(out, "at most 2 turns or reviews") {
+		t.Fatalf("a cap raised mid-turn reached the running turn: %d %s", code, out)
+	}
+	// Phase 1 checks that need the asker's own live token: a broken file does
+	// not reach it either, and the routes that stay closed to a turn token
+	// (they take the main token), while rename in its own tree is allowed.
 	write("[agent_api]\napply = all\n")
-	if code, out := as(t, e, tok, "GET", "/api/v0/harnesses", ""); code != 503 || !strings.Contains(out, "cannot be used") {
-		t.Errorf("broken file: %d %s", code, out)
+	if code, out := as(t, e, tok, "GET", "/api/v0/harnesses", ""); code != 200 {
+		t.Errorf("a file broken mid-turn reached the running turn: %d %s", code, out)
 	}
 	write("")
 	if code, out := as(t, e, tok, "PATCH", "/api/v0/sessions/"+root.Session, `{"title":"Named by a turn"}`); code != 200 || !strings.Contains(out, "Named by a turn") {
@@ -877,9 +879,12 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 		}
 	}
 
-	// Phase 2: the asked "child" runs once the asker's turn ends; its own token
-	// reads and renames within its tree with the retired switches off, and
-	// reaches nothing outside it.
+	// Phase 2: the asked "child" runs once the asker's turn ends, under the
+	// file as it is then: every retired switch off, scope "session", and a
+	// cost cap. Its own token reads and renames within its tree with the
+	// retired switches off, and reaches nothing outside it.
+	write("[agent_api]\nscope = \"session\"\nread = false\nlist_agents = false\nstart = false\nreview = false\ncancel = false\nrename = false\n" +
+		"[limits]\nmax_cost_usd_per_tree = 0.25\n")
 	release(dir, "root")
 	child := tokenOf(t, dir, "child")
 	// Another tree: a session the person started on their own, in its own
@@ -888,7 +893,6 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 	// Every retired switch off, scope "session": the file reads, and the
 	// child's token still reads, lists, starts, reviews, stops and renames
 	// within its tree, the person's session included.
-	write("[agent_api]\nscope = \"session\"\nread = false\nlist_agents = false\nstart = false\nreview = false\ncancel = false\nrename = false\n")
 	for _, tc := range []struct {
 		name, method, path, body string
 	}{
@@ -928,7 +932,6 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 		Session: root.Session, Turn: root.Turn, Exchange: "x-cost", Status: 200, CostUSD: &cost}); err != nil {
 		t.Fatal(err)
 	}
-	write("[limits]\nmax_cost_usd_per_tree = 0.25\n")
 	code, out = as(t, e, child, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"quick"}`)
 	if code != 403 || !strings.Contains(out, "(Cost per request tree in Settings, Limits)") || !strings.Contains(out, "$0.30") {
 		t.Errorf("past the cost cap: %d %s", code, out)
@@ -936,8 +939,11 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 	if again := ask(t, e, child, keyed); !again.Existing || again.Turn != first.Turn {
 		t.Errorf("a retry past the cost cap: %+v, want turn %s again", again, first.Turn)
 	}
+	// The cap turned off while the child runs reaches the next turn only.
 	write("[limits]\nmax_cost_usd_per_tree = 0\n")
-	ask(t, e, child, `{"agent":"claude","prompt":"quick"}`)
+	if code, out := as(t, e, child, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"quick"}`); code != 403 {
+		t.Errorf("a cap turned off mid-turn reached the running turn: %d %s", code, out)
+	}
 	for _, p := range []string{"root", "child"} {
 		release(dir, p)
 	}

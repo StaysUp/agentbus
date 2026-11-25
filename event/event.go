@@ -363,6 +363,11 @@ type Event struct {
 	Vendor   string    `json:"vendor" doc:"anthropic, openai, or program for a program's own event. Empty on events the API stores itself."`
 	Client   string    `json:"client,omitempty" doc:"The harness, from its User-Agent, such as claude-cli/2.1.318."`
 	Turn     string    `json:"turn,omitempty" doc:"The turn this event belongs to. A turn started by POST /api/v0/turns: the id its reply named, on every event of it. Traffic no run started: a hash of the conversation up to the person's message."`
+	// Owner is the owner whose authority the event happened under: the
+	// record's owner id (store.Owner), set by the store on every event it
+	// keeps, beside the actor (Turn, Origin). It is history: a later change of
+	// access never rewrites it.
+	Owner string `json:"owner,omitempty" doc:"The owner whose authority this happened under: the id of the one owner of this record (own_ and 16 hex digits), made once. Every event carries it beside who acted: an agent's turn (turn, origin), or the person. A later change of access never rewrites it. Absent on events stored before 0.6.x."`
 
 	Model        string   `json:"model,omitempty" doc:"On model.requested: the model asked for. On a run's turn.started and run.started: the model the run was started with, absent for the harness's default; a session's next turn that names no agent and no model keeps it."`
 	Text         string   `json:"text,omitempty" doc:"The person's words on turn.started, the reply on model.responded, a program's text."`
@@ -428,6 +433,10 @@ type Event struct {
 	// SettingsVersion, on settings.changed and a run's turn.started: the
 	// settings version.
 	SettingsVersion int64 `json:"settings_version,omitempty" doc:"On settings.changed: the settings version the change made. On a run's turn.started: the settings version the turn started under. It moves up by one with every change; absent before 0.5."`
+	// RulesVersion, on a run's turn.started: the version of the rules (the
+	// permissions) the turn took when it started. Everything the turn does is
+	// decided by them: its commands, its tools and its calls to the API.
+	RulesVersion string `json:"rules_version,omitempty" doc:"On a run's turn.started: the version of the permissions the turn took when it started, as GET /api/v0/settings/permissions sends it in ETag. Everything the turn does is decided by these rules: its commands, its tools and its calls to the API. A change of the permissions applies from the next turn. Absent before 0.6.x."`
 	// Title and OldTitle, only on session.renamed: the new name and the one
 	// it replaced.
 	Title    string `json:"title,omitempty" doc:"On session.renamed: the session's new name."`

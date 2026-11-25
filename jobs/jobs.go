@@ -359,25 +359,66 @@ func (s *Server) runnerBeat(w http.ResponseWriter, r *http.Request, rn queue.Run
 // runnerSettings sends a runner the policy and the instructions, read fresh,
 // for the turn it is about to start: every runner follows the server's.
 func (s *Server) runnerSettings(w http.ResponseWriter, r *http.Request, rn queue.Runner) {
+	snap, err := s.settingsNow()
+	var se *settings.Error
+	switch {
+	case errors.As(err, &se):
+		fail(w, http.StatusServiceUnavailable, se.Error())
+	case err != nil:
+		fail(w, http.StatusInternalServerError, "the settings could not be read")
+	default:
+		writeJSON(w, http.StatusOK, snap)
+	}
+}
+
+// settingsNow is control's settings, from one read, so the version names the
+// policy and instructions sent. No store sends the defaults.
+func (s *Server) settingsNow() (settings.RunnerSettings, error) {
 	snap := settings.RunnerSettings{Permissions: settings.DefaultPolicy(), Instructions: settings.DefaultInstructions}
-	if st := s.cfg.Settings; st != nil {
-		// One read, so the version names the policy and instructions sent.
-		got, err := settings.Read(st)
-		if err == nil {
-			snap = settings.RunnerSettings{Permissions: got.Policy, PermissionsVersion: got.PolicyVersion,
-				Instructions: got.Instructions, InstructionsVersion: got.InstructionsVersion, SettingsVersion: got.Revision}
-		}
-		var se *settings.Error
-		if errors.As(err, &se) {
-			fail(w, http.StatusServiceUnavailable, se.Error())
-			return
-		}
-		if err != nil {
-			fail(w, http.StatusInternalServerError, "the settings could not be read")
-			return
+	st := s.cfg.Settings
+	if st == nil {
+		return snap, nil
+	}
+	got, err := settings.Read(st)
+	if err != nil {
+		return snap, err
+	}
+	return settings.RunnerSettings{Permissions: got.Policy, PermissionsVersion: got.PolicyVersion,
+		Instructions: got.Instructions, InstructionsVersion: got.InstructionsVersion, SettingsVersion: got.Revision}, nil
+}
+
+// turnRules are the settings attempt a of runnerID's turn runs under, taken
+// once, when it starts: control keeps the rules (settings.Keep) and pins their
+// version on the attempt (queue.PinRules), so a start sent again gets the
+// rules the first one took, and the turn's calls to the API are decided by the
+// same rules as its commands and tools (O2.4). A setting that cannot be used
+// is the *settings.Error the turn is refused with.
+func (s *Server) turnRules(runnerID string, a queue.Attempt) (*settings.RunnerSettings, error) {
+	snap, err := s.settingsNow()
+	if err != nil {
+		return nil, err
+	}
+	if s.cfg.Settings != nil {
+		if err := settings.Keep(s.cfg.Settings, snap.Permissions, snap.PermissionsVersion); err != nil {
+			return nil, err
 		}
 	}
-	writeJSON(w, http.StatusOK, snap)
+	pinned, err := s.cfg.Queue.PinRules(runnerID, a.ID, a.Number, string(snap.PermissionsVersion))
+	if err != nil {
+		return nil, err
+	}
+	if v := settings.Version(pinned); v != snap.PermissionsVersion {
+		p, found, err := settings.RulesOf(s.cfg.Settings, v)
+		if err != nil {
+			return nil, err
+		}
+		if !found {
+			return nil, &settings.Error{Setting: settings.SettingPermissions, Where: "the rules this turn started under",
+				Why: "control no longer keeps them", Fix: "Start the turn again"}
+		}
+		snap.Permissions, snap.PermissionsVersion = p, v
+	}
+	return &snap, nil
 }
 
 func (s *Server) removed(w http.ResponseWriter, r *http.Request, rn queue.Runner) {
@@ -583,6 +624,27 @@ type AttemptStarted struct {
 	// refuses the turn with it before the agent starts, so the person reads
 	// it rather than a vendor's error.
 	Signin string `json:"signin,omitempty"`
+	// Settings, on a turn's attempt, are the settings the turn runs under,
+	// taken once when it starts (turnRules): its commands and tools at the
+	// gateway and its calls to control's API are all decided by these rules.
+	// RulesRefused, set instead, is why control has no rules to give it: the
+	// turn is refused with it.
+	Settings     *settings.RunnerSettings `json:"settings,omitempty"`
+	RulesRefused *RulesRefusal            `json:"rules_refused,omitempty"`
+}
+
+// RulesRefusal is a setting control cannot use, so a turn cannot start: where
+// it is, what is wrong with it and how to fix it, as settings.Error says them.
+type RulesRefusal struct {
+	Setting string `json:"setting"`
+	Where   string `json:"where"`
+	Why     string `json:"why"`
+	Fix     string `json:"fix"`
+}
+
+// Err is r as the settings error a turn is refused with.
+func (r *RulesRefusal) Err() *settings.Error {
+	return &settings.Error{Setting: r.Setting, Where: r.Where, Why: r.Why, Fix: r.Fix}
 }
 
 func (s *Server) start(w http.ResponseWriter, r *http.Request, rn queue.Runner) {
@@ -603,6 +665,19 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request, rn queue.Runner) 
 	}
 	if j, err := s.cfg.Queue.Current(rn.ID, a.ID, a.Number); err == nil {
 		st.Signin = s.signin(j)
+		if j.Kind == queue.KindTurn {
+			rules, err := s.turnRules(rn.ID, a)
+			var se *settings.Error
+			switch {
+			case errors.As(err, &se):
+				st.RulesRefused = &RulesRefusal{Setting: se.Setting, Where: se.Where, Why: se.Why, Fix: se.Fix}
+			case err != nil:
+				s.internal(w)
+				return
+			default:
+				st.Settings = rules
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, st)
 }

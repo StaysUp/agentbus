@@ -15,7 +15,7 @@ package api
 //     and says which. Nothing waits: these steps are quick, fire-and-return.
 //
 // An app reaches nothing the caller could not: each step is the HTTP request the
-// caller could make by hand, authorized by its own route (allowTurn), recorded
+// caller could make by hand, authorized by its own route (allow), recorded
 // like any call. Control holds no app-specific knowledge beyond this runner.
 
 import (
@@ -87,7 +87,7 @@ func reviewTurnApp() toolreg.Tool {
 						// A named turn reviews that turn's diff; no turn reviews the
 						// workspace's whole unapplied set (the same GET the Apply panel
 						// shows). The reviewer's token may read its own workspace's
-						// changes (changesWorkspaceTok), and its workspace is the asker's.
+						// changes (atWorkspace), and its workspace is the asker's.
 						"prompt": map[string]any{
 							"if_present": "$inputs.turn",
 							"then": "Review a change another agent made in turn {$inputs.turn}. Read the turn at " +
@@ -218,7 +218,7 @@ func (a *API) checkApp(def toolreg.Tool) string {
 		if rt == nil {
 			return "step " + strconv.Quote(s.StepID) + ": no API operation named " + s.OperationID
 		}
-		if rt.public || rt.self || rt.scope == scopeNone {
+		if rt.public || rt.self || rt.at == atControl || !run.TurnActions.Has(rt.action) {
 			return "step " + strconv.Quote(s.StepID) + ": operation " + s.OperationID + " cannot be called with a turn's own token"
 		}
 		// The app runtime fills only {id} in a path. An operation with another
@@ -276,21 +276,19 @@ func (a *API) runApp(r *http.Request, st servedTool, args map[string]any, callID
 	if why := validateArgs(st.def.Inputs, args); why != "" {
 		return toolFail(why)
 	}
-	g := grantOf(r)
+	c := callerOf(r)
+	g := &c.Grant
 	// Apps are for agents only (his call, 2026-11-19): an app's steps need a
-	// turn's folder and session, which only a turn token carries. A call with no
-	// turn grant (the main token, the turns token) is refused here as well as
-	// hidden from the list, so neither can run one.
-	if g == nil || g.Turn == "" {
+	// turn's folder and session, which only a turn token carries. A call that
+	// names no turn (the main token, the turns token) is refused here as well
+	// as hidden from the list, so neither can run one.
+	if g.Turn == "" {
 		return toolFail("this app runs only for an agent's turn; use the AgentBus API directly instead")
 	}
-	if ok, result := a.gateAppCall(r, g, st, args); !ok {
+	if ok, result := a.gateAppCall(r, c, st, args); !ok {
 		return result
 	}
-	caller := ""
-	if g != nil {
-		caller = g.Session
-	}
+	caller := g.Session
 	stepOut := map[string]map[string]any{}
 	for _, s := range st.def.Run.App.Steps {
 		rt := a.byOp[s.OperationID]
@@ -360,14 +358,12 @@ func validateArgs(inputs, args map[string]any) string {
 // the per-route authorize the single-operation gate does: an app has no one
 // route, and each step authorizes itself through its own route when it runs. A
 // call that is not an agent's own (no turn token) is not gated here.
-func (a *API) gateAppCall(r *http.Request, g *run.Grant, st servedTool, args map[string]any) (bool, toolResult) {
-	if g == nil || g.Turn == "" {
+func (a *API) gateAppCall(r *http.Request, c *caller, st servedTool, args map[string]any) (bool, toolResult) {
+	if !c.limits.gated() {
 		return true, toolResult{}
 	}
-	rules, err := a.toolRules()
-	if err != nil {
-		return false, toolFail("the call could not be decided; try again")
-	}
+	g := &c.Grant
+	rules := c.toolRules()
 	switch dec, rule := gateway.DecideTool(rules, st.def.Name); dec {
 	case gateway.Refuse:
 		a.recordToolRefused(g, st, args, rule)

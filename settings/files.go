@@ -23,6 +23,34 @@ import (
 type Files struct {
 	dir string
 	mu  sync.Mutex // one write at a time from this process
+
+	// kept are the rules turns took (KeepRules), by version. A data folder of
+	// files has no database to keep them in, so they are this process's
+	// only: after a restart a running turn's rules are not found, and its
+	// requests are refused (RulesOf), never decided by other rules.
+	keptMu sync.Mutex
+	kept   map[Version]Policy
+}
+
+// KeepRules keeps p under its version v: the rules a turn took at its start.
+func (f *Files) KeepRules(p Policy, v Version) error {
+	f.keptMu.Lock()
+	defer f.keptMu.Unlock()
+	if f.kept == nil {
+		f.kept = map[Version]Policy{}
+	}
+	if _, ok := f.kept[v]; !ok {
+		f.kept[v] = p
+	}
+	return nil
+}
+
+// Rules is the policy KeepRules kept under v.
+func (f *Files) Rules(v Version) (Policy, bool, error) {
+	f.keptMu.Lock()
+	defer f.keptMu.Unlock()
+	p, ok := f.kept[v]
+	return p, ok, nil
 }
 
 // NewFiles is the store of the data folder dir.

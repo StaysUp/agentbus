@@ -48,8 +48,8 @@ type ResultOf struct {
 	Agent   string `json:"agent,omitempty"`   // the saved agent, or harness, that did it
 }
 
-// Limits are the caps on asked work: [limits] in permissions.toml, read for
-// each request by the API, which passes them here. A negative value is never
+// Limits are the caps on asked work: [limits] as the asking turn's rules say,
+// the rules it took at its start, read by the API, which passes them here. A negative value is never
 // sent; 0 refuses all asked work of that kind.
 type Limits struct {
 	// MaxDepth: work may be asked for at most this many levels below the
@@ -93,11 +93,13 @@ func checkAsked(tx *sql.Tx, team string, links Links, lim Limits) error {
 // no job cap would see (found 2026-11-25). The on that ask_agent records with
 // its job (Delivery) has no chain: its job already counts.
 func countAsked(tx *sql.Tx, team string, c Chain, lim Limits) error {
+	// Who asked is stored once: a job's chain names the asking turn (by), and
+	// an on its maker. The tree an on's maker is in is read from the maker's
+	// own job, never kept on the on: the root its chain names, or, for the
+	// person's own turn, the session it runs in.
 	var n int
-	if err := tx.QueryRow(`SELECT (SELECT COUNT(*) FROM jobs WHERE team = ?1 AND json_extract(links, '$.chain.by') = ?2
-			AND json_extract(links, '$.chain.by_session') = ?3)
-		+ (SELECT COUNT(*) FROM ons WHERE team = ?1 AND json_extract(chain, '$.by') = ?2
-			AND json_extract(chain, '$.by_session') = ?3)`, team, c.By, c.BySession).Scan(&n); err != nil {
+	if err := tx.QueryRow(`SELECT (SELECT COUNT(*) FROM jobs WHERE team = ?1 AND json_extract(links, '$.chain.by') = ?2)
+		+ (SELECT COUNT(*) FROM ons WHERE team = ?1 AND asked = 1 AND json_extract(maker, '$.turn') = ?2)`, team, c.By).Scan(&n); err != nil {
 		return fmt.Errorf("queue: count asked: %w", err)
 	}
 	if n >= lim.MaxPerTurn {
@@ -105,8 +107,9 @@ func countAsked(tx *sql.Tx, team string, c Chain, lim Limits) error {
 	}
 	if err := tx.QueryRow(`SELECT (SELECT COUNT(*) FROM jobs WHERE team = ?1 AND json_extract(links, '$.chain.by') IS NOT NULL
 			AND json_extract(links, '$.chain.root') = ?2)
-		+ (SELECT COUNT(*) FROM ons WHERE team = ?1 AND json_extract(chain, '$.by') IS NOT NULL
-			AND json_extract(chain, '$.root') = ?2)`, team, c.Root).Scan(&n); err != nil {
+		+ (SELECT COUNT(*) FROM ons o JOIN jobs m ON m.team = o.team AND m.turn = json_extract(o.maker, '$.turn')
+			WHERE o.team = ?1 AND o.asked = 1
+			AND COALESCE(json_extract(m.links, '$.chain.root'), m.session) = ?2)`, team, c.Root).Scan(&n); err != nil {
 		return fmt.Errorf("queue: count asked: %w", err)
 	}
 	if n >= lim.MaxPerTree {

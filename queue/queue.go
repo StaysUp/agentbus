@@ -206,6 +206,7 @@ CREATE TABLE IF NOT EXISTS attempts (
 	result      TEXT,
 	last_seq    INTEGER NOT NULL DEFAULT 0,
 	expected_seq INTEGER,
+	rules       TEXT,
 	UNIQUE(job, number)
 );
 CREATE INDEX IF NOT EXISTS attempts_runner ON attempts(runner, state);
@@ -222,9 +223,10 @@ CREATE TABLE IF NOT EXISTS deliveries (
 -- this" (on.go). B13 has one event (a turn completes) and one action (start a
 -- turn in session with the subject turn's reply). It is a row plus the
 -- control loop's check; nothing waits. off is set when it is removed or, for a
--- one-shot, once it has fired. chain is set on an on a turn token registered
--- through POST /api/v0/ons: who asked, in which tree. It counts as asked work
--- under the caps (asked.go, countAsked), as a job with that chain does.
+-- one-shot, once it has fired. asked is set on an on a turn token registered
+-- through POST /api/v0/ons: it counts as asked work by its maker under the caps
+-- (asked.go, countAsked), as a job that turn asked for does. chain held a copy
+-- of the maker's tree before 0.6.x; it is no longer written or read.
 CREATE TABLE IF NOT EXISTS ons (
 	id       TEXT PRIMARY KEY,
 	team     TEXT NOT NULL REFERENCES teams(id),
@@ -235,7 +237,8 @@ CREATE TABLE IF NOT EXISTS ons (
 	idem_key TEXT NOT NULL DEFAULT '',
 	off      INTEGER,
 	created  INTEGER NOT NULL,
-	chain    TEXT
+	chain    TEXT,
+	asked    INTEGER
 );
 CREATE INDEX IF NOT EXISTS ons_live ON ons(team, event, off);
 -- B15 (his call, 2026-11-19): an on is deduped by its idempotency_key ONLY, the
@@ -579,6 +582,11 @@ type Attempt struct {
 	// ExpectedSeq is the last sequence number the runner said it sent, in
 	// its finish. When it is above LastSeq, events are missing.
 	ExpectedSeq *int64 `json:"expected_seq,omitempty"`
+	// Rules is the version of the rules the attempt's turn took when it
+	// started (PinRules): its commands, its tools and its calls to the API
+	// are all decided by them. Empty for an attempt that is not a turn, or
+	// one started before the rules were kept.
+	Rules string `json:"rules,omitempty"`
 	// TurnStarted: the runner reported the attempt's turn started. The
 	// attempt id is then a turn in the record. Read from its events, never
 	// kept.
@@ -1161,7 +1169,7 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, lim Limit
 			turn = NewID("t_")
 		}
 		sb, _ := json.Marshal(spec)
-		lb, _ := json.Marshal(links)
+		lb, _ := json.Marshal(stored(links))
 		var k, sess any
 		if key != "" {
 			k = key
@@ -1205,7 +1213,20 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, lim Limit
 
 // B15: the verdict and findings columns are no longer read (review is a normal
 // turn, with no verdict in core). They stay in an older DB, unreferenced.
-const jobCols = `id, team, kind, state, COALESCE(idem_key, ''), spec, links, COALESCE(attempt, ''), COALESCE(turn, ''), cancel, reason, result, COALESCE(session, ''), created, updated, ended`
+const jobCols = `id, team, kind, state, COALESCE(idem_key, ''), spec, links, COALESCE(attempt, ''), COALESCE(turn, ''), cancel, reason, result, COALESCE(session, ''), created, updated, ended,
+	COALESCE((SELECT b.session FROM jobs b WHERE b.team = jobs.team AND b.turn = json_extract(jobs.links, '$.chain.by') LIMIT 1), '')`
+
+// stored is l as a job keeps it. Who asked is kept once, as the asking turn
+// (Chain.By); the session that turn ran in is its own job's, read back with
+// the job (jobCols), so it is never stored beside By.
+func stored(l Links) Links {
+	if l.Chain != nil && l.Chain.BySession != "" {
+		c := *l.Chain
+		c.BySession = ""
+		l.Chain = &c
+	}
+	return l
+}
 
 type scanner interface{ Scan(...any) error }
 
@@ -1215,12 +1236,16 @@ func scanJob(s scanner) (Job, error) {
 	var result sql.NullString
 	var created, updated int64
 	var ended sql.NullInt64
+	var bySession string
 	if err := s.Scan(&j.ID, &j.Team, &j.Kind, &j.State, &j.IdempotencyKey, &spec, &links, &j.Attempt, &j.Turn, &j.CancelRequested,
-		&j.Reason, &result, &j.Session, &created, &updated, &ended); err != nil {
+		&j.Reason, &result, &j.Session, &created, &updated, &ended, &bySession); err != nil {
 		return j, err
 	}
 	_ = json.Unmarshal([]byte(spec), &j.Spec)
 	_ = json.Unmarshal([]byte(links), &j.Links)
+	if c := j.Links.Chain; c != nil && c.By != "" {
+		c.BySession = bySession // the asking turn's own job's session
+	}
 	if result.Valid {
 		j.Result = json.RawMessage(result.String)
 	}
@@ -1230,7 +1255,7 @@ func scanJob(s scanner) (Job, error) {
 
 // attemptCols reads an attempt, and whether its runner reported its turn
 // started (the turn.created event).
-const attemptCols = `id, job, number, runner, state, lease_until, taken, started, ended, reason, result, last_seq, expected_seq,
+const attemptCols = `id, job, number, runner, state, lease_until, taken, started, ended, reason, result, last_seq, expected_seq, COALESCE(rules, ''),
 	EXISTS (SELECT 1 FROM attempt_events e WHERE e.attempt = attempts.id AND e.kind = 'turn.created')`
 
 func scanAttempt(s scanner) (Attempt, error) {
@@ -1240,7 +1265,7 @@ func scanAttempt(s scanner) (Attempt, error) {
 	var result sql.NullString
 	var expected sql.NullInt64
 	if err := s.Scan(&a.ID, &a.Job, &a.Number, &a.Runner, &a.State, &lease, &taken, &started, &ended, &a.Reason, &result, &a.LastSeq, &expected,
-		&a.TurnStarted); err != nil {
+		&a.Rules, &a.TurnStarted); err != nil {
 		return a, err
 	}
 	if expected.Valid {
@@ -1750,6 +1775,28 @@ func (q *Queue) Start(runnerID, attemptID string, number int, lease time.Duratio
 		return err
 	})
 	return att, cancel, err
+}
+
+// PinRules records rules as the rules attempt's turn runs under, once: an
+// attempt that has rules keeps them, so a start sent again gets the rules the
+// first one took. It returns the attempt's rules.
+func (q *Queue) PinRules(runnerID, attemptID string, number int, rules string) (pinned string, err error) {
+	err = q.tx(func(tx *sql.Tx) error {
+		a, _, err := current(tx, q.now(), runnerID, attemptID, number)
+		if err != nil {
+			return err
+		}
+		if a.Rules != "" {
+			pinned = a.Rules
+			return nil
+		}
+		if _, err := tx.Exec(`UPDATE attempts SET rules = ? WHERE id = ?`, rules, a.ID); err != nil {
+			return fmt.Errorf("queue: write attempt: %w", err)
+		}
+		pinned = rules
+		return nil
+	})
+	return pinned, err
 }
 
 // Heartbeat renews the attempt's lease. cancel is true when the job was asked
