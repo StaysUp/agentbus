@@ -301,3 +301,43 @@ func TestDirectTokenFileAccessRequiresGrant(t *testing.T) {
 		}
 	}
 }
+
+// The files routes answer in fixed words: no error quotes the request's path
+// or passes Go's own error message on (AGENTS.md: error text is fixed wording;
+// plans/AUDIT_ownership.md §5).
+func TestFilesErrorsAreFixedWording(t *testing.T) {
+	e, _ := settingsEnv(t)
+	dir := t.TempDir()
+	const mark = "quoted-name-7f3a"
+	locked := filepath.Join(dir, mark+"-locked.txt")
+	if err := os.WriteFile(locked, []byte("x"), 0o000); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, mark+".txt")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range []struct{ route, path string }{
+		{"/api/v0/files/read", filepath.Join(dir, mark+"-missing.txt")},
+		{"/api/v0/files/read", locked},
+		{"/api/v0/files/read", filepath.Join(dir, mark+"-dir")},
+		{"/api/v0/files/list", filepath.Join(dir, mark+"-missing")},
+		{"/api/v0/files/list", file},
+		{"/api/v0/files/write", filepath.Join(locked, "under-a-file.txt")},
+	} {
+		if c.path == filepath.Join(dir, mark+"-dir") {
+			if err := os.Mkdir(c.path, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		resp, out := send(t, e, "POST", c.route, "", fmt.Sprintf(`{"path":%q,"content":"y"}`, c.path))
+		if resp.StatusCode < 400 {
+			t.Fatalf("%s %s: %d %s, want an error", c.route, c.path, resp.StatusCode, out)
+		}
+		for _, bad := range []string{mark, "permission denied", "no such file", "not a directory", "openat", "statat"} {
+			if strings.Contains(out, bad) {
+				t.Errorf("%s %s: the error quotes %q: %s", c.route, c.path, bad, out)
+			}
+		}
+	}
+}

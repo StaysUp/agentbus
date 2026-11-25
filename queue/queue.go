@@ -207,6 +207,7 @@ CREATE TABLE IF NOT EXISTS attempts (
 	last_seq    INTEGER NOT NULL DEFAULT 0,
 	expected_seq INTEGER,
 	rules       TEXT,
+	settings    TEXT,
 	UNIQUE(job, number)
 );
 CREATE INDEX IF NOT EXISTS attempts_runner ON attempts(runner, state);
@@ -1777,26 +1778,57 @@ func (q *Queue) Start(runnerID, attemptID string, number int, lease time.Duratio
 	return att, cancel, err
 }
 
-// PinRules records rules as the rules attempt's turn runs under, once: an
-// attempt that has rules keeps them, so a start sent again gets the rules the
-// first one took. It returns the attempt's rules.
-func (q *Queue) PinRules(runnerID, attemptID string, number int, rules string) (pinned string, err error) {
+// PinRules records rules as the rules attempt's turn runs under, with
+// snapshot, the whole settings the turn takes with them (the policy, the
+// instructions and their versions, as control sends them to the runner), once:
+// an attempt that has rules keeps them, so a start sent again gets what the
+// first one took. It returns the attempt's rules and snapshot; the snapshot is
+// empty for an attempt pinned before snapshots were kept.
+func (q *Queue) PinRules(runnerID, attemptID string, number int, rules string, snapshot json.RawMessage) (pinned string, pinnedSnap json.RawMessage, err error) {
 	err = q.tx(func(tx *sql.Tx) error {
 		a, _, err := current(tx, q.now(), runnerID, attemptID, number)
 		if err != nil {
 			return err
 		}
 		if a.Rules != "" {
+			var snap sql.NullString
+			if err := tx.QueryRow(`SELECT settings FROM attempts WHERE id = ?`, a.ID).Scan(&snap); err != nil {
+				return fmt.Errorf("queue: read attempt: %w", err)
+			}
 			pinned = a.Rules
+			if snap.Valid {
+				pinnedSnap = json.RawMessage(snap.String)
+			}
 			return nil
 		}
-		if _, err := tx.Exec(`UPDATE attempts SET rules = ? WHERE id = ?`, rules, a.ID); err != nil {
+		if _, err := tx.Exec(`UPDATE attempts SET rules = ?, settings = ? WHERE id = ?`, rules, string(snapshot), a.ID); err != nil {
 			return fmt.Errorf("queue: write attempt: %w", err)
 		}
-		pinned = rules
+		pinned, pinnedSnap = rules, snapshot
 		return nil
 	})
-	return pinned, err
+	return pinned, pinnedSnap, err
+}
+
+// Pinned is the rules and snapshot PinRules recorded on the attempt, or
+// empty ones when it has none yet.
+func (q *Queue) Pinned(runnerID, attemptID string, number int) (rules string, snapshot json.RawMessage, err error) {
+	err = q.tx(func(tx *sql.Tx) error {
+		a, _, err := current(tx, q.now(), runnerID, attemptID, number)
+		if err != nil {
+			return err
+		}
+		var snap sql.NullString
+		if err := tx.QueryRow(`SELECT settings FROM attempts WHERE id = ?`, a.ID).Scan(&snap); err != nil {
+			return fmt.Errorf("queue: read attempt: %w", err)
+		}
+		rules = a.Rules
+		if snap.Valid {
+			snapshot = json.RawMessage(snap.String)
+		}
+		return nil
+	})
+	return rules, snapshot, err
 }
 
 // Heartbeat renews the attempt's lease. cancel is true when the job was asked

@@ -115,8 +115,8 @@ type ruleKeeper interface {
 
 // Keep keeps p, the policy a turn takes at its start, under its version v, so
 // everything the turn does later is decided by the same rules (RulesOf). A
-// store that keeps no history, such as files, keeps nothing: its turns can be
-// held only to the rules while the policy is still at v.
+// store that keeps no history keeps nothing: its turns can be held only to the
+// rules while the policy is still at v.
 func Keep(s Store, p Policy, v Version) error {
 	if k, ok := s.(ruleKeeper); ok {
 		return k.KeepRules(p, v)
@@ -207,7 +207,7 @@ const (
 // dataFiles are the data folder's own files, which no turn may edit: a turn
 // that could would raise its own limits, or read a token.
 var dataFiles = []string{PolicyFile, InstructionsFile, AgentsFile, ToolsFile, "token", "turns_token",
-	"enroll_token", "events.db", "jobs.db", DBFile, "runner.json", "folders.json", filepath.Join("bin", APIClient)}
+	"enroll_token", "events.db", "jobs.db", DBFile, KeptRulesFile, "runner.json", "folders.json", filepath.Join("bin", APIClient)}
 
 // protected is dataFiles under dir.
 func protected(dir string) []string {

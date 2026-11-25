@@ -270,6 +270,7 @@ func addColumns(db *sql.DB) error {
 		{"ons", "idem_key", "TEXT NOT NULL DEFAULT ''"},
 		{"ons", "chain", "TEXT"},
 		{"attempts", "rules", "TEXT"},
+		{"attempts", "settings", "TEXT"},
 		{"ons", "asked", "INTEGER"},
 	} {
 		var n int

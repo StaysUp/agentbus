@@ -388,37 +388,42 @@ func (s *Server) settingsNow() (settings.RunnerSettings, error) {
 }
 
 // turnRules are the settings attempt a of runnerID's turn runs under, taken
-// once, when it starts: control keeps the rules (settings.Keep) and pins their
-// version on the attempt (queue.PinRules), so a start sent again gets the
-// rules the first one took, and the turn's calls to the API are decided by the
-// same rules as its commands and tools (O2.4). A setting that cannot be used
-// is the *settings.Error the turn is refused with.
+// once, when it starts: control keeps the rules (settings.Keep) and pins them
+// on the attempt, the whole snapshot with their version (queue.PinRules), so a
+// start sent again gets what the first one took, read from the attempt and
+// never from the settings as they are now, and the turn's calls to the API are
+// decided by the same rules as its commands and tools (O2.4). A setting that
+// cannot be used is the *settings.Error the turn is refused with.
 func (s *Server) turnRules(runnerID string, a queue.Attempt) (*settings.RunnerSettings, error) {
-	snap, err := s.settingsNow()
+	rules, snap, err := s.cfg.Queue.Pinned(runnerID, a.ID, a.Number)
 	if err != nil {
 		return nil, err
 	}
-	if s.cfg.Settings != nil {
-		if err := settings.Keep(s.cfg.Settings, snap.Permissions, snap.PermissionsVersion); err != nil {
-			return nil, err
-		}
-	}
-	pinned, err := s.cfg.Queue.PinRules(runnerID, a.ID, a.Number, string(snap.PermissionsVersion))
-	if err != nil {
-		return nil, err
-	}
-	if v := settings.Version(pinned); v != snap.PermissionsVersion {
-		p, found, err := settings.RulesOf(s.cfg.Settings, v)
+	if rules == "" {
+		now, err := s.settingsNow()
 		if err != nil {
 			return nil, err
 		}
-		if !found {
-			return nil, &settings.Error{Setting: settings.SettingPermissions, Where: "the rules this turn started under",
-				Why: "control no longer keeps them", Fix: "Start the turn again"}
+		if s.cfg.Settings != nil {
+			if err := settings.Keep(s.cfg.Settings, now.Permissions, now.PermissionsVersion); err != nil {
+				return nil, err
+			}
 		}
-		snap.Permissions, snap.PermissionsVersion = p, v
+		b, err := json.Marshal(now)
+		if err != nil {
+			return nil, err
+		}
+		if _, snap, err = s.cfg.Queue.PinRules(runnerID, a.ID, a.Number, string(now.PermissionsVersion), b); err != nil {
+			return nil, err
+		}
 	}
-	return &snap, nil
+	var out settings.RunnerSettings
+	if len(snap) == 0 || json.Unmarshal(snap, &out) != nil {
+		// An attempt pinned before control kept the whole snapshot.
+		return nil, &settings.Error{Setting: settings.SettingPermissions, Where: "the rules this turn started under",
+			Why: "control no longer keeps them", Fix: "Start the turn again"}
+	}
+	return &out, nil
 }
 
 func (s *Server) removed(w http.ResponseWriter, r *http.Request, rn queue.Runner) {

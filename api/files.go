@@ -100,6 +100,8 @@ type WriteFileResponse struct {
 	Written int    `json:"written"`
 }
 
+// resolveSymlinkPath is p with its symbolic links followed. Its errors are
+// fixed wording, never Go's own message, so a caller may pass them on.
 func resolveSymlinkPath(p string) (string, error) {
 	clean := filepath.Clean(p)
 	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
@@ -110,7 +112,7 @@ func resolveSymlinkPath(p string) (string, error) {
 
 func resolveSymlinkPathBounded(p string, hops int) (string, error) {
 	if hops > 32 {
-		return "", errors.New("too many levels of symbolic links")
+		return "", errors.New("the path has too many levels of symbolic links")
 	}
 	vol := filepath.VolumeName(p)
 	rest := p[len(vol):]
@@ -125,7 +127,7 @@ func resolveSymlinkPathBounded(p string, hops int) (string, error) {
 		if err == nil && fi.Mode()&os.ModeSymlink != 0 {
 			target, err := os.Readlink(next)
 			if err != nil {
-				return "", err
+				return "", errors.New("a symbolic link in the path cannot be read")
 			}
 			if !filepath.IsAbs(target) {
 				target = filepath.Join(curr, target)
@@ -148,7 +150,7 @@ func (a *API) openFolderAccess(w http.ResponseWriter, r *http.Request, path, too
 	}
 	resolved, err := resolveSymlinkPath(path)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid path: "+err.Error())
+		writeError(w, http.StatusBadRequest, err.Error())
 		return nil, "", "", false
 	}
 	// The grant's limits say in which folder the path may be opened, and the
@@ -212,7 +214,7 @@ func (a *API) openFolderAccess(w http.ResponseWriter, r *http.Request, path, too
 	}
 	root, err := os.OpenRoot(canonicalGrant)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("cannot access folder %s: %v", grantFolder, err))
+		writeError(w, http.StatusBadRequest, "the granted folder cannot be opened")
 		return nil, "", "", false
 	}
 	if rootF, err := root.Open("."); err == nil {
@@ -220,7 +222,7 @@ func (a *API) openFolderAccess(w http.ResponseWriter, r *http.Request, path, too
 		if actualRootPath, err := fdPath(rootF); err == nil && actualRootPath != "" && grantFolder != "/" {
 			if !store.IsInside(actualRootPath, grantFolder) {
 				root.Close()
-				writeError(w, http.StatusForbidden, "folder was replaced by ungranted target: "+path)
+				writeError(w, http.StatusForbidden, "the granted folder was replaced by a folder not granted")
 				return nil, "", "", false
 			}
 		}
@@ -228,7 +230,7 @@ func (a *API) openFolderAccess(w http.ResponseWriter, r *http.Request, path, too
 	rel, err := filepath.Rel(canonicalGrant, resolved)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		root.Close()
-		writeError(w, http.StatusForbidden, "path is outside granted folder: "+path)
+		writeError(w, http.StatusForbidden, "the path is outside the granted folder")
 		return nil, "", "", false
 	}
 	if rel == "" {
@@ -245,7 +247,7 @@ func resolveFilePath(p string) (string, error) {
 	if strings.HasPrefix(p, "~") {
 		home, err := os.UserHomeDir()
 		if err != nil {
-			return "", err
+			return "", errors.New("the home folder is not known")
 		}
 		if p == "~" {
 			p = home
@@ -281,43 +283,43 @@ func (a *API) readFile(w http.ResponseWriter, r *http.Request) {
 	defer root.Close()
 
 	if fi, err := root.Lstat(rel); err == nil && !fi.Mode().IsRegular() {
-		writeError(w, http.StatusBadRequest, "path is not a regular file: "+path)
+		writeError(w, http.StatusBadRequest, "the path is not a regular file")
 		return
 	}
 	f, err := root.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			writeError(w, http.StatusNotFound, "file not found: "+path)
+			writeError(w, http.StatusNotFound, "no file at that path")
 			return
 		}
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("cannot read file %s: %v", path, err))
+		writeError(w, http.StatusBadRequest, "the file cannot be read")
 		return
 	}
 	defer f.Close()
 
 	if actualPath, err := fdPath(f); err == nil && actualPath != "" && grantFolder != "/" {
 		if !store.IsInside(actualPath, grantFolder) {
-			writeError(w, http.StatusForbidden, "path redirects outside granted folder: "+path)
+			writeError(w, http.StatusForbidden, "the path leads outside the granted folder")
 			return
 		}
 	}
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() {
-		writeError(w, http.StatusBadRequest, "path is not a regular file: "+path)
+		writeError(w, http.StatusBadRequest, "the path is not a regular file")
 		return
 	}
 	const maxFileSize = 10 * 1024 * 1024
 	if info.Size() > maxFileSize {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("file is too large to read (%d bytes, max %d): %s", info.Size(), maxFileSize, path))
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("the file is too large to read (%d bytes, max %d)", info.Size(), maxFileSize))
 		return
 	}
 	data, err := io.ReadAll(io.LimitReader(f, maxFileSize+1))
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to read file %s: %v", path, err))
+		writeError(w, http.StatusInternalServerError, "the file could not be read")
 		return
 	}
 	if int64(len(data)) > maxFileSize {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("file is too large to read: %s", path))
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("the file is too large to read (max %d bytes)", maxFileSize))
 		return
 	}
 	writeJSON(w, http.StatusOK, ReadFileResponse{
@@ -347,35 +349,35 @@ func (a *API) listFolder(w http.ResponseWriter, r *http.Request) {
 
 	if rel != "." {
 		if fi, err := root.Lstat(rel); err == nil && !fi.IsDir() {
-			writeError(w, http.StatusBadRequest, "path is a file; use read_file: "+path)
+			writeError(w, http.StatusBadRequest, "the path is a file; use read_file")
 			return
 		}
 	}
 	f, err := root.OpenFile(rel, os.O_RDONLY|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		if errors.Is(err, fs.ErrNotExist) {
-			writeError(w, http.StatusNotFound, "folder not found: "+path)
+			writeError(w, http.StatusNotFound, "no folder at that path")
 			return
 		}
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("cannot list folder %s: %v", path, err))
+		writeError(w, http.StatusBadRequest, "the folder cannot be listed")
 		return
 	}
 	defer f.Close()
 
 	if actualPath, err := fdPath(f); err == nil && actualPath != "" && grantFolder != "/" {
 		if !store.IsInside(actualPath, grantFolder) {
-			writeError(w, http.StatusForbidden, "path redirects outside granted folder: "+path)
+			writeError(w, http.StatusForbidden, "the path leads outside the granted folder")
 			return
 		}
 	}
 	info, err := f.Stat()
 	if err != nil || !info.IsDir() {
-		writeError(w, http.StatusBadRequest, "path is a file; use read_file: "+path)
+		writeError(w, http.StatusBadRequest, "the path is a file; use read_file")
 		return
 	}
 	des, err := f.ReadDir(-1)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to list folder %s: %v", path, err))
+		writeError(w, http.StatusInternalServerError, "the folder could not be listed")
 		return
 	}
 	entries := make([]FolderEntry, 0, len(des))
@@ -422,38 +424,38 @@ func (a *API) writeFile(w http.ResponseWriter, r *http.Request) {
 	relDir := filepath.Dir(rel)
 	if relDir != "." && relDir != "" {
 		if err := root.MkdirAll(relDir, 0o755); err != nil {
-			writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to create directory %s: %v", relDir, err))
+			writeError(w, http.StatusInternalServerError, "the file's folder could not be made")
 			return
 		}
 	}
 	if fi, err := root.Lstat(rel); err == nil && !fi.Mode().IsRegular() {
-		writeError(w, http.StatusBadRequest, "path is not a regular file: "+path)
+		writeError(w, http.StatusBadRequest, "the path is not a regular file")
 		return
 	}
 	f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|syscall.O_NONBLOCK, 0o644)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to write file %s: %v", path, err))
+		writeError(w, http.StatusInternalServerError, "the file could not be written")
 		return
 	}
 	defer f.Close()
 
 	if actualPath, err := fdPath(f); err == nil && actualPath != "" && grantFolder != "/" {
 		if !store.IsInside(actualPath, grantFolder) {
-			writeError(w, http.StatusForbidden, "path redirects outside granted folder: "+path)
+			writeError(w, http.StatusForbidden, "the path leads outside the granted folder")
 			return
 		}
 	}
 	info, err := f.Stat()
 	if err != nil || !info.Mode().IsRegular() {
-		writeError(w, http.StatusBadRequest, "path is not a regular file: "+path)
+		writeError(w, http.StatusBadRequest, "the path is not a regular file")
 		return
 	}
 	if err := f.Truncate(0); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to truncate file %s: %v", path, err))
+		writeError(w, http.StatusInternalServerError, "the file could not be written")
 		return
 	}
 	if _, err := f.Write([]byte(content)); err != nil {
-		writeError(w, http.StatusInternalServerError, fmt.Sprintf("failed to write file %s: %v", path, err))
+		writeError(w, http.StatusInternalServerError, "the file could not be written")
 		return
 	}
 	writeJSON(w, http.StatusOK, WriteFileResponse{

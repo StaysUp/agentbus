@@ -1003,8 +1003,13 @@ func (r *Runner) prepare(ctx context.Context, at *attempt) *queue.Result {
 			return nil // the engine refuses it, in its own words
 		}
 		if sp.Isolate {
-			p, err := r.policy()
-			if err != nil {
+			p, err := r.policyOf(at)
+			var se *settings.Error
+			switch {
+			case errors.As(err, &se):
+				return &queue.Result{Refused: se.Where + " cannot be used, so the turn did not start: " + se.Why + ". " + se.Fix + ", and send the turn again.",
+					Status: http.StatusBadRequest}
+			case err != nil:
 				return &queue.Result{Refused: "the permissions cannot be read, so the turn did not start; fix them and send the turn again"}
 			}
 			// The workspace's sandbox is the one switch for copy-or-folder; the
@@ -1099,6 +1104,24 @@ func (r *Runner) loadSpace(w queue.Workspace) (*isolation.Space, error) {
 // equip gives s what reads its base content.
 func (r *Runner) equip(s *isolation.Space) {
 	s.Blobs, s.Lender = r.cfg.Blobs, r.cfg.Lender
+}
+
+// policyOf is the policy at's turn runs under: the one control took for it
+// when its attempt started, as the engine reads it (run.Engine.settingsFor),
+// so an edit made since applies from the next turn. A control that sent none
+// (before 0.6.x) leaves the runner's own settings, read now.
+func (r *Runner) policyOf(at *attempt) (settings.Policy, error) {
+	at.mu.Lock()
+	rs, rulesErr := at.settings, at.rulesErr
+	at.mu.Unlock()
+	switch {
+	case rulesErr != nil:
+		return settings.Policy{}, rulesErr
+	case rs != nil:
+		snap, err := settings.FromRunner(*rs)
+		return snap.Policy, err
+	}
+	return r.policy()
 }
 
 // policy is the settings' policy, or the defaults with no settings.
