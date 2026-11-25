@@ -44,9 +44,10 @@ const specIntro = "agentbus runs on your machine, between your coding agents and
 	"- A turn exists from the moment it is asked for: `queued`, then `running`, then `finished`, `failed` or `stopped`.\n" +
 	"- Runners talk to this service through the runner protocol, under `/api/v0/runner/`. It is described on its own, at `/api/v0/runner/openapi.json`, and is not a public promise.\n" +
 	"- A turn started by `POST /api/v0/turns` gets its own token in `$AGENTBUS_TOKEN`, and this service's address in `$AGENTBUS_URL`. " +
-	"With it the agent reads its session and asks other agents: it starts turns, each in a new session, asks for reviews and reads their results, on the operations that say so; it never continues a session. " +
-	"Each result comes back to the asking session as a later turn. It never changes policy or saved agents, never sees a token, " +
-	"and stops working when the turn's child exits. " +
+	"With it the agent may do what its owner may, narrowed by three things only: where it works (a copy reaches its own workspace and the workspaces its session made; a turn that works in the folders as they are reaches its machine), " +
+	"the owner's brakes (Agents may apply, the command and tool rules, and the limits on depth, jobs and cost), and that it never changes its own brakes: " +
+	"it never changes the settings, the saved agents or the tools, never sees a token or a sign-in, and never answers an approval. Each operation says what a turn token may do there. " +
+	"A result it asks for comes back to a session as a later turn. The token stops working when the turn's child exits. " +
 	"An asked turn finds who asked it in `$AGENTBUS_ASKED_BY_SESSION` and `$AGENTBUS_ASKED_BY_TURN`. " +
 	"Its copy does not hold the asker's unapplied changes: read them through this API.\n" +
 	"- The turns token, the file `turns_token` in the data folder, may only start, stop, review and read turns, on the operations that say so. " +
@@ -76,24 +77,31 @@ const runnerTokenDoc = "Runner protocol: called by a runner, never by the cockpi
 var (
 	docSessionQuery = "A turn token may call this for a session it may read: without session, its own is used. " + turnReads
 	docTurn         = "A turn token may call this for a turn of a session it may read, by the turn id alone. " + turnReads
-	docAsk          = "A turn token may call this to start the one turn of a session it opened (POST /api/v0/sessions), " +
-		"in its own workspace or in one its session made. It never continues a session. " +
-		"The result comes back only when asked for: delivery set to its own session, or an on (POST /api/v0/ons). Caps: " + askCaps
-	docStop    = "A turn token may stop a turn that a turn asked for (not one the person started), in a session it may read. " + turnReads
+	docAsk          = "A turn token may call this to start a turn in any session it may read: a new one it opened (POST /api/v0/sessions), one that already ran, its own too. " +
+		"The result comes back only when asked for: delivery set to a session it may read, or an on (POST /api/v0/ons). " + turnReads + " Caps: " + askCaps
+	docStop    = "A turn token may stop any turn in a session it may read. " + turnReads
 	docAnyRead = "A turn token may call this too."
-	docChanges = "A turn token may preview the changes of its own workspace (the workspace of its session) and of each workspace its session made."
-	docApply   = "A turn token may apply its own workspace's changes (the workspace of its session) only when the Agents may apply switch is on in Settings (Permissions) (off by default). " +
-		"It may apply a workspace its session made when its own workspace works in the folder as it is (it can already write there), else only when that switch is on."
-	docNewSession = "A turn token may open a session in its own workspace (the default when workspace is absent) or in a workspace its session made; " +
-		"it alone may then start that session's turn."
-	docRename       = "A turn token may rename a session it may read. It never closes one. " + turnReads
-	docWorkspace    = "A turn token may read its own workspace (the workspace of its session) and each workspace its session made."
-	docNewWorkspace = "A turn token may make a workspace within its own authority: sandbox true (a copy), never false; on its own workspace's machine; " +
-		"and when its own workspace is a copy, only of folders that workspace holds, named by folder_ref (GET /api/v0/workspaces/{id} of its own workspace lists them). " +
-		"A turn token whose own workspace works in the folder as it is may copy any folder of its machine. " +
+	docChanges = "A turn token may preview the changes of a workspace in its authority. " + turnWorkspaces
+	docApply   = "A turn token may apply the changes of a workspace in its authority only when the Agents may apply switch is on in Settings (Permissions) (off by default). " +
+		"It may apply a workspace its session made when its own workspace works in the folder as it is (it can already write there), else only when that switch is on. " + turnWorkspaces
+	docNewSession   = "A turn token may open a session in a workspace in its authority (its own workspace when workspace is absent). " + turnWorkspaces
+	docRename       = "A turn token may rename or archive a session it may read. " + turnReads
+	docWorkspace    = "A turn token may read a workspace in its authority. " + turnWorkspaces
+	docCopy         = "A turn token may call this for a workspace in its authority, such as a copy its session made. " + turnWorkspaces
+	docNewWorkspace = "A turn token may make a workspace within its own authority, on its own workspace's machine. " +
+		"When its own workspace works in the folder as it is, any workspace of that machine, sandbox true or false. " +
+		"When its own workspace is a copy, only a copy (sandbox true) of folders that workspace holds, named by folder_ref (GET /api/v0/workspaces/{id} of its own workspace lists them). " +
 		"Its session may then open sessions in the new workspace (POST /api/v0/sessions) and start their turns, read the new workspace's changes, " +
 		"and apply them when its own workspace works in the folder as it is, or when Agents may apply is on."
-	docTools = "A turn token may call this: its list holds the tools its turn may call under permissions (none of them when tool:* is refused), " +
+	docListSessions   = "A turn token may call this: it lists the sessions it may read. " + turnReads
+	docListWorkspaces = "A turn token may call this: it lists the workspaces in its authority. " + turnWorkspaces
+	docListApprovals  = "A turn token may call this: it lists the held calls of the sessions it may read. Only the owner answers one. " + turnReads
+	docListFolders    = "A turn token may call this: it lists the folders of its machine when its own workspace works in the folder as it is, else only its own workspace's folders."
+	docHomeFiles      = "A turn token may call this only when its own workspace works in the folder as it is, for a folder of that machine: a machine's home is outside every copy."
+	docStream         = "A turn token may stream a session it may read: without session, its own is used. " + turnReads
+	docWriteEvent     = "A turn token may write into a session it may read; the event's origin names its turn. " + turnReads
+	docReadBrakes     = "A turn token may read this too. Only the owner changes it."
+	docTools          = "A turn token may call this: its list holds the tools its turn may call under permissions (none of them when tool:* is refused), " +
 		"and each call is checked by the operation it names."
 	docSession = "A turn token may call this for a session it may read. " + turnReads
 )
@@ -119,6 +127,24 @@ var turnTokenDoc = map[string]string{
 	"listHarnesses":    docAnyRead,
 	"listModels":       docAnyRead,
 	"workspaceChanges": docChanges,
+	"discardWorkspace": docCopy,
+	"closeWorkspace":   docCopy,
+	"updateWorkspace":  docCopy,
+	"listSessions":     docListSessions,
+	"listWorkspaces":   docListWorkspaces,
+	"listApprovals":    docListApprovals,
+	"listFolders":      docListFolders,
+	"folderHomeFiles":  docHomeFiles,
+	"streamEvents":     docStream,
+	"writeEvent":       docWriteEvent,
+	"listTools":        docReadBrakes,
+	"getTool":          docReadBrakes,
+	"listRunners":      docReadBrakes,
+	"getVersion":       docAnyRead,
+	"getSettings":      docReadBrakes,
+	"getPermissions":   docReadBrakes,
+	"getInstructions":  docReadBrakes,
+	"getCompaction":    docReadBrakes,
 	"applyWorkspace":   docApply,
 	"createSession":    docNewSession,
 	"updateSession":    docRename,
@@ -137,9 +163,15 @@ const turnReads = "A turn token reads the sessions of the workspaces in its auth
 	"when its own workspace works in the folder as it is (sandbox false), every workspace on that workspace's machine; " +
 	"when its own workspace is a copy, that workspace and each workspace its session made."
 
+// turnWorkspaces is the one rule for which workspaces a turn token works in.
+const turnWorkspaces = "A turn token's authority, when its own workspace works in the folder as it is (sandbox false), is every workspace on that workspace's machine; " +
+	"when its own workspace is a copy, that workspace and each workspace its session made."
+
 // askCaps names the caps on asked work. A request past one gets 403 saying which.
 var askCaps = fmt.Sprintf("[limits] in the settings (PUT /api/v0/settings/permissions): by default at most %d levels below the person's turn, %d jobs asked by one turn, "+
-	"%d in one request tree, and no cost cap (max_cost_usd_per_tree).", settings.DefaultMaxDepth, settings.DefaultMaxJobsPerTurn, settings.DefaultMaxJobsPerTree)
+	"%d in one request tree, and no cost cap (max_cost_usd_per_tree). Each turn is in one request tree, recorded when it is made, and the caps count by turn: "+
+	"a turn that continues another session counts against the asker's tree, never that session's earlier turns. "+
+	"The caps hold every turn the tree gets: asked work, and the reply an on delivers.", settings.DefaultMaxDepth, settings.DefaultMaxJobsPerTurn, settings.DefaultMaxJobsPerTree)
 
 // spec is the description as served, built on first use. New builds it, so a
 // table or type it cannot describe stops the service from starting.
@@ -672,7 +704,7 @@ func accessReplies(rt route) []accessReply {
 	forbidden := "The service is on loopback and the Host header does not name it on 127.0.0.1, localhost or [::1]."
 	name := "ForbiddenHost"
 	if !rt.public && !rt.self {
-		forbidden += " Or a turn token was sent where it may not read: another session, or an operation that does not take one."
+		forbidden += " Or a turn token was sent outside its authority, past a brake its owner set, or to an operation only the owner calls."
 		name = "ForbiddenToken"
 		if !rt.turns {
 			forbidden += " Or the turns token was sent: it may only start, stop, review and read turns."

@@ -11,9 +11,24 @@ package api
 // The owner's own token holds every class everywhere and has no limits
 // (noLimits). The turns token holds its fixed classes everywhere, on the routes
 // that say so (turnsLimits). An agent turn's own token holds the owner's
-// classes but admin and copy, in the reach its limits leave (agentLimits).
-// Those limits are in code today (tokens.go, workspaces.go); each is to become
-// an owner setting with today's value as its default (O2.3).
+// classes but admin, in the reach its limits leave (agentLimits).
+//
+// An agent may do what its owner may, narrowed by three things only (O2.3, his
+// call 2026-11-25):
+//
+//  1. Where it works, its reach (agentLimits.Holds). A turn in a Copy session
+//     reaches its own workspace and the workspaces its session made. A turn in
+//     a Direct session reaches what the owner reaches on that machine: every
+//     workspace there.
+//  2. The owner's brakes: the Agents may apply switch, the command and tool
+//     rules (with the folder grants a person gave by answering a hold), and the
+//     limits (depth, jobs, cost).
+//  3. It never changes its own brakes: no admin class (run.ActAdmin), so no
+//     writing the permissions, the settings, the instructions, the saved agents
+//     or the tools, no tokens or sign-ins, and no answering an approval.
+//
+// Every 403 an agent can get names one of the three; authority_test.go fails on
+// a refusal that does not (TestAgentRefusalsAreTheThree).
 //
 // An agent turn's limits are decided by the rules the turn took when it
 // started (rulesOf), the same rules its commands and tools are held to at the
@@ -57,6 +72,10 @@ const (
 	// atBody: the body names the place, and the handler asks the grant:
 	// start a turn, ons, the files, the tool list, a new session or workspace.
 	atBody
+	// atList: a list of many workspaces' items, such as the sessions. A grant
+	// that does not reach every workspace sees the items its reach holds: the
+	// handler keeps each one the grant may read (caller.reaches).
+	atList
 )
 
 // callerKey carries a request's caller from the door to its handler.
@@ -97,6 +116,25 @@ func (c *caller) origin() *event.Origin {
 		return nil
 	}
 	return &event.Origin{Kind: event.OriginAsked, Session: c.Session, Turn: c.Turn}
+}
+
+// everywhere says c reaches every workspace for act, so a list needs no
+// filter.
+func (c *caller) everywhere(act run.Action) bool {
+	every, err := c.May(act, run.Everywhere)
+	return err == nil && every
+}
+
+// reaches says c may read at w, for a list's filter: an item a reach does not
+// hold is left out. A reach that refuses with its own words (a switch that is
+// off) only leaves the item out.
+func (c *caller) reaches(w run.Where) (bool, error) {
+	ok, err := c.May(run.ActRead, w)
+	var why *refusal
+	if errors.As(err, &why) {
+		return false, nil
+	}
+	return ok, err
 }
 
 // toolRules are c's allow, ask and forbid lists, as the tool gate reads them.
@@ -143,20 +181,16 @@ type limits interface {
 	watch(a *API, w http.ResponseWriter, j queue.Job, body *OnRequest) (session string, maker queue.Maker, asked *queue.Chain, ok bool)
 	// removeOn checks the grant may remove on id. ok false has answered.
 	removeOn(a *API, w http.ResponseWriter, id string) bool
-	// stops says why the grant may not stop the turn of job j, or "".
-	stops(j queue.Job) string
-	// archives says why the grant may not archive a session, or "".
-	archives() string
+	// machines is the machine reach of the grant, for what is a machine's
+	// rather than a workspace's (its folders, its home): every machine, one
+	// machine (a Direct session's), or only the folders of its own workspace
+	// (a Copy session's).
+	machines(a *API) (machineReach, error)
 	// makes checks a workspace the body asks for. ok false has answered.
 	makes(a *API, w http.ResponseWriter, body *WorkspaceRequest) bool
 	// home is the workspace a session opens in when the body names none, or
 	// "" when the grant has none. ok false has answered.
 	home(a *API, w http.ResponseWriter) (ids.WorkspaceID, bool)
-	// folder is the folder a file tool may open resolved in, and the rules
-	// the tool is held to (nil: none). nearest says the folder is the nearest
-	// one there of resolved, a file a person allowed (files.go finds it). ok
-	// false has answered.
-	folder(a *API, w http.ResponseWriter, r *http.Request, resolved, path string) (grantFolder string, nearest bool, rules *gateway.Rules, ok bool)
 }
 
 // noLimits are the owner's own: none.
@@ -181,8 +215,7 @@ func (noLimits) watch(_ *API, w http.ResponseWriter, _ queue.Job, body *OnReques
 	return body.Session, queue.Maker{}, nil, true
 }
 func (noLimits) removeOn(*API, http.ResponseWriter, string) bool { return true }
-func (noLimits) stops(queue.Job) string                          { return "" }
-func (noLimits) archives() string                                { return "" }
+func (noLimits) machines(*API) (machineReach, error)             { return machineReach{every: true}, nil }
 func (noLimits) makes(*API, http.ResponseWriter, *WorkspaceRequest) bool {
 	return true
 }
@@ -213,23 +246,30 @@ type agentLimits struct {
 	rules settings.Policy
 }
 
-// Holds is the agent's reach. A session is in it when it is the agent's own
-// or its workspace is in the agent's authority (inAuthority). A workspace's
-// own routes reach the agent's own workspaces (ownWorkspace): its session's
-// and those its session made. Applying one takes the Agents may apply switch,
-// but in a workspace its Direct session made, where it can already write.
-// Every workspace is never in it.
+// Holds is the agent's reach (limit 1), the same for every class. A session
+// is in it when it is the agent's own or its workspace is (inAuthority). A
+// workspace is in it when it is in the agent's authority (readsWorkspace): for
+// a Copy session its own workspace and those its session made, for a Direct
+// session every workspace on its machine. Applying one also takes the Agents
+// may apply switch (limit 2), but in a workspace its Direct session made, where
+// it can already write. Every workspace is never in it.
 func (l agentLimits) Holds(act run.Action, w run.Where) (bool, error) {
 	switch {
 	case w.Every():
 		return false, nil
 	case w.Workspace != "":
-		own, err := l.a.ownWorkspace(l.g, string(w.Workspace))
-		if err != nil || own == notOwn {
+		in, err := l.a.readsWorkspace(l.g, w.Workspace)
+		if err != nil || !in {
 			return false, err
 		}
-		if act == run.ActApply && own != madeByDirect && !l.applyOn() {
-			return false, refused(turnSwitchedOff("apply a workspace's changes", "Agents may apply"))
+		if act == run.ActApply && !l.applyOn() {
+			own, err := l.a.ownWorkspace(l.g, string(w.Workspace))
+			if err != nil {
+				return false, err
+			}
+			if own != madeByDirect {
+				return false, refused(turnSwitchedOff("apply a workspace's changes", "Agents may apply"))
+			}
 		}
 		return true, nil
 	}
@@ -254,23 +294,36 @@ func (agentLimits) gated() bool                                { return true }
 func (agentLimits) appliesAnywhere(rules settings.Policy) bool { return applyOn(rules) }
 
 func (l agentLimits) ask(a *API, w http.ResponseWriter, rules settings.Policy, body *TurnRequest) (queue.Links, bool) {
-	return a.askChecks(w, l.g, rules, body)
+	return a.askChecks(w, l.g, body)
 }
 
+// deliver: a reply goes to any session in the agent's reach (limit 1).
 func (l agentLimits) deliver(w http.ResponseWriter, to string) (*queue.Delivery, bool) {
-	if to != l.g.Session {
-		writeError(w, http.StatusForbidden, "a turn token may deliver only to its own session")
+	if !l.inReach(w, to) {
 		return nil, false
 	}
-	return &queue.Delivery{Session: l.g.Session, Maker: queue.Maker{Session: l.g.Session, Turn: l.g.Turn}}, true
+	return &queue.Delivery{Session: to, Maker: queue.Maker{Session: l.g.Session, Turn: l.g.Turn}}, true
 }
 
-// watch: an agent may watch any turn it may read (mayReadTurn) but one of its
-// own session, whose reply delivered to that same session would be a
-// self-continuation. The reply goes to its own session, and the on counts as
-// asked work by its turn under the caps (queue.countAsked): its delivered turn
-// is not asked work, so without this a chain of ons over ended turns would
-// pass the caps.
+// inReach says session s is in the agent's reach, and has answered when it is
+// not.
+func (l agentLimits) inReach(w http.ResponseWriter, s string) bool {
+	ok, err := l.a.inAuthority(l.g, s)
+	switch {
+	case err != nil:
+		l.a.internal(w)
+	case !ok:
+		writeError(w, http.StatusForbidden, turnSessionRefused)
+	}
+	return err == nil && ok
+}
+
+// watch: an agent may watch any turn it may read (mayReadTurn), its own
+// session's too, and have the reply delivered to any session in its reach,
+// its own when the body names none. The on counts as asked work by its turn
+// under the caps (queue.countAsked, limit 2): its delivered turn is not asked
+// work, so without this a chain of ons over ended turns, or a session that
+// watches itself, would pass the caps.
 func (l agentLimits) watch(a *API, w http.ResponseWriter, j queue.Job, body *OnRequest) (string, queue.Maker, *queue.Chain, bool) {
 	found, ok, err := a.mayReadTurn(l.g, body.Turn, "")
 	switch {
@@ -280,15 +333,21 @@ func (l agentLimits) watch(a *API, w http.ResponseWriter, j queue.Job, body *OnR
 		writeError(w, http.StatusNotFound, noTurn)
 	case !ok:
 		writeError(w, http.StatusForbidden, turnOnRefused)
-	case turnSession(j) == l.g.Session:
-		writeError(w, http.StatusForbidden, turnOnSelfRefused)
 	default:
-		return l.g.Session, queue.Maker{Session: l.g.Session, Turn: l.g.Turn}, askedLinks(l.g).Chain, true
+		to := body.Session
+		if to == "" {
+			to = l.g.Session
+		}
+		if !l.inReach(w, to) {
+			return "", queue.Maker{}, nil, false
+		}
+		return to, queue.Maker{Session: l.g.Session, Turn: l.g.Turn}, askedLinks(l.g).Chain, true
 	}
 	return "", queue.Maker{}, nil, false
 }
 
-// removeOn: an agent removes only an on its own turn made.
+// removeOn: an agent removes an on its own turn made, or one that delivers to
+// a session in its reach.
 func (l agentLimits) removeOn(a *API, w http.ResponseWriter, id string) bool {
 	on, err := a.cfg.Queue.GetOn(queue.DefaultTeam, id)
 	switch {
@@ -299,23 +358,70 @@ func (l agentLimits) removeOn(a *API, w http.ResponseWriter, id string) bool {
 		a.internal(w)
 		return false
 	}
-	if on.Maker.Turn != l.g.Turn || on.Maker.Session != l.g.Session {
+	if on.Maker.Turn == l.g.Turn && on.Maker.Session == l.g.Session {
+		return true
+	}
+	in, err := a.inAuthority(l.g, on.Session)
+	switch {
+	case err != nil:
+		a.internal(w)
+		return false
+	case !in:
 		writeError(w, http.StatusForbidden, turnOnRemoveRefused)
 		return false
 	}
 	return true
 }
 
-// stops: asked work only. A turn the person started is the person's to stop.
-func (agentLimits) stops(j queue.Job) string {
-	if j.Links.Chain == nil || j.Links.Chain.By == "" {
-		return turnAskedRefused
+// machines: a Direct session's machine is its reach; a Copy session reaches
+// the folders of its own workspace only, never the machine's home.
+func (l agentLimits) machines(a *API) (machineReach, error) {
+	ownID, found, err := a.workspaceOf(l.g.Session)
+	if err != nil || !found {
+		return machineReach{}, err
 	}
-	return ""
+	own, found, err := a.cfg.Store.Workspace(ownID)
+	if err != nil || !found {
+		return machineReach{}, err
+	}
+	if !own.Sandbox {
+		return machineReach{machine: a.machineOf(own)}, nil
+	}
+	refs := map[string]bool{}
+	for _, f := range own.Folders {
+		if f.FolderRef != "" {
+			refs[f.FolderRef] = true
+		}
+	}
+	if own.FolderRef != "" {
+		refs[own.FolderRef] = true
+	}
+	return machineReach{machine: a.machineOf(own), folders: refs}, nil
 }
 
-func (agentLimits) archives() string {
-	return "a turn token cannot archive a session; only the person can"
+// machineReach is a grant's reach over what is a machine's: every machine;
+// one machine, whole (folders nil); or, on that machine, only the folders
+// named.
+type machineReach struct {
+	every   bool
+	machine string
+	folders map[string]bool
+}
+
+// folder says the reach holds the folder ref on machine.
+func (m machineReach) folder(machine, ref string) bool {
+	if m.every {
+		return true
+	}
+	if m.machine == "" || machine != m.machine {
+		return false
+	}
+	return m.folders == nil || m.folders[ref]
+}
+
+// home says the reach holds machine's home: the whole machine.
+func (m machineReach) home(machine string) bool {
+	return m.every || m.folders == nil && m.machine != "" && machine == m.machine
 }
 
 func (l agentLimits) makes(a *API, w http.ResponseWriter, body *WorkspaceRequest) bool {
@@ -334,27 +440,6 @@ func (l agentLimits) home(a *API, w http.ResponseWriter) (ids.WorkspaceID, bool)
 		return "", false
 	}
 	return ws, true
-}
-
-// folder is where an agent's file tool may open resolved: within a folder the
-// person granted its session before the turn started ("always for this
-// folder"), or where a person allowed this held call. A grant made during the
-// turn applies from the next (O2.4). Its tool is held to the turn's rules.
-func (l agentLimits) folder(a *API, w http.ResponseWriter, r *http.Request, resolved, path string) (string, bool, *gateway.Rules, bool) {
-	rules := &gateway.Rules{Allow: l.rules.Allow, Ask: l.rules.Ask, Forbid: l.rules.Forbid}
-	if gf, ok, err := a.cfg.Store.MatchingFolderGrant(l.g.Session, resolved, l.g.RulesAt); err == nil && ok {
-		return gf, false, rules, true
-	}
-	approved, held := r.Context().Value(toolGatedKey{}).(string)
-	switch {
-	case !held || approved == "" || approved == "*":
-		writeError(w, http.StatusForbidden, "folder access not granted for this session: "+path)
-	case approved != resolved:
-		writeError(w, http.StatusForbidden, "path changed to ungranted target while approval was pending: "+path)
-	default:
-		return resolved, true, rules, true
-	}
-	return "", false, nil, false
 }
 
 // refusal is a place a reach refuses with its own words, such as a switch
@@ -439,8 +524,10 @@ func (a *API) within(w http.ResponseWriter, r *http.Request, rt *route, id strin
 	switch rt.at {
 	case atControl:
 		where, outside = run.Everywhere, turnWriteRefused
-	case atNothing, atBody:
+	case atNothing, atBody, atList:
 		// atBody: the handler finds the place in the body and asks c.
+		// atList: the handler leaves out what c's reach does not hold.
+		where = run.Nowhere
 	case atSession:
 		where = run.InSession(id)
 	case atSessionQuery:
@@ -483,12 +570,9 @@ func (a *API) within(w http.ResponseWriter, r *http.Request, rt *route, id strin
 		if err != nil {
 			return failed(err)
 		}
-		if msg := c.limits.stops(j); msg != "" {
-			return refuse(msg)
-		}
 		// The same reach as a read, so a child in a narrower copy cannot stop
 		// work in its parent's folders.
-		where, outside = run.InSession(string(j.Spec.Session)), turnAskedRefused
+		where, outside = run.InSession(string(j.Spec.Session)), turnStopRefused
 	case atWorkspace:
 		where = run.InWorkspace(ids.WorkspaceID(id))
 	default:

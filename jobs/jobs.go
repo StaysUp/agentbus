@@ -167,6 +167,9 @@ func New(cfg Config) (*Server, error) {
 		// What is applied and what is appliable is the record's: the queue
 		// reads it there, never from its own job rows.
 		cfg.Queue.ReadAppliedWith(rec.Applied)
+		// What a request tree has cost is the record's, by its turns: the
+		// queue's cost cap reads it there when it makes a job.
+		cfg.Queue.ReadCostWith(rec.CostOfTurns)
 	}
 	s := &Server{cfg: cfg, token: sha256.Sum256([]byte(cfg.Token)), enrol: sha256.Sum256([]byte(cfg.EnrollToken)), mux: http.NewServeMux(),
 		tokenKey: sha256.Sum256([]byte("agentbus runner turn tokens\x00" + cfg.Token)), sealer: standInSealer(cfg.Token)}

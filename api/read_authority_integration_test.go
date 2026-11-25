@@ -3,11 +3,15 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // One rule decides what a turn token reads (his call, 2026-11-25): the sessions
@@ -59,8 +63,11 @@ func TestTurnTokenReadsItsAuthority(t *testing.T) {
 	if code, out := as(t, e, coord, "POST", "/api/v0/ons", `{"turn":"`+elsewhere.Turn+`"}`); code != 201 {
 		t.Errorf("direct coordinator watches another tree's turn: %d %s", code, out)
 	}
-	// Stop still takes asked work: a turn the person started is theirs.
-	refused("direct coordinator", coord, "POST", "/api/v0/turns/"+elsewhere.Turn+"/stop", "", turnAskedRefused)
+	// It stops any turn it may read, as its owner may (O2.3): a turn the
+	// person started too.
+	if code, out := as(t, e, coord, "POST", "/api/v0/turns/"+elsewhere.Turn+"/stop", ""); code == 403 {
+		t.Errorf("direct coordinator stops a turn on its machine: %d %s", code, out)
+	}
 
 	// Case 2: the coordinator makes a Copy workspace, runs a builder there,
 	// then asks a reviewer, whose session opens in the coordinator's own
@@ -102,6 +109,29 @@ func TestTurnTokenReadsItsAuthority(t *testing.T) {
 		refused("builder in a copy", btok, "POST", "/api/v0/ons", `{"turn":"`+s.Turn+`"}`, turnOnRefused)
 	}
 	refused("builder in a copy", btok, "GET", "/api/v0/turns?session="+elsewhere.Session, "", turnSessionRefused)
+	refused("builder in a copy", btok, "POST", "/api/v0/turns/"+walled.Turn+"/stop", "", turnStopRefused)
+	// Review P1, 2026-11-25: an empty place is a missing place, refused at
+	// the door for every token, never read as "no place" and allowed. The
+	// event stream with ?session= streamed the events of no session, the
+	// changes.previewed diffs of every workspace among them.
+	for who, tok := range map[string]string{"builder in a copy": btok, "direct coordinator": coord} {
+		// A stream the door lets through stays open, so the check has a
+		// deadline: an open stream fails it rather than hang the test.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		r := e.req(t, "GET", "/api/v0/events?session=", nil).WithContext(ctx)
+		r.Header.Set("Authorization", "Bearer "+tok)
+		resp, err := http.DefaultClient.Do(r)
+		if err != nil {
+			t.Errorf("%s: GET /api/v0/events?session=: %v, want 403", who, err)
+		} else {
+			out, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != 403 || !strings.Contains(string(out), turnSessionRefused) {
+				t.Errorf("%s: GET /api/v0/events?session=: %d %s, want 403", who, resp.StatusCode, out)
+			}
+		}
+		cancel()
+	}
 
 	release(dir, "builder")
 	waitEnded(t, e, builder.Turn)

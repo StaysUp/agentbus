@@ -88,7 +88,10 @@ func TestAgentMakesWorkspaceWithinAuthority(t *testing.T) {
 	if maker, err := e.store.WorkspaceMaker(ids.WorkspaceID(w.ID)); err != nil || maker == "" {
 		t.Fatalf("the workspace's maker is not recorded: %q %v", maker, err)
 	}
-	refused(dtok, "POST", "/api/v0/workspaces", `{"folder":"`+f2+`","sandbox":false}`, agentDirectRefused)
+	// A Direct workspace of its machine is in its reach too (O2.3).
+	if code, out := as(t, e, dtok, "POST", "/api/v0/workspaces", `{"folder":"`+f2+`","sandbox":false}`); code != 201 || !strings.Contains(out, `"sandbox":false`) {
+		t.Fatalf("a Direct agent's Direct workspace: %d %s", code, out)
+	}
 	refused(dtok, "POST", "/api/v0/workspaces", `{"folder":"`+f2+`","machine":"con_0000000000000000"}`, agentMachineRefused)
 	builder := start(dtok, session(dtok, w.ID), "builder")
 	if pwd := pwdOf(t, dir, "builder"); pwd == f2 {
@@ -124,7 +127,7 @@ func TestAgentMakesWorkspaceWithinAuthority(t *testing.T) {
 	} {
 		refused(btok, c[0], c[1], c[2], turnSessionRefused)
 	}
-	refused(btok, "POST", "/api/v0/turns/"+sibling.Turn+"/stop", "", turnAskedRefused)
+	refused(btok, "POST", "/api/v0/turns/"+sibling.Turn+"/stop", "", turnStopRefused)
 
 	// A Copy agent: only its own folders, by reference.
 	e.firstTurn(t, f1, "claude", "copy", true)
@@ -135,7 +138,7 @@ func TestAgentMakesWorkspaceWithinAuthority(t *testing.T) {
 	refused(ctok, "POST", "/api/v0/workspaces", `{"folder":"`+f1+`"}`, agentPathRefused)
 	refused(ctok, "POST", "/api/v0/workspaces", `{"folder_ref":"`+ref1+`","sandbox":false}`, agentDirectRefused)
 	// Another session's workspace is not its own.
-	refused(ctok, "POST", "/api/v0/sessions", `{"workspace":"`+w.ID+`"}`, "only in its own workspace or one its session made")
+	refused(ctok, "POST", "/api/v0/sessions", `{"workspace":"`+w.ID+`"}`, turnWorkspaceRefused)
 	refused(ctok, "GET", "/api/v0/workspaces/"+w.ID, "", turnSessionRefused)
 	// The same idempotency_key and body from another maker is another
 	// request, never the first maker's workspace handed back; the first maker's

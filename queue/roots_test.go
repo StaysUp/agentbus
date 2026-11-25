@@ -75,7 +75,7 @@ func TestBlobRoots(t *testing.T) {
 // makes one now.
 func storedSnapshot(t *testing.T, q *Queue, attempt string, taken SnapshotTaken) {
 	t.Helper()
-	j, _, err := q.create(DefaultTeam, "snapshot", "snapshot/"+attempt, Spec{}, Links{}, Limits{}, "", nil)
+	j, _, err := q.create(DefaultTeam, "snapshot", "snapshot/"+attempt, Spec{}, Links{}, nil, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

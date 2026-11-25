@@ -68,6 +68,9 @@ type Recorder interface {
 	// Applied is a workspace's applied state, folded from the record, its one
 	// owner: the queue reads it for apply, preview, discard and update.
 	Applied(ws ids.WorkspaceID) (applied.State, error)
+	// CostOfTurns is what the turns named have cost, for the queue's cost
+	// cap (queue.CostReader).
+	CostOfTurns(turns []string) (float64, error)
 	Finder
 }
 

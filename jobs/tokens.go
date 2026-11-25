@@ -93,12 +93,14 @@ func (s *Server) attemptJob(msg string) (queue.Job, run.Grant, bool) {
 	// Everything the grant says of the turn is read from its job and attempt,
 	// the one copy: its place in the request tree, and the rules it took when
 	// it started (turnRules).
-	g := run.Grant{Session: session, Turn: j.Turn, Root: session, Harness: j.Spec.Harness, Rules: settings.Version(a.Rules)}
+	// Its tree is the one the job recorded when it was made (jobs.tree),
+	// the same fact the caps count by.
+	g := run.Grant{Session: session, Turn: j.Turn, Root: j.Tree, Harness: j.Spec.Harness, Rules: settings.Version(a.Rules)}
 	if a.Started != nil {
 		g.RulesAt = *a.Started
 	}
 	if c := j.Links.Chain; c != nil {
-		g.Root, g.Depth = c.Root, c.Depth
+		g.Depth = c.Depth
 	}
 	return j, g, true
 }

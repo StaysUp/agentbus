@@ -790,3 +790,86 @@ func TestOnChainStopsAtCaps(t *testing.T) {
 		t.Fatalf("a main-token on: %v", err)
 	}
 }
+
+// Work a request tree causes stays in that tree, whatever session it lands in
+// (review P1, 2026-11-25). An asked turn sends a reply into an empty session,
+// once through an on it registers and once through the delivery recorded with
+// its ask. An empty session has no tree, so a delivery that took the receiving
+// session's tree got a new root at depth zero with fresh caps, and repeating it
+// passed the depth, job and cost limits. Each delivery now carries the asking
+// turn's root and depth, and what it asks for counts against that tree.
+func TestDeliveryStaysInTheAskersTree(t *testing.T) {
+	q, _ := open(t)
+	r := runner(t, q, 5)
+	parent := job(t, q, "")
+	_, pa := take(t, q, r)
+	if _, _, err := q.Start(r.ID, pa.ID, pa.Number, lease); err != nil {
+		t.Fatal(err)
+	}
+	child, err := askTurn(q, asked(parent.Session, parent.Turn, parent.Session, 1), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ca := take(t, q, r)
+	if _, _, err := q.Start(r.ID, ca.ID, ca.Number, lease); err != nil {
+		t.Fatal(err)
+	}
+	mk := Maker{Session: string(child.Session), Turn: child.Turn}
+	// The child asks for a grandchild and has its reply delivered to an empty
+	// session, in the same write.
+	grand, _, err := q.CreateTurnLinked(DefaultTeam, "", Spec{Harness: "claude", Folder: "/x", Isolate: true, Prompt: "hi"},
+		asked(string(child.Session), child.Turn, parent.Session, 2), testLimits, &Delivery{Session: "s_empty_a", Maker: mk})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ga := take(t, q, r)
+	if _, _, err := q.Start(r.ID, ga.ID, ga.Number, lease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.End(r.ID, ga.ID, ga.Number, Finish{Status: Finished, Result: json.RawMessage(`{"session":"` + grand.Session + `","state":"finished"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	// And it watches itself, delivering into another empty session.
+	if _, err := q.RegisterOnLinked(DefaultTeam, OnTurnCompleted, child.Turn, "s_empty_b", "", mk,
+		&Chain{Root: parent.Session, By: child.Turn, BySession: string(child.Session)}, testLimits); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.End(r.ID, ca.ID, ca.Number, Finish{Status: Finished, Result: json.RawMessage(`{"session":"` + child.Session + `","state":"finished"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	q.ReadReplyWith(func(session, turn string) (string, error) { return "the answer", nil })
+	to := func(session string) (DeliverTo, bool, error) { return DeliverTo{Workspace: "ws_" + session}, true, nil }
+	for range 2 {
+		if _, err := q.FireOns(DefaultTeam, jobEnded(q), to, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var delivered []Job
+	for _, s := range []string{"s_empty_a", "s_empty_b"} {
+		ds := deliveriesOf(t, q, s)
+		if len(ds) != 1 {
+			t.Fatalf("delivered %d times to %s, want once", len(ds), s)
+		}
+		if c := ds[0].Links.Chain; c == nil || c.Root != parent.Session || c.Depth != 1 || c.By != "" {
+			t.Fatalf("delivery to %s has chain %+v, want root %s depth 1 (the asking turn's tree)", s, c, parent.Session)
+		}
+		if ds[0].Tree != parent.Session {
+			t.Fatalf("delivery to %s is recorded in tree %q, want %s", s, ds[0].Tree, parent.Session)
+		}
+		delivered = append(delivered, ds[0])
+	}
+	// What a delivered turn asks for counts against the asker's tree: two asked
+	// jobs and one on so far, so a cap of 4 lets one more on and refuses the
+	// next. Its root is the one its token gets (jobs/tokens.go): its chain's.
+	lim := Limits{MaxDepth: 2, MaxPerTurn: 10, MaxPerTree: 4}
+	for i, d := range delivered {
+		_, err := q.RegisterOnLinked(DefaultTeam, OnTurnCompleted, child.Turn, string(d.Session), "",
+			Maker{Session: string(d.Session), Turn: d.Turn}, &Chain{Root: d.Links.Chain.Root, By: d.Turn, BySession: string(d.Session)}, lim)
+		switch {
+		case i == 0 && err != nil:
+			t.Fatalf("the first on by a delivered turn: %v", err)
+		case i == 1 && !isLimit(err, "in all"):
+			t.Fatalf("the second on by a delivered turn: %v, want the asker's per-tree cap", err)
+		}
+	}
+}

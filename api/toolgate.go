@@ -34,7 +34,6 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -77,21 +76,6 @@ func (a *API) gateToolCall(r *http.Request, inner *http.Request, c *caller, st s
 	if dec == gateway.Refuse {
 		a.recordToolRefused(g, st, args, rule)
 		return false, toolFail(refusedToolText(rule))
-	}
-	if isFolderServedTool(st) && a.cfg.Store != nil {
-		targetPath, _ := args["path"].(string)
-		if targetPath != "" {
-			if resolved, err := resolveFilePath(targetPath); err == nil {
-				targetPath = resolved
-			}
-			if resolved, err := resolveSymlinkPath(targetPath); err == nil {
-				targetPath = resolved
-			}
-			granted, err := a.cfg.Store.HasFolderGrant(g.Session, targetPath, g.RulesAt)
-			if err == nil && granted {
-				return true, toolResult{}
-			}
-		}
 	}
 	switch dec {
 	case gateway.Ask:
@@ -147,11 +131,6 @@ func (a *API) holdToolCall(r *http.Request, g *run.Grant, st servedTool, args ma
 	moveRules := gateway.MatchingRules(ask, st.def.Name)
 	if !contains(moveRules, st.def.Name) {
 		moveRules = append(moveRules, st.def.Name)
-	}
-	if isFolderServedTool(st) {
-		if targetFolder := folderOfTool(st, args); targetFolder != "" {
-			moveRules = []string{targetFolder}
-		}
 	}
 	a.changed(event.Event{
 		Kind: event.ApprovalRequested, Session: g.Session, Turn: g.Turn, Approval: id,
@@ -319,56 +298,6 @@ func toolFail(msg string) toolResult {
 // begins "allowed" for an allow and nothing else does.
 func approvalWasAllowed(text string) bool {
 	return len(text) >= 7 && text[:7] == "allowed"
-}
-
-func isFolderRoute(path string) bool {
-	return path == "/api/v0/files/read" || path == "/api/v0/files/list" || path == "/api/v0/files/write"
-}
-
-func isFolderToolName(name string) bool {
-	return name == "read_file" || name == "list_folder" || name == "write_file"
-}
-
-func isFolderServedTool(st servedTool) bool {
-	if isFolderRoute(st.def.Run.Path) {
-		return true
-	}
-	if st.rt != nil && isFolderRoute(st.rt.path) {
-		return true
-	}
-	return isFolderToolName(st.def.Name)
-}
-
-func (a *API) isFolderTool(name string) bool {
-	if isFolderToolName(name) {
-		return true
-	}
-	if st, ok := a.servedByName(name); ok {
-		return isFolderServedTool(st)
-	}
-	return false
-}
-
-func isFolderTool(name string) bool {
-	return isFolderToolName(name)
-}
-
-func folderOfTool(st servedTool, args map[string]any) string {
-	p, _ := args["path"].(string)
-	if p == "" {
-		return ""
-	}
-	p, err := resolveFilePath(p)
-	if err != nil {
-		return ""
-	}
-	if resolved, err := resolveSymlinkPath(p); err == nil {
-		p = resolved
-	}
-	if st.def.Name == "list_folder" || (st.rt != nil && st.rt.path == "/api/v0/files/list") || st.def.Run.Path == "/api/v0/files/list" {
-		return p
-	}
-	return filepath.Dir(p)
 }
 
 // Hold and refusal texts: what the agent reads in place of a gated call's

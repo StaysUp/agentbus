@@ -104,7 +104,7 @@ func (q *Queue) Update(team string, ws ids.WorkspaceID, machine string, by *By, 
 	// the copy's runner. The head turn and folded turns are filled at the finish,
 	// not here (a turn may run while it waits in the lane).
 	spec := Spec{Workspace: ws, Machine: first.Machine, FolderRef: first.FolderRef, Folders: first.Folders, Restore: base, Merge: merge}
-	return q.create(team, KindUpdate, "", spec, Links{ApplyBy: by}, Limits{}, "", nil)
+	return q.create(team, KindUpdate, "", spec, Links{ApplyBy: by}, nil, "", nil)
 }
 
 // folderBaseCheckpoint is the copy checkpoint whose content the person's folder

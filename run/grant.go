@@ -27,10 +27,14 @@ const (
 	ActSessionCreate
 	// ActWorkspaceCreate makes a new workspace: a folder and a sandbox mode.
 	ActWorkspaceCreate
-	// ActAdmin changes the settings, the saved agents, the runners and the
-	// keys.
+	// ActAdmin is what an agent never holds, so it can never lift its own
+	// brakes (SOUL v5 principle 8, limit 3): changing the settings (the
+	// permissions, the instructions), the saved agents (which sign-in or key a
+	// turn spends), the tools (whose names the rules match), the runners (a
+	// runner's token), the keys and the subscriptions; reading a sign-in in
+	// progress; and answering an approval.
 	ActAdmin
-	// ActCopy discards or updates a workspace's copy outside a turn.
+	// ActCopy discards, updates or closes a workspace's copy outside a turn.
 	ActCopy
 
 	// AllActions is every class: the owner's.
@@ -54,16 +58,24 @@ func (a Action) String() string {
 
 // Where is the place a request acts in: one session, one workspace, every
 // workspace (control's state as a whole, such as the list of all sessions),
-// or none (a request that holds no workspace's data, such as the saved
-// agents). The zero value is none.
+// or none (Nowhere: a request that holds no workspace's data, such as the
+// saved agents). Each is stated: the zero value, like InSession("") or
+// InWorkspace(""), is a place that is missing, and May refuses it for every
+// grant (review P1, 2026-11-25: an empty ?session= on the event stream read as
+// no place, so it was allowed and streamed every session's events).
 type Where struct {
 	Session   string
 	Workspace ids.WorkspaceID
 	every     bool
+	none      bool
 }
 
 // Everywhere is every workspace: control's state as a whole.
 var Everywhere = Where{every: true}
+
+// Nowhere is a request that holds no workspace's data: the class alone
+// decides it.
+var Nowhere = Where{none: true}
 
 // InSession is the place of a request on session s.
 func InSession(s string) Where { return Where{Session: s} }
@@ -74,8 +86,14 @@ func InWorkspace(ws ids.WorkspaceID) Where { return Where{Workspace: ws} }
 // Every says w is every workspace.
 func (w Where) Every() bool { return w.every }
 
-// None says w holds no workspace's data.
-func (w Where) None() bool { return !w.every && w.Session == "" && w.Workspace == "" }
+// None says w holds no workspace's data (Nowhere).
+func (w Where) None() bool { return w.none }
+
+// Missing says w names no place at all: the zero value, or a session or
+// workspace given as "".
+func (w Where) Missing() bool {
+	return !w.every && !w.none && w.Session == "" && w.Workspace == ""
+}
 
 // Reach is where a grant may act: which places, for which class. The owner's
 // reach is every workspace (EveryWorkspace). An agent turn's reach is the
@@ -83,7 +101,7 @@ func (w Where) None() bool { return !w.every && w.Session == "" && w.Workspace =
 // record, so the API builds it (api/authority.go).
 type Reach interface {
 	// Holds says act may happen at w: a session, a workspace, or every
-	// workspace. It is never asked about none.
+	// workspace. It is never asked about none or a missing place.
 	Holds(act Action, w Where) (bool, error)
 }
 
@@ -141,9 +159,10 @@ type Grant struct {
 }
 
 // May says g may do act at w: it holds the class, and its reach holds the
-// place. A request that acts in no workspace needs the class only.
+// place. A request that acts in no workspace (Nowhere) needs the class only.
+// A missing place is refused, whoever asks: no grant reads it as allowed.
 func (g Grant) May(act Action, w Where) (bool, error) {
-	if !g.Actions.Has(act) || g.Reach == nil {
+	if !g.Actions.Has(act) || g.Reach == nil || w.Missing() {
 		return false, nil
 	}
 	if w.None() {
@@ -153,10 +172,10 @@ func (g Grant) May(act Action, w Where) (bool, error) {
 }
 
 // TurnActions are what an agent turn's own token may do: the owner's, but
-// admin and changing a copy outside a turn (ActCopy). Admin stays the owner's
-// so an agent can never lift the limits the owner set. Apply is narrowed per
-// workspace by the Agents may apply switch (api/authority.go).
-const TurnActions = ActRead | ActRun | ActApply | ActSessionCreate | ActWorkspaceCreate
+// admin. Admin stays the owner's so an agent can never lift the limits the
+// owner set (O2.3, limit 3). Where it may use them is its reach, and apply is
+// narrowed per workspace by the Agents may apply switch (api/authority.go).
+const TurnActions = AllActions &^ ActAdmin
 
 // OwnerGrant is the owner token's grant: everything, everywhere, for owner.
 func OwnerGrant(owner string) Grant {

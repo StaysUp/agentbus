@@ -6,7 +6,7 @@ package api
 // OpenAPI description (spec.go), so a field added to a request type is in the
 // tool with no other edit. One tool per route is the default; POST
 // /api/v0/turns is two, since starting a session and continuing one are
-// told apart: a turn token starts sessions and never continues one.
+// told apart.
 //
 // The list is discovery only. A call is sent back through ServeHTTP as the
 // HTTP request it names, with the caller's own token, so the token check,

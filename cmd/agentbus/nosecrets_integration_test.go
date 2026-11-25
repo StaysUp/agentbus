@@ -284,11 +284,14 @@ func TestRunnerHoldsNoKey(t *testing.T) {
 		t.Fatalf("the job is %s while its turn waits", st.State)
 	}
 	// The running turn's token is a turn token: it never reads the
-	// subscriptions or the settings.
-	for _, path := range []string{"/api/v0/subscriptions", "/api/v0/settings/permissions"} {
-		if code, _ := getAPI(t, ns.server, envOf(t, ns.report)["AGENTBUS_TOKEN"], path); code != http.StatusForbidden {
-			t.Fatalf("a turn token on %s: %d", path, code)
-		}
+	// subscriptions. It may read the policy, its owner's brakes, but never
+	// change it (O2.3, limit 3).
+	agentTok := envOf(t, ns.report)["AGENTBUS_TOKEN"]
+	if code, _ := getAPI(t, ns.server, agentTok, "/api/v0/subscriptions"); code != http.StatusForbidden {
+		t.Fatalf("a turn token on /api/v0/subscriptions: %d", code)
+	}
+	if code, _ := getAPI(t, ns.server, agentTok, "/api/v0/settings/permissions"); code != http.StatusOK {
+		t.Fatalf("a turn token reading the policy: %d", code)
 	}
 	// The vendor got the server's key; the agent never had it. On this relayed
 	// OpenRouter turn ANTHROPIC_AUTH_TOKEN is pinned in --settings (a stand-in);

@@ -48,5 +48,5 @@ func (q *Queue) CloseWorkspace(team string, ws ids.WorkspaceID, machine string, 
 	spec := Spec{Workspace: ws, Machine: machine}
 	// No session (a close is a workspace op); its copy affinity keys by the
 	// workspace (CopyKey), so create routes it to the copy's runner.
-	return q.create(team, KindClose, "", spec, Links{ApplyBy: by}, Limits{}, "", nil)
+	return q.create(team, KindClose, "", spec, Links{ApplyBy: by}, nil, "", nil)
 }

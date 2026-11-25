@@ -55,7 +55,7 @@ type TurnRequest struct {
 	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"Optional, 1 to 128 characters of A-Z, a-z, 0-9 and . _ : -. A retry with the same key and the same fields answers 202 with the turn the key first started, existing true, and starts nothing. The same key with other fields gets 409. A request refused with 400 used no key."`
 	// Delivery records the on for the turn's reply in the SAME write as the turn
 	// (his call (a), 2026-11-19), so starting and delivering are one atomic step.
-	Delivery string `json:"delivery,omitempty" doc:"A session to deliver this turn's reply to when it completes, recorded as a turn.completed on in the same transaction that starts the turn (the same as POST /api/v0/ons, but atomic with the start, so no separate call can be lost). A turn token may name only its own session, so it sends its own; the main token may name any. Absent: no delivery is registered. The turn's idempotency_key covers the on too, so a retry adds no second."`
+	Delivery string `json:"delivery,omitempty" doc:"A session to deliver this turn's reply to when it completes, recorded as a turn.completed on in the same transaction that starts the turn (the same as POST /api/v0/ons, but atomic with the start, so no separate call can be lost). A turn token may name any session it may read; the main token may name any. Absent: no delivery is registered. The turn's idempotency_key covers the on too, so a retry adds no second."`
 }
 
 // Started is the answer to a turn's start, and to a review's.
@@ -109,8 +109,8 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, msg)
 		return
 	}
-	// A turn token asks another agent: its checks (tokens.go) verify the
-	// session is one it created in its own workspace, and name the asking turn.
+	// A turn token asks: its checks (tokens.go) verify the session is in its
+	// reach and its tree is within its cost cap, and name the asking turn.
 	who := callerOf(r)
 	links, ok := who.limits.ask(a, w, who.rules, &body)
 	if !ok {
@@ -195,9 +195,8 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 	// Atomic delivery (his call (a), 2026-11-19): if delivery is set, record the
 	// on in the SAME write as the turn, under the one authorization that starts
 	// it — the same rules POST /api/v0/ons applies, but no separate call that a
-	// stop or a lost token can drop. A turn token delivers only to its own
-	// session (the new turn is already in its tree, so the on is within its
-	// reach); the main token may name any session. The turn's key covers the on.
+	// stop or a lost token can drop. A turn token delivers to a session in its
+	// reach; the main token may name any session. The turn's key covers the on.
 	var deliver *queue.Delivery
 	if body.Delivery != "" {
 		if deliver, ok = who.limits.deliver(w, body.Delivery); !ok {
@@ -215,9 +214,6 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		return
 	case errors.As(err, &removed):
 		writeError(w, http.StatusConflict, removed.Error())
-		return
-	case errors.Is(err, queue.ErrAskedSessionUsed):
-		writeError(w, http.StatusForbidden, turnContinueRefused)
 		return
 	case errors.Is(err, queue.ErrKeyConflict):
 		writeError(w, http.StatusConflict, "idempotency_key already started a turn with other fields; send a new key for a new turn")

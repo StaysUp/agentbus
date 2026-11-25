@@ -143,9 +143,6 @@ var (
 	turnFailed = fail(http.StatusInternalServerError, "The store could not be written, or the agent's program would not start.")
 )
 
-// elsewhere is the file routes' 409: they act on control's disk only.
-var elsewhere = fail(http.StatusConflict, "The session's folder is on a machine other than control's: these routes act on control's disk only.")
-
 // streamDoc is the one description of the event stream's framing.
 const streamDoc = "Server-sent events. Every stored event after the cursor, in order, then new ones as they land. " +
 	"Without store and after it starts with new events only. Each message is `id: <store>/<seq>`, " +
@@ -163,12 +160,11 @@ var tags = []struct {
 	{name: "Sessions", doc: "A session is a conversation: its turns, in order. Read its history, search it, name it or close it. Create one in a workspace, then run its turns."},
 	{name: "Workspaces", doc: "A workspace is where turns run: it owns the folder, the machine and the sandbox mode (a copy behind a wall, or the folder as it is). Create one, then create a session in it, then run the session's turns. The folder and the mode are the workspace's; a session carries neither."},
 	{name: "Agents", doc: "Saved agents: a harness, how it reaches its model, the model and a name. A turn names one. And the harnesses, runners and folders a turn can use."},
-	{name: "Tools", doc: "The tools control serves to agents: the built-in ones and the person's own, in one stored format. List, add and remove them. The main token only."},
-	{name: "Files", doc: "Access to files and folders outside the session copy, gated on control."},
+	{name: "Tools", doc: "The tools control serves to agents: the built-in ones and the person's own, in one stored format. List, add and remove them. Only the main token adds or removes one: a tool's name is what the rules match."},
 	{name: "Reactions", doc: "An on is a standing instruction: when an event happens (for now, a turn completes), do something (for now, deliver that turn's reply to a session). Register one and remove it. A row on control; nothing waits. ask_agent registers one for itself."},
-	{name: "Settings", doc: "The policy and the instructions every turn gets, and the subscriptions control holds for runners. The main token only."},
-	{name: "Approvals", doc: "The commands the gateway held for a person (an ask entry, or a command on none of the lists under the ask default): list them and answer one, once, always or refuse. The main token only."},
-	{name: "Events", doc: "The record as a live stream, for a cockpit, an export or a program, and a program's own events. The main token only."},
+	{name: "Settings", doc: "The policy and the instructions every turn gets, and the subscriptions control holds for runners. Only the main token changes them or reads a subscription; a turn token may read the rest."},
+	{name: "Approvals", doc: "The commands the gateway held for a person (an ask entry, or a command on none of the lists under the ask default): list them and answer one, once, always or refuse. Only the main token answers one."},
+	{name: "Events", doc: "The record as a live stream, for a cockpit, an export or a program, and a program's own events."},
 	{name: "Service", doc: "Which build this is, and this description."},
 	{name: "Runners", doc: "Register a runner, and take work.", runner: true},
 	{name: "Attempts", doc: "Report an attempt: its start, lease, events, record, model calls and end.", runner: true},
@@ -188,7 +184,7 @@ var routes = slices.Concat([]route{
 		doc: "Start a turn: in a new session, or with session the next turn of that one. The reply names the turn at once; every event of the turn carries its id.\n\n" +
 			"Without session, agent, folder and prompt are required and the turn opens a new session. " +
 			"With session, agent and prompt are required and the turn continues that session, in its folder, on the agent named; " +
-			"a folder sent that differs from the session's is refused with 400. Only the main token continues a session: a turn token is refused with 403. " +
+			"a folder sent that differs from the session's is refused with 400. A turn token may continue any session it may read. " +
 			"The turn's turn.started, with the prompt, is stored before the reply.\n\n" +
 			"A session runs on one machine, the one that holds its folder, for its whole life: pick the machine (its machine id, from GET /api/v0/runners), " +
 			"then type a folder on it (folder) or name one it holds (folder_ref, from GET /api/v0/folders). Only that machine's runner takes the session's work.\n\n" +
@@ -261,14 +257,14 @@ var routes = slices.Concat([]route{
 		summary: "Register an on",
 		doc: "Register a standing instruction: when the turn you name completes, its reply is delivered to a session as that session's next turn.\n\n" +
 			"This is the one primitive every reaction is built on; for now the only event is a turn completing. " +
-			"A turn token may watch any turn it may read (the check GET /api/v0/turns/{id} uses), but not a turn of its own session, and the reply goes to its own session, so it leaves session out. " +
+			"A turn token may watch any turn it may read (the check GET /api/v0/turns/{id} uses), its own session's too, and the reply goes to a session it may read: its own when it leaves session out. " +
 			"An on a turn token registers counts as work its turn asked for, under the caps in Settings, Limits: Turns per request (max_jobs_per_turn) and Turns per request tree (max_jobs_per_tree). A cap reached is 403 and registers nothing; a retry with the key of an on already made returns it without counting again. " +
 			"The main token may watch any turn and names the session to deliver to. " +
 			"It is a row on control plus control's own check: nothing waits, and the reply arrives as a later turn. " +
 			"Dedup is by idempotency_key only: the same key for the same turn and session returns the on already registered, the same key with other fields is 409, and a request with no key always registers a new on (several ons may watch one turn). ask_agent registers one of these for itself.",
 		body: OnRequest{},
 		replies: []reply{ok(201, OnView{}, "The on."), turnRefused,
-			fail(403, "A turn token named a turn it may not read, or a turn of its own session, or its turn or request tree reached a cap on asked work (the message says which)."),
+			fail(403, "A turn token named a turn or a session it may not read, or its turn or request tree reached a cap on asked work (the message says which)."),
 			fail(404, "This service keeps no queue, or no turn has this id."),
 			fail(409, "The idempotency_key was already used to register an on for a different turn or session.")},
 		at:    atBody,
@@ -401,6 +397,7 @@ var routes = slices.Concat([]route{
 		at:      atBody,
 		serve:   plain((*API).createWorkspace)},
 	{method: "GET", path: "/api/v0/workspaces", op: "listWorkspaces", action: run.ActRead,
+		at:      atList,
 		tag:     "Workspaces",
 		summary: "List workspaces",
 		doc:     "Every workspace, newest first, each with its folder, machine, sandbox mode and apply state.",
@@ -522,6 +519,7 @@ var routes = slices.Concat([]route{
 		turns: true,
 		serve: plain((*API).createSession)},
 	{method: "GET", path: "/api/v0/sessions", op: "listSessions", action: run.ActRead,
+		at:      atList,
 		tag:     "Sessions",
 		summary: "List sessions",
 		doc: "A page of sessions, newest activity first, and the seq they were computed at.\n\n" +
@@ -643,6 +641,7 @@ var routes = slices.Concat([]route{
 		replies: []reply{{status: 204, doc: "Removed.", empty: true}, badRequest, fail(404, "No such agent."), storeFailed},
 		serve:   (*API).removeSaved},
 	{method: "GET", path: "/api/v0/tools", op: "listTools", action: run.ActRead,
+		at:      atNothing,
 		tag:     "Tools",
 		summary: "List tools",
 		doc: "The tools control serves to agents, in a stable order: the built-in ones first, then the person's own. " +
@@ -660,6 +659,7 @@ var routes = slices.Concat([]route{
 		replies: []reply{ok(201, toolreg.Tool{}, "Added."), badRequest, fail(409, "A tool of that name already exists, or there are too many."), storeFailed},
 		serve:   plain((*API).createTool)},
 	{method: "GET", path: "/api/v0/tools/{id}", op: "getTool", action: run.ActRead,
+		at:      atNothing,
 		idDoc:   "A tool's name.",
 		tag:     "Tools",
 		summary: "Get a tool",
@@ -686,12 +686,13 @@ var routes = slices.Concat([]route{
 		at:      atNothing,
 		serve:   plain((*API).listHarnesses)},
 	{method: "GET", path: "/api/v0/runners", op: "listRunners", action: run.ActRead,
+		at:      atNothing,
 		tag:     "Agents",
 		summary: "List runners",
 		doc: "The runners control knows, one per machine, for a person: each one's name, id, machine, role, labels, whether it is online, " +
 			"when it was last seen, its last probe of each harness with its version. Online means it asked for work in the last minute. " +
 			"pending lists the machines that ran agentbus login and wait for the person's approval. " +
-			"A runner that stopped stays listed, offline, until removed. A connector of a build before 0.5 is listed only while no runner reports its machine. No token is in the answer. Takes the main token only. No body is read.",
+			"A runner that stopped stays listed, offline, until removed. A connector of a build before 0.5 is listed only while no runner reports its machine. No token is in the answer. No body is read.",
 		replies: []reply{ok(200, RunnerList{}, "The runners."), badRequest, storeFailed},
 		serve:   plain((*API).listRunners)},
 	{method: "POST", path: "/api/v0/runners/pending/{id}/approve", op: "approveMachine", action: run.ActAdmin,
@@ -724,6 +725,7 @@ var routes = slices.Concat([]route{
 			fail(409, "It is online."), storeFailed},
 		serve: (*API).removeRunner},
 	{method: "GET", path: "/api/v0/folders", op: "listFolders", action: run.ActRead,
+		at:      atList,
 		tag:     "Agents",
 		summary: "List folders",
 		doc: "The folders the runners hold, each by its reference: a turn names one as folder_ref, with its machine as machine, and runs on that machine. " +
@@ -733,6 +735,7 @@ var routes = slices.Concat([]route{
 		replies: []reply{ok(200, FolderList{}, "The folders."), badRequest},
 		serve:   plain((*API).listFolders)},
 	{method: "GET", path: "/api/v0/folders/{id}/home-files", op: "folderHomeFiles", action: run.ActRead,
+		at:      atBody,
 		idDoc:   "A folder's reference (fld_ and 16 hex digits), from GET /api/v0/folders. Another shape gets 404.",
 		tag:     "Agents",
 		summary: "List the usual config files",
@@ -749,66 +752,38 @@ var routes = slices.Concat([]route{
 			fail(503, "The folder's machine is offline."), fail(504, "The folder's machine did not answer within 15 seconds."), storeFailed},
 		serve: (*API).homeFiles},
 
-	{method: "POST", path: "/api/v0/files/read", op: "readFile", action: run.ActRead,
-		tag:     "Files",
-		summary: "Read an outside file",
-		doc:     "Read a file outside the session copy, on control's machine. Only for a session whose folder is on control's own machine (agentbus up), or a call without a session; a session on another machine's runner gets 409, before any approval card.",
-		body:    ReadFileRequest{},
-		at:      atBody, toolsSwitch: true,
-		// B8 folder tools (read_file, list_folder, write_file) are hidden: not
-		// registered as tools, so no agent can call them (his call, 2026-11-23).
-		// The HTTP route stays for 0.9, when the file tools come back. An agent
-		// reaches files through its CLI's own built-in tools meanwhile.
-		replies: []reply{ok(200, ReadFileResponse{}, "The file content."), badRequest, fail(404, "File not found."), elsewhere, storeFailed},
-		serve:   plain((*API).readFile)},
-	{method: "POST", path: "/api/v0/files/list", op: "listFolder", action: run.ActRead,
-		tag:     "Files",
-		summary: "List an outside folder",
-		doc:     "List entries of a folder outside the session copy, on control's machine. Only for a session whose folder is on control's own machine (agentbus up), or a call without a session; a session on another machine's runner gets 409, before any approval card.",
-		body:    ListFolderRequest{},
-		at:      atBody, toolsSwitch: true,
-		// Hidden folder tool: not registered (see read_file above).
-		replies: []reply{ok(200, ListFolderResponse{}, "The folder entries."), badRequest, fail(404, "Folder not found."), elsewhere, storeFailed},
-		serve:   plain((*API).listFolder)},
-	{method: "POST", path: "/api/v0/files/write", op: "writeFile", action: run.ActRun,
-		tag:     "Files",
-		summary: "Write an outside file",
-		doc:     "Write a file outside the session copy, on control's machine. Only for a session whose folder is on control's own machine (agentbus up), or a call without a session; a session on another machine's runner gets 409, before any approval card.",
-		body:    WriteFileRequest{},
-		at:      atBody, toolsSwitch: true,
-		// Hidden folder tool: not registered (see read_file above).
-		replies: []reply{ok(200, WriteFileResponse{}, "File written."), badRequest, elsewhere, storeFailed},
-		serve:   plain((*API).writeFile)},
-
 	{method: "GET", path: "/api/v0/approvals", op: "listApprovals", action: run.ActRead,
+		at:      atList,
 		tag:     "Approvals",
 		summary: "List commands to approve",
 		doc: "The commands a person must answer: each one's id, its session and turn, the agent's shell tool, the commands, the entry of permissions.toml they matched (an ask entry, or one suggested from a command on no list), and when they were recorded. " +
 			"The gateway holds a call whose command matches ask, or is on none of the lists under the ask default, and records it here; the turn ends, nothing is held. GET it here, then POST your answer. " +
-			"Once answered a command leaves this list; its approval.decided event says how it ended. No token or header value is in the answer. Takes the main token only. No body is read.",
+			"Once answered a command leaves this list; its approval.decided event says how it ended. No token or header value is in the answer. No body is read.",
 		query:   []param{{name: "state", doc: `Only "pending" is kept here; decided commands are in the events. Absent or "pending" lists them.`}},
 		replies: []reply{ok(200, HeldCalls{}, "The commands to approve, oldest first."), badRequest, storeFailed},
 		serve:   plain((*API).listApprovals)},
-	{method: "POST", path: "/api/v0/approvals/{id}", op: "decideApproval", action: run.ActRun,
+	{method: "POST", path: "/api/v0/approvals/{id}", op: "decideApproval", action: run.ActAdmin,
 		idDoc:   "A command's id, from GET /api/v0/approvals. Another shape gets 404.",
 		tag:     "Approvals",
 		summary: "Answer a command",
 		doc: "Answer a held command, once, always or refuse. The gateway is holding the model's reply at the command: once releases it so the agent runs these commands in the same turn and writes nothing to the settings; always releases them and also moves each matched entry to allow in the settings, for later turns; refuse refuses the held call. No continuation turn is started for any of them (an allow runs in the turn already held). (allow is the old name for always.) " +
 			"An approval.decided event records the answer. Takes the main token only.",
 		body: Decision{},
-		replies: []reply{{status: 204, doc: "Answered.", empty: true}, badRequest, fail(404, "No command by that id, or it was answered already."),
-			fail(409, "That command is already being answered."), storeFailed},
+		replies: []reply{{status: 204, doc: "Answered.", empty: true}, badRequest, fail(404, "No command by that id."),
+			fail(409, "That command was answered already, or is being answered now."), storeFailed},
 		serve: (*API).decideApproval},
 	{method: "GET", path: "/api/v0/events", op: "streamEvents", action: run.ActRead,
+		at:      atSessionQuery,
 		tag:     "Events",
 		summary: "Stream events",
 		doc:     "A live stream of the record's events: every session's, or one session's. A cockpit follows it; an export reads it from the start.\n\n" + streamDoc,
 		query: []param{qStore, qAfter,
-			{name: "session", doc: "Only this session's events, plus the drops that name it."}},
+			{name: "session", doc: "Only this session's events, plus the drops that name it. An empty value names no session and is refused (403)."}},
 		replies: []reply{streamReply("The stream.", eventsExample), badRequest, mismatch, tooMany,
 			fail(500, "This connection cannot stream.")},
 		serve: plain((*API).stream)},
 	{method: "POST", path: "/api/v0/events", op: "writeEvent", action: run.ActRun,
+		at:      atBody,
 		tag:     "Events",
 		summary: "Write a program event",
 		doc:     "A program writes its own event, of a kind x.<program>.<name>, into a session's record.",
@@ -832,10 +807,10 @@ var routes = slices.Concat([]route{
 		turns: true,
 		serve: plain((*API).mcp)},
 	{method: "GET", path: "/api/v0/version", op: "getVersion", action: run.ActRead,
+		at:      atNothing,
 		tag:     "Service",
 		summary: "Get the version",
-		doc: "Which build of AgentBus this service is: the values agentbus version prints. " +
-			"Takes the main token only. No body is read.",
+		doc:     "Which build of AgentBus this service is: the values agentbus version prints. No body is read.",
 		replies: []reply{ok(200, Version{}, "The version."), badRequest},
 		serve:   plain((*API).version)},
 	{method: "GET", path: "/api/v0/openapi.json", op: "openapi",

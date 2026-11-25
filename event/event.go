@@ -568,7 +568,7 @@ type Event struct {
 	// person. Another agent's turn asked for it through the API, or AgentBus
 	// started it to deliver the result of work this session asked for. On a
 	// session.created or workspace.created: the agent's turn that made it.
-	Origin *Origin `json:"origin,omitempty" doc:"On a run's turn.started: who started this turn when the person did not. On session.created and workspace.created: the agent's turn that made it (kind asked). Absent for what the person started or made."`
+	Origin *Origin `json:"origin,omitempty" doc:"On a run's turn.started: who started this turn when the person did not. On session.created and workspace.created: the agent's turn that made it (kind asked). On a program's own event: the agent's turn that wrote it. Absent for what the person started or made."`
 	// Replayed, only on model.requested: how many messages of the earlier
 	// turn's history the gateway put in front of this request.
 	Replayed int `json:"replayed,omitempty" doc:"On model.requested: how many messages of the earlier turn's history the gateway put in front of this request. Absent when it put none."`

@@ -16,31 +16,55 @@ import (
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
-	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 )
 
-// askChecks lets a turn token run an asked turn only in a session its own tree
-// opened (POST /api/v0/sessions records the asker). A session another token
-// opened, the asker's own session, or no session, is refused, so a turn token
-// neither continues a conversation nor writes into another's.
-func TestAskChecksSessionTheAskerOpened(t *testing.T) {
+// reachStore is a record and a queue with seedReach's workspaces.
+//
+// seedReach is a record with two machines: a Copy workspace ws_a with the
+// asker's session s_asker, a session it opened (s_mine) and a sibling's
+// (s_sib); ws_made, which s_asker made; ws_other, the person's other copy; a
+// Direct workspace ws_d (s_d) and a copy ws_e (s_e), on machine reachM1 with
+// ws_a; and ws_f (s_f) on reachM2.
+func reachStore(t *testing.T) (*store.Store, *queue.Queue) {
+	t.Helper()
 	dir := t.TempDir()
 	st, err := store.Open(filepath.Join(dir, "events.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	t.Cleanup(func() { st.Close() })
 	q, err := queue.Open(filepath.Join(dir, "jobs.db"), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer q.Close()
-	// asker names the session that opened this one; "" is a session the person
-	// opened (no asker).
-	mk := func(session, asker string) {
-		e := event.Event{ID: "sc_" + session, Kind: event.SessionCreated,
-			Session: session, Workspace: "ws_a", Time: time.Now().UTC()}
+	t.Cleanup(func() { q.Close() })
+	seedReach(t, st)
+	return st, q
+}
+
+// The two machines of seedReach.
+const (
+	reachM1 = "con_00000000000000a1"
+	reachM2 = "con_00000000000000a2"
+)
+
+// seedReach records reachStore's workspaces and sessions in st.
+func seedReach(t *testing.T, st *store.Store) {
+	t.Helper()
+	ws := func(id, machine string, sandbox bool, maker string) {
+		sb := sandbox
+		e := event.Event{ID: "wc_" + id, Kind: event.WorkspaceCreated, Time: time.Now().UTC(), Workspace: id,
+			Folder: "/f/" + id, FolderRef: "fld_" + id, Machine: machine, Sandbox: &sb}
+		if maker != "" {
+			e.Origin = &event.Origin{Kind: event.OriginAsked, Session: maker, Turn: "t_" + maker}
+		}
+		if _, err := st.AppendOnce(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sess := func(session, workspace, asker string) {
+		e := event.Event{ID: "sc_" + session, Kind: event.SessionCreated, Session: session, Workspace: workspace, Time: time.Now().UTC()}
 		if asker != "" {
 			e.Origin = &event.Origin{Kind: event.OriginAsked, Session: asker, Turn: "t_" + asker}
 		}
@@ -48,30 +72,58 @@ func TestAskChecksSessionTheAskerOpened(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	mk("s_asker", "")            // the asker's own session, opened by the person
-	mk("s_mine", "s_asker")      // a session the asker opened
-	mk("s_other", "s_elsewhere") // a session another token opened
+	ws("ws_a", reachM1, true, "")
+	sess("s_asker", "ws_a", "")
+	sess("s_mine", "ws_a", "s_asker")
+	sess("s_sib", "ws_a", "s_elsewhere")
+	ws("ws_made", reachM1, true, "s_asker")
+	sess("s_made", "ws_made", "s_asker")
+	ws("ws_other", reachM1, true, "")
+	sess("s_other", "ws_other", "")
+	ws("ws_d", reachM1, false, "")
+	sess("s_d", "ws_d", "")
+	ws("ws_e", reachM1, true, "")
+	sess("s_e", "ws_e", "")
+	ws("ws_f", reachM2, true, "")
+	sess("s_f", "ws_f", "")
+}
+
+// O2.3, limit 1: a turn token starts a turn in any session of its reach, its
+// own and one it already ran in too. A Copy session's reach is its own
+// workspace and those its session made; a Direct session's is its machine.
+// Outside it, or with no session, it is refused.
+func TestAskChecksSessionInReach(t *testing.T) {
+	st, q := reachStore(t)
 	a := &API{cfg: Config{Queue: q, Store: st}}
-	g := run.ForTurn(run.Grant{Session: "s_asker", Root: "s_asker", Turn: "t1"}, "")
-	perm := settings.DefaultPolicy()
-	check := func(session string) int {
+	check := func(g run.Grant, session string) int {
 		w := httptest.NewRecorder()
-		if _, ok := a.askChecks(w, g, perm, &TurnRequest{Session: session, Agent: "claude", Prompt: "go"}); ok {
+		if _, ok := a.askChecks(w, g, &TurnRequest{Session: session, Agent: "claude", Prompt: "go"}); ok {
 			return 0
 		}
 		return w.Code
 	}
-	if code := check("s_mine"); code != 0 {
-		t.Fatalf("a session the asker opened was refused: %d", code)
-	}
-	if code := check("s_other"); code != http.StatusForbidden {
-		t.Fatalf("a session another token opened was not refused: %d", code)
-	}
-	if code := check("s_asker"); code != http.StatusForbidden {
-		t.Fatalf("the asker's own session was not refused: %d", code)
-	}
-	if code := check(""); code != http.StatusForbidden {
-		t.Fatalf("no session was not refused: %d", code)
+	copyAgent := run.ForTurn(run.Grant{Session: "s_asker", Root: "s_asker", Turn: "t1"}, "")
+	direct := run.ForTurn(run.Grant{Session: "s_d", Root: "s_d", Turn: "t2"}, "")
+	for _, c := range []struct {
+		name    string
+		g       run.Grant
+		session string
+		want    int
+	}{
+		{"copy: a session it opened", copyAgent, "s_mine", 0},
+		{"copy: its own session", copyAgent, "s_asker", 0},
+		{"copy: a sibling's session in its workspace", copyAgent, "s_sib", 0},
+		{"copy: a session in a workspace it made", copyAgent, "s_made", 0},
+		{"copy: the person's other copy", copyAgent, "s_other", http.StatusForbidden},
+		{"copy: another machine", copyAgent, "s_f", http.StatusForbidden},
+		{"copy: no session", copyAgent, "", http.StatusForbidden},
+		{"direct: its machine's sessions", direct, "s_e", 0},
+		{"direct: a copy on its machine", direct, "s_asker", 0},
+		{"direct: another machine", direct, "s_f", http.StatusForbidden},
+	} {
+		if got := check(c.g, c.session); got != c.want {
+			t.Errorf("%s: %d, want %d", c.name, got, c.want)
+		}
 	}
 }
 

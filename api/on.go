@@ -9,12 +9,12 @@ package api
 //
 // The caller's token decides what it may do. A turn token may register an on
 // for any turn it may read (mayReadTurn, the check GET /api/v0/turns/{id}
-// uses) but one of its own session, and its result is delivered to its own
-// session; it may remove only an on its own turn made. Such an on counts as
-// work its turn asked for, under the per-turn and per-tree caps ([limits]
-// max_jobs_per_turn, max_jobs_per_tree). The main token may
-// register an on for any turn, naming the session to deliver to, and remove
-// any on.
+// uses), its own session's too, and its result is delivered to a session it
+// may read (its own when it names none); it may remove an on its own turn made
+// or one that delivers to a session it may read. Such an on counts as work its
+// turn asked for, under the per-turn and per-tree caps ([limits]
+// max_jobs_per_turn, max_jobs_per_tree). The main token may register an on for
+// any turn, naming the session to deliver to, and remove any on.
 
 import (
 	"errors"
@@ -25,8 +25,8 @@ import (
 
 // OnRequest is the body of POST /api/v0/ons.
 type OnRequest struct {
-	Turn    string `json:"turn" doc:"The turn to watch: when it completes, its reply is delivered. A turn token may name any turn it may read with GET /api/v0/turns/{id}, but not one of its own session."`
-	Session string `json:"session,omitempty" doc:"The session the reply is delivered to as its next turn. A turn token always delivers to its own session, so it leaves this out; the main token must set it."`
+	Turn    string `json:"turn" doc:"The turn to watch: when it completes, its reply is delivered. A turn token may name any turn it may read with GET /api/v0/turns/{id}, its own session's too."`
+	Session string `json:"session,omitempty" doc:"The session the reply is delivered to as its next turn. The main token must set it. A turn token may name any session it may read, and its own is used when it leaves this out."`
 	// IdempotencyKey is the same mechanism POST /api/v0/turns takes: a key
 	// already used returns the on it made, so a retry does not add a second.
 	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"An optional idempotency key, as POST /api/v0/turns takes: the same key returns the same on, so a retry registers no second delivery."`
@@ -41,9 +41,8 @@ type OnView struct {
 }
 
 const (
-	turnOnRefused       = "a turn token may watch only a turn it may read, and the reply goes to its own session"
-	turnOnSelfRefused   = "a turn token may not watch a turn of its own session: its reply would only continue the session"
-	turnOnRemoveRefused = "a turn token may remove only an on its own turn registered"
+	turnOnRefused       = "a turn token may watch only a turn it may read"
+	turnOnRemoveRefused = "a turn token may remove only an on its own turn registered or one that delivers to a session it may read"
 )
 
 // POST /api/v0/ons
@@ -85,13 +84,12 @@ func (a *API) registerOn(w http.ResponseWriter, r *http.Request) {
 	//   - a turn token may watch any turn it may read (C2, 2026-11-25: a
 	//     coordinator was refused the review its builder asked for). The check
 	//     is the read's own (mayReadTurn), so a wider read widens this too.
-	//     Delivery stays to the token's own session. One turn it may read is
-	//     still refused: one of its own session. Its reply delivered to that
-	//     same session would be a self-continuation.
+	//     Delivery goes to a session it may read, its own by default (O2.3).
 	//     The on counts as asked work under the per-turn and per-tree caps
 	//     (2026-11-25): a delivered turn skips them (deliverResult), so a chain
 	//     of ons over ended turns, each fired at once into a new turn that
-	//     registers the next, stops at the caps here instead.
+	//     registers the next, or a session watching itself, stops at the caps
+	//     here instead.
 	//   - the main token may watch any turn and deliver to any session it names;
 	//     it can already start a turn in any session. A main-token on over a
 	//     person's turn is made safe by the self-retire checks (B13b), not by a

@@ -72,8 +72,11 @@ type ConnectInput struct {
 
 const noSubscriptions = "this service connects no subscriptions: it is not control"
 
+// The subscriptions are the owner's sign-ins, so every route of them is
+// run.ActAdmin, the reads too: a login in progress shows its link and one-time
+// code, and an agent never follows or finishes a sign-in (O2.3, limit 3).
 var subscriptionRoutes = []route{
-	{method: "GET", path: "/api/v0/subscriptions", op: "listSubscriptions", action: run.ActRead,
+	{method: "GET", path: "/api/v0/subscriptions", op: "listSubscriptions", action: run.ActAdmin,
 		tag:     "Settings",
 		summary: "List subscriptions",
 		doc: "The person's own subscriptions that control can add to the model calls of agents on their runners, which hold no sign-in: " +
@@ -92,7 +95,7 @@ var subscriptionRoutes = []route{
 		replies: []reply{ok(202, credentials.View{}, "The login, running."), badRequest, fail(404, "No login for this harness here."),
 			fail(500, "The login could not be started.")},
 		serve: (*API).connectSubscription},
-	{method: "GET", path: "/api/v0/subscriptions/{id}/connect", op: "getConnect", action: run.ActRead,
+	{method: "GET", path: "/api/v0/subscriptions/{id}/connect", op: "getConnect", action: run.ActAdmin,
 		idDoc:   "A harness, such as claude. Another shape gets 404.",
 		tag:     "Settings",
 		summary: "Follow a connect",

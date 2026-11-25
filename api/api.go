@@ -651,6 +651,22 @@ func (a *API) sessions(w http.ResponseWriter, r *http.Request) {
 		a.internal(w)
 		return
 	}
+	// A turn token lists the sessions its reach holds (O2.3). A page may hold
+	// fewer than limit; NextBefore still steps to the next.
+	if c := callerOf(r); !c.everywhere(run.ActRead) {
+		kept := snap.Sessions[:0]
+		for _, s := range snap.Sessions {
+			in, err := c.reaches(run.InSession(s.ID))
+			if err != nil {
+				a.internal(w)
+				return
+			}
+			if in {
+				kept = append(kept, s)
+			}
+		}
+		snap.Sessions = kept
+	}
 	writeJSON(w, http.StatusOK, snap)
 }
 

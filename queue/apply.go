@@ -222,7 +222,7 @@ func (q *Queue) applyLocked(team, turn string, by *By) (Job, bool, error) {
 	// The key counts the applies of turn that ended without applying, so
 	// requests at once make one job, and one after a refusal makes a new
 	// one. It holds a "/", which no key a caller sends may hold (ResultKey).
-	return q.create(team, KindApply, ApplyKey(turn, p.refused), p.spec, p.links, Limits{}, string(p.spec.Session), nil)
+	return q.create(team, KindApply, ApplyKey(turn, p.refused), p.spec, p.links, nil, string(p.spec.Session), nil)
 }
 
 // applyPlan is the apply job of a turn not applied yet: its spec (the
@@ -422,7 +422,7 @@ func (q *Queue) Preview(team string, wsID ids.WorkspaceID) (job Job, turn string
 	if err := q.dropPreviews(team, `session = ? AND cancel = 1`, string(wsID)); err != nil {
 		return Job{}, turn, applies, err
 	}
-	job, _, err = q.create(team, KindPreview, "", p.spec, p.links, Limits{}, string(wsID), nil)
+	job, _, err = q.create(team, KindPreview, "", p.spec, p.links, nil, string(wsID), nil)
 	return job, turn, applies, err
 }
 
@@ -536,7 +536,7 @@ func (q *Queue) Discard(team string, ws ids.WorkspaceID, machine string, by *By)
 	// so events it produces name only the workspace. Its copy affinity keys by
 	// the workspace (CopyKey), so create still routes it to the copy's runner.
 	// AppliesTurns (the dropped turns) is filled at the finish, not here.
-	return q.create(team, KindDiscard, "", spec, Links{ApplyBy: by}, Limits{}, "", nil)
+	return q.create(team, KindDiscard, "", spec, Links{ApplyBy: by}, nil, "", nil)
 }
 
 // DroppedTurns are the unapplied turns a discard running now drops: the

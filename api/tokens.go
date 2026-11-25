@@ -2,23 +2,22 @@ package api
 
 // Turn tokens. POST /api/v0/turns gives each turn's child its own token in
 // AGENTBUS_TOKEN, with the service's address in AGENTBUS_URL. With it the
-// agent reads its session's history and asks other agents: it starts turns
-// on any saved agent, each in a new session, asks for reviews, and reads
-// their results. It never continues a session (his call, 2026-11-12). Each result comes back to its session as a later
-// turn, delivered by an on row the ask path registers (queue/on.go, FireOns).
+// agent does what its owner may, narrowed by three things only (O2.3, his
+// call 2026-11-25; authority.go): where it works, the owner's brakes, and
+// never changing its own brakes. Each result it asks for comes back to a
+// session as a later turn, delivered by an on row the ask path registers
+// (queue/on.go, FireOns).
 //
-// What a turn token must never do: read or change the settings (the policy
-// and the instructions: every /api/v0/settings route is main-token only),
-// change or remove saved agents, see or make tokens (none is
-// ever in a reply), close sessions, write program events, or read sessions
-// outside its authority. Its own session and the person's session are never
-// continued by it: results reach them by delivery only.
+// What a turn token never does is the third: change the settings, the saved
+// agents or the tools, see or make tokens (none is ever in a reply), follow a
+// sign-in, or answer an approval (run.ActAdmin).
 //
-// One rule decides what a turn token reads (inAuthority): the sessions of the
-// workspaces in its authority. A Direct session's authority is its machine,
-// since it works in the folders with no wall and can read the same store on
-// disk. A Copy session's is its own workspace and the workspaces its session
-// made. Reads, search, ons, rename and stop of asked work all ask it.
+// One rule decides where a turn token works (inAuthority, readsWorkspace):
+// the sessions of the workspaces in its authority. A Direct session's
+// authority is its machine, since it works in the folders with no wall and can
+// read the same store on disk. A Copy session's is its own workspace and the
+// workspaces its session made. Reads, search, asks, ons, rename, archive,
+// stop, and a workspace's discard, update, close and apply all ask it.
 //
 // A request tree is the person's session (its root) and every session work
 // asked for from it, at any depth (queue.Chain). It bounds the caps on asked
@@ -35,7 +34,6 @@ package api
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 	"os"
 
@@ -53,11 +51,9 @@ const (
 		"and asks for work with POST /api/v0/turns"
 	turnSessionRefused = "a turn token reads only the sessions of the workspaces in its authority: " +
 		"its machine when its own workspace works in the folder as it is, else its own workspace and the workspaces its session made"
-	turnCallRefused     = "a turn token reads only the calls of the sessions of the workspaces in its authority"
-	turnContinueRefused = "a turn token does not continue sessions: ask_agent starts a new one, and its result comes back to your session " +
-		"as a later turn; to follow up, ask again with what the result said"
-	turnAskedRefused = "a turn token stops only asked work in the sessions it may read"
-	turnNoSession    = "a turn needs a session: create one in your workspace with POST /api/v0/sessions, then run its turn"
+	turnCallRefused = "a turn token reads only the calls of the sessions of the workspaces in its authority"
+	turnStopRefused = "a turn token stops only turns in the sessions it may read"
+	turnNoSession   = "a turn needs a session: create one in your workspace with POST /api/v0/sessions, then run its turn"
 )
 
 // The refusal when [agent_api] turns a kind of call off, naming the
@@ -109,9 +105,11 @@ func (a *API) rulesOf(g run.Grant) (settings.Policy, error) {
 	return p.Resolve(home)
 }
 
-// queueLimits are [limits] as the queue takes them.
+// queueLimits are [limits] as the queue takes them. The queue checks every
+// one of them where it makes a job (queue/budget.go), whichever path asks.
 func queueLimits(p settings.Policy) queue.Limits {
-	return queue.Limits{MaxDepth: *p.Limits.MaxDepth, MaxPerTurn: *p.Limits.MaxJobsPerTurn, MaxPerTree: *p.Limits.MaxJobsPerTree}
+	return queue.Limits{MaxDepth: *p.Limits.MaxDepth, MaxPerTurn: *p.Limits.MaxJobsPerTurn, MaxPerTree: *p.Limits.MaxJobsPerTree,
+		MaxCostUSD: *p.Limits.MaxCostUSDPerTree}
 }
 
 // mayReadTurn is the one check of whether g may read turn id: the turn's
@@ -179,32 +177,6 @@ func (a *API) queueJob(id string) (queue.Job, error) {
 	return a.cfg.Queue.Get(queue.DefaultTeam, id)
 }
 
-// overBudget says why g's request tree may ask for no more work under
-// max_cost_usd_per_tree, or "" while it may: the cost of every model call in
-// the tree's sessions so far. 0 is off. A retry whose idempotency key already
-// made a job is not new work, so it passes, and gets its job as before.
-func (a *API) overBudget(g run.Grant, perm settings.Policy, key string) (string, error) {
-	max := *perm.Limits.MaxCostUSDPerTree
-	if max <= 0 || a.cfg.Queue == nil {
-		return "", nil
-	}
-	if known, err := a.cfg.Queue.HasKey(queue.DefaultTeam, key); err != nil || known {
-		return "", err
-	}
-	sessions, err := a.cfg.Queue.TreeSessions(queue.DefaultTeam, g.Root)
-	if err != nil {
-		return "", err
-	}
-	cost, err := a.cfg.Store.CostOf(append(sessions, g.Root, g.Session))
-	if err != nil {
-		return "", err
-	}
-	if cost >= max {
-		return fmt.Sprintf("work started from one session may cost at most $%.2f in all, and it has cost $%.2f (Cost per request tree in Settings, Limits)", max, cost), nil
-	}
-	return "", nil
-}
-
 // inAuthority is the one rule for which sessions g reads: session is g's own,
 // or its workspace is in g's authority (readsWorkspace). The request tree
 // decides nothing here (his call, 2026-11-25): it held reads to one tree, so a
@@ -261,44 +233,27 @@ func (a *API) machineOf(ws store.Workspace) string {
 	return ws.Machine
 }
 
-// askChecks checks a turn token's POST /api/v0/turns body: the asked turn runs
-// in a session the asker created in its own workspace (POST /api/v0/sessions
-// {workspace: the asker's}), so the turn's session must resolve to the asker's
-// workspace. Then the asked agent shares the asker's folder and its sandbox
-// wall by construction, with no folder on the turn. It says why not, and has
-// then answered.
-func (a *API) askChecks(w http.ResponseWriter, g run.Grant, perm settings.Policy, body *TurnRequest) (queue.Links, bool) {
+// askChecks checks a turn token's POST /api/v0/turns body: the turn runs in a
+// session in the asker's reach (inAuthority, limit 1), a new one or one that
+// already ran, its own too. The caps (limit 2: depth, jobs, cost) are the
+// queue's, checked where it makes the job (queue/budget.go). The
+// turn runs in its session's workspace, so it shares that workspace's folder
+// and sandbox wall by construction. It says why not, and has then answered.
+func (a *API) askChecks(w http.ResponseWriter, g run.Grant, body *TurnRequest) (queue.Links, bool) {
 	refuse := func(msg string) (queue.Links, bool) {
 		writeError(w, http.StatusForbidden, msg)
 		return queue.Links{}, false
 	}
-	if msg, err := a.overBudget(g, perm, body.IdempotencyKey); err != nil {
-		a.internal(w)
-		return queue.Links{}, false
-	} else if msg != "" {
-		return refuse(msg)
-	}
 	if body.Session == "" {
 		return refuse(turnNoSession)
 	}
-	// A turn token may start a turn only in a session its own tree opened (POST
-	// /api/v0/sessions set the asker on it): the asker names this token's
-	// session. This is the one check, and it implies the workspace, since the
-	// session was created in the asker's workspace. It is not the asker's own
-	// session (opened by the person, no asker) nor a sibling's (a different
-	// asker), so a turn token neither continues a conversation nor writes into
-	// another's -- the boundary the shared workspace would otherwise lose.
-	asker, found, err := a.cfg.Store.SessionAsker(body.Session)
+	in, err := a.inAuthority(g, body.Session)
 	if err != nil {
 		a.internal(w)
 		return queue.Links{}, false
 	}
-	if !found || asker != g.Session {
+	if !in {
 		return refuse(turnSessionRefused)
 	}
-	// An ask is one turn: a turn token opens a session and starts its single
-	// turn. A second turn to the same asked session is refused as a continuation
-	// inside the create transaction (queue.ErrAskedSessionUsed), so two asks
-	// racing to one session cannot both pass; run() maps it to the same 403.
 	return askedLinks(g), true
 }

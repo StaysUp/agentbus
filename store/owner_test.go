@@ -50,24 +50,3 @@ func TestOwnerMadeOnceAndOnEveryEvent(t *testing.T) {
 		}
 	}
 }
-
-// A turn holds the folder grants made before it started (asOf); one made
-// later applies from the next turn.
-func TestFolderGrantAsOf(t *testing.T) {
-	st, err := Open(filepath.Join(t.TempDir(), "events.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	before := time.Now()
-	if err := st.AddFolderGrant("s1", "/data/notes"); err != nil {
-		t.Fatal(err)
-	}
-	after := time.Now()
-	if ok, err := st.HasFolderGrant("s1", "/data/notes/a.txt", before.Add(-time.Second)); err != nil || ok {
-		t.Errorf("a grant made after the turn started: %v %v", ok, err)
-	}
-	if ok, err := st.HasFolderGrant("s1", "/data/notes/a.txt", after); err != nil || !ok {
-		t.Errorf("a grant made before the turn started: %v %v", ok, err)
-	}
-}

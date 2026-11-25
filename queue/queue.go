@@ -177,7 +177,8 @@ CREATE TABLE IF NOT EXISTS jobs (
 	result       TEXT,
 	created      INTEGER NOT NULL,
 	updated      INTEGER NOT NULL,
-	ended        INTEGER
+	ended        INTEGER,
+	tree         TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS jobs_key ON jobs(team, idem_key) WHERE idem_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(team, state, created);
@@ -234,8 +235,10 @@ CREATE TABLE IF NOT EXISTS deliveries (
 -- control loop's check; nothing waits. off is set when it is removed or, for a
 -- one-shot, once it has fired. asked is set on an on a turn token registered
 -- through POST /api/v0/ons: it counts as asked work by its maker under the caps
--- (asked.go, countAsked), as a job that turn asked for does. chain held a copy
--- of the maker's tree before 0.6.x; it is no longer written or read.
+-- (asked.go, countAsked), as a job that turn asked for does. limits are the
+-- caps of the turn that made the on, as its rules said when it registered it:
+-- the turn the on delivers is held to them (budget.go). chain held a copy of
+-- the maker's tree before 0.6.x; it is no longer written or read.
 CREATE TABLE IF NOT EXISTS ons (
 	id       TEXT PRIMARY KEY,
 	team     TEXT NOT NULL REFERENCES teams(id),
@@ -247,7 +250,8 @@ CREATE TABLE IF NOT EXISTS ons (
 	off      INTEGER,
 	created  INTEGER NOT NULL,
 	chain    TEXT,
-	asked    INTEGER
+	asked    INTEGER,
+	limits   TEXT
 );
 CREATE INDEX IF NOT EXISTS ons_live ON ons(team, event, off);
 -- B15 (his call, 2026-11-19): an on is deduped by its idempotency_key ONLY, the
@@ -300,9 +304,6 @@ var (
 	// ErrSessionBusy: the session has a job that has not ended, so it cannot
 	// be closed.
 	ErrSessionBusy = errors.New("queue: the session has a job that has not ended")
-	// ErrAskedSessionUsed: a turn token started a second turn in an asked
-	// session. An ask is one turn.
-	ErrAskedSessionUsed = errors.New("queue: the asked session already has a turn")
 )
 
 // GapError: an events batch starts after the next expected sequence number.
@@ -525,7 +526,11 @@ type Job struct {
 	Reason          string          `json:"reason,omitempty"`
 	Result          json.RawMessage `json:"result,omitempty"`
 	// Session: the framework session the job's turn ran in, once known.
-	Session  string     `json:"session,omitempty"`
+	Session string `json:"session,omitempty"`
+	// Tree, for a turn job: the request tree the turn belongs to, recorded
+	// once when the job is made (treeOf) and never changed. The caps count by
+	// it (budget.go).
+	Tree     string     `json:"tree,omitempty"`
 	Created  time.Time  `json:"created"`
 	Updated  time.Time  `json:"updated"`
 	Ended    *time.Time `json:"ended,omitempty"`
@@ -686,6 +691,9 @@ type Queue struct {
 	// applied reads a workspace's applied state from the record, its one
 	// owner (ReadAppliedWith). The queue keeps no copy of it.
 	applied AppliedReader
+	// cost reads what turns cost from the record (ReadCostWith), for the
+	// cost cap (budget.go).
+	cost CostReader
 }
 
 // By says who asked for a job, by the kind of token it came with (the
@@ -974,7 +982,7 @@ func scanRunner(s scanner) (Runner, error) {
 // the same fields returns the first job and created false; other fields under
 // the same key get ErrKeyConflict.
 func (q *Queue) Create(team, kind, key string, spec Spec, links Links) (job Job, created bool, err error) {
-	return q.create(team, kind, key, spec, links, Limits{}, string(spec.Session), nil)
+	return q.create(team, kind, key, spec, links, nil, string(spec.Session), nil)
 }
 
 // HasKey reports whether a job was already made with this idempotency key.
@@ -1081,7 +1089,12 @@ func (q *Queue) TurnsAhead(team, id string) ([]Job, error) {
 // turn, the reviewed job's session for a review. A turn job that opens a new
 // session gets its id here. A session whose turn runs is never refused: Take
 // starts its turn jobs one at a time, in the order they were made.
-func (q *Queue) create(team, kind, key string, spec Spec, links Links, lim Limits, session string, deliver *Delivery) (job Job, created bool, err error) {
+//
+// Every job is made here, so the caps are checked here and nowhere else
+// (checkBudget): budget nil is work no cap binds (the person's own, and the
+// queue's own jobs), and a job of a request tree that a cap binds is checked
+// in this transaction, whichever path asked for it.
+func (q *Queue) create(team, kind, key string, spec Spec, links Links, budget *Limits, session string, deliver *Delivery) (job Job, created bool, err error) {
 	specBytes, err := spec.asked().hashBytes()
 	if err != nil {
 		return job, false, err
@@ -1145,25 +1158,12 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, lim Limit
 				}
 			}
 		}
-		if err := checkAsked(tx, team, links, lim); err != nil {
-			return err
-		}
-		// An ask is one turn: an asked session (its job links name an asker) takes
-		// only its first turn. A second turn to it is a continuation, which a turn
-		// token may not do. Checked here, in the create transaction, so two asks
-		// racing to the same asked session cannot both pass (the askChecks read
-		// outside the transaction could).
-		if kind == KindTurn && session != "" && links.Chain != nil && links.Chain.By != "" {
-			var n int
-			if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND session = ? AND kind = 'turn'`, team, session).Scan(&n); err != nil {
-				return fmt.Errorf("queue: count asked session turns: %w", err)
-			}
-			if n > 0 {
-				return ErrAskedSessionUsed
-			}
-		}
 		if kind == KindTurn && session == "" {
 			session = NewID("") // the new session its first turn opens
+		}
+		tree := treeOf(kind, links, session)
+		if err := q.checkBudget(tx, team, tree, links, budget); err != nil {
+			return err
 		}
 		var open int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND state IN ('queued','taken','running')`, team).Scan(&open); err != nil {
@@ -1180,15 +1180,18 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, lim Limit
 		}
 		sb, _ := json.Marshal(spec)
 		lb, _ := json.Marshal(stored(links))
-		var k, sess any
+		var k, sess, tr any
 		if key != "" {
 			k = key
 		}
 		if session != "" {
 			sess = session
 		}
-		if _, err := tx.Exec(`INSERT INTO jobs(id, team, kind, state, idem_key, request_hash, spec, links, turn, session, created, updated)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, job.ID, team, kind, Queued, k, hash, string(sb), string(lb), turn, sess, now, now); err != nil {
+		if tree != "" {
+			tr = tree
+		}
+		if _, err := tx.Exec(`INSERT INTO jobs(id, team, kind, state, idem_key, request_hash, spec, links, turn, session, created, updated, tree)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, job.ID, team, kind, Queued, k, hash, string(sb), string(lb), turn, sess, now, now, tr); err != nil {
 			return fmt.Errorf("queue: write job: %w", err)
 		}
 		// Atomic delivery (his call (a), 2026-11-19): record the on in the SAME
@@ -1202,9 +1205,11 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, lim Limit
 			if err != nil {
 				return fmt.Errorf("queue: delivery maker: %w", err)
 			}
-			if _, err := tx.Exec(`INSERT INTO ons(id, team, event, subject, session, maker, idem_key, created) VALUES(?,?,?,?,?,?,?,?)
+			// The reply is held to the caps the asking turn's work is held to
+			// (budget): its turn is made in the asker's tree when the on fires.
+			if _, err := tx.Exec(`INSERT INTO ons(id, team, event, subject, session, maker, idem_key, created, limits) VALUES(?,?,?,?,?,?,?,?,?)
 				ON CONFLICT(team, idem_key) WHERE idem_key != '' DO NOTHING`,
-				NewID("on_"), team, OnTurnCompleted, turn, deliver.Session, string(mk), deliveryKey(key), now); err != nil {
+				NewID("on_"), team, OnTurnCompleted, turn, deliver.Session, string(mk), deliveryKey(key), now, limitsColumn(budget)); err != nil {
 				return fmt.Errorf("queue: write delivery on: %w", err)
 			}
 		}
@@ -1223,7 +1228,7 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, lim Limit
 
 // B15: the verdict and findings columns are no longer read (review is a normal
 // turn, with no verdict in core). They stay in an older DB, unreferenced.
-const jobCols = `id, team, kind, state, COALESCE(idem_key, ''), spec, links, COALESCE(attempt, ''), COALESCE(turn, ''), cancel, reason, result, COALESCE(session, ''), created, updated, ended,
+const jobCols = `id, team, kind, state, COALESCE(idem_key, ''), spec, links, COALESCE(attempt, ''), COALESCE(turn, ''), cancel, reason, result, COALESCE(session, ''), created, updated, ended, COALESCE(tree, ''),
 	COALESCE((SELECT b.session FROM jobs b WHERE b.team = jobs.team AND b.turn = json_extract(jobs.links, '$.chain.by') LIMIT 1), '')`
 
 // stored is l as a job keeps it. Who asked is kept once, as the asking turn
@@ -1248,7 +1253,7 @@ func scanJob(s scanner) (Job, error) {
 	var ended sql.NullInt64
 	var bySession string
 	if err := s.Scan(&j.ID, &j.Team, &j.Kind, &j.State, &j.IdempotencyKey, &spec, &links, &j.Attempt, &j.Turn, &j.CancelRequested,
-		&j.Reason, &result, &j.Session, &created, &updated, &ended, &bySession); err != nil {
+		&j.Reason, &result, &j.Session, &created, &updated, &ended, &j.Tree, &bySession); err != nil {
 		return j, err
 	}
 	_ = json.Unmarshal([]byte(spec), &j.Spec)

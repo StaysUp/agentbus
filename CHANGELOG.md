@@ -13,7 +13,36 @@ All notable changes to AgentBus. Full notes for each release are on the
   A file the agent leaves beside the folders, in none of them, refuses the apply until it is moved
   or discarded.
 
+### Changed
+- **An agent may do what you may, narrowed by three things only.** Where it works (a Copy session
+  reaches its own workspace and the copies its session made; a Direct session reaches its machine),
+  your brakes (Agents may apply, the command and tool rules, the limits on depth, jobs and cost),
+  and it never changes its own brakes (settings, saved agents, tools, runners, keys, subscriptions,
+  approvals). So an agent may now discard, update or close a copy it made, list the sessions,
+  workspaces and approvals it may read, continue or stop a session in its reach, archive one, and
+  have a reply delivered to any session in its reach. A Direct agent may make a Direct workspace on
+  its machine. A program event an agent writes names it as the origin.
+
+### Removed
+- **The file routes and folder grants.** `POST /api/v0/files/read`, `/list` and `/write` are gone,
+  with the folder grants they used and the "always for this folder" answer that made one. Their
+  tools were hidden on 2026-11-23 and nothing called the routes. An agent reaches files through its
+  CLI's own tools. A record made before keeps its old grants table; nothing reads it.
+
 ### Fixed
+- **A delivered reply escaped its request tree's limits.** A turn could make an empty session and
+  have a reply delivered there. The delivered turn started a new tree at depth zero, with fresh
+  depth, job and cost limits. A reply a turn asks for now stays in that turn's tree, whatever
+  session it lands in.
+- **The limits on asked work are counted by turn, in one place.** Every turn now records the
+  request tree it belongs to when it is made, and the depth, job and cost limits are checked where
+  any turn is made: asked work, a reply delivered to the asker, a reply an on delivers. Two gaps
+  this closes: a turn watching itself kept getting new turns past the cost limit, and continuing
+  another session counted that session's whole earlier cost against the asker's tree. Cost is
+  now the tree's own turns only.
+- **An empty `?session=` on the event stream is refused.** It was read as naming no place, so an
+  agent's token got every session's events, other copies' diffs among them. Every route now
+  refuses a missing or empty place, for every token.
 - **Edits inside a repo nested in the folder were lost.** A committed repo inside a session's folder
   was recorded as a commit pointer only, so the agent's edits inside it never reached Review or
   Apply, and nothing said so. A new session's copy now records a nested repo's files as its own,

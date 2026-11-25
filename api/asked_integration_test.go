@@ -525,9 +525,10 @@ func TestAskAgentCallerStoppedStillDelivers(t *testing.T) {
 }
 
 // The public on routes honour the caller's token: a turn token registers an
-// on for any turn it may read but one of its own session, always delivering
-// to its own session, and removes only an on its own turn made; the main token names any turn and
-// the session. (B15: ons dedupe by idempotency_key only, so a keyless register
+// on for any turn it may read, its own session's too, delivering to a session
+// it may read (its own by default), and removes an on its own turn made or one
+// that delivers within its reach (O2.3); the main token names any turn and the
+// session. (B15: ons dedupe by idempotency_key only, so a keyless register
 // is a new on each time — several may watch one turn.)
 func TestOnAPIAuth(t *testing.T) {
 	e, dir := askEnv(t)
@@ -536,8 +537,11 @@ func TestOnAPIAuth(t *testing.T) {
 	other := e.firstTurn(t, gitRepo(t), "claude", "other", true)
 	child := ask(t, e, ptok, `{"agent":"claude","prompt":"child"}`)
 
-	// In-tree: the session is forced to the token's own, so one it sends is ignored.
-	code, out := as(t, e, ptok, "POST", "/api/v0/ons", `{"turn":"`+child.Turn+`","session":"s_not_mine"}`)
+	// A session outside its reach is refused; without one, its own is used.
+	if code, out := as(t, e, ptok, "POST", "/api/v0/ons", `{"turn":"`+child.Turn+`","session":"`+other.Session+`"}`); code != 403 || !strings.Contains(out, turnSessionRefused) {
+		t.Fatalf("register to a session outside its reach: %d %s, want 403", code, out)
+	}
+	code, out := as(t, e, ptok, "POST", "/api/v0/ons", `{"turn":"`+child.Turn+`"}`)
 	if code != 201 {
 		t.Fatalf("register in-tree: %d %s", code, out)
 	}
@@ -590,10 +594,16 @@ func TestOnAPIAuth(t *testing.T) {
 	if code, out := as(t, e, ptok, "POST", "/api/v0/ons", `{"turn":"`+child.Turn+`","idempotency_key":"delivery/x"}`); code != 400 {
 		t.Fatalf("on with a '/' key: %d %s, want 400", code, out)
 	}
-	// A turn may not subscribe to a turn of its own session, its own included,
-	// though it may read it: the reply would only continue that session.
-	if code, out := as(t, e, ptok, "POST", "/api/v0/ons", `{"turn":"`+p.Turn+`"}`); code != 403 || !strings.Contains(out, "its own session") {
-		t.Fatalf("self register: %d %s, want 403", code, out)
+	// A turn may watch a turn of its own session, its own included (O2.3):
+	// the on counts under the caps (TestOnCountsAsAskedWork). Removed again,
+	// so the parent's end delivers nothing here.
+	code, out = as(t, e, ptok, "POST", "/api/v0/ons", `{"turn":"`+p.Turn+`"}`)
+	var self OnView
+	if code != 201 || json.Unmarshal([]byte(out), &self) != nil {
+		t.Fatalf("self register: %d %s, want 201", code, out)
+	}
+	if code, out := as(t, e, ptok, "DELETE", "/api/v0/ons/"+self.ID, ""); code != 204 {
+		t.Fatalf("remove the self on: %d %s, want 204", code, out)
 	}
 	// The main token must name a session (an asked turn without one is 400),
 	// and a nonexistent turn is 404.
@@ -706,12 +716,10 @@ func TestAskFanOutAndDeliver(t *testing.T) {
 	}{
 		{"GET", "/api/v0/sessions/" + p.Session + "/events", "", 200},
 		{"GET", "/api/v0/sessions/" + c2.Session + "/events", "", 200},
-		// It writes to no session but one its own tree opened: not its asker's,
-		// and not its own (it did not open its own session).
-		{"POST", "/api/v0/turns", `{"agent":"claude","session":"` + p.Session + `","prompt":"x"}`, 403},
-		{"POST", "/api/v0/turns", `{"agent":"claude","session":"` + c1.Session + `","prompt":"x"}`, 403},
-		// It may not stop the person's work.
-		{"POST", "/api/v0/turns/" + p.Turn + "/stop", "", 403},
+		// It may stop any turn it may read, as its owner may (O2.3): the
+		// person's turn has ended here, so the stop passes the door and is 409.
+		// A continuation in its reach is TestAskTokenContinuesTheAskedSession.
+		{"POST", "/api/v0/turns/" + p.Turn + "/stop", "", 409},
 	} {
 		if code, out := as(t, e, ctok, tc.method, tc.path, tc.body); code != tc.want {
 			t.Errorf("child %s %s: %d %s, want %d", tc.method, tc.path, code, out, tc.want)
@@ -868,14 +876,17 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 		{"POST", "/api/v0/agents", `{"name":"x","harness":"claude","access":"subscription"}`},
 		{"PUT", "/api/v0/agents/a_x", `{"name":"x","harness":"claude","access":"subscription"}`},
 		{"DELETE", "/api/v0/agents/a_x", ""},
-		// The settings: a turn token neither reads nor writes them.
-		{"GET", "/api/v0/settings/permissions", ""},
+		// The settings: a turn token reads them but never writes them (O2.3).
 		{"PUT", "/api/v0/settings/permissions", `{"forbid":[]}`},
-		{"GET", "/api/v0/settings/instructions", ""},
 		{"PUT", "/api/v0/settings/instructions", `{"text":"x"}`},
 	} {
 		if code, out := as(t, e, tok, r[0], r[1], r[2]); code != 403 || !strings.Contains(out, "main token") {
 			t.Errorf("%s %s: %d %s, want 403", r[0], r[1], code, out)
+		}
+	}
+	for _, path := range []string{"/api/v0/settings/permissions", "/api/v0/settings/instructions"} {
+		if code, out := as(t, e, tok, "GET", path, ""); code != 200 {
+			t.Errorf("GET %s: %d %s, want 200", path, code, out)
 		}
 	}
 
@@ -917,7 +928,7 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 		{"read another tree", "GET", "/api/v0/sessions/" + other.Session + "/search?q=x", "", "in its authority"},
 		{"read another tree by query", "GET", "/api/v0/turns?session=" + other.Session, "", "in its authority"},
 		{"rename another tree's session", "PATCH", "/api/v0/sessions/" + other.Session, `{"title":"x"}`, "in its authority"},
-		{"stop another tree's turn", "POST", "/api/v0/turns/" + other.Turn + "/stop", "", "stops only asked work"},
+		{"stop another tree's turn", "POST", "/api/v0/turns/" + other.Turn + "/stop", "", "stops only turns in the sessions it may read"},
 	} {
 		if code, out := as(t, e, child, tc.method, tc.path, tc.body); code != 403 || !strings.Contains(out, tc.want) {
 			t.Errorf("%s: %d %s, want 403 with %q", tc.name, code, out, tc.want)
@@ -932,7 +943,10 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 		Session: root.Session, Turn: root.Turn, Exchange: "x-cost", Status: 200, CostUSD: &cost}); err != nil {
 		t.Fatal(err)
 	}
-	code, out = as(t, e, child, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"quick"}`)
+	// A session in its reach, so the refusal is the cost cap's: the cap is
+	// checked where the job is made, after the reach.
+	inReach := `{"session":"` + first.Session + `","agent":"claude","prompt":"quick"}`
+	code, out = as(t, e, child, "POST", "/api/v0/turns", inReach)
 	if code != 403 || !strings.Contains(out, "(Cost per request tree in Settings, Limits)") || !strings.Contains(out, "$0.30") {
 		t.Errorf("past the cost cap: %d %s", code, out)
 	}
@@ -941,7 +955,7 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 	}
 	// The cap turned off while the child runs reaches the next turn only.
 	write("[limits]\nmax_cost_usd_per_tree = 0\n")
-	if code, out := as(t, e, child, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"quick"}`); code != 403 {
+	if code, out := as(t, e, child, "POST", "/api/v0/turns", inReach); code != 403 || !strings.Contains(out, "Cost per request tree") {
 		t.Errorf("a cap turned off mid-turn reached the running turn: %d %s", code, out)
 	}
 	for _, p := range []string{"root", "child"} {

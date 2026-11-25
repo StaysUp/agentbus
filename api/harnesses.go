@@ -178,5 +178,18 @@ func (a *API) listFolders(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeJSON(w, http.StatusOK, FolderList{list})
+	// A turn token lists the folders its reach holds (O2.3): its machine's in
+	// a Direct session, its own workspace's in a Copy session.
+	reach, err := callerOf(r).limits.machines(a)
+	if err != nil {
+		a.internal(w)
+		return
+	}
+	kept := make([]queue.RunnerFolder, 0, len(list))
+	for _, f := range list {
+		if reach.folder(f.Machine, f.Ref) {
+			kept = append(kept, f)
+		}
+	}
+	writeJSON(w, http.StatusOK, FolderList{kept})
 }

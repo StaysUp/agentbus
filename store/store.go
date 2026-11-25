@@ -54,15 +54,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS events_turn_started ON events(session, turn)
 -- POST /api/v0/turns finds the turn an idempotency key started (TurnByKey).
 CREATE INDEX IF NOT EXISTS events_idempotency ON events(json_extract(data, '$.idempotency_key'))
 	WHERE kind = 'turn.started';
-CREATE TABLE IF NOT EXISTS folder_grants (
-	id      TEXT PRIMARY KEY,
-	session TEXT NOT NULL,
-	folder  TEXT NOT NULL,
-	created INTEGER NOT NULL
-);
-CREATE INDEX IF NOT EXISTS folder_grants_session ON folder_grants(session);
-CREATE INDEX IF NOT EXISTS folder_grants_folder ON folder_grants(folder);
-CREATE UNIQUE INDEX IF NOT EXISTS folder_grants_unique ON folder_grants(session, folder);
+-- folder_grants was retired with the file routes (his call, 2026-11-25). A
+-- record made before keeps its table; nothing reads or writes it.
 -- The owner of this record: one row, made once. Every event names it (owner).
 CREATE TABLE IF NOT EXISTS owner (
 	id      TEXT PRIMARY KEY,

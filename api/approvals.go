@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/settings"
 )
 
@@ -120,7 +121,21 @@ func (a *API) listApprovals(w http.ResponseWriter, r *http.Request) {
 	}
 	out := []HeldCall{}
 	harnessOf := map[string]string{} // one lookup per session, not per command
+	c := callerOf(r)
+	every := c.everywhere(run.ActRead)
 	for _, h := range replies {
+		// A turn token sees the held calls of the sessions its reach holds; it
+		// never answers one (run.ActAdmin).
+		if !every {
+			in, err := c.reaches(run.InSession(h.session))
+			if err != nil {
+				a.internal(w)
+				return
+			}
+			if !in {
+				continue
+			}
+		}
 		agent, ok := harnessOf[h.session]
 		if !ok {
 			agent, err = a.cfg.Store.SessionHarness(h.session)
@@ -150,7 +165,7 @@ func (a *API) decideApproval(w http.ResponseWriter, r *http.Request, id string) 
 	switch decision {
 	case "once":
 		once = true
-	case "always", "allow", "always for this folder":
+	case "always", "allow":
 		always, decision = true, "always"
 	case "refuse":
 	default:
@@ -180,8 +195,15 @@ func (a *API) decideApproval(w http.ResponseWriter, r *http.Request, id string) 
 		a.internal(w)
 		return
 	}
-	if !exists || decided {
-		writeError(w, http.StatusNotFound, "no command by that id, or it was answered already")
+	// Answered already is a conflict, the same as an answer still in progress
+	// (the claim above): which of the two a second answer meets is timing, and
+	// it gets one reply. 404 is only for no command by that id.
+	if !exists {
+		writeError(w, http.StatusNotFound, "no command by that id")
+		return
+	}
+	if decided {
+		writeError(w, http.StatusConflict, "that command was answered already")
 		return
 	}
 	// Do the work before recording the answer, so a failure leaves it pending
@@ -189,22 +211,9 @@ func (a *API) decideApproval(w http.ResponseWriter, r *http.Request, id string) 
 	// allow, for the turns after this one; once changes no settings.
 	_ = once
 	if always {
-		if a.isFolderTool(h.toolName) {
-			folder := ""
-			if len(h.rules) > 0 {
-				folder = h.rules[0]
-			}
-			if folder != "" && a.cfg.Store != nil {
-				if err := a.cfg.Store.AddFolderGrant(h.session, folder); err != nil {
-					writeError(w, http.StatusInternalServerError, "the folder grant could not be stored")
-					return
-				}
-			}
-		} else {
-			if err := a.allowCommands(h.rules); err != nil {
-				writeError(w, http.StatusInternalServerError, "the approval could not be written to the settings")
-				return
-			}
+		if err := a.allowCommands(h.rules); err != nil {
+			writeError(w, http.StatusInternalServerError, "the approval could not be written to the settings")
+			return
 		}
 	}
 	// H1: no continuation turn. The gateway holds the model's reply at the Ask

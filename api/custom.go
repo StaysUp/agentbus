@@ -11,6 +11,7 @@ import (
 	"regexp"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/run"
 )
 
 var customKind = regexp.MustCompile(`^x\.[a-z0-9][a-z0-9_-]{0,31}\.[a-z0-9][a-z0-9_.-]{0,63}$`)
@@ -64,6 +65,20 @@ func (a *API) writeEvent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "data must be a JSON object, at most 64 KiB")
 		return
 	}
+	// A turn token writes into the sessions its reach holds (O2.3), and the
+	// record names its turn as the event's origin, beside the owner.
+	c := callerOf(r)
+	if !c.everywhere(run.ActRun) {
+		in, err := c.May(run.ActRun, run.InSession(body.Session))
+		if err != nil {
+			a.internal(w)
+			return
+		}
+		if !in {
+			writeError(w, http.StatusForbidden, turnSessionRefused)
+			return
+		}
+	}
 	if body.Session != "default" {
 		known, err := a.cfg.Store.Known(body.Session)
 		if err != nil {
@@ -76,7 +91,7 @@ func (a *API) writeEvent(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	e := event.Event{ID: newEventID(), Kind: event.Kind(body.Kind), Time: a.cfg.Now().UTC(),
-		Session: body.Session, Turn: body.Turn, Vendor: "program", Text: body.Text, Data: body.Data}
+		Session: body.Session, Turn: body.Turn, Vendor: "program", Text: body.Text, Data: body.Data, Origin: c.origin()}
 	out, _, err := a.cfg.Store.Append(e)
 	if err != nil {
 		a.internal(w)

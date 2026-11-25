@@ -187,26 +187,27 @@ func TestTurnToken(t *testing.T) {
 		{"GET", "/api/v0/turns/" + s.Turn + "/calls/x-none/pieces/0", "", 404},
 		{"GET", "/api/v0/openapi.json", "", 200},
 		{"GET", "/docs/llms.txt", "", 200},
-		// The writes it may not make, and every read beyond its request
-		// tree. Asking other agents is tested in asked_integration_test.go.
-		{"POST", "/api/v0/turns", `{"agent":"claude","session":"` + own + `","prompt":"again"}`, 403},
+		// What it may do as its owner may (O2.3), and the limits that hold.
+		// Continuing its own session and stopping its own turn are allowed too
+		// (TestAskTokenContinuesTheAskedSession, TestTurnTokenReadsItsAuthority);
+		// they are left out here so this turn runs to its end.
 		{"POST", "/api/v0/turns", `{"agent":"claude","session":"` + other + `","prompt":"again"}`, 403},
-		{"POST", "/api/v0/events", `{"kind":"x.a.b","session":"` + own + `","text":"hi"}`, 403},
-		// Not even its own turn: it stops only work its tree asked for.
-		{"POST", "/api/v0/turns/" + s.Turn + "/stop", "", 403},
-		{"GET", "/api/v0/sessions", "", 403},
-		{"GET", "/api/v0/events?session=" + own, "", 403},
-		{"GET", "/api/v0/version", "", 403},
+		{"POST", "/api/v0/events", `{"kind":"x.a.b","session":"` + own + `","text":"hi"}`, 201},
+		{"POST", "/api/v0/events", `{"kind":"x.a.b","session":"` + other + `","text":"hi"}`, 403},
+		{"GET", "/api/v0/sessions", "", 200},
+		{"GET", "/api/v0/events?session=" + other, "", 403},
+		{"GET", "/api/v0/version", "", 200},
+		// Limit 3: it never changes its own brakes.
 		{"POST", "/api/v0/agents", `{"harness":"claude","access":"subscription","name":"x"}`, 403},
-		// Only the person closes a session.
-		{"PATCH", "/api/v0/sessions/" + own, `{"closed":true}`, 403},
-		// A turn token cannot read the list of workspaces. It makes a workspace
+		// It archives only a session it may read.
+		{"PATCH", "/api/v0/sessions/" + other, `{"archived":true}`, 403},
+		// It lists the workspaces in its authority. It makes a workspace
 		// only within its own authority (workspace_grant_integration_test.go):
 		// this one runs in a copy, so a typed path is refused. It opens a session
 		// in its own workspace (the default) or one its session made, never in
 		// another (0.6.6: it was silently its own before, which would have run a
 		// builder in the wrong place).
-		{"GET", "/api/v0/workspaces", "", 403},
+		{"GET", "/api/v0/workspaces", "", 200},
 		{"POST", "/api/v0/workspaces", `{"folder":"/tmp"}`, 403},
 		{"POST", "/api/v0/sessions", `{"workspace":"ws_0123456789abcdef"}`, 403},
 		{"POST", "/api/v0/sessions", `{}`, 201},
@@ -246,7 +247,7 @@ func TestTurnToken(t *testing.T) {
 	// The session's next turn gets a token of its own.
 	os.WriteFile(filepath.Join(dir, "release"), nil, 0o600)
 	waitRunEnded(t, e.store, own)
-	// The refused stop stopped nothing.
+	// Nothing above stopped the turn: it ended by itself.
 	if end, err := e.store.TurnEnd(own, s.Turn); err != nil || end.Stopped || end.ExitCode == nil || *end.ExitCode != 0 {
 		t.Errorf("the turn after a turn token's stop: %+v %v, want exit 0, not stopped", end, err)
 	}

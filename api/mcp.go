@@ -13,7 +13,6 @@ package api
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -317,31 +316,9 @@ func (a *API) callTool(r *http.Request, st servedTool, args map[string]any, call
 	// decode -> authorize -> decide -> hold if Ask -> run (toolgate.go). A
 	// malformed or unauthorized call is refused at once, never held; an allowed
 	// call falls through to run below. Built-in and custom tools pass here alike.
-	approvedTarget := "*"
-	if isFolderServedTool(st) {
-		// Before the gate, so a call the route would refuse shows no card: the
-		// route's own answer, so the agent reads the same either way.
-		if rec := (&toolRecorder{header: http.Header{}}); a.refuseFilesElsewhere(rec, g) {
-			return fail(toolStatus(rec.code) + ": " + strings.TrimSpace(rec.body.String()))
-		}
-		p, _ := args["path"].(string)
-		if p == "" {
-			return fail("path argument is required")
-		}
-		res, err := resolveFilePath(p)
-		if err != nil {
-			return fail("invalid path: " + err.Error())
-		}
-		res, err = resolveSymlinkPath(res)
-		if err != nil {
-			return fail("invalid path: " + err.Error())
-		}
-		approvedTarget = res
-	}
 	if ok, result := a.gateToolCall(r, inner, g, st, args); !ok {
 		return result
 	}
-	inner = inner.WithContext(context.WithValue(inner.Context(), toolGatedKey{}, approvedTarget))
 	rec := &toolRecorder{header: http.Header{}}
 	// Through the http.Handler, as any request: the route table serves this
 	// handler, so a direct call would make the table refer to itself.

@@ -75,10 +75,6 @@ func (a *API) updateSession(w http.ResponseWriter, r *http.Request, id string) {
 		yes := true
 		archive = &yes
 	}
-	if msg := callerOf(r).limits.archives(); archive != nil && msg != "" {
-		writeError(w, http.StatusForbidden, msg)
-		return
-	}
 	var t string
 	if body.Title != nil {
 		var msg string

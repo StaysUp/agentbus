@@ -238,30 +238,30 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
 
 // Refusals of a workspace an agent's turn token may not make. Fixed wording.
 const (
-	agentDirectRefused  = "an agent may make only a workspace with sandbox true, a copy behind a wall; a workspace that works in a folder as it is is the person's to make"
+	agentDirectRefused  = "an agent working in a copy may make only a workspace with sandbox true, a copy behind a wall: a workspace that works in a folder as it is would reach past its own"
 	agentNoWorkspace    = "a turn token has no workspace, so it has no folders to make a workspace of"
 	agentMachineRefused = "an agent makes workspaces only on its own workspace's machine"
 	agentPathRefused    = "an agent working in a copy names folders by folder_ref, from GET /api/v0/workspaces/{id} of its own workspace, never by path"
 	agentFolderRefused  = "an agent working in a copy may make a workspace only of folders its own workspace holds"
+	// turnWorkspaceRefused: a session opened in a workspace outside the reach.
+	turnWorkspaceRefused = "a turn token opens sessions only in the workspaces in its authority: its machine's when its own workspace works in the folder as it is, else its own workspace and the workspaces its session made"
 )
 
 // workspaceAuthority checks that the workspace body asks for is within g's
-// authority, and has written the 403 when it is not. The rule (his call,
-// 2026-11-24): the new workspace is a copy (sandbox true), never direct; it is on
-// the machine of g's own workspace (machine is set to it when absent); and each
-// folder is one g can already reach. A direct workspace has no wall, so a copy of
-// any folder of its machine adds no power. A copy reaches only its own folders,
-// so it names them by folder_ref and each must be one of its own; a path is
+// reach (limit 1 of O2.3), and has written the 403 when it is not. The new
+// workspace is on the machine of g's own workspace (machine is set to it when
+// absent), and each folder is one g can already reach. A Direct workspace has
+// no wall and reaches its whole machine, so any workspace of that machine,
+// Direct too, adds no power (O2.3 replaced "copies only", his call
+// 2026-11-24). A copy reaches only its own folders: what it makes is a copy, it
+// names folders by folder_ref and each must be one of its own; a path is
 // refused before any runner reads it, so a walled agent cannot probe the
-// machine's disk. A workspace made this way is a copy whose folders are within
+// machine's disk. A workspace a copy makes is a copy whose folders are within
 // its maker's, so a chain of makes never reaches further than the first.
 func (a *API) workspaceAuthority(w http.ResponseWriter, g run.Grant, body *WorkspaceRequest) bool {
 	refuse := func(msg string) bool {
 		writeError(w, http.StatusForbidden, msg)
 		return false
-	}
-	if body.Sandbox != nil && !*body.Sandbox {
-		return refuse(agentDirectRefused)
 	}
 	ownID, found, err := a.workspaceOf(g.Session)
 	if err != nil {
@@ -289,6 +289,9 @@ func (a *API) workspaceAuthority(w http.ResponseWriter, g run.Grant, body *Works
 	}
 	if !own.Sandbox {
 		return true
+	}
+	if body.Sandbox != nil && !*body.Sandbox {
+		return refuse(agentDirectRefused)
 	}
 	holds := map[string]bool{}
 	for _, f := range own.Folders {
@@ -372,7 +375,7 @@ func (a *API) discardStateOf(j queue.Job) (DiscardState, int) {
 
 // discardWorkspace serves POST /api/v0/workspaces/{id}/discard: drop the
 // workspace's unapplied changes, resetting its sandbox copy to the last applied
-// state (or base). The person's folder is never touched. Main token only.
+// state (or base). The person's folder is never touched.
 func (a *API) discardWorkspace(w http.ResponseWriter, r *http.Request, id string) {
 	if a.cfg.Queue == nil {
 		writeError(w, http.StatusNotFound, noTurns)
@@ -470,7 +473,7 @@ func (a *API) closeStateOf(j queue.Job) (CloseState, int) {
 // workspace's copy to reclaim its disk. The person's folder is never touched,
 // and the next turn rebuilds a fresh copy. Changes not applied when the close
 // runs are dropped with the copy; the cockpit signals unapplied work so the
-// person can apply or discard on the session first. Main token only.
+// person can apply or discard on the session first.
 func (a *API) closeWorkspace(w http.ResponseWriter, r *http.Request, id string) {
 	if a.cfg.Queue == nil {
 		writeError(w, http.StatusNotFound, noTurns)
@@ -586,7 +589,7 @@ func (a *API) updateStateOf(j queue.Job) (UpdateState, int) {
 // updateWorkspace serves POST /api/v0/workspaces/{id}/update: merge the person's
 // folder as it is now into the sandbox copy, so the session's work sits on top
 // and the next apply writes only that work. The person's folder is never
-// touched. Main token only.
+// touched.
 func (a *API) updateWorkspace(w http.ResponseWriter, r *http.Request, id string) {
 	if a.cfg.Queue == nil {
 		writeError(w, http.StatusNotFound, noTurns)
@@ -780,15 +783,30 @@ func decodeOptional[T any](w http.ResponseWriter, r *http.Request, refusal strin
 
 // WorkspacesPage is a page of workspaces.
 type WorkspacesPage struct {
-	Workspaces []store.Workspace `json:"workspaces" doc:"Every workspace, newest first."`
+	Workspaces []store.Workspace `json:"workspaces" doc:"Every workspace, newest first: for a turn token, those in its authority."`
 }
 
-// listWorkspaces serves GET /api/v0/workspaces.
-func (a *API) listWorkspaces(w http.ResponseWriter, _ *http.Request) {
+// listWorkspaces serves GET /api/v0/workspaces: the workspaces the caller's
+// reach holds, every one for the owner.
+func (a *API) listWorkspaces(w http.ResponseWriter, r *http.Request) {
 	ws, err := a.cfg.Store.Workspaces()
 	if err != nil {
 		a.internal(w)
 		return
+	}
+	if c := callerOf(r); !c.everywhere(run.ActRead) {
+		kept := make([]store.Workspace, 0, len(ws))
+		for _, x := range ws {
+			in, err := c.reaches(run.InWorkspace(ids.WorkspaceID(x.ID)))
+			if err != nil {
+				a.internal(w)
+				return
+			}
+			if in {
+				kept = append(kept, x)
+			}
+		}
+		ws = kept
 	}
 	writeJSON(w, http.StatusOK, WorkspacesPage{Workspaces: ws})
 }
@@ -827,7 +845,7 @@ func (a *API) createSession(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if !may {
-			writeError(w, http.StatusForbidden, "a turn token opens sessions only in its own workspace or one its session made")
+			writeError(w, http.StatusForbidden, turnWorkspaceRefused)
 			return
 		}
 	}
