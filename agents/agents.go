@@ -51,7 +51,7 @@ type Agent struct {
 	ID      string    `json:"id" doc:"The agent's id. A turn names it in agent."`
 	Name    string    `json:"name" doc:"What the person calls it, such as Claude Code · sonnet. Unique, ignoring case."`
 	Harness string    `json:"harness" doc:"The program that runs the agent's loop: claude or codex."`
-	Access  string    `json:"access" doc:"How the harness reaches its model: subscription (the person's, connected on control), openrouter (the key set in Settings, or else one from an environment variable) or api (the vendor's API key set in Settings)."`
+	Access  string    `json:"access" doc:"How the harness reaches its model: subscription (the person's, connected on control), openrouter (the key set in Settings, or else one from an environment variable) api (the vendor's API key set in Settings), or a provider: xai (the xAI API key set in Settings)."`
 	Model   string    `json:"model,omitempty" doc:"The model, passed as --model. Absent: the harness's own default. Required for openrouter, in OpenRouter's naming, such as deepseek/deepseek-v4.1-flash."`
 	KeyEnv  string    `json:"key_env,omitempty" doc:"For openrouter: the name of the environment variable, where control runs, that holds the key while no key is set in Settings. Never the key."`
 	Created time.Time `json:"created"`
@@ -62,8 +62,8 @@ type Agent struct {
 type Fields struct {
 	Name    string `json:"name" doc:"1 to 100 bytes, unique among the agents, ignoring case."`
 	Harness string `json:"harness" doc:"claude, codex, agy, opencode or gemini. A harness that is only planned is refused as not available yet."`
-	Access  string `json:"access" doc:"subscription, openrouter or api. api uses the vendor's API key set in Settings (claude: Anthropic, codex: OpenAI, agy and gemini: Gemini). opencode runs on openrouter only, gemini on api only."`
-	Model   string `json:"model,omitempty" doc:"Optional for subscription and api. Required for openrouter."`
+	Access  string `json:"access" doc:"subscription, openrouter or api. api uses the vendor's API key set in Settings (claude: Anthropic, codex: OpenAI, agy and gemini: Gemini). opencode runs on openrouter, or on a provider: xai (the xAI API key set in Settings). gemini runs on api only."`
+	Model   string `json:"model,omitempty" doc:"Optional for subscription and api. Required for openrouter and a provider."`
 	KeyEnv  string `json:"key_env,omitempty" doc:"For openrouter only: a variable name ending in _KEY, such as OPENROUTER_API_KEY, which is used when this is absent."`
 }
 
@@ -99,12 +99,15 @@ func Check(f *Fields) string {
 		return "harness " + f.Harness + " is not available yet (planned: " + harness.PlannedList() + "); use " + harness.NameList()
 	case !known(f.Harness):
 		return "harness must be " + harness.NameList()
-	case f.Access != Subscription && f.Access != OpenRouter && f.Access != API:
-		return "access must be subscription, openrouter or api"
+	case f.Access != Subscription && f.Access != OpenRouter && f.Access != API && !isProvider(f.Access):
+		return "access must be subscription, openrouter, api or a provider (xai)"
 	case !offers(f.Harness, f.Access):
 		return "harness " + f.Harness + " cannot use access " + f.Access + " yet"
 	case f.Model != "" && !run.ModelShape.MatchString(f.Model):
 		return "model must match " + run.ModelShape.String()
+	}
+	if isProvider(f.Access) && f.Model == "" {
+		return "an agent on a provider needs a model, such as " + firstModel(f.Access)
 	}
 	if f.Access == OpenRouter {
 		if f.Model == "" {
@@ -513,4 +516,18 @@ func randomHex(n int) string {
 		panic(err)
 	}
 	return hex.EncodeToString(b)
+}
+
+// isProvider says access names a provider (harness.Providers).
+func isProvider(access string) bool {
+	_, ok := harness.ProviderOf(access)
+	return ok
+}
+
+// firstModel is the first model the provider named access offers.
+func firstModel(access string) string {
+	if p, ok := harness.ProviderOf(access); ok && len(p.Models) > 0 {
+		return p.Models[0]
+	}
+	return "its model's id"
 }

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -57,7 +58,7 @@ func TestUpdateCleanMerge(t *testing.T) {
 	// change line3 of a.txt, add theirs.txt, and an ignored dependency folder.
 	fixture(t, src, map[string]string{"a.txt": "line1\nline2\nTHEIRS\n", "theirs.txt": "yours\n", "node_modules/pkg.txt": "junk\n"})
 
-	res, err := b.UpdateFrom(s, "", src)
+	res, err := b.UpdateFrom(s, "", at(src), false)
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -109,7 +110,7 @@ func TestUpdateConflictChangesNothing(t *testing.T) {
 	// The folder changed the same line a different way.
 	fixture(t, src, map[string]string{"a.txt": "THEIRS\nline2\n"})
 
-	res, err := b.UpdateFrom(s, "", src)
+	res, err := b.UpdateFrom(s, "", at(src), false)
 	if err != nil {
 		t.Fatalf("update: %v", err)
 	}
@@ -159,7 +160,7 @@ func TestUpdateKeepsFolderOnlyModeChange(t *testing.T) {
 	if err := os.Chmod(filepath.Join(src, "keep.txt"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	res, err := b.UpdateFrom(s, "", src)
+	res, err := b.UpdateFrom(s, "", at(src), false)
 	if err != nil || !res.Clean {
 		t.Fatalf("update: clean=%v conflicts=%v err=%v", res.Clean, res.Conflicts, err)
 	}
@@ -187,7 +188,7 @@ func TestUpdatePriorHeadUndoesTheMerge(t *testing.T) {
 		t.Fatal(err)
 	}
 	fixture(t, src, map[string]string{"theirs.txt": "yours\n"})
-	res, err := b.UpdateFrom(s, "", src)
+	res, err := b.UpdateFrom(s, "", at(src), false)
 	if err != nil || !res.Clean {
 		t.Fatalf("update: clean=%v err=%v", res.Clean, err)
 	}
@@ -227,11 +228,178 @@ func TestUpdateKeepsNewlyIgnoredTrackedFile(t *testing.T) {
 	}
 	// The person adds keep.txt to .gitignore in the folder but keeps the file.
 	fixture(t, src, map[string]string{".gitignore": "keep.txt\n"})
-	res, err := b.UpdateFrom(s, "", src)
+	res, err := b.UpdateFrom(s, "", at(src), false)
 	if err != nil || !res.Clean {
 		t.Fatalf("update: clean=%v conflicts=%v err=%v", res.Clean, res.Conflicts, err)
 	}
 	if read(t, filepath.Join(s.Dir, "keep.txt")) != "k\n" {
 		t.Fatalf("keep.txt was removed from the copy by a new ignore rule, want it kept")
 	}
+}
+
+// A merge (UpdateFrom with merge) that meets a conflict does not stop: the
+// conflicting file enters the copy with both sides between conflict markers,
+// the clean parts merge as usual, the folder baseline moves to theirs, and the
+// file is named Unresolved. The folder is only read.
+func TestUpdateMergeLeavesMarkers(t *testing.T) {
+	src := t.TempDir()
+	fixture(t, src, map[string]string{"a.txt": "line1\nline2\n", "b.txt": "b1\nb2\nb3\n"})
+	b, s := open(t, Copy, src)
+	if !s.hasShadow() {
+		t.Skip("the copy made no shadow repo on this disk")
+	}
+	fixture(t, s.Dir, map[string]string{"a.txt": "OURS\nline2\n", "b.txt": "OURS\nb2\nb3\n", "ours.txt": "mine\n"})
+	if _, err := b.Checkpoint(s, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	fixture(t, src, map[string]string{"a.txt": "THEIRS\nline2\n", "b.txt": "b1\nb2\nTHEIRS\n", "theirs.txt": "yours\n"})
+	before := read(t, filepath.Join(src, "a.txt"))
+
+	res, err := b.UpdateFrom(s, "", at(src), true)
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if !res.Clean || res.Theirs == "" || res.Merged == "" {
+		t.Fatalf("a merge did not record the merge: %+v", res)
+	}
+	if !reflect.DeepEqual(res.Unresolved, []string{"a.txt"}) || len(res.Conflicts) != 0 {
+		t.Fatalf("unresolved = %v conflicts = %v, want unresolved [a.txt]", res.Unresolved, res.Conflicts)
+	}
+	got := read(t, filepath.Join(s.Dir, "a.txt"))
+	for _, want := range []string{"<<<<<<< ", "OURS\n", "=======\n", "THEIRS\n", ">>>>>>> "} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("a.txt holds no %q: %q", want, got)
+		}
+	}
+	if got := read(t, filepath.Join(s.Dir, "b.txt")); got != "OURS\nb2\nTHEIRS\n" {
+		t.Fatalf("b.txt did not merge cleanly beside the conflict: %q", got)
+	}
+	if read(t, filepath.Join(s.Dir, "theirs.txt")) != "yours\n" || read(t, filepath.Join(s.Dir, "ours.txt")) != "mine\n" {
+		t.Fatal("a side's new file was lost by the merge")
+	}
+	// The baseline moved: theirs..merged is the session's work (with a.txt as
+	// the agent must still resolve it), not the folder's changes.
+	if got, want := diffNames(t, b, s, res.Theirs, res.Merged), []string{"a.txt", "b.txt", "ours.txt"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("theirs..merged = %v, want %v", got, want)
+	}
+	if read(t, filepath.Join(src, "a.txt")) != before {
+		t.Fatal("the merge wrote the person's folder")
+	}
+	if _, err := os.Stat(filepath.Join(src, ".git")); !os.IsNotExist(err) {
+		t.Fatal("the merge made a .git in the person's folder")
+	}
+}
+
+// A merge with no conflict behaves exactly as an update: nothing unresolved.
+func TestUpdateMergeCleanIsUpdate(t *testing.T) {
+	src := t.TempDir()
+	fixture(t, src, map[string]string{"a.txt": "line1\nline2\nline3\n"})
+	b, s := open(t, Copy, src)
+	if !s.hasShadow() {
+		t.Skip("the copy made no shadow repo on this disk")
+	}
+	fixture(t, s.Dir, map[string]string{"a.txt": "OURS\nline2\nline3\n"})
+	if _, err := b.Checkpoint(s, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	fixture(t, src, map[string]string{"a.txt": "line1\nline2\nTHEIRS\n"})
+	res, err := b.UpdateFrom(s, "", at(src), true)
+	if err != nil {
+		t.Fatalf("merge: %v", err)
+	}
+	if !res.Clean || len(res.Unresolved) != 0 {
+		t.Fatalf("a clean merge = %+v, want clean with nothing unresolved", res)
+	}
+	if got := read(t, filepath.Join(s.Dir, "a.txt")); got != "OURS\nline2\nTHEIRS\n" {
+		t.Fatalf("a.txt = %q", got)
+	}
+}
+
+// A conflict markers cannot show -- a binary file, or one side removed the
+// file the other changed -- makes a merge change nothing and names it, so no
+// side's change is lost silently (review finding, 2026-11-24).
+func TestUpdateMergeRefusesUnmergeable(t *testing.T) {
+	for name, folderSide := range map[string]func(t *testing.T, src string){
+		"binary": func(t *testing.T, src string) {
+			if err := os.WriteFile(filepath.Join(src, "a.bin"), []byte("THEIRS\x00\x01"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"removed": func(t *testing.T, src string) {
+			if err := os.Remove(filepath.Join(src, "a.bin")); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			src := t.TempDir()
+			fixture(t, src, map[string]string{"a.bin": "base\x00\x01", "t.txt": "x\n"})
+			b, s := open(t, Copy, src)
+			if !s.hasShadow() {
+				t.Skip("the copy made no shadow repo on this disk")
+			}
+			fixture(t, s.Dir, map[string]string{"a.bin": "OURS\x00\x01"})
+			if _, err := b.Checkpoint(s, "t1"); err != nil {
+				t.Fatal(err)
+			}
+			folderSide(t, src)
+			res, err := b.UpdateFrom(s, "", at(src), true)
+			if err != nil {
+				t.Fatalf("merge: %v", err)
+			}
+			if res.Clean || !reflect.DeepEqual(res.Unmergeable, []string{"a.bin"}) || res.Merged != "" {
+				t.Fatalf("merge = %+v, want nothing changed with a.bin unmergeable", res)
+			}
+			if got := read(t, filepath.Join(s.Dir, "a.bin")); got != "OURS\x00\x01" {
+				t.Fatalf("the copy changed: %q", got)
+			}
+		})
+	}
+}
+
+// A text conflict in a file whose mode the person changed keeps the person's
+// mode in the merge: the side that changed it from the base wins (review
+// finding, 2026-11-24: the session's mode always won and Apply undid chmod +x).
+func TestUpdateMergeKeepsFolderMode(t *testing.T) {
+	src := t.TempDir()
+	fixture(t, src, map[string]string{"run.sh": "echo one\n"})
+	b, s := open(t, Copy, src)
+	if !s.hasShadow() {
+		t.Skip("the copy made no shadow repo on this disk")
+	}
+	fixture(t, s.Dir, map[string]string{"run.sh": "echo OURS\n"})
+	if _, err := b.Checkpoint(s, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	fixture(t, src, map[string]string{"run.sh": "echo THEIRS\n"})
+	if err := os.Chmod(filepath.Join(src, "run.sh"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	res, err := b.UpdateFrom(s, "", at(src), true)
+	if err != nil || !res.Clean || len(res.Unresolved) != 1 {
+		t.Fatalf("merge: %+v %v", res, err)
+	}
+	fi, err := os.Stat(filepath.Join(s.Dir, "run.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Mode().Perm()&0o111 == 0 {
+		t.Fatalf("run.sh mode = %v, want the folder's executable bit kept", fi.Mode().Perm())
+	}
+	if diff := diffNames(t, b, s, res.Theirs, res.Merged); !reflect.DeepEqual(diff, []string{"run.sh"}) {
+		t.Fatalf("theirs..merged = %v", diff)
+	}
+}
+
+func TestRegularMode(t *testing.T) {
+	for m, want := range map[string]bool{"100644": true, "100755": true, "": false, "120000": false, "160000": false} {
+		if regularMode(m) != want {
+			t.Errorf("regularMode(%q) = %v, want %v", m, !want, want)
+		}
+	}
+}
+
+// at finds every folder reference at path: a copy of one folder.
+func at(path string) FolderPaths {
+	return func(string) (string, bool) { return path, true }
 }

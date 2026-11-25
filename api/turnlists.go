@@ -26,7 +26,7 @@ type TurnChangesPage struct {
 	DiffsCut       bool         `json:"diffs_cut,omitempty" doc:"Some text files have no diff: all the turn's diffs together passed 1 MiB and the later ones were left out, each marked diff_left_out."`
 	ContentLeftOut bool         `json:"content_left_out,omitempty" doc:"Some small text files have no content, to keep the result small."`
 	Error          string       `json:"error,omitempty" doc:"The workspace could not be read at the end of the turn."`
-	Changes        []FileChange `json:"changes" doc:"A page of the turn's changed files, sorted by path."`
+	Changes        []FileChange `json:"changes" doc:"A page of the turn's changed files, sorted by path. Empty for a turn in a direct workspace (sandbox false): its changes go straight into the person's folder and are not recorded."`
 	NextBefore     *int64       `json:"next_before" doc:"The before for the next, earlier page, or null when the page reaches the first file."`
 }
 

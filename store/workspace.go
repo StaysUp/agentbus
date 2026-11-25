@@ -2,6 +2,7 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -23,12 +24,17 @@ import (
 // same way, since a migrated workspace's id is its session's id). head_turn is
 // the workspace's latest turn that recorded a changeset.
 type Workspace struct {
-	ID        string    `json:"workspace"`
-	Folder    string    `json:"folder,omitempty" doc:"The person's folder the workspace runs in."`
-	FolderRef string    `json:"folder_ref,omitempty" doc:"The folder's reference (fld_ and 16 hex digits), as its connector issued it."`
-	Machine   string    `json:"machine,omitempty" doc:"The connector that owns the folder (con_ and 16 hex digits). Absent for this service's own machine."`
-	Sandbox   bool      `json:"sandbox" doc:"The mode: true for a copy behind a wall, false for the person's real folder."`
-	Created   time.Time `json:"created" doc:"When the workspace was created."`
+	ID        string `json:"workspace"`
+	Folder    string `json:"folder,omitempty" doc:"The person's folder the workspace runs in."`
+	FolderRef string `json:"folder_ref,omitempty" doc:"The folder's reference (fld_ and 16 hex digits), as its connector issued it."`
+	Machine   string `json:"machine,omitempty" doc:"The connector that owns the folder (con_ and 16 hex digits). Absent for this service's own machine."`
+	Sandbox   bool   `json:"sandbox" doc:"The mode: true for a copy behind a wall, false for the person's real folder."`
+	// Folders are the workspace's folders, in order: one for a workspace made
+	// with one folder (also in Folder and FolderRef, as before), several for
+	// one made with several (Folder and FolderRef then empty, so nothing reads
+	// one folder as the whole workspace). Empty for a workspace with no folder.
+	Folders []WorkspaceFolder `json:"folders,omitempty" doc:"The workspace's folders, in order. One for a workspace with one folder, which folder and folder_ref also name; several for a workspace made with several, whose folder and folder_ref are then absent."`
+	Created time.Time         `json:"created" doc:"When the workspace was created."`
 	// HeadTurn is the workspace's latest turn that recorded a changeset
 	// (turn.changed), the turn an apply would go up to. Empty when no turn of
 	// the workspace has ended with a changeset.
@@ -41,6 +47,13 @@ type Workspace struct {
 	// was a discard, so its unapplied changes were dropped and no apply has run
 	// since. Nil otherwise.
 	DiscardedAt *time.Time `json:"discarded_at,omitempty" doc:"When the workspace's latest action was a discard. Absent when its latest action was an apply, or it has neither."`
+}
+
+// WorkspaceFolder is one folder of a workspace.
+type WorkspaceFolder struct {
+	Name      ids.FolderName `json:"name" doc:"The folder's name: where it sits under the copy's top when the workspace has several folders, and the group its files are listed under. Empty for a workspace with one folder, whose copy is the folder itself."`
+	Folder    string         `json:"folder,omitempty" doc:"The folder's path, kept only on the machine that owns it."`
+	FolderRef string         `json:"folder_ref,omitempty" doc:"The folder's reference (fld_ and 16 hex digits)."`
 }
 
 // ErrNoWorkspace means no workspace.created names the id.
@@ -56,13 +69,14 @@ const resolvedWorkspace = `COALESCE(NULLIF(json_extract(ts.data, '$.workspace'),
 // workspace.created names it.
 func (s *Store) Workspace(id ids.WorkspaceID) (w Workspace, found bool, err error) {
 	w.ID = string(id)
-	var folder, ref, machine sql.NullString
+	var folder, ref, machine, list sql.NullString
 	var sandbox int
 	var created int64
 	err = s.r.QueryRow(`SELECT json_extract(data, '$.folder'), json_extract(data, '$.folder_ref'),
-			json_extract(data, '$.machine'), COALESCE(json_extract(data, '$.sandbox'), 0), time
+			json_extract(data, '$.machine'), COALESCE(json_extract(data, '$.sandbox'), 0), time,
+			json_extract(data, '$.folders')
 		FROM events WHERE kind = ? AND json_extract(data, '$.workspace') = ? ORDER BY seq LIMIT 1`,
-		string(event.WorkspaceCreated), string(id)).Scan(&folder, &ref, &machine, &sandbox, &created)
+		string(event.WorkspaceCreated), string(id)).Scan(&folder, &ref, &machine, &sandbox, &created, &list)
 	if errors.Is(err, sql.ErrNoRows) {
 		return w, false, nil
 	}
@@ -70,6 +84,19 @@ func (s *Store) Workspace(id ids.WorkspaceID) (w Workspace, found bool, err erro
 		return w, false, fmt.Errorf("store: read workspace: %w", err)
 	}
 	w.Folder, w.FolderRef, w.Machine = folder.String, ref.String, machine.String
+	if list.String != "" {
+		var fs []event.WorkspaceFolderEntry
+		if err := json.Unmarshal([]byte(list.String), &fs); err != nil {
+			return w, false, fmt.Errorf("store: read workspace folders: %w", err)
+		}
+		for _, f := range fs {
+			w.Folders = append(w.Folders, WorkspaceFolder{Name: ids.FolderName(f.Name), Folder: f.Folder, FolderRef: f.FolderRef})
+		}
+	} else if w.Folder != "" || w.FolderRef != "" {
+		// A workspace with one folder, and every one made before several: a list
+		// of one, with no name, as its copy is the folder itself.
+		w.Folders = []WorkspaceFolder{{Folder: w.Folder, FolderRef: w.FolderRef}}
+	}
 	w.Sandbox = sandbox != 0
 	w.Created = time.Unix(0, created).UTC()
 	if err := s.workspaceState(&w); err != nil {
@@ -79,53 +106,13 @@ func (s *Store) Workspace(id ids.WorkspaceID) (w Workspace, found bool, err erro
 }
 
 // workspaceState fills HeadTurn, AppliedTurn and DiscardedAt from the
-// workspace's turn.changed and its apply/discard history.
+// workspace's applied state (Applied), the one fold the queue reads too.
 func (s *Store) workspaceState(w *Workspace) error {
-	// The workspace's latest turn that recorded a changeset, other than one a
-	// discard dropped (its changes are gone from the copy, so an apply would not
-	// go up to it).
-	var head sql.NullString
-	err := s.r.QueryRow(`SELECT tc.turn FROM events tc
-		JOIN events ts ON ts.kind = 'turn.started' AND ts.session = tc.session AND ts.turn = tc.turn
-		WHERE tc.kind = 'turn.changed' AND `+resolvedWorkspace+` = ?1
-		AND tc.turn NOT IN (
-			SELECT je.value FROM events d, json_each(COALESCE(json_extract(d.data, '$.discarded.dropped_turns'), '[]')) je
-			WHERE d.kind = 'workspace.discarded' AND json_extract(d.data, '$.workspace') = ?1)
-		ORDER BY tc.seq DESC LIMIT 1`, w.ID).Scan(&head)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("store: read workspace head: %w", err)
+	a, err := s.Applied(ids.WorkspaceID(w.ID))
+	if err != nil {
+		return err
 	}
-	w.HeadTurn = head.String
-
-	// The turn the latest successful apply went up to. A pre-workspace
-	// turn.applied of a migrated workspace is keyed by its session, which is
-	// the workspace's id.
-	var applied sql.NullString
-	err = s.r.QueryRow(`SELECT json_extract(data, '$.turn') FROM events
-		WHERE ((kind = 'workspace.applied' AND json_extract(data, '$.workspace') = ?1)
-			OR (kind = 'turn.applied' AND session = ?1))
-			AND json_extract(data, '$.applied.result') = 'applied'
-		ORDER BY seq DESC LIMIT 1`, w.ID).Scan(&applied)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("store: read workspace applied: %w", err)
-	}
-	w.AppliedTurn = applied.String
-
-	// When the latest apply-or-discard action was a discard, the workspace's
-	// unapplied changes were dropped and no apply has run since.
-	var kind sql.NullString
-	var when int64
-	err = s.r.QueryRow(`SELECT kind, time FROM events
-		WHERE (kind IN ('workspace.applied', 'workspace.discarded') AND json_extract(data, '$.workspace') = ?1)
-			OR (kind = 'turn.applied' AND session = ?1)
-		ORDER BY seq DESC LIMIT 1`, w.ID).Scan(&kind, &when)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("store: read workspace action: %w", err)
-	}
-	if kind.String == string(event.WorkspaceDiscarded) {
-		t := time.Unix(0, when).UTC()
-		w.DiscardedAt = &t
-	}
+	w.HeadTurn, w.AppliedTurn, w.DiscardedAt = a.Head(), a.AppliedTurn, a.DiscardedAt
 	return nil
 }
 
@@ -251,6 +238,22 @@ func (s *Store) SessionAsker(session string) (asker string, found bool, err erro
 		return "", false, fmt.Errorf("store: read session asker: %w", err)
 	}
 	return a.String, a.String != "", nil
+}
+
+// WorkspaceMaker is the session whose turn made workspace id (its
+// workspace.created origin), or "" for a workspace the person made, or none.
+func (s *Store) WorkspaceMaker(id ids.WorkspaceID) (session string, err error) {
+	var m sql.NullString
+	err = s.r.QueryRow(`SELECT json_extract(data, '$.origin.session') FROM events
+		WHERE kind = ? AND json_extract(data, '$.workspace') = ? ORDER BY seq LIMIT 1`,
+		string(event.WorkspaceCreated), string(id)).Scan(&m)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: read workspace maker: %w", err)
+	}
+	return m.String, nil
 }
 
 // WorkspaceSeed is one existing session's facts for the workspace migration,

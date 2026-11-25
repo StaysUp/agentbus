@@ -72,11 +72,17 @@ func UpdatedOf(j queue.Job, res queue.Result) *event.Updated {
 	if res.Update.Clean() {
 		u.Result = "updated"
 		u.From, u.To = res.Update.From, res.Update.To
-		u.FoldedTurns = j.Links.AppliesTurns
+		u.FoldedTurns, u.HeadTurn = j.Links.AppliesTurns, j.Links.AppliesTurn
+		u.TheirsCheckpoint, u.MergedCheckpoint = res.Update.TheirsCheckpoint, res.Update.MergedCheckpoint
+		if len(res.Update.Unresolved) > 0 {
+			u.Result = "merged"
+			u.Unresolved = res.Update.Unresolved
+		}
 	} else {
 		u.Result = "conflict"
 		if res.Update != nil {
 			u.Conflicts = res.Update.Conflicts
+			u.Unmergeable = res.Update.Unmergeable
 		}
 	}
 	return u
@@ -115,19 +121,27 @@ func keepOutcomes(rec Recorder, j queue.Job, f queue.Finish) (kept json.RawMessa
 	moved := false
 	switch j.Kind {
 	case queue.KindTurn:
-		if res.Changes == nil || j.Turn == "" {
+		// A turn with a changeset is recorded even when its finish carried no
+		// file list: the record alone says which turns are appliable.
+		if (res.Changes == nil && res.Changeset == "") || res.ChangesEvent != "" || j.Turn == "" {
 			break
 		}
 		session := assignedSession(j)
 		if session == "" {
 			break
 		}
+		// The changeset and checkpoint go on the event, apart from the file
+		// list: a finish without a list records no list, not an empty one.
+		cp := res.Checkpoint
+		if res.Changes != nil {
+			cp = res.Changes.To
+		}
 		e := event.Event{ID: changedID(j), Kind: event.TurnChanged, Time: now, Session: session, Turn: j.Turn,
-			Changes: EventChanges(res.Changes)}
+			Changes: EventChanges(res.Changes), Changeset: res.Changeset, Checkpoint: cp}
 		if _, err := rec.AppendOnce(e); err != nil {
 			return nil, err
 		}
-		res.Checkpoint = res.Changes.To
+		res.Checkpoint = cp
 		res.Changes, res.ChangesEvent, moved = nil, e.ID, true
 	case queue.KindApply:
 		if res.AppliedEvent != "" || j.Links.AppliesTurn == "" {
@@ -205,7 +219,7 @@ func endedAt(j queue.Job) time.Time {
 // AppliedOf is what apply job j did, from its state and its result res as
 // the runner sent it: the turn.applied it is recorded as.
 func AppliedOf(j queue.Job, res queue.Result) *event.Applied {
-	a := &event.Applied{Turns: j.Links.AppliesTurns}
+	a := &event.Applied{Turns: j.Links.AppliesTurns, From: j.Spec.ApplyFrom, To: j.Spec.ApplyTo}
 	if b := j.Links.ApplyBy; b != nil {
 		a.By = &event.By{Kind: b.Kind, Session: b.Session, Turn: b.Turn}
 	}
@@ -215,7 +229,7 @@ func AppliedOf(j queue.Job, res queue.Result) *event.Applied {
 	if res.Apply != nil {
 		a.Files, a.Count, a.Truncated, a.Pruned = res.Apply.Files, res.Apply.Count, res.Apply.Truncated, res.Apply.Pruned
 		for _, c := range res.Apply.Conflicts {
-			a.Conflicts = append(a.Conflicts, event.RefusedFile{Path: c.Path, Why: c.Why})
+			a.Conflicts = append(a.Conflicts, event.RefusedFile{Path: c.Path, Why: c.Why, Markers: c.Markers})
 		}
 	}
 	switch {
@@ -241,7 +255,8 @@ func AppliedOf(j queue.Job, res queue.Result) *event.Applied {
 }
 
 // Changes is what turn job j changed: from the record by its pointer, or
-// from its result for a job from before 0.5. nil when it holds none.
+// from its result for a job from before 0.5. nil when it holds none, as for a
+// turn whose finish sent its changeset but no file list.
 func Changes(rd Finder, j queue.Job) (*event.TurnChanges, error) {
 	res, err := queue.ReadResult(j.Result)
 	if err != nil || res.ChangesEvent == "" {
@@ -251,7 +266,7 @@ func Changes(rd Finder, j queue.Job) (*event.TurnChanges, error) {
 	switch {
 	case err != nil:
 		return nil, err
-	case !ok || e.Kind != event.TurnChanged || e.Changes == nil:
+	case !ok || e.Kind != event.TurnChanged:
 		return nil, ErrOutcomeMissing
 	}
 	return e.Changes, nil

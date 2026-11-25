@@ -357,10 +357,11 @@ func TestTurnDiffAndApply(t *testing.T) {
 }
 
 // A turn's changes have one source, its checkpoints, whatever the isolation
-// setting: the job's result holds what the backend's Diff of the turn's
+// backend: the job's result holds what the backend's Diff of the turn's
 // start and end checkpoints answers, and GET /turns/{id}/diff shows the
-// same. In a folder used as it is (none), the folder changes in place and
-// the changes cannot be applied. (The copy's private git repo tracks the copy
+// same. In a folder used as it is (a direct workspace), the folder changes in
+// place and AgentBus keeps no record of the changes (0.6.5): no turn.changed,
+// and the diff's files are null. (The copy's private git repo tracks the copy
 // for Discard; it never touches the person's folder -- TestDiscardLeavesThePersonsRepo.)
 func TestTurnChangesAreTheCheckpointDiff(t *testing.T) {
 	for _, setting := range []string{settings.IsolationCopy, settings.IsolationOverlay, settings.IsolationNone} {
@@ -397,6 +398,16 @@ func TestTurnChangesAreTheCheckpointDiff(t *testing.T) {
 			}{{first, 3}, {second, 1}} {
 				j := outcomeKept(t, e, c.st.Turn)
 				res, err := queue.ReadResult(j.Result)
+				if setting == settings.IsolationNone {
+					changed, cerr := jobs.Changes(e.store, j)
+					if err != nil || res.Changes != nil || res.ChangesEvent != "" || res.Changeset != "" || changed != nil || cerr != nil {
+						t.Fatalf("turn %s in the folder recorded changes: %s, %+v, %v", c.st.Turn, j.Result, changed, cerr)
+					}
+					if d := diffOf(t, e, c.st.Turn); d.Files != nil {
+						t.Fatalf("turn %s in the folder: the diff has files %+v", c.st.Turn, d.Files)
+					}
+					continue
+				}
 				if err != nil || res.Changes != nil || res.ChangesEvent == "" {
 					t.Fatalf("turn %s: the job keeps more than a pointer: %s", c.st.Turn, j.Result)
 				}
@@ -406,12 +417,6 @@ func TestTurnChangesAreTheCheckpointDiff(t *testing.T) {
 				}
 				if d := diffOf(t, e, c.st.Turn); !reflect.DeepEqual(d.Files, filesSummary(changed)) {
 					t.Fatalf("turn %s: the diff %+v is not the record's %+v", c.st.Turn, d.Files, changed)
-				}
-				if setting == settings.IsolationNone {
-					if changed.From != "" || changed.To != "" || res.Folder != "" {
-						t.Fatalf("turn %s in the folder: %+v in %s", c.st.Turn, changed, res.Folder)
-					}
-					continue
 				}
 				// The copy is at <workdir>/<id>, named by its space: the
 				// backend diffs the turn's checkpoints again, and answers what

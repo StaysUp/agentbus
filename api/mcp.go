@@ -366,8 +366,7 @@ func (a *API) callTool(r *http.Request, st servedTool, args map[string]any, call
 
 // turnsOnly says r was sent with the turns token.
 func (a *API) turnsOnly(r *http.Request) bool {
-	who, _, ok := a.authorized(r)
-	return ok && who == byTurns
+	return tokenGrant(r).TurnsOnly
 }
 
 // toolRecorder keeps the answer of one tool call's request.

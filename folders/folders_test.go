@@ -179,3 +179,34 @@ func TestOpenFoldsOldConnectorKey(t *testing.T) {
 		t.Fatalf("reopen from machine key: %q %v", r2.Machine(), err)
 	}
 }
+
+// Expand reads a leading ~ or ~/ as the given home and leaves every other
+// path for CheckShape; with no home, a ~ path is refused in plain words.
+func TestExpand(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "u")
+	cases := []struct {
+		path, home, want string
+		err              error
+	}{
+		{"~", home, home, nil},
+		{"~/", home, home, nil},
+		{"~/Sites/project", home, filepath.Join(home, "Sites", "project"), nil},
+		{"/abs/path", home, "/abs/path", nil},
+		{"relative", home, "relative", nil},
+		{"~root/x", home, "~root/x", nil},
+		{"~/x", "", "", ErrNoHome},
+	}
+	for _, c := range cases {
+		got, err := Expand(c.path, c.home)
+		if got != c.want || err != c.err {
+			t.Errorf("Expand(%q, %q) = %q, %v; want %q, %v", c.path, c.home, got, err, c.want, c.err)
+		}
+	}
+	// What Expand leaves relative, CheckShape refuses.
+	for _, p := range []string{"relative", "~root/x"} {
+		got, _ := Expand(p, home)
+		if CheckShape(got) != ErrNotAbsolute {
+			t.Errorf("CheckShape(Expand(%q)) accepted a relative path", p)
+		}
+	}
+}

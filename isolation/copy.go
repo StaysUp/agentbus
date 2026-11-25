@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/staysup/agentbus/workspace"
@@ -32,6 +33,9 @@ type copyBackend struct{}
 func (copyBackend) Name() string { return Copy }
 
 func (copyBackend) Open(r Request) (*Space, error) {
+	if len(r.Places) > 0 {
+		return openPlaces(r)
+	}
 	if r.Snapshot != nil {
 		return openSnapshot(r)
 	}
@@ -41,7 +45,12 @@ func (copyBackend) Open(r Request) (*Space, error) {
 	if s, err := Load(r.Workdir, filepath.Join(r.Workdir, r.ID)); err == nil {
 		return s, nil // a retry of the job that made it
 	}
-	source := filepath.Clean(r.Folder)
+	// The folder's real path: a folder named through a link is copied, never
+	// the link, which would point the copy into the person's folder.
+	source, err := filepath.EvalSymlinks(filepath.Clean(r.Folder))
+	if err != nil {
+		return nil, &Refusal{"the folder is not an existing directory"}
+	}
 	s := &Space{ID: r.ID, Backend: Copy, Ref: r.Ref, Root: filepath.Join(r.Workdir, r.ID), Workdir: r.Workdir}
 	s.Dir = s.Root
 	// What a failed attempt left, with no record, is this job's own.
@@ -71,6 +80,7 @@ func (copyBackend) Open(r Request) (*Space, error) {
 	// first commit (Base) is the copy as opened. space.json is written only
 	// after the repo and its Base are made, so a copy with a record always has
 	// a working shadow, and a crash before then is remade from scratch.
+	s.Nested = true
 	if err := s.initShadow(ctxOf(r)); err != nil {
 		copyBackend{}.Close(s)
 		return nil, err
@@ -88,6 +98,113 @@ func (b copyBackend) Checkpoint(s *Space, name string) (Checkpoint, error) {
 		return s.gitCheckpoint(context.Background(), name)
 	}
 	return checkpoint(s, name, b)
+}
+
+// openPlaces makes the copy of a workspace with several folders: each folder
+// cloned under the copy's top in a folder of its name, as one folder's copy is
+// made.
+func openPlaces(r Request) (*Space, error) {
+	if err := checkOpen(r); err != nil {
+		return nil, err
+	}
+	names := map[string]bool{}
+	for i, p := range r.Places {
+		if err := checkFolder(Request{ID: r.ID, Workdir: r.Workdir, Folder: p.Folder}); err != nil {
+			return nil, err
+		}
+		if p.Name == "" || p.Name == "." || p.Name == ".." || strings.ContainsAny(p.Name, "/\\\x00") ||
+			strings.EqualFold(p.Name, ".git") || names[strings.ToLower(p.Name)] {
+			return nil, &Refusal{"each folder of the workspace needs its own name"}
+		}
+		names[strings.ToLower(p.Name)] = true
+		for _, q := range r.Places[:i] {
+			if inside(p.Folder, q.Folder) || inside(q.Folder, p.Folder) {
+				return nil, &Refusal{refusedNested}
+			}
+		}
+	}
+	if s, err := Load(r.Workdir, filepath.Join(r.Workdir, r.ID)); err == nil {
+		return s, nil // a retry of the job that made it
+	}
+	s := &Space{ID: r.ID, Backend: Copy, Root: filepath.Join(r.Workdir, r.ID), Workdir: r.Workdir}
+	s.Dir = s.Root
+	// What a failed attempt left, with no record, is this job's own.
+	if err := removeAll(s.Root); err != nil {
+		return nil, err
+	}
+	if err := removeState(s); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(s.Root, 0o700); err != nil {
+		return nil, err
+	}
+	s.start = time.Now()
+	for _, p := range r.Places {
+		dst := filepath.Join(s.Root, p.Name)
+		// The folder's real path, never a link into the person's folder.
+		src, err := filepath.EvalSymlinks(filepath.Clean(p.Folder))
+		if err != nil {
+			removeAll(s.Root)
+			return nil, &Refusal{"a folder of the workspace is not an existing directory"}
+		}
+		method, err := cloneTree(src, dst)
+		if err != nil {
+			removeAll(s.Root)
+			return nil, err
+		}
+		// The slowest way any folder was copied names the copy's method.
+		if s.Method == "" || method == MethodCopy || (method == MethodReflink && s.Method == MethodClone) {
+			s.Method = method
+		}
+		if fi, err := os.Lstat(filepath.Join(dst, ".git")); err == nil && !fi.IsDir() {
+			if err := os.Remove(filepath.Join(dst, ".git")); err != nil {
+				removeAll(s.Root)
+				return nil, err
+			}
+		}
+		s.Folders = append(s.Folders, SpaceFolder{Name: p.Name, Ref: p.Ref})
+	}
+	// One private git for the whole copy, its work tree the copy's top: each
+	// folder's files, a repo's among them (nested.go), and what a turn puts
+	// beside the folders are recorded in one history.
+	s.Nested = true
+	if err := s.initShadow(ctxOf(r)); err != nil {
+		copyBackend{}.Close(s)
+		return nil, err
+	}
+	s.Shadow = true
+	if err := s.save(); err != nil {
+		copyBackend{}.Close(s)
+		return nil, err
+	}
+	return s, nil
+}
+
+// refusedNested: one folder of a workspace is inside another.
+const refusedNested = "one folder of the workspace is inside another; name the outer folder alone, or folders side by side"
+
+// inside says whether folder a is b or inside b, by the folders' identity on
+// disk (os.SameFile), so a link, a case variant on a disk that ignores case,
+// or a Unicode variant of one name is the same folder.
+func inside(a, b string) bool {
+	bi, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	d, err := filepath.EvalSymlinks(a)
+	if err != nil {
+		return false
+	}
+	for {
+		if di, err := os.Stat(d); err == nil && os.SameFile(di, bi) {
+			return true
+		}
+		p := filepath.Dir(d)
+		if p == d {
+			return false
+		}
+		d = p
+	}
 }
 
 // checkFolder checks what a copy of r.Folder needs.
@@ -143,9 +260,9 @@ func (copyBackend) RestoreTo(s *Space, name string) error {
 // UpdateFrom brings the person's folder into the copy by a three-way merge in
 // the copy's private git repo (gitupdate.go). Only a shadow copy can do it; a
 // snapshot-built or legacy copy has no private git and is refused.
-func (copyBackend) UpdateFrom(s *Space, base, folder string) (UpdateResult, error) {
+func (copyBackend) UpdateFrom(s *Space, base string, folders FolderPaths, merge bool) (UpdateResult, error) {
 	if s.hasShadow() {
-		return s.updateFromFolder(context.Background(), base, folder)
+		return s.updateFromFolder(context.Background(), base, folders, merge)
 	}
 	return UpdateResult{}, ErrNoUpdate
 }

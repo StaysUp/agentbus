@@ -160,10 +160,27 @@ func TestExecCommands(t *testing.T) {
 		{`const re = /https?:\/\//; await tools.exec_command({cmd: "git push"});`, []string{"git push"}},
 		{`const re = /cmd: "git push"/; text(re)`, nil},
 		{`const x = a / 2; tools.exec_command({cmd: "ls"}) // b / c`, []string{"ls"}},
-		// Not a cmd key, or not a literal.
+		// Not a cmd key.
 		{`const cmd2 = "git push"; tools.exec_command({mycmd:"git push"})`, nil},
-		{`tools.exec_command({cmd: "git " + "push"})`, []string{"git "}},
-		{`const c = "git push"; tools.exec_command({cmd: c})`, nil},
+		{`for (const cmd of list) { text(cmd) }`, nil},
+		// cmd between commas outside braces: an argument or an element, not
+		// a key (2026-11-24, review of #80).
+		{`text(["name", cmd, "done"])`, nil},
+		{`report("name", cmd, "done")`, nil},
+		{`report(a, cmd)`, nil},
+		{`f({a: [x, cmd, y]})`, nil},
+		{`f([{a: 1, cmd}])`, []string{runTimeCommand}},
+		// Not one literal: known only at run time.
+		{`tools.exec_command({cmd: "git " + "push"})`, []string{"git ", runTimeCommand}},
+		{`const c = "git push"; tools.exec_command({cmd: c})`, []string{runTimeCommand}},
+		{`tools.exec_command({cmd: /* c */ c, workdir: "/x"})`, []string{runTimeCommand}},
+		{`tools.exec_command({"cmd": ["git", "push"].join(" ")})`, []string{runTimeCommand}},
+		{`tools.exec_command({cmd, workdir: "/x"}); tools.exec_command({workdir: "/x", cmd })`,
+			[]string{runTimeCommand, runTimeCommand}},
+		{`tools.exec_command({cmd: "ls", workdir: w})`, []string{"ls"}},
+		// codex-cli 0.171.0, 2026-11-23, a live turn: the shorthand, from a loop.
+		{"for (const cmd of [\"uname -a\",\"date\",\"whoami\"]) {\n  const result = await tools.exec_command({cmd});\n  text({cmd, exit_code: result.exit_code, output: result.output});\n}\n",
+			[]string{runTimeCommand, runTimeCommand}},
 	} {
 		if got := execCommands(c.script); !slices.Equal(got, c.want) {
 			t.Errorf("execCommands(%q) = %q, want %q", c.script, got, c.want)

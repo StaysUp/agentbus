@@ -508,3 +508,26 @@ func TestSpecRoundTripFromConnectorOnly(t *testing.T) {
 		t.Fatalf("re-store dropped a key: %s", s)
 	}
 }
+
+// compat 0.6.5: drop sandbox. A runner of a build before 0.6.5 still reports
+// the retired wall under "sandbox". Control's runner-wire decode is strict,
+// so the key must decode; nothing of it is kept, and no runner sends it now.
+func TestCapabilitiesAcceptRetiredSandbox(t *testing.T) {
+	old := `{"os":"linux","sandbox":{"can":false,"why":"AppArmor refuses user namespaces"}}`
+	d := json.NewDecoder(strings.NewReader(old))
+	d.DisallowUnknownFields()
+	var c Capabilities
+	if err := d.Decode(&c); err != nil {
+		t.Fatalf("a strict decode refused a pre-0.6.5 runner's caps: %v", err)
+	}
+	if c.OS != "linux" || c.Check() != "" {
+		t.Fatalf("caps %+v, check %q", c, c.Check())
+	}
+	b, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), "sandbox") {
+		t.Fatalf("the retired key was kept or sent: %s", b)
+	}
+}

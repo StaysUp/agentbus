@@ -78,6 +78,8 @@ func TestWatches(t *testing.T) {
 	for _, c := range [][2]string{
 		{"GET", "/backend-api/codex/responses"}, // the WebSocket upgrade
 		{"GET", "/backend-api/codex/models"},
+		{"POST", "/backend-api/codex/alpha/search"},
+		{"POST", "/v1/alpha/search"},
 		{"POST", "/backend-api/codex/responses/compact"},
 	} {
 		if adapter.Watches(a, c[0], c[1]) {

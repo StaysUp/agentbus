@@ -227,7 +227,7 @@ func (s *Space) initShadow(ctx context.Context) error {
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(dir, "info", "exclude"),
-		[]byte(strings.Join(gitBuiltinIgnore, "\n")+"\n"), 0o600); err != nil {
+		[]byte(strings.Join(folderIgnores(s.Folders), "\n")+"\n"), 0o600); err != nil {
 		return err
 	}
 	// info/attributes overrides any .gitattributes in the copy, so no path is
@@ -247,17 +247,20 @@ func (s *Space) initShadow(ctx context.Context) error {
 // nested repo (a turn ran `git init sub` and did not commit), so --ignore-
 // errors lets it add the rest; exit 1 is that partial add and is expected,
 // any other non-zero is a real failure. A committed nested repo is added as a
-// gitlink, its own files left to it; a reset leaves such a repo in place and a
-// clean removes one a dropped turn added (clean -ffd, below).
+// gitlink; in a copy made since 0.6.6 its files then take its place
+// (nested.go), and in one made before its own files are left to it. A reset
+// leaves such a repo in place and a clean removes one a dropped turn added
+// (clean -ffd, below).
 func (s *Space) shadowAdd(ctx context.Context) error {
+	if s.Nested {
+		// One rule for every file, a nested repo's included (nested.go).
+		return s.stageTree(ctx, s.Dir, "", s.ignorer(s.Dir), s.headFiles(ctx))
+	}
 	_, _, code, err := s.runGit(ctx, "add", "-A", "--ignore-errors")
-	if err == nil || code == 1 {
-		return nil
+	if err != nil && code != 1 {
+		return gitErr(ctx)
 	}
-	if ctx.Err() != nil {
-		return ctx.Err()
-	}
-	return errGit
+	return nil
 }
 
 // commitShadow records the copy's current files as the checkpoint name's
@@ -984,13 +987,16 @@ func (s *Space) resetTo(ctx context.Context, name string) error {
 	if err := makeTreeWritable(s.Dir); err != nil {
 		return err
 	}
+	if err := s.guardRepos(ctx, name); err != nil {
+		return err
+	}
 	if _, err := s.shadowGit(ctx, "reset", "-q", "--hard", shadowRef(name), "--"); err != nil {
 		return err
 	}
 	// -ffd: a second -f removes a nested repo a dropped turn added, which a
 	// single -f would skip; -d removes now-empty folders too. Ignored files
 	// (node_modules and the like) stay, so a discard does not rebuild them.
-	if _, err := s.shadowGit(ctx, "clean", "-q", "-ffd"); err != nil {
+	if err := s.cleanCopy(ctx); err != nil {
 		return err
 	}
 	// git reset writes git's 0644/0755, masked by the umask; reconcile every

@@ -9,6 +9,8 @@ import (
 	"io"
 	"sync"
 	"time"
+
+	"github.com/staysup/agentbus/applied"
 )
 
 // Kind names what happened.
@@ -128,9 +130,9 @@ const (
 	RunnerRemoved         Kind = "runner.removed"
 	SettingsChanged       Kind = "settings.changed"
 
-	// TurnChanged: control's record of what a turn changed in its copy, or
-	// in the folder it ran in, stored when control accepts the turn job's
-	// finish. Changes holds the changed files and the diffs. The list can be
+	// TurnChanged: control's record of what a turn changed in its copy,
+	// stored when control accepts the turn job's finish. A Direct turn (in
+	// the person's folder as it is) has none. Changes holds the changed files and the diffs. The list can be
 	// cut: truncated says it is not complete.
 	// TurnApplied: an apply of a session's turns to the person's folder
 	// ended. Applied says which turns, who asked, how it ended and the files.
@@ -174,6 +176,13 @@ const (
 	WorkspaceApplied   Kind = "workspace.applied"
 	WorkspaceDiscarded Kind = "workspace.discarded"
 	WorkspaceUpdated   Kind = "workspace.updated"
+	// WorkspaceSnapshot is the applied state of a workspace whose record was
+	// written before 0.6.6, when its outcome events did not yet carry it all
+	// (a turn's changeset, an apply's to, an update's head and checkpoints):
+	// written once, at control's start, from the job rows of that time
+	// (jobs.MigrateApplied). A reader folds the workspace's applied state from
+	// it on.
+	WorkspaceSnapshot Kind = "workspace.snapshot"
 
 	// FolderRegistered is control's record that a folder a person typed was
 	// checked and registered on its machine's runner (queue.KindFolder), so a
@@ -255,13 +264,14 @@ var Kinds = []KindInfo{
 	{RunnerGone, "A runner or a connector stopped asking control for work for a minute: runner is its id. It may come back; a turn it was running whose lease runs out ends as runner_lost. No session. Show it as a warning.", []string{"runner"}},
 	{RunnerRemoved, "The person removed a runner that was offline (POST /api/v0/runners/{id}/remove): runner is its id. Its token works no more and it is no longer listed; its sessions, jobs and their events stay, but its sessions take no more turns or reviews. No session.", []string{"runner"}},
 	{SettingsChanged, "The settings changed, through the API or by the one-time import of the settings files: setting is permissions, instructions or agents; keys names what changed (a policy key such as limits.max_depth, text for the instructions, an agent id or id.field such as a_1234.model); settings_version is the settings version the change made. On an import, file is the file the setting came from. A build that changed a default writes the old value into the person's policy on its first start: a change of permissions with no file, whose keys are those defaults. Names only: never a value, so never a secret. The change and this event are stored together: the settings database keeps the event until the record has it. No session.", []string{"setting", "settings_version"}},
-	{TurnChanged, "What the turn changed in its session's copy, or in the folder it ran in, from its start to its end. Stored by control once it accepts the turn's end, at most once per turn: changes holds the changed files (path, change, size, sha256 at the end, sha256_before at the start) and, for small text files, each one's unified diff (at most 1 MiB for the whole turn; diffs_cut says some were left out) and content. A binary file has its path, size and hashes only. The file list can be cut: truncated says it is not complete, because files were left out (past 1,000, or when the whole was too large to send; count still counts them) or because the copy held more files than a checkpoint keeps (then count misses some too). GET /api/v0/turns/{id}/changes lists it, and /diff summarises it. Absent for a turn that ran in no folder, and for turns from before 0.5, whose changes are in their job.", []string{"session", "turn", "changes"}},
+	{TurnChanged, "What the turn changed in its session's copy, from its start to its end. Stored by control once it accepts the turn's end, at most once per turn: changes holds the changed files (path, change, size, sha256 at the end, sha256_before at the start) and, for small text files, each one's unified diff (at most 1 MiB for the whole turn; diffs_cut says some were left out) and content. A binary file has its path, size and hashes only. The file list can be cut: truncated says it is not complete, because files were left out (past 1,000, or when the whole was too large to send; count still counts them) or because the copy held more files than a checkpoint keeps (then count misses some too). GET /api/v0/turns/{id}/changes lists it, and /diff summarises it. Absent for a turn that ran in no folder; for a turn in a direct workspace (sandbox false), whose changes went straight into the person's folder and AgentBus keeps no record of them; and for turns from before 0.5, whose changes are in their job. A direct turn from before 0.6.5 may still have one. From 0.6.6 changeset and checkpoint name what an apply up to the turn writes; changes is absent when the turn's end sent no file list.", []string{"session", "turn"}},
 	{TurnApplied, "An apply of the session's turns to the person's folder ended (POST /api/v0/turns/{id}/apply): turn is the turn asked for, and applied holds every turn whose changes it carried, who asked (by: the person or an agent, never a token), the result (applied, refused or failed), the files written or removed, and on a refusal the files that refused it, each with why. Stored once per apply. Pre-workspace records only; the workspace reader reads it as an apply of the turn's workspace. Show a refusal as a warning.", []string{"session", "turn", "applied"}},
 	{WorkspaceCreated, "A workspace was created, before any turn of it ran: workspace is its id, folder_ref (and folder on a local agentbus up) the folder it runs in, machine the connector that owns the folder, and sandbox the mode (true for a copy behind a wall, false for the person's real folder; always present). It is the single source of the workspace's folder, machine and mode. Stored once per workspace, keyed on the event id wc_<workspace>.", []string{"workspace", "sandbox"}},
 	{WorkspaceApplied, "An apply of a workspace's changes to the person's folder ended (POST /api/v0/workspaces/{id}/apply): workspace and session name it, turn is the turn applied up to, and applied holds every turn whose changes it carried, the from and to changesets, who asked (by: the person or an agent, never a token), the result (applied, refused or failed), the files written or removed, and on a refusal the files that refused it, each with why. Stored once per apply. Show a refusal as a warning.", []string{"workspace", "applied"}},
 	{WorkspaceDiscarded, "The unapplied changes of a sandbox workspace were dropped (POST /api/v0/workspaces/{id}/discard): workspace and session name it, and discarded holds the changeset it was reset to (the last applied one, or base when never applied), the turns whose file changes were dropped, and who asked. The conversation stays in the record. Stored once per discard.", []string{"workspace", "discarded"}},
 	{FolderRegistered, "A folder a person typed was checked and registered on its machine's runner (POST /api/v0/workspaces with folder): folder_ref is the reference its machine issued, and machine the connector that holds it. The path is not carried; it is kept off control's disk. No session. Stored once per folder reference and machine, as the folder is first registered, so a folder becoming known is in the record and not only in the folder listing (GET /api/v0/folders).", []string{"folder_ref", "machine"}},
-	{WorkspaceUpdated, "The person's folder as it is now was merged into a sandbox workspace's copy (POST /api/v0/workspaces/{id}/update), so the session's work sits on top of it and the next Apply writes only that work: workspace and session name it, and updated holds the result (updated or conflict), on a clean update the new baseline changeset (from, the folder now) and the merged changeset (to) with the folded turns, on a conflict the files that conflicted, and who asked. Nothing is written to the folder; the copy's private git does the three-way merge. Stored once per update.", []string{"workspace", "updated"}},
+	{WorkspaceUpdated, "The person's folder as it is now was merged into a sandbox workspace's copy (POST /api/v0/workspaces/{id}/update), so the session's work sits on top of it and the next Apply writes only that work: workspace and session name it, and updated holds the result (updated, merged or conflict), on a clean update or a merge the new baseline changeset (from, the folder now) and the merged changeset (to) with the folded turns, on a merge the files left with conflict markers (unresolved), on a conflict the files that conflicted, and who asked. Nothing is written to the folder; the copy's private git does the three-way merge. Stored once per update.", []string{"workspace", "updated"}},
+	{WorkspaceSnapshot, "The applied state of a workspace whose record was written before 0.6.6, when its outcome events did not yet carry all of it: workspace names it, and snapshot holds its appliable turns with their changesets and checkpoints, how far a successful apply went and what it wrote, the update in force and whether a merge left conflict markers. Written once, when control starts, from what control held then. It stands for every turn.changed, apply, discard and update of the workspace before it; later ones add to it.", []string{"workspace", "snapshot"}},
 	{TurnEnded, "A turn job ended, whatever its outcome: control writes it once per turn job for every ended turn (finished, failed, stopped, cancelled or its runner lost), so a reactor (a delivery) learns a turn ended from the record, not from the scheduler's job table. It is keyed on the turn and carries no session -- a reactor trigger, not part of a session's event stream. state is how it ended and error says why. The changes and the reply are not here: those are turn.changed and the job's result.", []string{"turn", "state"}},
 	{ChangesPreviewed, "What applying a workspace's changes to the person's folder would do now, the dry run of POST /api/v0/workspaces/{id}/apply computed on the folder's machine, nothing written: previewed holds the files it would write or remove (with diffs), the conflicts it would refuse, the turn it would apply up to and the turns it would carry. workspace names the workspace it is of (its session field is empty, so it never enters the session namespace). Stored so GET /api/v0/workspaces/{id}/changes serves and pages it from the record, as of this event's time; a new one is stored when a preview runs again (the workspace changed, or a fresh one was asked for). The file list can be cut (truncated) when too many to send; count still counts them all.", []string{"workspace", "previewed"}},
 	{PlanUsage, "How much of a subscription's plan is used in one of its windows, as the vendor said in the headers of a model reply that carried control's credential for that subscription: plan holds the subscription (the harness, such as claude), the connect its credential came from, the window, its length in minutes, the percent used, when it resets and the vendor's status word. " +
@@ -329,6 +339,14 @@ type Usage struct {
 	// CostUSD is what the vendor says it charged for the call, in US
 	// dollars: OpenRouter's usage.cost. Nil when it said nothing.
 	CostUSD *float64 `json:"cost_usd,omitempty" doc:"What the vendor says it charged for the call, in US dollars, such as OpenRouter's usage.cost. Absent when it said nothing; then the cost comes from the price table."`
+}
+
+// WorkspaceFolderEntry is one folder of a workspace with several, on its
+// workspace.created.
+type WorkspaceFolderEntry struct {
+	Name      string `json:"name" doc:"The folder's name: its place under the copy's top, and the group its files are listed under. Set when the workspace is made."`
+	Folder    string `json:"folder,omitempty" doc:"The folder's path, kept only on the machine that owns it."`
+	FolderRef string `json:"folder_ref" doc:"The folder's reference (fld_ and 16 hex digits)."`
 }
 
 // Event is one step of an agent's work.
@@ -445,6 +463,11 @@ type Event struct {
 	Workspace string `json:"workspace,omitempty" doc:"On workspace.created, workspace.applied, workspace.discarded and turn.started: the workspace the turn ran in (ws_ and 16 hex digits)."`
 	Machine   string `json:"machine,omitempty" doc:"On workspace.created and folder.registered: the connector that owns the folder (con_ and 16 hex digits). Absent when no connector owns the folder, as for hook or gateway traffic."`
 	Sandbox   *bool  `json:"sandbox,omitempty" doc:"On workspace.created: the workspace's mode, true for a copy behind a wall and false for the person's real folder. Always present on workspace.created; absent on every other kind."`
+	// Folders, only on workspace.created of a workspace with several folders:
+	// each folder, in order, with its name. Folder and FolderRef are then
+	// empty, so no reader takes one folder for the whole workspace. A
+	// workspace with one folder keeps it in Folder and FolderRef, as before.
+	Folders []WorkspaceFolderEntry `json:"folders,omitempty" doc:"On workspace.created of a workspace with several folders: each folder, in order. Absent for a workspace with one folder, which names it in folder and folder_ref."`
 	// AgentID, Access and KeyEnv, on a run's turn.started and run.started:
 	// the saved agent the run started, how it reaches its model, and for an
 	// OpenRouter agent the name of the variable that holds its key. Never
@@ -471,6 +494,15 @@ type Event struct {
 	// says why (ErrorLine).
 	State string `json:"state,omitempty" doc:"On a run's run.ended: how the turn ended: finished (its agent exited 0), stopped (someone stopped it) or failed (anything else). A failed turn's error says why: the agent's own error line from its stderr, else its exit code, or why it could not start. Absent on records from before 0.5.7."`
 
+	// Changeset and Checkpoint, only on turn.changed: what an apply up to the
+	// turn writes, kept apart from Changes (the file list), which a finish may
+	// not carry. The record owns which turns are appliable: a turn is appliable
+	// only with a changeset.
+	Changeset  string `json:"changeset,omitempty" doc:"On turn.changed: the copy at the turn's end, from its base, as kept in control's store: what an apply up to the turn writes, unless the turn heads an update in force, whose merge it writes then. In an isolated copy only. Absent when it could not be kept, so the turn cannot be applied; and on turns recorded before 0.6.6, whose workspace's workspace.snapshot holds it."`
+	Checkpoint string `json:"checkpoint,omitempty" doc:"On turn.changed: the copy's checkpoint at the turn's end. With a file list, the same as changes.to."`
+	// Snapshot, only on workspace.snapshot: the workspace's applied state
+	// when control took it.
+	Snapshot *applied.AppliedSnapshot `json:"snapshot,omitempty" doc:"On workspace.snapshot: the workspace's applied state when control took it -- its appliable turns with their changesets, how far a successful apply went and what it wrote, the update in force -- standing for every apply, discard, update and turn.changed of the workspace before it."`
 	// Changes, only on turn.changed: what the turn changed.
 	Changes *TurnChanges `json:"changes,omitempty" doc:"On turn.changed: every file the turn added, modified or deleted, with diffs."`
 	// Applied, on turn.applied and workspace.applied: what the apply did.
@@ -519,10 +551,11 @@ type Event struct {
 	// finds this turn and a different request under it is refused.
 	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"On turn.started: the idempotency_key POST /api/v0/turns was sent with. A retry with the same key returns this turn and starts nothing."`
 	RequestHash    string `json:"request_hash,omitempty" doc:"With idempotency_key: the SHA-256, in hex, of the request's fields. A request with the same key and other fields is refused."`
-	// Origin, only on a run's turn.started: the turn was not typed by the
+	// Origin, on a run's turn.started: the turn was not typed by the
 	// person. Another agent's turn asked for it through the API, or AgentBus
-	// started it to deliver the result of work this session asked for.
-	Origin *Origin `json:"origin,omitempty" doc:"On a run's turn.started: who started this turn when the person did not. Absent for a turn the person started."`
+	// started it to deliver the result of work this session asked for. On a
+	// session.created or workspace.created: the agent's turn that made it.
+	Origin *Origin `json:"origin,omitempty" doc:"On a run's turn.started: who started this turn when the person did not. On session.created and workspace.created: the agent's turn that made it (kind asked). Absent for what the person started or made."`
 	// Replayed, only on model.requested: how many messages of the earlier
 	// turn's history the gateway put in front of this request.
 	Replayed int `json:"replayed,omitempty" doc:"On model.requested: how many messages of the earlier turn's history the gateway put in front of this request. Absent when it put none."`
@@ -614,8 +647,9 @@ type Applied struct {
 
 // RefusedFile is one file that refused an apply.
 type RefusedFile struct {
-	Path string `json:"path"`
-	Why  string `json:"why"`
+	Path    string `json:"path"`
+	Why     string `json:"why"`
+	Markers bool   `json:"markers,omitempty" doc:"The file still holds the conflict markers an update's merge left (<<<<<<< this session ... >>>>>>> your folder), rather than having changed in the folder: the agent combining it in a turn clears it, an update does not."`
 }
 
 // Discarded is what one discard dropped (workspace.discarded).
@@ -637,13 +671,21 @@ type Discarded struct {
 // so they are no longer applied on their own. On a conflict Conflicts names the
 // files and nothing changed.
 type Updated struct {
-	Result      string   `json:"result" doc:"updated (the folder was merged into the copy) or conflict (the same lines changed on both sides; nothing changed)."`
+	Result      string   `json:"result" doc:"updated (the folder was merged into the copy), merged (a merge: as updated, with the files in unresolved left holding conflict markers for the agent) or conflict (the same lines changed on both sides; nothing changed)."`
 	From        string   `json:"from,omitempty" doc:"On a clean update: the new baseline changeset, the folder as it is now. A later Apply diffs the session's work against it."`
 	To          string   `json:"to,omitempty" doc:"On a clean update: the merged changeset the copy now holds."`
 	FoldedTurns []string `json:"folded_turns,omitempty" doc:"The turns whose changes the merge folded into the copy's new head, oldest first; they are no longer applied on their own."`
-	By          *By      `json:"by,omitempty" doc:"Who asked for the update, by the kind of token it came with. Never the token itself."`
-	Conflicts   []string `json:"conflicts,omitempty" doc:"On a conflict: the folder-relative files that conflicted, sorted. Nothing changed; the agent can be asked to resolve them in a turn."`
-	Error       string   `json:"error,omitempty" doc:"Why the update failed."`
+	HeadTurn    string   `json:"head_turn,omitempty" doc:"On a clean update: the workspace's latest unapplied turn, kept as the copy's head. An apply up to it writes the merged changeset (to). Absent when nothing was unapplied."`
+	// TheirsCheckpoint and MergedCheckpoint are the copy's own checkpoints of
+	// from and to: the merge base of the next update, and the reset point of a
+	// discard after the merge is applied.
+	TheirsCheckpoint string   `json:"theirs_checkpoint,omitempty" doc:"On a clean update: the copy's checkpoint of the folder as it was read (from)."`
+	MergedCheckpoint string   `json:"merged_checkpoint,omitempty" doc:"On a clean update: the copy's checkpoint of the merge (to)."`
+	By               *By      `json:"by,omitempty" doc:"Who asked for the update, by the kind of token it came with. Never the token itself."`
+	Conflicts        []string `json:"conflicts,omitempty" doc:"On a conflict: the folder-relative files that conflicted, sorted. Nothing changed; the agent can be asked to resolve them in a turn."`
+	Unresolved       []string `json:"unresolved,omitempty" doc:"On a merge: the folder-relative files that changed on both sides, sorted, now in the copy with both sides between conflict markers."`
+	Unmergeable      []string `json:"unmergeable,omitempty" doc:"On a merge that changed nothing (result conflict): the conflicting files conflict markers cannot show -- not text, a link, or removed on one side -- sorted."`
+	Error            string   `json:"error,omitempty" doc:"Why the update failed."`
 }
 
 // Previewed is an apply's dry run (changes.previewed): what applying the

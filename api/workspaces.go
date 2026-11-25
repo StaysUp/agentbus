@@ -21,6 +21,7 @@ import (
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -86,19 +87,33 @@ const (
 )
 
 const (
-	badWorkspace = "the body must be one JSON object with folder (an absolute path) or folder_ref, and optionally machine, sandbox and idempotency_key"
+	badWorkspace = "the body must be one JSON object with folder (an absolute path or ~/...) or folder_ref, and optionally machine, sandbox and idempotency_key"
+	badFolder    = "folder must be an absolute path or start with ~/, at most 4096 bytes"
 	badSession   = "the body must be one JSON object with workspace, and optionally title and idempotency_key"
 )
 
 // WorkspaceRequest is the body of POST /api/v0/workspaces.
 type WorkspaceRequest struct {
-	Folder    string `json:"folder,omitempty" doc:"An absolute path to a directory on the machine named by machine, that the runner can read. Typing it is the grant: that machine's runner checks and registers it, and the workspace keeps only its reference. One of folder or folder_ref is required."`
+	Folder    string `json:"folder,omitempty" doc:"An absolute path, or one starting with ~/ for the home of the user that machine's runner runs as, to a directory on the machine named by machine, that the runner can read. Typing it is the grant: that machine's runner checks and registers it, and the workspace keeps only its reference. One of folder or folder_ref is required."`
 	FolderRef string `json:"folder_ref,omitempty" doc:"A folder's reference (fld_ and 16 hex digits), from GET /api/v0/folders, in place of folder."`
 	Machine   string `json:"machine,omitempty" doc:"The machine that holds the folder (con_ and 16 hex digits). With folder: the machine whose runner checks it. Absent: this service's own machine, or the only one online."`
-	Sandbox   *bool  `json:"sandbox,omitempty" doc:"True (the default): turns run in a copy of the folder behind a wall, and their changes are applied on request. False: turns run in the folder as it is."`
+	// Folders, in place of folder and folder_ref: a workspace with several
+	// folders, all on one machine. Its copy holds each folder side by side
+	// under one top, named by the folder's last path part.
+	Folders []WorkspaceFolderRequest `json:"folders,omitempty" doc:"In place of folder and folder_ref: the folders of a workspace with several, 1 to 8, all on the machine named by machine. The workspace keeps each folder in order with a name: the last part of its path, in letters, digits, . _ and - (any other character becomes -), at most 64 bytes, and -2, -3 for a second of the same name. Its turns run at the top of one copy that holds each folder side by side under its name, and their changes name each file by its folder's name and its path inside the folder. Needs sandbox true."`
+	Sandbox *bool                    `json:"sandbox,omitempty" doc:"True (the default): turns run in a copy of the folder behind a wall, and their changes are applied on request. False: turns run in the folder as it is."`
 	// IdempotencyKey makes a retry safe: the same key returns the same workspace.
 	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"Optional, 1 to 128 characters of A-Z, a-z, 0-9 and . _ : -. A retry with the same key returns the workspace the key first created and makes nothing new."`
 }
+
+// WorkspaceFolderRequest is one folder of POST /api/v0/workspaces' folders.
+type WorkspaceFolderRequest struct {
+	Folder    string `json:"folder,omitempty" doc:"An absolute path, or one starting with ~/, on the workspace's machine. One of folder or folder_ref is required."`
+	FolderRef string `json:"folder_ref,omitempty" doc:"A folder's reference (fld_ and 16 hex digits), from GET /api/v0/folders, in place of folder."`
+}
+
+// MaxWorkspaceFolders bounds a workspace's folders.
+const MaxWorkspaceFolders = 8
 
 // SessionRequest is the body of POST /api/v0/sessions.
 type SessionRequest struct {
@@ -127,6 +142,30 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 	// Cheap validation, before the key check: a bad request is refused whether
 	// or not it reuses a key, and at no side effect.
+	if len(body.Folders) > 0 {
+		if body.Folder != "" || body.FolderRef != "" {
+			writeError(w, http.StatusBadRequest, "send folders, or folder or folder_ref, not both")
+			return
+		}
+		if len(body.Folders) == 1 {
+			// One folder is today's workspace, by whichever field it came in.
+			body.Folder, body.FolderRef, body.Folders = body.Folders[0].Folder, body.Folders[0].FolderRef, nil
+		}
+	}
+	// An agent's turn token makes a workspace only within its own authority,
+	// checked here, once, for one folder or several; the workspace records the
+	// turn that made it, which is how its session later reaches it.
+	var maker *event.Origin
+	if g := grantOf(r); g != nil {
+		if !a.workspaceAuthority(w, *g, &body) {
+			return
+		}
+		maker = &event.Origin{Kind: event.OriginAsked, Session: g.Session, Turn: g.Turn}
+	}
+	if len(body.Folders) > 0 {
+		a.createMultiWorkspace(w, r, body, maker)
+		return
+	}
 	if (body.Folder == "") == (body.FolderRef == "") {
 		writeError(w, http.StatusBadRequest, "send folder or folder_ref, not both and not neither")
 		return
@@ -140,7 +179,7 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sandbox := body.Sandbox == nil || *body.Sandbox
-	hash := requestHash(body.Folder, body.FolderRef, body.Machine, strconv.FormatBool(sandbox))
+	hash := requestHash(withMaker([]string{body.Folder, body.FolderRef, body.Machine, strconv.FormatBool(sandbox)}, maker)...)
 	id := queue.NewID("ws_")
 	a.idempotentCreate(w, event.WorkspaceCreated, "$.workspace", body.IdempotencyKey, hash, workspaceConflict, id,
 		func() (event.Event, bool) {
@@ -150,8 +189,8 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
 					writeError(w, http.StatusNotFound, noTurns)
 					return event.Event{}, false
 				}
-				if len(body.Folder) > MaxFolder || !filepath.IsAbs(body.Folder) {
-					writeError(w, http.StatusBadRequest, "folder must be an absolute path to an existing directory, at most 4096 bytes")
+				if !typedFolderShape(body.Folder) {
+					writeError(w, http.StatusBadRequest, badFolder)
 					return event.Event{}, false
 				}
 				var status int
@@ -187,7 +226,7 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
 			// (DisplayFolder); on a server the reference is the only pointer.
 			return event.Event{ID: "wc_" + id, Kind: event.WorkspaceCreated, Time: a.cfg.Now().UTC(),
 				Workspace: id, Folder: queue.DisplayFolder(a.cfg.Folders, ref, conn),
-				FolderRef: ref, Machine: conn, Sandbox: &sb}, true
+				FolderRef: ref, Machine: conn, Sandbox: &sb, Origin: maker}, true
 		},
 		func(wsID string) {
 			out, ok, err := a.cfg.Store.Workspace(ids.WorkspaceID(wsID))
@@ -197,6 +236,95 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
 			}
 			writeJSON(w, http.StatusCreated, out)
 		})
+}
+
+// Refusals of a workspace an agent's turn token may not make. Fixed wording.
+const (
+	agentDirectRefused  = "an agent may make only a workspace with sandbox true, a copy behind a wall; a workspace that works in a folder as it is is the person's to make"
+	agentNoWorkspace    = "a turn token has no workspace, so it has no folders to make a workspace of"
+	agentMachineRefused = "an agent makes workspaces only on its own workspace's machine"
+	agentPathRefused    = "an agent working in a copy names folders by folder_ref, from GET /api/v0/workspaces/{id} of its own workspace, never by path"
+	agentFolderRefused  = "an agent working in a copy may make a workspace only of folders its own workspace holds"
+)
+
+// workspaceAuthority checks that the workspace body asks for is within g's
+// authority, and has written the 403 when it is not. The rule (his call,
+// 2026-11-24): the new workspace is a copy (sandbox true), never direct; it is on
+// the machine of g's own workspace (machine is set to it when absent); and each
+// folder is one g can already reach. A direct workspace has no wall, so a copy of
+// any folder of its machine adds no power. A copy reaches only its own folders,
+// so it names them by folder_ref and each must be one of its own; a path is
+// refused before any runner reads it, so a walled agent cannot probe the
+// machine's disk. A workspace made this way is a copy whose folders are within
+// its maker's, so a chain of makes never reaches further than the first.
+func (a *API) workspaceAuthority(w http.ResponseWriter, g run.Grant, body *WorkspaceRequest) bool {
+	refuse := func(msg string) bool {
+		writeError(w, http.StatusForbidden, msg)
+		return false
+	}
+	if body.Sandbox != nil && !*body.Sandbox {
+		return refuse(agentDirectRefused)
+	}
+	ownID, found, err := a.workspaceOf(g.Session)
+	if err != nil {
+		a.internal(w)
+		return false
+	}
+	if !found {
+		return refuse(agentNoWorkspace)
+	}
+	own, found, err := a.cfg.Store.Workspace(ownID)
+	if err != nil {
+		a.internal(w)
+		return false
+	}
+	if !found {
+		return refuse(agentNoWorkspace)
+	}
+	machine := own.Machine
+	if machine == "" && a.cfg.Folders != nil {
+		machine = a.cfg.Folders.Machine()
+	}
+	switch body.Machine {
+	case "":
+		body.Machine = machine
+	case machine:
+	default:
+		return refuse(agentMachineRefused)
+	}
+	if !own.Sandbox {
+		return true
+	}
+	holds := map[string]bool{}
+	for _, f := range own.Folders {
+		if f.FolderRef != "" {
+			holds[f.FolderRef] = true
+		}
+	}
+	asked := body.Folders
+	if len(asked) == 0 {
+		asked = []WorkspaceFolderRequest{{Folder: body.Folder, FolderRef: body.FolderRef}}
+	}
+	for _, f := range asked {
+		if f.Folder != "" {
+			return refuse(agentPathRefused)
+		}
+		if !holds[f.FolderRef] {
+			return refuse(agentFolderRefused)
+		}
+	}
+	return true
+}
+
+// withMaker adds the session of the turn that makes a workspace to its request
+// hash's parts: the same idempotency_key sent by another maker is another
+// request, never the first maker's workspace handed back. The person's
+// requests hash as they always have.
+func withMaker(parts []string, o *event.Origin) []string {
+	if o == nil {
+		return parts
+	}
+	return append(parts, "maker", o.Session)
 }
 
 // getWorkspace serves GET /api/v0/workspaces/{id}.
@@ -314,10 +442,17 @@ func (a *API) discardWorkspace(w http.ResponseWriter, r *http.Request, id string
 // UpdateState is the state of a workspace update (POST
 // /api/v0/workspaces/{id}/update): the person's folder merged into the copy.
 type UpdateState struct {
-	State     string   `json:"state,omitempty" doc:"queued, running, updated (the folder was merged in), conflict (the files in conflicts changed on both sides; nothing changed), or failed (error says why)."`
-	Updated   bool     `json:"updated,omitempty" doc:"The folder was merged into the copy; the next apply writes only the session's work."`
-	Conflicts []string `json:"conflicts,omitempty" doc:"On a conflict: the files that changed on both sides, sorted. Nothing changed; ask the agent to resolve them in a turn."`
-	Error     string   `json:"error,omitempty" doc:"Why the update failed."`
+	State       string   `json:"state,omitempty" doc:"queued, running, updated (the folder was merged in), conflict (the files in conflicts changed on both sides; nothing changed), or failed (error says why)."`
+	Updated     bool     `json:"updated,omitempty" doc:"The folder was merged into the copy; the next apply writes only the session's work."`
+	Conflicts   []string `json:"conflicts,omitempty" doc:"On a conflict: the files that changed on both sides, sorted. Nothing changed; ask the agent to resolve them in a turn."`
+	Unresolved  []string `json:"unresolved,omitempty" doc:"On a merge (state merged): the files that changed on both sides, sorted. The copy now holds each with both sides between conflict markers, for the agent to combine in its next turn; an apply refuses any file that still holds them."`
+	Unmergeable []string `json:"unmergeable,omitempty" doc:"On a merge that changed nothing (state conflict): the conflicting files conflict markers cannot show -- not text, a link, or removed on one side -- sorted. error says so in a sentence. The agent can still be asked to combine them in a turn."`
+	Error       string   `json:"error,omitempty" doc:"Why the update failed, or (a merge that changed nothing) why it could not merge."`
+}
+
+// UpdateRequest is the optional body of POST /api/v0/workspaces/{id}/update.
+type UpdateRequest struct {
+	Mode string `json:"mode,omitempty" doc:"Absent or update: a conflict changes nothing. merge: a conflict leaves the conflicting files in the copy with both sides between conflict markers and moves the folder baseline, so the agent's next turn combines them and Apply then writes only the session's work. A merge is refused with 409 while a turn of the workspace runs or waits."`
 }
 
 // updateStateOf reads an update job's state and the HTTP status that reports it:
@@ -332,12 +467,20 @@ func (a *API) updateStateOf(j queue.Job) (UpdateState, int) {
 		return UpdateState{State: "running"}, http.StatusAccepted
 	case j.State == queue.Finished:
 		r, _ := queue.ReadResult(j.Result)
+		if r.Update.Clean() && len(r.Update.Unresolved) > 0 {
+			return UpdateState{State: "merged", Updated: true, Unresolved: r.Update.Unresolved}, http.StatusOK
+		}
 		if r.Update.Clean() {
 			return UpdateState{State: "updated", Updated: true}, http.StatusOK
 		}
 		st := UpdateState{State: "conflict"}
 		if r.Update != nil {
 			st.Conflicts = r.Update.Conflicts
+			if len(r.Update.Unmergeable) > 0 {
+				st.Unmergeable = r.Update.Unmergeable
+				st.Error = "some files cannot be merged with conflict markers (not text, a link, or removed on one side): " +
+					strings.Join(r.Update.Unmergeable, ", ") + "; nothing changed"
+			}
 		}
 		return st, http.StatusOK
 	default:
@@ -376,11 +519,22 @@ func (a *API) updateWorkspace(w http.ResponseWriter, r *http.Request, id string)
 		writeError(w, http.StatusBadRequest, "this session works directly in your folder; there is nothing to update into a copy")
 		return
 	}
-	j, created, err := a.cfg.Queue.Update(queue.DefaultTeam, wsID, ws.Machine, askedBy(r))
+	body, ok := decodeOptional[UpdateRequest](w, r, "the body must be a JSON object with an optional mode (update or merge), or empty")
+	if !ok {
+		return
+	}
+	if body.Mode != "" && body.Mode != "update" && body.Mode != "merge" {
+		writeError(w, http.StatusBadRequest, "mode must be update or merge")
+		return
+	}
+	j, created, err := a.cfg.Queue.Update(queue.DefaultTeam, wsID, ws.Machine, askedBy(r), body.Mode == "merge")
 	var removed *queue.RunnerRemovedError
 	switch {
 	case errors.Is(err, queue.ErrApplyBusy):
 		writeJSON(w, http.StatusConflict, UpdateState{State: "failed", Error: "an apply, discard or update of this workspace is still running or waiting; wait for it to end before updating"})
+		return
+	case errors.Is(err, queue.ErrTurnBusy):
+		writeJSON(w, http.StatusConflict, UpdateState{State: "failed", Error: "a turn of this workspace is running or waiting; merge once it ends"})
 		return
 	case errors.Is(err, queue.ErrSessionClosed):
 		writeError(w, http.StatusBadRequest, "this workspace is closed, so its copy cannot be updated")
@@ -451,8 +605,8 @@ func (a *API) applyWorkspace(w http.ResponseWriter, r *http.Request, id string) 
 		return
 	}
 	// The target turn and every check are resolved in the queue under one lock
-	// (ApplyWorkspace): the empty-body head comes from the queue's appliable
-	// cursor, the same source the preview uses, not store.HeadTurn.
+	// (ApplyWorkspace): the empty-body head is the record's (store.Applied),
+	// the same fold head_turn shows and the preview reads.
 	j, created, err := a.cfg.Queue.ApplyWorkspace(queue.DefaultTeam, wsID, body.Turn, askedBy(r))
 	switch {
 	case errors.Is(err, queue.ErrAllApplied):
@@ -510,7 +664,14 @@ func (a *API) applyWorkspace(w http.ResponseWriter, r *http.Request, id string) 
 // non-empty one must be a JSON object. It writes the 400 and returns false on a
 // malformed body.
 func decodeApplyBody(w http.ResponseWriter, r *http.Request) (ApplyRequest, bool) {
-	var body ApplyRequest
+	return decodeOptional[ApplyRequest](w, r, "the body must be a JSON object with an optional turn, or empty")
+}
+
+// decodeOptional reads an optional JSON object body into a T: an empty body is
+// the zero T. It writes the 400 with refusal and returns false on a malformed
+// body.
+func decodeOptional[T any](w http.ResponseWriter, r *http.Request, refusal string) (T, bool) {
+	var body T
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "the body could not be read")
@@ -523,7 +684,7 @@ func decodeApplyBody(w http.ResponseWriter, r *http.Request) (ApplyRequest, bool
 		dec := json.NewDecoder(bytes.NewReader(data))
 		dec.DisallowUnknownFields()
 		if t[0] != '{' || dec.Decode(&body) != nil || dec.More() || dec.Decode(&struct{}{}) != io.EOF {
-			writeError(w, http.StatusBadRequest, "the body must be a JSON object with an optional turn, or empty")
+			writeError(w, http.StatusBadRequest, refusal)
 			return body, false
 		}
 	}
@@ -556,23 +717,38 @@ func (a *API) createSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, msg)
 		return
 	}
-	// A turn token creates a session only in its own workspace (the ask opens
-	// one beside the asker, in the same copy); the main token names it. The
+	// A turn token creates a session in its own workspace (the ask opens one
+	// beside the asker, in the same copy) or in one its session made; the main
+	// token names any. The
 	// asker is recorded on the session so only the token that opened a session
 	// may start its turn (askChecks), now that asks share one workspace.
 	wsID := ids.WorkspaceID(body.Workspace)
 	var asker *event.Origin
 	if g := grantOf(r); g != nil {
-		ws, found, err := a.cfg.Store.WorkspaceOf(ids.SessionID(g.Session))
-		if err != nil {
-			a.internal(w)
-			return
+		// Its own workspace when the body names none (an ask opens its session
+		// beside the asker), else one its session made.
+		if body.Workspace == "" {
+			ws, found, err := a.cfg.Store.WorkspaceOf(ids.SessionID(g.Session))
+			if err != nil {
+				a.internal(w)
+				return
+			}
+			if !found {
+				writeError(w, http.StatusForbidden, "a turn token has no workspace to create a session in")
+				return
+			}
+			wsID = ws
+		} else {
+			own, err := a.ownWorkspace(*g, body.Workspace)
+			if err != nil {
+				a.internal(w)
+				return
+			}
+			if own == notOwn {
+				writeError(w, http.StatusForbidden, "a turn token opens sessions only in its own workspace or one its session made")
+				return
+			}
 		}
-		if !found {
-			writeError(w, http.StatusForbidden, "a turn token has no workspace to create a session in")
-			return
-		}
-		wsID = ws
 		asker = &event.Origin{Kind: event.OriginAsked, Session: g.Session, Turn: g.Turn}
 	} else if !sessionID.MatchString(body.Workspace) {
 		writeError(w, http.StatusBadRequest, "workspace must be "+sessionID.String())
@@ -618,4 +794,13 @@ func (a *API) createSession(w http.ResponseWriter, r *http.Request) {
 			}
 			writeJSON(w, http.StatusCreated, SessionCreated{Session: sID, Workspace: sWS, Title: sTitle})
 		})
+}
+
+// typedFolderShape is whether a typed folder has a usable shape: absolute, or
+// ~ or ~/... for the home of the folder's machine. Control only checks the
+// shape and passes ~ on as typed: the folder may be on another machine,
+// whose runner expands it against its own home (folders.Expand) and says
+// whether the folder exists.
+func typedFolderShape(f string) bool {
+	return len(f) <= MaxFolder && (filepath.IsAbs(f) || f == "~" || strings.HasPrefix(f, "~/"))
 }

@@ -86,10 +86,6 @@ type Config struct {
 	// them can only use the local fast path, and records no changeset.
 	Blobs    isolation.BlobSource
 	BlobSink blobs.Sink
-	// Sandbox says whether this machine can build a session's wall, and why
-	// not (sandbox.Can). It is asked once, when the runner enrolls, and
-	// reported with the runner's capabilities. Nil reports nothing.
-	Sandbox func() (bool, string)
 	// LookPath and Environ are how the runner probes its harnesses for its
 	// report (caps.go). Nil LookPath probes nothing.
 	LookPath func(string) (string, error)
@@ -142,8 +138,6 @@ type Runner struct {
 	probed  []harness.Report
 	// beatMu keeps one report in flight at a time (beat).
 	beatMu sync.Mutex
-	// sandbox is Config.Sandbox's answer, nil without one.
-	sandbox *queue.SandboxReport
 	// attempts are the running attempts by their turn, under attemptsMu, so the
 	// gateway's hold can find the attempt a held reply's turn runs in and poll
 	// its decision (decide.go). A turn runs one attempt at a time.
@@ -194,10 +188,6 @@ func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 	r := &Runner{cfg: cfg,
 		// Shorter than a lease, so one slow call cannot outlast it.
 		short: &http.Client{Timeout: 10 * time.Second, Transport: cfg.HTTP.Transport}}
-	if cfg.Sandbox != nil {
-		can, why := cfg.Sandbox()
-		r.sandbox = queue.NewSandboxReport(can, why)
-	}
 	// A saved identity is used again when the control plane still knows it.
 	if st, ok := loadState(cfg.StateFile); ok {
 		var rn jobs.RunnerBeatReply
@@ -568,16 +558,15 @@ type attempt struct {
 	cancelOnce, staleOnce sync.Once
 
 	// The workspace, once known: its folder, and for a session's first job
-	// the workspace to record. In an isolated session, space is its copy;
-	// for a folder used as it is, watch checkpoints it for this job only
-	// (isolation.None). start is the checkpoint the turn starts from, in
-	// either. session is the turn's session once it started. ref is the
+	// the workspace to record. In an isolated session, space is its copy and
+	// start the checkpoint the turn starts from. A folder used as it is
+	// (Direct) has no space: AgentBus keeps no record of what its turns
+	// change. session is the turn's session once it started. ref is the
 	// folder reference of a session's first job, for the record.
 	folder  string
 	ref     string
 	ws      *queue.Workspace
 	space   *isolation.Space
-	watch   *isolation.Space
 	start   string
 	session string
 
@@ -658,11 +647,13 @@ func (at *attempt) finish(ctx context.Context, f queue.Finish) {
 // protocol's body limit.
 const MaxRecordBatch = jobs.MaxBody * 3 / 4
 
-// addChanges puts what the job changed in its workspace into f's result, and
-// for a session's first job the session and its workspace, so the session's
-// later jobs come to this runner.
+// addChanges puts what the job changed in its copy into f's result, and for
+// a session's first job the session and its workspace, so the session's
+// later jobs come to this runner. A turn in a folder used as it is (Direct)
+// records no changes: they went straight into the folder.
 func (at *attempt) addChanges(ctx context.Context, f *queue.Finish) {
-	if at.watch == nil && at.space == nil {
+	defer at.claim(f)
+	if at.space == nil {
 		return
 	}
 	res, _ := queue.ReadResult(f.Result)
@@ -687,20 +678,21 @@ func (at *attempt) addChanges(ctx context.Context, f *queue.Finish) {
 	res.Changes = &c
 	f.Result = mustJSON(res)
 	at.event("workspace.changes", map[string]any{"count": c.Count, "kind": c.Kind})
-	// A review runs in another session's workspace: it never claims one.
+}
+
+// claim names, for a turn that started, its session and the workspace it ran
+// in, so the session's later jobs come to this runner.
+func (at *attempt) claim(f *queue.Finish) {
 	if at.ws != nil && at.session != "" && at.job.Kind == queue.KindTurn {
 		f.Session, f.Workspace = at.session, at.ws
 	}
 }
 
 // changes is what the job changed: from the turn's start checkpoint to a
-// checkpoint taken now, named by the turn, in the session's copy or in the
-// folder used as it is. It is the same diff GET /turns/{id}/diff shows.
+// checkpoint taken now, named by the turn, in the session's copy. It is the
+// same diff GET /turns/{id}/diff shows.
 func (at *attempt) changes() (workspace.Changes, bool) {
 	s := at.space
-	if s == nil {
-		s = at.watch
-	}
 	b, ok := isolation.Get(s.Backend)
 	if !ok {
 		return workspace.Changes{}, false
@@ -711,18 +703,6 @@ func (at *attempt) changes() (workspace.Changes, bool) {
 	}
 	c, err := b.Diff(s, at.start, end.Name)
 	return c, err == nil
-}
-
-// unwatch removes the record of a folder used as it is, once the job is
-// done with it. The folder itself is never touched.
-func (at *attempt) unwatch() {
-	if at.watch == nil {
-		return
-	}
-	if err := isolation.Close(at.watch); err != nil {
-		at.r.cfg.Logf("job %s: the checkpoints of its folder could not be removed", at.job.ID)
-	}
-	at.watch = nil
 }
 
 // heartbeats renews the lease every heartbeat interval until done closes, on
@@ -823,7 +803,6 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 		return
 	}
 	refused := r.prepare(ctx, at)
-	defer at.unwatch()
 	if refused != nil {
 		// prepare may have loaded the copy (at.space/at.ws) before a later step
 		// refused -- loadSpace succeeds, then checkpointStart fails (an overlay
@@ -846,10 +825,9 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 		// turn never removes the copy -- the copy belongs to the workspace, not
 		// the turn, and another session may be running in it or hold unapplied
 		// edits (his rule, 2026-11-21; removal is a workspace event, not a turn's
-		// teardown). The attempt only lets go of the copy and its folder watch
-		// before finishing, so addChanges sees nothing to record.
+		// teardown). The attempt only lets go of the copy before finishing, so
+		// addChanges sees nothing to record.
 		at.space = nil
-		at.unwatch()
 		at.event("turn.refused", map[string]any{"status": res.Status})
 		at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup, Result: mustJSON(res)})
 		return
@@ -960,6 +938,31 @@ func (r *Runner) prepare(ctx context.Context, at *attempt) *queue.Result {
 		at.ref = sp.RepoRef
 		b, _ := isolation.Get(isolation.Git)
 		return r.isolate(at, b, isolation.Request{Repo: repo, Base: sp.Base, Ref: sp.RepoRef})
+	case len(sp.Folders) > 0:
+		// A workspace with several folders: one copy holds each side by side,
+		// made by the copy backend, whatever the isolation setting names (only
+		// it copies several folders). A turn whose copy is made loads it.
+		if w := at.job.Workspace; w != nil && w.Kind == queue.WorkspaceCopy {
+			if res, reused := r.loadCopy(at, *w); reused {
+				return res
+			}
+		}
+		if !sp.Isolate {
+			return &queue.Result{Refused: "a workspace with several folders runs in a copy; it cannot work in its folders directly", Status: http.StatusBadRequest}
+		}
+		places := make([]isolation.Place, len(sp.Folders))
+		for i, p := range sp.Folders {
+			folder, ok := r.folderPath("", p.Ref, sp.Machine)
+			if !ok {
+				return &queue.Result{Refused: folderUnknown, Status: http.StatusBadRequest}
+			}
+			if info, err := os.Stat(folder); err != nil || !info.IsDir() {
+				return &queue.Result{Refused: "a folder of the workspace is not an existing directory", Status: http.StatusBadRequest}
+			}
+			places[i] = isolation.Place{Name: string(p.Name), Folder: folder, Ref: p.Ref}
+		}
+		b, _ := isolation.Get(isolation.Copy)
+		return r.isolate(at, b, isolation.Request{Places: places})
 	case sp.Folder != "" || sp.FolderRef != "":
 		// A continuation whose workspace already has a copy loads it here, before
 		// the source folder is resolved or checked (os.Stat below), so a
@@ -1012,7 +1015,7 @@ func (r *Runner) prepare(ctx context.Context, at *attempt) *queue.Result {
 		at.folder = r.workspaceDir(w)
 		if k := w.Kind; k == queue.WorkspaceWorktree || k == queue.WorkspaceCopy {
 			// A worktree made before the backends kept a record has none:
-			// it is checkpointed as a folder used as it is.
+			// it is used as a folder as it is, with no record of its changes.
 			if s, err := r.loadSpace(w); err == nil {
 				at.space = s
 				return r.checkpointStart(at)
@@ -1041,7 +1044,7 @@ func (r *Runner) prepare(ctx context.Context, at *attempt) *queue.Result {
 			return &queue.Result{Refused: "no such session", Status: http.StatusNotFound}
 		}
 	}
-	return r.watchFolder(at)
+	return r.useFolder(at)
 }
 
 // workspaceDir is where a session's workspace is on this runner: its
@@ -1180,6 +1183,9 @@ func (r *Runner) discardWork(at *attempt) queue.Finish {
 		if errors.Is(err, isolation.ErrNoRestore) {
 			return refuse(err.Error(), http.StatusBadRequest)
 		}
+		if errors.Is(err, isolation.ErrRepoInTheWay) {
+			return refuse(err.Error(), http.StatusConflict)
+		}
 		return refuse("the copy could not be reset to the last applied state, so nothing was discarded", http.StatusInternalServerError)
 	}
 	return queue.Finish{Status: queue.Finished}
@@ -1228,14 +1234,34 @@ func (r *Runner) updateWork(ctx context.Context, at *attempt) queue.Finish {
 	if r.cfg.FolderSide == nil || r.cfg.Folders == nil || sp.Machine != r.cfg.Folders.Machine() {
 		return refuse("update needs the copy and the folder on one machine; it is not available for a copy on another machine yet", http.StatusBadRequest)
 	}
-	folder, ok := r.folderPath("", sp.FolderRef, sp.Machine)
-	if !ok {
+	// Each part of the copy reads its own folder: the workspace's one, or each
+	// of its several. A copy of one folder made before its parts named the
+	// folder's reference is the job's folder.
+	paths := func(ref string) (string, bool) {
+		if ref == "" {
+			ref = sp.FolderRef
+		}
+		return r.folderPath("", ref, sp.Machine)
+	}
+	places := sp.Places()
+	if len(places) == 0 {
 		return refuse(folderUnknown, http.StatusBadRequest)
 	}
-	res, err := b.UpdateFrom(s, sp.Restore, folder)
+	for _, p := range places {
+		if _, ok := paths(p.Ref); !ok {
+			return refuse(folderUnknown, http.StatusBadRequest)
+		}
+	}
+	res, err := b.UpdateFrom(s, sp.Restore, paths, sp.Merge)
 	if err != nil {
 		if errors.Is(err, isolation.ErrNoUpdate) {
 			return refuse(err.Error(), http.StatusBadRequest)
+		}
+		if errors.Is(err, isolation.ErrNoFolder) {
+			return refuse(folderUnknown, http.StatusBadRequest)
+		}
+		if errors.Is(err, isolation.ErrRepoInTheWay) {
+			return refuse(err.Error(), http.StatusConflict)
 		}
 		if ctx.Err() != nil {
 			return refuse("the update was stopped; nothing was changed", http.StatusConflict)
@@ -1247,7 +1273,7 @@ func (r *Runner) updateWork(ctx context.Context, at *attempt) queue.Finish {
 		// records workspace.updated(result conflict) and the person can ask the
 		// agent to resolve them.
 		return queue.Finish{Status: queue.Finished,
-			Result: mustJSON(queue.Result{Update: &queue.UpdateResult{Conflicts: res.Conflicts}})}
+			Result: mustJSON(queue.Result{Update: &queue.UpdateResult{Conflicts: res.Conflicts, Unmergeable: res.Unmergeable}})}
 	}
 	// Publish the folder's current state (the new apply baseline) and the merge as
 	// changesets, so an apply reads them from the store by blob. UpdateFrom has
@@ -1278,7 +1304,7 @@ func (r *Runner) updateWork(ctx context.Context, at *attempt) queue.Finish {
 		return undo("this runner has no store to save the merge, so nothing was updated")
 	}
 	return queue.Finish{Status: queue.Finished, Result: mustJSON(queue.Result{Update: &queue.UpdateResult{
-		From: fromCS, To: toCS, TheirsCheckpoint: res.Theirs, MergedCheckpoint: res.Merged}})}
+		From: fromCS, To: toCS, TheirsCheckpoint: res.Theirs, MergedCheckpoint: res.Merged, Unresolved: res.Unresolved}})}
 }
 
 // isolate opens a session's first job's copy with b, and its turn starts
@@ -1415,22 +1441,14 @@ func (r *Runner) remount(at *attempt, folder string) *queue.Result {
 	return nil
 }
 
-// watchFolder checkpoints the folder the job uses as it is, before the turn,
-// so its changes come from checkpoints as an isolated turn's do.
-func (r *Runner) watchFolder(at *attempt) *queue.Result {
+// useFolder readies a folder the job uses as it is (Direct): the turn changes
+// it in place, and AgentBus keeps no record of those changes. A folder in a
+// copy this runner made is mounted again first.
+func (r *Runner) useFolder(at *attempt) *queue.Result {
 	if at.folder == "" {
-		return nil // no folder to watch: the engine still runs the turn, or refuses it
+		return nil // no folder: the engine still runs the turn, or refuses it
 	}
-	if res := r.remount(at, at.folder); res != nil {
-		return res
-	}
-	b, _ := isolation.Get(isolation.None)
-	s, err := b.Open(isolation.Request{ID: at.a.ID, Workdir: r.cfg.Workdir, Folder: at.folder})
-	if err != nil {
-		return &queue.Result{Refused: "the workspace could not be read"}
-	}
-	at.watch, at.start = s, isolation.Base
-	return nil
+	return r.remount(at, at.folder)
 }
 
 // follow waits for the turn to end, then finishes the attempt with how it

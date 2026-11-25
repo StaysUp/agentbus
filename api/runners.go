@@ -32,26 +32,18 @@ type RunnerInfo struct {
 	Arch     string    `json:"arch,omitempty" doc:"Its processor, as Go names it, such as amd64 or arm64. Absent before its first report."`
 	// Harnesses: the runner's last probe of each harness.
 	Harnesses []RunnerProbe `json:"harnesses" doc:"Its last probe of each harness, in the order it reported them. Empty for a connector, and before its first probe ends."`
-	Sandbox   *SandboxInfo  `json:"sandbox,omitempty" doc:"Whether it can build a session's wall (the sandbox setting). Absent from a runner of a build before it reported it."`
-}
-
-// SandboxInfo is whether a runner can build a session's wall.
-type SandboxInfo struct {
-	Can bool   `json:"can" doc:"It can: sandbox-exec on macOS, or bwrap on Linux with user namespaces allowed, started a program in a wall when the runner started."`
-	Why string `json:"why,omitempty" doc:"Why it cannot, in a plain sentence, such as AppArmor refusing user namespaces on Ubuntu 24.04. Absent when it can."`
 }
 
 // PendingMachine is a machine waiting for the person's approval.
 type PendingMachine struct {
-	ID       string       `json:"id" doc:"The sign-in's id (lgn_ and 16 hex digits): approve or refuse it by this."`
-	Name     string       `json:"name" doc:"The name the machine gave, such as its host name. Anyone who reaches control can ask; the code the machine shows is what proves it is yours."`
-	OS       string       `json:"os,omitempty" doc:"Its operating system, as it reported it."`
-	Arch     string       `json:"arch,omitempty" doc:"Its processor, as it reported it."`
-	Labels   []string     `json:"labels" doc:"The labels it asked for. Empty when none."`
-	Capacity int          `json:"capacity" doc:"How many jobs it will run at once."`
-	Sandbox  *SandboxInfo `json:"sandbox,omitempty" doc:"Whether it can build a session's wall, as it reported it."`
-	Asked    time.Time    `json:"asked" doc:"When it asked."`
-	Expires  time.Time    `json:"expires" doc:"When it stops waiting: then agentbus login must be run again."`
+	ID       string    `json:"id" doc:"The sign-in's id (lgn_ and 16 hex digits): approve or refuse it by this."`
+	Name     string    `json:"name" doc:"The name the machine gave, such as its host name. Anyone who reaches control can ask; the code the machine shows is what proves it is yours."`
+	OS       string    `json:"os,omitempty" doc:"Its operating system, as it reported it."`
+	Arch     string    `json:"arch,omitempty" doc:"Its processor, as it reported it."`
+	Labels   []string  `json:"labels" doc:"The labels it asked for. Empty when none."`
+	Capacity int       `json:"capacity" doc:"How many jobs it will run at once."`
+	Asked    time.Time `json:"asked" doc:"When it asked."`
+	Expires  time.Time `json:"expires" doc:"When it stops waiting: then agentbus login must be run again."`
 }
 
 // RunnerProbe is one harness as one runner last probed it.
@@ -123,23 +115,15 @@ func runnerInfo(rn queue.Runner, now time.Time) RunnerInfo {
 	if c.Role == queue.RoleConnector {
 		v.Role = queue.RoleConnector
 	}
-	v.OS, v.Arch, v.Machine, v.Sandbox = c.OS, c.Arch, c.MachineID(), sandboxInfo(c)
+	v.OS, v.Arch, v.Machine = c.OS, c.Arch, c.MachineID()
 	for _, rep := range c.Harnesses {
 		v.Harnesses = append(v.Harnesses, RunnerProbe{Name: rep.Name, Found: rep.Found, Version: rep.Version, SignedIn: rep.SignedIn})
 	}
 	return v
 }
 
-func sandboxInfo(c *queue.Capabilities) *SandboxInfo {
-	if c == nil || c.Sandbox == nil {
-		return nil
-	}
-	return &SandboxInfo{Can: c.Sandbox.Can, Why: c.Sandbox.Why}
-}
-
 func pendingMachine(l queue.Login) PendingMachine {
-	p := PendingMachine{ID: l.ID, Name: l.Name, Labels: l.Labels, Capacity: l.Capacity, Asked: l.Created.UTC(), Expires: l.Expires.UTC(),
-		Sandbox: sandboxInfo(l.Caps)}
+	p := PendingMachine{ID: l.ID, Name: l.Name, Labels: l.Labels, Capacity: l.Capacity, Asked: l.Created.UTC(), Expires: l.Expires.UTC()}
 	if p.Labels == nil {
 		p.Labels = []string{}
 	}

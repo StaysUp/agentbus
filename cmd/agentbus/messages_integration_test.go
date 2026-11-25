@@ -56,6 +56,13 @@ func getAPI(t *testing.T, svc *service, tok, path string) (int, string) {
 // the session's latest turn, as the cockpit's box starts with.
 func postMessage(t *testing.T, svc *service, tok, session string, body map[string]any) (int, map[string]any, string) {
 	t.Helper()
+	return postTurn(t, svc, tok, messageBody(t, svc, session, body))
+}
+
+// messageBody is postMessage's turn body: body in session, with the agent of
+// the session's latest turn when body names none.
+func messageBody(t *testing.T, svc *service, session string, body map[string]any) map[string]any {
+	t.Helper()
 	with := map[string]any{"session": session}
 	if _, named := body["agent"]; !named {
 		with["agent"] = lastAgent(t, svc, session)
@@ -63,8 +70,30 @@ func postMessage(t *testing.T, svc *service, tok, session string, body map[strin
 	for k, v := range body {
 		with[k] = v
 	}
-	b, _ := json.Marshal(with)
-	return postAPI(t, svc, tok, "/api/v0/turns", b)
+	return with
+}
+
+// postRunning posts the turn body (postTurn) and returns the reply of a turn
+// that runs: 202 running, with session, turn and base_url. Any other reply
+// fails the test with the reply as sent, never a panic on a missing field.
+func postRunning(t *testing.T, svc *service, tok string, body map[string]any) (map[string]any, string) {
+	t.Helper()
+	code, out, raw := postTurn(t, svc, tok, body)
+	if code != http.StatusAccepted || out["state"] != "running" {
+		t.Fatalf("turn: %d %s, want 202 running", code, raw)
+	}
+	for _, f := range []string{"session", "turn", "base_url"} {
+		if s, _ := out[f].(string); s == "" {
+			t.Fatalf("turn reply without %s: %s", f, raw)
+		}
+	}
+	return out, raw
+}
+
+// postRunRunning is postRun, returning once the turn runs (postRunning).
+func postRunRunning(t *testing.T, svc *service, tok string, body map[string]any) (map[string]any, string) {
+	t.Helper()
+	return postRunning(t, svc, tok, firstTurnBody(t, svc, tok, body))
 }
 
 // lastAgent is the agent of session's latest turn, as the record holds it:
@@ -126,10 +155,7 @@ func startRun(t *testing.T, svc *service, tok, agent, stdout string) (string, st
 	t.Helper()
 	t.Setenv("AGENTBUS_FAKE_STDOUT", stdout)
 	t.Setenv("AGENTBUS_FAKE_EXIT", "0")
-	code, out, raw := postRun(t, svc, tok, map[string]any{"agent": agent, "folder": t.TempDir(), "prompt": "one"})
-	if code != http.StatusAccepted {
-		t.Fatalf("run: %d %s", code, raw)
-	}
+	out, _ := postRunRunning(t, svc, tok, map[string]any{"agent": agent, "folder": t.TempDir(), "prompt": "one"})
 	id := out["session"].(string)
 	waitClosed(t, svc.store, id)
 	return id, out["base_url"].(string)
@@ -190,10 +216,11 @@ func TestHarnessesListsFoundVersionsAndSignIn(t *testing.T) {
 	if cx.Name != "codex" || cx.Found || cx.Version != "" || cx.SignedIn != nil {
 		t.Errorf("codex: %+v", cx)
 	}
-	// opencode runs on an OpenRouter key only: its own sign-in is listed,
-	// disabled.
-	if oc.Name != "opencode" || oc.Disabled || oc.Found || oc.SignedIn != nil || len(oc.Access) != 2 ||
-		oc.Access[0].Kind != "subscription" || !oc.Access[0].Disabled || oc.Access[1].Kind != "openrouter" || oc.Access[1].Disabled {
+	// opencode runs on an OpenRouter key or a provider's (xai): its own
+	// sign-in is listed, disabled.
+	if oc.Name != "opencode" || oc.Disabled || oc.Found || oc.SignedIn != nil || len(oc.Access) != 3 ||
+		oc.Access[0].Kind != "subscription" || !oc.Access[0].Disabled || oc.Access[1].Kind != "openrouter" || oc.Access[1].Disabled ||
+		oc.Access[2].Kind != "xai" || oc.Access[2].Disabled {
 		t.Errorf("opencode: %+v", oc)
 	}
 	// gemini runs on a Gemini API key only: its Google sign-in and
@@ -292,12 +319,17 @@ func TestRunWithSessionRunsNextTurnInSameSession(t *testing.T) {
 		if tc.model != "" {
 			body["model"] = tc.model
 		}
-		code, out, raw := postMessage(t, svc, tok, id, body)
+		out, raw := postRunning(t, svc, tok, messageBody(t, svc, id, body))
 		next, _ := out["turn"].(string)
 		session := strings.Split(base, "/t/")[0]
-		if code != http.StatusAccepted || next == "" || strings.HasSuffix(base, "/t/"+next) ||
-			strings.TrimSpace(raw) != `{"session":"`+id+`","turn":"`+next+`","state":"running","base_url":"`+session+`/t/`+next+`"}` {
-			t.Fatalf("%s: %d %s, want 202 with the same id, a new turn, and the session's base URL with it", name, code, raw)
+		// existing is true when postRunning had to ask again for the same turn.
+		again := ""
+		if out["existing"] == true {
+			again = `,"existing":true`
+		}
+		if strings.HasSuffix(base, "/t/"+next) ||
+			strings.TrimSpace(raw) != `{"session":"`+id+`","turn":"`+next+`","state":"running","base_url":"`+session+`/t/`+next+`"`+again+`}` {
+			t.Fatalf("%s: %s, want 202 with the same id, a new turn, and the session's base URL with it", name, raw)
 		}
 		base = out["base_url"].(string) // this turn's own
 		closed := waitClosedN(t, svc, id, 2)

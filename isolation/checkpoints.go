@@ -629,8 +629,7 @@ func diff(s *Space, from, to string) (workspace.Changes, error) {
 
 // readEnd reads the file rel as a checkpoint holds it, f, at most max
 // bytes: its saved copy, or the file in the space's folder while it still
-// has f's hash. A folder used as it is (none) saves nothing, so there it is
-// always read from the folder.
+// has f's hash.
 func readEnd(objects, dir *os.Root, rel string, f workspace.File, max int) ([]byte, bool) {
 	if f.Mode&fs.ModeSymlink != 0 || f.Hash == "" {
 		return nil, false

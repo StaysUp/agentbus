@@ -40,8 +40,8 @@ import (
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/gateway"
 	"github.com/staysup/agentbus/harness"
+	"github.com/staysup/agentbus/homefiles"
 	"github.com/staysup/agentbus/logfile"
-	"github.com/staysup/agentbus/sandbox"
 	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 )
@@ -102,17 +102,18 @@ type Access struct {
 }
 
 // accessKnown says access is one a turn can run on: "" (the subscription),
-// subscription, openrouter or api.
+// subscription, openrouter, api or a provider's name (harness.Providers).
 func accessKnown(access string) bool {
 	switch access {
 	case "", harness.Subscription, harness.OpenRouter, harness.API:
 		return true
 	}
-	return false
+	_, ok := harness.ProviderOf(access)
+	return ok
 }
 
 // accessWords refuses an access that is none of accessKnown's.
-const accessWords = "access must be subscription, openrouter or api"
+const accessWords = "access must be subscription, openrouter, api or a provider (xai)"
 
 // Refused makes a refusal a Wire can return: status and the person's words.
 func Refused(status int, msg string) error { return refuse(status, msg) }
@@ -931,6 +932,13 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	all = harness.CombineSettings(h, all)
 	cmd.Args = append([]string{l.Path}, all...)
 	cmd.Dir = t.folder
+	// PWD names the folder the child starts in, as a shell sets it: the one
+	// it would inherit is the service's own. opencode run takes its project
+	// folder from PWD before its working folder (opencode 2.1.1, cli/src/run/
+	// run.ts: process.env.PWD ?? process.cwd(), then chdir), so an inherited
+	// PWD sends its turn to the folder agentbus started in, and an empty one
+	// fails ("Failed to change directory to ", seen live 2026-11-24).
+	cmd.Env = setEnv(cmd.Env, []string{"PWD=" + t.folder})
 	// Stdin stays nil: the child reads an empty stdin. Stdout is read for the
 	// vendor's session id, the only thing from it that reaches an event; the
 	// work is in the events. Stdout and stderr together, their last
@@ -1072,7 +1080,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 
 // copyHomeFiles copies the policy's home_files into session's own home at
 // the start of each turn, sandbox on or off, and takes back any the policy no
-// longer lists (sandbox.CopyGrants), or says why it cannot (fixed wording). A
+// longer lists (homefiles.CopyGrants), or says why it cannot (fixed wording). A
 // session with no home of its own gets none, since they would land in this
 // user's own home: a service without homes, or a session begun before them.
 func (e *Engine) copyHomeFiles(p settings.Policy, session string) string {
@@ -1090,14 +1098,14 @@ func (e *Engine) copyHomeFiles(p settings.Policy, session string) string {
 		return ""
 	}
 	userHome, _ := os.UserHomeDir()
-	if err := sandbox.CopyGrants(home, home+grantsRecord, userHome, p.HomeFiles, settings.SignInFile); err != nil {
+	if err := homefiles.CopyGrants(home, home+grantsRecord, userHome, p.HomeFiles, settings.SignInFile); err != nil {
 		return err.Error()
 	}
 	return ""
 }
 
 // grantsRecord ends the name of the file beside a session's home that
-// records the home_files copied into it (sandbox.CopyGrants).
+// records the home_files copied into it (homefiles.CopyGrants).
 // The session cannot write it: it is not in its home.
 const grantsRecord = ".grants"
 

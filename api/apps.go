@@ -94,12 +94,14 @@ func reviewTurnApp() toolreg.Tool {
 							"then": "Review a change another agent made in turn {$inputs.turn}. Read the turn at " +
 								"GET /api/v0/turns/{$inputs.turn} and its diff at GET /api/v0/turns/{$inputs.turn}/diff through " +
 								"agentbus-api (its base URL is $AGENTBUS_URL, its token $AGENTBUS_TOKEN). " +
+								"If the ended turn's diff has files null, it ran in a direct workspace: " + reviewDirect +
 								"Reply with your findings, most serious first, and say plainly whether the change is safe to apply.",
 							"else": "Review the changes another agent made in your workspace and has not applied yet — " +
 								"the whole set applying would write to the person's folder. Read them at " +
 								"GET /api/v0/workspaces/{$steps.session.outputs.workspace}/changes through " +
 								"agentbus-api (its base URL is $AGENTBUS_URL, its token $AGENTBUS_TOKEN): " +
 								"each changed file with its diff, across every unapplied turn. " +
+								"If it answers isolated false, the workspace is direct: " + reviewDirect +
 								"Reply with your findings, most serious first, and say plainly whether the changes are safe to apply.",
 						},
 					},
@@ -109,6 +111,12 @@ func reviewTurnApp() toolreg.Tool {
 		}},
 	}
 }
+
+// reviewDirect is the review prompt's word on a direct workspace (sandbox
+// false): its turns change the person's folder in place and AgentBus keeps no
+// record of those changes, so there is no diff to read from it.
+const reviewDirect = "AgentBus keeps no record of its changes and gives you no diff. " +
+	"The changes are already in the folder you run in, so find them there yourself. "
 
 // askAgentApp is ask_agent: start a turn on another agent, then register the on
 // that delivers its reply to the asking session. Two steps over the public API,
@@ -212,7 +220,7 @@ func (a *API) checkApp(def toolreg.Tool) string {
 		if rt == nil {
 			return "step " + strconv.Quote(s.StepID) + ": no API operation named " + s.OperationID
 		}
-		if rt.public || rt.self || rt.turn == mainOnly {
+		if rt.public || rt.self || rt.scope == scopeNone {
 			return "step " + strconv.Quote(s.StepID) + ": operation " + s.OperationID + " cannot be called with a turn's own token"
 		}
 		// The app runtime fills only {id} in a path. An operation with another

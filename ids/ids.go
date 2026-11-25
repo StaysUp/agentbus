@@ -18,3 +18,9 @@ type WorkspaceID string
 
 // SessionID names a session: a conversation that groups turns.
 type SessionID string
+
+// FolderName names one folder of a workspace: its place under the copy's top,
+// and the group its files are listed under in a review. It is set once, when
+// the workspace is made, and never computed again. It is not a path and not a
+// folder's reference, and the compiler keeps it apart from both.
+type FolderName string

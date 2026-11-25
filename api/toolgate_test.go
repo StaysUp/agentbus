@@ -271,7 +271,7 @@ func TestToolCallGatesBuiltinAndCustomAlike(t *testing.T) {
 // run the call, never record a second decision that refuses it.
 func TestHoldFinalizationHonorsAPersonsAnswer(t *testing.T) {
 	e := toolGateEnv(t, 5*time.Second, 0, nil)
-	g := &run.Grant{Session: "s1", Turn: "t_1", Root: "s1"}
+	g := ptr(run.ForTurn(run.Grant{Session: "s1", Turn: "t_1", Root: "s1"}))
 	id := "ap-tool-race1"
 	// The approval was raised, then a person allowed it (as decideApproval does).
 	e.api.changed(event.Event{Kind: event.ApprovalRequested, Session: "s1", Turn: "t_1", Approval: id}, "")
@@ -289,7 +289,7 @@ func TestHoldFinalizationHonorsAPersonsAnswer(t *testing.T) {
 // With no answer, the timeout records exactly one decision and refuses.
 func TestHoldFinalizationRecordsTimeoutWhenUnanswered(t *testing.T) {
 	e := toolGateEnv(t, 5*time.Second, 0, nil)
-	g := &run.Grant{Session: "s1", Turn: "t_1", Root: "s1"}
+	g := ptr(run.ForTurn(run.Grant{Session: "s1", Turn: "t_1", Root: "s1"}))
 	id := "ap-tool-race2"
 	e.api.changed(event.Event{Kind: event.ApprovalRequested, Session: "s1", Turn: "t_1", Approval: id}, "")
 	allow, res := e.api.endHeldCall(g, id, "no one answered in time", holdTimeoutToolText)

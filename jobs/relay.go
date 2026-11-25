@@ -53,7 +53,7 @@ const RelayPrefix = "/relay/"
 // Harness names the one harness whose subscription a call there gets.
 type Upstream struct {
 	URL     *url.URL
-	Access  string // subscription, openrouter or api
+	Access  string // subscription, openrouter, api or a provider's name (xai)
 	Harness string // for a subscription or api: the harness whose vendor this is
 	// Under, when set, is how every vendor path relayed here starts, such
 	// as "v1internal:" for agy's Code Assist methods. Any other path gets

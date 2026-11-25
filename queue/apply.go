@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/staysup/agentbus/applied"
 	"github.com/staysup/agentbus/ids"
 )
 
@@ -63,58 +64,27 @@ func (q *Queue) appliesWhere(team, where string, arg any) ([]Job, error) {
 	return out, nil
 }
 
-// sessionTurn is one turn of a session whose changes can be applied: the
-// turn and its changeset, in the session's order.
-type sessionTurn struct {
-	turn, changeset string
-}
-
-// appliableTurns are the session's turns with a changeset, in the order
-// they ran: a session's turn jobs run one at a time, so the order they
-// ended in, which labels can make differ from the order they were made in.
-// jobWorkspace is the workspace a turn job runs in, for scoping a copy's turns
-// and applies: its spec workspace, or its session (its own workspace). Every
-// session of one workspace shares the one copy, so apply and preview order all
-// their turns together by this key, not by session.
+// jobWorkspace is the workspace a job runs in, for scoping a copy's jobs: its
+// spec workspace, or its session (its own workspace). Every session of one
+// workspace shares the one copy, so its jobs are scoped by this key, not by
+// session.
 const jobWorkspace = `COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), session)`
 
-func (q *Queue) appliableTurns(team string, ws ids.WorkspaceID) ([]sessionTurn, error) {
-	// A turn a finished discard dropped is gone from the copy, so it is not
-	// appliable, previewable or droppable again; a turn a finished update folded
-	// into the merge (its links.applies_turns, every folded turn but the update's
-	// head turn) is no longer applied on its own either -- applying the head turn
-	// writes the merge. Exclude both: every turn a finished discard or update of
-	// this workspace named in links.applies_turns.
-	rows, err := q.db.Query(`SELECT turn, COALESCE(json_extract(result, '$.changeset'), '') FROM jobs
-		WHERE team = ? AND `+jobWorkspace+` = ? AND kind = 'turn' AND ended IS NOT NULL AND attempt IS NOT NULL
-		AND turn NOT IN (
-			SELECT je.value FROM jobs d, json_each(COALESCE(json_extract(d.links, '$.applies_turns'), '[]')) je
-			WHERE d.team = ? AND COALESCE(NULLIF(json_extract(d.spec, '$.workspace'), ''), d.session) = ? AND d.kind IN ('discard','update') AND d.state = 'finished')
-		ORDER BY ended, rowid`, team, string(ws), team, string(ws))
-	if err != nil {
-		return nil, fmt.Errorf("queue: list turns: %w", err)
+// coveringApply is the finished apply job the record says went up to the
+// record's apply of turn at index at or later: the newest one whose turn the
+// record places at or after at. ok is false when the record holds no such
+// apply, or its job is not finished yet (the record is written a moment
+// before the job ends).
+func coveringApply(rec applied.State, applies []Job, at int) (Job, bool) {
+	if at < 0 || at > rec.Mark {
+		return Job{}, false
 	}
-	defer rows.Close()
-	var out []sessionTurn
-	for rows.Next() {
-		var turn, changeset string
-		if err := rows.Scan(&turn, &changeset); err != nil {
-			return nil, fmt.Errorf("queue: list turns: %w", err)
-		}
-		if changeset != "" {
-			out = append(out, sessionTurn{turn: turn, changeset: changeset})
+	for _, a := range applies { // newest first
+		if a.State == Finished && rec.Index(a.Links.AppliesTurn) >= at {
+			return a, true
 		}
 	}
-	return out, rows.Err()
-}
-
-func indexOf(turns []sessionTurn, turn string) int {
-	for i, t := range turns {
-		if t.turn == turn {
-			return i
-		}
-	}
-	return -1
+	return Job{}, false
 }
 
 // AppliedBy is the apply that put turn's changes in the folder: the newest
@@ -122,6 +92,8 @@ func indexOf(turns []sessionTurn, turn string) int {
 // apply up to a turn applies every turn before it. Else the newest apply of
 // turn, refused or not ended; ok is false when there is none.
 func (q *Queue) AppliedBy(team, turn string) (job Job, ok bool, err error) {
+	q.applyMu.Lock()
+	defer q.applyMu.Unlock()
 	j, err := q.JobByTurn(team, turn)
 	if err != nil {
 		return Job{}, false, err
@@ -130,19 +102,16 @@ func (q *Queue) AppliedBy(team, turn string) (job Job, ok bool, err error) {
 	if err != nil {
 		return Job{}, false, err
 	}
-	turns, err := q.appliableTurns(team, ws)
+	rec, err := q.appliedState(ws)
 	if err != nil {
 		return Job{}, false, err
 	}
-	at := indexOf(turns, turn)
 	applies, err := q.sessionApplies(team, ws)
 	if err != nil {
 		return Job{}, false, err
 	}
-	for _, a := range applies {
-		if a.State == Finished && at >= 0 && indexOf(turns, a.Links.AppliesTurn) >= at {
-			return a, true, nil
-		}
+	if a, ok := coveringApply(rec, applies, rec.Index(turn)); ok {
+		return a, true, nil
 	}
 	for _, a := range applies {
 		if a.Links.AppliesTurn == turn {
@@ -176,12 +145,10 @@ func (q *Queue) ApplyAs(team, turn string, by *By) (job Job, created bool, err e
 }
 
 // ApplyWorkspace applies the workspace's changes up to turn, or up to its
-// appliable head when turn is empty. The head is the queue's appliable cursor --
-// the same source Preview and Discard read -- resolved under applyMu so the
-// target cannot move under the apply, and NOT store.Workspace.HeadTurn, which is
-// a second source that disagrees (a turn whose publish failed records
-// turn.changed with an empty changeset; a pre-0.5 job stores a changeset with no
-// turn.changed event). A turn of another workspace is ErrNotFound; a workspace
+// appliable head when turn is empty. The head is the record's (applied.State,
+// the same fold store.Workspace.HeadTurn shows), read under applyMu so the
+// target cannot move under the apply. A turn of another workspace is
+// ErrNotFound; a workspace
 // with nothing the queue can apply is ErrAllApplied, unless an apply or discard
 // is in flight (ErrApplyBusy) or the copy is closed (ErrSessionClosed).
 func (q *Queue) ApplyWorkspace(team string, ws ids.WorkspaceID, turn string, by *By) (job Job, created bool, err error) {
@@ -273,16 +240,21 @@ func (q *Queue) planApply(team, turn string, by *By) (plan applyPlan, done Job, 
 	if j.Kind != KindTurn || j.Ended == nil || j.Attempt == "" {
 		return plan, Job{}, false, ErrNotApplicable
 	}
-	r, _ := ReadResult(j.Result)
-	if r.Changeset == "" || j.Workspace == nil || (j.Workspace.Kind != WorkspaceCopy && j.Workspace.Kind != WorkspaceWorktree) {
+	ws, err := q.workspaceID(team, ids.SessionID(j.Session))
+	if err != nil {
+		return plan, Job{}, false, err
+	}
+	// What is applied and what is appliable is the record's (applied.State);
+	// the job rows say only how each apply job stands.
+	rec, err := q.appliedState(ws)
+	if err != nil {
+		return plan, Job{}, false, err
+	}
+	if !rec.Changed(turn) || j.Workspace == nil || (j.Workspace.Kind != WorkspaceCopy && j.Workspace.Kind != WorkspaceWorktree) {
 		return plan, Job{}, false, ErrNotApplicable
 	}
 	if j.Workspace.Closed != nil {
 		return plan, Job{}, false, ErrSessionClosed
-	}
-	ws, err := q.workspaceID(team, ids.SessionID(j.Session))
-	if err != nil {
-		return plan, Job{}, false, err
 	}
 	// Apply, discard and update all move the applied point or the copy, so one
 	// runs per workspace: an apply while a discard or an update is in flight is
@@ -297,14 +269,10 @@ func (q *Queue) planApply(team, turn string, by *By) (plan applyPlan, done Job, 
 	if err != nil {
 		return plan, Job{}, false, err
 	}
-	if first.FolderRef == "" || first.Machine == "" {
+	if len(first.Places()) == 0 || first.Machine == "" {
 		return plan, Job{}, false, ErrNotApplicable
 	}
-	turns, err := q.appliableTurns(team, ws)
-	if err != nil {
-		return plan, Job{}, false, err
-	}
-	at := indexOf(turns, turn)
+	at := rec.Index(turn)
 	if at < 0 {
 		return plan, Job{}, false, ErrNotApplicable
 	}
@@ -312,46 +280,42 @@ func (q *Queue) planApply(team, turn string, by *By) (plan applyPlan, done Job, 
 	if err != nil {
 		return plan, Job{}, false, err
 	}
-	mark := -1
-	lastAppliedTo := "" // what the folder holds now: the most recent finished apply's target
+	// An apply job not ended yet: the record has no outcome of it to read.
 	for _, a := range applies {
-		k := indexOf(turns, a.Links.AppliesTurn)
-		switch {
-		case a.Ended == nil && k >= at:
-			return plan, a, true, nil // being applied, by this apply or a later one
-		case a.Ended == nil:
-			return plan, Job{}, false, ErrApplyBusy
-		case a.State == Finished && k >= at:
-			return plan, a, true, nil // applied already
-		case a.State == Finished:
-			mark = max(mark, k)
-			if lastAppliedTo == "" { // applies are newest first: the first finished is the folder's state
-				lastAppliedTo = a.Spec.ApplyTo
+		if a.Ended == nil {
+			if rec.Index(a.Links.AppliesTurn) >= at {
+				return plan, a, true, nil // being applied, by this apply or a later one
 			}
-		case a.Links.AppliesTurn == turn:
+			return plan, Job{}, false, ErrApplyBusy
+		}
+	}
+	if a, ok := coveringApply(rec, applies, at); ok {
+		return plan, a, true, nil // applied already
+	}
+	// The applies of turn that ended without applying, for the next one's key.
+	for _, a := range applies {
+		if a.State != Finished && a.Links.AppliesTurn == turn {
 			plan.refused++
 		}
 	}
-	// The baseline the apply starts from is what the folder holds now: the most
-	// recent apply's target changeset. An active update (one with no apply or
-	// discard after it) moved the copy to the folder's current state without
-	// touching the folder, so until the next apply the baseline is the update's
-	// recorded folder state (from), and applying up to the update's head turn
-	// writes the merge (to) rather than that turn's own changeset.
-	from := lastAppliedTo
-	to := r.Changeset
-	if upd, ok, uerr := q.activeUpdate(team, ws); uerr != nil {
-		return plan, Job{}, false, uerr
-	} else if ok {
+	// The baseline the apply starts from is what the folder holds now: the
+	// latest successful apply's target changeset. An active update (one with no
+	// apply or discard after it) moved the copy to the folder's current state
+	// without touching the folder, so until the next apply the baseline is the
+	// update's recorded folder state (from), and applying up to the update's
+	// head turn writes the merge (to) rather than that turn's own changeset.
+	from := rec.AppliedTo
+	to := rec.Turns[at].Changeset
+	if upd := rec.Update; upd != nil {
 		from = upd.From
 		if turn == upd.HeadTurn {
 			to = upd.To
 		}
 	}
-	plan.spec = Spec{Session: ids.SessionID(j.Session), Workspace: j.Spec.Workspace, FolderRef: first.FolderRef, Machine: first.Machine, ApplyFrom: from, ApplyTo: to}
-	carried := make([]string, 0, at-mark)
-	for _, t := range turns[mark+1 : at+1] {
-		carried = append(carried, t.turn)
+	plan.spec = Spec{Session: ids.SessionID(j.Session), Workspace: j.Spec.Workspace, FolderRef: first.FolderRef, Folders: first.Folders, Machine: first.Machine, ApplyFrom: from, ApplyTo: to, CheckMarkers: rec.Markers}
+	carried := make([]string, 0, at-rec.Mark)
+	for _, t := range rec.Turns[rec.Mark+1 : at+1] {
+		carried = append(carried, t.Turn)
 	}
 	plan.links = Links{AppliesTurn: turn, AppliesJob: j.ID, AppliesTurns: carried, ApplyBy: by}
 	return plan, Job{}, false, nil
@@ -462,11 +426,11 @@ func (q *Queue) Preview(team string, wsID ids.WorkspaceID) (job Job, turn string
 // neither number. ok is false when nothing is appliable. The caller holds
 // applyMu.
 func (q *Queue) appliableCursor(team string, ws ids.WorkspaceID) (turn string, applies int, ok bool, err error) {
-	turns, err := q.appliableTurns(team, ws)
+	rec, err := q.appliedState(ws)
 	if err != nil {
 		return "", 0, false, err
 	}
-	if len(turns) == 0 {
+	if len(rec.Turns) == 0 {
 		return "", 0, false, nil
 	}
 	// Count applies, discards and updates: each moves the folder's baseline or
@@ -476,7 +440,7 @@ func (q *Queue) appliableCursor(team string, ws ids.WorkspaceID) (turn string, a
 		team, string(ws)).Scan(&applies); err != nil {
 		return "", 0, false, fmt.Errorf("queue: count applies: %w", err)
 	}
-	return turns[len(turns)-1].turn, applies, true, nil
+	return rec.Head(), applies, true, nil
 }
 
 // Discard queues a KindDiscard job that resets the workspace's copy to its
@@ -501,11 +465,11 @@ func (q *Queue) Discard(team string, ws ids.WorkspaceID, machine string, by *By)
 	if busy {
 		return Job{}, false, ErrApplyBusy
 	}
-	turns, mark, err := q.appliedMark(team, ws)
+	rec, err := q.appliedState(ws)
 	if err != nil {
 		return Job{}, false, err
 	}
-	if mark == len(turns)-1 {
+	if rec.Mark == len(rec.Turns)-1 {
 		// No ended unapplied turn. But a turn in flight will leave unapplied
 		// changes in the copy, so the discard is not "nothing to do": it queues,
 		// waits for the turn in the lane, and drops it at the finish. Only with no
@@ -517,20 +481,14 @@ func (q *Queue) Discard(team string, ws ids.WorkspaceID, machine string, by *By)
 		}
 	}
 	restore := ""
-	if mark >= 0 {
+	if rec.Mark >= 0 {
 		// Reset to the checkpoint whose content the folder's last apply wrote --
 		// which may be an update's merge, not the applied turn's own pre-merge
 		// checkpoint. Using the turn checkpoint would reset the copy behind the
 		// merge the folder holds, and a later turn + apply would then revert the
 		// folder's imported content.
-		to, ok, terr := q.lastFinishedApplyTo(team, ws)
-		if terr != nil {
-			return Job{}, false, terr
-		}
-		if ok {
-			if restore, err = q.checkpointForChangeset(team, ws, to); err != nil {
-				return Job{}, false, err
-			}
+		if rec.Applied {
+			restore = rec.CheckpointOf(rec.AppliedTo)
 		}
 		if restore == "" {
 			// The applied content has no checkpoint to reset to. Refuse rather than
@@ -567,51 +525,28 @@ func (q *Queue) Discard(team string, ws ids.WorkspaceID, machine string, by *By)
 	return q.create(team, KindDiscard, "", spec, Links{ApplyBy: by}, Limits{}, "", nil)
 }
 
-// appliedMark is the workspace's appliable turns (every ended turn with a
-// changeset not dropped by a finished discard) and the index of the last one a
-// finished apply covered (-1 when none was applied). The caller holds applyMu.
-func (q *Queue) appliedMark(team string, ws ids.WorkspaceID) (turns []sessionTurn, mark int, err error) {
-	turns, err = q.appliableTurns(team, ws)
-	if err != nil {
-		return nil, -1, err
-	}
-	applies, err := q.sessionApplies(team, ws)
-	if err != nil {
-		return nil, -1, err
-	}
-	mark = -1
-	for _, a := range applies {
-		if a.State == Finished {
-			if k := indexOf(turns, a.Links.AppliesTurn); k > mark {
-				mark = k
-			}
-		}
-	}
-	return turns, mark, nil
-}
-
 // DroppedTurns are the unapplied turns a discard running now drops: the
-// workspace's appliable turns after its last applied one. Read when the discard
-// RUNS, not when it is queued, so a turn that ran while the discard waited in
-// the lane is included.
+// workspace's appliable turns after its last applied one, as the record holds
+// them. Read when the discard RUNS, not when it is queued, so a turn that ran
+// while the discard waited in the lane is included. The caller is inside
+// Outcome.
 func (q *Queue) DroppedTurns(team string, ws ids.WorkspaceID) ([]string, error) {
-	q.applyMu.Lock()
-	defer q.applyMu.Unlock()
-	turns, mark, err := q.appliedMark(team, ws)
+	rec, err := q.appliedState(ws)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]string, 0, len(turns)-mark-1)
-	for _, t := range turns[mark+1:] {
-		out = append(out, t.turn)
+	out := make([]string, 0, len(rec.Turns)-rec.Mark-1)
+	for _, t := range rec.Turns[rec.Mark+1:] {
+		out = append(out, t.Turn)
 	}
 	return out, nil
 }
 
-// MarkDiscarded records on the discard job the turns it dropped, so they stop
-// being appliable, previewable or droppable again (appliableTurns excludes a
-// finished discard's dropped turns). Called at the finish, once the dropped
-// turns are known -- a turn that ran while the discard waited is among them.
+// MarkDiscarded records on the discard job the turns it dropped, for the job's
+// own answer (GET of the discard). They stop being appliable through the
+// record's workspace.discarded, not through this. Called at the finish, once
+// the dropped turns are known -- a turn that ran while the discard waited is
+// among them.
 func (q *Queue) MarkDiscarded(team, jobID string, dropped []string) error {
 	b, err := json.Marshal(dropped)
 	if err != nil {
@@ -622,22 +557,6 @@ func (q *Queue) MarkDiscarded(team, jobID string, dropped []string) error {
 		return fmt.Errorf("queue: mark discarded: %w", err)
 	}
 	return nil
-}
-
-// turnCheckpoint is turn's end checkpoint (Result.Checkpoint, or in a result
-// from before 0.5 its changes' to), or empty for a turn with none or one the
-// queue does not hold.
-func (q *Queue) turnCheckpoint(team, turn string) (string, error) {
-	var cp string
-	err := q.db.QueryRow(`SELECT COALESCE(json_extract(result, '$.checkpoint'), json_extract(result, '$.changes.to'), '')
-		FROM jobs WHERE team = ? AND turn = ? AND kind = 'turn'`, team, turn).Scan(&cp)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("queue: read turn checkpoint: %w", err)
-	}
-	return cp, nil
 }
 
 // copyRunner is the state of the runner holding the workspace's copy, in ONE
@@ -736,3 +655,48 @@ func (q *Queue) firstSpec(team string, ws ids.WorkspaceID) (Spec, error) {
 // ApplyKey is the idempotency key of the n-th apply job of turn. Like
 // ResultKey it holds a "/", so no caller's key can take it first.
 func ApplyKey(turn string, n int) string { return fmt.Sprintf("apply/%s/%d", turn, n) }
+
+// Outcome runs fn, which puts a job's outcome into the record and then ends the
+// job, as one step for every reader of the applied state: apply, preview,
+// discard and update read the record and the job rows under the same lock, so
+// none sees an outcome in the record whose job has not ended, or the reverse.
+// Control's finisher calls it for each job it ends.
+func (q *Queue) Outcome(fn func() error) error {
+	q.applyMu.Lock()
+	defer q.applyMu.Unlock()
+	return fn()
+}
+
+// OutcomeJobs are team's ended turn, apply, discard and update jobs, in the
+// order they ended: what the queue held of each workspace's applied state
+// before the record held it (0.6.6). Only the record's one-time snapshot of
+// that state reads them (jobs.MigrateApplied).
+func (q *Queue) OutcomeJobs(team string) ([]Job, error) {
+	rows, err := q.db.Query(`SELECT id FROM jobs WHERE team = ? AND kind IN ('turn','apply','discard','update')
+		AND ended IS NOT NULL ORDER BY ended, rowid`, team)
+	if err != nil {
+		return nil, fmt.Errorf("queue: list outcome jobs: %w", err)
+	}
+	var jobIDs []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("queue: list outcome jobs: %w", err)
+		}
+		jobIDs = append(jobIDs, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("queue: list outcome jobs: %w", err)
+	}
+	out := make([]Job, 0, len(jobIDs))
+	for _, id := range jobIDs {
+		j, err := q.Get(team, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, j)
+	}
+	return out, nil
+}

@@ -326,6 +326,10 @@ type OpenRouterWire struct {
 	StandIn bool
 	// Model is the turn's model, or "".
 	Model string
+	// Provider names the provider (Providers) when the endpoint is not
+	// OpenRouter's, and Label is its name for the person; both empty for
+	// OpenRouter. Only a harness that offers providers reads them.
+	Provider, Label string
 }
 
 // Copy is a turn's Copy-mode sandbox (DESIGN_contain_mode): the CLI's own
@@ -391,7 +395,7 @@ type Turn struct {
 	// Info.CopySandbox walls each command itself (its own per-command sandbox),
 	// fenced to the copy, instead of the runner wrapping the whole process.
 	Copy Copy
-	// Walled says the runner's sandbox walls the turn in (package sandbox):
+	// Walled says the runner's whole-agent wall (retired in 0.6.4) walls the turn in:
 	// the harness's own sandbox stays off, since macOS cannot build one
 	// Seatbelt sandbox inside another ("sandbox_apply: Operation not
 	// permitted", measured 2026-11-11 on macOS 13.0.1). For a harness with

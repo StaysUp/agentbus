@@ -396,6 +396,12 @@ const (
 	WhyNotFile = "is a folder or cannot be read in your folder"
 	// WhyNoFolder: the file's own folder, or one above it, is no folder.
 	WhyNoFolder = "belongs in a folder that is a file or a link in your folder"
+	// WhyMarkers: a merge left both sides in the file between conflict
+	// markers, and they are still there.
+	WhyMarkers = "still holds conflict markers from the merge; ask the agent to finish combining it"
+	// WhyBeside: a session in several folders made a file beside them, at
+	// the top of its copy, which none of the folders holds.
+	WhyBeside = "is beside the folders, in none of them; ask the agent to move it into a folder, or discard it"
 )
 
 // More apply refusals, in fixed wording.
@@ -423,8 +429,73 @@ var applyMu sync.Mutex
 // from the store writes nothing either. Only a failure while files are put
 // in place leaves some written; ErrPartial says so, and Applied lists them.
 func (c *Connector) Apply(ctx context.Context, ref, from, to string) (Applied, error) {
-	out, _, err := c.apply(ctx, ref, from, to, false)
-	return out, err
+	return c.ApplyPlaces(ctx, []workspace.Place{{Ref: ref}}, from, to, false)
+}
+
+// ApplyPlaces is Apply for a workspace's folders: each place's part of the
+// changesets (its files, under its name) into its folder. Conflicts are checked
+// in every folder before any is written, and a conflict in one refuses the
+// whole apply, so a turn's changes across folders land together or not at all.
+// It is still not one write across folders on disk: a failure while files are
+// put in place in one folder, after another was written, is ErrPartial, with
+// the files written. Paths in what it answers are the changesets' own, each
+// starting with its folder's name.
+func (c *Connector) ApplyPlaces(ctx context.Context, places []workspace.Place, from, to string, checkMarkers bool) (Applied, error) {
+	applyMu.Lock()
+	defer applyMu.Unlock()
+	csFrom, csTo, err := c.changesets(ctx, from, to)
+	if err != nil {
+		return Applied{}, err
+	}
+	if len(places) > 1 {
+		// Every folder's conflicts, before any folder is written. One folder needs
+		// no first pass: its own apply checks every file before it writes one.
+		var all Conflict
+		out, err := beside(csFrom, csTo, places)
+		if err != nil {
+			return Applied{}, err
+		}
+		all.Files = append(all.Files, out...)
+		for _, p := range places {
+			_, _, err := c.apply(ctx, p.Ref, csFrom.Under(p), csTo.Under(p), checkOnly, checkMarkers)
+			var cf *Conflict
+			switch {
+			case errors.As(err, &cf):
+				for _, f := range cf.Files {
+					all.Files = append(all.Files, ConflictFile{p.Prefix() + f.Path, f.Why})
+				}
+			case err != nil:
+				return Applied{}, err
+			}
+		}
+		if len(all.Files) > 0 {
+			sort.Slice(all.Files, func(i, j int) bool { return all.Files[i].Path < all.Files[j].Path })
+			return Applied{}, &all
+		}
+	}
+	out := Applied{Files: []string{}}
+	for _, p := range places {
+		done, _, err := c.apply(ctx, p.Ref, csFrom.Under(p), csTo.Under(p), writeFiles, checkMarkers)
+		for _, f := range done.Files {
+			out.Files = append(out.Files, p.Prefix()+f)
+		}
+		if err != nil {
+			sort.Strings(out.Files)
+			if len(out.Files) > 0 && !errors.Is(err, ErrPartial) {
+				// An earlier folder was written: say so, as a partial apply.
+				return out, ErrPartial
+			}
+			var cf *Conflict
+			if errors.As(err, &cf) {
+				for i := range cf.Files {
+					cf.Files[i].Path = p.Prefix() + cf.Files[i].Path
+				}
+			}
+			return out, err
+		}
+	}
+	sort.Strings(out.Files)
+	return out, nil
 }
 
 // Preview is Apply's dry run, by the same code up to the point where Apply
@@ -433,33 +504,126 @@ func (c *Connector) Apply(ctx context.Context, ref, from, to string) (Applied, e
 // Conflicts are in the preview, not an error. It writes nothing in the
 // folder; it may fetch the small files it shows into this machine's store.
 func (c *Connector) Preview(ctx context.Context, ref, from, to string) (queue.PreviewResult, error) {
-	_, p, err := c.apply(ctx, ref, from, to, true)
-	return p, err
+	return c.PreviewPlaces(ctx, []workspace.Place{{Ref: ref}}, from, to, false)
 }
 
-// apply is Apply, or with dry its Preview: dry stops after the conflict
-// check, before anything is staged or written.
-func (c *Connector) apply(ctx context.Context, ref, from, to string, dry bool) (Applied, queue.PreviewResult, error) {
-	var none queue.PreviewResult
-	defer lockRef(ref)()
-	// A dry run writes nothing, so it keeps no other apply out: one into a
-	// folder inside this one may run meanwhile, and the preview shows the
-	// folder as it read it.
-	if !dry {
-		applyMu.Lock()
-		defer applyMu.Unlock()
-	}
-	dir, err := c.path(ref)
+// PreviewPlaces is ApplyPlaces' dry run: each folder's preview, its paths
+// under the folder's name, as one.
+func (c *Connector) PreviewPlaces(ctx context.Context, places []workspace.Place, from, to string, checkMarkers bool) (queue.PreviewResult, error) {
+	csFrom, csTo, err := c.changesets(ctx, from, to)
 	if err != nil {
-		return Applied{}, none, err
+		return queue.PreviewResult{}, err
 	}
-	var csFrom *workspace.Changeset
-	if from != "" {
-		if csFrom, err = c.changeset(ctx, from); err != nil {
-			return Applied{}, none, err
+	out := queue.PreviewResult{Files: []queue.PreviewFile{}}
+	if len(places) > 1 {
+		steps, err := workspace.Between(csFrom, csTo)
+		if err != nil {
+			return queue.PreviewResult{}, ErrChangeset
+		}
+		for _, st := range steps {
+			if inPlace(st.Path, places) {
+				continue
+			}
+			change := "modified"
+			switch {
+			case st.From == nil:
+				change = "added"
+			case st.To == nil:
+				change = "deleted"
+			}
+			out.Files = append(out.Files, queue.PreviewFile{Path: st.Path, Change: change})
+			out.Conflicts = append(out.Conflicts, queue.ApplyConflict{Path: st.Path, Why: WhyBeside})
+			out.Count++
 		}
 	}
-	csTo, err := c.changeset(ctx, to)
+	for _, p := range places {
+		_, one, err := c.apply(ctx, p.Ref, csFrom.Under(p), csTo.Under(p), dryRun, checkMarkers)
+		if err != nil {
+			return queue.PreviewResult{}, err
+		}
+		for _, f := range one.Files {
+			f.Path = p.Prefix() + f.Path
+			out.Files = append(out.Files, f)
+		}
+		for _, f := range one.Conflicts {
+			f.Path = p.Prefix() + f.Path
+			out.Conflicts = append(out.Conflicts, f)
+		}
+		out.Count += one.Count
+		out.Truncated = out.Truncated || one.Truncated
+		out.DiffsCut = out.DiffsCut || one.DiffsCut
+	}
+	sort.Slice(out.Files, func(i, j int) bool { return out.Files[i].Path < out.Files[j].Path })
+	sort.Slice(out.Conflicts, func(i, j int) bool { return out.Conflicts[i].Path < out.Conflicts[j].Path })
+	return out, nil
+}
+
+// beside are the files the changesets change outside every place: files a
+// turn put at the top of a copy of several folders, beside them, which no
+// folder holds. Each refuses the apply, as a conflict does, so nothing a turn
+// made is dropped without a word.
+func beside(csFrom, csTo *workspace.Changeset, places []workspace.Place) ([]ConflictFile, error) {
+	steps, err := workspace.Between(csFrom, csTo)
+	if err != nil {
+		return nil, ErrChangeset
+	}
+	var out []ConflictFile
+	for _, st := range steps {
+		if !inPlace(st.Path, places) {
+			out = append(out, ConflictFile{st.Path, WhyBeside})
+		}
+	}
+	return out, nil
+}
+
+// inPlace says whether a changeset's path is inside one of places.
+func inPlace(path string, places []workspace.Place) bool {
+	for _, p := range places {
+		if pre := p.Prefix(); strings.HasPrefix(path, pre) && len(path) > len(pre) {
+			return true
+		}
+	}
+	return false
+}
+
+// changesets reads the changesets an apply goes from ("" is the copy's base)
+// and to.
+func (c *Connector) changesets(ctx context.Context, from, to string) (csFrom, csTo *workspace.Changeset, err error) {
+	if from != "" {
+		if csFrom, err = c.changeset(ctx, from); err != nil {
+			return nil, nil, err
+		}
+	}
+	if csTo, err = c.changeset(ctx, to); err != nil {
+		return nil, nil, err
+	}
+	return csFrom, csTo, nil
+}
+
+// How far apply goes: writeFiles puts the files in place; dryRun stops after the
+// conflict check and answers the preview; checkOnly stops there too and
+// answers only the conflicts, as the *Conflict a write would refuse with.
+type applyMode int
+
+const (
+	writeFiles applyMode = iota
+	dryRun
+	checkOnly
+)
+
+// apply is one folder's part of an apply, or its preview: the changesets from
+// and to, already read. A dry run or a check stops after the conflict check,
+// before anything is staged or written. A write runs under applyMu, which the
+// caller holds; a dry run writes nothing, so it keeps no other apply out: one
+// into a folder inside this one may run meanwhile, and the preview shows the
+// folder as it read it. With checkMarkers (a merge left conflict markers in the
+// copy), a file to write that still holds them (workspace.HasMergeMarkers) is a
+// conflict (WhyMarkers), never written: the agent has not combined it.
+func (c *Connector) apply(ctx context.Context, ref string, csFrom, csTo *workspace.Changeset, mode applyMode, checkMarkers bool) (Applied, queue.PreviewResult, error) {
+	var none queue.PreviewResult
+	dry := mode != writeFiles
+	defer lockRef(ref)()
+	dir, err := c.path(ref)
 	if err != nil {
 		return Applied{}, none, err
 	}
@@ -539,7 +703,31 @@ func (c *Connector) apply(ctx context.Context, ref, from, to string, dry bool) (
 			shown = append(shown, shownFile{rel: st.Path, to: fb, exists: exists || why == WhyNotFile, mode: mode, unread: why == WhyNotFile})
 		}
 	}
+	// While a merge's markers may be in the copy, every file to write is read
+	// for them, whatever its path: a rename or a later update cannot carry one
+	// past this check.
+	kept := ops[:0]
+	for _, o := range ops {
+		if checkMarkers && o.to != nil && !o.chmod && o.to.Mode.IsRegular() {
+			marked, err := c.hasMergeMarkers(ctx, o.to.Hash)
+			if err != nil {
+				return Applied{}, none, err
+			}
+			if marked {
+				conflict.Files = append(conflict.Files, ConflictFile{o.rel, WhyMarkers})
+				continue
+			}
+		}
+		kept = append(kept, o)
+	}
+	ops = kept
 	sort.Slice(conflict.Files, func(i, j int) bool { return conflict.Files[i].Path < conflict.Files[j].Path })
+	if mode == checkOnly {
+		if len(conflict.Files) > 0 {
+			return Applied{}, none, &conflict
+		}
+		return Applied{}, none, nil
+	}
 	if dry {
 		p, err := c.preview(ctx, rt, shown, conflict.Files)
 		return Applied{}, p, err
@@ -663,7 +851,7 @@ type shownFile struct {
 func (c *Connector) preview(ctx context.Context, rt *os.Root, shown []shownFile, conflicts []ConflictFile) (queue.PreviewResult, error) {
 	p := queue.PreviewResult{Files: make([]queue.PreviewFile, 0, len(shown)), Count: len(shown)}
 	for _, f := range conflicts {
-		p.Conflicts = append(p.Conflicts, queue.ApplyConflict{Path: f.Path, Why: f.Why})
+		p.Conflicts = append(p.Conflicts, queue.ApplyConflict{Path: f.Path, Why: f.Why, Markers: f.Why == WhyMarkers})
 	}
 	small := func(f *workspace.File) bool {
 		return f != nil && f.Mode&fs.ModeSymlink == 0 && f.Size <= workspace.MaxFileDiff
@@ -772,6 +960,33 @@ func (c *Connector) changeset(ctx context.Context, h string) (*workspace.Changes
 		return nil, ErrChangeset
 	}
 	return &cs, nil
+}
+
+// hasMergeMarkers reads blob h from the store as a stream and reports
+// whether it holds an update's merge markers. A blob that cannot be read
+// refuses the apply (ErrChangeset), so a marked file is never written for want
+// of a read.
+func (c *Connector) hasMergeMarkers(ctx context.Context, h string) (bool, error) {
+	src := blobs.Local{Store: c.Store}
+	if c.Remote != nil {
+		src.From = c.Remote
+	}
+	rc, err := src.Open(ctx, h)
+	if err != nil {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		return false, ErrChangeset
+	}
+	defer rc.Close()
+	marked, err := workspace.HasMergeMarkers(rc)
+	if err != nil {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		return false, ErrChangeset
+	}
+	return marked, nil
 }
 
 // stageFile writes the file f, from its blob, as tmp of rt.
@@ -887,9 +1102,16 @@ func hashIn(rt *os.Root, name string) (hash string, mode fs.FileMode, exists boo
 type Jobs struct{ *Connector }
 
 // FolderJob is Folders.Add, for a folder job: a folder a person typed,
-// checked and registered. Its errors are one sentence each, naming no path.
-// A job stopped while the folder was checked registers nothing.
+// checked and registered. A leading ~ is this machine's home (folders.Expand),
+// and the folder is registered by its expanded path. Its errors are one
+// sentence each, naming no path. A job stopped while the folder was checked
+// registers nothing.
 func (j Jobs) FolderJob(ctx context.Context, path string) (string, error) {
+	home, _ := os.UserHomeDir()
+	path, err := folders.Expand(path, home)
+	if err != nil {
+		return "", err
+	}
 	if err := folders.Check(path); err != nil {
 		return "", err
 	}
@@ -899,21 +1121,21 @@ func (j Jobs) FolderJob(ctx context.Context, path string) (string, error) {
 	return j.Folders.Register(path)
 }
 
-// PreviewJob is Preview, for a preview job: Apply's dry run.
-func (j Jobs) PreviewJob(ctx context.Context, ref, from, to string) (queue.PreviewResult, error) {
-	return j.Preview(ctx, ref, from, to)
+// PreviewJob is PreviewPlaces, for a preview job: Apply's dry run.
+func (j Jobs) PreviewJob(ctx context.Context, places []workspace.Place, from, to string, checkMarkers bool) (queue.PreviewResult, error) {
+	return j.PreviewPlaces(ctx, places, from, to, checkMarkers)
 }
 
 // ApplyJob is Apply, for an apply job: the files written, or the conflicts
 // that refused it; partial when not all files could be put in place.
-func (j Jobs) ApplyJob(ctx context.Context, ref, from, to string) (files []string, conflicts []queue.ApplyConflict, partial bool, err error) {
-	done, err := j.Apply(ctx, ref, from, to)
+func (j Jobs) ApplyJob(ctx context.Context, places []workspace.Place, from, to string, checkMarkers bool) (files []string, conflicts []queue.ApplyConflict, partial bool, err error) {
+	done, err := j.ApplyPlaces(ctx, places, from, to, checkMarkers)
 	var cf *Conflict
 	switch {
 	case errors.As(err, &cf):
 		out := make([]queue.ApplyConflict, len(cf.Files))
 		for i, x := range cf.Files {
-			out[i] = queue.ApplyConflict{Path: x.Path, Why: x.Why}
+			out[i] = queue.ApplyConflict{Path: x.Path, Why: x.Why, Markers: x.Why == WhyMarkers}
 		}
 		return nil, out, false, nil
 	case errors.Is(err, ErrPartial):

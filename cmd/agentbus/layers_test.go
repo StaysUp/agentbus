@@ -74,6 +74,11 @@ func TestPackageLayers(t *testing.T) {
 			"cost", "replay", "store", "body", "logfile", "settings", "cmd", "jobs", "runner"}},
 		{[]string{"isolation", "run"}, []string{"folders", "connector"}},
 		{[]string{"runner"}, []string{"connector"}},
+		// applied, a workspace's applied state and its fold, uses nothing of
+		// the module: the record folds it, the queue holds it, and the folder
+		// side, which uses the queue's types, must not reach the record.
+		{[]string{"applied"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
+			"cost", "replay", "store", "body", "logfile", "settings", "cmd", "folders", "connector", "blobs", "credentials", "ids"}, jobSide...)},
 		// credentials, where control's gateway gets a credential, uses
 		// nothing of the module.
 		{[]string{"credentials"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
@@ -86,10 +91,10 @@ func TestPackageLayers(t *testing.T) {
 		// nothing of the module.
 		{[]string{"netjail"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
 			"cost", "replay", "store", "body", "logfile", "settings", "cmd", "folders", "connector", "blobs", "credentials"}, jobSide...)},
-		// sandbox, which builds a wall around a session, uses netjail and
-		// nothing else of the module.
-		{[]string{"sandbox"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
-			"cost", "replay", "store", "body", "logfile", "settings", "cmd", "folders", "connector", "blobs", "credentials"}, jobSide...)},
+		// homefiles, which copies the policy's home_files into a session's
+		// home, uses nothing of the module.
+		{[]string{"homefiles"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
+			"cost", "replay", "store", "body", "logfile", "settings", "cmd", "folders", "connector", "blobs", "credentials", "netjail"}, jobSide...)},
 		{[]string{"blobs"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
 			"cost", "replay", "store", "body", "logfile", "settings", "cmd", "folders", "connector"}, jobSide...)},
 	} {

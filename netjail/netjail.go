@@ -125,7 +125,7 @@ func New(spec Spec) *Jail {
 // this machine's loopback, now, and is served until Close. The forwarded
 // addresses are not served: the agent reaches them as they are. It is for
 // a wall that lets the agent reach only these ports, as Seatbelt does on
-// macOS (package sandbox); on its own it closes nothing off.
+// macOS did for the whole-agent wall retired in 0.6.4; on its own it closes nothing off.
 func NewHost(spec Spec) (*Jail, error) {
 	j := New(spec)
 	l, err := net.Listen("tcp", "127.0.0.1:0")

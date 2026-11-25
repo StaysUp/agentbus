@@ -3,7 +3,9 @@ package jobs
 import (
 	"testing"
 
+	"github.com/staysup/agentbus/applied"
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -11,8 +13,9 @@ import (
 // satisfy the interface for approvalState's unit test.
 type recStub struct{ evs []event.Event }
 
-func (r recStub) ApprovalEvents() ([]event.Event, error) { return r.evs, nil }
-func (r recStub) AppendOnce(event.Event) (bool, error)   { return true, nil }
+func (r recStub) ApprovalEvents() ([]event.Event, error)         { return r.evs, nil }
+func (r recStub) Applied(ids.WorkspaceID) (applied.State, error) { return applied.Empty(), nil }
+func (r recStub) AppendOnce(event.Event) (bool, error)           { return true, nil }
 func (r recStub) CallSession(string) (string, bool, error) {
 	return "", false, nil
 }

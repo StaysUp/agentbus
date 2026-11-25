@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/staysup/agentbus/applied"
 	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/workspace"
 	_ "modernc.org/sqlite"
@@ -316,9 +317,13 @@ type Spec struct {
 	// still hold a path; the runner that takes it registers it.
 	Folder    string `json:"folder,omitempty"`
 	FolderRef string `json:"folder_ref,omitempty"`
-	Isolate   bool   `json:"isolate,omitempty"`
-	Repo      string `json:"repo,omitempty"`
-	RepoRef   string `json:"repo_ref,omitempty"`
+	// Folders, in place of FolderRef, for a workspace with several folders:
+	// each folder's reference and name, as the workspace record holds them.
+	// A workspace with one folder names it in FolderRef, as always.
+	Folders []workspace.Place `json:"folders,omitempty"`
+	Isolate bool              `json:"isolate,omitempty"`
+	Repo    string            `json:"repo,omitempty"`
+	RepoRef string            `json:"repo_ref,omitempty"`
 	// Machine is the only machine-id field. compat 0.6: drop connector. The
 	// old key is read and written only inside MarshalJSON/UnmarshalJSON, never
 	// as a struct field, so a caller cannot set the wrong one.
@@ -352,6 +357,17 @@ type Spec struct {
 	// (the last applied turn's end checkpoint). Empty means the copy's base --
 	// the folder as it was first copied, when no turn was applied.
 	Restore string `json:"restore,omitempty"`
+	// Merge, for an update job: on a conflict, leave the conflicting files in
+	// the copy between conflict markers and record the merge (the folder
+	// baseline moves), rather than change nothing. The person's Merge asks for
+	// it, and the agent's next turn resolves the markers.
+	Merge bool `json:"merge,omitempty"`
+	// CheckMarkers, for an apply or preview job: a merge left conflict
+	// markers in the copy since the last finished apply or discard, so the
+	// folder side refuses any file to write that still holds them. Off in a
+	// workspace with no such merge, so a file that only shows the markers (a
+	// doc) applies there.
+	CheckMarkers bool `json:"check_markers,omitempty"`
 	// Typed and TypedMachine: a new session's folder as the request typed
 	// it, and the machine it named. They are never stored; they only keep
 	// the request's hash what was asked, so a retry with the same key gets
@@ -363,6 +379,19 @@ type Spec struct {
 	// lets exactly these run, this turn only, and nothing is written to the
 	// settings. Carried on the job so control's record is the only source.
 	AllowOnce []string `json:"allow_once,omitempty"`
+}
+
+// Places are the workspace's folders as the job names them: each of Folders,
+// or the one FolderRef as a place with no name (its copy is the folder
+// itself), or none.
+func (spec Spec) Places() []workspace.Place {
+	if len(spec.Folders) > 0 {
+		return spec.Folders
+	}
+	if spec.FolderRef != "" {
+		return []workspace.Place{{Ref: spec.FolderRef}}
+	}
+	return nil
 }
 
 // asked is spec as the request named it, for the idempotency hash: the
@@ -634,6 +663,9 @@ type Queue struct {
 	// reply reads a turn's whole reply from the record (ReadReplyWith), in
 	// place of a copy in the job result.
 	reply ReplyReader
+	// applied reads a workspace's applied state from the record, its one
+	// owner (ReadAppliedWith). The queue keeps no copy of it.
+	applied AppliedReader
 }
 
 // By says who asked for a job, by the kind of token it came with (the
@@ -660,6 +692,29 @@ type ReplyReader func(session, turn string) (string, error)
 // a review prompt's author reply and an asked result's reply, in place of a
 // copy in the job result. Set it before the queue is used.
 func (q *Queue) ReadReplyWith(r ReplyReader) { q.reply = r }
+
+// AppliedReader reads a workspace's applied state from the record
+// (applied.State): its appliable turns, how far an apply went, the update that
+// sets the folder's baseline.
+type AppliedReader func(ws ids.WorkspaceID) (applied.State, error)
+
+// ReadAppliedWith sets how the queue reads a workspace's applied state from
+// the record. Apply, preview, discard and update read it there and nowhere
+// else: the queue's job rows say only how each job stands (his call,
+// 2026-11-24: one owner per fact).
+func (q *Queue) ReadAppliedWith(r AppliedReader) { q.applied = r }
+
+// ErrNoRecord: the queue was given no record to read a workspace's applied
+// state from (ReadAppliedWith).
+var ErrNoRecord = errors.New("queue: no record to read the applied state from")
+
+// appliedState is the workspace's applied state, read from the record.
+func (q *Queue) appliedState(ws ids.WorkspaceID) (applied.State, error) {
+	if q.applied == nil {
+		return applied.State{}, ErrNoRecord
+	}
+	return q.applied(ws)
+}
 
 // replyOf is the whole text of job j's turn's last reply, read from the
 // record. "" when no reader is set or the turn has no reply.
@@ -966,15 +1021,13 @@ func (q *Queue) SessionHasWork(team, session string) (bool, error) {
 }
 
 // TurnsAhead are the jobs the job waits behind in its workspace's lane, oldest
-// first: the lane jobs (turn, apply, preview, discard) of its workspace that
-// have not ended and were made before it. An asked session's turn waits behind
-// the asker's, since both name the one workspace. None for a job of no lane.
+// first: every job o for which laneTake says the job waits for o -- the one
+// rule Take obeys, so what is shown waiting ahead is what Take waits for. An
+// asked session's turn waits behind the asker's, since both name the one
+// workspace. None for a job of no lane (laneKinds).
 func (q *Queue) TurnsAhead(team, id string) ([]Job, error) {
 	rows, err := q.db.Query(`SELECT o.id FROM jobs o JOIN jobs j ON j.id = ? AND j.team = ?
-		WHERE o.team = j.team AND o.ended IS NULL AND o.id != j.id
-		AND j.kind IN `+laneKinds+` AND o.kind IN `+laneKinds+`
-		AND COALESCE(NULLIF(json_extract(o.spec, '$.workspace'), ''), o.session) = COALESCE(NULLIF(json_extract(j.spec, '$.workspace'), ''), j.session)
-		AND (o.created < j.created OR (o.created = j.created AND o.id < j.id))
+		WHERE o.team = j.team AND o.id != j.id AND (`+laneTake+`)
 		ORDER BY o.created, o.id`, id, team)
 	if err != nil {
 		return nil, fmt.Errorf("queue: list turns ahead: %w", err)

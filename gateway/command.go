@@ -132,11 +132,31 @@ func parse(line string) (*syntax.File, error) {
 // assignment is stripped, never decided. fn returns false to stop the walk.
 // depth bounds sh -c inside sh -c.
 func eachCommand(line string, depth int, fn func(words []string, soft bool) bool) {
+	walkCommands(line, depth, fn, nil)
+}
+
+// parsedThrough says whether the parser read line and every script it hands
+// to a shell, at every depth: no word of it came from eachToken's fallback.
+// Only such a line suggests rules; a fallback's runs of words are not
+// commands a person chose (2026-11-24: bash -c "echo hi; import sys'"
+// parsed outside, and its inner script suggested "hi import" and "sys").
+func parsedThrough(line string) bool {
+	ok := true
+	walkCommands(line, 0, func([]string, bool) bool { return ok }, func() { ok = false })
+	return ok
+}
+
+// walkCommands is eachCommand; unparsed, when set, is called for each line
+// or inner script the parser cannot read, before its fallback runs.
+func walkCommands(line string, depth int, fn func(words []string, soft bool) bool, unparsed func()) {
 	if depth > maxNesting {
 		return
 	}
 	f, err := parse(line)
 	if err != nil {
+		if unparsed != nil {
+			unparsed()
+		}
 		// A line the parser cannot read: the shell may still run part of it,
 		// so err toward refusing. Every run of words is decided (soft false),
 		// so an unlisted word anywhere holds or refuses the line.
@@ -156,7 +176,7 @@ func eachCommand(line string, depth int, fn func(words []string, soft bool) bool
 		if !ok {
 			return true
 		}
-		if !eachCall(st, call, depth, fn) {
+		if !eachCall(st, call, depth, fn, unparsed) {
 			stop = true
 		}
 		return !stop
@@ -165,7 +185,7 @@ func eachCommand(line string, depth int, fn func(words []string, soft bool) bool
 
 // eachCall decides one simple command and the scripts it hands to a shell.
 // Returns false when fn asked to stop.
-func eachCall(st *syntax.Stmt, call *syntax.CallExpr, depth int, fn func(words []string, soft bool) bool) bool {
+func eachCall(st *syntax.Stmt, call *syntax.CallExpr, depth int, fn func(words []string, soft bool) bool, unparsed func()) bool {
 	words := make([]string, 0, len(call.Args))
 	for _, w := range call.Args {
 		words = append(words, wordText(w))
@@ -211,13 +231,13 @@ func eachCall(st *syntax.Stmt, call *syntax.CallExpr, depth int, fn func(words [
 	emitted := 0
 	for _, s := range innerScripts(st, words) {
 		stop := false
-		eachCommand(s, depth+1, func(w []string, soft bool) bool {
+		walkCommands(s, depth+1, func(w []string, soft bool) bool {
 			emitted++
 			if !fn(w, soft) {
 				stop = true
 			}
 			return !stop
-		})
+		}, unparsed)
 		if stop {
 			return false
 		}
@@ -515,11 +535,22 @@ func gitSubcommand(words []string) []string {
 //	const r = await tools.exec_command({cmd:"git push origin main",workdir:"…"});
 //
 // (codex-cli 0.164.0, 2026-11-08). It finds every cmd key followed by a
-// string literal. A cmd built at run time, such as "git " + "push" or a
-// variable, is not seen. A cmd key anywhere counts, not only inside an
+// string literal. A cmd key anywhere counts, not only inside an
 // exec_command call: {cmd: "git push"} kept in a variable is refused even if
 // the script never runs it. That errs on the side of refusing, since an
 // object built first and passed later, exec_command(o), runs it.
+//
+// A cmd whose value is not one string literal is known only at run time: a
+// variable, an expression such as "git " + "push", or the shorthand {cmd}.
+// codex-cli 0.171.0 wrote
+//
+//	for (const cmd of ["uname -a","date","whoami"]) {
+//	  const result = await tools.exec_command({cmd});
+//
+// (2026-11-23, a live turn). Each such cmd is returned as runTimeCommand, so
+// it is decided as a shell line's $cmd is: held unless "*" allows it, and with
+// no rule to suggest. Before, it gave no command at all, and the call ran
+// under no command rule.
 func execCommands(script string) []string {
 	var out []string
 	key := false // the last token was a cmd key
@@ -527,8 +558,17 @@ func execCommands(script string) []string {
 	// prevWord the last word, to tell a regular expression from a division.
 	var prev byte
 	prevWord := ""
+	// open holds the brackets open at i, innermost last: a shorthand cmd is
+	// one only inside braces, never in a call's arguments or an array.
+	var open []byte
 	for i := 0; i < len(script); {
 		c := script[i]
+		if key && !isJSSpace(c) && !strings.HasPrefix(script[i:], "//") && !strings.HasPrefix(script[i:], "/*") &&
+			c != '"' && c != '\'' && c != '`' {
+			// The value of a cmd key is not a string literal.
+			out = append(out, runTimeCommand)
+			key = false
+		}
 		switch {
 		case strings.HasPrefix(script[i:], "//"):
 			i = lineEnd(script, i)
@@ -538,7 +578,7 @@ func execCommands(script string) []string {
 			} else {
 				i = len(script)
 			}
-		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+		case isJSSpace(c):
 			i++
 		case c == '/' && regexAllowed(prev, prevWord):
 			// A regular expression literal, such as /https?:\/\//: its
@@ -552,6 +592,11 @@ func execCommands(script string) []string {
 			if key {
 				out = append(out, v)
 				key = false
+				// More after the literal, such as + "push": the rest is
+				// built at run time.
+				if !nextIs(script, i, ',') && !nextIs(script, i, '}') {
+					out = append(out, runTimeCommand)
+				}
 				continue
 			}
 			// A quoted key: "cmd":
@@ -565,6 +610,11 @@ func execCommands(script string) []string {
 			for k < len(script) && isIdent(script[k]) {
 				k++
 			}
+			// The shorthand {cmd} or {…, cmd}: the value of a variable.
+			if script[i:k] == "cmd" && len(open) > 0 && open[len(open)-1] == '{' &&
+				(prev == '{' || prev == ',') && (nextIs(script, k, ',') || nextIs(script, k, '}')) {
+				out = append(out, runTimeCommand)
+			}
 			prev, prevWord = c, script[i:k]
 			key = script[i:k] == "cmd" && nextIs(script, k, ':')
 			i = k
@@ -573,11 +623,27 @@ func execCommands(script string) []string {
 				prev = ':'
 			}
 		default:
+			switch c {
+			case '{', '[', '(':
+				open = append(open, c)
+			case '}', ']', ')':
+				if len(open) > 0 {
+					open = open[:len(open)-1]
+				}
+			}
 			prev, prevWord, key = c, "", false
 			i++
 		}
 	}
 	return out
+}
+
+// runTimeCommand stands for an exec script's cmd known only at run time. As a
+// shell line it is one word built at run time, which matches no rule but "*".
+const runTimeCommand = `"$cmd"`
+
+func isJSSpace(c byte) bool {
+	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
 // regexAllowed says whether a / after prev (and the word prevWord) starts a

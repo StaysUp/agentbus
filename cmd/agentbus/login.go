@@ -33,7 +33,6 @@ import (
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/runner"
-	"github.com/staysup/agentbus/sandbox"
 )
 
 const loginUsage = "usage: agentbus login URL [agentbus runner's flags: -name NAME -folder DIR -labels a,b -capacity 4]\n" +
@@ -45,8 +44,8 @@ type loginDeps struct {
 	http *http.Client
 	// self is this program's path, which the printed command runs.
 	self string
-	// caps is what the machine reports when it asks: its OS and whether it
-	// can build a session's wall, which the Runners page shows.
+	// caps is what the machine reports when it asks: its OS and processor,
+	// which the Runners page shows.
 	caps func() *queue.Capabilities
 	// poll, when not zero, is how often to ask, in place of control's.
 	poll time.Duration
@@ -65,8 +64,7 @@ func systemLogin() loginDeps {
 		http: &http.Client{Timeout: 15 * time.Second},
 		self: self,
 		caps: func() *queue.Capabilities {
-			can, why := sandbox.Can()
-			return &queue.Capabilities{OS: runtime.GOOS, Arch: runtime.GOARCH, Sandbox: queue.NewSandboxReport(can, why)}
+			return &queue.Capabilities{OS: runtime.GOOS, Arch: runtime.GOARCH}
 		},
 		signals: func(ctx context.Context) (context.Context, context.CancelFunc) {
 			return signal.NotifyContext(ctx, os.Interrupt)

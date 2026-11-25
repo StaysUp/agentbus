@@ -183,7 +183,7 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spec := queue.Spec{Prompt: body.Prompt, Model: body.Model, Session: ids.SessionID(body.Session),
-		Workspace: ids.WorkspaceID(wsp.ID), FolderRef: wsp.FolderRef, Machine: wsp.Machine, Isolate: wsp.Sandbox}
+		Workspace: ids.WorkspaceID(wsp.ID), FolderRef: wsp.FolderRef, Folders: Places(wsp), Machine: wsp.Machine, Isolate: wsp.Sandbox}
 	spec.Harness, spec.AgentID, spec.Access, spec.KeyEnv = ag.Harness, ag.ID, ag.Access, ag.KeyEnv
 	if spec.Model == "" {
 		spec.AgentModel = ag.Model

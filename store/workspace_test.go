@@ -165,9 +165,19 @@ func TestWorkspaceReaderState(t *testing.T) {
 
 	// A turn with a changeset makes it the head.
 	mustAppend(t, s, event.Event{ID: "c1", Kind: event.TurnChanged, Session: "s1", Turn: "t1",
-		Changes: &event.TurnChanges{Isolated: true, Count: 1}, Time: base.Add(time.Minute)})
+		Changes: &event.TurnChanges{Isolated: true, Count: 1}, Changeset: "cs_t1", Time: base.Add(time.Minute)})
 	if w, _, _ := s.Workspace("s1"); w.HeadTurn != "t1" {
 		t.Fatalf("head_turn %q, want t1", w.HeadTurn)
+	}
+	// A turn whose changeset could not be kept (turn.changed with none) is not
+	// appliable, so it does not become the head: the head is the turn an apply
+	// goes up to, and the queue reads this same fold (store.Applied). Before
+	// 0.6.6 the store said head and the queue said not appliable.
+	wsStarted(t, s, "s1", "t1b", "/src/app", "fld_aaaaaaaaaaaaaaaa", base.Add(time.Minute))
+	mustAppend(t, s, event.Event{ID: "c1b", Kind: event.TurnChanged, Session: "s1", Turn: "t1b",
+		Changes: &event.TurnChanges{Isolated: true, Count: 1}, Time: base.Add(time.Minute)})
+	if w, _, _ := s.Workspace("s1"); w.HeadTurn != "t1" {
+		t.Fatalf("head_turn %q after a turn with no changeset, want t1", w.HeadTurn)
 	}
 	if w, _, _ := s.Workspace("s1"); w.AppliedTurn != "" || w.DiscardedAt != nil {
 		t.Fatalf("before apply: applied %q discarded %v", w.AppliedTurn, w.DiscardedAt)
@@ -183,7 +193,7 @@ func TestWorkspaceReaderState(t *testing.T) {
 	// A later discard drops the newer changes and sets discarded_at.
 	wsStarted(t, s, "s1", "t2", "/src/app", "fld_aaaaaaaaaaaaaaaa", base.Add(3*time.Minute))
 	mustAppend(t, s, event.Event{ID: "c2", Kind: event.TurnChanged, Session: "s1", Turn: "t2",
-		Changes: &event.TurnChanges{Isolated: true, Count: 1}, Time: base.Add(4 * time.Minute)})
+		Changes: &event.TurnChanges{Isolated: true, Count: 1}, Changeset: "cs_t2", Time: base.Add(4 * time.Minute)})
 	mustAppend(t, s, event.Event{ID: "d1", Kind: event.WorkspaceDiscarded, Session: "s1", Workspace: "s1",
 		Discarded: &event.Discarded{ResetTo: "cs_applied", DroppedTurns: []string{"t2"}}, Time: base.Add(5 * time.Minute)})
 	w, _, _ := s.Workspace("s1")

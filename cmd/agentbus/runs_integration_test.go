@@ -182,11 +182,8 @@ func TestRunSetsBaseURLInChildOnlyAndClosesWithExitCode(t *testing.T) {
 	folder := t.TempDir()
 
 	// isolate false: the turn runs in folder itself, which events name.
-	code, out, raw := postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": folder, "isolate": false,
+	out, raw := postRunRunning(t, svc, tok, map[string]any{"agent": "claude", "folder": folder, "isolate": false,
 		"prompt": "--dangerously-skip-permissions hello", "model": "haiku"})
-	if code != http.StatusAccepted {
-		t.Fatalf("status %d: %s", code, raw)
-	}
 	id, _ := out["session"].(string)
 	turn, _ := out["turn"].(string)
 	base, _ := out["base_url"].(string)
@@ -201,13 +198,14 @@ func TestRunSetsBaseURLInChildOnlyAndClosesWithExitCode(t *testing.T) {
 	}
 	// Nothing writes session.registered any more: run.started carries
 	// the agent and folder, and the run stores its turn's turn.started.
-	// The turn's job ended, so what it changed (turn.changed) is in too.
+	// The turn ran in the folder itself (direct), so AgentBus keeps no record
+	// of what it changed (0.6.5): no turn.changed.
 	evs := runEvents(t, svc.store, id)
 	kinds := make([]string, len(evs))
 	for i, e := range evs {
 		kinds[i] = e.Kind
 	}
-	if got := strings.Join(kinds, " "); got != "session.created run.started turn.started context.added run.ended turn.changed" || evs[1].Hold != c.Hold {
+	if got := strings.Join(kinds, " "); got != "session.created run.started turn.started context.added run.ended" || evs[1].Hold != c.Hold {
 		t.Fatalf("events %s: %+v", got, evs)
 	}
 	if evs[1].Agent != "claude" || evs[1].Folder != folder {
@@ -375,10 +373,7 @@ func TestRunReadOnlyRetired(t *testing.T) {
 			if readOnly != nil {
 				body["read_only"] = readOnly
 			}
-			code, out, raw := postRun(t, svc, tok, body)
-			if code != http.StatusAccepted {
-				t.Fatalf("%s read_only %v: status %d: %s", tc.agent, readOnly, code, raw)
-			}
+			out, _ := postRunRunning(t, svc, tok, body)
 			want := strings.ReplaceAll(tc.want, "BASE", out["base_url"].(string))
 			rep := readReport(t, report)
 			if got := argsOf(t, rep.Args, out["session"].(string)); got != want {
@@ -403,11 +398,13 @@ func TestRunRefusals(t *testing.T) {
 	// The folder is the workspace's, so folder refusals belong to POST
 	// /api/v0/workspaces, before any turn, and store nothing.
 	const (
-		badFolder    = "folder must be an absolute path to an existing directory, at most 4096 bytes"
-		badWorkspace = "the body must be one JSON object with folder (an absolute path) or folder_ref, and optionally machine, sandbox and idempotency_key"
+		badFolder    = "folder must be an absolute path or start with ~/, at most 4096 bytes"
+		badWorkspace = "the body must be one JSON object with folder (an absolute path or ~/...) or folder_ref, and optionally machine, sandbox and idempotency_key"
 	)
 	for _, tc := range []struct{ name, body, want string }{
 		{"relative folder", `{"folder":"x/y"}`, badFolder},
+		{"another user's home", `{"folder":"~root/x"}`, badFolder},
+		{"missing folder under ~", `{"folder":"~/agentbus-no-such-folder-71"}`, "the folder does not exist on the chosen machine"},
 		{"missing folder", `{"folder":` + jsonStr(filepath.Join(folder, "nope")) + `}`, "the folder does not exist on the chosen machine"},
 		{"folder is a file", `{"folder":` + jsonStr(file) + `}`, "the folder is a file, not a directory"},
 		{"neither folder nor folder_ref", `{}`, "send folder or folder_ref, not both and not neither"},
@@ -551,7 +548,9 @@ func TestRunConcurrencyBound(t *testing.T) {
 	// workspace and session are made first, so only the turn is measured.
 	fifth := newWorkspaceSession(t, svc, tok, t.TempDir(), true)
 	before := svc.store.Last()
-	code, out, raw := postRun(t, svc, tok, map[string]any{"session": fifth, "agent": "claude", "prompt": "hi"})
+	// Posted as is (not postRun): the runner-wait answer is what is measured.
+	fifthBody, _ := json.Marshal(map[string]any{"session": fifth, "agent": "claude", "prompt": "hi"})
+	code, out, raw := postAPI(t, svc, tok, "/api/v0/turns", fifthBody)
 	if code != http.StatusAccepted || out["state"] != "queued" || out["turn"] == "" || out["session"] == "" {
 		t.Fatalf("fifth run: %d %s, want 202 queued", code, raw)
 	}
@@ -841,5 +840,34 @@ func TestFirstCopyTurnIsSandboxed(t *testing.T) {
 	waitClosed(t, svc.store, out["session"].(string))
 	if d := settingsArg(readReport(t, direct).Args); strings.Contains(d, `"sandbox":`) {
 		t.Fatalf("a Direct turn carries a sandbox block: --settings %q", d)
+	}
+}
+
+// A folder typed as ~ or ~/... is the home of the user the folder's machine's
+// runner runs as: that runner expands it and registers the folder by its
+// expanded path, so the workspace shows the absolute path.
+func TestWorkspaceFolderUnderHome(t *testing.T) {
+	home := t.TempDir()
+	svc := runService(t, home, nil, 0) // sets HOME to a clean temp folder
+	tok := readToken(t, home)
+	userHome := os.Getenv("HOME")
+	project := filepath.Join(userHome, "project")
+	if err := os.Mkdir(project, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ typed, want string }{
+		{"~/project", project},
+		{"~/project/", project},
+		{"~", userHome},
+	} {
+		b, _ := json.Marshal(map[string]any{"folder": tc.typed})
+		code, out, raw := postAPI(t, svc, tok, "/api/v0/workspaces", b)
+		if code != http.StatusCreated {
+			t.Errorf("folder %q: %d %.200s, want 201", tc.typed, code, raw)
+			continue
+		}
+		if out["folder"] != tc.want {
+			t.Errorf("folder %q: workspace folder %v, want %q", tc.typed, out["folder"], tc.want)
+		}
 	}
 }

@@ -28,15 +28,18 @@ import (
 // FolderSide is what a runner does to its machine's folders (connector.Jobs).
 // Its errors are in fixed wording for the person: they name no path.
 type FolderSide interface {
-	// ApplyJob makes the folder ref as the changeset blob to holds it, from
-	// as the changeset from holds it ("": the copy's base). conflicts, when
-	// not empty, refused it: nothing was written. partial: not every file
-	// could be put in place, and files are those that were.
-	ApplyJob(ctx context.Context, ref, from, to string) (files []string, conflicts []queue.ApplyConflict, partial bool, err error)
+	// ApplyJob makes each folder of places as its part of the changeset blob
+	// to holds it, from as the changeset from holds it ("": the copy's base).
+	// conflicts, when not empty, refused it in every folder: nothing was
+	// written. partial: not every file could be put in place, and files are
+	// those that were. Paths are the changesets' own. checkMarkers: a merge
+	// left conflict markers in the copy (queue.Spec.CheckMarkers), so a file to
+	// write that still holds them is a conflict, never written.
+	ApplyJob(ctx context.Context, places []workspace.Place, from, to string, checkMarkers bool) (files []string, conflicts []queue.ApplyConflict, partial bool, err error)
 	// PreviewJob is ApplyJob's dry run, by the same code: what it would
 	// write, each file's diff against the folder now, and the conflicts
 	// that would refuse it. It writes nothing in the folder.
-	PreviewJob(ctx context.Context, ref, from, to string) (queue.PreviewResult, error)
+	PreviewJob(ctx context.Context, places []workspace.Place, from, to string, checkMarkers bool) (queue.PreviewResult, error)
 	// FolderJob checks the folder at path, a folder a person typed, and
 	// registers it: it answers the folder's reference, or why it cannot
 	// be used, in one sentence.
@@ -93,21 +96,27 @@ func (r *Runner) folderWork(ctx context.Context, at *attempt) queue.Finish {
 		r.beat(ctx)
 		return queue.Finish{Status: queue.Finished, Result: mustJSON(queue.Result{FolderRef: ref})}
 	}
-	if _, ok := r.cfg.Folders.Path(sp.FolderRef); !ok {
+	places := sp.Places()
+	if len(places) == 0 {
 		return refuse(folderUnknown, nil)
+	}
+	for _, p := range places {
+		if _, ok := r.cfg.Folders.Path(p.Ref); !ok {
+			return refuse(folderUnknown, nil)
+		}
 	}
 	if !blobs.Valid(sp.ApplyTo) || (sp.ApplyFrom != "" && !blobs.Valid(sp.ApplyFrom)) {
 		return refuse("this apply was asked for before this build; ask for it again", nil)
 	}
 	if at.job.Kind == queue.KindPreview {
-		p, err := r.cfg.FolderSide.PreviewJob(ctx, sp.FolderRef, sp.ApplyFrom, sp.ApplyTo)
+		p, err := r.cfg.FolderSide.PreviewJob(ctx, places, sp.ApplyFrom, sp.ApplyTo, sp.CheckMarkers)
 		if err != nil {
 			return refuse(err.Error()+"; nothing was written", nil)
 		}
 		p.Fit(jobs.MaxBody - finishMargin - 1024)
 		return queue.Finish{Status: queue.Finished, Result: mustJSON(queue.Result{Preview: &p})}
 	}
-	files, conflicts, partial, err := r.cfg.FolderSide.ApplyJob(ctx, sp.FolderRef, sp.ApplyFrom, sp.ApplyTo)
+	files, conflicts, partial, err := r.cfg.FolderSide.ApplyJob(ctx, places, sp.ApplyFrom, sp.ApplyTo, sp.CheckMarkers)
 	switch {
 	case len(conflicts) > 0:
 		msg := fmt.Sprintf("apply refused: %d file(s) in your folder changed since the checkpoint", len(conflicts))

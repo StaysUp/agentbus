@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/staysup/agentbus/workspace"
 )
 
 // Update from the person's folder, as a three-way merge in the copy's private
@@ -29,7 +31,12 @@ import (
 // A clean merge records theirs and the merge as two checkpoints and leaves the
 // copy holding the merge; the folder is only read. A real conflict (the same
 // lines changed on both sides) changes nothing and names the files, so the
-// person can ask the agent to resolve it in a turn. git 2.37 has no
+// person can ask the agent to resolve it in a turn. A merge (merge true) goes
+// on instead: each conflicting file enters the merge as git left it in the
+// trial work directory (both sides between conflict markers), the merge is
+// recorded like a clean one, and the files are named as Unresolved, so the
+// agent's next turn resolves them and Apply writes only the session's work.
+// git 2.37 has no
 // `merge-tree --write-tree`, so the merge runs with `merge-recursive` against a
 // throwaway index and work directory: the real copy is touched only once the
 // merge is known to be clean.
@@ -39,10 +46,10 @@ import (
 // update, so a stopped update leaves nothing behind.
 func (s *Space) updateTmpDir() string { return filepath.Join(s.state(), "update-tmp") }
 
-// updateFromFolder runs the three-way merge. The caller resolved folder to the
-// person's folder on this machine (the runner, never this package). base is the
-// merge-base checkpoint ("" means Base).
-func (s *Space) updateFromFolder(ctx context.Context, base, folder string) (UpdateResult, error) {
+// updateFromFolder runs the three-way merge. folders resolves the copy's
+// folder references to the person's folders on this machine (the runner does,
+// never this package). base is the merge-base checkpoint ("" means Base).
+func (s *Space) updateFromFolder(ctx context.Context, base string, folders FolderPaths, merge bool) (UpdateResult, error) {
 	unlock := lock(s)
 	defer unlock()
 
@@ -80,8 +87,9 @@ func (s *Space) updateFromFolder(ctx context.Context, base, folder string) (Upda
 	}
 	defer os.RemoveAll(tmp)
 
-	// theirs: a snapshot of the folder as it is now, parented on base.
-	theirsCommit, theirsModes, err := s.commitFolder(ctx, folder, baseCommit, tmp)
+	// theirs: a snapshot of the folder (or folders) as it is now, parented on
+	// base.
+	theirsCommit, theirsModes, err := s.commitTheirs(ctx, folders, baseCommit, baseName, tmp)
 	if err != nil {
 		return UpdateResult{}, err
 	}
@@ -97,17 +105,33 @@ func (s *Space) updateFromFolder(ctx context.Context, base, folder string) (Upda
 		return UpdateResult{}, err
 	}
 	_, _, code, rerr := s.runGitIn(ctx, trialWT, trialIdx, "merge-recursive", baseCommit, "--", oursCommit, theirsCommit)
+	var unresolved []string
 	switch {
 	case code == 0:
 		// clean
 	case code == 1:
-		// A real conflict: the same paths changed on both sides. Name them and
-		// change nothing.
+		// A real conflict: the same paths changed on both sides.
 		conflicts, cerr := s.unmergedPaths(ctx, trialWT, trialIdx)
 		if cerr != nil {
 			return UpdateResult{}, cerr
 		}
-		return UpdateResult{Clean: false, Conflicts: conflicts}, nil
+		if !merge {
+			// Name them and change nothing.
+			return UpdateResult{Clean: false, Conflicts: conflicts}, nil
+		}
+		// A merge: stage each conflicting file with both sides between conflict
+		// markers, so the merge below writes it into the copy for the agent to
+		// resolve. A conflict markers cannot show (a binary file, a link, a file
+		// one side removed) would let one side win silently, so then the merge
+		// changes nothing, as an update does, and names those files.
+		unmergeable, err := s.stageResolved(ctx, trialIdx, tmp, conflicts)
+		if err != nil {
+			return UpdateResult{}, err
+		}
+		if len(unmergeable) > 0 {
+			return UpdateResult{Clean: false, Conflicts: conflicts, Unmergeable: unmergeable}, nil
+		}
+		unresolved = conflicts
 	default:
 		if ctx.Err() != nil {
 			return UpdateResult{}, ctx.Err()
@@ -209,10 +233,13 @@ func (s *Space) updateFromFolder(ctx context.Context, base, folder string) (Upda
 		if err := makeTreeWritable(s.Dir); err != nil {
 			return err
 		}
+		if err := s.guardRepos(ctx, mergedName); err != nil {
+			return err
+		}
 		if _, err := s.shadowGit(ctx, "reset", "-q", "--hard", shadowRef(mergedName), "--"); err != nil {
 			return err
 		}
-		if _, err := s.shadowGit(ctx, "clean", "-q", "-ffd"); err != nil {
+		if err := s.cleanCopy(ctx); err != nil {
 			return err
 		}
 		return s.reconcileModes(ctx, mergedName)
@@ -226,7 +253,121 @@ func (s *Space) updateFromFolder(ctx context.Context, base, folder string) (Upda
 		}
 		return UpdateResult{}, err
 	}
-	return UpdateResult{Clean: true, Theirs: theirsName, Merged: mergedName, PriorHead: headName}, nil
+	return UpdateResult{Clean: true, Theirs: theirsName, Merged: mergedName, PriorHead: headName, Unresolved: unresolved}, nil
+}
+
+// stageResolved records each conflicting path in the trial index idx at stage
+// 0, so the index writes a tree. The trial work tree holds no file to take
+// (merge-recursive writes there only what it can), so each file is built from
+// the index's own stages: git merge-file joins both sides with conflict
+// markers labelled for the agent. A path markers cannot show -- one side
+// removed it, either side is a link or a nested repository, or merge-file
+// cannot join it (binary) --
+// is answered in unmergeable, sorted, and the index is then not to be used.
+// Any path still unmerged after is an error, never a half-merged tree.
+func (s *Space) stageResolved(ctx context.Context, idx, tmp string, paths []string) (unmergeable []string, err error) {
+	out, _, _, err := s.runGitIn(ctx, tmp, idx, "ls-files", "-u", "-z")
+	if err != nil {
+		return nil, gitErr(ctx)
+	}
+	type entry struct{ mode, sha string }
+	stages := map[string]map[string]entry{}
+	for _, e := range strings.Split(string(out), "\x00") {
+		// "<mode> <sha> <stage>\t<path>"
+		tab := strings.IndexByte(e, '\t')
+		if tab < 0 {
+			continue
+		}
+		f := strings.Fields(e[:tab])
+		if len(f) != 3 {
+			continue
+		}
+		p := e[tab+1:]
+		if stages[p] == nil {
+			stages[p] = map[string]entry{}
+		}
+		stages[p][f[2]] = entry{f[0], f[1]}
+	}
+	blob := func(sha, name string) (string, error) {
+		path := filepath.Join(tmp, name)
+		b := []byte{}
+		if sha != "" {
+			var err error
+			if b, err = s.shadowGit(ctx, "cat-file", "blob", sha); err != nil {
+				return "", err
+			}
+		}
+		return path, os.WriteFile(path, b, 0o600)
+	}
+	for _, p := range paths {
+		st := stages[p]
+		base, ours, theirs := st["1"], st["2"], st["3"]
+		if !regularMode(ours.mode) || !regularMode(theirs.mode) {
+			unmergeable = append(unmergeable, p)
+			continue
+		}
+		o, err := blob(ours.sha, "merge-ours")
+		if err != nil {
+			return nil, err
+		}
+		b, err := blob(base.sha, "merge-base")
+		if err != nil {
+			return nil, err
+		}
+		t, err := blob(theirs.sha, "merge-theirs")
+		if err != nil {
+			return nil, err
+		}
+		// merge-file writes the joined file over its first argument and exits
+		// with the number of conflicts; a negative exit is binary or an error.
+		_, _, code, _ := s.runGitIn(ctx, tmp, idx, "merge-file", "-L", workspace.MergeOurs, "-L", "base", "-L", workspace.MergeTheirs, o, b, t)
+		if code < 0 || code >= 128 {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			unmergeable = append(unmergeable, p)
+			continue
+		}
+		sha, err := s.shadowGitIn(ctx, tmp, idx, "hash-object", "-w", "--", o)
+		if err != nil {
+			return nil, err
+		}
+		// The mode is a three-way choice as well: the side that changed it from
+		// the base wins, so the person's chmod +x survives a text conflict.
+		mode := theirs.mode
+		if base.mode == "" || ours.mode != base.mode {
+			mode = ours.mode
+		}
+		// A stage-0 entry replaces every unmerged stage of the path.
+		if _, err := s.shadowGitIn(ctx, tmp, idx, "update-index", "--add", "--cacheinfo", mode+","+strings.TrimSpace(string(sha))+","+p); err != nil {
+			return nil, err
+		}
+	}
+	if len(unmergeable) > 0 {
+		sort.Strings(unmergeable)
+		return unmergeable, nil
+	}
+	left, err := s.unmergedPaths(ctx, tmp, idx)
+	if err != nil {
+		return nil, err
+	}
+	if len(left) > 0 {
+		return nil, errGit
+	}
+	return nil, nil
+}
+
+// regularMode: a git index mode of a regular file (plain or executable), the
+// only kind conflict markers can show. Absent (one side removed it), a link
+// (120000) or a nested repository (160000) is not.
+func regularMode(m string) bool { return m == "100644" || m == "100755" }
+
+// gitErr is errGit, or the context's error when it was stopped.
+func gitErr(ctx context.Context) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	return errGit
 }
 
 // commitFolder snapshots the folder as a commit parented on parent, and answers
@@ -235,7 +376,7 @@ func (s *Space) updateFromFolder(ctx context.Context, base, folder string) (Upda
 // folder is written and the folder's own .git is never seen (GIT_DIR is the
 // private repo). The built-in ignores (info/exclude) and the folder's own
 // .gitignore are respected, the same as a checkpoint.
-func (s *Space) commitFolder(ctx context.Context, folder, parent, tmp string) (commit string, modes map[string]string, err error) {
+func (s *Space) commitFolder(ctx context.Context, folder, parent, tmp string, ign ignorer) (commit string, modes map[string]string, err error) {
 	idx := filepath.Join(tmp, "theirs.idx")
 	// Seed the index from the merge base's tree first, so a file the base tracked
 	// that now matches a .gitignore rule but is still present in the folder stays
@@ -245,13 +386,15 @@ func (s *Space) commitFolder(ctx context.Context, folder, parent, tmp string) (c
 	if _, err := s.shadowGitIn(ctx, folder, idx, "read-tree", parent); err != nil {
 		return "", nil, err
 	}
-	// git add aborts the lot on an unborn nested repo; --ignore-errors adds the
-	// rest and exits 1, the same partial-add shadowAdd tolerates.
-	if _, _, code, aerr := s.runGitIn(ctx, folder, idx, "add", "-A", "--ignore-errors"); aerr != nil && code != 1 {
-		if ctx.Err() != nil {
-			return "", nil, ctx.Err()
+	if s.Nested {
+		// The person's side by the copy's one rule (nested.go).
+		if err := s.stageTree(ctx, folder, idx, ign, nil); err != nil {
+			return "", nil, err
 		}
-		return "", nil, errGit
+	} else if _, _, code, aerr := s.runGitIn(ctx, folder, idx, "add", "-A", "--ignore-errors"); aerr != nil && code != 1 {
+		// git add aborts the lot on an unborn nested repo; --ignore-errors adds
+		// the rest and exits 1, the same partial-add shadowAdd tolerates.
+		return "", nil, gitErr(ctx)
 	}
 	treeOut, err := s.shadowGitIn(ctx, folder, idx, "write-tree")
 	if err != nil {
@@ -267,6 +410,131 @@ func (s *Space) commitFolder(ctx context.Context, folder, parent, tmp string) (c
 		return "", nil, err
 	}
 	return commit, modes, nil
+}
+
+// commitTheirs is the "theirs" side of an update: the person's folder as it
+// is now, or for a copy of several folders, each folder at its name with what
+// the copy holds beside them kept as base has it (no folder of the person's
+// holds it). A folder that is not where it was (moved, removed, or not a
+// folder) refuses the update with ErrNoFolder: its files are not gone, only
+// out of reach, and must not be merged in as removed.
+func (s *Space) commitTheirs(ctx context.Context, folders FolderPaths, parent, baseName, tmp string) (string, map[string]string, error) {
+	at := func(ref string) (string, error) {
+		p, ok := folders(ref)
+		if !ok {
+			return "", ErrNoFolder
+		}
+		if fi, err := os.Stat(p); err != nil || !fi.IsDir() {
+			return "", ErrNoFolder
+		}
+		return p, nil
+	}
+	if len(s.Folders) == 0 {
+		src, err := at(s.Ref)
+		if err != nil {
+			return "", nil, err
+		}
+		return s.commitFolder(ctx, src, parent, tmp, s.ignorer(src))
+	}
+	idx := filepath.Join(tmp, "theirs.idx")
+	if _, err := s.shadowGitIn(ctx, s.Dir, idx, "read-tree", parent); err != nil {
+		return "", nil, err
+	}
+	modes := map[string]string{}
+	for p, m := range s.loadModesRaw(baseName) {
+		if !underFolder(p, s.Folders) {
+			modes[p] = m
+		}
+	}
+	for i, f := range s.Folders {
+		src, err := at(f.Ref)
+		if err != nil {
+			return "", nil, err
+		}
+		ign, err := s.folderIgnorer(ctx, filepath.Join(tmp, "rules-"+strconv.Itoa(i)), src)
+		if err != nil {
+			return "", nil, err
+		}
+		// The folder's side, staged on its own by the copy's one rule, seeded
+		// from base's tree of it as one folder's is (commitFolder), then put in
+		// place of what base holds under its name.
+		sub := filepath.Join(tmp, "theirs-"+strconv.Itoa(i)+".idx")
+		if _, _, code, _ := s.runGitIn(ctx, src, sub, "read-tree", parent+":"+f.Name); code != 0 {
+			os.Remove(sub)
+		}
+		if err := s.stageTree(ctx, src, sub, ign, nil); err != nil {
+			return "", nil, err
+		}
+		out, _, _, err := s.runGitIn(ctx, src, sub, "ls-files", "-s", "-z")
+		if err != nil {
+			return "", nil, gitErr(ctx)
+		}
+		sm, err := s.modesIn(ctx, src, sub)
+		if err != nil {
+			return "", nil, err
+		}
+		for p, m := range sm {
+			modes[f.Name+"/"+p] = m
+		}
+		if _, err := s.shadowGitIn(ctx, s.Dir, idx, "rm", "-r", "-q", "-f", "--cached", "--ignore-unmatch", "--", f.Name+"/"); err != nil {
+			return "", nil, err
+		}
+		var in strings.Builder
+		for _, e := range strings.Split(string(out), "\x00") {
+			if tab := strings.IndexByte(e, '\t'); tab > 0 {
+				in.WriteString(e[:tab] + "\t" + f.Name + "/" + e[tab+1:] + "\x00")
+			}
+		}
+		if err := s.gitStdinIn(ctx, s.Dir, idx, in.String(), "update-index", "-z", "--index-info"); err != nil {
+			return "", nil, err
+		}
+	}
+	treeOut, err := s.shadowGitIn(ctx, s.Dir, idx, "write-tree")
+	if err != nil {
+		return "", nil, err
+	}
+	commit, err := s.commitTree(ctx, strings.TrimSpace(string(treeOut)), "checkpoint theirs", parent)
+	if err != nil {
+		return "", nil, err
+	}
+	return commit, modes, nil
+}
+
+// folderIgnorer is the copy's rules for one folder of a copy of several, read
+// from the person's folder src: the built-in list at the folder's top (as the
+// copy's info/exclude holds it under the folder's name) and the folder's own
+// .gitignore files. It asks git through a repo of its own at dir, which holds
+// only that list.
+func (s *Space) folderIgnorer(ctx context.Context, dir, src string) (ignorer, error) {
+	if err := os.MkdirAll(filepath.Join(dir, "info"), 0o700); err != nil {
+		return nil, err
+	}
+	for _, sub := range []string{"objects", "refs"} {
+		if err := os.MkdirAll(filepath.Join(dir, sub), 0o700); err != nil {
+			return nil, err
+		}
+	}
+	if err := os.WriteFile(filepath.Join(dir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(dir, "info", "exclude"), []byte(strings.Join(gitBuiltinIgnore, "\n")+"\n"), 0o600); err != nil {
+		return nil, err
+	}
+	args := s.gitBaseArgsWT(src)
+	args[0] = "--git-dir=" + dir
+	return func(ctx context.Context, paths []string) (map[string]bool, error) {
+		return checkIgnore(ctx, args, src, paths)
+	}, nil
+}
+
+// underFolder says whether a copy path is inside one of a copy's folders.
+func underFolder(p string, folders []SpaceFolder) bool {
+	for _, f := range folders {
+		if strings.HasPrefix(p, f.Name+"/") {
+			return true
+		}
+	}
+	return false
 }
 
 // commitTree makes a commit object for tree with the given message and parents,

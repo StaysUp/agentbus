@@ -259,8 +259,26 @@ type usage struct {
 		CachedTokens int `json:"cached_tokens"`
 	} `json:"prompt_tokens_details"`
 	// Cost is OpenRouter's charge for the call, in US dollars.
-	Cost    *float64 `json:"cost"`
-	unknown []event.Unexpected
+	Cost *float64 `json:"cost"`
+	// CostTicks is xAI's charge for the call, in units of 1e-10 US dollars
+	// (litellm's xai chat transformation and its test, 37756000 ticks =
+	// $0.0037756; read 2026-11-24, not yet seen live here). A negative count
+	// is no charge reported.
+	CostTicks *int64 `json:"cost_in_usd_ticks"`
+	unknown   []event.Unexpected
+}
+
+// charge is the vendor's own charge for the call in US dollars, or nil when
+// it reported none: OpenRouter's cost, else xAI's ticks.
+func (u *usage) charge() *float64 {
+	if u.Cost != nil {
+		return u.Cost
+	}
+	if u.CostTicks != nil && *u.CostTicks >= 0 {
+		usd := float64(*u.CostTicks) / 1e10
+		return &usd
+	}
+	return nil
 }
 
 // UnmarshalJSON reads usage and notes any field name the known lists do not
@@ -301,9 +319,9 @@ var (
 	knownFinish = adapter.Names("stop", "length", "tool_calls", "content_filter", "function_call")
 	// knownUsage: the three counts and prompt_tokens_details are seen;
 	// completion_tokens_details is documented; cost, cost_details and
-	// is_byok are OpenRouter's.
+	// is_byok are OpenRouter's; cost_in_usd_ticks is xAI's.
 	knownUsage = adapter.Names("prompt_tokens", "completion_tokens", "total_tokens",
-		"prompt_tokens_details", "completion_tokens_details", "cost", "cost_details", "is_byok")
+		"prompt_tokens_details", "completion_tokens_details", "cost", "cost_details", "is_byok", "cost_in_usd_ticks")
 	knownPromptDetails     = adapter.Names("cached_tokens", "audio_tokens")
 	knownCompletionDetails = adapter.Names("reasoning_tokens", "audio_tokens",
 		"accepted_prediction_tokens", "rejected_prediction_tokens")
@@ -442,7 +460,7 @@ func fromReply(r parsed, problem string, u *adapter.Unknowns) []event.Event {
 			OutputTokens:    x.CompletionTokens,
 			CacheReadTokens: x.PromptTokensDetails.CachedTokens,
 			ServiceTier:     r.serviceTier,
-			CostUSD:         x.Cost,
+			CostUSD:         x.charge(),
 		}
 		for _, x := range x.unknown {
 			u.Admit(x)

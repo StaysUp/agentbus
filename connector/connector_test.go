@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -267,5 +268,80 @@ func TestStoppedJobsStop(t *testing.T) {
 		{Path: "a.txt", Base: fileOf("one\n", 0o644), Now: fileOf("two\n", 0o644)}}}, map[string]string{"a": "two\n"})
 	if _, err := c.Apply(ctx, ref, "", cs); err == nil || text(t, filepath.Join(folder, "a.txt")) != "one\n" {
 		t.Fatalf("a stopped apply: %v, a.txt %q", err, text(t, filepath.Join(folder, "a.txt")))
+	}
+}
+
+// A file that still holds the markers an update's merge left is refused, as a
+// conflict with why, and nothing is written -- whatever its path, so a file the
+// person renamed after the merge is caught too (review finding, 2026-11-24).
+// git's own markers, as a doc shows them, are not the merge's and apply. Once
+// the agent combined the file, the same apply writes it.
+func TestApplyRefusesMergeMarkers(t *testing.T) {
+	folder := t.TempDir()
+	write(t, folder, map[string]string{"a.txt": "one\n", "doc.md": "d\n"})
+	c, ref := newConnector(t, folder)
+	j := Jobs{Connector: c}
+	ours := "<<<<<<< this session\nOURS\n=======\nTHEIRS\n>>>>>>> your folder\n"
+	gits := "<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> main\n"
+	base := map[string]*workspace.File{"a.txt": fileOf("one\n", 0o644), "doc.md": fileOf("d\n", 0o644)}
+	marked := putChangeset(t, c, workspace.Changeset{Space: "job_1", Checkpoint: "m", Files: []workspace.FileChange{
+		{Path: "a.txt", Base: base["a.txt"]},
+		{Path: "renamed.txt", Now: fileOf(ours, 0o644)},
+		{Path: "doc.md", Base: base["doc.md"], Now: fileOf(gits, 0o644)},
+	}}, map[string]string{"m": ours, "g": gits})
+	p, err := j.PreviewJob(context.Background(), []workspace.Place{{Ref: ref}}, "", marked, true)
+	if err != nil || len(p.Conflicts) != 1 || p.Conflicts[0].Path != "renamed.txt" || p.Conflicts[0].Why != WhyMarkers || !p.Conflicts[0].Markers {
+		t.Fatalf("preview with markers: conflicts %+v err %v, want renamed.txt %q", p.Conflicts, err, WhyMarkers)
+	}
+	_, conflicts, _, err := j.ApplyJob(context.Background(), []workspace.Place{{Ref: ref}}, "", marked, true)
+	if err != nil || len(conflicts) != 1 || conflicts[0].Path != "renamed.txt" || !conflicts[0].Markers {
+		t.Fatalf("apply with markers: conflicts %+v err %v, want renamed.txt refused", conflicts, err)
+	}
+	if text(t, filepath.Join(folder, "a.txt")) != "one\n" || text(t, filepath.Join(folder, "doc.md")) != "d\n" ||
+		text(t, filepath.Join(folder, "renamed.txt")) != "<missing>" {
+		t.Fatal("an apply refused for markers wrote the folder")
+	}
+	resolved := putChangeset(t, c, workspace.Changeset{Space: "job_1", Checkpoint: "r", Files: []workspace.FileChange{
+		{Path: "a.txt", Base: base["a.txt"]},
+		{Path: "renamed.txt", Now: fileOf("OURS\nTHEIRS\n", 0o644)},
+		{Path: "doc.md", Base: base["doc.md"], Now: fileOf(gits, 0o644)},
+	}}, map[string]string{"r": "OURS\nTHEIRS\n", "g": gits})
+	files, conflicts, _, err := j.ApplyJob(context.Background(), []workspace.Place{{Ref: ref}}, "", resolved, true)
+	if err != nil || len(conflicts) != 0 || len(files) != 3 {
+		t.Fatalf("apply once resolved: files %v conflicts %+v err %v", files, conflicts, err)
+	}
+	if text(t, filepath.Join(folder, "renamed.txt")) != "OURS\nTHEIRS\n" || text(t, filepath.Join(folder, "doc.md")) != gits {
+		t.Fatal("the combined file, or the doc showing git's markers, was not written")
+	}
+}
+
+// A file past any read bound still applies: the marker check reads it as a
+// stream (review finding, 2026-11-24: a 64 MiB bound refused a valid file).
+func TestApplyLargeFileReadForMarkers(t *testing.T) {
+	folder := t.TempDir()
+	c, ref := newConnector(t, folder)
+	big := strings.Repeat("0123456789abcdef", (65<<20)/16) + "\n"
+	cs := putChangeset(t, c, workspace.Changeset{Space: "job_1", Checkpoint: "b", Files: []workspace.FileChange{
+		{Path: "big.txt", Now: fileOf(big, 0o644)},
+	}}, map[string]string{"b": big})
+	files, conflicts, _, err := Jobs{Connector: c}.ApplyJob(context.Background(), []workspace.Place{{Ref: ref}}, "", cs, true)
+	if err != nil || len(conflicts) != 0 || len(files) != 1 {
+		t.Fatalf("apply of a 65 MiB file: files %v conflicts %+v err %v", files, conflicts, err)
+	}
+}
+
+// In a workspace with no merge pending, nothing is read for markers: a file
+// that shows AgentBus's own marker lines (a guide) applies (review finding,
+// 2026-11-24).
+func TestApplyWithoutMergeIgnoresMarkers(t *testing.T) {
+	folder := t.TempDir()
+	c, ref := newConnector(t, folder)
+	guide := "<<<<<<< this session\nOURS\n=======\nTHEIRS\n>>>>>>> your folder\n"
+	cs := putChangeset(t, c, workspace.Changeset{Space: "job_1", Checkpoint: "g", Files: []workspace.FileChange{
+		{Path: "guide.md", Now: fileOf(guide, 0o644)},
+	}}, map[string]string{"g": guide})
+	files, conflicts, _, err := Jobs{Connector: c}.ApplyJob(context.Background(), []workspace.Place{{Ref: ref}}, "", cs, false)
+	if err != nil || len(conflicts) != 0 || len(files) != 1 {
+		t.Fatalf("apply of a guide with no merge pending: files %v conflicts %+v err %v", files, conflicts, err)
 	}
 }

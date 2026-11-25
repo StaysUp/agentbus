@@ -317,9 +317,11 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 	// folder (apply and the changes preview above moved from the turn and the
 	// session to the workspace, so the count is unchanged). 78 with POST
 	// /api/v0/workspaces/{id}/update, which merges the person's folder into the
-	// copy so the next apply writes only the session's work.
-	if len(ops) != 78 {
-		t.Errorf("%d endpoints, want 78: %v", len(ops), ops)
+	// copy so the next apply writes only the session's work. 80 with PUT and
+	// DELETE /api/v0/subscriptions/xai/key, the xAI provider's key, which start
+	// no turn.
+	if len(ops) != 80 {
+		t.Errorf("%d endpoints, want 80: %v", len(ops), ops)
 	}
 	for _, want := range []string{"POST /api/v0/turns", "GET /api/v0/turns", "GET /api/v0/turns/{id}", "POST /api/v0/turns/{id}/stop",
 		"GET /api/v0/turns/{id}/diff", "GET /api/v0/workspaces/{id}/changes", "POST /api/v0/workspaces/{id}/apply",

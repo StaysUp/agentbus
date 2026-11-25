@@ -164,6 +164,9 @@ func New(cfg Config) (*Server, error) {
 			_, reply, _, err := rec.TurnText(session, turn)
 			return reply, err
 		})
+		// What is applied and what is appliable is the record's: the queue
+		// reads it there, never from its own job rows.
+		cfg.Queue.ReadAppliedWith(rec.Applied)
 	}
 	s := &Server{cfg: cfg, token: sha256.Sum256([]byte(cfg.Token)), enrol: sha256.Sum256([]byte(cfg.EnrollToken)), mux: http.NewServeMux(),
 		tokenKey: sha256.Sum256([]byte("agentbus runner turn tokens\x00" + cfg.Token)), sealer: standInSealer(cfg.Token)}

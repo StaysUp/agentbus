@@ -11,7 +11,7 @@ import (
 // finishUpdate takes the queued update job and finishes it the way the finisher
 // does: computes the folds, records them on the job (MarkUpdated), and ends it
 // with the runner's clean result (the folder baseline and the merge changesets).
-func finishUpdate(t *testing.T, q *Queue, r Runner, ws ids.WorkspaceID, from, to, theirsCp, mergedCp string) Job {
+func finishUpdate(t *testing.T, q *Queue, r Runner, ws ids.WorkspaceID, from, to, theirsCp, mergedCp string, unresolved ...string) Job {
 	t.Helper()
 	uj, ua := take(t, q, r)
 	if uj.Kind != KindUpdate {
@@ -27,7 +27,7 @@ func finishUpdate(t *testing.T, q *Queue, r Runner, ws ids.WorkspaceID, from, to
 	if err := q.MarkUpdated(DefaultTeam, uj.ID, head, folded); err != nil {
 		t.Fatal(err)
 	}
-	b, _ := json.Marshal(Result{Update: &UpdateResult{From: from, To: to, TheirsCheckpoint: theirsCp, MergedCheckpoint: mergedCp}})
+	b, _ := json.Marshal(Result{Update: &UpdateResult{From: from, To: to, TheirsCheckpoint: theirsCp, MergedCheckpoint: mergedCp, Unresolved: unresolved}})
 	done, err := q.End(r.ID, ua.ID, ua.Number, Finish{Status: Finished, Result: b})
 	if err != nil {
 		t.Fatal(err)
@@ -54,12 +54,12 @@ func TestUpdateMovesApplyBaseline(t *testing.T) {
 
 	// Update from the folder. Nothing applied yet, so the merge base is the
 	// copy's base.
-	u, created, err := q.Update(DefaultTeam, ws, conA, nil)
+	u, created, err := q.Update(DefaultTeam, ws, conA, nil, false)
 	if err != nil || !created || u.Spec.Restore != "" {
 		t.Fatalf("update: created=%v restore=%q err=%v", created, u.Spec.Restore, err)
 	}
 	// While it is in flight, a second update, a discard and an apply are refused.
-	if _, _, err := q.Update(DefaultTeam, ws, conA, nil); !errors.Is(err, ErrApplyBusy) {
+	if _, _, err := q.Update(DefaultTeam, ws, conA, nil, false); !errors.Is(err, ErrApplyBusy) {
 		t.Fatalf("second update during an update: %v, want ErrApplyBusy", err)
 	}
 	if _, _, err := q.Discard(DefaultTeam, ws, conA, nil); !errors.Is(err, ErrApplyBusy) {
@@ -98,7 +98,7 @@ func TestUpdateThenNewTurnExtends(t *testing.T) {
 	run(t, q, rn, Result{Changeset: hexOf('1'), Checkpoint: "cp1"})
 	ws := ids.WorkspaceID(first.Session)
 
-	if _, _, err := q.Update(DefaultTeam, ws, conA, nil); err != nil {
+	if _, _, err := q.Update(DefaultTeam, ws, conA, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	finishUpdate(t, q, rn, ws, theirs, merged, "theirscp", "mergedcp")
@@ -126,7 +126,7 @@ func TestUpdateConflictLeavesBaseline(t *testing.T) {
 	t1 := run(t, q, rn, Result{Changeset: hexOf('1'), Checkpoint: "cp1"})
 	ws := ids.WorkspaceID(first.Session)
 
-	if _, _, err := q.Update(DefaultTeam, ws, conA, nil); err != nil {
+	if _, _, err := q.Update(DefaultTeam, ws, conA, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	// Finish the update as a conflict: no folds, a conflict result.
@@ -167,7 +167,7 @@ func TestUpdateWaitsBehindRunningTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The update queues behind it, not refused.
-	u, created, err := q.Update(DefaultTeam, ws, conA, nil)
+	u, created, err := q.Update(DefaultTeam, ws, conA, nil, false)
 	if err != nil || !created {
 		t.Fatalf("update while a turn runs: created=%v err=%v", created, err)
 	}
@@ -190,7 +190,7 @@ func TestSecondUpdateMergesFromPriorFolder(t *testing.T) {
 	ws := ids.WorkspaceID(first.Session)
 
 	// Update #1: nothing applied, so the merge base is the copy's base ("").
-	u1, _, err := q.Update(DefaultTeam, ws, conA, nil)
+	u1, _, err := q.Update(DefaultTeam, ws, conA, nil, false)
 	if err != nil || u1.Spec.Restore != "" {
 		t.Fatalf("update 1 base: restore=%q err=%v, want empty", u1.Spec.Restore, err)
 	}
@@ -198,7 +198,7 @@ func TestSecondUpdateMergesFromPriorFolder(t *testing.T) {
 
 	// Update #2: the merge base is update #1's folder snapshot checkpoint, so the
 	// merge is against the folder as #1 imported it, not the copy's base.
-	u2, _, err := q.Update(DefaultTeam, ws, conA, nil)
+	u2, _, err := q.Update(DefaultTeam, ws, conA, nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +221,7 @@ func TestDiscardAfterAppliedMergeResetsToMerge(t *testing.T) {
 	t1 := run(t, q, rn, Result{Changeset: hexOf('1'), Checkpoint: "cp1"})
 	ws := ids.WorkspaceID(first.Session)
 
-	if _, _, err := q.Update(DefaultTeam, ws, conA, nil); err != nil {
+	if _, _, err := q.Update(DefaultTeam, ws, conA, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	finishUpdate(t, q, rn, ws, theirs, merged, "u.theirs", "u.merged")
@@ -260,7 +260,7 @@ func TestUpdateMovesNextTurnDiffFrom(t *testing.T) {
 	run(t, q, rn, Result{Changeset: hexOf('1'), Checkpoint: "cp1"})
 	ws := ids.WorkspaceID(first.Session)
 
-	if _, _, err := q.Update(DefaultTeam, ws, conA, nil); err != nil {
+	if _, _, err := q.Update(DefaultTeam, ws, conA, nil, false); err != nil {
 		t.Fatal(err)
 	}
 	finishUpdate(t, q, rn, ws, hexOf('a'), hexOf('b'), "u.theirs", "u.merged")
@@ -273,5 +273,67 @@ func TestUpdateMovesNextTurnDiffFrom(t *testing.T) {
 	}
 	if w.DiffFrom != "u.merged" {
 		t.Fatalf("next turn DiffFrom = %q, want the update's merge checkpoint u.merged (not the pre-update cp1)", w.DiffFrom)
+	}
+}
+
+// A merge is refused while a turn of the workspace runs or waits, so its
+// conflict markers land only between turns; once the turn ends it queues with
+// Merge set, and the baseline moves as on a clean update.
+func TestMergeRefusedDuringTurn(t *testing.T) {
+	q, _ := open(t)
+	rn := capsRunner(t, q, nil, &Capabilities{Connector: conA})
+	theirs, merged := hexOf('a'), hexOf('b')
+
+	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
+	ws := ids.WorkspaceID(first.Session)
+	if _, _, err := q.Update(DefaultTeam, ws, conA, nil, true); !errors.Is(err, ErrTurnBusy) {
+		t.Fatalf("merge while a turn waits: %v, want ErrTurnBusy", err)
+	}
+	t1 := run(t, q, rn, Result{Changeset: hexOf('1'), Checkpoint: "cp1"})
+
+	u, _, err := q.Update(DefaultTeam, ws, conA, nil, true)
+	if err != nil || !u.Spec.Merge {
+		t.Fatalf("merge after the turn: merge=%v err=%v", u.Spec.Merge, err)
+	}
+	finishUpdate(t, q, rn, ws, theirs, merged, "theirscp", "mergedcp", "a.txt")
+
+	aj, _, err := q.Apply(DefaultTeam, t1.Turn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if aj.Spec.ApplyFrom != theirs || aj.Spec.ApplyTo != merged {
+		t.Fatalf("apply from=%q to=%q, want from=%q to=%q", aj.Spec.ApplyFrom, aj.Spec.ApplyTo, theirs, merged)
+	}
+}
+
+// Apply and preview check for merge markers only while a merge left them:
+// none before any merge, on after it (also after a later plain update), and
+// off again once an apply finished (review finding, 2026-11-24).
+func TestCheckMarkersOnlyAfterAMerge(t *testing.T) {
+	q, _ := open(t)
+	rn := capsRunner(t, q, nil, &Capabilities{Connector: conA})
+	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
+	ws := ids.WorkspaceID(first.Session)
+	t1 := run(t, q, rn, Result{Changeset: hexOf('1'), Checkpoint: "cp1"})
+
+	if rec, err := q.appliedState(ws); err != nil || rec.Markers {
+		t.Fatalf("before any merge: %v %v, want no check", rec.Markers, err)
+	}
+	if _, _, err := q.Update(DefaultTeam, ws, conA, nil, true); err != nil {
+		t.Fatal(err)
+	}
+	finishUpdate(t, q, rn, ws, hexOf('a'), hexOf('b'), "theirs1", "merged1", "a.txt")
+	if _, _, err := q.Update(DefaultTeam, ws, conA, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	finishUpdate(t, q, rn, ws, hexOf('c'), hexOf('d'), "theirs2", "merged2")
+	aj, _, err := q.Apply(DefaultTeam, t1.Turn)
+	if err != nil || !aj.Spec.CheckMarkers {
+		t.Fatalf("apply after a merge and a plain update: check=%v err=%v, want the check on", aj.Spec.CheckMarkers, err)
+	}
+	// The apply finishes: the merge is behind it, and the check is off.
+	endApply(t, q, rn, Finished, "", Result{Apply: &ApplyResult{Files: []string{"a.txt"}}})
+	if rec, err := q.appliedState(ws); err != nil || rec.Markers {
+		t.Fatalf("after a finished apply: %v %v, want no check", rec.Markers, err)
 	}
 }

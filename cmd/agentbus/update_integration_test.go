@@ -12,14 +12,16 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 type updateAnswer struct {
-	State     string
-	Updated   bool
-	Conflicts []string
-	Error     string
+	State      string
+	Updated    bool
+	Conflicts  []string
+	Unresolved []string
+	Error      string
 }
 
 func (c *client) update(ws string) (int, updateAnswer) {
@@ -125,5 +127,73 @@ func TestUpdateDirectWorkspaceRefused(t *testing.T) {
 	}
 	if code, u := c.update(ws.Workspace); code != http.StatusBadRequest {
 		t.Fatalf("update of a direct workspace: %d %+v, want 400", code, u)
+	}
+}
+
+func (c *client) merge(ws string) (int, updateAnswer) {
+	var u updateAnswer
+	code, _ := c.call("POST", "/api/v0/workspaces/"+ws+"/update", map[string]any{"mode": "merge"}, &u)
+	return code, u
+}
+
+// Merge, after an update reported a conflict: the copy gets the conflicting
+// file with both sides between conflict markers and the folder baseline moves,
+// the folder itself untouched. An apply refuses the file while it still holds
+// the markers; once a turn combines it, the apply writes only the session's
+// work with no refusal and no second update.
+func TestMergeLeavesMarkersThenApply(t *testing.T) {
+	bin, bins := built(t), standInDir(t)
+	home, addr := t.TempDir(), freeAddr(t)
+	p := startProc(t, bin, home, bins, "up", "-listen", addr, "-replay=false")
+	c := waitService(t, p, addr, home)
+	folder := personFolder(t)
+
+	t1 := c.turn(map[string]any{"folder": folder, "agent": "claude", "prompt": "p1"})
+	ws := c.ws[t1.Session]
+	if err := os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\nHUMAN\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if code, u := c.update(ws); code != 200 || u.State != "conflict" {
+		t.Fatalf("update: %d %+v, want 200 conflict", code, u)
+	}
+
+	code, u := c.merge(ws)
+	if code != 200 || u.State != "merged" || len(u.Unresolved) != 1 || u.Unresolved[0] != "a.txt" {
+		t.Fatalf("merge: %d %+v, want 200 merged with a.txt unresolved", code, u)
+	}
+	if got := fileText(t, filepath.Join(folder, "a.txt")); got != "one\nHUMAN\n" {
+		t.Fatalf("the merge wrote the folder: a.txt = %q", got)
+	}
+
+	// The markers are still there: the apply refuses a.txt, writes nothing.
+	code, a := c.apply(t1)
+	if code != http.StatusConflict || a.State != "refused" || len(a.Conflicts) != 1 ||
+		a.Conflicts[0].Path != "a.txt" || !strings.Contains(a.Conflicts[0].Why, "conflict markers") {
+		t.Fatalf("apply with markers: %d %+v, want 409 refused on a.txt for its markers", code, a)
+	}
+	if got := fileText(t, filepath.Join(folder, "new.txt")); got != "<missing>" && got != "" {
+		t.Fatalf("an apply refused for markers wrote new.txt: %q", got)
+	}
+
+	// A plain update after the merge names nothing unresolved, yet the markers
+	// are still in the copy: the apply still refuses a.txt (review finding,
+	// 2026-11-24).
+	if code, u := c.update(ws); code != 200 || u.State != "updated" {
+		t.Fatalf("plain update after the merge: %d %+v, want 200 updated", code, u)
+	}
+	if code, a := c.apply(t1); code != http.StatusConflict || len(a.Conflicts) != 1 || a.Conflicts[0].Path != "a.txt" {
+		t.Fatalf("apply after merge and update: %d %+v, want 409 refused on a.txt", code, a)
+	}
+
+	// A turn combines the file (the stand-in's restore writes it whole).
+	t2 := c.turn(map[string]any{"session": t1.Session, "agent": "claude", "prompt": "restore"})
+	if code, a := c.apply(t2); code != 200 || a.State != "applied" {
+		t.Fatalf("apply after the merge turn: %d %+v, want 200 applied", code, a)
+	}
+	if got := fileText(t, filepath.Join(folder, "a.txt")); got != "one\n" {
+		t.Fatalf("a.txt after the merge turn and apply: %q", got)
+	}
+	if got := fileText(t, filepath.Join(folder, "new.txt")); got != "p1\n" {
+		t.Fatalf("new.txt after apply: %q", got)
 	}
 }

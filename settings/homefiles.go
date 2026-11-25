@@ -13,7 +13,7 @@ import (
 // UsualHomeFiles are the config paths "Use my config" looks for on the
 // folder's machine (GET /api/v0/folders/{ref}/home-files), in this order. A
 // path ending in / is a folder. ~/.claude.json gives its MCP servers only
-// (sandbox.ClaudeJSON). agy keeps its MCP servers in
+// (homefiles.ClaudeJSON). agy keeps its MCP servers in
 // ~/.gemini/config/mcp_config.json (agy 1.5.5, 2026-11-14, read on this
 // machine; harness/agy.go keeps the rest of agy in ~/.gemini).
 var UsualHomeFiles = []string{

@@ -37,12 +37,23 @@ func (Adapter) Vendor() string { return "openai" }
 // 2026-11-14, against a local listener; the path and query from codex-rs
 // codex-api/src/endpoint/models.rs at rust-v0.164.0). A service call: its
 // reply is passed on as JSON and not read.
+//
+// POST <base>/alpha/search is codex's web search tool: codex sends the search
+// terms and pages to open, and chatgpt.com answers with the results as JSON,
+// not streamed (codex-rs codex-api/src/endpoint/search.rs and search.rs at
+// rust-v0.171.0). With a ChatGPT sign-in the base is /backend-api/codex
+// (codex-cli 0.171.0, 2026-11-23, a live call through a local relay: 200,
+// application/json, gzip); with a key it is /v1 (from codex's own tests, not
+// seen live). The reply carries no usage. A service call: its reply is passed
+// on as JSON and not read.
 func (Adapter) Calls() []adapter.Call {
 	return []adapter.Call{
 		{Method: "POST", Path: "/backend-api/codex/responses", Replies: adapter.JSONOrSSEOrNone},
 		{Method: "POST", Path: "/v1/responses", Replies: adapter.JSONOrSSEOrNone},
 		{Method: "GET", Path: "/backend-api/codex/models", Versions: []string{"client_version"}, Replies: adapter.JSONOnly,
 			Service: true, Models: true},
+		{Method: "POST", Path: "/backend-api/codex/alpha/search", Replies: adapter.JSONOnly, Service: true},
+		{Method: "POST", Path: "/v1/alpha/search", Replies: adapter.JSONOnly, Service: true},
 	}
 }
 

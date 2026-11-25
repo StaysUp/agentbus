@@ -37,7 +37,7 @@ func TestLoginApproved(t *testing.T) {
 	}()
 	code := waitCode(t, &out)
 	pend, _ := q.PendingLogins(queue.DefaultTeam)
-	if len(pend) != 1 || pend[0].Name != "box" || pend[0].Caps.Sandbox == nil || pend[0].Caps.Sandbox.Why != "bwrap is missing" {
+	if len(pend) != 1 || pend[0].Name != "box" || pend[0].Caps == nil || pend[0].Caps.OS != "linux" {
 		t.Fatalf("pending: %+v", pend)
 	}
 	if signedIn(home) {

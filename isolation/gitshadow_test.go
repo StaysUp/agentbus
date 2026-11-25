@@ -60,8 +60,9 @@ func TestShadowAgedFileRestores(t *testing.T) {
 }
 
 // A nested git repo in the copy never breaks a checkpoint: an unborn one (a
-// turn ran `git init` and did not commit) is skipped, a committed one is tracked
-// by its commit, and one a dropped turn added is removed by a restore.
+// turn ran `git init` and did not commit) has its files recorded like any
+// folder's, and a restore removes the files one a dropped turn added, never
+// its .git.
 func TestShadowNestedRepos(t *testing.T) {
 	git, err := exec.LookPath("git")
 	if err != nil {
@@ -100,8 +101,13 @@ func TestShadowNestedRepos(t *testing.T) {
 	if err := b.RestoreTo(s, "t1"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(filepath.Join(s.Dir, "dropped")); !os.IsNotExist(err) {
-		t.Fatal("a restore left a nested repo a dropped turn added")
+	// The dropped turn's files in it go; the repo's own .git stays, as a
+	// restore of a copy made since 0.6.6 never removes a .git (nested.go).
+	if _, err := os.Lstat(filepath.Join(s.Dir, "dropped", "h.txt")); !os.IsNotExist(err) {
+		t.Fatal("a restore left a file of a nested repo a dropped turn added")
+	}
+	if _, err := os.Stat(filepath.Join(s.Dir, "dropped", ".git")); err != nil {
+		t.Fatal("a restore removed a nested repo's .git")
 	}
 	if read(t, filepath.Join(s.Dir, "a.txt")) != "a2" {
 		t.Fatal("a.txt did not restore to t1")

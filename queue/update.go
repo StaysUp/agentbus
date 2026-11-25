@@ -1,13 +1,17 @@
 package queue
 
 import (
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
 
+	"github.com/staysup/agentbus/applied"
 	"github.com/staysup/agentbus/ids"
 )
+
+// ErrTurnBusy: a merge was asked for while a turn of the workspace runs or
+// waits. Nothing was queued.
+var ErrTurnBusy = errors.New("queue: a turn of this workspace is running or waiting")
 
 // Update queues a KindUpdate job that merges the person's folder as it is now
 // into the workspace's copy, so the session's unapplied work sits on top of the
@@ -23,7 +27,13 @@ import (
 // the applied point is stable). ErrNotApplicable when the applied turn has no
 // checkpoint or the workspace names no folder, ErrMachineOffline when the copy's
 // runner is not seen. The caller (the API) checked the workspace is a sandbox.
-func (q *Queue) Update(team string, ws ids.WorkspaceID, machine string, by *By) (job Job, created bool, err error) {
+//
+// merge asks for a merge (Spec.Merge): on a conflict the copy gets the
+// conflicting files with conflict markers, for the agent's next turn to
+// resolve. Unlike an update it is refused with ErrTurnBusy while a turn of the
+// workspace runs or waits, so the markers land only between turns, before the
+// turn the person sends to resolve them.
+func (q *Queue) Update(team string, ws ids.WorkspaceID, machine string, by *By, merge bool) (job Job, created bool, err error) {
 	q.applyMu.Lock()
 	defer q.applyMu.Unlock()
 	busy, err := q.jobsInFlight(team, ws, `'apply','discard','update'`)
@@ -33,6 +43,13 @@ func (q *Queue) Update(team string, ws ids.WorkspaceID, machine string, by *By) 
 	if busy {
 		return Job{}, false, ErrApplyBusy
 	}
+	if merge {
+		if busy, err := q.jobsInFlight(team, ws, `'turn'`); err != nil {
+			return Job{}, false, err
+		} else if busy {
+			return Job{}, false, ErrTurnBusy
+		}
+	}
 	// The merge base: the copy checkpoint whose content the folder currently
 	// holds -- the last applied turn's end checkpoint, a prior update's folder
 	// snapshot, or the copy's base when nothing was applied. NOT simply the last
@@ -40,15 +57,12 @@ func (q *Queue) Update(team string, ws ids.WorkspaceID, machine string, by *By) 
 	// the turn checkpoint would re-import the earlier folder state over the
 	// person's later change (folder A->B, update, person reverts to A, a second
 	// update must merge from B, not from base A).
-	_, mark, err := q.appliedMark(team, ws)
+	rec, err := q.appliedState(ws)
 	if err != nil {
 		return Job{}, false, err
 	}
-	base, err := q.folderBaseCheckpoint(team, ws)
-	if err != nil {
-		return Job{}, false, err
-	}
-	if base == "" && mark >= 0 {
+	base := folderBaseCheckpoint(rec)
+	if base == "" && rec.Mark >= 0 {
 		// Something was applied (or a prior update ran) but its checkpoint could
 		// not be found; refuse rather than merge from the copy's base and lose the
 		// folder baseline.
@@ -59,7 +73,7 @@ func (q *Queue) Update(team string, ws ids.WorkspaceID, machine string, by *By) 
 	if err != nil {
 		return Job{}, false, err
 	}
-	if first.FolderRef == "" || first.Machine == "" {
+	if len(first.Places()) == 0 || first.Machine == "" {
 		return Job{}, false, ErrNotApplicable
 	}
 	// The update runs on the runner holding the copy (copy affinity routes it),
@@ -86,131 +100,23 @@ func (q *Queue) Update(team string, ws ids.WorkspaceID, machine string, by *By) 
 	// Its copy affinity keys by the workspace (CopyKey), so create routes it to
 	// the copy's runner. The head turn and folded turns are filled at the finish,
 	// not here (a turn may run while it waits in the lane).
-	spec := Spec{Workspace: ws, Machine: first.Machine, FolderRef: first.FolderRef, Restore: base}
+	spec := Spec{Workspace: ws, Machine: first.Machine, FolderRef: first.FolderRef, Folders: first.Folders, Restore: base, Merge: merge}
 	return q.create(team, KindUpdate, "", spec, Links{ApplyBy: by}, Limits{}, "", nil)
-}
-
-// updateBaseline is the folder baseline an active update set: From the folder's
-// current state (the new apply baseline), To the merge (what applying the head
-// turn writes), HeadTurn the turn an apply up to which writes the merge, and
-// TheirsCheckpoint the copy's own checkpoint for the folder snapshot (the merge
-// base of the next update).
-type updateBaseline struct {
-	From, To, HeadTurn, TheirsCheckpoint string
-}
-
-// activeUpdate is the workspace's latest finished clean update when no apply or
-// discard ran after it, so the update still governs the folder's baseline: until
-// the next apply the folder holds From, and applying up to HeadTurn writes To.
-// ok is false when there is none, the latest update was a conflict, or a later
-// apply or discard superseded it. The caller holds applyMu.
-func (q *Queue) activeUpdate(team string, ws ids.WorkspaceID) (info updateBaseline, ok bool, err error) {
-	var id string
-	var ended sql.NullInt64
-	err = q.db.QueryRow(`SELECT id, ended FROM jobs
-		WHERE team = ? AND `+jobWorkspace+` = ? AND kind = 'update' AND state = 'finished'
-		AND COALESCE(json_extract(result, '$.update.to'), '') != ''
-		ORDER BY ended DESC, rowid DESC LIMIT 1`, team, string(ws)).Scan(&id, &ended)
-	if errors.Is(err, sql.ErrNoRows) {
-		return info, false, nil
-	}
-	if err != nil {
-		return info, false, fmt.Errorf("queue: read active update: %w", err)
-	}
-	// A later apply or discard moved the folder's baseline or reset the copy away
-	// from the merge, so the update no longer governs it.
-	var n int
-	if err := q.db.QueryRow(`SELECT COUNT(*) FROM jobs
-		WHERE team = ? AND `+jobWorkspace+` = ? AND kind IN ('apply','discard') AND state = 'finished' AND ended > ?`,
-		team, string(ws), ended.Int64).Scan(&n); err != nil {
-		return info, false, fmt.Errorf("queue: read update supersede: %w", err)
-	}
-	if n > 0 {
-		return info, false, nil
-	}
-	j, err := q.Get(team, id)
-	if err != nil {
-		return info, false, err
-	}
-	r, _ := ReadResult(j.Result)
-	if !r.Update.Clean() {
-		return info, false, nil
-	}
-	return updateBaseline{From: r.Update.From, To: r.Update.To, HeadTurn: j.Links.AppliesTurn,
-		TheirsCheckpoint: r.Update.TheirsCheckpoint}, true, nil
-}
-
-// checkpointForChangeset is the copy checkpoint whose content is the changeset
-// cs: a turn's end checkpoint (its result.changeset), or an update's theirs or
-// merged checkpoint (its result.update.from or .to). "" when cs is empty (the
-// copy's base) or no job of the workspace recorded it. It is how control maps a
-// changeset the folder holds back to a copy checkpoint, so an update's merge
-// base and a discard's reset point are the checkpoint the folder matches, not a
-// turn's own pre-merge checkpoint.
-func (q *Queue) checkpointForChangeset(team string, ws ids.WorkspaceID, cs string) (string, error) {
-	if cs == "" {
-		return "", nil
-	}
-	var turn sql.NullString
-	err := q.db.QueryRow(`SELECT turn FROM jobs WHERE team = ? AND `+jobWorkspace+` = ? AND kind = 'turn'
-		AND json_extract(result, '$.changeset') = ? ORDER BY ended DESC, rowid DESC LIMIT 1`,
-		team, string(ws), cs).Scan(&turn)
-	if err == nil && turn.String != "" {
-		return q.turnCheckpoint(team, turn.String)
-	}
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("queue: checkpoint for changeset: %w", err)
-	}
-	var merged, theirs, to sql.NullString
-	err = q.db.QueryRow(`SELECT json_extract(result, '$.update.merged_checkpoint'),
-		json_extract(result, '$.update.theirs_checkpoint'), json_extract(result, '$.update.to')
-		FROM jobs WHERE team = ? AND `+jobWorkspace+` = ? AND kind = 'update' AND state = 'finished'
-		AND (json_extract(result, '$.update.to') = ? OR json_extract(result, '$.update.from') = ?)
-		ORDER BY ended DESC, rowid DESC LIMIT 1`, team, string(ws), cs, cs).Scan(&merged, &theirs, &to)
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", nil
-	}
-	if err != nil {
-		return "", fmt.Errorf("queue: checkpoint for changeset: %w", err)
-	}
-	if to.String == cs {
-		return merged.String, nil
-	}
-	return theirs.String, nil
-}
-
-// lastFinishedApplyTo is the target changeset of the workspace's most recent
-// finished apply -- what the person's folder holds now -- and whether there was
-// one. The caller holds applyMu.
-func (q *Queue) lastFinishedApplyTo(team string, ws ids.WorkspaceID) (to string, ok bool, err error) {
-	applies, err := q.sessionApplies(team, ws)
-	if err != nil {
-		return "", false, err
-	}
-	for _, a := range applies { // newest first
-		if a.State == Finished {
-			return a.Spec.ApplyTo, true, nil
-		}
-	}
-	return "", false, nil
 }
 
 // folderBaseCheckpoint is the copy checkpoint whose content the person's folder
 // currently holds -- the merge base for an update. An unapplied clean update
-// governs it (its theirs, the folder as the update imported it); else the most
-// recent finished apply's target; else "" (the copy's base, nothing applied).
-// The caller holds applyMu.
-func (q *Queue) folderBaseCheckpoint(team string, ws ids.WorkspaceID) (string, error) {
-	if upd, ok, err := q.activeUpdate(team, ws); err != nil {
-		return "", err
-	} else if ok {
-		return upd.TheirsCheckpoint, nil
+// governs it (its theirs, the folder as the update imported it); else the
+// latest successful apply's target; else "" (the copy's base, nothing
+// applied). All of it is the record's (applied.State).
+func folderBaseCheckpoint(rec applied.State) string {
+	if rec.Update != nil {
+		return rec.Update.TheirsCheckpoint
 	}
-	to, ok, err := q.lastFinishedApplyTo(team, ws)
-	if err != nil || !ok {
-		return "", err
+	if !rec.Applied {
+		return ""
 	}
-	return q.checkpointForChangeset(team, ws, to)
+	return rec.CheckpointOf(rec.AppliedTo)
 }
 
 // UpdateFolds are the head turn and the folded turns of an update finishing now:
@@ -219,29 +125,29 @@ func (q *Queue) folderBaseCheckpoint(team string, ws ids.WorkspaceID) (string, e
 // own). Read when the update RUNS, not when it was queued, so a turn that ran
 // while it waited in the lane is included. head is empty when nothing is
 // unapplied (the update re-synced the copy but there is no session work on top).
+// The caller is inside Outcome.
 func (q *Queue) UpdateFolds(team string, ws ids.WorkspaceID) (head string, folded []string, err error) {
-	q.applyMu.Lock()
-	defer q.applyMu.Unlock()
-	turns, mark, err := q.appliedMark(team, ws)
+	rec, err := q.appliedState(ws)
 	if err != nil {
 		return "", nil, err
 	}
-	unapplied := turns[mark+1:]
+	unapplied := rec.Turns[rec.Mark+1:]
 	if len(unapplied) == 0 {
 		return "", nil, nil
 	}
-	head = unapplied[len(unapplied)-1].turn
+	head = unapplied[len(unapplied)-1].Turn
 	folded = make([]string, 0, len(unapplied)-1)
 	for _, t := range unapplied[:len(unapplied)-1] {
-		folded = append(folded, t.turn)
+		folded = append(folded, t.Turn)
 	}
 	return head, folded, nil
 }
 
 // MarkUpdated records on the update job its head turn (links.applies_turn) and
-// the folded turns (links.applies_turns), so a later apply targets the head as
-// the merge and the folded turns stop being appliable on their own
-// (appliableTurns excludes them). Called at the finish, once the folds are known.
+// the folded turns (links.applies_turns), for the job's own answer. A later
+// apply targets the head as the merge, and the folded turns stop being
+// appliable, through the record's workspace.updated, not through this. Called
+// at the finish, once the folds are known.
 func (q *Queue) MarkUpdated(team, jobID, head string, folded []string) error {
 	b, err := json.Marshal(folded)
 	if err != nil {

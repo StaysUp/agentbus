@@ -35,7 +35,7 @@ func TestRunnerUsesAPIKeysSetInSettings(t *testing.T) {
 
 	code, raw := getAPI(t, ns.server, ns.tok, "/api/v0/subscriptions")
 	keep(raw)
-	if code != 200 || !strings.Contains(raw, `"api_keys":{"anthropic":{"set":false},"gemini":{"set":false},"openai":{"set":false},"openrouter":{"set":false}}`) {
+	if code != 200 || !strings.Contains(raw, `"api_keys":{"anthropic":{"set":false},"gemini":{"set":false},"openai":{"set":false},"openrouter":{"set":false},"xai":{"set":false}}`) {
 		t.Fatalf("before: %d %s", code, raw)
 	}
 	// One agent per harness on its vendor's API key.

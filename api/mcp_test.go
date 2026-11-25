@@ -161,7 +161,7 @@ func TestMCPToolListFollowsTheToken(t *testing.T) {
 func TestMCPToolListFollowsAgentAPI(t *testing.T) {
 	e := mcpEnv(t)
 	// A real turn token: it has a turn, so it may see the apps (listedApp).
-	g := &run.Grant{Session: "s1", Root: "s1", Turn: "t_1"}
+	g := ptr(run.ForTurn(run.Grant{Session: "s1", Root: "s1", Turn: "t_1"}))
 	// Apps list to a turn token whose tool server is on; route tools follow the
 	// gateway rules (B16). Both read the same rules now.
 	names := func(rules gateway.Rules) []string {
@@ -201,11 +201,11 @@ func TestMCPToolListFollowsAgentAPI(t *testing.T) {
 	}
 	// tool:* refused refuses the tool server to a turn token, naming the
 	// switch as Settings shows it.
-	toolListRoute := &route{turn: toolList}
+	toolListRoute := &route{scope: toolList, action: run.ActRun}
 	forbidTools := gateway.Rules{
 		Forbid: []string{"tool:*"},
 	}
-	if msg := turnRefusal(toolListRoute, forbidTools, false); !strings.Contains(msg, "AgentBus tools is off in Settings (Permissions)") ||
+	if msg := turnRefusal(toolListRoute, run.TurnActions, forbidTools); !strings.Contains(msg, "AgentBus tools is off in Settings (Permissions)") ||
 		strings.Contains(msg, "permissions.toml") {
 		t.Errorf("tools off: %q", msg)
 	}

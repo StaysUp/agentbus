@@ -36,11 +36,13 @@ const (
 	KeyAnthropic = "anthropic"
 	KeyOpenAI    = "openai"
 	KeyGemini    = "gemini"
+	// KeyXAI is the xAI provider's key (harness.Providers).
+	KeyXAI = "xai"
 )
 
 // KeyNames are every key that can be set in Settings. No other name has a
 // file.
-var KeyNames = []string{AccessOpenRouter, KeyAnthropic, KeyOpenAI, KeyGemini}
+var KeyNames = []string{AccessOpenRouter, KeyAnthropic, KeyOpenAI, KeyGemini, KeyXAI}
 
 // MaxKeyLen bounds a key's length. OpenRouter's are about 73 characters,
 // Anthropic's about 108, OpenAI's up to about 170, Gemini's 39.
@@ -230,6 +232,37 @@ func (k APIKeys) Credential(n Need) (Cred, error) {
 
 // Ready: as Credential, which reads only files.
 func (k APIKeys) Ready(n Need) string {
+	if _, err := k.Credential(n); err != nil {
+		return err.Error()
+	}
+	return ""
+}
+
+// ProviderKey gives an agent on a provider (harness.Providers) its key: the
+// one set in Settings by the name Key. There is no variable to fall back on.
+type ProviderKey struct {
+	Kept  *Subscriptions
+	Key   string // the key's name in Settings (KeyNames)
+	Label string // its name for the person, such as xAI API key
+}
+
+// Credential is the provider's key set in Settings.
+func (k ProviderKey) Credential(Need) (Cred, error) {
+	if k.Kept == nil {
+		return Cred{}, &Missing{Why: "set your " + k.Label + " in Settings"}
+	}
+	kk, err := k.Kept.readKey(k.Key)
+	switch {
+	case errors.Is(err, ErrNotConnected):
+		return Cred{}, &Missing{Why: "set your " + k.Label + " in Settings"}
+	case err != nil:
+		return Cred{}, &Missing{Why: "the " + k.Label + " kept on control cannot be read; set it again in Settings"}
+	}
+	return Cred{Token: kk.Key}, nil
+}
+
+// Ready: as Credential, which reads only files.
+func (k ProviderKey) Ready(n Need) string {
 	if _, err := k.Credential(n); err != nil {
 		return err.Error()
 	}

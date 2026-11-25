@@ -116,10 +116,7 @@ func TestNonLoopbackHandsAgentsLoopback(t *testing.T) {
 	t.Setenv("AGENTBUS_FAKE_EXIT", "0")
 	_, port, _ := net.SplitHostPort(svc.addr)
 	want := "http://127.0.0.1:" + port
-	code, out, raw := postRun(t, svc, tok, map[string]any{"agent": "claude", "folder": t.TempDir(), "prompt": "hi"})
-	if code != http.StatusAccepted {
-		t.Fatalf("status %d: %s", code, raw)
-	}
+	out, _ := postRunRunning(t, svc, tok, map[string]any{"agent": "claude", "folder": t.TempDir(), "prompt": "hi"})
 	id, _ := out["session"].(string)
 	base, _ := out["base_url"].(string)
 	if !strings.HasPrefix(base, want+"/s/"+id+"/t/") {
