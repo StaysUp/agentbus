@@ -79,9 +79,6 @@ func (st treeState) snapshot() *workspace.Snapshot {
 	return snap
 }
 
-// racy is workspace.Snapshot.Racy for a checkpoint taken at taken.
-func racy(taken, mtime int64) bool { return taken != 0 && mtime >= taken-int64(workspace.Racy) }
-
 // locks keeps one change of a space at a time, in this process.
 var locks sync.Map // state folder -> *sync.Mutex
 
@@ -244,10 +241,10 @@ func checkpoints(s *Space) ([]Checkpoint, error) {
 type keeper interface {
 	// take records the space's files now as a tree in t, and answers it and
 	// the count of its files: prev is the latest checkpoint, or nil for the
-	// Base. A file whose size, modification time and mode match prev's
-	// keeps prev's hash; any other is passed to save, which saves it and
-	// answers its hash. The Base may leave hashes empty (not hashed), and
-	// saves only what it passes to save.
+	// Base. A file prev's hash is kept for (workspace.Keeps) keeps it; any
+	// other is passed to save, which saves it and answers its hash. The Base
+	// may leave hashes empty (not hashed), and saves only what it passes to
+	// save.
 	take(s *Space, t *trees, prev *treeState, save workspace.Hasher) (treeState, int, error)
 	// learn hashes rel as the Base holds it, f, when that content can still
 	// be read as it was; save it too when it is small. ok is false when it
