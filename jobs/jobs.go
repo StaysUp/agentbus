@@ -174,6 +174,23 @@ func New(cfg Config) (*Server, error) {
 		// put-away is the record's too (queue/putaway.go).
 		cfg.Queue.ReadActivityWith(rec.WorkspaceUsedAfter)
 	}
+	// Whether putting copies away is on is read when a put-away comes due,
+	// so turning it off holds for one already queued. Installed here, before
+	// anything serves, so a runner reconnecting at control's start never meets
+	// a due put-away without it. No settings, or a policy that cannot be
+	// read, is off: nothing is put away on a guess.
+	putAwaySettings := cfg.Settings
+	cfg.Queue.ReadPutAwayWith(func() bool {
+		if putAwaySettings == nil {
+			return false
+		}
+		p, _, err := putAwaySettings.Policy()
+		if err != nil {
+			return false
+		}
+		_, on := p.PutAwayAfter()
+		return on
+	})
 	s := &Server{cfg: cfg, token: sha256.Sum256([]byte(cfg.Token)), enrol: sha256.Sum256([]byte(cfg.EnrollToken)), mux: http.NewServeMux(),
 		tokenKey: sha256.Sum256([]byte("agentbus runner turn tokens\x00" + cfg.Token)), sealer: standInSealer(cfg.Token)}
 	if cfg.Record != nil {

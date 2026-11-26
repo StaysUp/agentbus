@@ -8,6 +8,7 @@ import (
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -35,6 +36,40 @@ func recordOf(t *testing.T, st *store.Store, kind event.Kind) event.Event {
 	return out[0]
 }
 
+// Review P2 (t_7274812a7a928fcb): control's setting reader is installed when
+// the jobs server is made, before anything serves. A runner that reconnects at
+// control's start and takes at once meets a due put-away with the setting
+// already readable, so the put-away goes rather than ending kept as "off".
+func TestPutAwaySettingReadFromTheStart(t *testing.T) {
+	e := newMigEnv(t)
+	if _, err := New(Config{Queue: e.q, Token: mainTok, EnrollToken: enrollTok, Record: e.st, Settings: settings.NewFiles(t.TempDir())}); err != nil {
+		t.Fatal(err)
+	}
+	first := e.oldTurn("", "", "", false)
+	ws := ids.WorkspaceID(first.Session)
+	if _, err := e.q.RegisterRecordOn(queue.DefaultTeam, "workspace.discarded", queue.Action{Queue: queue.KindPutAway}, "builtin/put_away/workspace.discarded", 0); err != nil {
+		t.Fatal(err)
+	}
+	e.append(event.Event{ID: "evt_discard", Kind: event.WorkspaceDiscarded, Workspace: string(ws), Discarded: &event.Discarded{ResetTo: "base"}})
+	read := func(kind string, after int64, limit int) ([]queue.RecordEvent, error) {
+		evs, err := e.st.EventsOfKind(kind, after, limit)
+		var out []queue.RecordEvent
+		for _, x := range evs {
+			out = append(out, queue.RecordEvent{ID: x.ID, Seq: x.Seq, Time: x.Time, Workspace: x.Workspace})
+		}
+		return out, err
+	}
+	where := func(w string) (queue.DeliverTo, bool, error) {
+		return queue.DeliverTo{Workspace: w, Machine: migCon, Isolate: true}, true, nil
+	}
+	if n, err := e.q.FireRecordOns(queue.DefaultTeam, read, where, func(string) (time.Duration, bool) { return 0, true }); err != nil || n != 1 {
+		t.Fatalf("fire: queued %d err %v, want 1", n, err)
+	}
+	if j, _ := e.take(false); j.Kind != queue.KindPutAway {
+		t.Fatalf("took %s, want the put-away", j.Kind)
+	}
+}
+
 // The record says why each put-away was queued, when, and what it did: the
 // one that went is a workspace.closed naming the on and the event; the one that
 // kept the copy is a workspace.kept with why, written by control's sweep, and
@@ -42,6 +77,7 @@ func recordOf(t *testing.T, st *store.Store, kind event.Kind) event.Event {
 func TestPutAwayOutcomesInTheRecord(t *testing.T) {
 	e := newMigEnv(t)
 	e.q.ReadActivityWith(e.st.WorkspaceUsedAfter)
+	e.q.ReadPutAwayWith(func() bool { return true })
 	first := e.oldTurn("", "", "", false) // no changes: settled
 	ws := ids.WorkspaceID(first.Session)
 	on, err := e.q.RegisterRecordOn(queue.DefaultTeam, "workspace.discarded", queue.Action{Queue: queue.KindPutAway}, "builtin/put_away/workspace.discarded", 0)

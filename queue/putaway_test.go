@@ -42,6 +42,7 @@ func newPutAwayRig(t *testing.T, res Result) *putAwayRig {
 	q.ReadAppliedWith(st.Applied)
 	q.ReadActivityWith(st.WorkspaceUsedAfter)
 	r := &putAwayRig{q: q, c: c, st: st}
+	q.ReadPutAwayWith(func() bool { return !r.off })
 	r.rn = capsRunner(t, q, nil, &Capabilities{Connector: conA})
 	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
 	run(t, q, r.rn, res)
@@ -210,7 +211,59 @@ func TestLaterPutAwayWins(t *testing.T) {
 	if j.ID != second.ID {
 		t.Fatalf("took %s (%s), want the later put-away %s", j.ID, j.Kind, second.ID)
 	}
-	kept(t, r.q, first.ID, KeptBusy)
+	kept(t, r.q, first.ID, KeptNewer)
+}
+
+// Review P2 (t_236214b93f8e7d9b): one tick reads a workspace.applied and then
+// a workspace.discarded, and the discard's on fires first, so the put-away of
+// the later event is queued before the earlier one's. The later one still
+// goes and the earlier yields to it: a settled copy never stays for good.
+func TestLaterEventWinsWhateverTheQueueOrder(t *testing.T) {
+	r := newPutAwayRig(t, Result{}) // the discard's on, registered first
+	r.c.add(time.Second)
+	applyOn, err := r.q.RegisterRecordOn(DefaultTeam, "workspace.applied", Action{Queue: KindPutAway}, "builtin/put_away/workspace.applied", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.record(t)
+	for _, e := range []event.Event{
+		{ID: "evt_apply", Kind: event.WorkspaceApplied, Time: r.c.now(), Workspace: string(r.ws)},
+		{ID: "evt_discard", Kind: event.WorkspaceDiscarded, Time: r.c.now(), Workspace: string(r.ws), Discarded: &event.Discarded{ResetTo: "base"}},
+	} {
+		if _, _, err := r.st.Append(e); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := r.fire(); err != nil || n != 2 {
+		t.Fatalf("fire: queued %d err %v, want 2", n, err)
+	}
+	var later, earlier string
+	if err := r.q.db.QueryRow(`SELECT id FROM jobs WHERE kind = 'put_away' AND json_extract(links, '$.because.on') = ?`, r.on.ID).Scan(&later); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.q.db.QueryRow(`SELECT id FROM jobs WHERE kind = 'put_away' AND json_extract(links, '$.because.on') = ?`, applyOn.ID).Scan(&earlier); err != nil {
+		t.Fatal(err)
+	}
+	if state(t, r.q, later).Links.Because.Seq <= state(t, r.q, earlier).Links.Because.Seq {
+		t.Fatal("the discard was meant to be the later event")
+	}
+	r.c.add(quiet)
+	if j, _ := take(t, r.q, r.rn); j.ID != later {
+		t.Fatalf("took %s (%s), want the later event's put-away %s", j.ID, j.Kind, later)
+	}
+	kept(t, r.q, earlier, KeptNewer)
+}
+
+// Review P2 (t_236214b93f8e7d9b): turning putting away off after one was
+// queued is the owner's brake. When it comes due it reads the setting as it is
+// then, and keeps the copy.
+func TestTurnedOffBeforeDueKeepsTheCopy(t *testing.T) {
+	r := newPutAwayRig(t, Result{})
+	p := r.settle(t)
+	r.off = true
+	r.c.add(quiet)
+	r.takeNone(t)
+	kept(t, r.q, p.ID, KeptOff)
 }
 
 // A put-away with no record to read keeps the copy: nothing goes on a guess.

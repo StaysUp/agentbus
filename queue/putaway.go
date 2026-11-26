@@ -10,8 +10,11 @@ package queue
 // that holds the copy (decidePutAways), from the record and the lane, before
 // any job is chosen. The copy goes only when all of these hold:
 //
-//   - no other job of the workspace is waiting or running (a turn, an apply, a
-//     discard, an update, a close, a later put-away);
+//   - putting copies away is still on in the settings, read as they are now;
+//   - no put-away for a later record event of the workspace is waiting (that
+//     one decides instead), and no other job of the workspace is waiting or
+//     running (a turn, an apply, a discard, an update, a close, a put-away a
+//     runner holds);
 //   - the record holds nothing that happened in the workspace after the event
 //     that queued it (a turn started, an apply, a discard, an update, a close,
 //     a preview);
@@ -47,9 +50,19 @@ type ActivityReader func(ws ids.WorkspaceID, after int64) (bool, error)
 // record only and never call back into the queue.
 func (q *Queue) ReadActivityWith(r ActivityReader) { q.activity = r }
 
+// PutAwaySetting says whether putting copies away is on in the settings now.
+type PutAwaySetting func() bool
+
+// ReadPutAwayWith sets how the queue reads, when a put-away comes due, whether
+// putting copies away is still on: the owner may turn it off after a put-away
+// was queued, and that brake holds. Without it no put-away goes.
+func (q *Queue) ReadPutAwayWith(r PutAwaySetting) { q.putAwayOn = r }
+
 // Why a put-away kept its copy.
 const (
 	KeptBusy      = "other work of the workspace is waiting or running"
+	KeptNewer     = "a put-away for a later event of the workspace will decide instead"
+	KeptOff       = "putting copies away is off in the settings"
 	KeptUsed      = "the workspace was used after the event that queued this"
 	KeptUnapplied = "the workspace holds work that is not applied or discarded"
 	KeptNoCopy    = "the workspace has no copy to put away"
@@ -111,16 +124,39 @@ func (q *Queue) decidePutAways(tx *sql.Tx, runnerID, team string, now time.Time)
 
 // putAwayWhy is why the put-away job id must keep workspace ws's copy, or ""
 // when it may go.
+//
+// Of the workspace's put-aways waiting at once, the one queued for the latest
+// record event decides, whatever order they were queued in (one tick can read
+// a discard and then an apply, and the apply's on fire first): every older one
+// ends kept for it, and it is not held up by them. So a settled copy always
+// has one put-away that can still go.
 func (q *Queue) putAwayWhy(tx *sql.Tx, team, id string, ws ids.WorkspaceID, because *Because) (string, error) {
+	if q.putAwayOn == nil || !q.putAwayOn() {
+		return KeptOff, nil
+	}
+	if because == nil {
+		return KeptNoRecord, nil
+	}
+	var newer int
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND `+jobWorkspace+` = ? AND id != ? AND ended IS NULL
+		AND kind = 'put_away' AND state = 'queued' AND COALESCE(json_extract(links, '$.because.seq'), 0) > ?`,
+		team, string(ws), id, because.Seq).Scan(&newer); err != nil {
+		return "", fmt.Errorf("queue: read put-away lane: %w", err)
+	}
+	if newer > 0 {
+		return KeptNewer, nil
+	}
+	// Other work, and a put-away a runner already holds (a removal under way).
 	var busy int
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND `+jobWorkspace+` = ? AND id != ? AND ended IS NULL
-		AND kind IN ('turn','apply','discard','update','close','put_away')`, team, string(ws), id).Scan(&busy); err != nil {
+		AND (kind IN ('turn','apply','discard','update','close') OR (kind = 'put_away' AND state IN ('taken','running')))`,
+		team, string(ws), id).Scan(&busy); err != nil {
 		return "", fmt.Errorf("queue: read put-away lane: %w", err)
 	}
 	if busy > 0 {
 		return KeptBusy, nil
 	}
-	if q.activity == nil || q.applied == nil || because == nil {
+	if q.activity == nil || q.applied == nil {
 		return KeptNoRecord, nil
 	}
 	used, err := q.activity(ws, because.Seq)

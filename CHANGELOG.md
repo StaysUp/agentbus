@@ -13,7 +13,8 @@ All notable changes to AgentBus. Full notes for each release are on the
   update, a preview, a close), or work is waiting in it, the put-away does nothing. The record says
   which: `workspace.closed` with `put_away` (the on and event that queued it, when it was queued
   and when it came due), or `workspace.kept` with why. The quiet time is a setting,
-  `[workspaces] put_away_after_minutes` (30 by default, 0 is off).
+  `[workspaces] put_away_after_minutes` (30 by default, 0 is off). Turning it off also stops a
+  put-away already waiting. When several wait at once, the one for the latest event decides.
 - **A job may wait until a time.** A job can carry a time before which no runner takes it
   (`not_before`). Until then it holds no place in its workspace's lane, so a turn sent meanwhile
   runs at once. The put-away is the first job that uses it.

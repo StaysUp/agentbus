@@ -721,6 +721,8 @@ type Queue struct {
 	// activity reads whether a workspace was used after a record seq, for a
 	// put-away (putaway.go).
 	activity ActivityReader
+	// putAwayOn reads whether putting copies away is on now (putaway.go).
+	putAwayOn PutAwaySetting
 	// cost reads what turns cost from the record (ReadCostWith), for the
 	// cost cap (budget.go).
 	cost CostReader
