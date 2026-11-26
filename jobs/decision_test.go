@@ -26,6 +26,7 @@ func (r recStub) CallSession(string) (string, bool, error) {
 	return "", false, nil
 }
 func (r recStub) OtherTurns(string, string, string) (bool, error) { return false, nil }
+func (r recStub) TurnClosed(string, string) (bool, error)         { return false, nil }
 func (r recStub) Continuation(string) (store.Continuation, error) {
 	return store.Continuation{}, nil
 }
