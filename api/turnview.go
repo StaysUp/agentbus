@@ -24,11 +24,13 @@ type Turn struct {
 	// Prompt and Reply are the whole text, served only by GET /api/v0/turns/{id}
 	// (the single turn), read from the record at request time. The turn list
 	// leaves them empty: it carries facts only.
-	Prompt string     `json:"prompt,omitempty" doc:"Only on GET /api/v0/turns/{id}: the person's whole words from the turn's turn.started. Absent on the turn list, and absent here when the turn has no prompt text. For a queued turn it is the prompt it was asked with."`
-	Reply  string     `json:"reply,omitempty" doc:"Only on GET /api/v0/turns/{id}: the whole text of the reply to the turn's last model call, read from the record. Absent on the turn list, and absent here while that reply has not come, when it carried no text, or when the turn has no calls."`
-	Kind   string     `json:"kind" doc:"turn. (B15: review is a normal turn — a review_turn app — not a kind of its own.)"`
-	Asked  *time.Time `json:"asked,omitempty" doc:"When the turn was asked for. Absent for a turn this service did not run."`
-	Ahead  int        `json:"ahead,omitempty" doc:"For a queued turn: how many of its session's turns are before it."`
+	Prompt string `json:"prompt,omitempty" doc:"Only on GET /api/v0/turns/{id}: the person's whole words from the turn's turn.started. Absent on the turn list, and absent here when the turn has no prompt text. For a queued turn it is the prompt it was asked with."`
+	Reply  string `json:"reply,omitempty" doc:"Only on GET /api/v0/turns/{id}: the whole text of the reply to the turn's last model call, read from the record. Absent on the turn list, and absent here while that reply has not come, when it carried no text, or when the turn has no calls."`
+	// Replies are every answer the turn gave, oldest first (store.TurnAnswers).
+	Replies []store.Answer `json:"replies,omitempty" doc:"Only on GET /api/v0/turns/{id}: every answer the turn gave, oldest first, each with its whole text and the time of its turn.completed. A turn can answer more than once, as when Claude Code resumes after its own background command ends; reply is the last answer's text once the turn has ended. Absent on the turn list, and absent here until the turn has answered."`
+	Kind    string         `json:"kind" doc:"turn. (B15: review is a normal turn — a review_turn app — not a kind of its own.)"`
+	Asked   *time.Time     `json:"asked,omitempty" doc:"When the turn was asked for. Absent for a turn this service did not run."`
+	Ahead   int            `json:"ahead,omitempty" doc:"For a queued turn: how many of its session's turns are before it."`
 }
 
 // TurnList is a page of turns.
@@ -125,13 +127,7 @@ func started(j queue.Job) bool { return startedTurn(j) != "" }
 func (a *API) turns(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	tq := store.TurnQuery{Limit: defaultTurnLimit}
-	if q.Has("session") {
-		tq.Session = q.Get("session")
-		if !sessionID.MatchString(tq.Session) {
-			writeError(w, http.StatusBadRequest, "session must match "+sessionID.String())
-			return
-		}
-	}
+	tq.Session = q.Get("session")
 	if q.Has("before") {
 		n, err := strconv.ParseInt(q.Get("before"), 10, 64)
 		if err != nil || n < 1 {
@@ -292,6 +288,10 @@ func (a *API) oneTurn(w http.ResponseWriter, r *http.Request, id string) (Turn, 
 		}
 		if ok {
 			v.Prompt, v.Reply = prompt, reply
+		}
+		if v.Replies, err = a.cfg.Store.TurnAnswers(v.Session, v.ID); err != nil {
+			a.internal(w)
+			return Turn{}, false, err
 		}
 		return v, true, nil
 	case j != nil:

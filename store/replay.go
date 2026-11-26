@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 	"unicode/utf8"
 )
 
@@ -64,6 +65,46 @@ func (s *Store) TurnText(session, turn string) (prompt, reply string, found bool
 		return "", "", false, fmt.Errorf("store: read a turn's text: %w", err)
 	}
 	return p.String, r.String, true, nil
+}
+
+// Answer is one answer of a turn: the text of a reply that ended it, and when.
+type Answer struct {
+	Text string    `json:"text" doc:"The reply's whole text."`
+	Time time.Time `json:"time" doc:"When the turn.completed that ended on this reply was recorded."`
+}
+
+// TurnAnswers reads every answer of (session, turn), oldest first: for each
+// turn.completed, the text of the model.responded of its exchange. A turn can
+// answer more than once: Claude Code resumes after its own background command
+// ends, and the record then holds a turn.completed per answer (seen
+// 2026-11-26, t_5794feb266e80f67: two, four minutes apart). A turn.completed
+// whose reply carried no text, or with no exchange to pair it by, gives no
+// answer.
+func (s *Store) TurnAnswers(session, turn string) ([]Answer, error) {
+	rows, err := s.r.Query(`SELECT c.time, json_extract(r.data, '$.text')
+		FROM events c JOIN events r ON r.seq = (
+			SELECT p.seq FROM events p WHERE p.session = c.session AND p.turn = c.turn AND p.kind = 'model.responded'
+				AND json_extract(p.data, '$.exchange') = json_extract(c.data, '$.exchange') AND p.seq < c.seq
+			ORDER BY p.seq DESC LIMIT 1)
+		WHERE c.session = ? AND c.turn = ? AND c.kind = 'turn.completed'
+			AND COALESCE(json_extract(c.data, '$.exchange'), '') <> ''
+			AND COALESCE(json_extract(r.data, '$.text'), '') <> ''
+		ORDER BY c.seq`, session, turn)
+	if err != nil {
+		return nil, fmt.Errorf("store: read a turn's answers: %w", err)
+	}
+	defer rows.Close()
+	out := []Answer{}
+	for rows.Next() {
+		var ns int64
+		var a Answer
+		if err := rows.Scan(&ns, &a.Text); err != nil {
+			return nil, fmt.Errorf("store: read a turn's answers: %w", err)
+		}
+		a.Time = time.Unix(0, ns).UTC()
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 // TranscriptTurn is one turn as plain text: who ran it, the person's words

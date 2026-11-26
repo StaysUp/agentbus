@@ -52,8 +52,32 @@ All notable changes to AgentBus. Full notes for each release are on the
   keeps a cursor in the record and fires once per event. The put-away is control's first built-in
   on, over `workspace.applied` and `workspace.discarded`. `POST /api/v0/ons` still registers only
   a turn's on.
+- **List the ons.** `GET /api/v0/ons` lists the ons still waiting to react, oldest first: each
+  one's id, the turn it watches, the session it delivers to and the turn that registered it.
+  `session` keeps the ons that deliver to that session. The main token sees every on; a turn
+  token sees the ons it may remove: those its own turn registered and those that deliver to a
+  session it may read. Finding them used to take a read of `jobs.db`.
+  The ons a turn's ask records with it (`delivery` on `POST /api/v0/turns`, as ask_agent does)
+  are listed too. One that fired or was removed drops out.
+- **Every answer of a turn.** `GET /api/v0/turns/{id}` adds `replies`: each answer the turn gave,
+  oldest first, with its text and time. A turn can answer more than once, as when Claude Code
+  resumes after its own background command ends; `reply` still holds the last. Before, the
+  earlier answers showed only in the turn's events.
+
+### Changed
+- **Close answers at once.** `POST /api/v0/workspaces/{id}/close` queues the close and answers
+  202 with state `queued`; it no longer waits up to 30 seconds for the close to run. The record's
+  `workspace.closed` says when it ran. A close that fails records none and leaves the copy.
+- **A malformed `session` query is 400 for every caller.** On `GET /api/v0/events` and
+  `GET /api/v0/turns`, a `session` sent twice, empty or not shaped as a session id is refused
+  with 400, the owner's token included. A turn token sending it twice got 403 before.
 
 ### Fixed
+- **The owner's `GET /api/v0/events?session=` opened a stream of no session** instead of
+  refusing. The door checked the query only for a token that does not reach everywhere.
+- **A reply the main token delivered into a session another tree had continued joined that
+  tree.** A session's tree is now its first turn's: a session the person started has none, even
+  after another tree's turn delivered into it.
 - **An OpenRouter call on your own provider key (BYOK) was recorded as $0 and complete**
   ([#94](https://github.com/staysup/agentbus/issues/94)). On a BYOK call OpenRouter's `usage.cost`
   holds only its own fee, often 0, and the provider's charge is in

@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -296,6 +297,14 @@ func TestAskAgentAppDelivers(t *testing.T) {
 	if turn3 == turn {
 		t.Fatalf("a fresh ask with the same args reused the completed turn: %s", turn3)
 	}
+	// GET /api/v0/ons lists the ons the asks recorded with their turns (the
+	// delivery of POST /api/v0/turns, not POST /api/v0/ons), for the main
+	// token and for the asking turn's own, by the session they deliver to.
+	for _, tk := range []string{token, tok} {
+		if got := onTurns(t, e, tk, root.Session); !slices.Equal(got, []string{turn, turn3}) {
+			t.Errorf("GET /api/v0/ons?session=root before delivery: %v, want [%s %s]", got, turn, turn3)
+		}
+	}
 	// The asked turns run in the asker's workspace lane, after the asker's turn
 	// ends, so release root; then the runner starts the first asked turn (check
 	// its origin) and BOTH replies come back to the asking session as later turns.
@@ -314,6 +323,30 @@ func TestAskAgentAppDelivers(t *testing.T) {
 	if !delivered[turn] || !delivered[turn3] {
 		t.Fatalf("the asked replies were not both delivered to root (want %s and %s): %+v", turn, turn3, got)
 	}
+	// An on that fired is no longer listed. The fire turns it off just after
+	// the delivery is queued, so allow the sweep a moment.
+	deadline := time.Now().Add(10 * time.Second)
+	for len(onTurns(t, e, token, root.Session)) > 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("fired ons still listed: %v", onTurns(t, e, token, root.Session))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// onTurns is the turns the ons delivering to session watch, as tok lists them.
+func onTurns(t *testing.T, e *env, tok, session string) []string {
+	t.Helper()
+	code, out := as(t, e, tok, "GET", "/api/v0/ons?session="+session, "")
+	var l OnList
+	if code != 200 || json.Unmarshal([]byte(out), &l) != nil {
+		t.Fatalf("GET /api/v0/ons: %d %s", code, out)
+	}
+	turns := []string{}
+	for _, on := range l.Ons {
+		turns = append(turns, on.Turn)
+	}
+	return turns
 }
 
 // The review_turn app end to end: it starts a review turn (ask_agent with a

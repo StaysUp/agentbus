@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"net/http"
 	"strconv"
 	"testing"
@@ -63,5 +64,34 @@ func TestListSessionsPinZero(t *testing.T) {
 	}
 	if len(p.Sessions) != 0 || p.Seq != 0 {
 		t.Fatalf("after=0 should pin to the empty snapshot: %+v seq %d", p.Sessions, p.Seq)
+	}
+}
+
+// The session query of the event stream and the turn list is checked for
+// every token, the owner's too (O2.3 review P2): the door skipped the place
+// check for a grant that reaches everywhere, so the owner's ?session= opened
+// a stream of no session instead of 400.
+func TestSessionQueryShapeOwner(t *testing.T) {
+	e := newEnv(t)
+	for _, path := range []string{
+		"/api/v0/events?session=",
+		"/api/v0/events?session=a&session=b",
+		"/api/v0/events?session=a%20b",
+		"/api/v0/turns?session=",
+		"/api/v0/turns?session=a&session=b",
+	} {
+		// A stream the door lets through stays open: the deadline fails it
+		// rather than hang the test.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		resp, err := http.DefaultClient.Do(e.req(t, "GET", path, nil).WithContext(ctx))
+		if err != nil {
+			t.Errorf("GET %s: %v, want 400", path, err)
+		} else {
+			resp.Body.Close()
+			if resp.StatusCode != 400 {
+				t.Errorf("GET %s: %d, want 400", path, resp.StatusCode)
+			}
+		}
+		cancel()
 	}
 }

@@ -1,7 +1,8 @@
 package api
 
-// POST /api/v0/ons and DELETE /api/v0/ons/{id}: register and remove an on, the
-// standing instruction "when this event happens, do this" (queue/on.go). B13
+// POST /api/v0/ons, GET /api/v0/ons and DELETE /api/v0/ons/{id}: register,
+// list and remove an on, the standing instruction "when this event happens, do
+// this" (queue/on.go). B13
 // has one event, a turn completing, and one action, deliver that turn's reply
 // to a session as its next turn. It is the public form of what ask_agent
 // registers for itself (runs.go): the primitive every later reaction is built
@@ -11,16 +12,18 @@ package api
 // for any turn it may read (mayReadTurn, the check GET /api/v0/turns/{id}
 // uses), its own session's too, and its result is delivered to a session it
 // may read (its own when it names none); it may remove an on its own turn made
-// or one that delivers to a session it may read. Such an on counts as work its
-// turn asked for, under the per-turn and per-tree caps ([limits]
-// max_jobs_per_turn, max_jobs_per_tree). The main token may register an on for
-// any turn, naming the session to deliver to, and remove any on.
+// or one that delivers to a session it may read, and it lists those same ons
+// (agentOn). Such an on counts as work its turn asked for, under the per-turn
+// and per-tree caps ([limits] max_jobs_per_turn, max_jobs_per_tree). The main
+// token may register an on for any turn, naming the session to deliver to, and
+// list and remove any on.
 
 import (
 	"errors"
 	"net/http"
 
 	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/run"
 )
 
 // OnRequest is the body of POST /api/v0/ons.
@@ -38,6 +41,28 @@ type OnView struct {
 	Event   string `json:"event" doc:"The event it reacts to. For now, turn.completed."`
 	Turn    string `json:"turn" doc:"The turn it watches."`
 	Session string `json:"session" doc:"The session its action delivers to."`
+	// By is who registered it, as the queue's Maker names it.
+	By *OnMaker `json:"by,omitempty" doc:"The turn whose token registered the on, and that turn's session. Absent for an on the main token registered."`
+}
+
+// OnMaker is the turn that registered an on.
+type OnMaker struct {
+	Session string `json:"session" doc:"The registering turn's session."`
+	Turn    string `json:"turn" doc:"The registering turn."`
+}
+
+// OnList is the reply of GET /api/v0/ons.
+type OnList struct {
+	Ons []OnView `json:"ons" doc:"The ons waiting to react, oldest first. Empty when none."`
+}
+
+// onView is on as the API shows it.
+func onView(on queue.On) OnView {
+	v := OnView{ID: on.ID, Event: on.Event, Turn: on.Subject, Session: on.Session}
+	if on.Maker.Turn != "" {
+		v.By = &OnMaker{Session: on.Maker.Session, Turn: on.Maker.Turn}
+	}
+	return v
 }
 
 const (
@@ -118,7 +143,50 @@ func (a *API) registerOn(w http.ResponseWriter, r *http.Request) {
 		a.internal(w)
 		return
 	}
-	writeJSON(w, http.StatusCreated, OnView{ID: on.ID, Event: on.Event, Turn: on.Subject, Session: on.Session})
+	writeJSON(w, http.StatusCreated, onView(on))
+}
+
+// GET /api/v0/ons: the turns' ons still waiting to react, oldest first, the
+// ones the caller may remove: every one for the main token; for a turn token,
+// agentOn's, the rule of DELETE /api/v0/ons/{id}. Control's own ons over the
+// record (the put-away) are not listed: no caller registers or removes them.
+func (a *API) listOns(w http.ResponseWriter, r *http.Request) {
+	if !noBody(w, r) {
+		return
+	}
+	session, sent, ok := sessionQuery(w, r)
+	if !ok {
+		return
+	}
+	out := OnList{Ons: []OnView{}}
+	if a.cfg.Queue == nil {
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	ons, err := a.cfg.Queue.ListOns(queue.DefaultTeam)
+	if err != nil {
+		a.internal(w)
+		return
+	}
+	c := callerOf(r)
+	every := c.everywhere(run.ActRead)
+	for _, on := range ons {
+		if on.Event != queue.OnTurnCompleted || sent && on.Session != session {
+			continue
+		}
+		if !every {
+			in, err := a.agentOn(c.Grant, on)
+			if err != nil {
+				a.internal(w)
+				return
+			}
+			if !in {
+				continue
+			}
+		}
+		out.Ons = append(out.Ons, onView(on))
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // DELETE /api/v0/ons/{id}

@@ -216,7 +216,7 @@ var routes = slices.Concat([]route{
 			"A turn that ended before it started, such as one stopped while queued, is listed among them where it was asked for, on one page only. " +
 			"Page older turns with before set to the next_before of the page before. Stream from the list's store and seq to follow new events.",
 		query: []param{
-			{name: "session", doc: "Only this session's turns."},
+			{name: "session", doc: "Only this session's turns. Sent twice, empty or not a session id, it is refused (400), whoever asks."},
 			{name: "before", doc: "Only turns whose started_seq is below it: the next_before of the previous page.", integer: true, min: 1},
 			{name: "limit", doc: "Turns per page. 100 when absent.", integer: true, min: 1, max: maxTurnLimit}},
 		replies:   []reply{ok(200, TurnList{}, "A page of turns."), badRequest, storeFailed},
@@ -229,6 +229,7 @@ var routes = slices.Concat([]route{
 		tag:     "Turns",
 		summary: "Get a turn",
 		doc: "One turn, from the moment it is asked for: its state (queued, running, finished, failed or stopped), its agent, prompt and reply, its cost, and for a review its verdict and findings.\n\n" +
+			"A turn can answer more than once (Claude Code resumes after its own background command ends): replies holds every answer, oldest first, with its text and time, and reply is the text of the last. " +
 			"Poll it to wait for a turn to end, or stream from its store and seq.",
 		query:     []param{{name: "session", doc: turnSessionDoc}},
 		replies:   []reply{ok(200, OneTurn{}, "The turn."), badRequest, fail(404, "No such turn."), storeFailed},
@@ -269,13 +270,23 @@ var routes = slices.Concat([]route{
 			fail(409, "The idempotency_key was already used to register an on for a different turn or session.")},
 		at:    atBody,
 		serve: plain((*API).registerOn)},
+	{method: "GET", path: "/api/v0/ons", op: "listOns", action: run.ActRead,
+		at:      atList,
+		tag:     "Reactions",
+		summary: "List ons",
+		doc: "The ons still waiting to react, oldest first: each one's id, the turn it watches, the session it delivers to, and the turn that registered it. An on that has fired, or was removed, is not listed. Control's built-in ons over the record (the put-away) are not listed either.\n\n" +
+			"The main token lists every on. A turn token lists the ons it may remove with DELETE /api/v0/ons/{id}: those its own turn registered, and those that deliver to a session it may read. " +
+			"With session, only the ons that deliver to that session. No body is read.",
+		query:   []param{{name: "session", doc: "Only the ons that deliver to this session. Sent twice, empty or not a session id, it is refused (400)."}},
+		replies: []reply{ok(200, OnList{}, "The ons."), badRequest, storeFailed},
+		serve:   plain((*API).listOns)},
 	{method: "DELETE", path: "/api/v0/ons/{id}", op: "removeOn", action: run.ActRun,
 		idDoc:   "An on's id (on_...), as POST /api/v0/ons named it.",
 		tag:     "Reactions",
 		summary: "Remove an on",
-		doc:     "Remove an on: it stops reacting. Removing one already removed, or one that has fired, is accepted. A turn token may remove only an on its own turn registered, never one of control's built-in ons (the put-away). No body is read.",
+		doc:     "Remove an on: it stops reacting. Removing one already removed, or one that has fired, is accepted. A turn token may remove an on its own turn registered, or one that delivers to a session it may read (GET /api/v0/ons lists both), never one of control's built-in ons (the put-away). No body is read.",
 		replies: []reply{{status: 204, doc: "Removed.", empty: true}, turnRefused,
-			fail(403, "A turn token tried to remove an on another turn registered."),
+			fail(403, "A turn token tried to remove an on another turn registered that delivers to a session it may not read, or one of control's built-in ons."),
 			fail(404, "This service keeps no queue, or no on has this id.")},
 		at:    atBody,
 		serve: (*API).removeOn},
@@ -430,10 +441,11 @@ var routes = slices.Concat([]route{
 		summary: "Close a workspace",
 		idDoc:   "A workspace id (ws_ and 16 hex digits). Another shape gets 404.",
 		doc: "Remove a sandbox workspace's copy to reclaim its disk. The person's folder is never touched. Close is reversible: the record and the turns stay, and the next turn rebuilds a fresh copy from the folder. No body is read.\n\n" +
-			"Like a discard, a close waits behind a running or queued turn in the workspace lane; changes not applied when it runs are dropped with the copy, so apply or discard them on the session first to keep them (the cockpit signals unapplied work). A finished close is a baseline reset: a later apply starts from the rebuilt copy's base, never the removed lineage. One apply, discard, update or close runs per workspace, so a close while one is still running or waiting is refused with 409. The reply waits up to 30 seconds; past that it is 202 with state queued or running. Every close joins the lane, even if an earlier close finished. It runs after preceding turns and succeeds if no copy remains.\n\n" +
+			"Like a discard, a close waits behind a running or queued turn in the workspace lane; changes not applied when it runs are dropped with the copy, so apply or discard them on the session first to keep them (the cockpit signals unapplied work). A finished close is a baseline reset: a later apply starts from the rebuilt copy's base, never the removed lineage. One apply, discard, update or close runs per workspace, so a close while one is still running or waiting is refused with 409. Every close joins the lane, even if an earlier close finished. It runs after preceding turns and succeeds if no copy remains.\n\n" +
+			"The reply comes at once: 202 with state queued. Nothing waits for the close to run. When it has, the record holds workspace.closed for the workspace, and GET /api/v0/workspaces/{id} names it closed until its next turn starts. A close that fails records no workspace.closed and leaves the copy; send it again.\n\n" +
 			"A person rarely needs it: AgentBus puts a copy away by itself once its work is all applied or discarded and the workspace has been quiet for [workspaces] put_away_after_minutes (30 by default, 0 is off). It does the same as a close, and records workspace.closed with put_away. A copy with work not applied is never put away; if anything happened in the workspace since, it does nothing and records workspace.kept with why.",
-		replies: []reply{ok(200, CloseState{}, "Closed: the copy was removed. already true: this workspace was permanently closed by an older build."),
-			ok(202, CloseState{}, "The close has not finished yet (it waits behind a running turn)."),
+		replies: []reply{ok(200, CloseState{}, "Nothing to do: already true, this workspace was permanently closed by an older build."),
+			ok(202, CloseState{}, "Queued: the close runs after what waits in the workspace lane; workspace.closed on the record says it ran."),
 			badRequest,
 			fail(404, "This service keeps no queue, or no such workspace."),
 			ok(409, CloseState{}, "Refused: an apply, discard, update or close of the workspace is still running or waiting. Nothing was removed."),
@@ -779,7 +791,7 @@ var routes = slices.Concat([]route{
 		summary: "Stream events",
 		doc:     "A live stream of the record's events: every session's, or one session's. A cockpit follows it; an export reads it from the start.\n\n" + streamDoc,
 		query: []param{qStore, qAfter,
-			{name: "session", doc: "Only this session's events, plus the drops that name it. An empty value names no session and is refused (403)."}},
+			{name: "session", doc: "Only this session's events, plus the drops that name it. Sent twice, empty or not a session id, it is refused (400), whoever asks."}},
 		replies: []reply{streamReply("The stream.", eventsExample), badRequest, mismatch, tooMany,
 			fail(500, "This connection cannot stream.")},
 		serve: plain((*API).stream)},
