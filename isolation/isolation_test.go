@@ -1,6 +1,7 @@
 package isolation
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"github.com/staysup/agentbus/connector"
@@ -394,7 +395,7 @@ func TestCopyTreeByFiles(t *testing.T) {
 	fixture(t, src, map[string]string{"x/y.sh": "#!/bin/sh", "z": "z"})
 	os.Chmod(filepath.Join(src, "x", "y.sh"), 0o755)
 	os.Symlink("../z", filepath.Join(src, "x", "l"))
-	method, err := copyTree(src, dst)
+	method, err := copyTree(context.Background(), src, dst)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -210,6 +210,14 @@ func TestMaxRunsQueuesAndStopWithTurnsToken(t *testing.T) {
 	if code != 202 || queued.State != "queued" || queued.Turn == "" || queued.Session == "" {
 		t.Fatalf("second: %d %s, want 202 queued with its turn", code, out)
 	}
+	// The stop is sent once the agent runs, so it stops a running turn and
+	// the run ends. (A stop while the copy is still being made ends the turn
+	// before any run starts, so no run.ended would come: #95.)
+	for deadline := time.Now().Add(10 * time.Second); children(t, dir) == 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the first turn's agent never started")
+		}
+	}
 	if code, out := asTok(t, e, turnsTok, "POST", "/api/v0/turns/"+first.Turn+"/stop", ""); code != 202 {
 		t.Fatalf("stop: %d %s", code, out)
 	}
