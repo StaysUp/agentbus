@@ -9,6 +9,7 @@ import (
 	"github.com/staysup/agentbus/adapter/anthropic"
 	"github.com/staysup/agentbus/body"
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/gateway"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -322,11 +323,59 @@ func TestUnchangedRequests(t *testing.T) {
 var subagentBody = strings.Replace(t2First("look for the parser in ./src"),
 	`{"type":"text","text":"b","cache_control":{"type":"ephemeral"}}`, `{"type":"text","text":"You are a search agent."}`, 1)
 
+// passedCompacted checks a main request the harness compacted went on as it
+// was sent, with the gateway's verdict, history.compacted, on its call.
+func passedCompacted(t *testing.T, rw gateway.Rewrite) {
+	t.Helper()
+	if rw.Body != nil || rw.Refuse != nil {
+		t.Fatalf("a compacted main request was changed or refused: %+v", rw)
+	}
+	if !judgedCompacted(rw) || len(rw.Events) != 1 {
+		t.Fatalf("events %+v, want one history.compacted", rw.Events)
+	}
+}
+
+// judgedCompacted is the gateway's verdict in a Rewrite.
+func judgedCompacted(rw gateway.Rewrite) bool {
+	for _, e := range rw.Events {
+		if e.Kind == event.HistoryCompacted {
+			return true
+		}
+	}
+	return false
+}
+
+// through sends req of turn through the gateway's rewriter, as the gateway
+// does, stores what went on with add (exchange x, newest), and records the
+// gateway's verdict on the call, as the store does from history.compacted.
+func (f *fakeSource) through(t *testing.T, r *Replayer, turn, x, req string, add func(sent string)) gateway.Rewrite {
+	t.Helper()
+	rw := r.Rewrite("s", turn, []byte(req))
+	if rw.Refuse != nil {
+		t.Fatalf("%s %s refused: %+v", turn, x, rw.Events)
+	}
+	sent := req
+	if rw.Body != nil {
+		sent = string(rw.Body)
+	}
+	add(sent)
+	if judgedCompacted(rw) {
+		ft := f.turns[turn]
+		if ft.exchanges[0].Exchange != x {
+			t.Fatalf("%s is not the newest call", x)
+		}
+		ft.exchanges[0].Compacted = true
+		f.turns[turn] = ft
+	}
+	return rw
+}
+
 // After a compaction, the main thread's request no longer carries the
-// prompt block. It keeps the main system prompt, so it is refused, never
-// sent on without the history. A request with tools before any main one
-// is refused the same way.
-func TestCompactedMainRequestIsRefused(t *testing.T) {
+// prompt block. It keeps the main system prompt: it goes on as the harness
+// sent it, recorded once. Its earlier requests carried the history, so the
+// harness's summary covers it; the next turn is built from the record. A
+// request with tools before any main one is still refused.
+func TestCompactedMainRequestPasses(t *testing.T) {
 	_, r := twoTurns(t)
 	compacted := `{"model":"claude-x","messages":[{"role":"user","content":[{"type":"text","text":"This session is being continued from a previous conversation. Summary: ..."}]},` +
 		`{"role":"system","content":"` + sys2 + `"}],` + top + `,"stream":true}`
@@ -336,16 +385,10 @@ func TestCompactedMainRequestIsRefused(t *testing.T) {
 	if rw := r.Rewrite("s", "t2", []byte(t2First("which word?"))); rw.Body == nil {
 		t.Fatal("the main thread's first request was not spliced")
 	}
-	rw := r.Rewrite("s", "t2", []byte(compacted))
-	if rw.Refuse == nil || len(rw.Events) != 1 || rw.Events[0].Kind != event.ReplayFailed ||
-		!strings.Contains(rw.Events[0].Error, "compaction") {
-		t.Errorf("compacted main request: %+v, want replay.failed", rw)
-	}
+	passedCompacted(t, r.Rewrite("s", "t2", []byte(compacted)))
 	// The billing header (system[0]) may differ; the identity leaves it out.
 	other := strings.Replace(compacted, `"text":"a","cache_control"`, `"text":"a2","cache_control"`, 1)
-	if rw := r.Rewrite("s", "t2", []byte(other)); rw.Refuse == nil {
-		t.Error("a compacted request with another billing header was not refused")
-	}
+	passedCompacted(t, r.Rewrite("s", "t2", []byte(other)))
 }
 
 // While the newest finished reply of the earlier turn is not stored, an
@@ -645,7 +688,8 @@ func TestBreakpointFollowsClaudeCodesLifetime(t *testing.T) {
 
 // A claude run with --tools "" sends its main requests with no tools. They are
 // told by their layout, not by tools: the first is spliced, a later one
-// without the prompt block and with the main system prompt is refused, and a
+// without the prompt block and with the main system prompt is the harness's
+// compaction and passes, and a
 // side call after them (no tools, its own system prompt) still goes on
 // unchanged.
 func TestMainRequestsWithoutTools(t *testing.T) {
@@ -658,9 +702,7 @@ func TestMainRequestsWithoutTools(t *testing.T) {
 		t.Fatalf("a main request without tools was not spliced: %+v", rw)
 	}
 	compacted := strip(`{"model":"claude-x","messages":[{"role":"user","content":"Summary: ..."},{"role":"system","content":"` + sys2 + `"}],` + top + `}`)
-	if rw := r.Rewrite("s", "t2", []byte(compacted)); rw.Refuse == nil {
-		t.Error("a main request without tools or prompt block was not refused")
-	}
+	passedCompacted(t, r.Rewrite("s", "t2", []byte(compacted)))
 	title := `{"model":"claude-y","system":[{"type":"text","text":"h"},{"type":"text","text":"Write a title."}],"messages":[{"role":"user","content":"Summary: ..."}]}`
 	if rw := r.Rewrite("s", "t2", []byte(title)); rw.Body != nil || rw.Refuse != nil {
 		t.Errorf("a side call was changed: %+v", rw)
@@ -688,30 +730,48 @@ func TestMainRequestsWithoutTools(t *testing.T) {
 }
 
 // A turn (here a first turn, not replayed) whose last main-thread request was
-// compacted has no usable history. Its earlier max_tokens answer never stands
-// in: Base gives ErrUnusable and a replayed turn's request is refused.
-func TestCompactedLastCallIsUnusable(t *testing.T) {
+// compacted by its harness is rebuilt from the record, never from the
+// harness's summary: its newest request from before the compaction, then a
+// note that the turn went on, with the model's last words. The next turn
+// continues from it.
+func TestCompactedTurnIsRebuiltFromTheRecord(t *testing.T) {
 	src := newSource()
 	src.addTurn("t1", "remember the word kiwi", "")
-	src.addCall(t, "t1", "x-0", t1Last, `{"role":"assistant","content":[{"type":"text","text":"cut short"}]}`, "max_tokens")
+	r := New(src)
+	src.through(t, r, "t1", "x-0", t1Last, func(b string) {
+		src.addCall(t, "t1", "x-0", b, `{"role":"assistant","content":[{"type":"text","text":"cut short"}]}`, "max_tokens")
+	})
 	compacted := `{"model":"claude-x","messages":[{"role":"user","content":"Summary: the person asked to remember a word."},` +
 		`{"role":"system","content":"` + sys1 + `"}],` + top + `}`
-	src.addCall(t, "t1", "x-1", compacted, t1Reply, "end_turn")
+	if rw := src.through(t, r, "t1", "x-1", compacted, func(b string) { src.addCall(t, "t1", "x-1", b, t1Reply, "end_turn") }); !judgedCompacted(rw) {
+		t.Fatalf("a first turn's compacted request was not judged: %+v", rw)
+	}
 	src.addTurn("t2", "which word?", "t1")
-	r := New(src)
-	if got, err := r.Base("s"); !errors.Is(err, ErrUnusable) {
-		t.Errorf("base %+v %v, want ErrUnusable", got, err)
+	src.setEnd("t1", store.TurnEnd{Closed: true, ExitCode: intp(0)})
+	src.order = []string{"t1"} // Base is read before t2 starts
+	if got, err := r.Base("s"); err != nil || got.Turn != "t1" || got.Failed != "" {
+		t.Errorf("base %+v %v, want t1, finished", got, err)
 	}
 	rw := r.Rewrite("s", "t2", []byte(t2First("which word?")))
-	if rw.Refuse == nil || len(rw.Events) != 1 || !strings.Contains(rw.Events[0].Error, "compaction") {
-		t.Errorf("got %+v, want a refusal naming the compaction", rw)
+	if rw.Body == nil || rw.Refuse != nil {
+		t.Fatalf("not spliced: %+v", rw)
+	}
+	msgs := mustElements(t, field(rw.Body, "messages"))
+	if countIn(msgs, "Summary: the person asked") != 0 || countIn(msgs, "remember the word kiwi") != 1 {
+		t.Errorf("history %s\nwant the record's request, not the harness's summary", msgText(msgs))
+	}
+	if countIn(msgs, "compacted its context") != 1 || countIn(msgs, "Noted: kiwi.") != 1 || countIn(msgs, "cut short") != 0 {
+		t.Errorf("history %s\nwant one note with the model's last words", msgText(msgs))
+	}
+	if roles(msgs[:7]) != "user,system,assistant,user,system,assistant,user" {
+		t.Errorf("roles %s", roles(msgs))
 	}
 }
 
 // A subagent given the person's words verbatim, in the fresh layout but with
 // its own system prompt, is not main: it passes unchanged, does not take
 // over the main thread's identity, and a compacted main request after it is
-// still refused. In a stored turn, the same subagent's later end_turn call
+// still the main thread's (it passes, recorded). In a stored turn, the same subagent's later end_turn call
 // is not the turn's last main call.
 func TestSubagentWithTheSamePromptIsNotMain(t *testing.T) {
 	src, r := twoTurns(t)
@@ -724,9 +784,7 @@ func TestSubagentWithTheSamePromptIsNotMain(t *testing.T) {
 		t.Errorf("a subagent with the person's words was changed: %+v", rw)
 	}
 	compacted := `{"model":"claude-x","messages":[{"role":"user","content":"Summary: ..."},{"role":"system","content":"` + sys2 + `"}],` + top + `}`
-	if rw := r.Rewrite("s", "t2", []byte(compacted)); rw.Refuse == nil {
-		t.Error("a compacted main request after a subagent was not refused")
-	}
+	passedCompacted(t, r.Rewrite("s", "t2", []byte(compacted)))
 
 	// Stored: the subagent's end_turn call is newer than the main thread's
 	// last call, and is not taken for it.

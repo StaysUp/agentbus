@@ -40,6 +40,7 @@ var RunnerKinds = map[event.Kind]bool{
 	event.ToolRequested: true, event.ToolCompleted: true, event.TurnCompleted: true,
 	event.RunStarted: true, event.RunEnded: true, event.ContextAdded: true,
 	event.NetworkRefused: true, event.SchemaUnexpected: true, event.ReplayFailed: true,
+	event.HistoryShortened: true, event.HistoryCompacted: true,
 	event.ToolRefused: true, event.CallRefused: true, event.VendorCalled: true,
 	// A runner's gateway raises approval.requested when it holds an Ask, and
 	// records approval.decided itself when the hold times out or the agent

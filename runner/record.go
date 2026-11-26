@@ -27,12 +27,12 @@ import (
 )
 
 // relayOnly are the kinds of a call's events (those with an exchange) that
-// the runner's gateway makes and control's relay cannot: own replay's refusal,
-// the guard's, and a call the runner's gateway refused on its own, before it
+// the runner's gateway makes and control's relay cannot: own replay's refusal
+// and its history steps (history.shortened, history.compacted), the guard's, and a call the runner's gateway refused on its own, before it
 // reached control's relay (refuseCall, for an unrecorded path or a bad header:
 // no credential is added and the call is sent nowhere, so the relay never sees
 // it). Every other event of a relayed call control records itself.
-var relayOnly = map[event.Kind]bool{event.ReplayFailed: true, event.ToolRefused: true,
+var relayOnly = map[event.Kind]bool{event.ReplayFailed: true, event.HistoryShortened: true, event.HistoryCompacted: true, event.ToolRefused: true,
 	event.ApprovalRequested: true, event.ApprovalDecided: true, event.CallRefused: true}
 
 // relayedCall is true for a call's event that control's relay records itself, so

@@ -180,6 +180,10 @@ type Call struct {
 	// Such a reply's stop reason cannot be trusted, and its reply is never
 	// kept.
 	Error string
+	// Compacted: the gateway judged this call a main-thread request its
+	// harness had compacted (a history.compacted with its exchange). The
+	// one place a compaction is decided; own replay reads only this.
+	Compacted bool
 }
 
 // TurnCalls lists the turn's model calls, newest request first, leaving out
@@ -193,7 +197,9 @@ func (s *Store) TurnCalls(session, turn string) ([]Call, error) {
 	rows, err := s.r.Query(`SELECT json_extract(q.data, '$.exchange'),
 			COUNT(r.seq), COALESCE(MAX(json_extract(r.data, '$.status')), 0),
 			COALESCE(MAX(json_extract(r.data, '$.stop_reason')), ''),
-			COALESCE(MAX(json_extract(r.data, '$.error')), '')
+			COALESCE(MAX(json_extract(r.data, '$.error')), ''),
+			EXISTS(SELECT 1 FROM events c WHERE c.session = q.session AND c.turn = q.turn
+				AND c.kind = 'history.compacted' AND json_extract(c.data, '$.exchange') = json_extract(q.data, '$.exchange'))
 		FROM events q
 		LEFT JOIN events r ON r.session = q.session AND r.turn = q.turn AND r.kind = 'model.responded'
 			AND json_extract(r.data, '$.exchange') = json_extract(q.data, '$.exchange')
@@ -210,7 +216,7 @@ func (s *Store) TurnCalls(session, turn string) ([]Call, error) {
 	for rows.Next() {
 		var c Call
 		var n int
-		if err := rows.Scan(&c.Exchange, &n, &c.Status, &c.Stop, &c.Error); err != nil {
+		if err := rows.Scan(&c.Exchange, &n, &c.Status, &c.Stop, &c.Error, &c.Compacted); err != nil {
 			return nil, fmt.Errorf("store: read a turn's calls: %w", err)
 		}
 		c.Responded = n > 0

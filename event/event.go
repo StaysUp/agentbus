@@ -46,6 +46,14 @@ const (
 	// without that history. Error says why.
 	ReplayFailed Kind = "replay.failed"
 
+	// HistoryShortened: own replay shortened the history it puts in front of
+	// a turn, to keep it within the history budget. History says the step.
+	// HistoryCompacted: the gateway's verdict on one main-thread call, that
+	// its harness had compacted it; it went on as sent. The only record of a
+	// compaction own replay reads.
+	HistoryShortened Kind = "history.shortened"
+	HistoryCompacted Kind = "history.compacted"
+
 	// ToolRefused: the gateway refused a tool call of a run's turn, because
 	// its command matched a forbid entry of permissions.toml. The agent did
 	// not run it. Rule names the entry.
@@ -252,6 +260,8 @@ var Kinds = []KindInfo{
 	{RunEnded, "A run's turn ended: its child exited, or could not start. hold, exit_code, resume_id, turn, state (finished, failed or stopped), error when it failed (the agent's own error line from its stderr, or plain words in its place for a failure its harness knows, else its exit code, or why it could not start), stopped when the person stopped the turn, error_tail (the last lines the agent wrote to stderr, when it exited with an error), and unsettled when the gateway could not confirm all of the turn's calls were stored. Also stored at start, with unsettled and state failed, for a child the previous service left running, and by control for a turn whose runner stopped answering.", []string{"session"}},
 	{SchemaUnexpected, "The vendor sent a shape the adapter does not know: unexpected, as names only. Show it as a quiet warning.", []string{"unexpected"}},
 	{ReplayFailed, "A model request of a replayed turn (a turn.started with replay_from) could not be given the earlier turn's history: error says why, such as the harness's request layout not being one the gateway knows. The gateway refused that request with 400 and did not send it to the vendor, so the turn fails rather than continue without its history. Show it as an error.", []string{"error"}},
+	{HistoryShortened, "Own replay shortened the history it put in front of the turn, to keep it within the history budget (budget of GET /api/v0/settings/compaction, a share of the model's window, 0.4 by default). history holds the step: from (the earlier turn whose history it is), model, window_tokens, budget_tokens, before_tokens and after_tokens (rough counts, AgentBus's own, not the vendor's), results_shortened and inputs_shortened (long tool results and tool-call inputs made a stub that says where the full text is), turns_summarised (the oldest turns folded into AgentBus's summary), turns_left_out (the oldest logs left out of the summary for one line, so it stays bounded), newest_shortened (the newest earlier turn was shortened too: the budget wins over keeping it whole) and turns_whole (the newer turns left whole). Stored on the turn's first main request, once per step (again if the service restarted inside the turn). Each step is frozen: later turns carry the shortened history byte for byte, so the prompt cache keeps working. The record keeps every byte of every call; the turn's stored requests are what the model saw. Show it as a quiet line.", []string{"history"}},
+	{HistoryCompacted, "The gateway's verdict on one model call of a turn's main thread: its harness had compacted its context, so the request was not in the layout a fresh process sends (the turn's prompt where a fresh process puts it). It went on as the harness sent it (codex's under the session's thread id). Stored on each such call, with its exchange, in any turn, replayed or not. It is the one place a compaction is decided: own replay builds the next turn from the record, from the turn's last call before it, never from the harness's summary.", []string{"exchange"}},
 	{ToolRefused, "The gateway refused a tool call before the agent could run it, because its command matched a forbid entry of permissions.toml: tool_id, tool_name, tool_input, rule (the entry), and text (what the model is told in place of the output). The call's tool.requested is still stored, and its tool.completed carries that text. Show it as a warning.", []string{"tool_id", "rule"}},
 	{ApprovalRequested, "The gateway refused a tool call because its command matched an ask entry of permissions.toml, and recorded it for a person: approval (its id), tool_id, tool_name, rule (the first ask entry), commands (every ask command in the reply) and rules (the ask entries they matched); text lists the commands one per line. The turn ends with the call refused; nothing is held. Control derives the pending list from the record, a requested with no approval.decided for the same approval id, so it works when the gateway that refused runs on a separate runner. GET /api/v0/approvals lists it and POST /api/v0/approvals/{id} answers it: allow moves the entries from ask to allow and continues the session so the agent can run them; refuse records the decision. The call's tool.requested is still stored, and its tool.completed carries the refusal. Show it as a prompt to allow or refuse.", []string{"approval", "tool_id", "commands", "rules"}},
 	{ApprovalDecided, "A recorded ask command was answered, written by control when a person answers: approval ties it to its approval.requested, rule is the first ask entry, and text says how it ended (allowed or refused) and who answered. Show it beside the request.", []string{"approval"}},
@@ -425,6 +435,8 @@ type Event struct {
 	Server      string       `json:"server,omitempty" doc:"On tools.listed: the tool server's name, as the harness puts it in tool names: agentbus."`
 	Tools       []string     `json:"tools,omitempty" doc:"On tools.listed: the names of the tools the server served the turn, in its order. Absent when it served none."`
 	ToolsHidden []HiddenTool `json:"tools_hidden,omitempty" doc:"On tools.listed: the harness's own tools the turn does not get, each with why. Absent when none are hidden."`
+	// History, only on history.shortened: the step own replay took.
+	History *HistoryStep `json:"history,omitempty" doc:"On history.shortened: how own replay shortened the history it put in front of the turn."`
 	// Added, only on context.added: each piece AgentBus gave the turn.
 	Added []Added `json:"added,omitempty" doc:"On context.added: each piece AgentBus gave the turn besides the person's words, in the order the agent got them."`
 	// Call, only on call.refused and vendor.called: method and vendor path.
@@ -768,6 +780,22 @@ const (
 type HiddenTool struct {
 	Name string `json:"name" doc:"The tool's name, as the harness names it, such as Task."`
 	Why  string `json:"why" doc:"Why the turn does not get it, such as replaced by AgentBus tools."`
+}
+
+// HistoryStep is one step of own replay's history budget (history.shortened).
+type HistoryStep struct {
+	From             string `json:"from" doc:"The earlier turn whose history this turn carries."`
+	Model            string `json:"model,omitempty" doc:"The model the window is for, from the turn's request."`
+	WindowTokens     int    `json:"window_tokens" doc:"The model's assumed context window in tokens (the context view's window_tokens)."`
+	BudgetTokens     int    `json:"budget_tokens" doc:"The history budget in tokens: the budget share of window_tokens. Over it, the history is shortened to about half of it."`
+	BeforeTokens     int    `json:"before_tokens" doc:"The history's size before the step: a rough count (bytes / 2.66, an image counted as 1,600), not the vendor's."`
+	AfterTokens      int    `json:"after_tokens" doc:"The history's size after the step, counted the same way."`
+	ResultsShortened int    `json:"results_shortened,omitempty" doc:"Tool results over 2 KiB made a stub: what it was, how it began, and where the agent fetches it back."`
+	InputsShortened  int    `json:"inputs_shortened,omitempty" doc:"Tool-call inputs over 2 KiB made a stub the same way."`
+	TurnsSummarised  int    `json:"turns_summarised,omitempty" doc:"The oldest turns now in AgentBus's summary: the person's words and the model's last words verbatim, AgentBus's notes, a line per tool call. An earlier summary is kept word for word inside it."`
+	TurnsLeftOut     int    `json:"turns_left_out,omitempty" doc:"The oldest turns' logs this step left out of the summary, for one line naming how many turns and their range: the summary stays bounded however long the session runs. Their records stay in full."`
+	NewestShortened  bool   `json:"newest_shortened,omitempty" doc:"The newest earlier turn was shortened too, because the history did not fit the budget otherwise: the budget wins over keeping it whole."`
+	TurnsWhole       int    `json:"turns_whole,omitempty" doc:"The newer turns besides the newest that are not in the summary (their long tool output may be stubs)."`
 }
 
 // Added is one piece of what AgentBus gave a turn besides the person's

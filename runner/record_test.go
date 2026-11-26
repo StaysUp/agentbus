@@ -68,6 +68,8 @@ func TestForwardLeavesRelayedCallsToControl(t *testing.T) {
 		{ID: "gw-tool", Kind: event.ToolRequested, Exchange: "x-run-1"},
 		{ID: "gw-refused", Kind: event.ToolRefused, Exchange: "x-run-1"},
 		{ID: "gw-replay", Kind: event.ReplayFailed, Exchange: "x-run-1"},
+		{ID: "gw-shortened", Kind: event.HistoryShortened, Exchange: "x-run-1"},
+		{ID: "gw-compacted", Kind: event.HistoryCompacted, Exchange: "x-run-1"},
 		{ID: "gw-resp", Kind: event.ModelResponded, Exchange: "x-run-1"},
 		{ID: "un-req", Kind: event.ModelRequested, Exchange: "x-run-2"},
 		{ID: "un-resp", Kind: event.ModelResponded, Exchange: "x-run-2", Status: 502, Error: "the vendor could not be reached (dial)"},
@@ -94,7 +96,7 @@ func TestForwardLeavesRelayedCallsToControl(t *testing.T) {
 	for id := range fc.events {
 		sent = append(sent, id)
 	}
-	want := map[string]bool{"own-start": true, "gw-refused": true, "gw-replay": true, "gw-callrefused": true, "own-closed": true}
+	want := map[string]bool{"own-start": true, "gw-refused": true, "gw-replay": true, "gw-shortened": true, "gw-compacted": true, "gw-callrefused": true, "own-closed": true}
 	if len(fc.events) != len(want) {
 		t.Fatalf("sent events %v, want the %d a no-secret runner sends", sent, len(want))
 	}

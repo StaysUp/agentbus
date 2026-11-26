@@ -293,7 +293,8 @@ func TestRunnerSettings(t *testing.T) {
 }
 
 // A runner gets the settings version with the settings, from one read, so a
-// turn on it records the version it ran under.
+// turn on it records the version it ran under; and the history budget, so its
+// own replay keeps the person's.
 func TestRunnerSettingsVersion(t *testing.T) {
 	q, err := queue.Open(filepath.Join(t.TempDir(), "jobs.db"), nil)
 	if err != nil {
@@ -306,6 +307,10 @@ func TestRunnerSettingsVersion(t *testing.T) {
 	if _, err := db.SetInstructions("mine", settings.Any); err != nil {
 		t.Fatal(err)
 	}
+	b := 0.25
+	if _, _, err := db.SetCompaction(settings.Compaction{Budget: &b}, settings.Any); err != nil {
+		t.Fatal(err)
+	}
 	s, err := New(Config{Queue: q, Token: mainTok, EnrollToken: enrollTok, Settings: db})
 	if err != nil {
 		t.Fatal(err)
@@ -314,7 +319,7 @@ func TestRunnerSettingsVersion(t *testing.T) {
 	t.Cleanup(func() { srv.Close(); q.Close(); db.Close() })
 	a := enroll(t, srv, 1)
 	var got settings.RunnerSettings
-	if code := send(t, srv, a.Token, "GET", "/api/v0/runner/settings", nil, &got); code != 200 || got.SettingsVersion != 1 || got.Instructions != "mine" {
+	if code := send(t, srv, a.Token, "GET", "/api/v0/runner/settings", nil, &got); code != 200 || got.SettingsVersion != 2 || got.Instructions != "mine" || got.Budget != 0.25 {
 		t.Fatalf("%d %+v", code, got)
 	}
 }

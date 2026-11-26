@@ -100,7 +100,7 @@ installed, and a Claude and a ChatGPT subscription.
    "what do you think about the answer above?". Codex reads Claude's answer and gives its own.
 
 Every turn and every model call is now in the record, with its cost.
-By default (`-replay`), `agentbus up`, `server` and `runner` continue Claude and Codex sessions by sending the earlier turns' history through the gateway. Pass `-replay=false` when you want to use the vendor's own session resume instead.
+By default (`-replay`), `agentbus up`, `server` and `runner` continue Claude and Codex sessions by sending the earlier turns' history through the gateway. Pass `-replay=false` when you want to use the vendor's own session resume instead. AgentBus keeps that history within a budget by itself (40% of the model's window by default, `budget` in `/api/v0/settings/compaction`): older turns' long tool output becomes stubs the agent can fetch back, and the oldest turns become a short summary, while the record keeps every byte.
 
 ### Sign-ins and keys
 

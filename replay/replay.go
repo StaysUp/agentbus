@@ -71,6 +71,14 @@ type Replayer struct {
 	turns map[[2]string]turnInfo // (session, turn): its turn.started, read once
 	hists map[[2]string]*history // (session, turn): its history, once built
 	mains map[[2]string]string   // (session, turn): its main thread's system identity
+	// fits: (session, turn) of a replayed turn: the history its requests
+	// carry, fitted to the budget once, at its first main request (fit).
+	fits map[[2]string]*history
+	// carried: (session, turn) of a replayed turn one of whose requests
+	// went on with the history in front.
+	carried map[[2]string]bool
+	// budget gives the history budget, a share of the model's window.
+	budget func() float64
 }
 
 // New returns a Replayer for Claude Code's requests, reading src.
@@ -85,7 +93,7 @@ func NewChatCompletions(src Source) *Replayer { return newReplayer(src, chatComp
 
 func newReplayer(src Source, f format) *Replayer {
 	return &Replayer{src: src, f: f, turns: map[[2]string]turnInfo{}, hists: map[[2]string]*history{},
-		mains: map[[2]string]string{}}
+		mains: map[[2]string]string{}, fits: map[[2]string]*history{}, carried: map[[2]string]bool{}}
 }
 
 // format is what own replay knows of one vendor's request layout. Every
@@ -112,7 +120,8 @@ type format interface {
 	// later request.
 	asHistory(m json.RawMessage) (json.RawMessage, error)
 	// reply lays out a kept reply as history, and says how it left the turn.
-	reply(rep body.Reply, stop string) ([]json.RawMessage, ending, error)
+	// A tool call it asked for gets unanswered as its result (ending.results).
+	reply(rep body.Reply, stop, unanswered string) ([]json.RawMessage, ending, error)
 	// canEnd reports whether a history of a turn that did not finish may be
 	// followed by the note. kept says it ends with the turn's kept reply.
 	canEnd(msgs []json.RawMessage, kept bool) bool
@@ -135,6 +144,30 @@ type format interface {
 	// one that made it, as after the person switched agents: what belongs to
 	// the model or the process that made it goes, the conversation stays.
 	otherModel(msgs []json.RawMessage) ([]json.RawMessage, error)
+
+	// What the history budget needs (budget.go).
+	//
+	// isPrompt reports whether m is the person's message of a turn whose
+	// prompt is prompt.
+	isPrompt(m json.RawMessage, prompt string) bool
+	// shorten is m with each tool result (inputs false) or each tool call's
+	// input (inputs true) longer than over bytes made the stub stub writes,
+	// and how many it made. A message it cannot read stays as it is.
+	shorten(m json.RawMessage, inputs bool, over int, stub func(kind string, size int, head string) string) (json.RawMessage, int)
+	// said is what m holds for a summary: the model's words and AgentBus's
+	// notes, and its tool calls, one line each (callLine).
+	said(m json.RawMessage) (texts, calls []string)
+	// summaryIn finds AgentBus's summary of earlier turns in m: its text,
+	// and m without it (nil when m held only the summary).
+	summaryIn(m json.RawMessage) (text string, rest json.RawMessage, ok bool)
+	// withSummary lays the summary out in front of first, the person's
+	// message of the oldest turn kept.
+	withSummary(first json.RawMessage, text string) []json.RawMessage
+	// passOn is a main request the harness compacted, as it goes on: its
+	// conversation untouched, under the identity the turn's other requests
+	// went out with, so the record keeps the turn one thread; h is the
+	// history the turn carried. nil sends the request as it came.
+	passOn(req request, h *history) ([]byte, func(http.Header))
 }
 
 // request is one model request as the splice reads it.
@@ -185,6 +218,10 @@ type history struct {
 	// tools are the tool definitions of the turn's last request (Claude
 	// Code): among them each deferred tool ToolSearch loaded (carryLoaded).
 	tools []json.RawMessage
+	// src is where each message's full bytes are in the record, for the
+	// stubs the budget writes; shorter than messages when the last ones
+	// are AgentBus's own (a note, a result that never came).
+	src []source
 }
 
 // memoMax bounds each memo. Past it the memo starts over: an entry is only a
@@ -357,13 +394,6 @@ func (r *Replayer) history(session, turn string, keep bool) (*history, error) {
 	if err != nil {
 		return nil, err
 	}
-	type call struct {
-		a     store.Call
-		c     store.CallContext
-		msgs  []json.RawMessage
-		id    string
-		tools int
-	}
 	calls := make([]call, 0, len(answered))
 	for _, a := range answered {
 		c, ok, err := r.src.CallContext(a.Exchange, true)
@@ -404,17 +434,27 @@ func (r *Replayer) history(session, turn string, keep bool) (*history, error) {
 		}
 		return r.keep(k, h, keep), nil
 	}
-	var newest *call
-	for i := range calls {
-		if isMain(calls[i].id, main, true) {
-			newest = &calls[i]
-			break
+	// The turn's main-thread calls, newest first: those with the main
+	// identity, and those the gateway judged compacted, which only a main
+	// request can be (a compacted codex request may carry another thread
+	// id, in records from before passOn).
+	var mains []call
+	for _, c := range calls {
+		if isMain(c.id, main, true) || c.a.Compacted {
+			mains = append(mains, c)
 		}
 	}
+	newest := &mains[0]
 	x := newest.a.Exchange
-	if !r.f.mainLayout(newest.msgs, ti.prompt) {
-		return nil, &missing{why: "turn " + turn + "'s last main-thread request " + x +
-			" no longer carries the turn's prompt, as after a compaction, and a compacted request cannot be replayed", kind: unusableCall}
+	if newest.a.Compacted {
+		// The gateway judged it compacted when it forwarded it: the one place
+		// a compaction is decided. The history is built from the record,
+		// never from the harness's summary.
+		h, err = r.compactedHistory(session, turn, ti, mains)
+		if err != nil {
+			return nil, err
+		}
+		return r.keep(k, h, keep), nil
 	}
 	a := newest.a
 	// A reply with an error did not arrive whole: its stop reason is what
@@ -433,22 +473,17 @@ func (r *Replayer) history(session, turn string, keep bool) (*history, error) {
 			return nil, &missing{why: "turn " + turn + "'s last main-thread reply " + x + " is not stored", kind: pendingCall}
 		}
 	}
-	h = &history{model: body.Label(newest.c.Request, "model")}
-	r.f.carry(h, newest.c)
-	for _, m := range newest.msgs {
-		hm, err := r.f.asHistory(m)
-		if err != nil {
-			return nil, &missing{why: "turn " + turn + "'s stored request cannot be replayed: " + err.Error(), kind: unusableCall}
-		}
-		h.messages = append(h.messages, hm)
+	h, err = r.fromCall(turn, newest.c, newest.msgs)
+	if err != nil {
+		return nil, err
 	}
 	var e ending
 	if kept {
-		items, how, err := r.f.reply(rep, a.Stop)
+		items, how, err := r.f.reply(rep, a.Stop, notFinished)
 		if err != nil {
 			return nil, &missing{why: "turn " + turn + "'s stored reply cannot be replayed: " + err.Error(), kind: unusableCall}
 		}
-		h.messages = append(h.messages, items...)
+		h.add(turn, x, -1, items...)
 		e = how
 	}
 	// A finished reply ends the history whole, even for a turn the person
@@ -466,6 +501,167 @@ func (r *Replayer) history(session, turn string, keep bool) (*history, error) {
 		}
 	}
 	return r.keep(k, h, keep), nil
+}
+
+// fromCall starts a history from one stored call's request: its messages
+// laid out as history, each with where it is in the record.
+func (r *Replayer) fromCall(turn string, c store.CallContext, msgs []json.RawMessage) (*history, error) {
+	h := &history{model: body.Label(c.Request, "model")}
+	r.f.carry(h, c)
+	var pieces []int
+	for i, p := range c.Pieces {
+		if p.Kind == body.Message || p.Kind == body.InputItem {
+			pieces = append(pieces, i)
+		}
+	}
+	for i, m := range msgs {
+		hm, err := r.f.asHistory(m)
+		if err != nil {
+			return nil, &missing{why: "turn " + turn + "'s stored request cannot be replayed: " + err.Error(), kind: unusableCall}
+		}
+		n := -2
+		if i < len(pieces) {
+			n = pieces[i]
+		}
+		h.add(turn, c.Exchange, n, hm)
+	}
+	return h, nil
+}
+
+// add appends msgs, which are piece n of call (-1: its reply; -2: not
+// known) of turn, to h.
+func (h *history) add(turn, call string, n int, msgs ...json.RawMessage) {
+	for len(h.src) < len(h.messages) {
+		h.src = append(h.src, source{})
+	}
+	for _, m := range msgs {
+		h.messages = append(h.messages, m)
+		if n == -2 {
+			h.src = append(h.src, source{})
+		} else {
+			h.src = append(h.src, source{turn: turn, call: call, piece: n})
+		}
+	}
+}
+
+// compactedResult is what a tool call gets as its result in the history of a
+// turn whose harness compacted its context after the call: it ran, and its
+// result is in the record.
+const compactedResult = "This tool ran, but the agent's harness compacted its context afterwards, so its result is not shown here. It is in AgentBus's record."
+
+// compactedHistory is the history of a turn whose harness compacted its
+// context inside the turn, built from the record and never from the
+// harness's summary: the newest main call that still has the main layout,
+// with its reply when that reply asked for tools (they ran: compactedResult),
+// then one note saying the turn went on, how many model calls followed, and
+// the model's last words when its newest reply finished the turn. mains are
+// the turn's main-thread calls, newest first, the newest one compacted. A
+// call is compacted exactly when the record says so (store.Call.Compacted).
+func (r *Replayer) compactedHistory(session, turn string, ti turnInfo, mains []call) (*history, error) {
+	var base *call
+	var rep body.Reply
+	asked := false
+	for i := range mains {
+		c := &mains[i]
+		if c.a.Compacted {
+			continue
+		}
+		if base == nil {
+			base = c
+		}
+		if !(c.a.Responded && c.a.Status == 200 && c.a.Error == "" && r.f.replyKept(c.a.Stop)) {
+			continue
+		}
+		got, ok, err := r.src.Reply(c.a.Exchange)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			continue
+		}
+		if _, e, err := r.f.reply(got, c.a.Stop, compactedResult); err == nil && e.asked {
+			base, rep, asked = c, got, true
+			break
+		}
+	}
+	if base == nil {
+		return nil, &missing{why: "turn " + turn + "'s harness compacted its context and none of its main-thread requests from before that is stored, so its history cannot be rebuilt", kind: unusableCall}
+	}
+	after := 0
+	for _, c := range mains {
+		if c.a.Exchange == base.a.Exchange {
+			break
+		}
+		after++
+	}
+	h, err := r.fromCall(turn, base.c, base.msgs)
+	if err != nil {
+		return nil, err
+	}
+	if asked {
+		items, e, err := r.f.reply(rep, base.a.Stop, compactedResult)
+		if err != nil {
+			return nil, &missing{why: "turn " + turn + "'s stored reply cannot be replayed: " + err.Error(), kind: unusableCall}
+		}
+		h.add(turn, base.a.Exchange, -1, items...)
+		h.add("", "", -2, e.results...)
+	}
+	if !r.f.canEnd(h.messages, asked) {
+		return nil, &missing{why: "turn " + turn + "'s last main-thread request before its harness compacted ends in a layout the gateway does not know", kind: unusableCall}
+	}
+	// The model's last words: the newest reply, when it finished the turn.
+	last, finished := "", false
+	if n := mains[0]; n.a.Responded && n.a.Status == 200 && n.a.Error == "" && r.f.replyKept(n.a.Stop) {
+		if got, ok, err := r.src.Reply(n.a.Exchange); err != nil {
+			return nil, err
+		} else if ok {
+			if items, e, err := r.f.reply(got, n.a.Stop, compactedResult); err == nil && e.finished {
+				finished = true
+				for _, it := range items {
+					if t, _ := r.f.said(it); len(t) > 0 {
+						last = t[len(t)-1]
+					}
+				}
+			}
+		}
+	}
+	end, err := r.src.TurnEnd(session, turn)
+	if err != nil {
+		return nil, err
+	}
+	how := ""
+	switch {
+	case end.Error != "":
+		how = strings.TrimSuffix(end.Error, ".")
+	case end.Stopped:
+		how = stoppedWords
+	case end.ExitCode != nil && *end.ExitCode != 0:
+		how = exitWords(*end.ExitCode)
+	case !finished:
+		how = "its last model call did not finish the turn"
+	}
+	note := notePrefix + "The turn above went on after this point for " + strconv.Itoa(after) +
+		" more model calls, but its agent's harness compacted its context, so AgentBus shows the rest only in short."
+	if last != "" {
+		note += " The model's last words in the turn were:\n" + last + "\n"
+	}
+	if how != "" {
+		h.failed = "its harness compacted its context, and " + how
+		note += " The turn did not finish: " + how + "."
+	}
+	note += " Every call of the turn is in AgentBus's record: " + apiGet("/api/v0/turns/"+turn+"/record") +
+		". It may have changed files: check the folder before going on."
+	h.add("", "", -2, r.f.note(note))
+	return h, nil
+}
+
+// call is one stored call of a turn, as history reads it.
+type call struct {
+	a     store.Call
+	c     store.CallContext
+	msgs  []json.RawMessage
+	id    string
+	tools int
 }
 
 // keep stores h as turn k's history when keep is set, and returns it.
@@ -520,6 +716,7 @@ func (r *Replayer) notReached(session, turn string, ti turnInfo, keep bool) (*hi
 			return nil, err
 		}
 		h.messages = append(h.messages, ph.messages...)
+		h.src = append(h.src, ph.src...)
 		h.prior, h.thread, h.model, h.tools = ph.prior, ph.thread, ph.model, ph.tools
 	}
 	why := "it ended before the model was called"
@@ -761,17 +958,38 @@ func (r *Replayer) Rewrite(session, turn string, data []byte) gateway.Rewrite {
 	if err != nil {
 		return r.refuse("the store could not be read")
 	}
-	if !ti.found || ti.from == "" {
+	if !ti.found {
 		return gateway.Rewrite{}
 	}
-	out, hdr, n, pass, err := r.splice(session, ti, data)
+	if ti.from == "" {
+		// A turn that carries no history goes on as sent; its main requests
+		// are still judged, so a compaction in it is in the record too.
+		return gateway.Rewrite{Events: r.judge(session, ti, data)}
+	}
+	out, hdr, n, pass, evs, err := r.splice(session, ti, data)
 	if err != nil {
 		return r.refuse(err.Error())
 	}
 	if pass {
-		return gateway.Rewrite{}
+		return gateway.Rewrite{Events: evs}
 	}
-	return gateway.Rewrite{Body: out, Replayed: n, Header: hdr}
+	return gateway.Rewrite{Body: out, Replayed: n, Header: hdr, Events: evs}
+}
+
+// judge records a compaction in a turn that carries no history: a request of
+// the turn's main thread not in the fresh layout, by the same test splice
+// forwards by. Nothing else is decided here and nothing is refused.
+func (r *Replayer) judge(session string, ti turnInfo, data []byte) []event.Event {
+	req, ok := r.f.parse(data)
+	if !ok {
+		return nil
+	}
+	fresh := r.f.fresh(req, ti.prompt)
+	main, known, err := r.mainIdentity(session, ti, req.id, fresh)
+	if err != nil || !known || !isMain(req.id, main, known) || fresh {
+		return nil
+	}
+	return compactedEvent()
 }
 
 func (r *Replayer) refuse(why string) gateway.Rewrite {
@@ -918,10 +1136,10 @@ const maxBreakpoints = 4
 // splice returns the request with the history in front, the header edit
 // that goes with it, and how many history messages went in. pass means the
 // request is not the turn's main thread and goes on unchanged.
-func (r *Replayer) splice(session string, ti turnInfo, data []byte) (out []byte, hdr func(http.Header), n int, pass bool, err error) {
+func (r *Replayer) splice(session string, ti turnInfo, data []byte) (out []byte, hdr func(http.Header), n int, pass bool, evs []event.Event, err error) {
 	req, ok := r.f.parse(data)
 	if !ok {
-		return nil, nil, 0, true, nil
+		return nil, nil, 0, true, nil, nil
 	}
 	fresh := r.f.fresh(req, ti.prompt)
 	// The one rule (isMain). The main thread's identity is fixed by the
@@ -929,43 +1147,51 @@ func (r *Replayer) splice(session string, ti turnInfo, data []byte) (out []byte,
 	// is never changed after.
 	main, known, err := r.mainIdentity(session, ti, req.id, fresh)
 	if err != nil {
-		return nil, nil, 0, false, err
+		return nil, nil, 0, false, nil, err
 	}
+	carried := r.spliced(session, ti.turn)
 	switch {
 	case known && !isMain(req.id, main, known):
 		// Another system prompt (codex: another thread): a subagent or a
 		// side call, never main, whatever its messages carry.
-		return nil, nil, 0, true, nil
+		return nil, nil, 0, true, nil, nil
+	case known && !fresh && carried != nil:
+		// The main thread without the prompt where a fresh process puts it,
+		// after its requests carried the history: the harness compacted its
+		// context inside this one turn, and its summary covers the history.
+		// The request goes on as the harness sent it, recorded; nothing
+		// depends on it, since the next turn is built from the record
+		// (compactedHistory), not from the harness's summary.
+		out, hdr := r.f.passOn(req, carried)
+		return out, hdr, 0, out == nil, compactedEvent(), nil
 	case known && !fresh:
-		// The main thread without the prompt where a fresh process puts it:
-		// after the agent compacted the conversation, or a layout the
-		// gateway does not know. The gateway has no capture of a compacted
-		// request, so it cannot say whether the summary covered the
-		// replayed history: it refuses rather than send a turn with no past.
-		return nil, nil, 0, false, errors.New("a request of the turn's main thread " + r.f.freshRule() + ", as after a compaction or a layout change, so the replayed history cannot be placed")
+		// No request of the turn carried the history yet (its first was
+		// refused, or the service restarted inside the turn): sent on, it
+		// would give the model a turn with no past. Refused.
+		return nil, nil, 0, false, nil, errors.New("a request of the turn's main thread " + r.f.freshRule() + ", as after a compaction or a layout change, before any of its requests carried the history, so the replayed history cannot be placed")
 	case !known:
 		// Before the main thread's first request. One with no tools and no
 		// prompt is a side call (Claude Code's quota check); anything else
 		// is a layout the gateway does not know.
 		if req.tools == 0 && !r.f.hasPrompt(req.msgs, ti.prompt) {
-			return nil, nil, 0, true, nil
+			return nil, nil, 0, true, nil, nil
 		}
-		return nil, nil, 0, false, errors.New("a request came before the turn's main thread's first one, in a layout the gateway does not know, so the replayed history cannot be placed")
+		return nil, nil, 0, false, nil, errors.New("a request came before the turn's main thread's first one, in a layout the gateway does not know, so the replayed history cannot be placed")
 	}
-	h, err := r.history(session, ti.from, true)
+	h, evs, err := r.fitted(session, ti, requestModel(req.fields))
 	if err != nil {
 		var miss *missing
 		if errors.As(err, &miss) {
-			return nil, nil, 0, false, fmt.Errorf("the history of turn %s cannot be read: %s", ti.from, miss.why)
+			return nil, nil, 0, false, nil, fmt.Errorf("the history of turn %s cannot be read: %s", ti.from, miss.why)
 		}
-		return nil, nil, 0, false, errors.New("the store could not be read")
+		return nil, nil, 0, false, nil, errors.New("the store could not be read")
 	}
 	// A request to another model than the history's, as after a switch of
 	// agent on the same harness: the history is laid out for it.
 	if m := requestModel(req.fields); h.model != "" && m != "" && m != h.model {
 		msgs, err := r.f.otherModel(h.messages)
 		if err != nil {
-			return nil, nil, 0, false, errors.New("the history of turn " + ti.from + " cannot be laid out for another model: " + err.Error())
+			return nil, nil, 0, false, nil, errors.New("the history of turn " + ti.from + " cannot be laid out for another model: " + err.Error())
 		}
 		other := *h
 		other.messages = msgs
@@ -973,9 +1199,90 @@ func (r *Replayer) splice(session string, ti turnInfo, data []byte) (out []byte,
 	}
 	out, hdr, err = r.f.build(req, h, ti.prompt)
 	if err != nil {
-		return nil, nil, 0, false, err
+		return nil, nil, 0, false, nil, err
 	}
-	return out, hdr, len(h.messages), false, nil
+	r.mark(r.carried, session, ti.turn)
+	return out, hdr, len(h.messages), false, evs, nil
+}
+
+// fitted is the history a replayed turn's requests carry: the earlier turn's,
+// within the budget (fit). It is fitted once, at the turn's first main
+// request, for model, and every later request of the turn carries the same
+// bytes, so the cache holds inside the turn; the memo drops only closed
+// turns. evs, on that first request only, record the step it took, if any.
+func (r *Replayer) fitted(session string, ti turnInfo, model string) (*history, []event.Event, error) {
+	k := [2]string{session, ti.turn}
+	r.mu.Lock()
+	h, ok := r.fits[k]
+	r.mu.Unlock()
+	if ok {
+		return h, nil, nil
+	}
+	full, err := r.history(session, ti.from, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	h, step := r.fit(session, ti.from, full, model)
+	r.mu.Lock()
+	if len(r.fits) >= memoMax {
+		// Only closed turns go: a running turn's requests must keep the
+		// bytes its first one carried.
+		for c := range r.fits {
+			if closed, err := r.src.TurnClosed(c[0], c[1]); err == nil && closed {
+				delete(r.fits, c)
+			}
+		}
+	}
+	if got, ok := r.fits[k]; ok {
+		h, step = got, nil // another request of the turn fitted it first
+	} else {
+		r.fits[k] = h
+	}
+	r.mu.Unlock()
+	if step == nil {
+		return h, nil, nil
+	}
+	return h, []event.Event{{Kind: event.HistoryShortened, History: step}}, nil
+}
+
+// spliced is the history a request of the turn already went on with, in
+// this process, or nil when none has.
+func (r *Replayer) spliced(session, turn string) *history {
+	k := [2]string{session, turn}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if !r.carried[k] {
+		return nil
+	}
+	return r.fits[k]
+}
+
+// mark sets (session, turn) in memo m, and reports whether it was new.
+func (r *Replayer) mark(m map[[2]string]bool, session, turn string) bool {
+	k := [2]string{session, turn}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if m[k] {
+		return false
+	}
+	if len(m) >= memoMax {
+		// Only closed turns go, as evictClosed does for identities.
+		for c := range m {
+			if closed, err := r.src.TurnClosed(c[0], c[1]); err == nil && closed {
+				delete(m, c)
+			}
+		}
+	}
+	m[k] = true
+	return true
+}
+
+// compactedEvent is the gateway's verdict on one request, recorded on its
+// call: its harness had compacted it, and it went on as the harness sent it.
+// It is the only record of a compaction own replay reads (store.Call).
+func compactedEvent() []event.Event {
+	return []event.Event{{Kind: event.HistoryCompacted,
+		Text: "The agent's harness compacted its context in this request. AgentBus let it through as the harness sent it; the next turn is built from AgentBus's record, not from the harness's summary."}}
 }
 
 // requestModel is a request's model field, or "".
@@ -993,6 +1300,9 @@ func requestModel(fields []body.Field) string {
 
 // claude is Claude Code's format: Anthropic Messages.
 type claude struct{}
+
+// passOn: the request goes on as sent; its identity is its system prompt.
+func (claude) passOn(request, *history) ([]byte, func(http.Header)) { return nil, nil }
 
 func (claude) read(c store.CallContext) ([]json.RawMessage, string, int) {
 	var msgs, sys []json.RawMessage
@@ -1034,7 +1344,7 @@ func (claude) asHistory(m json.RawMessage) (json.RawMessage, error) { return asH
 // reply: the assistant message. One that stopped for tool_use asked for
 // tools; its results are a user message with a tool_result marked as an
 // error for each tool_use.
-func (claude) reply(rep body.Reply, stop string) ([]json.RawMessage, ending, error) {
+func (claude) reply(rep body.Reply, stop, unanswered string) ([]json.RawMessage, ending, error) {
 	m, err := asHistory(rep.Message)
 	if err != nil {
 		return nil, ending{}, err
@@ -1052,7 +1362,7 @@ func (claude) reply(rep body.Reply, stop string) ([]json.RawMessage, ending, err
 		for i, id := range ids {
 			blocks[i] = body.Object([]body.Field{{Key: "tool_use_id", Value: jsonString(id)},
 				{Key: "type", Value: json.RawMessage(`"tool_result"`)},
-				{Key: "content", Value: jsonString(notFinished)},
+				{Key: "content", Value: jsonString(unanswered)},
 				{Key: "is_error", Value: json.RawMessage(`true`)}})
 		}
 		e.results = []json.RawMessage{body.Object([]body.Field{{Key: "role", Value: json.RawMessage(`"user"`)},
@@ -1125,12 +1435,13 @@ func (claude) build(req request, h *history, prompt string) ([]byte, func(http.H
 
 	// The fresh process's first system message, cut to its hook texts and
 	// what its environment adds to the history's own copy (cutTurnSystem). A
-	// history with no system message has no such copy (no earlier turn
-	// reached the model, as when a session's first turn failed before its
-	// first call), so the message is kept whole, as a fresh process sends it.
+	// history with no environment has no such copy (no earlier turn reached
+	// the model, as when a session's first turn failed before its first
+	// call, or the turn that had it went into AgentBus's summary), so the
+	// message is kept whole, as a fresh process sends it.
 	m1 := msgs[1]
-	if hasSystem(h.messages) {
-		if m1, err = cutMessage(msgs[1], systemText(h.messages)); err != nil {
+	if prior := systemText(h.messages); strings.Contains(prior, envMark[2:]) {
+		if m1, err = cutMessage(msgs[1], prior); err != nil {
 			return nil, nil, err
 		}
 	}
@@ -1152,16 +1463,29 @@ func (claude) build(req request, h *history, prompt string) ([]byte, func(http.H
 	if hist, err = unreferenced(hist, searchable(tools)); err != nil {
 		return nil, nil, err
 	}
+	// A history the budget made AgentBus's summary alone ends with that
+	// summary, a user message: its block goes first in the new prompt's
+	// message, where a later step finds it (summaryIn), and the request
+	// alternates as Claude Code's does.
+	content := promptText
+	if n := len(hist); n > 0 {
+		if text, rest, ok := (claude{}).summaryIn(hist[n-1]); ok && rest == nil {
+			hist = hist[:n-1]
+			content = joinArray([]json.RawMessage{
+				body.Object([]body.Field{{Key: "type", Value: json.RawMessage(`"text"`)}, {Key: "text", Value: jsonString(text)}}),
+				body.Object([]body.Field{{Key: "type", Value: json.RawMessage(`"text"`)}, {Key: "text", Value: promptText}})})
+		}
+	}
 	// On the turn's first request only (the person's message and Claude
 	// Code's system message, nothing else yet), a breakpoint on the history's
 	// last message, the earlier turn's reply. That is where a resumed
 	// process puts one, so the whole history is read from cache from then on.
 	// Its cache_control is copied from Claude Code's own (breakpointValue).
-	addBP := len(msgs) == 2
+	addBP := len(msgs) == 2 && len(hist) > 0
 	var newMsgs []json.RawMessage
 	newMsgs = append(newMsgs, hist...)
 	newMsgs = append(newMsgs, body.Object([]body.Field{{Key: "role", Value: json.RawMessage(`"user"`)},
-		{Key: "content", Value: promptText}}))
+		{Key: "content", Value: content}}))
 	if m1 != nil {
 		newMsgs = append(newMsgs, m1)
 	}
@@ -1433,16 +1757,6 @@ func (claude) otherModel(msgs []json.RawMessage) ([]json.RawMessage, error) {
 		}
 	}
 	return out, nil
-}
-
-// hasSystem reports whether any of msgs is a role-system message.
-func hasSystem(msgs []json.RawMessage) bool {
-	for _, m := range msgs {
-		if role(m) == "system" {
-			return true
-		}
-	}
-	return false
 }
 
 // systemIdentity names a request's system prompt: its blocks after the first,

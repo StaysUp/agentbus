@@ -696,6 +696,14 @@ func start(c config) (*service, error) {
 	var replayBase func(string, string) (engine.ReplayPlan, error)
 	if !c.noReplay {
 		claudeReplay, codexReplay, chatReplay = replay.New(st), replay.NewCodex(st), replay.NewChatCompletions(st)
+		// The history budget is the person's setting on control (the budget
+		// of GET /api/v0/settings/compaction), read at each turn's start: from
+		// control's database, or on a runner from the server (settings.Remote),
+		// so every runner keeps the same budget.
+		budget := settings.BudgetOf(cfgStore)
+		for _, r := range []*replay.Replayer{claudeReplay, codexReplay, chatReplay} {
+			r.SetBudget(budget)
+		}
 		replayBase = func(agent, session string) (engine.ReplayPlan, error) {
 			// Each harness names the history format own replay uses for it.
 			r := claudeReplay

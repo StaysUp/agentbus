@@ -407,7 +407,8 @@ func (s *Server) settingsNow() (settings.RunnerSettings, error) {
 		return snap, err
 	}
 	return settings.RunnerSettings{Permissions: got.Policy, PermissionsVersion: got.PolicyVersion,
-		Instructions: got.Instructions, InstructionsVersion: got.InstructionsVersion, SettingsVersion: got.Revision}, nil
+		Instructions: got.Instructions, InstructionsVersion: got.InstructionsVersion, SettingsVersion: got.Revision,
+		Budget: settings.BudgetOf(st)()}, nil
 }
 
 // turnRules are the settings attempt a of runnerID's turn runs under, taken

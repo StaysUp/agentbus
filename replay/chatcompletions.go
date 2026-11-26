@@ -131,7 +131,7 @@ func (chatCompletions) asHistory(m json.RawMessage) (json.RawMessage, error) {
 	return body.Object(out), nil
 }
 
-func (chatCompletions) reply(rep body.Reply, stop string) ([]json.RawMessage, ending, error) {
+func (chatCompletions) reply(rep body.Reply, stop, unanswered string) ([]json.RawMessage, ending, error) {
 	if role(rep.Message) != "assistant" {
 		return nil, ending{}, errors.New("the kept reply is not an assistant message")
 	}
@@ -147,7 +147,7 @@ func (chatCompletions) reply(rep body.Reply, stop string) ([]json.RawMessage, en
 		e.results = append(e.results, body.Object([]body.Field{
 			{Key: "role", Value: json.RawMessage(`"tool"`)},
 			{Key: "tool_call_id", Value: jsonString(id)},
-			{Key: "content", Value: jsonString(notFinished)},
+			{Key: "content", Value: jsonString(unanswered)},
 		}))
 	}
 	return []json.RawMessage{rep.Message}, e, nil
@@ -282,6 +282,9 @@ func (c chatCompletions) build(req request, h *history, prompt string) ([]byte, 
 	}
 	return body.Object(req.fields), nil, nil
 }
+
+// passOn: the request goes on as sent; its identity is its system prompt.
+func (chatCompletions) passOn(request, *history) ([]byte, func(http.Header)) { return nil, nil }
 
 func chatHasSys(msgs []json.RawMessage) bool {
 	for _, m := range msgs {

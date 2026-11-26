@@ -6,6 +6,35 @@ All notable changes to AgentBus. Full notes for each release are on the
 ## Unreleased
 
 ### Added
+- **AgentBus keeps each turn's history within a budget, by itself.** Own replay used to put the
+  whole session in front of every turn, so a long session grew until its harness compacted. Now,
+  at each turn's start, the history it builds fits a budget: 40% of the model's window by default,
+  well below any harness's compaction point. Under the budget nothing changes. Over it, older turns
+  are shortened in one step down to half the budget, oldest first: long tool results (over 2 KiB)
+  become a stub that says what it was, how it began and the API call that fetches it back; then
+  long tool-call inputs the same way; then the oldest turns become AgentBus's own summary (the
+  person's words and the model's last words, each cut past 2,000 bytes, AgentBus's notes, a line
+  per tool call). When the summary itself grows too big, a step leaves the oldest turns out of it
+  for one line naming how many and their range, so a session of any length stays within the
+  budget. The three newest turns go in whole while that is enough. When even that does not fit,
+  the newest turn is shortened too: the budget wins, and every turn starts within it. Images are
+  counted by their block (about 1,600 tokens each), never guessed from long text. Each step is frozen: the next turns carry its bytes unchanged, so the prompt cache
+  keeps working, and a turn's log, once written, stays word for word until it is left out. No model
+  is called for it. The record keeps every byte, and the turn's stored requests are what the model saw.
+  `history.shortened` records each step. The budget is `budget` in
+  `GET/PUT /api/v0/settings/compaction`; control sends it to every runner with its settings, so a
+  runner on another machine keeps the same budget. Claude Code, Codex and OpenCode alike.
+
+### Changed
+- **A harness that compacts inside a turn is let through.** Own replay used to refuse a main
+  request the harness had compacted, which stopped the turn. Now, once a request of the turn has
+  carried the history, a compacted one goes on as the harness sent it (Codex's under the session's
+  thread id, as the turn's other requests). The gateway judges every main request once, by the
+  layout test it forwards by, in every turn, and records the verdict on the call as
+  `history.compacted`; that record is the only place a compaction is decided. Nothing depends on the harness's summary: the next turn is built from the
+  record, from the turn's last request before the compaction, then a note that the turn went on,
+  how many calls followed and the model's last words. A request not in the fresh layout before any
+  request carried the history is still refused.
 - **A Copy workspace puts itself away.** Once its work is all applied or discarded and the
   workspace has been quiet for 30 minutes, AgentBus removes the copy itself, as Close does.
   Sessions and the record stay, and the next turn makes a fresh copy. A copy with unapplied work
