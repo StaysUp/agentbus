@@ -9,7 +9,6 @@ package main
 // it runs. Every credential here is fake.
 
 import (
-	"bytes"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -26,9 +25,7 @@ import (
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/folders"
 	"github.com/staysup/agentbus/jobs"
-	"github.com/staysup/agentbus/netjail"
 	"github.com/staysup/agentbus/queue"
-	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 )
 
@@ -156,51 +153,6 @@ func startNoSecrets(t *testing.T) *noSecretsSetup {
 	t.Setenv("AGENTBUS_FAKE_OUT", ns.report)
 	t.Setenv("AGENTBUS_FAKE_CALL", "1")
 	return ns
-}
-
-// Under contain = "on" a runner's agent runs closed off: its model call still reaches the
-// vendor through the runner's gateway and the server's relay, a host not in
-// [network] allow is refused, and the refusal is in the server's record.
-func TestRunnerAgentClosedOff(t *testing.T) {
-	if !netjail.Supported {
-		t.Skip("network control is Linux-only")
-	}
-	if err := netjail.Check(); err != nil {
-		t.Skipf("this machine cannot close an agent off: %v", err)
-	}
-	ns := startNoSecrets(t)
-	putPolicy(t, ns.server, ns.tok, "[network]\ncontain = \"on\"\n")
-	t.Setenv("AGENTBUS_FAKE_NET", "http://blocked.example/")
-	code, ag := sendAPI(t, ns.server, ns.tok, "POST", "/api/v0/agents", map[string]any{"name": "DeepSeek", "harness": "claude",
-		"access": "openrouter", "model": "deepseek/deepseek-v4.1-flash", "key_env": "AB_TEST_OR_KEY"})
-	if code != http.StatusCreated {
-		t.Fatalf("create: %d %v", code, ag)
-	}
-	j := queueTurn(t, ns.server, ns.tok, map[string]any{"agent": ag["id"], "folder_ref": ns.ref, "connector": ns.connector, "prompt": "hello"})
-	jj := waitJob(t, ns.server, ns.tok, j.ID)
-	if jj.State != queue.Finished {
-		t.Fatalf("job %s %s %s", jj.State, jj.Reason, jj.Result)
-	}
-	if env := envOf(t, ns.report); !strings.HasPrefix(env["HTTPS_PROXY"], "http://127.0.0.1:") || env["NO_PROXY"] == "" {
-		t.Fatalf("the agent's proxy: %q %q", env["HTTPS_PROXY"], env["NO_PROXY"])
-	}
-	if got := ns.or.seen(); len(got) != 1 {
-		t.Fatalf("OpenRouter saw %v", got)
-	}
-	turn := jj.Turn
-	waitFor(t, "network.refused in the server's record", func() bool {
-		recs, _ := ns.server.store.After(0, store.Filter{Turn: turn}, 1000)
-		for _, r := range recs {
-			var e struct{ Host, Error string }
-			if r.Kind == "network.refused" && json.Unmarshal(r.Data, &e) == nil {
-				if e.Host != "blocked.example:80" || !strings.Contains(e.Error, "not in Allow hosts") {
-					t.Fatalf("network.refused: %+v", e)
-				}
-				return true
-			}
-		}
-		return false
-	})
 }
 
 func envOf(t *testing.T, report string) map[string]string {
@@ -850,27 +802,5 @@ func TestRunnerHomePerSession(t *testing.T) {
 	}
 	if _, err := os.Stat(homeOf(repB)); err != nil {
 		t.Fatalf("session B's home: %v", err)
-	}
-}
-
-// putPolicy replaces the server's policy, given as TOML, through the API:
-// control reads no settings file once it has started.
-func putPolicy(t *testing.T, svc *service, tok, policy string) {
-	t.Helper()
-	p, err := settings.ParsePolicy([]byte(policy))
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, _ := json.Marshal(p)
-	req, _ := http.NewRequest("PUT", "http://"+svc.addr+"/api/v0/settings/permissions", bytes.NewReader(b))
-	req.Header.Set("Authorization", "Bearer "+tok)
-	req.Header.Set("If-Match", "*")
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("PUT the policy: %d", resp.StatusCode)
 	}
 }

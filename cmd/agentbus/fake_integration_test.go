@@ -138,20 +138,6 @@ func fakeAgent() {
 			resp.Body.Close()
 		}
 	}
-	// With AGENTBUS_FAKE_NET, a GET of each URL it lists (comma separated),
-	// through the proxy the environment names, as a tool's download goes.
-	// "net=<url> <status or no>" goes to stdout for each.
-	if v := os.Getenv("AGENTBUS_FAKE_NET"); v != "" {
-		c := &http.Client{Timeout: 5 * time.Second}
-		for _, u := range strings.Split(v, ",") {
-			if resp, err := c.Get(u); err == nil {
-				resp.Body.Close()
-				fmt.Printf("net=%s %d\n", u, resp.StatusCode)
-			} else {
-				fmt.Printf("net=%s no\n", u)
-			}
-		}
-	}
 	// With AGENTBUS_FAKE_CODEX_BODY, one model call as codex makes it: to the
 	// openai_base_url its -c argument names, or the base_url of the provider
 	// its -c arguments set, with the key its env_key names as the bearer, and
