@@ -170,6 +170,9 @@ func New(cfg Config) (*Server, error) {
 		// What a request tree has cost is the record's, by its turns: the
 		// queue's cost cap reads it there when it makes a job.
 		cfg.Queue.ReadCostWith(rec.CostOfTurns)
+		// Whether a workspace was used since the event that queued its
+		// put-away is the record's too (queue/putaway.go).
+		cfg.Queue.ReadActivityWith(rec.WorkspaceUsedAfter)
 	}
 	s := &Server{cfg: cfg, token: sha256.Sum256([]byte(cfg.Token)), enrol: sha256.Sum256([]byte(cfg.EnrollToken)), mux: http.NewServeMux(),
 		tokenKey: sha256.Sum256([]byte("agentbus runner turn tokens\x00" + cfg.Token)), sealer: standInSealer(cfg.Token)}

@@ -179,6 +179,9 @@ const (
 	// WorkspaceClosed records removal of a sandbox copy. The next turn rebuilds
 	// from the folder; the record and conversation stay.
 	WorkspaceClosed Kind = "workspace.closed"
+	// WorkspaceKept records a put-away that kept the copy: when it came due,
+	// the workspace was not quiet or not settled. put_away says why.
+	WorkspaceKept Kind = "workspace.kept"
 	// WorkspaceSnapshot is the applied state of a workspace whose record was
 	// written before 0.6.6, when its outcome events did not yet carry it all
 	// (a turn's changeset, an apply's to, an update's head and checkpoints):
@@ -233,7 +236,8 @@ type KindInfo struct {
 // Kinds lists every framework kind. A program's own kind, x.<program>.<name>,
 // is not one of them. A test checks that every Kind constant is listed.
 var Kinds = []KindInfo{
-	{WorkspaceClosed, "A sandbox workspace's copy was removed (POST /api/v0/workspaces/{id}/close). The record and turns stay. The next turn rebuilds from the folder. Resets all apply and update baselines of the removed copy. Stored once per close.", []string{"workspace"}},
+	{WorkspaceClosed, "A sandbox workspace's copy was removed, by POST /api/v0/workspaces/{id}/close or by AgentBus putting it away. The record and turns stay. The next turn rebuilds from the folder. Resets all apply and update baselines of the removed copy. Stored once per close. put_away is present when AgentBus put the copy away by itself: the on and the event that queued it, when it was queued and when it came due.", []string{"workspace"}},
+	{WorkspaceKept, "AgentBus came to put a sandbox workspace's copy away and kept it: workspace names it, and put_away holds the on and the event that queued the put-away, when it was queued, when it came due, and why it kept the copy (other work waiting or running, the workspace used since, work not applied or discarded, no copy, or the record could not be read). Nothing was removed. Stored once per put-away.", []string{"workspace", "put_away"}},
 	{TurnStarted, "A person's message started a turn. Stored once per turn id; text holds their words; agent and folder name the run's agent and folder, empty when no run started the session. A turn started by POST /api/v0/turns has its turn.started stored by the API, with the prompt as sent, before its agent starts.", nil},
 	{ModelRequested, "The harness sent a request to the model: model and tools_offered.", nil},
 	{ModelResponded, "The model replied: status, text, stop_reason, usage, latency_ms, cost_usd, or error.", nil},
@@ -524,6 +528,8 @@ type Event struct {
 	Changes *TurnChanges `json:"changes,omitempty" doc:"On turn.changed: every file the turn added, modified or deleted, with diffs."`
 	// Applied, on turn.applied and workspace.applied: what the apply did.
 	Applied *Applied `json:"applied,omitempty" doc:"On turn.applied and workspace.applied: the turns applied, the from/to changesets, who asked, the result and the files."`
+	// PutAway, on workspace.closed and workspace.kept: a put-away's why.
+	PutAway *PutAway `json:"put_away,omitempty" doc:"On a workspace.closed AgentBus asked for itself, and on workspace.kept: the on and the record event that queued the put-away, when it was queued and came due, and on workspace.kept why the copy was kept."`
 	// Discarded, only on workspace.discarded: what the discard dropped.
 	Discarded *Discarded `json:"discarded,omitempty" doc:"On workspace.discarded: the changeset the workspace was reset to, the turns dropped, and who asked."`
 	// Updated, only on workspace.updated: what the update from the folder did.
@@ -667,6 +673,16 @@ type RefusedFile struct {
 	Path    string `json:"path"`
 	Why     string `json:"why"`
 	Markers bool   `json:"markers,omitempty" doc:"The file still holds the conflict markers an update's merge left (<<<<<<< this session ... >>>>>>> your folder), rather than having changed in the folder: the agent combining it in a turn clears it, an update does not."`
+}
+
+// PutAway is why AgentBus put a workspace's copy away, or kept it
+// (workspace.closed, workspace.kept).
+type PutAway struct {
+	On     string    `json:"on" doc:"The on that queued the put-away: the built-in one over workspace.applied or workspace.discarded."`
+	Event  string    `json:"event" doc:"The record event the on fired on: the apply or discard that settled the workspace."`
+	Queued time.Time `json:"queued" doc:"When the put-away was queued."`
+	Due    time.Time `json:"due,omitempty" doc:"When it came due: the event's time plus the quiet time of the settings ([workspaces] put_away_after_minutes)."`
+	Kept   string    `json:"kept,omitempty" doc:"On workspace.kept: why the copy was kept."`
 }
 
 // Discarded is what one discard dropped (workspace.discarded).

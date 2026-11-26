@@ -1069,6 +1069,18 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 			}
 		}()
 	}
+	// The built-in ons: a sandbox workspace whose work was applied or discarded
+	// gets a put-away, queued to run once it has been quiet ([workspaces]
+	// put_away_after_minutes). Registered once by key; a new one reads the
+	// record from now on, so an upgrade does not queue one for every apply ever
+	// recorded.
+	if s.store != nil {
+		for _, kind := range queue.RecordEvents {
+			if _, err := s.queue.RegisterRecordOn(queue.DefaultTeam, kind, queue.Action{Queue: queue.KindPutAway}, "builtin/put_away/"+kind, s.store.Last()); err != nil {
+				svcLog.Printf("queue.builtin_on_failed event=%s", kind)
+			}
+		}
+	}
 	go func() {
 		defer close(s.sweepDone)
 		defer beside.Wait()
@@ -1160,6 +1172,14 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 				} else if n > 0 {
 					svcLog.Printf("queue.results_delivered n=%d", n)
 				}
+				// An on over the record: an event of its kind recorded since
+				// its cursor queues its job (queue/recordon.go), such as the
+				// put-away of a workspace whose work is settled.
+				if n, err := s.queue.FireRecordOns(queue.DefaultTeam, s.recordEvents, s.workspacePlace, s.jobDelay); err != nil {
+					svcLog.Printf("queue.fire_record_ons_failed")
+				} else if n > 0 {
+					svcLog.Printf("queue.put_aways_queued n=%d", n)
+				}
 			}
 		}
 	}()
@@ -1242,6 +1262,44 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 		close(s.runnerDone)
 	}()
 	return nil
+}
+
+// recordEvents reads the record's events of kind past after, for an on over
+// the record (queue.RecordReader).
+func (s *service) recordEvents(kind string, after int64, limit int) ([]queue.RecordEvent, error) {
+	evs, err := s.store.EventsOfKind(kind, after, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]queue.RecordEvent, len(evs))
+	for i, e := range evs {
+		out[i] = queue.RecordEvent{ID: e.ID, Seq: e.Seq, Time: e.Time, Workspace: e.Workspace}
+	}
+	return out, nil
+}
+
+// workspacePlace is where workspace ws is, from the record: its machine and
+// whether it has a copy of its own, for the job an on over the record queues.
+func (s *service) workspacePlace(ws string) (queue.DeliverTo, bool, error) {
+	w, ok, err := s.store.Workspace(ids.WorkspaceID(ws))
+	if err != nil || !ok {
+		return queue.DeliverTo{}, false, err
+	}
+	return queue.DeliverTo{Workspace: w.ID, FolderRef: w.FolderRef, Folders: api.Places(w), Machine: w.Machine, Isolate: w.Sandbox}, true, nil
+}
+
+// jobDelay is how long a job an on over the record queues waits before a
+// runner may take it: for a put-away, the quiet time of the settings. false is
+// off. A policy that cannot be read is off, so nothing is put away on a guess.
+func (s *service) jobDelay(kind string) (time.Duration, bool) {
+	if kind != queue.KindPutAway || s.settings == nil {
+		return 0, false
+	}
+	p, _, err := s.settings.Policy()
+	if err != nil {
+		return 0, false
+	}
+	return p.PutAwayAfter()
 }
 
 // deliveredAgent is the agent a delivered result's turn runs on: the asking

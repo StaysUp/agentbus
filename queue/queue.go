@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -102,6 +103,16 @@ const (
 	// discards on the session to keep them). Its workspace.closed resets the
 	// record's applied state. It starts no turn.
 	KindClose = "close"
+	// KindPutAway is a close that AgentBus asks for itself (putaway.go): the
+	// built-in on queues one when a sandbox workspace's work is applied or
+	// discarded, to run once the workspace has been quiet for the setting's
+	// time (not_before). When it is due, control reads the record and the lane
+	// before any runner gets it: if anything happened in the workspace since
+	// the event that queued it, or work is still unapplied, it ends kept and
+	// the record says why. Otherwise the runner holding the copy removes it as a
+	// close does, and control records workspace.closed with the put-away's why.
+	// It is a lane job, but one not yet due holds no place in the lane.
+	KindPutAway = "put_away"
 	// KindUpdate brings the person's folder as it is now into a sandbox
 	// workspace's copy by a three-way merge, so the session's work sits on top
 	// of the folder and the next apply writes only that work (update.go). The
@@ -178,7 +189,8 @@ CREATE TABLE IF NOT EXISTS jobs (
 	created      INTEGER NOT NULL,
 	updated      INTEGER NOT NULL,
 	ended        INTEGER,
-	tree         TEXT
+	tree         TEXT,
+	not_before   INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS jobs_key ON jobs(team, idem_key) WHERE idem_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(team, state, created);
@@ -251,7 +263,9 @@ CREATE TABLE IF NOT EXISTS ons (
 	created  INTEGER NOT NULL,
 	chain    TEXT,
 	asked    INTEGER,
-	limits   TEXT
+	limits   TEXT,
+	action   TEXT,
+	cursor   INTEGER
 );
 CREATE INDEX IF NOT EXISTS ons_live ON ons(team, event, off);
 -- B15 (his call, 2026-11-19): an on is deduped by its idempotency_key ONLY, the
@@ -506,6 +520,17 @@ type Links struct {
 	// AppliesTurn. ApplyBy: who asked for it.
 	AppliesTurns []string `json:"applies_turns,omitempty"`
 	ApplyBy      *By      `json:"apply_by,omitempty"`
+	// Because: for a job an on queued (a put-away), the on and the record
+	// event that fired it. The record's outcome of the job repeats it.
+	Because *Because `json:"because,omitempty"`
+}
+
+// Because is why an on queued a job: the on, and the record event it fired on,
+// by its id and its seq in the record.
+type Because struct {
+	On    string `json:"on"`
+	Event string `json:"event"`
+	Seq   int64  `json:"seq"`
 }
 
 // Job is one requested turn.
@@ -530,11 +555,13 @@ type Job struct {
 	// Tree, for a turn job: the request tree the turn belongs to, recorded
 	// once when the job is made (treeOf) and never changed. The caps count by
 	// it (budget.go).
-	Tree     string     `json:"tree,omitempty"`
-	Created  time.Time  `json:"created"`
-	Updated  time.Time  `json:"updated"`
-	Ended    *time.Time `json:"ended,omitempty"`
-	Attempts []Attempt  `json:"attempts,omitempty"`
+	Tree    string     `json:"tree,omitempty"`
+	Created time.Time  `json:"created"`
+	Updated time.Time  `json:"updated"`
+	Ended   *time.Time `json:"ended,omitempty"`
+	// NotBefore: no runner takes the job before this time (nil: at once).
+	NotBefore *time.Time `json:"not_before,omitempty"`
+	Attempts  []Attempt  `json:"attempts,omitempty"`
 	// Workspace, for a job of a known session: where its runner keeps it.
 	Workspace *Workspace `json:"workspace,omitempty"`
 }
@@ -691,6 +718,9 @@ type Queue struct {
 	// applied reads a workspace's applied state from the record, its one
 	// owner (ReadAppliedWith). The queue keeps no copy of it.
 	applied AppliedReader
+	// activity reads whether a workspace was used after a record seq, for a
+	// put-away (putaway.go).
+	activity ActivityReader
 	// cost reads what turns cost from the record (ReadCostWith), for the
 	// cost cap (budget.go).
 	cost CostReader
@@ -1007,7 +1037,7 @@ func (q *Queue) HasKey(team, key string) (bool, error) {
 // person's folder, never the live copy, so they leave the lane and never wait
 // on a running turn (his call, 2026-11-22). folder and home touch no workspace
 // copy. (B15: a review is a turn in its own session, so no review clause.)
-const laneKinds = `('turn','discard','update','close')`
+const laneKinds = `('turn','discard','update','close','put_away')`
 
 // jobCopyKey is a job's workspace copy key in SQL, qualified by alias a (e.g.
 // "j"): its workspace, or its session when it names none, exactly as CopyKey
@@ -1029,9 +1059,15 @@ func jobCopyKey(a string) string {
 // run in the order they were made, so a close made after a queued turn always
 // runs after it. The lane key is the workspace, or the session for
 // a job with no workspace (its own workspace), as CopyKey keys the copy row.
-const laneTake = `j.kind IN ` + laneKinds + ` AND o.kind IN ` + laneKinds + `
+// A queued job that is not due yet (not_before after now, in nanoseconds)
+// holds no place: a put-away waiting out its quiet time never holds up the
+// turn the person sends meanwhile.
+func laneTake(now int64) string {
+	return `j.kind IN ` + laneKinds + ` AND o.kind IN ` + laneKinds + `
 	AND COALESCE(NULLIF(json_extract(o.spec, '$.workspace'), ''), o.session) = COALESCE(NULLIF(json_extract(j.spec, '$.workspace'), ''), j.session)
-	AND (o.state IN ('taken','running') OR (o.state = 'queued' AND o.rowid < j.rowid))`
+	AND (o.state IN ('taken','running') OR (o.state = 'queued' AND o.rowid < j.rowid
+		AND (o.not_before IS NULL OR o.not_before <= ` + strconv.FormatInt(now, 10) + `)))`
+}
 
 // SessionHasWork says the SESSION has a turn job that has not ended. It is kept
 // session-scoped (not the workspace lane): its callers ask about this one
@@ -1056,7 +1092,7 @@ func (q *Queue) SessionHasWork(team, session string) (bool, error) {
 // workspace. None for a job of no lane (laneKinds).
 func (q *Queue) TurnsAhead(team, id string) ([]Job, error) {
 	rows, err := q.db.Query(`SELECT o.id FROM jobs o JOIN jobs j ON j.id = ? AND j.team = ?
-		WHERE o.team = j.team AND o.id != j.id AND (`+laneTake+`)
+		WHERE o.team = j.team AND o.id != j.id AND (`+laneTake(nanos(q.now()))+`)
 		ORDER BY o.rowid`, id, team)
 	if err != nil {
 		return nil, fmt.Errorf("queue: list turns ahead: %w", err)
@@ -1095,6 +1131,11 @@ func (q *Queue) TurnsAhead(team, id string) ([]Job, error) {
 // queue's own jobs), and a job of a request tree that a cap binds is checked
 // in this transaction, whichever path asked for it.
 func (q *Queue) create(team, kind, key string, spec Spec, links Links, budget *Limits, session string, deliver *Delivery) (job Job, created bool, err error) {
+	return q.createAt(team, kind, key, spec, links, budget, session, deliver, nil)
+}
+
+// createAt is create for a job no runner takes before notBefore (nil: at once).
+func (q *Queue) createAt(team, kind, key string, spec Spec, links Links, budget *Limits, session string, deliver *Delivery, notBefore *time.Time) (job Job, created bool, err error) {
 	specBytes, err := spec.asked().hashBytes()
 	if err != nil {
 		return job, false, err
@@ -1190,8 +1231,12 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, budget *L
 		if tree != "" {
 			tr = tree
 		}
-		if _, err := tx.Exec(`INSERT INTO jobs(id, team, kind, state, idem_key, request_hash, spec, links, turn, session, created, updated, tree)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, job.ID, team, kind, Queued, k, hash, string(sb), string(lb), turn, sess, now, now, tr); err != nil {
+		var nb any
+		if notBefore != nil {
+			nb = nanos(*notBefore)
+		}
+		if _, err := tx.Exec(`INSERT INTO jobs(id, team, kind, state, idem_key, request_hash, spec, links, turn, session, created, updated, tree, not_before)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, job.ID, team, kind, Queued, k, hash, string(sb), string(lb), turn, sess, now, now, tr, nb); err != nil {
 			return fmt.Errorf("queue: write job: %w", err)
 		}
 		// Atomic delivery (his call (a), 2026-11-19): record the on in the SAME
@@ -1229,7 +1274,7 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, budget *L
 // B15: the verdict and findings columns are no longer read (review is a normal
 // turn, with no verdict in core). They stay in an older DB, unreferenced.
 const jobCols = `id, team, kind, state, COALESCE(idem_key, ''), spec, links, COALESCE(attempt, ''), COALESCE(turn, ''), cancel, reason, result, COALESCE(session, ''), created, updated, ended, COALESCE(tree, ''),
-	COALESCE((SELECT b.session FROM jobs b WHERE b.team = jobs.team AND b.turn = json_extract(jobs.links, '$.chain.by') LIMIT 1), '')`
+	COALESCE((SELECT b.session FROM jobs b WHERE b.team = jobs.team AND b.turn = json_extract(jobs.links, '$.chain.by') LIMIT 1), ''), not_before`
 
 // stored is l as a job keeps it. Who asked is kept once, as the asking turn
 // (Chain.By); the session that turn ran in is its own job's, read back with
@@ -1250,10 +1295,10 @@ func scanJob(s scanner) (Job, error) {
 	var spec, links string
 	var result sql.NullString
 	var created, updated int64
-	var ended sql.NullInt64
+	var ended, notBefore sql.NullInt64
 	var bySession string
 	if err := s.Scan(&j.ID, &j.Team, &j.Kind, &j.State, &j.IdempotencyKey, &spec, &links, &j.Attempt, &j.Turn, &j.CancelRequested,
-		&j.Reason, &result, &j.Session, &created, &updated, &ended, &j.Tree, &bySession); err != nil {
+		&j.Reason, &result, &j.Session, &created, &updated, &ended, &j.Tree, &bySession, &notBefore); err != nil {
 		return j, err
 	}
 	_ = json.Unmarshal([]byte(spec), &j.Spec)
@@ -1264,7 +1309,7 @@ func scanJob(s scanner) (Job, error) {
 	if result.Valid {
 		j.Result = json.RawMessage(result.String)
 	}
-	j.Created, j.Updated, j.Ended = fromNanos(created), fromNanos(updated), optTime(ended)
+	j.Created, j.Updated, j.Ended, j.NotBefore = fromNanos(created), fromNanos(updated), optTime(ended), optTime(notBefore)
 	return j, nil
 }
 
@@ -1518,16 +1563,25 @@ func (q *Queue) Take(runnerID string, lease time.Duration, folders bool) (job Jo
 		if busy >= places {
 			return nil
 		}
+		// A put-away now due on this runner is decided before any job is
+		// chosen, in this transaction (putaway.go): kept, it ends here; one
+		// that may go stays queued and is chosen below like a close.
+		if !folders {
+			if err := q.decidePutAways(tx, runnerID, team, now); err != nil {
+				return err
+			}
+		}
 		// A job goes only to a runner that can run it (caps.go): the job's
 		// machine, the session's runner, every label it asks for, and its
 		// harness. A runner stored as a connector of a build before 0.5
 		// takes nothing.
 		var id string
 		err = tx.QueryRow(`SELECT j.id FROM jobs j, runners r WHERE r.id = ? AND j.team = ? AND j.state = 'queued'
+			AND (j.not_before IS NULL OR j.not_before <= `+strconv.FormatInt(nanos(now), 10)+`)
 			AND `+kinds+` AND COALESCE(json_extract(r.caps, '$.role'), '') = ''
 			AND (j.kind IN `+folderKinds+` OR `+jobCopyKey("j")+` IS NULL OR NOT EXISTS (SELECT 1 FROM copies s WHERE s.id = `+jobCopyKey("j")+` AND s.team = j.team)
 				OR EXISTS (SELECT 1 FROM copies s WHERE s.id = `+jobCopyKey("j")+` AND s.team = j.team AND s.runner = r.id AND s.closed IS NULL))
-			AND (j.kind NOT IN `+laneKinds+` OR NOT EXISTS (SELECT 1 FROM jobs o WHERE o.team = j.team AND o.id != j.id AND (`+laneTake+`)))
+			AND (j.kind NOT IN `+laneKinds+` OR NOT EXISTS (SELECT 1 FROM jobs o WHERE o.team = j.team AND o.id != j.id AND (`+laneTake(nanos(now))+`)))
 			AND (`+machineTake+`) AND (`+labelsTake+`) AND (`+harnessTake+`)
 			ORDER BY j.created, j.id LIMIT 1`, runnerID, team, nanos(now.Add(-RunnerFresh))).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {

@@ -634,6 +634,14 @@ func TestOnAPIAuth(t *testing.T) {
 	if code, out := as(t, e, ptok, "DELETE", "/api/v0/ons/"+ov.ID, ""); code != 204 {
 		t.Fatalf("maker remove: %d %s, want 204", code, out)
 	}
+	// Control's built-in on (the put-away) is no agent's to turn off.
+	builtin, err := e.q.RegisterRecordOn(queue.DefaultTeam, "workspace.applied", queue.Action{Queue: queue.KindPutAway}, "builtin/put_away/workspace.applied", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, out := as(t, e, ptok, "DELETE", "/api/v0/ons/"+builtin.ID, ""); code != 403 {
+		t.Fatalf("a turn token removes the built-in on: %d %s, want 403", code, out)
+	}
 }
 
 // An on a turn token registers counts as asked work under the caps in

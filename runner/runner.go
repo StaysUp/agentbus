@@ -797,7 +797,8 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	case job.Kind == queue.KindDiscard:
 		at.finish(ctx, r.discardWork(at))
 		return
-	case job.Kind == queue.KindClose:
+	case job.Kind == queue.KindClose || job.Kind == queue.KindPutAway:
+		// A put-away control let go is a close: the copy goes, the record stays.
 		at.finish(ctx, r.closeWork(at))
 		return
 	case job.Kind == queue.KindUpdate:

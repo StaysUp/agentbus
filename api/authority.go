@@ -358,6 +358,12 @@ func (l agentLimits) removeOn(a *API, w http.ResponseWriter, id string) bool {
 		a.internal(w)
 		return false
 	}
+	// An on over the record is control's own (the built-in put-away): no
+	// agent turns it off.
+	if on.Event != queue.OnTurnCompleted {
+		writeError(w, http.StatusForbidden, turnOnRemoveRefused)
+		return false
+	}
 	if on.Maker.Turn == l.g.Turn && on.Maker.Session == l.g.Session {
 		return true
 	}

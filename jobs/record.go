@@ -71,6 +71,9 @@ type Recorder interface {
 	// CostOfTurns is what the turns named have cost, for the queue's cost
 	// cap (queue.CostReader).
 	CostOfTurns(turns []string) (float64, error)
+	// WorkspaceUsedAfter says whether the workspace was used after a record
+	// seq, for a put-away (queue.ActivityReader).
+	WorkspaceUsedAfter(ws ids.WorkspaceID, after int64) (bool, error)
 	Finder
 }
 

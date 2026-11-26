@@ -70,6 +70,14 @@ func (s State) Head() string {
 	return s.Turns[len(s.Turns)-1].Turn
 }
 
+// Settled reports whether nothing in the workspace waits on the person: every
+// appliable turn is at or before the mark of a successful apply (none at all,
+// after a discard or with no changes), and no update or conflict markers wait
+// for the next apply. A copy is put away only when its state is settled.
+func (s State) Settled() bool {
+	return s.Mark == len(s.Turns)-1 && s.Update == nil && !s.Markers
+}
+
 // Index is turn's place in Turns, -1 when it is not appliable.
 func (s State) Index(turn string) int {
 	for i, t := range s.Turns {

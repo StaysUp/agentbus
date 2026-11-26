@@ -30,13 +30,14 @@ func defaultPolicy() Policy {
 	cost := 0.0
 	off := false
 	return Policy{
-		Allow:     append([]string(nil), defaultAllow...),
-		Ask:       []string{},
-		Forbid:    append([]string(nil), defaultForbid...),
-		Isolation: IsolationAuto,
-		HomeFiles: []string{},
-		AgentAPI:  AgentAPI{Apply: &off},
-		Limits:    Limits{MaxDepth: num(2), MaxJobsPerTurn: num(10), MaxJobsPerTree: num(30), MaxCostUSDPerTree: &cost},
+		Allow:      append([]string(nil), defaultAllow...),
+		Ask:        []string{},
+		Forbid:     append([]string(nil), defaultForbid...),
+		Isolation:  IsolationAuto,
+		HomeFiles:  []string{},
+		AgentAPI:   AgentAPI{Apply: &off},
+		Limits:     Limits{MaxDepth: num(2), MaxJobsPerTurn: num(10), MaxJobsPerTree: num(30), MaxCostUSDPerTree: &cost},
+		Workspaces: Workspaces{PutAwayAfterMinutes: num(30)},
 	}
 }
 

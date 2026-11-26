@@ -158,10 +158,10 @@ var tags = []struct {
 }{
 	{name: "Turns", doc: "A turn is one message to an agent, its reply and its changes. Every action is on a turn: start it, stop it, read its diff, apply its changes to the person's folder, ask another agent to review it, and read its model calls."},
 	{name: "Sessions", doc: "A session is a conversation: its turns, in order. Read its history, search it, name it or close it. Create one in a workspace, then run its turns."},
-	{name: "Workspaces", doc: "A workspace is where turns run: it owns the folder, the machine and the sandbox mode (a copy behind a wall, or the folder as it is). Create one, then create a session in it, then run the session's turns. The folder and the mode are the workspace's; a session carries neither."},
+	{name: "Workspaces", doc: "A workspace is where turns run: it owns the folder, the machine and the sandbox mode (a copy behind a wall, or the folder as it is). Create one, then create a session in it, then run the session's turns. The folder and the mode are the workspace's; a session carries neither. A sandbox copy whose work is all applied or discarded is put away by itself after a quiet time; the next turn makes a fresh one."},
 	{name: "Agents", doc: "Saved agents: a harness, how it reaches its model, the model and a name. A turn names one. And the harnesses, runners and folders a turn can use."},
 	{name: "Tools", doc: "The tools control serves to agents: the built-in ones and the person's own, in one stored format. List, add and remove them. Only the main token adds or removes one: a tool's name is what the rules match."},
-	{name: "Reactions", doc: "An on is a standing instruction: when an event happens (for now, a turn completes), do something (for now, deliver that turn's reply to a session). Register one and remove it. A row on control; nothing waits. ask_agent registers one for itself."},
+	{name: "Reactions", doc: "An on is a standing instruction: when an event happens, do something. A turn's on watches a turn complete and delivers its reply to a session; register one and remove it here, and ask_agent registers one for itself. An on may also watch a kind on the record and queue a job: control's built-in ons put a sandbox copy away once its work is applied or discarded and it has been quiet. A row on control; nothing waits."},
 	{name: "Settings", doc: "The policy and the instructions every turn gets, and the subscriptions control holds for runners. Only the main token changes them or reads a subscription; a turn token may read the rest."},
 	{name: "Approvals", doc: "The commands the gateway held for a person (an ask entry, or a command on none of the lists under the ask default): list them and answer one, once, always or refuse. Only the main token answers one."},
 	{name: "Events", doc: "The record as a live stream, for a cockpit, an export or a program, and a program's own events."},
@@ -273,7 +273,7 @@ var routes = slices.Concat([]route{
 		idDoc:   "An on's id (on_...), as POST /api/v0/ons named it.",
 		tag:     "Reactions",
 		summary: "Remove an on",
-		doc:     "Remove an on: it stops reacting. Removing one already removed, or one that has fired, is accepted. A turn token may remove only an on its own turn registered. No body is read.",
+		doc:     "Remove an on: it stops reacting. Removing one already removed, or one that has fired, is accepted. A turn token may remove only an on its own turn registered, never one of control's built-in ons (the put-away). No body is read.",
 		replies: []reply{{status: 204, doc: "Removed.", empty: true}, turnRefused,
 			fail(403, "A turn token tried to remove an on another turn registered."),
 			fail(404, "This service keeps no queue, or no on has this id.")},
@@ -430,7 +430,8 @@ var routes = slices.Concat([]route{
 		summary: "Close a workspace",
 		idDoc:   "A workspace id (ws_ and 16 hex digits). Another shape gets 404.",
 		doc: "Remove a sandbox workspace's copy to reclaim its disk. The person's folder is never touched. Close is reversible: the record and the turns stay, and the next turn rebuilds a fresh copy from the folder. No body is read.\n\n" +
-			"Like a discard, a close waits behind a running or queued turn in the workspace lane; changes not applied when it runs are dropped with the copy, so apply or discard them on the session first to keep them (the cockpit signals unapplied work). A finished close is a baseline reset: a later apply starts from the rebuilt copy's base, never the removed lineage. One apply, discard, update or close runs per workspace, so a close while one is still running or waiting is refused with 409. The reply waits up to 30 seconds; past that it is 202 with state queued or running. Every close joins the lane, even if an earlier close finished. It runs after preceding turns and succeeds if no copy remains.",
+			"Like a discard, a close waits behind a running or queued turn in the workspace lane; changes not applied when it runs are dropped with the copy, so apply or discard them on the session first to keep them (the cockpit signals unapplied work). A finished close is a baseline reset: a later apply starts from the rebuilt copy's base, never the removed lineage. One apply, discard, update or close runs per workspace, so a close while one is still running or waiting is refused with 409. The reply waits up to 30 seconds; past that it is 202 with state queued or running. Every close joins the lane, even if an earlier close finished. It runs after preceding turns and succeeds if no copy remains.\n\n" +
+			"A person rarely needs it: AgentBus puts a copy away by itself once its work is all applied or discarded and the workspace has been quiet for [workspaces] put_away_after_minutes (30 by default, 0 is off). It does the same as a close, and records workspace.closed with put_away. A copy with work not applied is never put away; if anything happened in the workspace since, it does nothing and records workspace.kept with why.",
 		replies: []reply{ok(200, CloseState{}, "Closed: the copy was removed. already true: this workspace was permanently closed by an older build."),
 			ok(202, CloseState{}, "The close has not finished yet (it waits behind a running turn)."),
 			badRequest,

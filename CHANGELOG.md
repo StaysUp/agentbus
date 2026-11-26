@@ -5,6 +5,24 @@ All notable changes to AgentBus. Full notes for each release are on the
 
 ## Unreleased
 
+### Added
+- **A Copy workspace puts itself away.** Once its work is all applied or discarded and the
+  workspace has been quiet for 30 minutes, AgentBus removes the copy itself, as Close does.
+  Sessions and the record stay, and the next turn makes a fresh copy. A copy with unapplied work
+  is never touched. If anything happened in the workspace since (a turn, an apply, a discard, an
+  update, a preview, a close), or work is waiting in it, the put-away does nothing. The record says
+  which: `workspace.closed` with `put_away` (the on and event that queued it, when it was queued
+  and when it came due), or `workspace.kept` with why. The quiet time is a setting,
+  `[workspaces] put_away_after_minutes` (30 by default, 0 is off).
+- **A job may wait until a time.** A job can carry a time before which no runner takes it
+  (`not_before`). Until then it holds no place in its workspace's lane, so a turn sent meanwhile
+  runs at once. The put-away is the first job that uses it.
+- **An on may watch the record and queue a job.** Besides "a turn completed, deliver its reply",
+  an on can now watch a kind of event on the record and queue a job in that event's workspace. It
+  keeps a cursor in the record and fires once per event. The put-away is control's first built-in
+  on, over `workspace.applied` and `workspace.discarded`. `POST /api/v0/ons` still registers only
+  a turn's on.
+
 ### Fixed
 - **An OpenRouter call on your own provider key (BYOK) was recorded as $0 and complete**
   ([#94](https://github.com/staysup/agentbus/issues/94)). On a BYOK call OpenRouter's `usage.cost`

@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
@@ -91,6 +92,12 @@ max_cost_usd_per_tree = 0.0  # USD the turns of one request tree may cost before
 [agent_api]
 apply = false        # apply a turn's changes to the person's folder, for a turn in its tree;
                      # off by default: only the main token applies
+
+# A sandbox workspace's copy whose work is all applied or discarded is put away
+# by itself once the workspace has been quiet this long. A copy with work not
+# applied is never touched. The next turn makes a fresh copy. 0 is off.
+[workspaces]
+put_away_after_minutes = 30
 `
 
 // defaultAllow is the allow list of a person who changed nothing: "*" (every
@@ -116,6 +123,9 @@ const (
 	DefaultMaxDepth       = 2
 	DefaultMaxJobsPerTurn = 10
 	DefaultMaxJobsPerTree = 30
+	// DefaultPutAwayAfterMinutes is how long a settled workspace stays quiet
+	// before its copy is put away (his call, 2026-11-26).
+	DefaultPutAwayAfterMinutes = 30
 )
 
 // Policy is the policy as written: folders as the person wrote them, ~ and
@@ -123,13 +133,14 @@ const (
 // Once read from a store every value is filled: a key left out holds its
 // default, and a list is empty, never null.
 type Policy struct {
-	Allow     []string `toml:"allow" json:"allow" doc:"Commands and tools agents may run without asking, for claude and codex alike: a command or tool:<name>. Absent in a PUT: default allow rules."`
-	Ask       []string `toml:"ask" json:"ask" doc:"Commands and tools that wait for a person before an agent runs them, for claude and codex alike. The gateway holds a matching call and records it for a person; an \"always\" moves the entry to allow and continues the session so the agent can run it, \"once\" lets it run that continuation turn only, a refusal records the decision. Forbid wins over ask; ask wins over allow."`
-	Forbid    []string `toml:"forbid" json:"forbid" doc:"Commands and tools agents may never run. The gateway refuses them."`
-	Isolation string   `toml:"isolation" json:"isolation,omitempty" doc:"Where a new session's turns run: auto (copy on macOS; overlay on Linux where the runner can mount one, else copy), overlay, copy (a copy of its folder as it is now), git (a git worktree with the folder's uncommitted edits, in a repo) or none (the folder itself). On ext4, copy and the overlay's snapshot copy every byte: use xfs, btrfs, git or none for a big folder. Absent in a PUT: auto."`
-	HomeFiles []string `toml:"home_files" json:"home_files" doc:"Files or folders under the home folder, each starting with ~/, copied into each session's own home at the same place at the start of each turn, such as ~/.aws/config."`
-	Limits    Limits   `toml:"limits" json:"limits" doc:"The limits on work agents ask for."`
-	AgentAPI  AgentAPI `toml:"agent_api" json:"agent_api" doc:"What a turn's own token may call."`
+	Allow      []string   `toml:"allow" json:"allow" doc:"Commands and tools agents may run without asking, for claude and codex alike: a command or tool:<name>. Absent in a PUT: default allow rules."`
+	Ask        []string   `toml:"ask" json:"ask" doc:"Commands and tools that wait for a person before an agent runs them, for claude and codex alike. The gateway holds a matching call and records it for a person; an \"always\" moves the entry to allow and continues the session so the agent can run it, \"once\" lets it run that continuation turn only, a refusal records the decision. Forbid wins over ask; ask wins over allow."`
+	Forbid     []string   `toml:"forbid" json:"forbid" doc:"Commands and tools agents may never run. The gateway refuses them."`
+	Isolation  string     `toml:"isolation" json:"isolation,omitempty" doc:"Where a new session's turns run: auto (copy on macOS; overlay on Linux where the runner can mount one, else copy), overlay, copy (a copy of its folder as it is now), git (a git worktree with the folder's uncommitted edits, in a repo) or none (the folder itself). On ext4, copy and the overlay's snapshot copy every byte: use xfs, btrfs, git or none for a big folder. Absent in a PUT: auto."`
+	HomeFiles  []string   `toml:"home_files" json:"home_files" doc:"Files or folders under the home folder, each starting with ~/, copied into each session's own home at the same place at the start of each turn, such as ~/.aws/config."`
+	Limits     Limits     `toml:"limits" json:"limits" doc:"The limits on work agents ask for."`
+	AgentAPI   AgentAPI   `toml:"agent_api" json:"agent_api" doc:"What a turn's own token may call."`
+	Workspaces Workspaces `toml:"workspaces" json:"workspaces" doc:"How AgentBus looks after sandbox workspaces' copies."`
 
 	// where and fix say, in a turn's refusal, where the policy came from and
 	// what to do: set by the store that read it (Error).
@@ -146,6 +157,23 @@ type Policy struct {
 // retired the switches for those: upgradeSteps).
 type AgentAPI struct {
 	Apply *bool `toml:"apply" json:"apply" doc:"Apply a turn's changes to the person's folder, for a turn token in its own workspace or one its session made. Off by default: only the main token applies. Absent in a PUT: false."`
+}
+
+// Workspaces says how AgentBus looks after sandbox workspaces' copies
+// ([workspaces]). A pointer is a key left out; once read from a store each is
+// set.
+type Workspaces struct {
+	PutAwayAfterMinutes *int `toml:"put_away_after_minutes" json:"put_away_after_minutes,omitempty" doc:"Minutes a sandbox workspace whose work is all applied or discarded stays quiet before AgentBus puts its copy away by itself. A copy with work not applied is never touched; the next turn makes a fresh copy. 0 is off. Absent in a PUT: 30."`
+}
+
+// PutAwayAfter is how long a settled workspace stays quiet before its copy is
+// put away; false when putting copies away is off.
+func (p Policy) PutAwayAfter() (time.Duration, bool) {
+	m := DefaultPutAwayAfterMinutes
+	if v := p.Workspaces.PutAwayAfterMinutes; v != nil {
+		m = *v
+	}
+	return time.Duration(m) * time.Minute, m > 0
 }
 
 // Limits are the caps on work agents ask for ([limits]). A pointer is a key
@@ -193,6 +221,7 @@ func (p *Policy) fill() {
 	setInt(&p.Limits.MaxDepth, DefaultMaxDepth)
 	setInt(&p.Limits.MaxJobsPerTurn, DefaultMaxJobsPerTurn)
 	setInt(&p.Limits.MaxJobsPerTree, DefaultMaxJobsPerTree)
+	setInt(&p.Workspaces.PutAwayAfterMinutes, DefaultPutAwayAfterMinutes)
 	if p.Limits.MaxCostUSDPerTree == nil {
 		off := 0.0
 		p.Limits.MaxCostUSDPerTree = &off
@@ -219,6 +248,9 @@ func (p *Policy) Check() error {
 		if l.v != nil && *l.v < 0 {
 			return fmt.Errorf("[limits] %s must be 0 or more", l.name)
 		}
+	}
+	if v := p.Workspaces.PutAwayAfterMinutes; v != nil && *v < 0 {
+		return errors.New("[workspaces] put_away_after_minutes must be 0 (off) or more")
 	}
 	if c := p.Limits.MaxCostUSDPerTree; c != nil && (*c < 0 || *c != *c) {
 		return errors.New("[limits] max_cost_usd_per_tree must be 0 (off) or more")
@@ -286,7 +318,7 @@ func parsePolicy(b []byte) (Policy, error) {
 		return false
 	})
 	if len(extra) > 0 {
-		return Policy{}, fmt.Errorf("unknown key %s; the keys are allow, ask, forbid, isolation, home_files, [limits] and [agent_api] (see the README)", strconv.Quote(extra[0].String()))
+		return Policy{}, fmt.Errorf("unknown key %s; the keys are allow, ask, forbid, isolation, home_files, [limits], [agent_api] and [workspaces] (see the README)", strconv.Quote(extra[0].String()))
 	}
 	if err := p.Check(); err != nil {
 		return Policy{}, err
@@ -467,7 +499,7 @@ func DecodePolicyChange(b []byte) (Policy, error) {
 		case errors.As(err, &se):
 			return Policy{}, errors.New("the body is not valid JSON")
 		case strings.HasPrefix(err.Error(), "json: unknown field "):
-			return Policy{}, fmt.Errorf("unknown key %s; the keys are allow, ask, forbid, isolation, home_files, limits and agent_api",
+			return Policy{}, fmt.Errorf("unknown key %s; the keys are allow, ask, forbid, isolation, home_files, limits, agent_api and workspaces",
 				strings.TrimPrefix(err.Error(), "json: unknown field "))
 		}
 		return Policy{}, errors.New("the body must be one JSON object: the policy")
@@ -498,7 +530,8 @@ func FormatPolicy(p Policy) []byte {
 		"home_files":       p.HomeFiles,
 		"limits.max_depth": *p.Limits.MaxDepth, "limits.max_jobs_per_turn": *p.Limits.MaxJobsPerTurn,
 		"limits.max_jobs_per_tree": *p.Limits.MaxJobsPerTree, "limits.max_cost_usd_per_tree": *p.Limits.MaxCostUSDPerTree,
-		"agent_api.apply": *p.AgentAPI.Apply,
+		"agent_api.apply":                   *p.AgentAPI.Apply,
+		"workspaces.put_away_after_minutes": *p.Workspaces.PutAwayAfterMinutes,
 	}
 	var out bytes.Buffer
 	section := ""

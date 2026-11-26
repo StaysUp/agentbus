@@ -1,8 +1,10 @@
 package jobs
 
 // Outcomes of jobs that ended with no finish (queue/lost.go): an apply
-// whose runner was lost. Control's sweep writes each one's turn.applied
-// to the record, then swaps the job's due mark for the event's id.
+// whose runner was lost, and a put-away control kept when it came due.
+// Control's sweep writes each one's event (workspace.applied,
+// workspace.kept) to the record, then swaps the job's due mark for the
+// event's id.
 
 import (
 	"github.com/staysup/agentbus/event"
@@ -36,6 +38,10 @@ func CloseLostApplies(q *queue.Queue, rec Appender) (int, error) {
 			ws := queue.CopyKey(j.Spec.Workspace, j.Session)
 			e := event.Event{ID: appliedID(j), Kind: event.WorkspaceApplied, Time: endedAt(j), Workspace: string(ws), Session: j.Session,
 				Turn: j.Links.AppliesTurn, Applied: AppliedOf(j, res)}
+			if j.Kind == queue.KindPutAway {
+				// A put-away control kept when it came due (queue/putaway.go).
+				e = event.Event{ID: keptID(j), Kind: event.WorkspaceKept, Time: endedAt(j), Workspace: string(ws), PutAway: PutAwayOf(j, res.Kept)}
+			}
 			_, err := rec.AppendOnce(e)
 			if err == nil {
 				err = q.KeepOutcome(j.ID, e.ID)
