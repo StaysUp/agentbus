@@ -3,9 +3,20 @@
 All notable changes to AgentBus. Full notes for each release are on the
 [releases page](https://github.com/staysup/agentbus/releases).
 
-## Unreleased
+## 0.6.6 (2026-11-26)
 
 ### Added
+- **Close a workspace.** `POST /api/v0/workspaces/{id}/close` ends a Copy workspace's copy for good:
+  the copy, its checkpoints and its applied state. Sessions and the record stay, and a session's
+  next turn gets a fresh copy. A close waits behind any turn, apply, discard or update in that
+  workspace. The cockpit lists each machine's open workspaces on its runner page, with Close.
+- **The owner on the record.** Every stored event carries the owner's id (`owner`, one per data
+  folder) beside the agent that acted. Events are history: changing access never rewrites them.
+- **One rule set per turn.** A turn runs under the rules saved when it starts: its commands, its
+  tools and its API calls alike, and `turn.started` records which (`rules_version`). An edit to
+  the rules applies from the next turn. A start sent again, the copy's preparation and a reopened
+  store all keep the turn's saved rules.
+- **OpenCode on xAI**, with the xAI API key set in Settings.
 - **A session in several folders.** `POST /api/v0/workspaces` takes `folders` (2 to 8, on one
   machine, Copy only). The copy holds each folder side by side under its name, and the agent works
   at its top. Review lists every folder's files under its name. Apply checks every folder before it
@@ -14,6 +25,16 @@ All notable changes to AgentBus. Full notes for each release are on the
   or discarded.
 
 ### Changed
+- **A turn is queued first.** `POST /api/v0/turns` answers at once, and the `wait` parameter is
+  gone: it held the reply up to 30 seconds and refused an agent's token without `wait=false`. A
+  turn that cannot start, such as one whose program is missing on the runner, is recorded as
+  failed with its reason.
+- **One auth check.** Every route asks the caller's grant one question, whether an action may
+  happen in a place, and the grant answers. Who asked whom is stored once.
+- **An agent reads the sessions of the workspaces in its reach**, by one rule, and may watch any
+  turn it may read. A watch an agent registers counts under the job limits.
+- **An approval answered already replies 409**, as one still being answered does. 404 means no
+  approval by that id.
 - **An agent may do what you may, narrowed by three things only.** Where it works (a Copy session
   reaches its own workspace and the copies its session made; a Direct session reaches its machine),
   your brakes (Agents may apply, the command and tool rules, the limits on depth, jobs and cost),
@@ -49,6 +70,8 @@ All notable changes to AgentBus. Full notes for each release are on the
   found again at every checkpoint, so they are in Review, Apply, Discard and Update like any other.
   A repo the folder's `.gitignore` ignores stays out, as before. Sessions started earlier keep
   their old behaviour.
+- The gateway decides a codex `exec` command known only at run time as `$cmd`. Thanks to Kofi
+  Akpor (`akpor-kofi`, #80).
 
 ## 0.6.5 (2026-11-24)
 
