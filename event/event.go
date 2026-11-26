@@ -343,6 +343,10 @@ type Usage struct {
 	// CostUSD is what the vendor says it charged for the call, in US
 	// dollars: OpenRouter's usage.cost. Nil when it said nothing.
 	CostUSD *float64 `json:"cost_usd,omitempty" doc:"What the vendor says it charged for the call, in US dollars, such as OpenRouter's usage.cost. Absent when it said nothing; then the cost comes from the price table."`
+	// CostPartial means CostUSD leaves out part of the charge: an OpenRouter
+	// call on the person's own provider key (BYOK) whose reply gave
+	// OpenRouter's fee but not the provider's charge.
+	CostPartial bool `json:"cost_partial,omitempty" doc:"cost_usd leaves out part of the charge, such as the provider's charge on an OpenRouter call with your own key (BYOK) that OpenRouter did not report. The call's cost is then incomplete."`
 }
 
 // WorkspaceFolderEntry is one folder of a workspace with several, on its

@@ -3,6 +3,17 @@
 All notable changes to AgentBus. Full notes for each release are on the
 [releases page](https://github.com/staysup/agentbus/releases).
 
+## Unreleased
+
+### Fixed
+- **An OpenRouter call on your own provider key (BYOK) was recorded as $0 and complete**
+  ([#94](https://github.com/staysup/agentbus/issues/94)). On a BYOK call OpenRouter's `usage.cost`
+  holds only its own fee, often 0, and the provider's charge is in
+  `cost_details.upstream_inference_cost`. The call's cost is now both, in all three formats (Chat
+  Completions, Responses and Anthropic Messages). A BYOK reply without the provider's charge
+  records the fee as an incomplete cost, with `usage.cost_partial`, so a tree's cost limit no longer
+  reads the call as free and complete. `is_byok` is no longer reported as an unexpected field.
+
 ## 0.6.6 (2026-11-26)
 
 ### Added

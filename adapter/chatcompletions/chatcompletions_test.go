@@ -444,3 +444,23 @@ func TestXAICostTicks(t *testing.T) {
 }
 
 func ptr(f float64) *float64 { return &f }
+
+// An OpenRouter call on the person's own provider key (BYOK) reports only
+// OpenRouter's fee in usage.cost; the provider's charge is
+// cost_details.upstream_inference_cost (issue #94, payload from
+// anomalyco/opencode#60558, 2026-11-26). The call's cost is both. Without
+// the upstream cost the fee alone is partial.
+func TestOpenRouterBYOKCost(t *testing.T) {
+	const head = `{"model":"openai/gpt-6.1-sol","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x"}}],`
+	evs := reply(t, 200, "application/json", []byte(head+`"usage":{"prompt_tokens":33,"completion_tokens":5,"total_tokens":38,"cost":0,"is_byok":true,`+
+		`"cost_details":{"upstream_inference_cost":0.000232,"upstream_inference_prompt_cost":0.000132,"upstream_inference_completions_cost":0.0001}}}`))
+	if u := evs[0].Usage; u == nil || u.CostUSD == nil || *u.CostUSD != 0.000232 || u.CostPartial {
+		t.Fatalf("usage = %+v", evs[0].Usage)
+	}
+	wantKinds(t, evs, event.ModelResponded, event.TurnCompleted)
+	evs = reply(t, 200, "application/json", []byte(head+`"usage":{"prompt_tokens":33,"completion_tokens":5,"total_tokens":38,"cost":0,"is_byok":true,`+
+		`"cost_details":{"upstream_inference_cost":null}}}`))
+	if u := evs[0].Usage; u == nil || u.CostUSD == nil || *u.CostUSD != 0 || !u.CostPartial {
+		t.Fatalf("no upstream cost: usage = %+v", evs[0].Usage)
+	}
+}
