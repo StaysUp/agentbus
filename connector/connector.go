@@ -426,8 +426,11 @@ var applyMu sync.Mutex
 // *Conflict, and nothing is written. What the folder holds at a path is what
 // a checkpoint would list there (lookup). Then every new file is written out
 // of sight (staged) before any is put in place, so a file that cannot be read
-// from the store writes nothing either. Only a failure while files are put
-// in place leaves some written; ErrPartial says so, and Applied lists them.
+// from the store writes nothing either. After staging, each file to write or
+// remove is looked at again before the first is put in place: one the person
+// changed meanwhile refuses the apply as the check would have. Only a
+// failure while files are put in place leaves some written; ErrPartial says
+// so, and Applied lists them.
 func (c *Connector) Apply(ctx context.Context, ref, from, to string) (Applied, error) {
 	return c.ApplyPlaces(ctx, []workspace.Place{{Ref: ref}}, from, to, false)
 }
@@ -648,6 +651,13 @@ func (c *Connector) apply(ctx context.Context, ref string, csFrom, csTo *workspa
 		staged     string
 		removeOnly bool
 		respelt    string // the path removed that rel spells in another way
+		// What the conflict check found, for the look again before any
+		// write: the step, whether a file stood there, its stat and, when
+		// the check read it, its hash.
+		step  workspace.Step
+		there bool
+		seen  fs.FileInfo
+		hash  string
 	}
 	var ops []*op
 	var conflict Conflict
@@ -660,11 +670,15 @@ func (c *Connector) apply(ctx context.Context, ref string, csFrom, csTo *workspa
 		name := filepath.FromSlash(st.Path)
 		fa, fb := st.From, st.To
 		there, respelt, why := look.at(st)
+		var seen fs.FileInfo
+		if there {
+			seen, _ = rt.Lstat(name)
+		}
 		// A file the base recorded without a hash is as the base saw it,
 		// by size, modification time and mode: one still so in the folder
 		// is as at from, without reading it.
 		if there && fa != nil && fa.Hash == "" && sameStat(rt, name, *fa) {
-			ops = append(ops, &op{rel: st.Path, to: fb, removeOnly: fb == nil})
+			ops = append(ops, &op{rel: st.Path, to: fb, removeOnly: fb == nil, step: st, there: there, seen: seen})
 			shown = append(shown, shownFile{rel: st.Path, to: fb, exists: true, mode: fa.Mode})
 			continue
 		}
@@ -709,6 +723,10 @@ func (c *Connector) apply(ctx context.Context, ref string, csFrom, csTo *workspa
 			conflict.Files = append(conflict.Files, ConflictFile{st.Path, WhyRemoved})
 		default:
 			conflict.Files = append(conflict.Files, ConflictFile{st.Path, WhyChanged})
+		}
+		if len(ops) > nops {
+			o := ops[len(ops)-1]
+			o.step, o.there, o.seen, o.hash = st, there, seen, cur
 		}
 		if len(ops) > nops || len(conflict.Files) > nconf {
 			shown = append(shown, shownFile{rel: st.Path, to: fb, exists: exists || why == WhyNotFile, mode: mode, unread: why == WhyNotFile})
@@ -795,6 +813,20 @@ func (c *Connector) apply(ctx context.Context, ref string, csFrom, csTo *workspa
 	// stays, as before.
 	if err := ctx.Err(); err != nil {
 		return Applied{}, none, err // stopped before any file is put in place
+	}
+	// The person may write in the folder while the files are fetched and
+	// staged. Each file to write or remove is looked at again, before the
+	// first is: one no longer as the check found it, nor as the apply leaves
+	// it, refuses the apply as the check would have, and nothing is written.
+	again := newLookup(rt, steps)
+	for _, o := range ops {
+		if why := changedSince(rt, again, o.step, o.there, o.seen, o.hash); why != "" {
+			conflict.Files = append(conflict.Files, ConflictFile{o.rel, why})
+		}
+	}
+	if len(conflict.Files) > 0 {
+		sort.Slice(conflict.Files, func(i, j int) bool { return conflict.Files[i].Path < conflict.Files[j].Path })
+		return Applied{}, none, &conflict
 	}
 	out := Applied{Files: []string{}}
 	fail := func() (Applied, queue.PreviewResult, error) {
@@ -1066,6 +1098,45 @@ func copyInto(rt *os.Root, tmp, src string, perm fs.FileMode) error {
 		err = cerr
 	}
 	return err
+}
+
+// changedSince says why the file of st, about to be written or removed, is no
+// longer as the conflict check found it (there; seen, and hash when it read
+// it) nor as st leaves it, or "" when it is one of the two. look is a new
+// lookup, before anything is written. A file whose stat changed is read
+// again, so one touched and not changed is still as it was.
+func changedSince(rt *os.Root, look *lookup, st workspace.Step, there bool, seen fs.FileInfo, hash string) string {
+	now, _, why := look.at(st)
+	if why != "" {
+		return why
+	}
+	gone := WhyRemoved
+	if !there || st.To == nil {
+		gone = ""
+	}
+	if !now {
+		return gone
+	}
+	name := filepath.FromSlash(st.Path)
+	if there && seen != nil {
+		if fi, err := rt.Lstat(name); err == nil && fi.Mode() == seen.Mode() && fi.Size() == seen.Size() && fi.ModTime().Equal(seen.ModTime()) {
+			return ""
+		}
+	}
+	cur, mode, exists, err := hashIn(rt, name)
+	switch {
+	case err != nil:
+		return WhyNotFile
+	case !exists:
+		return gone
+	case there && seen != nil && hash != "" && cur == hash && mode == seen.Mode():
+		return ""
+	case st.To != nil && cur == st.To.Hash && mode&fs.ModeSymlink == st.To.Mode&fs.ModeSymlink && (!mode.IsRegular() || mode == st.To.Mode):
+		return ""
+	case !there:
+		return WhyAdded
+	}
+	return WhyChanged
 }
 
 // sameStat says whether the file name of rt has f's size, modification time
