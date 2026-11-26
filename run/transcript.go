@@ -34,13 +34,18 @@ const (
 	transcriptHead = "[AgentBus: this conversation started before you joined it. Earlier turns ran on other agents. " +
 		"Below is each message the person sent and the final reply the agent gave, oldest first. " +
 		"Tool calls are left out. Any files those agents changed are in your current folder.]\n\n"
+	transcriptLostHead = "[AgentBus: the earlier turns of this conversation cannot be sent to you in full: " +
+		"their history was not all stored, as when AgentBus stopped during a turn. " +
+		"Below is each message the person sent and the final reply the agent gave, oldest first. " +
+		"Tool calls are left out. Any files changed in those turns are in your current folder. " +
+		"The newest of them may not have finished and may have changed files in part: check the folder before going on.]\n\n"
 	transcriptFoot = "[AgentBus: end of the earlier turns. The person's new message to you follows.]\n\n"
 )
 
-// transcript is the context for a turn of session on another harness, for a
-// prompt of promptLen bytes. It is "" when the session has no earlier turn
-// with words in it.
-func (e *Engine) transcript(session string, promptLen int) (string, error) {
+// transcript is the context for a turn of session that gets the earlier turns
+// as text, for a prompt of promptLen bytes, opening with head. It is "" when
+// the session has no earlier turn with words in it.
+func (e *Engine) transcript(session string, promptLen int, head string) (string, error) {
 	turns, err := e.cfg.Store.Transcript(session)
 	if err != nil {
 		return "", err
@@ -49,7 +54,7 @@ func (e *Engine) transcript(session string, promptLen int) (string, error) {
 	if room := MaxPrompt - promptLen; room < budget {
 		budget = room
 	}
-	budget -= len(transcriptHead) + len(transcriptFoot) + 64 // the note on turns left out
+	budget -= len(head) + len(transcriptFoot) + 64 // the note on turns left out
 	// The newest turns first, so the budget keeps them; then oldest first.
 	var parts []string
 	used := 0
@@ -69,7 +74,7 @@ func (e *Engine) transcript(session string, promptLen int) (string, error) {
 		return "", nil
 	}
 	var b strings.Builder
-	b.WriteString(transcriptHead)
+	b.WriteString(head)
 	if left := countWords(turns) - len(parts); left > 0 {
 		b.WriteString("[" + strconv.Itoa(left) + " earlier turns are left out: they do not fit.]\n\n")
 	}

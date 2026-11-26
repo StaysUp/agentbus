@@ -137,6 +137,10 @@ type ReplayPlan struct {
 	// Refused, without Turn, says why the session cannot be continued by
 	// replay, naming the turn.
 	Refused string
+	// Unusable, with Refused, says the newest turn's history can never be
+	// rebuilt (replay.ErrUnusable), as after the service stopped during that
+	// turn. Without it, the history may still be stored later.
+	Unusable bool
 }
 
 // Config is what the engine needs.
@@ -519,10 +523,13 @@ func (e *Engine) next(req Request) (*Turn, error) {
 	// format, nor can a turn of codex on OpenRouter give or take one
 	// (replayLayout): it starts fresh with the earlier turns as plain text.
 	var from, recovered, recoveredWhy, context string
+	// lost says the newest turn's history can never be rebuilt, so a
+	// transcript says that instead of naming a switch of agent.
+	lost := false
 	continuity := e.Continuity(agent)
 	if agent != c.Harness || (continuity == ByReplay && !(replayLayout(agent, access) && replayLayout(c.Harness, c.Access))) {
 		continuity = ByTranscript
-		if context, err = e.transcript(session, len(req.Prompt)); err != nil {
+		if context, err = e.transcript(session, len(req.Prompt), transcriptHead); err != nil {
 			return fail(storeFailed)
 		}
 	}
@@ -544,14 +551,27 @@ func (e *Engine) next(req Request) (*Turn, error) {
 			// stored, still continues by the vendor's resume: its resume_id
 			// names the whole conversation. A session that did use replay
 			// does not: its resume_id names only its last turn's own process.
+			// It gets the earlier turns as text instead when that turn's
+			// history can never be rebuilt.
+			lost = plan.Unusable
 			used, err := e.cfg.Store.UsedReplay(session)
 			if err != nil {
 				return fail(storeFailed)
 			}
-			if used || c.ResumeID == "" {
+			switch {
+			case !used && c.ResumeID != "":
+				continuity = ByResume
+			case plan.Unusable:
+				// No history will ever be rebuilt for that turn, so waiting
+				// cannot help: the turn gets the earlier turns as text, as on
+				// a switch of agent, and the session goes on.
+				continuity = ByTranscript
+				if context, err = e.transcript(session, len(req.Prompt), transcriptLostHead); err != nil {
+					return fail(storeFailed)
+				}
+			default:
 				return fail(refuse(http.StatusConflict, "this session cannot be continued from here: "+plan.Refused))
 			}
-			continuity = ByResume
 		}
 	}
 	// A vendor's resume_id names the conversation of the turn that gave it.
@@ -560,7 +580,11 @@ func (e *Engine) next(req Request) (*Turn, error) {
 	// gets the earlier turns as text instead.
 	if continuity == ByResume && c.ResumeID != "" && c.ResumeStale {
 		continuity = ByTranscript
-		if context, err = e.transcript(session, len(req.Prompt)); err != nil {
+		head := transcriptHead
+		if lost {
+			head = transcriptLostHead
+		}
+		if context, err = e.transcript(session, len(req.Prompt), head); err != nil {
 			return fail(storeFailed)
 		}
 	}
@@ -610,9 +634,10 @@ const (
 	// ByResume: the vendor's own resume, from the session's resume_id.
 	ByResume = "resume"
 	// ByTranscript: the turn runs on another harness than the session's
-	// latest turn. The child starts fresh, and its prompt is the earlier
-	// turns as plain text (transcript.go), then the person's words. The
-	// turn's turn.started keeps that text in context.
+	// latest turn, or that turn's history can never be rebuilt for replay.
+	// The child starts fresh, and its prompt is the earlier turns as plain
+	// text (transcript.go), then the person's words. The turn's turn.started
+	// keeps that text in context.
 	ByTranscript = "transcript"
 )
 
