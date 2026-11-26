@@ -851,3 +851,124 @@ func TestIdentityRecoveredFromTheStore(t *testing.T) {
 		t.Errorf("with the first call unread, got %+v, want a refusal", rw)
 	}
 }
+
+// emptyForTheAPI says what the API refuses in a message that is not the last
+// one: no content, content that is only whitespace, a text block that is only
+// whitespace, or a breakpoint on an empty text block or on a thinking block.
+func emptyForTheAPI(m json.RawMessage) string {
+	var s string
+	if json.Unmarshal(field(m, "content"), &s) == nil {
+		if strings.TrimSpace(s) == "" {
+			return "no content"
+		}
+		return ""
+	}
+	blocks, ok := body.Elements(field(m, "content"))
+	if !ok {
+		return ""
+	}
+	if len(blocks) == 0 {
+		return "no content"
+	}
+	for _, b := range blocks {
+		if t := body.Label(b, "type"); (t == "thinking" || t == "redacted_thinking") && len(field(b, "cache_control")) > 0 {
+			return "a breakpoint on a " + t + " block"
+		}
+		if body.Label(b, "type") != "text" {
+			continue
+		}
+		var text string
+		_ = json.Unmarshal(field(b, "text"), &text)
+		if strings.TrimSpace(text) == "" {
+			return "a text block with no text"
+		}
+	}
+	return ""
+}
+
+// A model reply may be empty: no content, or only blank text, as an end_turn
+// right after tool results or a refusal can be. The API refuses a request with
+// such a message anywhere but last, and a breakpoint on an empty text block,
+// so the history the next turn gets must not carry it as it is. A reply with
+// other content (a tool call) is kept, without its blank text. One of thinking
+// alone keeps it and gets the note after it: the breakpoint cannot sit on a
+// thinking block.
+func TestEmptyReplyIsReplayedAsANote(t *testing.T) {
+	sig := `{"type":"thinking","thinking":"","signature":"U0lHLXR3bw=="}`
+	for _, tc := range []struct {
+		name, reply, stop string
+		notes             int
+		keep              []string
+	}{
+		{"no blocks", `{"role":"assistant","content":[]}`, "end_turn", 1, nil},
+		{"an empty string", `{"role":"assistant","content":""}`, "end_turn", 1, nil},
+		{"a blank string", `{"role":"assistant","content":"   \n"}`, "end_turn", 1, nil},
+		{"an empty text block", `{"role":"assistant","content":[{"type":"text","text":""}]}`, "end_turn", 1, nil},
+		{"a blank text block", `{"role":"assistant","content":[{"type":"text","text":"\n\n"}]}`, "end_turn", 1, nil},
+		{"two blank text blocks", `{"role":"assistant","content":[{"type":"text","text":" "},{"type":"text","text":""}]}`, "end_turn", 1, nil},
+		{"a refusal with nothing said", `{"role":"assistant","content":[]}`, "refusal", 1, nil},
+		{"thinking only", `{"role":"assistant","content":[` + sig + `]}`, "end_turn", 1, []string{`"signature":"U0lHLXR3bw=="`}},
+		{"thinking and blank text", `{"role":"assistant","content":[` + sig + `,{"type":"text","text":"\n"}]}`, "end_turn", 1, []string{`"signature":"U0lHLXR3bw=="`}},
+		{"redacted thinking only", `{"role":"assistant","content":[{"type":"redacted_thinking","data":"ZW5j"}]}`, "end_turn", 1, []string{`"data":"ZW5j"`}},
+		{"a reply with words", `{"role":"assistant","content":[` + sig + `,{"type":"text","text":"Noted: kiwi."}]}`, "end_turn", 0, []string{`"Noted: kiwi."`}},
+		{"blank text before a tool call", `{"role":"assistant","content":[{"type":"text","text":" "},{"type":"tool_use","id":"toolu_9","name":"Bash","input":{}}]}`, "tool_use", 1, []string{`"id":"toolu_9"`, `"tool_use_id":"toolu_9"`}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			src := newSource()
+			src.addTurn("t1", "remember the word kiwi", "")
+			src.addCall(t, "t1", "x-1", t1Last, tc.reply, tc.stop)
+			src.addTurn("t2", "which word?", "t1")
+			rw := New(src).Rewrite("s", "t2", []byte(t2First("which word?")))
+			if rw.Refuse != nil || rw.Body == nil {
+				t.Fatalf("refused or unchanged: %+v", rw.Events)
+			}
+			msgs := mustElements(t, field(rw.Body, "messages"))
+			for i, m := range msgs {
+				if role(m) == "system" {
+					continue
+				}
+				if why := emptyForTheAPI(m); why != "" && (i < len(msgs)-1 || strings.Contains(why, "breakpoint")) {
+					t.Errorf("message %d has %s, and the API refuses that: %s", i, why, m)
+				}
+			}
+			s := string(rw.Body)
+			if got := strings.Count(s, notePrefix); got != tc.notes {
+				t.Errorf("%d notes in the request, want %d: %s", got, tc.notes, s)
+			}
+			for _, w := range tc.keep {
+				if !strings.Contains(s, w) {
+					t.Errorf("the request lacks %s: %s", w, s)
+				}
+			}
+		})
+	}
+}
+
+// The note stands in for the empty reply in every later turn too: turn 3
+// builds its history from turn 2's request, which carries turn 1's.
+func TestEmptyReplyNoteLastsIntoTheNextTurn(t *testing.T) {
+	src := newSource()
+	src.addTurn("t1", "remember the word kiwi", "")
+	src.addCall(t, "t1", "x-1", t1Last, `{"role":"assistant","content":[]}`, "end_turn")
+	src.addTurn("t2", "which word?", "t1")
+	r := New(src)
+	rw := r.Rewrite("s", "t2", []byte(t2First("which word?")))
+	if rw.Refuse != nil || rw.Body == nil {
+		t.Fatalf("turn 2 refused or unchanged: %+v", rw.Events)
+	}
+	src.addCall(t, "t2", "x-2", string(rw.Body), `{"role":"assistant","content":[{"type":"text","text":"kiwi"}]}`, "end_turn")
+	src.addTurn("t3", "and again?", "t2")
+	rw3 := r.Rewrite("s", "t3", []byte(strings.ReplaceAll(t2First("and again?"), "env two", "env three")))
+	if rw3.Refuse != nil || rw3.Body == nil {
+		t.Fatalf("turn 3 refused or unchanged: %+v", rw3.Events)
+	}
+	msgs := mustElements(t, field(rw3.Body, "messages"))
+	for i, m := range msgs[:len(msgs)-1] {
+		if role(m) != "system" && emptyForTheAPI(m) != "" {
+			t.Errorf("turn 3's message %d is empty for the API: %s", i, m)
+		}
+	}
+	if got := strings.Count(string(rw3.Body), notePrefix); got != 1 {
+		t.Errorf("%d notes in turn 3's request, want 1", got)
+	}
+}
