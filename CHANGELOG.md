@@ -78,6 +78,14 @@ All notable changes to AgentBus. Full notes for each release are on the
 - **A reply the main token delivered into a session another tree had continued joined that
   tree.** A session's tree is now its first turn's: a session the person started has none, even
   after another tree's turn delivered into it.
+- **A compaction from before 0.6.7 no longer leaks the harness's summary into the next turn.** In a
+  turn with no earlier history, whose stored requests are the agent's own, own replay now applies
+  the gateway's own layout test to the stored request. So a record written before
+  `history.compacted` existed, or a call the gateway could not judge after a restart, is rebuilt
+  from before the compaction. Before, such a session failed to continue (before 0.6.7) or carried
+  the summary (0.6.7).
+- A history step that changed nothing is no longer recorded as `history.shortened`; the
+  compaction note says "1 more model call".
 - **An OpenRouter call on your own provider key (BYOK) was recorded as $0 and complete**
   ([#94](https://github.com/staysup/agentbus/issues/94)). On a BYOK call OpenRouter's `usage.cost`
   holds only its own fee, often 0, and the provider's charge is in

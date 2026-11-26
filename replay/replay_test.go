@@ -760,7 +760,8 @@ func TestCompactedTurnIsRebuiltFromTheRecord(t *testing.T) {
 	if countIn(msgs, "Summary: the person asked") != 0 || countIn(msgs, "remember the word kiwi") != 1 {
 		t.Errorf("history %s\nwant the record's request, not the harness's summary", msgText(msgs))
 	}
-	if countIn(msgs, "compacted its context") != 1 || countIn(msgs, "Noted: kiwi.") != 1 || countIn(msgs, "cut short") != 0 {
+	if countIn(msgs, "compacted its context") != 1 || countIn(msgs, "Noted: kiwi.") != 1 || countIn(msgs, "cut short") != 0 ||
+		countIn(msgs, "for 1 more model call, but") != 1 {
 		t.Errorf("history %s\nwant one note with the model's last words", msgText(msgs))
 	}
 	if roles(msgs[:7]) != "user,system,assistant,user,system,assistant,user" {

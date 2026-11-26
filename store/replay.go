@@ -222,8 +222,7 @@ type Call struct {
 	// kept.
 	Error string
 	// Compacted: the gateway judged this call a main-thread request its
-	// harness had compacted (a history.compacted with its exchange). The
-	// one place a compaction is decided; own replay reads only this.
+	// harness had compacted (a history.compacted with its exchange).
 	Compacted bool
 }
 

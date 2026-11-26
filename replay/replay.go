@@ -346,9 +346,9 @@ func (r *Replayer) turn(session, turn string) (turnInfo, error) {
 // thread's exactly when its system prompt is that one. No older call is ever
 // used in place of the newest main one.
 //
-// The newest main call's request must still carry the turn's prompt (a
-// compacted request does not, and its history would be the summary's, not the
-// turn's). Then:
+// When the newest main call is one its harness compacted (compacted), the
+// history is built from the turn's last call before that, never from the
+// harness's summary (compactedHistory). Otherwise:
 //   - a finished reply (status 200, no error, a stop reason other than
 //     tool_use, pause_turn or none): the request's messages and the reply;
 //   - a reply that asked for a tool (status 200, no error, tool_use): the
@@ -434,10 +434,7 @@ func (r *Replayer) history(session, turn string, keep bool) (*history, error) {
 		}
 		return r.keep(k, h, keep), nil
 	}
-	// The turn's main-thread calls, newest first: those with the main
-	// identity, and those the gateway judged compacted, which only a main
-	// request can be (a compacted codex request may carry another thread
-	// id, in records from before passOn).
+	// The turn's main-thread calls, newest first.
 	var mains []call
 	for _, c := range calls {
 		if isMain(c.id, main, true) || c.a.Compacted {
@@ -446,10 +443,9 @@ func (r *Replayer) history(session, turn string, keep bool) (*history, error) {
 	}
 	newest := &mains[0]
 	x := newest.a.Exchange
-	if newest.a.Compacted {
-		// The gateway judged it compacted when it forwarded it: the one place
-		// a compaction is decided. The history is built from the record,
-		// never from the harness's summary.
+	if r.compacted(*newest, ti) {
+		// The harness compacted its context inside the turn. The history is
+		// built from the record, never from the harness's summary.
 		h, err = r.compactedHistory(session, turn, ti, mains)
 		if err != nil {
 			return nil, err
@@ -555,15 +551,15 @@ const compactedResult = "This tool ran, but the agent's harness compacted its co
 // with its reply when that reply asked for tools (they ran: compactedResult),
 // then one note saying the turn went on, how many model calls followed, and
 // the model's last words when its newest reply finished the turn. mains are
-// the turn's main-thread calls, newest first, the newest one compacted. A
-// call is compacted exactly when the record says so (store.Call.Compacted).
+// the turn's main-thread calls, newest first, the newest one compacted
+// (compacted).
 func (r *Replayer) compactedHistory(session, turn string, ti turnInfo, mains []call) (*history, error) {
 	var base *call
 	var rep body.Reply
 	asked := false
 	for i := range mains {
 		c := &mains[i]
-		if c.a.Compacted {
+		if r.compacted(*c, ti) {
 			continue
 		}
 		if base == nil {
@@ -640,8 +636,12 @@ func (r *Replayer) compactedHistory(session, turn string, ti turnInfo, mains []c
 	case !finished:
 		how = "its last model call did not finish the turn"
 	}
+	calls := " more model calls"
+	if after == 1 {
+		calls = " more model call"
+	}
 	note := notePrefix + "The turn above went on after this point for " + strconv.Itoa(after) +
-		" more model calls, but its agent's harness compacted its context, so AgentBus shows the rest only in short."
+		calls + ", but its agent's harness compacted its context, so AgentBus shows the rest only in short."
 	if last != "" {
 		note += " The model's last words in the turn were:\n" + last + "\n"
 	}
@@ -662,6 +662,32 @@ type call struct {
 	msgs  []json.RawMessage
 	id    string
 	tools int
+}
+
+// compacted says a main-thread call is one its harness compacted: a request
+// not in the layout a fresh process sends (format.fresh), the one test of a
+// compaction. Who applies it depends on whether the record holds the agent's
+// own request:
+//   - a turn that carries no history (no replay_from) is never spliced, so
+//     its stored requests are the agent's own bytes, and the history applies
+//     the test to them. The gateway applies the same test to the same bytes
+//     (judge), so the two cannot disagree. This reads a record from before
+//     history.compacted, and a call the gateway could not judge (its main
+//     identity was not in memory after a restart), the same way (review of
+//     cbb539f: both were read as uncompacted).
+//   - a turn that carries a history has spliced requests in the record, which
+//     are not the agent's; there only the gateway's recorded verdict says. A
+//     request there that is not fresh before the history was carried is
+//     refused (splice), so it never stands in the record unjudged, and builds
+//     before 0.6.7 refused every such request.
+//
+// Not model.requested's replayed: a call through control's relay, as every
+// runner's is, records 0 there even when the runner's gateway spliced it.
+func (r *Replayer) compacted(c call, ti turnInfo) bool {
+	if c.a.Compacted {
+		return true
+	}
+	return ti.from == "" && !r.f.fresh(request{msgs: c.msgs, tools: c.tools, id: c.id}, ti.prompt)
 }
 
 // keep stores h as turn k's history when keep is set, and returns it.
@@ -1277,9 +1303,9 @@ func (r *Replayer) mark(m map[[2]string]bool, session, turn string) bool {
 	return true
 }
 
-// compactedEvent is the gateway's verdict on one request, recorded on its
-// call: its harness had compacted it, and it went on as the harness sent it.
-// It is the only record of a compaction own replay reads (store.Call).
+// compactedEvent records, on one request's call, that its harness had
+// compacted it and it went on as the harness sent it: what people see. The
+// history reads the same fact from the request itself (compacted).
 func compactedEvent() []event.Event {
 	return []event.Event{{Kind: event.HistoryCompacted,
 		Text: "The agent's harness compacted its context in this request. AgentBus let it through as the harness sent it; the next turn is built from AgentBus's record, not from the harness's summary."}}

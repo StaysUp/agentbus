@@ -35,10 +35,9 @@ package replay
 // context items, OpenCode's system message), is never shortened: every
 // fresh request carries it anyway.
 //
-// A compaction is not judged here: the gateway judges each main request
-// once, by the test it forwards by (fresh), and records the verdict on the
-// call (history.compacted); the history reads only that verdict
-// (store.Call.Compacted).
+// A compaction is not judged here: one test (the format's fresh) decides it,
+// applied by the gateway as it forwards a request, and read back by the
+// history (Replayer.compacted).
 //
 // Each step is frozen by the record itself: the gateway stores the request it
 // sent, so the next turn's history is built from the shortened one, and a
@@ -155,9 +154,9 @@ func (r *Replayer) fit(session, from string, h *history, model string) (*history
 	segs := r.segments(session, from, msgs)
 	if len(segs) == 0 {
 		// No turn of the history is found by its person's message: nothing
-		// is a turn to shorten. Not seen; the step records it unchanged.
-		step.AfterTokens = total
-		return h, step
+		// is a turn to shorten, and a step that changed nothing is not
+		// recorded, as everywhere else in fit.
+		return h, nil
 	}
 	start := func(i int) int {
 		if i >= len(segs) {
