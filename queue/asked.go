@@ -8,7 +8,9 @@ package queue
 // ("mail"). The asking turn never waits.
 //
 // The caps, [limits] in permissions.toml, keep a chain of agents asking
-// agents from running away.
+// agents from running away. They are checked in one place, where any job is
+// made (budget.go, checkBudget). An on a turn token registers through POST
+// /api/v0/ons counts under the per-turn and per-tree caps too (countAsked).
 
 import (
 	"database/sql"
@@ -26,7 +28,7 @@ import (
 // person's turn asks for has depth 1, work that work asks for depth 2. A
 // delivered result has the depth of the work it carries. By and BySession are
 // the turn and session that asked for the job: the provenance the per-turn cap
-// (checkAsked) keys on and the record's "asked" origin (runner.go, turnview.go)
+// (countAsked) keys on and the record's "asked" origin (runner.go, turnview.go)
 // reads, both from the asking turn's token. They are empty on a delivered
 // result and on the person's own work. They moved here off the retired Asker
 // struct so a turn's origin survives once delivery moves to an on row (on.go).
@@ -47,56 +49,6 @@ type ResultOf struct {
 	Agent   string `json:"agent,omitempty"`   // the saved agent, or harness, that did it
 }
 
-// Limits are the caps on asked work: [limits] in permissions.toml, read for
-// each request by the API, which passes them here. A negative value is never
-// sent; 0 refuses all asked work of that kind.
-type Limits struct {
-	// MaxDepth: work may be asked for at most this many levels below the
-	// person's turn.
-	MaxDepth int
-	// MaxPerTurn: jobs one turn may ask for.
-	MaxPerTurn int
-	// MaxPerTree: jobs a whole request tree may ask for, over every level:
-	// everything that started from one person's session.
-	MaxPerTree int
-}
-
-// LimitError is a cap on asked work that was reached. Its text says which,
-// in fixed wording.
-type LimitError struct{ Msg string }
-
-func (e *LimitError) Error() string { return e.Msg }
-
-// checkAsked refuses a new asked job that would pass a cap. It runs in the
-// job's own transaction, so requests at once cannot all pass.
-func checkAsked(tx *sql.Tx, team string, links Links, lim Limits) error {
-	if links.Chain == nil || links.Chain.By == "" {
-		return nil // not asked work: the person's own turn, or a delivered result
-	}
-	if links.Chain.Depth < 1 {
-		return ErrBadState
-	}
-	if links.Chain.Depth > lim.MaxDepth {
-		return &LimitError{fmt.Sprintf("work may be asked for at most %d levels below the person's turn, and this would be level %d (Depth in Settings, Limits)", lim.MaxDepth, links.Chain.Depth)}
-	}
-	var n int
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND json_extract(links, '$.chain.by') = ?
-		AND json_extract(links, '$.chain.by_session') = ?`, team, links.Chain.By, links.Chain.BySession).Scan(&n); err != nil {
-		return fmt.Errorf("queue: count asked: %w", err)
-	}
-	if n >= lim.MaxPerTurn {
-		return &LimitError{fmt.Sprintf("one turn may ask for at most %s, and this turn has asked for %d (Turns per request in Settings, Limits)", turnsOrReviews(lim.MaxPerTurn), n)}
-	}
-	if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND json_extract(links, '$.chain.by') IS NOT NULL
-		AND json_extract(links, '$.chain.root') = ?`, team, links.Chain.Root).Scan(&n); err != nil {
-		return fmt.Errorf("queue: count asked: %w", err)
-	}
-	if n >= lim.MaxPerTree {
-		return &LimitError{fmt.Sprintf("work started from one session may ask for at most %s in all, and %d have been asked for (Turns per request tree in Settings, Limits)", turnsOrReviews(lim.MaxPerTree), n)}
-	}
-	return nil
-}
-
 // turnsOrReviews is n turns or reviews, in words: what an agent may ask
 // for. A job is the queue's word, not the API's.
 func turnsOrReviews(n int) string {
@@ -107,13 +59,18 @@ func turnsOrReviews(n int) string {
 }
 
 // CreateTurnLinked makes a turn job, with links and the caps held to lim,
-// checked in the same transaction. A turn of a session whose turn runs waits
+// checked in the same transaction. lim binds asked work only (links name the
+// asking turn, Chain.By): the person's own turn is held to no cap. A turn of a session whose turn runs waits
 // behind it in the queue. B15 (his call (a), 2026-11-19): if deliver is set, it
 // records the delivery on in that same transaction, so starting the turn and
 // arranging its reply are one atomic write under one authorization. A nil
 // deliver registers no on; POST /api/v0/ons registers one separately.
 func (q *Queue) CreateTurnLinked(team, key string, spec Spec, links Links, lim Limits, deliver *Delivery) (Job, bool, error) {
-	return q.create(team, KindTurn, key, spec, links, lim, string(spec.Session), deliver)
+	var budget *Limits
+	if links.Chain != nil && links.Chain.By != "" {
+		budget = &lim
+	}
+	return q.create(team, KindTurn, key, spec, links, budget, string(spec.Session), deliver)
 }
 
 // SessionRoot is the root of the request tree a session was started in: the
@@ -128,10 +85,10 @@ func (q *Queue) SessionRoot(team, session string) (string, error) {
 
 // SessionChain is the request tree a session's own turns belong to: the root and
 // depth of its first rooted turn job, or ("", 0) for a session the person
-// started (which has no tree). A delivered result joins the RECEIVING session's
-// tree with these, so it counts against that tree's caps like any other turn
-// (his rule, 2026-11-19: every turn is a turn; a delivered answer is no
-// exception). B15 dropped the review kind, so only turn jobs carry a chain here.
+// started (which has no tree). A delivered result the main token asked for
+// joins the RECEIVING session's tree with these; one a turn asked for joins the
+// asking turn's tree instead (deliverResult). B15 dropped the review kind, so
+// only turn jobs carry a chain here.
 func (q *Queue) SessionChain(team, session string) (root string, depth int, err error) {
 	var r sql.NullString
 	var d sql.NullInt64
@@ -145,30 +102,6 @@ func (q *Queue) SessionChain(team, session string) (root string, depth int, err 
 		return "", 0, fmt.Errorf("queue: read session chain: %w", e)
 	}
 	return r.String, int(d.Int64), nil
-}
-
-// TreeSessions are the sessions work in root's request tree ran in: each
-// asked turn's session, and each asked review's own session once its turn
-// has started. root itself is not among them unless work ran there.
-func (q *Queue) TreeSessions(team, root string) ([]string, error) {
-	rows, err := q.db.Query(`SELECT DISTINCT session FROM jobs WHERE team = ? AND kind = 'turn' AND session IS NOT NULL
-		AND json_extract(links, '$.chain.root') = ?
-		UNION SELECT DISTINCT json_extract(e.data, '$.session') FROM jobs j JOIN attempts a ON a.job = j.id
-		JOIN attempt_events e ON e.attempt = a.id WHERE j.team = ? AND j.kind = 'review' AND e.kind = 'turn.created'
-		AND json_extract(j.links, '$.chain.root') = ? AND json_extract(e.data, '$.session') IS NOT NULL`, team, root, team, root)
-	if err != nil {
-		return nil, fmt.Errorf("queue: list tree sessions: %w", err)
-	}
-	defer rows.Close()
-	var out []string
-	for rows.Next() {
-		var s string
-		if err := rows.Scan(&s); err != nil {
-			return nil, fmt.Errorf("queue: list tree sessions: %w", err)
-		}
-		out = append(out, s)
-	}
-	return out, rows.Err()
 }
 
 // SessionFolder is the folder the session's first turn named, or its repo
@@ -203,8 +136,10 @@ func (q *Queue) SessionFolder(team, session string) (ref, machine string, repo b
 // the agent of the asking turn, as agent reads it now: every turn names its
 // agent, and control names this one. name gives a saved agent's name for the
 // prompt; nil names it by id. agent nil runs it on the asking turn's agent as
-// that turn was asked.
-func (q *Queue) deliverResult(team, onID, toSession, askingTurn string, j Job, to func(session string) (DeliverTo, bool, error), name func(id string) string, agent AgentOf) (string, string, error) {
+// that turn was asked. budget is the caps the on recorded from the turn that
+// made it (nil for the main token's): the delivered turn is made under them,
+// so a tree over its cost cap gets no more turns this way either.
+func (q *Queue) deliverResult(team, onID, toSession, askingTurn string, j Job, to func(session string) (DeliverTo, bool, error), name func(id string) string, agent AgentOf, budget *Limits) (string, string, error) {
 	c, err := q.changesOf(j)
 	if err != nil {
 		return "", "", err
@@ -251,6 +186,10 @@ func (q *Queue) deliverResult(team, onID, toSession, askingTurn string, j Job, t
 	// token names no asking turn (askingTurn ""); then it runs on the agent
 	// that did the work (the subject's own), so the delivery still has one.
 	from := j.Spec
+	// cause is the request tree that asked for this delivery: the asking turn's,
+	// read from its job as its token reads it (jobs/tokens.go): its chain's root
+	// and depth, or, for the person's own turn, its session at depth 0.
+	var cause *Chain
 	if askingTurn != "" {
 		asking, err := q.JobByTurn(team, askingTurn)
 		switch {
@@ -260,6 +199,10 @@ func (q *Queue) deliverResult(team, onID, toSession, askingTurn string, j Job, t
 			return "", "", err
 		}
 		from = asking.Spec
+		cause = &Chain{Root: asking.Session}
+		if c := asking.Links.Chain; c != nil {
+			cause = &Chain{Root: c.Root, Depth: c.Depth}
+		}
 	}
 	if agent != nil {
 		as, why := agent(from)
@@ -271,26 +214,40 @@ func (q *Queue) deliverResult(team, onID, toSession, askingTurn string, j Job, t
 	spec.Harness, spec.AgentID, spec.Access, spec.KeyEnv, spec.AgentModel = from.Harness, from.AgentID, from.Access, from.KeyEnv, from.AgentModel
 	res := &ResultOf{Job: j.ID, Kind: j.Kind, Session: resultSession(j), Turn: j.Turn, Agent: agentName(j.Spec)}
 	links := Links{ResultOf: res}
-	// The delivery is a turn in toSession, so it joins toSession's OWN request
-	// tree — its root and depth, never the subject's and never none (his rule,
-	// 2026-11-19: a delivered answer is a turn like any other of the receiving
-	// tree). Because its Chain.Root is that tree, its cost counts toward the
-	// tree's cost limit (TreeSessions reads it) and work IT asks for counts
-	// against the tree; it is not itself asked work, though, so the asked-work
-	// caps (checkAsked, keyed on Chain.By) skip it — By is empty on a delivery.
-	// The tree choice is right in every case: the ordinary ask (toSession is the
-	// asking session) carries that session's own root and depth; a main-token
-	// delivery to an unrelated session the person started carries no tree, so it
-	// cannot be pulled into the subject's tree; a delivery to a session already
-	// in another tree keeps THAT tree (found across three review rounds).
-	if root, depth, err := q.SessionChain(team, toSession); err != nil {
+	// Work a request tree causes stays in that tree, whatever session it lands
+	// in (his rule, 2026-11-25). A delivery a turn asked for (its on, or the
+	// delivery recorded with its ask) takes the ASKING turn's root and depth,
+	// never the receiving session's: an empty session has no tree, so taking
+	// its tree gave the delivery a new root at depth zero with fresh caps, and
+	// a turn could repeat that to pass the depth, job and cost limits (review
+	// P1, 2026-11-25). Because its Chain.Root is the asker's tree, it is
+	// recorded in that tree (treeOf), its cost counts toward that tree's cost
+	// cap, and work IT asks for counts against the tree. It is not itself asked
+	// work (By is empty), so the job caps do not count it; the on that asked for
+	// it is counted instead (countAsked), and the ask_agent on is covered by its
+	// job. The cost cap is checked for it (checkBudget). Being in a tree widens
+	// no reach: reach is by workspace (inAuthority), never by tree.
+	// An on the main token registered has no asking turn and no tree that
+	// caused it, so the delivery joins the receiving session's own tree, or
+	// none for a session the person started: a main-token delivery never pulls
+	// an unrelated session into the subject's tree.
+	// A reply to the person's own session, from its own turn, is that session's
+	// root-level turn, and so carries no chain, as the person's turns do.
+	if cause != nil {
+		if cause.Root != toSession || cause.Depth != 0 {
+			links.Chain = cause
+		}
+	} else if root, depth, err := q.SessionChain(team, toSession); err != nil {
 		return "", "", err
 	} else if root != "" {
 		links.Chain = &Chain{Root: root, Depth: depth}
 	}
-	d, _, err := q.create(team, KindTurn, ResultKey(onID, j.ID, toSession), spec, links, Limits{}, string(spec.Session), nil)
+	d, _, err := q.create(team, KindTurn, ResultKey(onID, j.ID, toSession), spec, links, budget, string(spec.Session), nil)
 	var removed *RunnerRemovedError
+	var limit *LimitError
 	switch {
+	case errors.As(err, &limit):
+		return "", limit.Msg, nil
 	case errors.As(err, &removed):
 		return "", "the asking session's machine " + strconv.Quote(removed.Machine) + " was removed", nil
 	case err == nil:

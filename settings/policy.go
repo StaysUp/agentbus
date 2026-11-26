@@ -26,8 +26,9 @@ import (
 // missing. Its lists are empty, and every other value is written out at its
 // default, so a new file changes nothing. A key left out of a file reads as
 // its default too. FormatPolicy writes a policy in this same layout.
-const PolicyStarter = `# What AgentBus turns may do without asking. Read at the start of every turn,
-# and by the API for each request a turn's token sends: an edit applies at once.
+const PolicyStarter = `# What AgentBus turns may do without asking. Read at the start of every turn:
+# everything a turn does is decided by it as it was then, and an edit applies
+# from the next turn.
 # A key left out reads as the default written here. Folders may start with ~.
 #
 # allow: commands and tools agents may run without asking.
@@ -75,14 +76,16 @@ isolation = "auto"
 # only. Vendor sign-in files never go.
 home_files = []      # e.g. ["~/.aws/config"]
 
-# Work agents ask other agents for. A request tree is the person's session and
-# every session work asked for from it, at any depth. A limit reached refuses
-# the request and says which limit.
+# Work agents ask other agents for. A request tree is the person's turns in one
+# session and every turn work asked for from them, at any depth, in whatever
+# session it ran. Each turn is in one tree, and the limits count by turn. A
+# limit reached refuses the request, or the reply an on would deliver, and
+# says which limit.
 [limits]
 max_depth = 2                # levels of asking below the person's turn
-max_jobs_per_turn = 10       # turns and reviews one turn may ask for
-max_jobs_per_tree = 30       # turns and reviews one request tree may ask for in all
-max_cost_usd_per_tree = 0.0  # USD one request tree may cost before asking stops; 0 is off
+max_jobs_per_turn = 10       # turns and reviews one turn may ask for, ons it registers included
+max_jobs_per_tree = 30       # turns and reviews one request tree may ask for in all, ons included
+max_cost_usd_per_tree = 0.0  # USD the turns of one request tree may cost before it gets no more; 0 is off
 
 # What a turn's own token may call.
 [agent_api]
@@ -138,20 +141,20 @@ type Policy struct {
 }
 
 // AgentAPI says what a turn token may call ([agent_api]). A pointer is a key
-// left out; once read from a store each is set. Within its request tree a
-// turn token may always read, list agents, start, review, stop and rename
-// (0.5.2 retired the switches for those: upgradeSteps).
+// left out; once read from a store each is set. Within its authority a turn
+// token may always read, list agents, start, review, stop and rename (0.5.2
+// retired the switches for those: upgradeSteps).
 type AgentAPI struct {
-	Apply *bool `toml:"apply" json:"apply" doc:"Apply a turn's changes to the person's folder, for a turn of a session in its request tree. Off by default: only the main token applies. Absent in a PUT: false."`
+	Apply *bool `toml:"apply" json:"apply" doc:"Apply a turn's changes to the person's folder, for a turn token in its own workspace or one its session made. Off by default: only the main token applies. Absent in a PUT: false."`
 }
 
 // Limits are the caps on work agents ask for ([limits]). A pointer is a key
 // left out; once read from a store each is set.
 type Limits struct {
 	MaxDepth          *int     `toml:"max_depth" json:"max_depth,omitempty" doc:"Levels of asking below the person's turn. Absent in a PUT: 2."`
-	MaxJobsPerTurn    *int     `toml:"max_jobs_per_turn" json:"max_jobs_per_turn,omitempty" doc:"Turns and reviews one turn may ask for. Absent in a PUT: 10."`
-	MaxJobsPerTree    *int     `toml:"max_jobs_per_tree" json:"max_jobs_per_tree,omitempty" doc:"Turns and reviews one request tree may ask for in all. Absent in a PUT: 30."`
-	MaxCostUSDPerTree *float64 `toml:"max_cost_usd_per_tree" json:"max_cost_usd_per_tree,omitempty" doc:"USD one request tree may cost before asking stops; 0 is off. Absent in a PUT: 0."`
+	MaxJobsPerTurn    *int     `toml:"max_jobs_per_turn" json:"max_jobs_per_turn,omitempty" doc:"Turns and reviews one turn may ask for. An on the turn registers with POST /api/v0/ons counts as one. Absent in a PUT: 10."`
+	MaxJobsPerTree    *int     `toml:"max_jobs_per_tree" json:"max_jobs_per_tree,omitempty" doc:"Turns and reviews one request tree may ask for in all. An on a turn of the tree registers with POST /api/v0/ons counts as one. Absent in a PUT: 30."`
+	MaxCostUSDPerTree *float64 `toml:"max_cost_usd_per_tree" json:"max_cost_usd_per_tree,omitempty" doc:"USD the turns of one request tree may cost in all before it gets no more turns: no asked work, and no reply an on delivers. Only the tree's own turns count, wherever they ran. 0 is off. Absent in a PUT: 0."`
 }
 
 // DefaultPolicy is the policy of a missing or empty file.

@@ -90,9 +90,10 @@ func getToolDef(t *testing.T, e *env, name string) toolreg.Tool {
 // same. The tool's list entry (schema, annotations, description) and a call's
 // result are byte-identical before removing it and after re-adding it.
 // A folder tool persisted in the registry from before 0.6.5 (removed and
-// re-added as a custom tool) is dropped on serve: its route ships no tool and
-// is not wrappable, so resolveServed rejects it the same way createTool rejects
-// a new one. Without this an upgraded install would keep serving read_file.
+// re-added as a custom tool) is dropped on serve: its route is gone (the file
+// routes were removed, his call 2026-11-25), so resolveServed rejects it the
+// same way createTool rejects a new one. Without this an upgraded install
+// would keep serving read_file.
 func TestPersistedFolderToolNotServed(t *testing.T) {
 	e := mcpEnv(t)
 	// Inject it straight into the registry, as a stored overlay would, past the
@@ -121,9 +122,7 @@ func TestPersistedFolderToolNotServed(t *testing.T) {
 
 func TestDefaultRemovedAndReaddedBehavesTheSame(t *testing.T) {
 	e := mcpEnv(t)
-	// The built-in tools are the two apps, ask_agent and review_turn. The B8
-	// folder tools (read_file, list_folder, write_file) are hidden in 0.6.5,
-	// so they are not served.
+	// The built-in tools are the two apps, ask_agent and review_turn.
 	if got := len(listToolSummaries(t, e)); got != 2 {
 		t.Fatalf("%d built-in tools, want 2", got)
 	}
@@ -261,11 +260,17 @@ func TestToolsRoutesGuardrails(t *testing.T) {
 	if resp, _ := do(t, e.req(t, "DELETE", "/api/v0/tools/no_such", nil)); resp.StatusCode != 404 {
 		t.Errorf("remove missing: %d", resp.StatusCode)
 	}
-	// A turn token cannot manage tools: the route is the main token's.
+	// A turn token reads the tools but never adds or removes one: a tool's
+	// name is what the rules match, so a new one could lift a brake (O2.3).
 	r := e.req(t, "GET", "/api/v0/tools", nil)
 	r.Header.Set("Authorization", "Bearer "+mcpWriteTok)
-	if resp, _ := do(t, r); resp.StatusCode == 200 {
-		t.Errorf("turn token reached /api/v0/tools: %d", resp.StatusCode)
+	if resp, _ := do(t, r); resp.StatusCode != 200 {
+		t.Errorf("turn token read /api/v0/tools: %d", resp.StatusCode)
+	}
+	r = e.req(t, "DELETE", "/api/v0/tools/my_tool", nil)
+	r.Header.Set("Authorization", "Bearer "+mcpWriteTok)
+	if resp, _ := do(t, r); resp.StatusCode != 403 {
+		t.Errorf("turn token removed a tool: %d", resp.StatusCode)
 	}
 }
 

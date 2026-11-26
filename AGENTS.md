@@ -74,8 +74,11 @@ may hold other projects' Go code. Go's own tools skip folders that start with `_
   agent version it was seen on, in a comment next to the code and in a test with that exact shape.
 - **Own replay covers the three formats.** `replay/` continues Claude, Codex and OpenCode sessions from the store.
   A change to how history is built needs a test for each agent.
-- **A turn that cannot start stores nothing.** If the agent's program is missing, the API answers
-  HTTP 400 with how to install it. Keep that check before anything is written.
+- **A turn is queued first, and a turn that cannot start ends failed.** `POST /api/v0/turns` never
+  waits for a runner. Whatever stops a turn (a missing program, a refused start) is recorded on the
+  turn as `failed` with its reason, so the record says what was tried and why it ended.
+  (His call, 2026-11-25: it replaced "a turn that cannot start stores nothing", which held only
+  through the old 30-second wait.)
 - **The client API describes itself.** Routes and types in `api/routes.go` generate the OpenAPI
   description, and that description is the contract. A behaviour change edits the route's
   `summary` and `doc`, or the types' `doc` tags. There is no hand-written copy to keep in step.

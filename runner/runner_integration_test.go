@@ -768,3 +768,53 @@ func TestSavedIdentityRefusesOlderControl(t *testing.T) {
 		t.Fatalf("a saved-identity runner did not refuse pre-0.6 control: %v", err)
 	}
 }
+
+// A close removes the workspace's copy to reclaim disk, leaving the person's
+// folder untouched, and the next turn rebuilds a fresh copy from the folder.
+func TestCloseRemovesTheCopyAndRebuilds(t *testing.T) {
+	src := t.TempDir()
+	write(t, filepath.Join(src, "a.txt"), "a1")
+	w := newWorld(t, 2, true)
+	p := settings.DefaultPolicy()
+	p.Isolation = settings.IsolationCopy
+	if _, _, err := w.settings.SetPolicy(p, settings.Any); err != nil {
+		t.Fatal(err)
+	}
+	first := w.create(t, queue.Spec{Harness: "claude", Folder: src, Isolate: true, Prompt: "write b.txt b1\nhold"})
+	waitFor(t, "a turn", func() bool { return len(w.runs()) == 1 })
+	w.release()
+	waitFor(t, "the turn finished", func() bool { return w.job(t, first.ID).Ended != nil })
+
+	copyDir := filepath.Join(w.r.cfg.Workdir, first.Session)
+	if _, err := os.Stat(copyDir); err != nil {
+		t.Fatalf("the copy was not made: %v", err)
+	}
+
+	cj, _, err := w.q.Create(queue.DefaultTeam, queue.KindClose, "",
+		queue.Spec{Session: ids.SessionID(first.Session), Workspace: ids.WorkspaceID(first.Session)},
+		queue.Links{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the close finished", func() bool { return w.job(t, cj.ID).Ended != nil })
+	if c := w.job(t, cj.ID); c.State != queue.Finished {
+		t.Fatalf("close %s: %s", c.State, c.Result)
+	}
+	// The copy is gone; the person's folder is untouched.
+	if _, err := os.Stat(copyDir); !os.IsNotExist(err) {
+		t.Fatalf("the copy was not removed: stat err %v", err)
+	}
+	if b, err := os.ReadFile(filepath.Join(src, "a.txt")); err != nil || string(b) != "a1" {
+		t.Fatalf("the close touched the person's folder: %q err %v", b, err)
+	}
+
+	// The next turn of the session rebuilds a fresh copy from the folder.
+	second := w.create(t, queue.Spec{Session: ids.SessionID(first.Session), Harness: "claude", Folder: src, Isolate: true, Prompt: "write c.txt c1"})
+	waitFor(t, "the second turn finished", func() bool { return w.job(t, second.ID).Ended != nil })
+	if n := w.job(t, second.ID); n.State != queue.Finished {
+		t.Fatalf("rebuilt turn %s (reason %s): %s", n.State, n.Reason, n.Result)
+	}
+	if _, err := os.Stat(copyDir); err != nil {
+		t.Fatalf("the next turn did not rebuild the copy: %v", err)
+	}
+}

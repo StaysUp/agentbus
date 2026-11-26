@@ -209,6 +209,63 @@ func TestApplyAllOrNothing(t *testing.T) {
 	}
 }
 
+// A mode the person changed in the folder is a local change, as a content
+// change is: an apply reports it instead of writing the turn's mode over it,
+// and its preview reports the same conflict. The turn's own chmod still
+// lands on a file the person left alone, and an apply over a file already
+// at the target does nothing.
+func TestApplyConflictingPermissions(t *testing.T) {
+	folder := t.TempDir()
+	write(t, folder, map[string]string{"s.sh": "x\n"})
+	c, ref := newConnector(t, folder)
+	base := fileOf("x\n", 0o644)
+	cs := putChangeset(t, c, workspace.Changeset{Space: "job_1", Checkpoint: "t1", Files: []workspace.FileChange{
+		{Path: "s.sh", Base: base, Now: fileOf("x\n", 0o755)},
+	}}, map[string]string{"s": "x\n"})
+
+	// The file is as the base left it: only the copy changed its mode, and
+	// the apply's chmod lands.
+	if _, err := c.Apply(context.Background(), ref, "", cs); err != nil {
+		t.Fatalf("apply over an untouched file: %v", err)
+	}
+	if fi, _ := os.Lstat(filepath.Join(folder, "s.sh")); fi.Mode().Perm() != 0o755 {
+		t.Fatalf("mode %v, want the turn's 0755", fi.Mode().Perm())
+	}
+	// Applied again there is nothing to do.
+	if got, err := c.Apply(context.Background(), ref, "", cs); err != nil || len(got.Files) != 0 {
+		t.Fatalf("apply over the target state: %+v %v", got, err)
+	}
+
+	// Back at the base but for the person's own chmod: the turn wants 0755
+	// over the local 0600, and that is a conflict, not a write over it.
+	write(t, folder, map[string]string{"s.sh": "x\n"})
+	os.Chmod(filepath.Join(folder, "s.sh"), 0o600)
+	_, err := c.Apply(context.Background(), ref, "", cs)
+	var cf *Conflict
+	if !errors.As(err, &cf) || len(cf.Files) != 1 || cf.Files[0].Path != "s.sh" || cf.Files[0].Why != WhyChanged {
+		t.Fatalf("apply over a local chmod: %v", err)
+	}
+	if fi, _ := os.Lstat(filepath.Join(folder, "s.sh")); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("a refused apply chmod'ed to %v", fi.Mode().Perm())
+	}
+	p, err := Jobs{Connector: c}.PreviewJob(context.Background(), []workspace.Place{{Ref: ref}}, "", cs, false)
+	if err != nil || len(p.Conflicts) != 1 || p.Conflicts[0].Path != "s.sh" || p.Conflicts[0].Why != WhyChanged {
+		t.Fatalf("preview over a local chmod: conflicts %+v err %v", p.Conflicts, err)
+	}
+
+	// The same for new content: a file still holding the base's bytes but
+	// the person's mode is changed, and the apply does not lose it.
+	both := putChangeset(t, c, workspace.Changeset{Space: "job_1", Checkpoint: "t2", Files: []workspace.FileChange{
+		{Path: "s.sh", Base: base, Now: fileOf("y\n", 0o644)},
+	}}, map[string]string{"s2": "y\n"})
+	if _, err := c.Apply(context.Background(), ref, "", both); !errors.As(err, &cf) || cf.Files[0].Why != WhyChanged {
+		t.Fatalf("apply of new content over a local chmod: %v", err)
+	}
+	if text(t, filepath.Join(folder, "s.sh")) != "x\n" {
+		t.Fatal("a refused apply wrote")
+	}
+}
+
 // Lend reads a file only while it is as the copy's base recorded it.
 func TestLend(t *testing.T) {
 	folder := t.TempDir()

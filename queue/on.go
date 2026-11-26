@@ -96,42 +96,86 @@ type On struct {
 // may watch one turn — so a key is never left unbound by a subject collision
 // (the round-3 finding). A keyless on is always a new registration.
 func (q *Queue) RegisterOn(team, event, subject, session, key string, maker Maker) (On, error) {
+	return q.RegisterOnLinked(team, event, subject, session, key, maker, nil, Limits{})
+}
+
+// RegisterOnLinked is RegisterOn for an on a turn token registers: asked is
+// the token's request tree and turn (Root and By; Depth is not read), and the
+// on counts as asked work under lim's per-turn and per-tree caps,
+// checked in the insert's own transaction (countAsked). A cap reached is a
+// *LimitError and stores nothing. A retry with a key already used returns its
+// on without counting again. nil asked is RegisterOn: no cap.
+func (q *Queue) RegisterOnLinked(team, event, subject, session, key string, maker Maker, asked *Chain, lim Limits) (On, error) {
 	if event != OnTurnCompleted {
 		return On{}, fmt.Errorf("%w: %q", ErrUnknownEvent, event)
 	}
-	if subject == "" || session == "" {
+	if subject == "" || session == "" || (asked != nil && asked.By == "") {
 		return On{}, ErrBadState
 	}
 	mk, err := json.Marshal(maker)
 	if err != nil {
 		return On{}, fmt.Errorf("queue: register on: %w", err)
 	}
+	// The on records that it counts as asked work, and the caps its maker
+	// was held to, which hold the turn it delivers (checkBudget). Who asked
+	// is its maker, and the maker's tree is its own job's (countAsked): no
+	// copy here.
+	var countsAsked, budget any
+	if asked != nil {
+		countsAsked, budget = 1, limitsColumn(&lim)
+	}
 	o := On{ID: NewID("on_"), Team: team, Event: event, Subject: subject, Session: session, Maker: maker, Created: nanos(q.now())}
-	// The insert and the dedup are ONE atomic statement: ON CONFLICT on the key
-	// index, not a read-then-insert. Two concurrent requests with the same key
-	// then both land here, one inserts and the other does nothing (never a
-	// uniqueness error, the round-4 finding). A keyless on never conflicts (the
-	// index is partial on idem_key != '') and is always new.
-	res, err := q.db.Exec(`INSERT INTO ons(id, team, event, subject, session, maker, idem_key, created) VALUES(?,?,?,?,?,?,?,?)
-		ON CONFLICT(team, idem_key) WHERE idem_key != '' DO NOTHING`,
-		o.ID, o.Team, o.Event, o.Subject, o.Session, string(mk), key, o.Created)
-	if err != nil {
-		return On{}, fmt.Errorf("queue: register on: %w", err)
-	}
-	if n, _ := res.RowsAffected(); n > 0 {
-		return o, nil // inserted: a new on, or a keyless one
-	}
-	// The key was already used: return that on when it is the same registration
-	// (same subject and session, so a retry is a no-op), else a conflict — the
-	// rule POST /api/v0/turns applies to a key with other fields.
-	existing, err := q.onByKey(team, key)
+	err = q.tx(func(tx *sql.Tx) error {
+		// A key already used returns its on (same subject and session, so a
+		// retry is a no-op) or is a conflict, the rule POST /api/v0/turns applies
+		// to a key with other fields. Read before the caps, so a retry is never
+		// refused for the on it made itself.
+		if key != "" {
+			existing, err := onByKey(tx, team, key)
+			switch {
+			case err == nil:
+				if existing.Subject != subject || existing.Session != session {
+					return ErrKeyConflict
+				}
+				o = existing
+				return nil
+			case !errors.Is(err, ErrNotFound):
+				return err
+			}
+		}
+		if asked != nil {
+			if err := countAsked(tx, team, *asked, lim); err != nil {
+				return err
+			}
+		}
+		// The insert and the dedup are ONE atomic statement: ON CONFLICT on the
+		// key index, not a read-then-insert. Two concurrent requests with the same
+		// key then both land here, one inserts and the other does nothing (never a
+		// uniqueness error, the round-4 finding). A keyless on never conflicts
+		// (the index is partial on idem_key != '') and is always new.
+		res, err := tx.Exec(`INSERT INTO ons(id, team, event, subject, session, maker, idem_key, created, asked, limits) VALUES(?,?,?,?,?,?,?,?,?,?)
+			ON CONFLICT(team, idem_key) WHERE idem_key != '' DO NOTHING`,
+			o.ID, o.Team, o.Event, o.Subject, o.Session, string(mk), key, o.Created, countsAsked, budget)
+		if err != nil {
+			return fmt.Errorf("queue: register on: %w", err)
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			return nil // inserted: a new on, or a keyless one
+		}
+		existing, err := onByKey(tx, team, key)
+		if err != nil {
+			return err
+		}
+		if existing.Subject != subject || existing.Session != session {
+			return ErrKeyConflict
+		}
+		o = existing
+		return nil
+	})
 	if err != nil {
 		return On{}, err
 	}
-	if existing.Subject != subject || existing.Session != session {
-		return On{}, ErrKeyConflict
-	}
-	return existing, nil
+	return o, nil
 }
 
 // EndedTurns lists turn jobs that ended at or before atOrBefore, oldest end
@@ -167,10 +211,10 @@ func (q *Queue) EndedTurns(after *Job, atOrBefore time.Time, limit int) ([]Job, 
 }
 
 // onByKey reads the on registered with idempotency key, or ErrNotFound.
-func (q *Queue) onByKey(team, key string) (On, error) {
+func onByKey(tx *sql.Tx, team, key string) (On, error) {
 	o := On{Team: team}
 	var mk string
-	switch err := q.db.QueryRow(`SELECT id, event, subject, session, maker, created FROM ons WHERE team = ? AND idem_key = ?`,
+	switch err := tx.QueryRow(`SELECT id, event, subject, session, maker, created FROM ons WHERE team = ? AND idem_key = ?`,
 		team, key).Scan(&o.ID, &o.Event, &o.Subject, &o.Session, &mk, &o.Created); {
 	case errors.Is(err, sql.ErrNoRows):
 		return On{}, ErrNotFound
@@ -292,18 +336,21 @@ func (q *Queue) FireOns(team string, ended func(turn string) (bool, error), to f
 	// and starve a newer on whose subject has ended (review P2, 2026-11-19). The
 	// set is small — a delivery on goes off as soon as it fires — and each ended
 	// check is an indexed lookup.
-	rows, err := q.db.Query(`SELECT o.id, o.subject, o.session, o.maker FROM ons o
+	rows, err := q.db.Query(`SELECT o.id, o.subject, o.session, o.maker, o.limits FROM ons o
 		WHERE o.team = ? AND o.event = ? AND o.off IS NULL
 		AND NOT EXISTS (SELECT 1 FROM on_fires f WHERE f.on_id = o.id AND f.key = o.subject)
 		ORDER BY o.created, o.id`, team, OnTurnCompleted)
 	if err != nil {
 		return 0, fmt.Errorf("queue: list ons: %w", err)
 	}
-	type pending struct{ id, subject, session, maker string }
+	type pending struct {
+		id, subject, session, maker string
+		limits                      sql.NullString
+	}
 	var ps []pending
 	for rows.Next() {
 		var p pending
-		if err := rows.Scan(&p.id, &p.subject, &p.session, &p.maker); err != nil {
+		if err := rows.Scan(&p.id, &p.subject, &p.session, &p.maker, &p.limits); err != nil {
 			rows.Close()
 			return 0, fmt.Errorf("queue: list ons: %w", err)
 		}
@@ -343,7 +390,11 @@ func (q *Queue) FireOns(team string, ended func(turn string) (bool, error), to f
 		if err != nil {
 			return n, err
 		}
-		did, why, err := q.deliverResult(team, p.id, p.session, mk.Turn, j, to, name, agent)
+		budget, err := limitsOf(p.limits)
+		if err != nil {
+			return n, err
+		}
+		did, why, err := q.deliverResult(team, p.id, p.session, mk.Turn, j, to, name, agent, budget)
 		if errors.Is(err, ErrFull) {
 			return n, nil // the queue is full: try again later, the on is still live
 		}

@@ -93,8 +93,7 @@ func (e *env) newSession(t *testing.T, folder string, sandbox bool) string {
 }
 
 // startFlow creates a sandbox workspace in folder, a session in it, and starts
-// a turn, returning the POST /turns response and its body. extra adds query
-// parameters (such as "wait=false") to the turn call.
+// a turn, returning the POST /turns response and its body.
 func (e *env) startFlow(t *testing.T, folder, agent, prompt string) (*http.Response, string) {
 	t.Helper()
 	ref, machine := e.folderRef(t, folder)

@@ -14,6 +14,32 @@ func turnsOf(s State) []string {
 	return out
 }
 
+func TestCloseResetsTheWholeCopyState(t *testing.T) {
+	var f Fold
+	f.Changed("t1", "cs1", "cp1")
+	f.Applied("t1", "cs1", true)
+	f.Updated(UpdateInForce{From: "theirs", To: "merged", TheirsCheckpoint: "tcp", MergedCheckpoint: "mcp"}, nil, true)
+	when := time.Date(2026, 11, 25, 0, 0, 0, 0, time.UTC)
+	f.Closed(when)
+	s := f.State()
+	if s.Head() != "" || s.Mark != -1 || s.Applied || s.AppliedTo != "" || s.AppliedTurn != "" || s.Update != nil || s.Markers || s.DiscardedAt != nil || s.Changed("t1") || s.CheckpointOf("cs1") != "" || s.CheckpointOf("merged") != "" || s.ClosedAt == nil {
+		t.Fatalf("state after close: %+v", s)
+	}
+	var restored Fold
+	restored.Restore(s.Snapshot())
+	if got := restored.State(); got.ClosedAt == nil || !got.ClosedAt.Equal(when) || got.Mark != -1 {
+		t.Fatalf("snapshot: %+v", got)
+	}
+	restored.Opened()
+	if got := restored.State(); got.ClosedAt != nil || got.Head() != "" {
+		t.Fatalf("reopened: %+v", got)
+	}
+	restored.Changed("t2", "cs2", "cp2")
+	if got := restored.State(); got.Head() != "t2" || got.AppliedTo != "" || got.Update != nil {
+		t.Fatalf("new copy: %+v", got)
+	}
+}
+
 // The appliable turns are the ones with a changeset, minus what a discard
 // dropped and an update folded; the mark is the furthest successful apply.
 func TestFoldAppliableAndMark(t *testing.T) {

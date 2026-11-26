@@ -71,8 +71,9 @@ func TestAskedCaps(t *testing.T) {
 	if _, err := askTurn(q, asked("c", "t_new", "p", 2), ""); !isLimit(err, "in all") {
 		t.Fatalf("job past the tree cap: %v", err)
 	}
-	// Another tree is not affected.
-	if _, err := askTurn(q, asked("q", "t_1", "q", 1), ""); err != nil {
+	// Another tree is not affected. Its asking turn is another turn: a turn id
+	// names one turn (NewID), so the per-turn cap keys on it alone.
+	if _, err := askTurn(q, asked("q", "t_q1", "q", 1), ""); err != nil {
 		t.Fatalf("another tree: %v", err)
 	}
 }

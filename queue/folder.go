@@ -27,7 +27,7 @@ func (q *Queue) RegisterFolder(team, machine, path string) (Job, error) {
 	// hands the job out before its path is here.
 	q.typedMu.Lock()
 	defer q.typedMu.Unlock()
-	job, _, err := q.create(team, KindFolder, "", Spec{Machine: machine}, Links{}, Limits{}, "", nil)
+	job, _, err := q.create(team, KindFolder, "", Spec{Machine: machine}, Links{}, nil, "", nil)
 	if err != nil {
 		return Job{}, err
 	}
@@ -65,7 +65,7 @@ func (q *Queue) AskHome(team, machine string) (Job, error) {
 	if err := q.dropJobs(team, KindHome, `cancel = ?`, 1); err != nil {
 		return Job{}, err
 	}
-	job, _, err := q.create(team, KindHome, "", Spec{Machine: machine}, Links{}, Limits{}, "", nil)
+	job, _, err := q.create(team, KindHome, "", Spec{Machine: machine}, Links{}, nil, "", nil)
 	return job, err
 }
 

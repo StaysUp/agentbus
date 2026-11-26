@@ -2,8 +2,11 @@ package run
 
 // The policy a turn runs under comes from the settings store
 // (settings.Store), read at the start of every turn, so an edit applies to
-// the next turn without a restart. A policy that cannot be used stops the
-// turn: a turn never runs without the policy the person wrote.
+// the next turn without a restart. A turn of control's takes it as control
+// read it when the turn's attempt started (Request.Settings), so its commands
+// and tools here and its calls to control's API are decided by one rule set.
+// A policy that cannot be used stops the turn: a turn never runs without the
+// policy the person wrote.
 //
 // What each list becomes, per harness (the flags are built in harness/):
 //
@@ -50,6 +53,27 @@ func (e *Engine) policy() (settings.Policy, error) {
 // its folders resolved as policy resolves them, the instructions before
 // {session} is filled in, and the settings version. No store gives every
 // default, at version 0.
+// settingsFor is the settings turn t runs under: the ones control took for it
+// when its attempt started, or, for a turn whose token this engine mints,
+// its own settings read now. Either way the folders are resolved here.
+func (e *Engine) settingsFor(t turn) (settings.Snapshot, error) {
+	switch {
+	case t.rulesErr != nil:
+		return settings.Snapshot{}, t.rulesErr
+	case t.settings == nil:
+		return e.settingsNow()
+	}
+	s, err := settings.FromRunner(*t.settings)
+	if err != nil {
+		return settings.Snapshot{}, err
+	}
+	home, _ := os.UserHomeDir()
+	if s.Policy, err = s.Policy.Resolve(home); err != nil {
+		return settings.Snapshot{}, err
+	}
+	return s, nil
+}
+
 func (e *Engine) settingsNow() (settings.Snapshot, error) {
 	if e.cfg.Settings == nil {
 		return settings.Snapshot{Policy: settings.DefaultPolicy(), Instructions: settings.DefaultInstructions}, nil

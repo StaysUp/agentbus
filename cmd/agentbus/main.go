@@ -1138,7 +1138,7 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 				// their provenance under links.asker, which this build no longer
 				// reads: (1) asked work that ended but was not delivered gets no
 				// on row, so FireOns never delivers it; (2) the asked-work caps
-				// (checkAsked) now count links.chain.by, so pre-upgrade jobs are
+				// (countAsked) now count links.chain.by, so pre-upgrade jobs are
 				// not counted and the per-turn and per-tree limits reset until
 				// those jobs drain. A one-time startup migration (register an on
 				// for each undelivered asked job, and backfill chain.by/by_session

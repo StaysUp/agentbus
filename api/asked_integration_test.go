@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
@@ -176,8 +177,8 @@ func deliverUntil(t *testing.T, e *env, session string, want int) []store.Turn {
 // ask drives the two steps ask_agent runs (his API rules, 2026-11-21): a turn
 // token opens a session in its own workspace, then starts the asked turn in it,
 // so the asked agent shares the asker's copy. body is the turn body with its
-// agent and prompt; ask injects the session it opened. It then registers a
-// delivery on, as the app does, and returns the asked turn.
+// agent and prompt; ask injects the session it opened and the delivery to
+// the asking session, as the app does, and returns the asked turn.
 func ask(t *testing.T, e *env, tok, body string) Started {
 	t.Helper()
 	// A turn's idempotency key covers both steps, so a retry reuses the same
@@ -198,20 +199,22 @@ func ask(t *testing.T, e *env, tok, body string) Started {
 	if err := json.Unmarshal([]byte(out), &sc); err != nil {
 		t.Fatal(err)
 	}
-	turnBody := strings.Replace(body, "{", `{"session":"`+sc.Session+`",`, 1)
-	// An ask is async: a turn token cannot wait for a turn it starts (it runs in
-	// the asker's workspace lane after the asker's turn ends), so wait=false, as
-	// the ask_agent app sends it.
-	code, out = as(t, e, tok, "POST", "/api/v0/turns?wait=false", turnBody)
+	// The reply comes back to the asking session through the on the turn's
+	// create records in the same write (delivery), as the ask_agent app sends
+	// it: the asked turn counts once under the caps. A separate POST
+	// /api/v0/ons would count as one more piece of asked work.
+	asker, found, err := e.store.SessionAsker(sc.Session)
+	if err != nil || !found {
+		t.Fatalf("ask: the asking session of %s: %q %v %v", sc.Session, asker, found, err)
+	}
+	turnBody := strings.Replace(body, "{", `{"session":"`+sc.Session+`","delivery":"`+asker+`",`, 1)
+	code, out = as(t, e, tok, "POST", "/api/v0/turns", turnBody)
 	if code != 202 {
 		t.Fatalf("ask %s: %d %s", turnBody, code, out)
 	}
 	var s Started
 	if err := json.Unmarshal([]byte(out), &s); err != nil {
 		t.Fatal(err)
-	}
-	if code, out := as(t, e, tok, "POST", "/api/v0/ons", `{"turn":"`+s.Turn+`"}`); code != 201 {
-		t.Fatalf("register delivery on for %s: %d %s", s.Turn, code, out)
 	}
 	return s
 }
@@ -230,7 +233,7 @@ func askRaw(t *testing.T, e *env, tok, body string) (int, string) {
 	if err := json.Unmarshal([]byte(out), &sc); err != nil {
 		t.Fatal(err)
 	}
-	return as(t, e, tok, "POST", "/api/v0/turns?wait=false", strings.Replace(body, "{", `{"session":"`+sc.Session+`",`, 1))
+	return as(t, e, tok, "POST", "/api/v0/turns", strings.Replace(body, "{", `{"session":"`+sc.Session+`",`, 1))
 }
 
 // callAskAgent drives the ask_agent app through the MCP endpoint with a turn's
@@ -412,8 +415,8 @@ func TestReviewTurnAppNoTurnDelivers(t *testing.T) {
 	}
 }
 
-// ask_agent's startTurn step does not wait for a runner (wait=false, his (d)
-// rule 2026-11-19): it returns once the turn is recorded, so registerOn runs in
+// ask_agent's startTurn step does not wait for a runner (POST /turns never
+// waits, C1 2026-11-25): it returns once the turn is recorded, so registerOn runs in
 // the same tool call even while the turn is only queued. Here the root turn
 // holds the one runner slot, so the asked turn cannot start during the call —
 // yet the app returns its id and its on is registered. When root ends and the
@@ -522,9 +525,10 @@ func TestAskAgentCallerStoppedStillDelivers(t *testing.T) {
 }
 
 // The public on routes honour the caller's token: a turn token registers an
-// on only for a turn its tree started, always delivering to its own session,
-// and removes only an on its own turn made; the main token names any turn and
-// the session. (B15: ons dedupe by idempotency_key only, so a keyless register
+// on for any turn it may read, its own session's too, delivering to a session
+// it may read (its own by default), and removes an on its own turn made or one
+// that delivers within its reach (O2.3); the main token names any turn and the
+// session. (B15: ons dedupe by idempotency_key only, so a keyless register
 // is a new on each time — several may watch one turn.)
 func TestOnAPIAuth(t *testing.T) {
 	e, dir := askEnv(t)
@@ -533,8 +537,11 @@ func TestOnAPIAuth(t *testing.T) {
 	other := e.firstTurn(t, gitRepo(t), "claude", "other", true)
 	child := ask(t, e, ptok, `{"agent":"claude","prompt":"child"}`)
 
-	// In-tree: the session is forced to the token's own, so one it sends is ignored.
-	code, out := as(t, e, ptok, "POST", "/api/v0/ons", `{"turn":"`+child.Turn+`","session":"s_not_mine"}`)
+	// A session outside its reach is refused; without one, its own is used.
+	if code, out := as(t, e, ptok, "POST", "/api/v0/ons", `{"turn":"`+child.Turn+`","session":"`+other.Session+`"}`); code != 403 || !strings.Contains(out, turnSessionRefused) {
+		t.Fatalf("register to a session outside its reach: %d %s, want 403", code, out)
+	}
+	code, out := as(t, e, ptok, "POST", "/api/v0/ons", `{"turn":"`+child.Turn+`"}`)
 	if code != 201 {
 		t.Fatalf("register in-tree: %d %s", code, out)
 	}
@@ -549,6 +556,36 @@ func TestOnAPIAuth(t *testing.T) {
 	if code, out := as(t, e, ptok, "POST", "/api/v0/ons", `{"turn":"`+other.Turn+`"}`); code != 403 {
 		t.Fatalf("out-of-tree register: %d %s, want 403", code, out)
 	}
+	// C2 (2026-11-25): a turn the token may read, though its own turn did not
+	// start it -- the review its builder asked for, a level below. The child
+	// cannot run while the parent's turn holds the lane, so its ask is put on
+	// the queue directly, as the child's POST /turns would.
+	code, out = as(t, e, ptok, "POST", "/api/v0/sessions", `{}`)
+	if code != 201 {
+		t.Fatalf("open the grandchild's session: %d %s", code, out)
+	}
+	var gs SessionCreated
+	if err := json.Unmarshal([]byte(out), &gs); err != nil {
+		t.Fatal(err)
+	}
+	cj, err := e.q.JobByTurn(queue.DefaultTeam, child.Turn)
+	if err != nil || cj.Links.Chain == nil {
+		t.Fatalf("child job: %+v %v", cj, err)
+	}
+	spec := cj.Spec
+	spec.Session, spec.Prompt = ids.SessionID(gs.Session), "review"
+	gj, _, err := e.q.CreateTurnLinked(queue.DefaultTeam, "", spec,
+		queue.Links{Chain: &queue.Chain{Root: cj.Links.Chain.Root, Depth: cj.Links.Chain.Depth + 1, By: child.Turn, BySession: child.Session}},
+		queue.Limits{MaxDepth: 10, MaxPerTurn: 10, MaxPerTree: 10}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, out := as(t, e, ptok, "GET", "/api/v0/turns/"+gj.Turn, ""); code != 200 {
+		t.Fatalf("the grandchild is readable: %d %s", code, out)
+	}
+	if code, out := as(t, e, ptok, "POST", "/api/v0/ons", `{"turn":"`+gj.Turn+`"}`); code != 201 || !strings.Contains(out, `"session":"`+p.Session+`"`) {
+		t.Fatalf("watch a readable turn its turn did not start: %d %s, want 201 to its own session", code, out)
+	}
 	// A key with '/' is refused, the same validator POST /turns uses: this is
 	// what reserves the internal delivery/ result/ apply/ namespaces, so a
 	// caller cannot register "delivery/<key>" and collide with a turn's own
@@ -557,10 +594,16 @@ func TestOnAPIAuth(t *testing.T) {
 	if code, out := as(t, e, ptok, "POST", "/api/v0/ons", `{"turn":"`+child.Turn+`","idempotency_key":"delivery/x"}`); code != 400 {
 		t.Fatalf("on with a '/' key: %d %s, want 400", code, out)
 	}
-	// A turn may not subscribe to its own turn (that would be a self-
-	// continuation dodging the asked-work caps).
-	if code, out := as(t, e, ptok, "POST", "/api/v0/ons", `{"turn":"`+p.Turn+`"}`); code != 403 {
-		t.Fatalf("self register: %d %s, want 403", code, out)
+	// A turn may watch a turn of its own session, its own included (O2.3):
+	// the on counts under the caps (TestOnCountsAsAskedWork). Removed again,
+	// so the parent's end delivers nothing here.
+	code, out = as(t, e, ptok, "POST", "/api/v0/ons", `{"turn":"`+p.Turn+`"}`)
+	var self OnView
+	if code != 201 || json.Unmarshal([]byte(out), &self) != nil {
+		t.Fatalf("self register: %d %s, want 201", code, out)
+	}
+	if code, out := as(t, e, ptok, "DELETE", "/api/v0/ons/"+self.ID, ""); code != 204 {
+		t.Fatalf("remove the self on: %d %s, want 204", code, out)
 	}
 	// The main token must name a session (an asked turn without one is 400),
 	// and a nonexistent turn is 404.
@@ -593,6 +636,39 @@ func TestOnAPIAuth(t *testing.T) {
 	}
 }
 
+// An on a turn token registers counts as asked work under the caps in
+// permissions.toml, with the turns it asks for (2026-11-25): a delivered turn
+// skips the caps, so a chain of ons over ended turns would otherwise run past
+// them. Past the cap, POST /api/v0/ons is 403 and says which cap; a retry
+// with the key of an on already made still returns it; the next ask meets the
+// same cap.
+func TestOnCountsAsAskedWork(t *testing.T) {
+	perm := filepath.Join(t.TempDir(), settings.PolicyFile)
+	if err := os.WriteFile(perm, []byte("[limits]\nmax_jobs_per_tree = 2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e, dir := askEnvWith(t, perm)
+	e.firstTurn(t, gitRepo(t), "claude", "parent", true)
+	ptok := tokenOf(t, dir, "parent")
+	child := ask(t, e, ptok, `{"agent":"claude","prompt":"child"}`)
+	code, out := as(t, e, ptok, "POST", "/api/v0/ons", `{"turn":"`+child.Turn+`","idempotency_key":"k1"}`)
+	if code != 201 {
+		t.Fatalf("the first on: %d %s", code, out)
+	}
+	if again, out2 := as(t, e, ptok, "POST", "/api/v0/ons", `{"turn":"`+child.Turn+`","idempotency_key":"k1"}`); again != 201 || out2 != out {
+		t.Fatalf("a retry with its key: %d %s, want 201 %s", again, out2, out)
+	}
+	code, out = as(t, e, ptok, "POST", "/api/v0/ons", `{"turn":"`+child.Turn+`"}`)
+	if code != 403 || !strings.Contains(out, "at most 2 turns or reviews in all") || !strings.Contains(out, "(Turns per request tree in Settings, Limits)") {
+		t.Fatalf("an on past max_jobs_per_tree = 2: %d %s", code, out)
+	}
+	if code, out := askRaw(t, e, ptok, `{"agent":"claude","prompt":"quick"}`); code != 403 || !strings.Contains(out, "(Turns per request tree in Settings, Limits)") {
+		t.Fatalf("an ask after the ons: %d %s, want the same cap", code, out)
+	}
+	release(dir, "parent")
+	release(dir, "child")
+}
+
 // A turn asks two agents with its token, in the person's folder: each runs in
 // a worktree of its own, says who asked it, and its result comes back to the
 // asking session as a later turn of its own, naming its worktree. A review it
@@ -620,8 +696,8 @@ func TestAskFanOutAndDeliver(t *testing.T) {
 		{"GET", "/api/v0/turns?session=" + c2.Session, "", 200},
 		{"GET", "/api/v0/turns/" + c1.Turn, "", 200},
 		{"GET", "/api/v0/sessions/" + c1.Session, "", 200},
-		{"POST", "/api/v0/turns?wait=false", `{"agent":"claude","prompt":"x","isolate":false}`, 400},
-		{"POST", "/api/v0/turns?wait=false", `{"agent":"claude","prompt":"x","folder":"` + filepath.Dir(repo) + `"}`, 400},
+		{"POST", "/api/v0/turns", `{"agent":"claude","prompt":"x","isolate":false}`, 400},
+		{"POST", "/api/v0/turns", `{"agent":"claude","prompt":"x","folder":"` + filepath.Dir(repo) + `"}`, 400},
 	} {
 		if code, out := as(t, e, ptok, tc.method, tc.path, tc.body); code != tc.want {
 			t.Errorf("parent %s %s: %d %s, want %d", tc.method, tc.path, code, out, tc.want)
@@ -640,12 +716,10 @@ func TestAskFanOutAndDeliver(t *testing.T) {
 	}{
 		{"GET", "/api/v0/sessions/" + p.Session + "/events", "", 200},
 		{"GET", "/api/v0/sessions/" + c2.Session + "/events", "", 200},
-		// It writes to no session but one its own tree opened: not its asker's,
-		// and not its own (it did not open its own session).
-		{"POST", "/api/v0/turns?wait=false", `{"agent":"claude","session":"` + p.Session + `","prompt":"x"}`, 403},
-		{"POST", "/api/v0/turns?wait=false", `{"agent":"claude","session":"` + c1.Session + `","prompt":"x"}`, 403},
-		// It may not stop the person's work.
-		{"POST", "/api/v0/turns/" + p.Turn + "/stop", "", 403},
+		// It may stop any turn it may read, as its owner may (O2.3): the
+		// person's turn has ended here, so the stop passes the door and is 409.
+		// A continuation in its reach is TestAskTokenContinuesTheAskedSession.
+		{"POST", "/api/v0/turns/" + p.Turn + "/stop", "", 409},
 	} {
 		if code, out := as(t, e, ctok, tc.method, tc.path, tc.body); code != tc.want {
 			t.Errorf("child %s %s: %d %s, want %d", tc.method, tc.path, code, out, tc.want)
@@ -755,12 +829,13 @@ func TestAskCaps(t *testing.T) {
 	release(dir, "ro")
 }
 
-// permissions.toml decides what a turn token may do, read for each request:
-// a cap changed in the file applies to the next request, a cost cap stops
-// asking once the tree has spent it, and a broken file refuses every turn
-// token's request. Within its request tree a turn token always reads, lists
+// permissions.toml decides what a turn token may do, as the turn took it when
+// it started (O2.4): a cap changed in the file, or a broken file, applies from
+// the next turn and never reaches a running one, and a cost cap stops asking
+// once the tree has spent it. Within its request tree a turn token always reads, lists
 // agents, starts, reviews, stops and renames: the switches 0.5.2 retired
-// still read, and change nothing. Outside its tree it reaches nothing. No
+// still read, and change nothing. In a copy, a session of another tree in its
+// own copy is outside its authority, and it reaches nothing there. No
 // setting opens the routes that change agents or tokens.
 func TestAskPolicyFromPermissions(t *testing.T) {
 	perm := filepath.Join(t.TempDir(), settings.PolicyFile)
@@ -781,15 +856,17 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 	if code != 403 || !strings.Contains(out, "at most 2 turns or reviews") || !strings.Contains(out, "(Turns per request in Settings, Limits)") {
 		t.Fatalf("past max_jobs_per_turn = 2: %d %s", code, out)
 	}
-	// The file is read again for the next request.
+	// A cap raised while the turn runs reaches the next turn, not this one.
 	write("[limits]\nmax_jobs_per_turn = 3\n")
-	ask(t, e, tok, `{"agent":"claude","prompt":"quick"}`)
-	// Phase 1 checks that need the asker's own live token: a broken file, and
-	// the routes that stay closed to a turn token (they take the main token),
-	// while rename in its own tree is allowed.
+	if code, out := askRaw(t, e, tok, `{"agent":"claude","prompt":"quick"}`); code != 403 || !strings.Contains(out, "at most 2 turns or reviews") {
+		t.Fatalf("a cap raised mid-turn reached the running turn: %d %s", code, out)
+	}
+	// Phase 1 checks that need the asker's own live token: a broken file does
+	// not reach it either, and the routes that stay closed to a turn token
+	// (they take the main token), while rename in its own tree is allowed.
 	write("[agent_api]\napply = all\n")
-	if code, out := as(t, e, tok, "GET", "/api/v0/harnesses", ""); code != 503 || !strings.Contains(out, "cannot be used") {
-		t.Errorf("broken file: %d %s", code, out)
+	if code, out := as(t, e, tok, "GET", "/api/v0/harnesses", ""); code != 200 {
+		t.Errorf("a file broken mid-turn reached the running turn: %d %s", code, out)
 	}
 	write("")
 	if code, out := as(t, e, tok, "PATCH", "/api/v0/sessions/"+root.Session, `{"title":"Named by a turn"}`); code != 200 || !strings.Contains(out, "Named by a turn") {
@@ -799,20 +876,26 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 		{"POST", "/api/v0/agents", `{"name":"x","harness":"claude","access":"subscription"}`},
 		{"PUT", "/api/v0/agents/a_x", `{"name":"x","harness":"claude","access":"subscription"}`},
 		{"DELETE", "/api/v0/agents/a_x", ""},
-		// The settings: a turn token neither reads nor writes them.
-		{"GET", "/api/v0/settings/permissions", ""},
+		// The settings: a turn token reads them but never writes them (O2.3).
 		{"PUT", "/api/v0/settings/permissions", `{"forbid":[]}`},
-		{"GET", "/api/v0/settings/instructions", ""},
 		{"PUT", "/api/v0/settings/instructions", `{"text":"x"}`},
 	} {
 		if code, out := as(t, e, tok, r[0], r[1], r[2]); code != 403 || !strings.Contains(out, "main token") {
 			t.Errorf("%s %s: %d %s, want 403", r[0], r[1], code, out)
 		}
 	}
+	for _, path := range []string{"/api/v0/settings/permissions", "/api/v0/settings/instructions"} {
+		if code, out := as(t, e, tok, "GET", path, ""); code != 200 {
+			t.Errorf("GET %s: %d %s, want 200", path, code, out)
+		}
+	}
 
-	// Phase 2: the asked "child" runs once the asker's turn ends; its own token
-	// reads and renames within its tree with the retired switches off, and
-	// reaches nothing outside it.
+	// Phase 2: the asked "child" runs once the asker's turn ends, under the
+	// file as it is then: every retired switch off, scope "session", and a
+	// cost cap. Its own token reads and renames within its tree with the
+	// retired switches off, and reaches nothing outside it.
+	write("[agent_api]\nscope = \"session\"\nread = false\nlist_agents = false\nstart = false\nreview = false\ncancel = false\nrename = false\n" +
+		"[limits]\nmax_cost_usd_per_tree = 0.25\n")
 	release(dir, "root")
 	child := tokenOf(t, dir, "child")
 	// Another tree: a session the person started on their own, in its own
@@ -821,7 +904,6 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 	// Every retired switch off, scope "session": the file reads, and the
 	// child's token still reads, lists, starts, reviews, stops and renames
 	// within its tree, the person's session included.
-	write("[agent_api]\nscope = \"session\"\nread = false\nlist_agents = false\nstart = false\nreview = false\ncancel = false\nrename = false\n")
 	for _, tc := range []struct {
 		name, method, path, body string
 	}{
@@ -843,10 +925,10 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 	for _, tc := range []struct {
 		name, method, path, body, want string
 	}{
-		{"read another tree", "GET", "/api/v0/sessions/" + other.Session + "/search?q=x", "", "only its own session"},
-		{"read another tree by query", "GET", "/api/v0/turns?session=" + other.Session, "", "only its own session"},
-		{"rename another tree's session", "PATCH", "/api/v0/sessions/" + other.Session, `{"title":"x"}`, "only its own session"},
-		{"stop another tree's turn", "POST", "/api/v0/turns/" + other.Turn + "/stop", "", "request tree asked for"},
+		{"read another tree", "GET", "/api/v0/sessions/" + other.Session + "/search?q=x", "", "in its authority"},
+		{"read another tree by query", "GET", "/api/v0/turns?session=" + other.Session, "", "in its authority"},
+		{"rename another tree's session", "PATCH", "/api/v0/sessions/" + other.Session, `{"title":"x"}`, "in its authority"},
+		{"stop another tree's turn", "POST", "/api/v0/turns/" + other.Turn + "/stop", "", "stops only turns in the sessions it may read"},
 	} {
 		if code, out := as(t, e, child, tc.method, tc.path, tc.body); code != 403 || !strings.Contains(out, tc.want) {
 			t.Errorf("%s: %d %s, want 403 with %q", tc.name, code, out, tc.want)
@@ -861,16 +943,21 @@ func TestAskPolicyFromPermissions(t *testing.T) {
 		Session: root.Session, Turn: root.Turn, Exchange: "x-cost", Status: 200, CostUSD: &cost}); err != nil {
 		t.Fatal(err)
 	}
-	write("[limits]\nmax_cost_usd_per_tree = 0.25\n")
-	code, out = as(t, e, child, "POST", "/api/v0/turns?wait=false", `{"agent":"claude","prompt":"quick"}`)
+	// A session in its reach, so the refusal is the cost cap's: the cap is
+	// checked where the job is made, after the reach.
+	inReach := `{"session":"` + first.Session + `","agent":"claude","prompt":"quick"}`
+	code, out = as(t, e, child, "POST", "/api/v0/turns", inReach)
 	if code != 403 || !strings.Contains(out, "(Cost per request tree in Settings, Limits)") || !strings.Contains(out, "$0.30") {
 		t.Errorf("past the cost cap: %d %s", code, out)
 	}
 	if again := ask(t, e, child, keyed); !again.Existing || again.Turn != first.Turn {
 		t.Errorf("a retry past the cost cap: %+v, want turn %s again", again, first.Turn)
 	}
+	// The cap turned off while the child runs reaches the next turn only.
 	write("[limits]\nmax_cost_usd_per_tree = 0\n")
-	ask(t, e, child, `{"agent":"claude","prompt":"quick"}`)
+	if code, out := as(t, e, child, "POST", "/api/v0/turns", inReach); code != 403 || !strings.Contains(out, "Cost per request tree") {
+		t.Errorf("a cap turned off mid-turn reached the running turn: %d %s", code, out)
+	}
 	for _, p := range []string{"root", "child"} {
 		release(dir, p)
 	}
@@ -890,9 +977,8 @@ func TestAskInOwnCopy(t *testing.T) {
 	if copyDir == folder {
 		t.Fatalf("the root turn ran in the folder itself")
 	}
-	// A turn carries no folder: a turn token naming one is refused (wait=false so
-	// the no-wait rule for asks is not what answers).
-	if code, out := as(t, e, tok, "POST", "/api/v0/turns?wait=false", `{"agent":"claude","prompt":"x","folder":"`+t.TempDir()+`"}`); code != 400 {
+	// A turn carries no folder: a turn token naming one is refused.
+	if code, out := as(t, e, tok, "POST", "/api/v0/turns", `{"agent":"claude","prompt":"x","folder":"`+t.TempDir()+`"}`); code != 400 {
 		t.Errorf("a turn naming a folder: %d %s, want 400", code, out)
 	}
 	// The asked turn runs in the asker's copy, not a copy of its own and not the
@@ -906,32 +992,27 @@ func TestAskInOwnCopy(t *testing.T) {
 	release(dir, "in-copy")
 }
 
-// A turn token cannot wait for a turn it starts: the asked turn runs in the
-// asker's workspace lane after the asker's turn ends, so a wait would stall it
-// (his rule, 2026-11-22). The ask is async -- wait=false is required, and the
-// answer comes back as a later turn.
-func TestAskCannotWait(t *testing.T) {
+// A turn token's ask answers at once (C1, 2026-11-25: wait is gone). The
+// asked turn runs in the asker's workspace lane after the asker's turn ends,
+// so it answers queued, and the answer comes back as a later turn. A wait
+// query a client still sends is ignored.
+func TestAskAnswersAtOnce(t *testing.T) {
 	e, dir := askEnv(t)
 	e.firstTurn(t, t.TempDir(), "claude", "root", true)
 	tok := tokenOf(t, dir, "root")
-	code, out := as(t, e, tok, "POST", "/api/v0/sessions", `{}`)
-	if code != 201 {
-		t.Fatalf("open a session: %d %s", code, out)
-	}
-	var sc SessionCreated
-	if err := json.Unmarshal([]byte(out), &sc); err != nil {
-		t.Fatal(err)
-	}
-	body := `{"session":"` + sc.Session + `","agent":"claude","prompt":"q"}`
-	// A wait (the default) and an explicit wait=true are both refused.
-	for _, path := range []string{"/api/v0/turns", "/api/v0/turns?wait=true"} {
-		if code, out := as(t, e, tok, "POST", path, body); code != 400 {
-			t.Errorf("%s: a turn token waiting: %d %s, want 400", path, code, out)
+	for _, path := range []string{"/api/v0/turns", "/api/v0/turns?wait=true", "/api/v0/turns?wait=false"} {
+		code, out := as(t, e, tok, "POST", "/api/v0/sessions", `{}`)
+		if code != 201 {
+			t.Fatalf("open a session: %d %s", code, out)
 		}
-	}
-	// wait=false is accepted: the ask is recorded and runs later.
-	if code, out := as(t, e, tok, "POST", "/api/v0/turns?wait=false", body); code != 202 {
-		t.Errorf("wait=false: %d %s, want 202", code, out)
+		var sc SessionCreated
+		if err := json.Unmarshal([]byte(out), &sc); err != nil {
+			t.Fatal(err)
+		}
+		body := `{"session":"` + sc.Session + `","agent":"claude","prompt":"q"}`
+		if code, out := as(t, e, tok, "POST", path, body); code != 202 || !strings.Contains(out, `"state":"queued"`) {
+			t.Errorf("%s: %d %s, want 202 queued", path, code, out)
+		}
 	}
 	release(dir, "root")
 }

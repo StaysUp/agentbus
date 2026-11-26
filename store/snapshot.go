@@ -620,26 +620,31 @@ func decodeList(s string) []string {
 	return out
 }
 
-// CostOf sums cost_usd over the model.responded events of the sessions
-// named, each counted once.
-func (s *Store) CostOf(sessions []string) (float64, error) {
+// CostOfTurns sums cost_usd over the model.responded events of the turns
+// named, each counted once: what a request tree has cost, by its turns
+// (queue.CostReader). A session's other turns are not in it.
+func (s *Store) CostOfTurns(turns []string) (float64, error) {
 	seen := map[string]bool{}
 	var args []any
-	for _, id := range sessions {
+	for _, id := range turns {
 		if id == "" || seen[id] {
 			continue
 		}
 		seen[id] = true
 		args = append(args, id)
 	}
-	if len(args) == 0 {
-		return 0, nil
-	}
 	var cost float64
-	err := s.r.QueryRow(`SELECT COALESCE(SUM(json_extract(data, '$.cost_usd')), 0) FROM events
-		WHERE kind = 'model.responded' AND session IN (?`+strings.Repeat(",?", len(args)-1)+`)`, args...).Scan(&cost)
-	if err != nil {
-		return 0, fmt.Errorf("store: sum cost: %w", err)
+	// SQLite takes at most 32766 variables, so a large tree is summed in parts.
+	for len(args) > 0 {
+		part := args[:min(len(args), 500)]
+		args = args[len(part):]
+		var c float64
+		err := s.r.QueryRow(`SELECT COALESCE(SUM(json_extract(data, '$.cost_usd')), 0) FROM events
+			WHERE kind = 'model.responded' AND turn IN (?`+strings.Repeat(",?", len(part)-1)+`)`, part...).Scan(&c)
+		if err != nil {
+			return 0, fmt.Errorf("store: sum cost: %w", err)
+		}
+		cost += c
 	}
 	return cost, nil
 }

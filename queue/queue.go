@@ -94,6 +94,14 @@ const (
 	// the copy, so it waits in the workspace lane behind a running turn
 	// (laneKinds). It starts no turn.
 	KindDiscard = "discard"
+	// KindClose removes a sandbox workspace's copy to reclaim its disk: the
+	// runner holding the copy removes it, and control records workspace.closed.
+	// The next turn rebuilds a fresh copy from the folder. Like a discard it is a
+	// lane job (laneKinds): it waits behind a running or queued turn, and changes
+	// not applied when it runs are dropped with the copy (the person applies or
+	// discards on the session to keep them). Its workspace.closed resets the
+	// record's applied state. It starts no turn.
+	KindClose = "close"
 	// KindUpdate brings the person's folder as it is now into a sandbox
 	// workspace's copy by a three-way merge, so the session's work sits on top
 	// of the folder and the next apply writes only that work (update.go). The
@@ -169,7 +177,8 @@ CREATE TABLE IF NOT EXISTS jobs (
 	result       TEXT,
 	created      INTEGER NOT NULL,
 	updated      INTEGER NOT NULL,
-	ended        INTEGER
+	ended        INTEGER,
+	tree         TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS jobs_key ON jobs(team, idem_key) WHERE idem_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(team, state, created);
@@ -206,6 +215,8 @@ CREATE TABLE IF NOT EXISTS attempts (
 	result      TEXT,
 	last_seq    INTEGER NOT NULL DEFAULT 0,
 	expected_seq INTEGER,
+	rules       TEXT,
+	settings    TEXT,
 	UNIQUE(job, number)
 );
 CREATE INDEX IF NOT EXISTS attempts_runner ON attempts(runner, state);
@@ -222,7 +233,12 @@ CREATE TABLE IF NOT EXISTS deliveries (
 -- this" (on.go). B13 has one event (a turn completes) and one action (start a
 -- turn in session with the subject turn's reply). It is a row plus the
 -- control loop's check; nothing waits. off is set when it is removed or, for a
--- one-shot, once it has fired.
+-- one-shot, once it has fired. asked is set on an on a turn token registered
+-- through POST /api/v0/ons: it counts as asked work by its maker under the caps
+-- (asked.go, countAsked), as a job that turn asked for does. limits are the
+-- caps of the turn that made the on, as its rules said when it registered it:
+-- the turn the on delivers is held to them (budget.go). chain held a copy of
+-- the maker's tree before 0.6.x; it is no longer written or read.
 CREATE TABLE IF NOT EXISTS ons (
 	id       TEXT PRIMARY KEY,
 	team     TEXT NOT NULL REFERENCES teams(id),
@@ -232,7 +248,10 @@ CREATE TABLE IF NOT EXISTS ons (
 	maker    TEXT NOT NULL,
 	idem_key TEXT NOT NULL DEFAULT '',
 	off      INTEGER,
-	created  INTEGER NOT NULL
+	created  INTEGER NOT NULL,
+	chain    TEXT,
+	asked    INTEGER,
+	limits   TEXT
 );
 CREATE INDEX IF NOT EXISTS ons_live ON ons(team, event, off);
 -- B15 (his call, 2026-11-19): an on is deduped by its idempotency_key ONLY, the
@@ -285,9 +304,6 @@ var (
 	// ErrSessionBusy: the session has a job that has not ended, so it cannot
 	// be closed.
 	ErrSessionBusy = errors.New("queue: the session has a job that has not ended")
-	// ErrAskedSessionUsed: a turn token started a second turn in an asked
-	// session. An ask is one turn.
-	ErrAskedSessionUsed = errors.New("queue: the asked session already has a turn")
 )
 
 // GapError: an events batch starts after the next expected sequence number.
@@ -510,7 +526,11 @@ type Job struct {
 	Reason          string          `json:"reason,omitempty"`
 	Result          json.RawMessage `json:"result,omitempty"`
 	// Session: the framework session the job's turn ran in, once known.
-	Session  string     `json:"session,omitempty"`
+	Session string `json:"session,omitempty"`
+	// Tree, for a turn job: the request tree the turn belongs to, recorded
+	// once when the job is made (treeOf) and never changed. The caps count by
+	// it (budget.go).
+	Tree     string     `json:"tree,omitempty"`
 	Created  time.Time  `json:"created"`
 	Updated  time.Time  `json:"updated"`
 	Ended    *time.Time `json:"ended,omitempty"`
@@ -576,6 +596,11 @@ type Attempt struct {
 	// ExpectedSeq is the last sequence number the runner said it sent, in
 	// its finish. When it is above LastSeq, events are missing.
 	ExpectedSeq *int64 `json:"expected_seq,omitempty"`
+	// Rules is the version of the rules the attempt's turn took when it
+	// started (PinRules): its commands, its tools and its calls to the API
+	// are all decided by them. Empty for an attempt that is not a turn, or
+	// one started before the rules were kept.
+	Rules string `json:"rules,omitempty"`
 	// TurnStarted: the runner reported the attempt's turn started. The
 	// attempt id is then a turn in the record. Read from its events, never
 	// kept.
@@ -666,6 +691,9 @@ type Queue struct {
 	// applied reads a workspace's applied state from the record, its one
 	// owner (ReadAppliedWith). The queue keeps no copy of it.
 	applied AppliedReader
+	// cost reads what turns cost from the record (ReadCostWith), for the
+	// cost cap (budget.go).
+	cost CostReader
 }
 
 // By says who asked for a job, by the kind of token it came with (the
@@ -954,7 +982,7 @@ func scanRunner(s scanner) (Runner, error) {
 // the same fields returns the first job and created false; other fields under
 // the same key get ErrKeyConflict.
 func (q *Queue) Create(team, kind, key string, spec Spec, links Links) (job Job, created bool, err error) {
-	return q.create(team, kind, key, spec, links, Limits{}, string(spec.Session), nil)
+	return q.create(team, kind, key, spec, links, nil, string(spec.Session), nil)
 }
 
 // HasKey reports whether a job was already made with this idempotency key.
@@ -971,8 +999,7 @@ func (q *Queue) HasKey(team, key string) (bool, error) {
 }
 
 // laneKinds are the job kinds that share a workspace's one ordered lane: the
-// jobs that CHANGE the one copy -- a turn (runs in it), a discard (resets it to
-// the last applied point) and an update (merges the folder into it). They run
+// jobs that CHANGE the one copy: a turn, discard, update or close. They run
 // one at a time on the runner that holds the copy, so neither a discard nor an
 // update ever touches a copy a turn is editing, and what an update merges is
 // computed when it runs (like a discard's dropped turns). apply and preview are
@@ -980,7 +1007,7 @@ func (q *Queue) HasKey(team, key string) (bool, error) {
 // person's folder, never the live copy, so they leave the lane and never wait
 // on a running turn (his call, 2026-11-22). folder and home touch no workspace
 // copy. (B15: a review is a turn in its own session, so no review clause.)
-const laneKinds = `('turn','discard','update')`
+const laneKinds = `('turn','discard','update','close')`
 
 // jobCopyKey is a job's workspace copy key in SQL, qualified by alias a (e.g.
 // "j"): its workspace, or its session when it names none, exactly as CopyKey
@@ -993,16 +1020,18 @@ func jobCopyKey(a string) string {
 }
 
 // laneTake is Take's one rule of a WORKSPACE's lane, for a job j and another job
-// o: j waits for o. A workspace's copy-changing jobs (turns and discards) are
-// one line, first in, first out -- an asked session's turns share the asker's
-// line, since both name the one workspace -- so each waits for one that runs,
-// and for an older one still queued. The lane key is the workspace, or the
-// session for a job with no workspace (its own workspace), as CopyKey keys the
-// copy row.
+// o: j waits for o. A workspace's copy-changing jobs (laneKinds) are one line,
+// first in, first out -- an asked session's turns share the asker's line, since
+// both name the one workspace -- so each waits for one that runs, and for one
+// made before it that is still queued. "Made before" is the row's order in the
+// jobs table (rowid), the order the jobs were made in, not their created time
+// or id: two jobs made in the same clock tick, or across a clock step back, still
+// run in the order they were made, so a close made after a queued turn always
+// runs after it. The lane key is the workspace, or the session for
+// a job with no workspace (its own workspace), as CopyKey keys the copy row.
 const laneTake = `j.kind IN ` + laneKinds + ` AND o.kind IN ` + laneKinds + `
 	AND COALESCE(NULLIF(json_extract(o.spec, '$.workspace'), ''), o.session) = COALESCE(NULLIF(json_extract(j.spec, '$.workspace'), ''), j.session)
-	AND (o.state IN ('taken','running')
-		OR (o.state = 'queued' AND (o.created < j.created OR (o.created = j.created AND o.id < j.id))))`
+	AND (o.state IN ('taken','running') OR (o.state = 'queued' AND o.rowid < j.rowid))`
 
 // SessionHasWork says the SESSION has a turn job that has not ended. It is kept
 // session-scoped (not the workspace lane): its callers ask about this one
@@ -1028,7 +1057,7 @@ func (q *Queue) SessionHasWork(team, session string) (bool, error) {
 func (q *Queue) TurnsAhead(team, id string) ([]Job, error) {
 	rows, err := q.db.Query(`SELECT o.id FROM jobs o JOIN jobs j ON j.id = ? AND j.team = ?
 		WHERE o.team = j.team AND o.id != j.id AND (`+laneTake+`)
-		ORDER BY o.created, o.id`, id, team)
+		ORDER BY o.rowid`, id, team)
 	if err != nil {
 		return nil, fmt.Errorf("queue: list turns ahead: %w", err)
 	}
@@ -1060,7 +1089,12 @@ func (q *Queue) TurnsAhead(team, id string) ([]Job, error) {
 // turn, the reviewed job's session for a review. A turn job that opens a new
 // session gets its id here. A session whose turn runs is never refused: Take
 // starts its turn jobs one at a time, in the order they were made.
-func (q *Queue) create(team, kind, key string, spec Spec, links Links, lim Limits, session string, deliver *Delivery) (job Job, created bool, err error) {
+//
+// Every job is made here, so the caps are checked here and nowhere else
+// (checkBudget): budget nil is work no cap binds (the person's own, and the
+// queue's own jobs), and a job of a request tree that a cap binds is checked
+// in this transaction, whichever path asked for it.
+func (q *Queue) create(team, kind, key string, spec Spec, links Links, budget *Limits, session string, deliver *Delivery) (job Job, created bool, err error) {
 	specBytes, err := spec.asked().hashBytes()
 	if err != nil {
 		return job, false, err
@@ -1124,25 +1158,12 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, lim Limit
 				}
 			}
 		}
-		if err := checkAsked(tx, team, links, lim); err != nil {
-			return err
-		}
-		// An ask is one turn: an asked session (its job links name an asker) takes
-		// only its first turn. A second turn to it is a continuation, which a turn
-		// token may not do. Checked here, in the create transaction, so two asks
-		// racing to the same asked session cannot both pass (the askChecks read
-		// outside the transaction could).
-		if kind == KindTurn && session != "" && links.Chain != nil && links.Chain.By != "" {
-			var n int
-			if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND session = ? AND kind = 'turn'`, team, session).Scan(&n); err != nil {
-				return fmt.Errorf("queue: count asked session turns: %w", err)
-			}
-			if n > 0 {
-				return ErrAskedSessionUsed
-			}
-		}
 		if kind == KindTurn && session == "" {
 			session = NewID("") // the new session its first turn opens
+		}
+		tree := treeOf(kind, links, session)
+		if err := q.checkBudget(tx, team, tree, links, budget); err != nil {
+			return err
 		}
 		var open int
 		if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND state IN ('queued','taken','running')`, team).Scan(&open); err != nil {
@@ -1158,16 +1179,19 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, lim Limit
 			turn = NewID("t_")
 		}
 		sb, _ := json.Marshal(spec)
-		lb, _ := json.Marshal(links)
-		var k, sess any
+		lb, _ := json.Marshal(stored(links))
+		var k, sess, tr any
 		if key != "" {
 			k = key
 		}
 		if session != "" {
 			sess = session
 		}
-		if _, err := tx.Exec(`INSERT INTO jobs(id, team, kind, state, idem_key, request_hash, spec, links, turn, session, created, updated)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, job.ID, team, kind, Queued, k, hash, string(sb), string(lb), turn, sess, now, now); err != nil {
+		if tree != "" {
+			tr = tree
+		}
+		if _, err := tx.Exec(`INSERT INTO jobs(id, team, kind, state, idem_key, request_hash, spec, links, turn, session, created, updated, tree)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, job.ID, team, kind, Queued, k, hash, string(sb), string(lb), turn, sess, now, now, tr); err != nil {
 			return fmt.Errorf("queue: write job: %w", err)
 		}
 		// Atomic delivery (his call (a), 2026-11-19): record the on in the SAME
@@ -1181,9 +1205,11 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, lim Limit
 			if err != nil {
 				return fmt.Errorf("queue: delivery maker: %w", err)
 			}
-			if _, err := tx.Exec(`INSERT INTO ons(id, team, event, subject, session, maker, idem_key, created) VALUES(?,?,?,?,?,?,?,?)
+			// The reply is held to the caps the asking turn's work is held to
+			// (budget): its turn is made in the asker's tree when the on fires.
+			if _, err := tx.Exec(`INSERT INTO ons(id, team, event, subject, session, maker, idem_key, created, limits) VALUES(?,?,?,?,?,?,?,?,?)
 				ON CONFLICT(team, idem_key) WHERE idem_key != '' DO NOTHING`,
-				NewID("on_"), team, OnTurnCompleted, turn, deliver.Session, string(mk), deliveryKey(key), now); err != nil {
+				NewID("on_"), team, OnTurnCompleted, turn, deliver.Session, string(mk), deliveryKey(key), now, limitsColumn(budget)); err != nil {
 				return fmt.Errorf("queue: write delivery on: %w", err)
 			}
 		}
@@ -1202,7 +1228,20 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, lim Limit
 
 // B15: the verdict and findings columns are no longer read (review is a normal
 // turn, with no verdict in core). They stay in an older DB, unreferenced.
-const jobCols = `id, team, kind, state, COALESCE(idem_key, ''), spec, links, COALESCE(attempt, ''), COALESCE(turn, ''), cancel, reason, result, COALESCE(session, ''), created, updated, ended`
+const jobCols = `id, team, kind, state, COALESCE(idem_key, ''), spec, links, COALESCE(attempt, ''), COALESCE(turn, ''), cancel, reason, result, COALESCE(session, ''), created, updated, ended, COALESCE(tree, ''),
+	COALESCE((SELECT b.session FROM jobs b WHERE b.team = jobs.team AND b.turn = json_extract(jobs.links, '$.chain.by') LIMIT 1), '')`
+
+// stored is l as a job keeps it. Who asked is kept once, as the asking turn
+// (Chain.By); the session that turn ran in is its own job's, read back with
+// the job (jobCols), so it is never stored beside By.
+func stored(l Links) Links {
+	if l.Chain != nil && l.Chain.BySession != "" {
+		c := *l.Chain
+		c.BySession = ""
+		l.Chain = &c
+	}
+	return l
+}
 
 type scanner interface{ Scan(...any) error }
 
@@ -1212,12 +1251,16 @@ func scanJob(s scanner) (Job, error) {
 	var result sql.NullString
 	var created, updated int64
 	var ended sql.NullInt64
+	var bySession string
 	if err := s.Scan(&j.ID, &j.Team, &j.Kind, &j.State, &j.IdempotencyKey, &spec, &links, &j.Attempt, &j.Turn, &j.CancelRequested,
-		&j.Reason, &result, &j.Session, &created, &updated, &ended); err != nil {
+		&j.Reason, &result, &j.Session, &created, &updated, &ended, &j.Tree, &bySession); err != nil {
 		return j, err
 	}
 	_ = json.Unmarshal([]byte(spec), &j.Spec)
 	_ = json.Unmarshal([]byte(links), &j.Links)
+	if c := j.Links.Chain; c != nil && c.By != "" {
+		c.BySession = bySession // the asking turn's own job's session
+	}
 	if result.Valid {
 		j.Result = json.RawMessage(result.String)
 	}
@@ -1227,7 +1270,7 @@ func scanJob(s scanner) (Job, error) {
 
 // attemptCols reads an attempt, and whether its runner reported its turn
 // started (the turn.created event).
-const attemptCols = `id, job, number, runner, state, lease_until, taken, started, ended, reason, result, last_seq, expected_seq,
+const attemptCols = `id, job, number, runner, state, lease_until, taken, started, ended, reason, result, last_seq, expected_seq, COALESCE(rules, ''),
 	EXISTS (SELECT 1 FROM attempt_events e WHERE e.attempt = attempts.id AND e.kind = 'turn.created')`
 
 func scanAttempt(s scanner) (Attempt, error) {
@@ -1237,7 +1280,7 @@ func scanAttempt(s scanner) (Attempt, error) {
 	var result sql.NullString
 	var expected sql.NullInt64
 	if err := s.Scan(&a.ID, &a.Job, &a.Number, &a.Runner, &a.State, &lease, &taken, &started, &ended, &a.Reason, &result, &a.LastSeq, &expected,
-		&a.TurnStarted); err != nil {
+		&a.Rules, &a.TurnStarted); err != nil {
 		return a, err
 	}
 	if expected.Valid {
@@ -1741,12 +1784,66 @@ func (q *Queue) Start(runnerID, attemptID string, number int, lease time.Duratio
 			if _, err := tx.Exec(`UPDATE jobs SET state = ?, updated = ? WHERE id = ?`, Running, nanos(now), j.ID); err != nil {
 				return fmt.Errorf("queue: write job: %w", err)
 			}
+
 		}
 		cancel = j.CancelRequested
 		att, err = scanAttempt(tx.QueryRow(`SELECT `+attemptCols+` FROM attempts WHERE id = ?`, a.ID))
 		return err
 	})
 	return att, cancel, err
+}
+
+// PinRules records rules as the rules attempt's turn runs under, with
+// snapshot, the whole settings the turn takes with them (the policy, the
+// instructions and their versions, as control sends them to the runner), once:
+// an attempt that has rules keeps them, so a start sent again gets what the
+// first one took. It returns the attempt's rules and snapshot; the snapshot is
+// empty for an attempt pinned before snapshots were kept.
+func (q *Queue) PinRules(runnerID, attemptID string, number int, rules string, snapshot json.RawMessage) (pinned string, pinnedSnap json.RawMessage, err error) {
+	err = q.tx(func(tx *sql.Tx) error {
+		a, _, err := current(tx, q.now(), runnerID, attemptID, number)
+		if err != nil {
+			return err
+		}
+		if a.Rules != "" {
+			var snap sql.NullString
+			if err := tx.QueryRow(`SELECT settings FROM attempts WHERE id = ?`, a.ID).Scan(&snap); err != nil {
+				return fmt.Errorf("queue: read attempt: %w", err)
+			}
+			pinned = a.Rules
+			if snap.Valid {
+				pinnedSnap = json.RawMessage(snap.String)
+			}
+			return nil
+		}
+		if _, err := tx.Exec(`UPDATE attempts SET rules = ?, settings = ? WHERE id = ?`, rules, string(snapshot), a.ID); err != nil {
+			return fmt.Errorf("queue: write attempt: %w", err)
+		}
+		pinned, pinnedSnap = rules, snapshot
+		return nil
+	})
+	return pinned, pinnedSnap, err
+}
+
+// Pinned is the rules and snapshot PinRules recorded on the attempt, or
+// empty ones when it has none yet.
+func (q *Queue) Pinned(runnerID, attemptID string, number int) (rules string, snapshot json.RawMessage, err error) {
+	err = q.tx(func(tx *sql.Tx) error {
+		a, _, err := current(tx, q.now(), runnerID, attemptID, number)
+		if err != nil {
+			return err
+		}
+		var snap sql.NullString
+		if err := tx.QueryRow(`SELECT settings FROM attempts WHERE id = ?`, a.ID).Scan(&snap); err != nil {
+			return fmt.Errorf("queue: read attempt: %w", err)
+		}
+		rules = a.Rules
+		if snap.Valid {
+			snapshot = json.RawMessage(snap.String)
+		}
+		return nil
+	})
+	return rules, snapshot, err
 }
 
 // Heartbeat renews the attempt's lease. cancel is true when the job was asked

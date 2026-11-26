@@ -13,7 +13,6 @@ package api
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -23,7 +22,6 @@ import (
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/gateway"
 	"github.com/staysup/agentbus/harness"
-	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/toolreg"
 )
@@ -188,27 +186,23 @@ func rpcID(id json.RawMessage) bool {
 // same test authorize makes, api/tokens.go). B11 removed the apply_turn tool,
 // so this reads the policy, not whether that tool lists.
 func (a *API) mayApply(r *http.Request) bool {
-	perm := policyOf(r)
-	return perm.AgentAPI.Apply != nil && *perm.AgentAPI.Apply
+	return applyOn(callerOf(r).rules)
 }
 
-// toolList is the tools r's token sees (listedRoute).
+// toolList is the tools r's token sees (caller.lists).
 func (a *API) toolList(r *http.Request) []mcpTool {
-	g, turnsOnly := grantOf(r), a.turnsOnly(r)
-	perm := policyOf(r)
-	rules := gateway.Rules{Allow: perm.Allow, Ask: perm.Ask, Forbid: perm.Forbid}
+	c := callerOf(r)
 	out := []mcpTool{}
-	apply := perm.AgentAPI.Apply != nil && *perm.AgentAPI.Apply
 	for _, st := range a.toolSnap.Load().list {
 		title := ""
 		if st.rt == nil {
 			// An app has no one route; it is listed when the caller may use
 			// the tool server at all, and each step authorizes itself.
-			if !listedApp(g, turnsOnly, rules) {
+			if !listedApp(c) {
 				continue
 			}
 		} else {
-			if !listedRoute(st.rt, g, turnsOnly, rules, apply) {
+			if !c.lists(st.rt) {
 				continue
 			}
 			title = st.rt.summary
@@ -225,11 +219,11 @@ func (a *API) toolList(r *http.Request) []mcpTool {
 // app; they reach the API directly. (Each app's steps need a turn's folder and
 // session, which only a turn token carries.) B16: "tools on" is a gateway rule
 // (tool:* not refused), not an [agent_api] switch any more.
-func listedApp(g *run.Grant, _ bool, rules gateway.Rules) bool {
-	if g == nil || g.Turn == "" {
+func listedApp(c *caller) bool {
+	if c.Turn == "" {
 		return false
 	}
-	dec, _ := gateway.DecideTool(rules, "tool:*")
+	dec, _ := gateway.DecideTool(c.toolRules(), "tool:*")
 	return dec != gateway.Refuse
 }
 
@@ -239,8 +233,8 @@ func listedApp(g *run.Grant, _ bool, rules gateway.Rules) bool {
 // A list the store cannot keep is still served: the record misses one event,
 // and the service log says so.
 func (a *API) toolsListed(r *http.Request, list []mcpTool) {
-	g := grantOf(r)
-	if g == nil || g.Turn == "" {
+	g := callerOf(r)
+	if g.Turn == "" {
 		return
 	}
 	names := make([]string, 0, len(list))
@@ -296,11 +290,8 @@ func (a *API) callTool(r *http.Request, st servedTool, args map[string]any, call
 	fail := func(msg string) toolResult {
 		return toolResult{Content: []textContent{{"text", msg}}, IsError: true}
 	}
-	g := grantOf(r)
-	own := ""
-	if g != nil {
-		own = g.Session
-	}
+	g := callerOf(r)
+	own := g.Session
 	method, target, body, why := toolRequestFrom(st.def, args, own)
 	if why != "" {
 		return fail(why)
@@ -325,31 +316,9 @@ func (a *API) callTool(r *http.Request, st servedTool, args map[string]any, call
 	// decode -> authorize -> decide -> hold if Ask -> run (toolgate.go). A
 	// malformed or unauthorized call is refused at once, never held; an allowed
 	// call falls through to run below. Built-in and custom tools pass here alike.
-	approvedTarget := "*"
-	if isFolderServedTool(st) {
-		// Before the gate, so a call the route would refuse shows no card: the
-		// route's own answer, so the agent reads the same either way.
-		if rec := (&toolRecorder{header: http.Header{}}); a.refuseFilesElsewhere(rec, g) {
-			return fail(toolStatus(rec.code) + ": " + strings.TrimSpace(rec.body.String()))
-		}
-		p, _ := args["path"].(string)
-		if p == "" {
-			return fail("path argument is required")
-		}
-		res, err := resolveFilePath(p)
-		if err != nil {
-			return fail("invalid path: " + err.Error())
-		}
-		res, err = resolveSymlinkPath(res)
-		if err != nil {
-			return fail("invalid path: " + err.Error())
-		}
-		approvedTarget = res
-	}
 	if ok, result := a.gateToolCall(r, inner, g, st, args); !ok {
 		return result
 	}
-	inner = inner.WithContext(context.WithValue(inner.Context(), toolGatedKey{}, approvedTarget))
 	rec := &toolRecorder{header: http.Header{}}
 	// Through the http.Handler, as any request: the route table serves this
 	// handler, so a direct call would make the table refer to itself.
@@ -362,11 +331,6 @@ func (a *API) callTool(r *http.Request, st servedTool, args map[string]any, call
 		text = toolStatus(rec.code)
 	}
 	return toolResult{Content: []textContent{{"text", text}}}
-}
-
-// turnsOnly says r was sent with the turns token.
-func (a *API) turnsOnly(r *http.Request) bool {
-	return tokenGrant(r).TurnsOnly
 }
 
 // toolRecorder keeps the answer of one tool call's request.

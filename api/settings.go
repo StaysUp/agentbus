@@ -13,8 +13,9 @@ package api
 // event are saved in one transaction of the settings database, and the event
 // is stored in the record from there (RecordSettings).
 //
-// Only the main token reads or writes settings. A turn token never does:
-// these rows leave route.scope at scopeNone, and the turns token at false.
+// Only the main token writes settings (run.ActAdmin): an agent never changes
+// its own brakes (O2.3, limit 3). An agent's turn token may read them
+// (route.at atNothing). The turns token neither reads nor writes them.
 
 import (
 	"errors"
@@ -89,6 +90,7 @@ const versionDoc = "Send If-Match with the ETag of your GET, or * to replace wha
 
 var settingsRoutes = []route{
 	{method: "GET", path: "/api/v0/settings", op: "getSettings", action: run.ActRead,
+		at:      atNothing,
 		tag:     "Settings",
 		summary: "Read the settings' state",
 		doc: "The settings database's state: the settings version, when the settings last changed, " +
@@ -103,6 +105,7 @@ var settingsRoutes = []route{
 		versioned: true,
 		serve:     plain((*API).getSettings)},
 	{method: "GET", path: "/api/v0/settings/permissions", op: "getPermissions", action: run.ActRead,
+		at:      atNothing,
 		tag:     "Settings",
 		summary: "Read the policy",
 		doc: "The policy: what a turn may do without a person to ask, the limits on work agents ask for, and what a turn token may call. " +
@@ -115,7 +118,7 @@ var settingsRoutes = []route{
 	{method: "PUT", path: "/api/v0/settings/permissions", op: "putPermissions", action: run.ActAdmin,
 		tag:     "Settings",
 		summary: "Change the policy",
-		doc: "Replace the policy whole. A key left out takes its default. The next turn runs under it, and a turn token's next request.\n\n" +
+		doc: "Replace the policy whole. A key left out takes its default. The next turn runs under it: a turn that runs keeps the rules it took when it started, for its commands, its tools and its calls to this API.\n\n" +
 			versionDoc + "The settings database keeps only the keys whose value differs from the defaults. " +
 			"The change and its settings.changed event, which names the keys that changed and never their values, are saved together. " +
 			"A PUT that changes nothing makes no event and no new settings version. " +
@@ -143,6 +146,7 @@ var settingsRoutes = []route{
 		versioned: true,
 		serve:     plain((*API).patchPermissions)},
 	{method: "GET", path: "/api/v0/settings/instructions", op: "getInstructions", action: run.ActRead,
+		at:      atNothing,
 		tag:     "Settings",
 		summary: "Read the instructions",
 		doc: "The text every turn gets as an instruction of its agent's own (Claude Code's --append-system-prompt, codex's developer_instructions). " +
@@ -163,6 +167,7 @@ var settingsRoutes = []route{
 		versioned: true,
 		serve:     plain((*API).putInstructions)},
 	{method: "GET", path: "/api/v0/settings/compaction", op: "getCompaction", action: run.ActRead,
+		at:      atNothing,
 		tag:     "Settings",
 		summary: "Read the compaction points",
 		doc: "The compaction points: per vendor, the share of a model's context window at which that vendor's harness compacts its context, " +

@@ -342,6 +342,14 @@ type Request struct {
 	// Settings": the turn is refused with it, after a missing program and
 	// before anything is stored.
 	Signin string
+	// Settings, when set, are the settings this turn runs under, as control
+	// took them when the turn's attempt started (jobs.AttemptStarted): its
+	// commands and tools here, and its calls to control's API there, are all
+	// decided by the same rules. RulesError, set instead, refuses the turn
+	// with control's reason. Neither set: the engine reads its own settings
+	// now, for a turn whose token it mints itself.
+	Settings   *settings.RunnerSettings
+	RulesError *settings.Error
 	// AllowOnce are command lines a person allowed once on an earlier card,
 	// for this continuation turn only (api/approvals.go, decision "once").
 	// The gateway lets exactly these run; nothing is written to the settings.
@@ -450,7 +458,8 @@ func (e *Engine) Start(req Request) (*Turn, error) {
 	return e.start(turn{harness: req.Harness, folder: req.Folder, folderRef: req.FolderRef, workspace: req.Workspace, copy: req.Copy, session: id, id: req.Turn,
 		model: model, prompt: req.Prompt, key: req.IdempotencyKey,
 		agentID: req.AgentID, access: req.Access, keyEnv: req.KeyEnv, origin: req.Origin, root: req.Root, depth: req.Depth,
-		token: req.Token, apiURL: req.APIURL, standIn: req.StandIn, signin: req.Signin, allowOnce: req.AllowOnce})
+		token: req.Token, apiURL: req.APIURL, standIn: req.StandIn, signin: req.Signin, allowOnce: req.AllowOnce,
+		settings: req.Settings, rulesErr: req.RulesError})
 }
 
 // next starts the next turn of req.Session, in its own agent and folder.
@@ -582,7 +591,8 @@ func (e *Engine) next(req Request) (*Turn, error) {
 		recoveredFrom: recovered, recoveredWhy: recoveredWhy, continuity: continuity, model: model,
 		prompt: req.Prompt, context: context, key: req.IdempotencyKey,
 		agentID: agentID, access: access, keyEnv: keyEnv, origin: req.Origin, root: req.Root, depth: req.Depth,
-		token: req.Token, apiURL: req.APIURL, standIn: req.StandIn, signin: req.Signin, allowOnce: req.AllowOnce}
+		token: req.Token, apiURL: req.APIURL, standIn: req.StandIn, signin: req.Signin, allowOnce: req.AllowOnce,
+		settings: req.Settings, rulesErr: req.RulesError}
 	if from != "" || continuity == ByTranscript {
 		// A fresh child: the history comes from the gateway, or from the
 		// transcript in its prompt.
@@ -639,6 +649,8 @@ const replayOnly = "this session cannot be continued from here: it was continued
 
 // turn is one start of an agent: a new session's first, or a session's next.
 type turn struct {
+	settings                 *settings.RunnerSettings // the rules control took for the turn (Request.Settings)
+	rulesErr                 *settings.Error          // or why it has none
 	harness, folder, session string
 	workspace                string // the workspace the turn runs in; stored on turn.started
 	copy                     bool   // Copy mode: the folder is a sandbox copy, commands walled to it
@@ -687,7 +699,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	// version the turn records. A policy that cannot be used stops the
 	// turn: it never runs without it. Instructions that cannot be used stop
 	// it too.
-	snap, err := e.settingsNow()
+	snap, err := e.settingsFor(t)
 	if err != nil {
 		reason := "permissions_file"
 		var se *settings.Error
@@ -738,7 +750,15 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	if t.token != "" {
 		apiURL = t.apiURL
 	} else {
-		if tok, err = e.turnTokens.mint(Grant{Session: t.session, Turn: t.id, Root: root, Depth: t.depth, Harness: t.harness}); err != nil {
+		// The rules this turn took are kept, so the API decides its calls by
+		// them too, as the gateway decides its commands and tools.
+		if e.cfg.Settings != nil {
+			if err := settings.Keep(e.cfg.Settings, snap.Policy, snap.PolicyVersion); err != nil {
+				return nil, storeFailed
+			}
+		}
+		if tok, err = e.turnTokens.mint(Grant{Session: t.session, Turn: t.id, Root: root, Depth: t.depth, Harness: t.harness,
+			Rules: snap.PolicyVersion, RulesAt: e.cfg.Now().UTC()}); err != nil {
 			return nil, storeFailed
 		}
 		childTok = tok
@@ -978,7 +998,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Text: t.prompt, Harness: t.harness, Folder: t.folder, FolderRef: t.folderRef, Workspace: t.workspace,
 		ReplayFrom: t.replayFrom, Continuity: t.continuity, RecoveredFrom: t.recoveredFrom,
 		RecoveredReason: t.recoveredWhy, IdempotencyKey: t.key, AgentID: t.agentID, Access: t.access, KeyEnv: t.keyEnv,
-		Context: t.context, Model: t.model, Origin: t.origin, SettingsVersion: snap.Revision, Unkept: unkept}); err != nil {
+		Context: t.context, Model: t.model, Origin: t.origin, SettingsVersion: snap.Revision, RulesVersion: string(snap.PolicyVersion), Unkept: unkept}); err != nil {
 		closeHold()
 		return nil, storeFailed
 	}

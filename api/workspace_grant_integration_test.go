@@ -24,7 +24,7 @@ func TestAgentMakesWorkspaceWithinAuthority(t *testing.T) {
 	os.WriteFile(perm, nil, 0o600) // Agents may apply: off
 	e, dir := askEnvWith(t, perm)
 	defer func() {
-		for _, p := range []string{"direct", "copy", "builder", "nested", "copybuilder", "sibling"} {
+		for _, p := range []string{"direct", "copy", "builder", "nested", "copybuilder", "sibling", "copy2", "copybuilder2"} {
 			release(dir, p)
 		}
 	}()
@@ -66,7 +66,7 @@ func TestAgentMakesWorkspaceWithinAuthority(t *testing.T) {
 	}
 	start := func(tok, sess, prompt string) Started {
 		t.Helper()
-		code, out := as(t, e, tok, "POST", "/api/v0/turns?wait=false", `{"session":"`+sess+`","agent":"claude","prompt":"`+prompt+`"}`)
+		code, out := as(t, e, tok, "POST", "/api/v0/turns", `{"session":"`+sess+`","agent":"claude","prompt":"`+prompt+`"}`)
 		if code != 202 {
 			t.Fatalf("start %s: %d %s", prompt, code, out)
 		}
@@ -88,7 +88,10 @@ func TestAgentMakesWorkspaceWithinAuthority(t *testing.T) {
 	if maker, err := e.store.WorkspaceMaker(ids.WorkspaceID(w.ID)); err != nil || maker == "" {
 		t.Fatalf("the workspace's maker is not recorded: %q %v", maker, err)
 	}
-	refused(dtok, "POST", "/api/v0/workspaces", `{"folder":"`+f2+`","sandbox":false}`, agentDirectRefused)
+	// A Direct workspace of its machine is in its reach too (O2.3).
+	if code, out := as(t, e, dtok, "POST", "/api/v0/workspaces", `{"folder":"`+f2+`","sandbox":false}`); code != 201 || !strings.Contains(out, `"sandbox":false`) {
+		t.Fatalf("a Direct agent's Direct workspace: %d %s", code, out)
+	}
 	refused(dtok, "POST", "/api/v0/workspaces", `{"folder":"`+f2+`","machine":"con_0000000000000000"}`, agentMachineRefused)
 	builder := start(dtok, session(dtok, w.ID), "builder")
 	if pwd := pwdOf(t, dir, "builder"); pwd == f2 {
@@ -124,7 +127,7 @@ func TestAgentMakesWorkspaceWithinAuthority(t *testing.T) {
 	} {
 		refused(btok, c[0], c[1], c[2], turnSessionRefused)
 	}
-	refused(btok, "POST", "/api/v0/turns/"+sibling.Turn+"/stop", "", turnAskedRefused)
+	refused(btok, "POST", "/api/v0/turns/"+sibling.Turn+"/stop", "", turnStopRefused)
 
 	// A Copy agent: only its own folders, by reference.
 	e.firstTurn(t, f1, "claude", "copy", true)
@@ -135,7 +138,7 @@ func TestAgentMakesWorkspaceWithinAuthority(t *testing.T) {
 	refused(ctok, "POST", "/api/v0/workspaces", `{"folder":"`+f1+`"}`, agentPathRefused)
 	refused(ctok, "POST", "/api/v0/workspaces", `{"folder_ref":"`+ref1+`","sandbox":false}`, agentDirectRefused)
 	// Another session's workspace is not its own.
-	refused(ctok, "POST", "/api/v0/sessions", `{"workspace":"`+w.ID+`"}`, "only in its own workspace or one its session made")
+	refused(ctok, "POST", "/api/v0/sessions", `{"workspace":"`+w.ID+`"}`, turnWorkspaceRefused)
 	refused(ctok, "GET", "/api/v0/workspaces/"+w.ID, "", turnSessionRefused)
 	// The same idempotency_key and body from another maker is another
 	// request, never the first maker's workspace handed back; the first maker's
@@ -148,12 +151,19 @@ func TestAgentMakesWorkspaceWithinAuthority(t *testing.T) {
 	if again := mustWS(dtok, keyed); again.ID != first.ID {
 		t.Fatalf("the maker's retry: %s, want %s", again.ID, first.ID)
 	}
-	// Apply of a workspace a Copy agent made takes the person's switch.
+	// Apply of a workspace a Copy agent made takes the person's switch, as
+	// its turn took it when it started: turned on mid-turn, it reaches the
+	// next turn only (O2.4).
 	start(ctok, session(ctok, cw.ID), "copybuilder")
 	refused(ctok, "POST", "/api/v0/workspaces/"+cw.ID+"/apply", "{}", "Agents may apply is off in Settings")
 	os.WriteFile(perm, []byte("[agent_api]\napply = true\n"), 0o600)
-	if code, out := as(t, e, ctok, "POST", "/api/v0/workspaces/"+cw.ID+"/apply", "{}"); code != 200 {
-		t.Fatalf("a Copy agent's apply with the switch on: %d %s", code, out)
+	refused(ctok, "POST", "/api/v0/workspaces/"+cw.ID+"/apply", "{}", "Agents may apply is off in Settings")
+	e.firstTurn(t, f1, "claude", "copy2", true)
+	c2tok := tokenOf(t, dir, "copy2")
+	cw2 := mustWS(c2tok, `{"folder_ref":"`+ref1+`"}`)
+	start(c2tok, session(c2tok, cw2.ID), "copybuilder2")
+	if code, out := as(t, e, c2tok, "POST", "/api/v0/workspaces/"+cw2.ID+"/apply", "{}"); code != 200 {
+		t.Fatalf("a Copy agent's apply with the switch on when its turn started: %d %s", code, out)
 	}
 	os.WriteFile(perm, nil, 0o600)
 

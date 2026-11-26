@@ -3,9 +3,20 @@
 All notable changes to AgentBus. Full notes for each release are on the
 [releases page](https://github.com/staysup/agentbus/releases).
 
-## Unreleased
+## 0.6.6 (2026-11-26)
 
 ### Added
+- **Close a workspace.** `POST /api/v0/workspaces/{id}/close` ends a Copy workspace's copy for good:
+  the copy, its checkpoints and its applied state. Sessions and the record stay, and a session's
+  next turn gets a fresh copy. A close waits behind any turn, apply, discard or update in that
+  workspace. The cockpit lists each machine's open workspaces on its runner page, with Close.
+- **The owner on the record.** Every stored event carries the owner's id (`owner`, one per data
+  folder) beside the agent that acted. Events are history: changing access never rewrites them.
+- **One rule set per turn.** A turn runs under the rules saved when it starts: its commands, its
+  tools and its API calls alike, and `turn.started` records which (`rules_version`). An edit to
+  the rules applies from the next turn. A start sent again, the copy's preparation and a reopened
+  store all keep the turn's saved rules.
+- **OpenCode on xAI**, with the xAI API key set in Settings.
 - **A session in several folders.** `POST /api/v0/workspaces` takes `folders` (2 to 8, on one
   machine, Copy only). The copy holds each folder side by side under its name, and the agent works
   at its top. Review lists every folder's files under its name. Apply checks every folder before it
@@ -13,13 +24,54 @@ All notable changes to AgentBus. Full notes for each release are on the
   A file the agent leaves beside the folders, in none of them, refuses the apply until it is moved
   or discarded.
 
+### Changed
+- **A turn is queued first.** `POST /api/v0/turns` answers at once, and the `wait` parameter is
+  gone: it held the reply up to 30 seconds and refused an agent's token without `wait=false`. A
+  turn that cannot start, such as one whose program is missing on the runner, is recorded as
+  failed with its reason.
+- **One auth check.** Every route asks the caller's grant one question, whether an action may
+  happen in a place, and the grant answers. Who asked whom is stored once.
+- **An agent reads the sessions of the workspaces in its reach**, by one rule, and may watch any
+  turn it may read. A watch an agent registers counts under the job limits.
+- **An approval answered already replies 409**, as one still being answered does. 404 means no
+  approval by that id.
+- **An agent may do what you may, narrowed by three things only.** Where it works (a Copy session
+  reaches its own workspace and the copies its session made; a Direct session reaches its machine),
+  your brakes (Agents may apply, the command and tool rules, the limits on depth, jobs and cost),
+  and it never changes its own brakes (settings, saved agents, tools, runners, keys, subscriptions,
+  approvals). So an agent may now discard, update or close a copy it made, list the sessions,
+  workspaces and approvals it may read, continue or stop a session in its reach, archive one, and
+  have a reply delivered to any session in its reach. A Direct agent may make a Direct workspace on
+  its machine. A program event an agent writes names it as the origin.
+
+### Removed
+- **The file routes and folder grants.** `POST /api/v0/files/read`, `/list` and `/write` are gone,
+  with the folder grants they used and the "always for this folder" answer that made one. Their
+  tools were hidden on 2026-11-23 and nothing called the routes. An agent reaches files through its
+  CLI's own tools. A record made before keeps its old grants table; nothing reads it.
+
 ### Fixed
+- **A delivered reply escaped its request tree's limits.** A turn could make an empty session and
+  have a reply delivered there. The delivered turn started a new tree at depth zero, with fresh
+  depth, job and cost limits. A reply a turn asks for now stays in that turn's tree, whatever
+  session it lands in.
+- **The limits on asked work are counted by turn, in one place.** Every turn now records the
+  request tree it belongs to when it is made, and the depth, job and cost limits are checked where
+  any turn is made: asked work, a reply delivered to the asker, a reply an on delivers. Two gaps
+  this closes: a turn watching itself kept getting new turns past the cost limit, and continuing
+  another session counted that session's whole earlier cost against the asker's tree. Cost is
+  now the tree's own turns only.
+- **An empty `?session=` on the event stream is refused.** It was read as naming no place, so an
+  agent's token got every session's events, other copies' diffs among them. Every route now
+  refuses a missing or empty place, for every token.
 - **Edits inside a repo nested in the folder were lost.** A committed repo inside a session's folder
   was recorded as a commit pointer only, so the agent's edits inside it never reached Review or
   Apply, and nothing said so. A new session's copy now records a nested repo's files as its own,
   found again at every checkpoint, so they are in Review, Apply, Discard and Update like any other.
   A repo the folder's `.gitignore` ignores stays out, as before. Sessions started earlier keep
   their old behaviour.
+- The gateway decides a codex `exec` command known only at run time as `$cmd`. Thanks to Kofi
+  Akpor (`akpor-kofi`, #80).
 
 ## 0.6.5 (2026-11-24)
 

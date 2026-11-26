@@ -91,9 +91,9 @@ var upgradeSteps = []upgradeStep{
 	// the folder copy-on-write, so a big node_modules costs nothing to copy,
 	// and a turn may now write its own.
 	{Key: "share_read_only", Retired: true},
-	// 0.6: read_folders is retired with B8 folder access tools (read_file,
-	// list_folder, write_file). Access outside the sandbox is granted per
-	// folder on control, never through a machine-wide setting.
+	// 0.6: read_folders is retired. Its replacement, AgentBus's own file
+	// tools and their folder grants, was removed too (his call, 2026-11-25):
+	// an agent reaches files through its CLI's own tools.
 	{Key: "read_folders", Retired: true},
 	// 0.6: switches become rules (B16). agent_api.tools,
 	// subagents and edit become shipped default rules in the one list.

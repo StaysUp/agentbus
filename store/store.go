@@ -54,23 +54,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS events_turn_started ON events(session, turn)
 -- POST /api/v0/turns finds the turn an idempotency key started (TurnByKey).
 CREATE INDEX IF NOT EXISTS events_idempotency ON events(json_extract(data, '$.idempotency_key'))
 	WHERE kind = 'turn.started';
-CREATE TABLE IF NOT EXISTS folder_grants (
+-- folder_grants was retired with the file routes (his call, 2026-11-25). A
+-- record made before keeps its table; nothing reads or writes it.
+-- The owner of this record: one row, made once. Every event names it (owner).
+CREATE TABLE IF NOT EXISTS owner (
 	id      TEXT PRIMARY KEY,
-	session TEXT NOT NULL,
-	folder  TEXT NOT NULL,
 	created INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS folder_grants_session ON folder_grants(session);
-CREATE INDEX IF NOT EXISTS folder_grants_folder ON folder_grants(folder);
-CREATE UNIQUE INDEX IF NOT EXISTS folder_grants_unique ON folder_grants(session, folder);
 `
 
 // Store is one events file. It is safe for concurrent use.
 type Store struct {
-	w    *sql.DB  // the one writer
-	lock *os.File // held with flock for the store's life
-	r    *sql.DB  // readers
-	id   string
+	w     *sql.DB  // the one writer
+	lock  *os.File // held with flock for the store's life
+	r     *sql.DB  // readers
+	id    string
+	owner string // the record's one owner (Owner)
 
 	mu     sync.Mutex // serialises writes, guards last, subs and closed
 	last   int64
@@ -188,6 +187,19 @@ func (s *Store) init() error {
 	if err := tx.QueryRow(`SELECT value FROM meta WHERE key = 'store'`).Scan(&s.id); err != nil {
 		return fmt.Errorf("store: read id: %w", err)
 	}
+	// The owner, made once, like the store's id: the one row a second Open
+	// finds and keeps.
+	o := make([]byte, 8)
+	if _, err := rand.Read(o); err != nil {
+		return fmt.Errorf("store: make owner: %w", err)
+	}
+	if _, err := tx.Exec(`INSERT INTO owner(id, created) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM owner)`,
+		"own_"+hex.EncodeToString(o), time.Now().UnixNano()); err != nil {
+		return fmt.Errorf("store: write owner: %w", err)
+	}
+	if err := tx.QueryRow(`SELECT id FROM owner ORDER BY created LIMIT 1`).Scan(&s.owner); err != nil {
+		return fmt.Errorf("store: read owner: %w", err)
+	}
 	if err := tx.QueryRow(`SELECT COALESCE(MAX(seq), 0) FROM events`).Scan(&s.last); err != nil {
 		return fmt.Errorf("store: read last seq: %w", err)
 	}
@@ -196,6 +208,11 @@ func (s *Store) init() error {
 
 // ID is the store's random id, made when the file was created.
 func (s *Store) ID() string { return s.id }
+
+// Owner is the id of the record's one owner, made when the file was
+// created: whose authority every event here happened under. Every grant the
+// API resolves names it, and every event stored carries it (appendLocked).
+func (s *Store) Owner() string { return s.owner }
 
 // Last is the highest seq written so far; 0 for an empty store.
 func (s *Store) Last() int64 {
@@ -295,6 +312,10 @@ func (s *Store) appendLocked(e event.Event) (out event.Event, stored bool, err e
 		return e, false, ErrClosed
 	}
 	e.Seq = s.last + 1
+	// The record names its owner on every event, beside the actor. An event
+	// sent on from another store (a runner's) gets this record's owner: the
+	// owner is control's fact, never a sender's claim.
+	e.Owner = s.owner
 	data, err := json.Marshal(e)
 	if err != nil {
 		return e, false, fmt.Errorf("store: encode %s: %w", e.Kind, err)

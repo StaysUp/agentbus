@@ -223,9 +223,8 @@ cloned copy-on-write where the disk supports it, so a big `node_modules` costs n
   wall is only partly verified so far.
 - On ext4 a copy is a full copy. A clone (APFS) or a reflink (xfs, btrfs) is used where the disk can
   make one.
-- AgentBus's own folder tools (`read_file`, `list_folder`, `write_file`) are hidden for now; an
-  agent reaches files through its CLI's built-in tools, and the gateway refuses a file edit outside
-  the copy with a plain reason.
+- AgentBus has no file tools of its own: an agent reaches files through its CLI's built-in tools,
+  and the gateway refuses a file edit outside the copy with a plain reason.
 - MCP servers in your config load on every turn, reviews included. On a Mac, a server that
   signs in with OAuth keeps its token in the Keychain, and macOS asks to let the session read it;
   deny it to keep that server off. What a server does is outside AgentBus's record.

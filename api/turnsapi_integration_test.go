@@ -108,6 +108,23 @@ func TestIdempotentStartStartsOneChild(t *testing.T) {
 	}
 }
 
+// untilStarted sends post again, a retry under one idempotency key, until its
+// answer is no longer queued: POST /api/v0/turns answers at once, and a retry
+// of a turn a runner has started answers running.
+func untilStarted(t *testing.T, post func() (int, string)) (int, Started, string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		code, out := post()
+		var s Started
+		_ = json.Unmarshal([]byte(out), &s)
+		if code != 202 || s.State != "queued" || time.Now().After(deadline) {
+			return code, s, out
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // An idempotency key is the turn job's key. A retry with the same key and
 // fields answers the same turn, existing true, and starts nothing; other
 // fields under it get 409; a bad key gets 400 and is never queued.
@@ -122,9 +139,17 @@ func TestIdempotencyKey(t *testing.T) {
 	resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(body)))
 	var first Started
 	_ = json.Unmarshal([]byte(out), &first)
-	if resp.StatusCode != 202 || first.Turn == "" || first.Existing || first.State != "running" ||
-		first.BaseURL != e.api.cfg.BaseURL+"/s/"+first.Session+"/t/"+first.Turn {
-		t.Fatalf("first: %d %s", resp.StatusCode, out)
+	if resp.StatusCode != 202 || first.Turn == "" || first.Existing || first.State != "queued" {
+		t.Fatalf("first: %d %s, want 202 queued at once", resp.StatusCode, out)
+	}
+	// A retry once a runner has started it says running, with its gateway.
+	code, started, out := untilStarted(t, func() (int, string) {
+		resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(body)))
+		return resp.StatusCode, out
+	})
+	if code != 202 || started.Turn != first.Turn || !started.Existing || started.State != "running" ||
+		started.BaseURL != e.api.cfg.BaseURL+"/s/"+first.Session+"/t/"+first.Turn {
+		t.Fatalf("retry once started: %d %s", code, out)
 	}
 	waitRunEnded(t, e.store, first.Session)
 	resp, out = do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(body)))
@@ -189,9 +214,7 @@ func TestMaxRunsQueuesAndStopWithTurnsToken(t *testing.T) {
 		t.Fatalf("stop: %d %s", code, out)
 	}
 	waitRunEnded(t, e.store, first.Session)
-	code, out = asTok(t, e, turnsTok, "POST", "/api/v0/turns", second)
-	var s Started
-	_ = json.Unmarshal([]byte(out), &s)
+	code, s, out := untilStarted(t, func() (int, string) { return asTok(t, e, turnsTok, "POST", "/api/v0/turns", second) })
 	if code != 202 || s.State != "running" || s.Turn != queued.Turn || !s.Existing || s.Session != queued.Session {
 		t.Fatalf("second, after the first ended: %d %s", code, out)
 	}

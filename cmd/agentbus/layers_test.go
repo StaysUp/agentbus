@@ -206,14 +206,6 @@ var controlAllowed = []string{
 	"settings/files.go readFile os.Lstat",
 	"settings/files.go readFile os.ReadFile",
 	"store/store.go Open os.OpenFile",
-	// B8 folder access tools: read_file, list_folder, write_file
-	"api/fdpath_linux.go fdPath os.Readlink",
-	"api/files.go API.openFolderAccess filepath.EvalSymlinks",
-	"api/files.go API.openFolderAccess os.OpenRoot",
-	"api/files.go API.openFolderAccess os.Stat",
-	"api/files.go resolveSymlinkPath filepath.EvalSymlinks",
-	"api/files.go resolveSymlinkPathBounded os.Lstat",
-	"api/files.go resolveSymlinkPathBounded os.Readlink",
 }
 
 // Control never touches a person's folder: no control package calls a

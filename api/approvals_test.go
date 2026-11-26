@@ -331,7 +331,8 @@ func TestDecideApprovalAllowAskingTurnGone(t *testing.T) {
 	}
 }
 
-// An unknown id is 404, and an id already answered is 404 the second time.
+// An unknown id is 404, and an id already answered is 409 the second time:
+// the same reply as an answer that meets one still in progress.
 func TestDecideApprovalUnknownAndAnswered(t *testing.T) {
 	e := askStack(t)
 	if resp, _ := send(t, e, "POST", "/api/v0/approvals/nope", "", `{"decision":"allow"}`); resp.StatusCode != 404 {
@@ -341,7 +342,7 @@ func TestDecideApprovalUnknownAndAnswered(t *testing.T) {
 	if resp, _ := send(t, e, "POST", "/api/v0/approvals/ap1", "", `{"decision":"refuse"}`); resp.StatusCode != 204 {
 		t.Fatalf("first answer: %d", resp.StatusCode)
 	}
-	if resp, _ := send(t, e, "POST", "/api/v0/approvals/ap1", "", `{"decision":"refuse"}`); resp.StatusCode != 404 {
-		t.Fatalf("an already-answered id was not 404: %d", resp.StatusCode)
+	if resp, _ := send(t, e, "POST", "/api/v0/approvals/ap1", "", `{"decision":"refuse"}`); resp.StatusCode != 409 {
+		t.Fatalf("an already-answered id was not 409: %d", resp.StatusCode)
 	}
 }

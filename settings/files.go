@@ -9,6 +9,7 @@ package settings
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -23,6 +24,77 @@ import (
 type Files struct {
 	dir string
 	mu  sync.Mutex // one write at a time from this process
+
+	keptMu sync.Mutex // one keep at a time from this process
+}
+
+// KeptRulesFile holds the rules turns took (KeepRules), by version, in a data
+// folder of files: kept on disk, so a turn still running after a restart is
+// decided by the rules it started under.
+const KeptRulesFile = "kept_rules.json"
+
+// KeepRules keeps p under its version v: the rules a turn took at its start.
+// A version already kept keeps what it has.
+func (f *Files) KeepRules(p Policy, v Version) error {
+	f.keptMu.Lock()
+	defer f.keptMu.Unlock()
+	kept, err := f.keptRules()
+	if err != nil {
+		return err
+	}
+	if _, ok := kept[v]; ok {
+		return nil
+	}
+	b, err := json.Marshal(p)
+	if err != nil {
+		return errors.New("settings: the rules a turn took could not be kept")
+	}
+	kept[v] = b
+	out, err := json.Marshal(kept)
+	if err != nil {
+		return errors.New("settings: the rules a turn took could not be kept")
+	}
+	if _, err := f.write(KeptRulesFile, out, Any); err != nil {
+		return errors.New("settings: the rules a turn took could not be kept")
+	}
+	return nil
+}
+
+// Rules is the policy KeepRules kept under v.
+func (f *Files) Rules(v Version) (Policy, bool, error) {
+	f.keptMu.Lock()
+	kept, err := f.keptRules()
+	f.keptMu.Unlock()
+	if err != nil {
+		return Policy{}, false, err
+	}
+	b, ok := kept[v]
+	if !ok {
+		return Policy{}, false, nil
+	}
+	var p Policy
+	if err := json.Unmarshal(b, &p); err != nil {
+		return Policy{}, false, &Error{Setting: SettingPermissions, Where: keptWhere, Why: "the rules a turn took could not be read", Fix: keptFix}
+	}
+	p.fill()
+	p.where, p.fix = policyWhere, policyFix
+	return p, true, nil
+}
+
+// keptRules reads KeptRulesFile. A missing file keeps nothing.
+func (f *Files) keptRules() (map[Version]json.RawMessage, error) {
+	b, v, err := readFile(filepath.Join(f.dir, KeptRulesFile))
+	if err != nil {
+		return nil, &Error{Setting: SettingPermissions, Where: keptWhere, Why: err.Error(), Fix: keptFix}
+	}
+	kept := map[Version]json.RawMessage{}
+	if v == noFile {
+		return kept, nil
+	}
+	if err := json.Unmarshal(b, &kept); err != nil {
+		return nil, &Error{Setting: SettingPermissions, Where: keptWhere, Why: "it is not the JSON control writes", Fix: keptFix}
+	}
+	return kept, nil
 }
 
 // NewFiles is the store of the data folder dir.
@@ -37,6 +109,8 @@ const (
 	policyFix         = "Fix the file, or remove it for the defaults"
 	instructionsWhere = "the instructions file " + InstructionsFile + " in the data folder"
 	instructionsFix   = "Fix the file, or remove it for the default text"
+	keptWhere         = "the file " + KeptRulesFile + " in the data folder, of the rules turns took"
+	keptFix           = "Stop the running turns and start them again; remove the file once none runs"
 )
 
 // Init writes each file that is missing, with mode 0600: the starter

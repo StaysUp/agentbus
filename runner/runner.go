@@ -554,7 +554,11 @@ type attempt struct {
 	cancel, stale chan struct{} // closed when a heartbeat hears it
 	// signin is control's word that the turn's agent can get no
 	// credential from it now (jobs.AttemptStarted.Signin).
-	signin                string
+	signin string
+	// settings are the rules control took for the turn when the attempt
+	// started, or rulesErr why it has none (jobs.AttemptStarted).
+	settings              *settings.RunnerSettings
+	rulesErr              *settings.Error
 	cancelOnce, staleOnce sync.Once
 
 	// The workspace, once known: its folder, and for a session's first job
@@ -767,6 +771,10 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	at.mu.Lock()
 	at.until = time.Now().Add(r.lease)
 	at.token, at.standIn, at.signin = st.Token, st.StandIn, st.Signin
+	at.settings = st.Settings
+	if st.RulesRefused != nil {
+		at.rulesErr = st.RulesRefused.Err()
+	}
 	at.mu.Unlock()
 	done := make(chan struct{})
 	defer close(done)
@@ -788,6 +796,9 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 		return
 	case job.Kind == queue.KindDiscard:
 		at.finish(ctx, r.discardWork(at))
+		return
+	case job.Kind == queue.KindClose:
+		at.finish(ctx, r.closeWork(at))
 		return
 	case job.Kind == queue.KindUpdate:
 		at.finish(ctx, r.updateWork(ctx, at))
@@ -865,6 +876,10 @@ func (r *Runner) request(at *attempt) run.Request {
 	// always, and in up too. Its model calls carry the stand-in, not the token.
 	if (r.cfg.Forward || r.cfg.NoSecrets) && at.token != "" {
 		req.Token, req.APIURL = at.token, r.cfg.Queue
+		// The rules control took for the turn with its token: the turn's
+		// commands and tools here are decided by the same rules as its calls
+		// to control's API.
+		req.Settings, req.RulesError = at.settings, at.rulesErr
 	}
 	// Control adds this runner's agents' credentials, and has none for
 	// this agent now: the engine refuses the turn in control's words. The
@@ -991,8 +1006,13 @@ func (r *Runner) prepare(ctx context.Context, at *attempt) *queue.Result {
 			return nil // the engine refuses it, in its own words
 		}
 		if sp.Isolate {
-			p, err := r.policy()
-			if err != nil {
+			p, err := r.policyOf(at)
+			var se *settings.Error
+			switch {
+			case errors.As(err, &se):
+				return &queue.Result{Refused: se.Where + " cannot be used, so the turn did not start: " + se.Why + ". " + se.Fix + ", and send the turn again.",
+					Status: http.StatusBadRequest}
+			case err != nil:
 				return &queue.Result{Refused: "the permissions cannot be read, so the turn did not start; fix them and send the turn again"}
 			}
 			// The workspace's sandbox is the one switch for copy-or-folder; the
@@ -1089,6 +1109,24 @@ func (r *Runner) equip(s *isolation.Space) {
 	s.Blobs, s.Lender = r.cfg.Blobs, r.cfg.Lender
 }
 
+// policyOf is the policy at's turn runs under: the one control took for it
+// when its attempt started, as the engine reads it (run.Engine.settingsFor),
+// so an edit made since applies from the next turn. A control that sent none
+// (before 0.6.x) leaves the runner's own settings, read now.
+func (r *Runner) policyOf(at *attempt) (settings.Policy, error) {
+	at.mu.Lock()
+	rs, rulesErr := at.settings, at.rulesErr
+	at.mu.Unlock()
+	switch {
+	case rulesErr != nil:
+		return settings.Policy{}, rulesErr
+	case rs != nil:
+		snap, err := settings.FromRunner(*rs)
+		return snap.Policy, err
+	}
+	return r.policy()
+}
+
 // policy is the settings' policy, or the defaults with no settings.
 func (r *Runner) policy() (settings.Policy, error) {
 	if r.cfg.Settings == nil {
@@ -1138,6 +1176,19 @@ func (r *Runner) loadCopy(at *attempt, w queue.Workspace) (res *queue.Result, re
 		}
 	}
 	return r.checkpointStart(at), true
+}
+
+// closeWork removes the copy through its backend. A missing copy is success.
+func (r *Runner) closeWork(at *attempt) queue.Finish {
+	w := queue.Workspace{Space: string(at.job.Spec.Workspace)}
+	if at.job.Workspace != nil {
+		w = *at.job.Workspace
+	}
+	if err := r.remove(w); err != nil {
+		return queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup,
+			Result: mustJSON(queue.Result{Refused: "the copy could not be removed, so nothing was closed", Status: http.StatusInternalServerError})}
+	}
+	return queue.Finish{Status: queue.Finished}
 }
 
 // discardWork resets the workspace's copy to the checkpoint the discard names

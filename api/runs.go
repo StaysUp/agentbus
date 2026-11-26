@@ -9,14 +9,14 @@ package api
 
 import (
 	"bytes"
-	"context"
 	"errors"
-	"github.com/staysup/agentbus/agents"
 	"io"
 	"net/http"
 	"regexp"
 	"strconv"
 	"time"
+
+	"github.com/staysup/agentbus/agents"
 
 	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/ids"
@@ -32,8 +32,9 @@ const MaxRunBody = 2 << 20
 // MaxPrompt bounds a turn's prompt, in bytes.
 const MaxPrompt = run.MaxPrompt
 
-// DefaultTurnWait bounds how long POST /api/v0/turns waits for a runner to
-// start the turn, when Config.TurnWait is zero.
+// DefaultTurnWait bounds how long a request waits on a turn's job, when
+// Config.TurnWait is zero: a workspace's changes preview (changes.go) and a
+// turn's diff while it ends (turndiff.go). POST /api/v0/turns never waits.
 const DefaultTurnWait = 30 * time.Second
 
 var runModel = run.ModelShape
@@ -54,7 +55,7 @@ type TurnRequest struct {
 	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"Optional, 1 to 128 characters of A-Z, a-z, 0-9 and . _ : -. A retry with the same key and the same fields answers 202 with the turn the key first started, existing true, and starts nothing. The same key with other fields gets 409. A request refused with 400 used no key."`
 	// Delivery records the on for the turn's reply in the SAME write as the turn
 	// (his call (a), 2026-11-19), so starting and delivering are one atomic step.
-	Delivery string `json:"delivery,omitempty" doc:"A session to deliver this turn's reply to when it completes, recorded as a turn.completed on in the same transaction that starts the turn (the same as POST /api/v0/ons, but atomic with the start, so no separate call can be lost). A turn token may name only its own session, so it sends its own; the main token may name any. Absent: no delivery is registered. The turn's idempotency_key covers the on too, so a retry adds no second."`
+	Delivery string `json:"delivery,omitempty" doc:"A session to deliver this turn's reply to when it completes, recorded as a turn.completed on in the same transaction that starts the turn (the same as POST /api/v0/ons, but atomic with the start, so no separate call can be lost). A turn token may name any session it may read; the main token may name any. Absent: no delivery is registered. The turn's idempotency_key covers the on too, so a retry adds no second."`
 }
 
 // Started is the answer to a turn's start, and to a review's.
@@ -108,35 +109,12 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, msg)
 		return
 	}
-	// wait is validated here, before any job is created: an invalid value must
-	// refuse without queuing a turn or consuming its idempotency key (found in
-	// review 2026-11-19). noWait returns the turn once recorded; see below.
-	noWait := false
-	if v := r.URL.Query().Get("wait"); v != "" {
-		b, err := strconv.ParseBool(v)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "wait must be true or false")
-			return
-		}
-		noWait = !b
-	}
-	// A turn token asks another agent: its checks (tokens.go) verify the
-	// session is one it created in its own workspace, and name the asking turn.
-	var links queue.Links
-	if g := grantOf(r); g != nil {
-		// The asked turn runs in the asker's workspace, which holds one ordered
-		// lane, so it waits for the asker's (running) turn to end. A wait here
-		// would stall the asker's turn behind a turn that cannot start until the
-		// asker's turn is over. An ask is async: the answer comes back as a later
-		// turn (mail), so a turn token cannot wait for a turn it starts.
-		if !noWait {
-			writeError(w, http.StatusBadRequest, "a turn token cannot wait for a turn it starts: the turn runs in your workspace after your own turn ends, and its answer comes back to your session as a later turn; send it with wait=false")
-			return
-		}
-		var ok bool
-		if links, ok = a.askChecks(w, *g, policyOf(r), &body); !ok {
-			return
-		}
+	// A turn token asks: its checks (tokens.go) verify the session is in its
+	// reach and its tree is within its cost cap, and name the asking turn.
+	who := callerOf(r)
+	links, ok := who.limits.ask(a, w, who.rules, &body)
+	if !ok {
+		return
 	}
 	if !sessionID.MatchString(body.Session) {
 		writeError(w, http.StatusBadRequest, "session is required and must match "+sessionID.String())
@@ -217,24 +195,17 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 	// Atomic delivery (his call (a), 2026-11-19): if delivery is set, record the
 	// on in the SAME write as the turn, under the one authorization that starts
 	// it — the same rules POST /api/v0/ons applies, but no separate call that a
-	// stop or a lost token can drop. A turn token delivers only to its own
-	// session (the new turn is already in its tree, so the on is within its
-	// reach); the main token may name any session. The turn's key covers the on.
+	// stop or a lost token can drop. A turn token delivers to a session in its
+	// reach; the main token may name any session. The turn's key covers the on.
 	var deliver *queue.Delivery
 	if body.Delivery != "" {
-		if g := grantOf(r); g != nil {
-			if body.Delivery != g.Session {
-				writeError(w, http.StatusForbidden, "a turn token may deliver only to its own session")
-				return
-			}
-			deliver = &queue.Delivery{Session: g.Session, Maker: queue.Maker{Session: g.Session, Turn: g.Turn}}
-		} else {
-			deliver = &queue.Delivery{Session: body.Delivery}
+		if deliver, ok = who.limits.deliver(w, body.Delivery); !ok {
+			return
 		}
 	}
 	// Never refused for a busy session: the job waits behind the session's turns
 	// that have not ended, as a delivered result does.
-	job, created, err := a.cfg.Queue.CreateTurnLinked(queue.DefaultTeam, body.IdempotencyKey, spec, links, queueLimits(policyOf(r)), deliver)
+	job, created, err := a.cfg.Queue.CreateTurnLinked(queue.DefaultTeam, body.IdempotencyKey, spec, links, queueLimits(who.rules), deliver)
 	var limit *queue.LimitError
 	var removed *queue.RunnerRemovedError
 	switch {
@@ -243,9 +214,6 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		return
 	case errors.As(err, &removed):
 		writeError(w, http.StatusConflict, removed.Error())
-		return
-	case errors.Is(err, queue.ErrAskedSessionUsed):
-		writeError(w, http.StatusForbidden, turnContinueRefused)
 		return
 	case errors.Is(err, queue.ErrKeyConflict):
 		writeError(w, http.StatusConflict, "idempotency_key already started a turn with other fields; send a new key for a new turn")
@@ -263,33 +231,7 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		a.internal(w)
 		return
 	}
-	// async by default (his rule, 2026-11-19): wait=false returns once the turn
-	// is recorded, naming it, without waiting for a runner. The ask_agent and
-	// review_turn apps send it, so startTurn never blocks and registerOn runs
-	// next in the same tool call, shrinking the gap between the two steps to that
-	// one dispatch. Absent or true keeps the 30s wait.
-	if noWait {
-		// Report the turn's real state, not a hardcoded "queued": a retry whose
-		// turn was stopped or ended before it started must say so, not pretend it
-		// is still waiting to run (found in review 2026-11-19). This is awaitTurn's
-		// own first check, without the wait.
-		j, err := a.cfg.Queue.Get(queue.DefaultTeam, job.ID)
-		if err != nil {
-			a.internal(w)
-			return
-		}
-		turn := startedTurn(j)
-		switch {
-		case turn != "":
-			writeJSON(w, http.StatusAccepted, a.startedRunning(j, turn, !created))
-		case j.Ended != nil:
-			a.notStarted(w, j)
-		default:
-			writeJSON(w, http.StatusAccepted, Started{Session: j.Session, Turn: j.Turn, State: queue.TurnQueued, Existing: !created})
-		}
-		return
-	}
-	a.awaitTurn(w, r.Context(), job, !created)
+	a.answerStarted(w, job.ID, !created)
 }
 
 // turnAgent is the saved agent a turn names, or false once it has answered
@@ -340,9 +282,7 @@ const noTurns = "this service starts no turns: it keeps no queue"
 
 // startedRunning is the Started for a turn a runner has started: its running
 // state, and the gateway BaseURL when this service runs the turn itself
-// (agentbus up). Both the waiting path and the wait=false path build their
-// running reply through it, so they cannot diverge on the gateway address
-// (found in review 2026-11-19: wait=false had omitted BaseURL).
+// (agentbus up). A retry of a turn already running answers through it.
 func (a *API) startedRunning(j queue.Job, turn string, existing bool) Started {
 	st := Started{Session: j.Session, Turn: turn, State: queue.TurnRunning, Existing: existing}
 	// BaseURL is the turn's gateway, which only this service serves, and only
@@ -355,54 +295,34 @@ func (a *API) startedRunning(j queue.Job, turn string, existing bool) Started {
 	return st
 }
 
-// awaitTurn answers once the job's turn has started: 202 with the turn. A job
-// that ended before its turn started answers why, with the status the runner
-// was refused with. A job no runner took within TurnWait answers 202 with
-// queued: it stays queued. A job that waits behind its session's earlier
-// turns answers queued at once, with how many are ahead.
-func (a *API) awaitTurn(w http.ResponseWriter, ctx context.Context, job queue.Job, existing bool) {
-	wait := a.cfg.TurnWait
-	if wait == 0 {
-		wait = DefaultTurnWait
+// answerStarted answers POST /api/v0/turns at once, never waiting for a
+// runner (C1, 2026-11-25: the 30 s wait was old code; every client handles a
+// queued turn). It reports the job's real state, not a hardcoded queued: a
+// retry whose turn already runs says running, and one whose turn was stopped
+// or ended before it started says why (found in review 2026-11-19). A turn
+// queued behind its session's earlier turns says how many are ahead.
+func (a *API) answerStarted(w http.ResponseWriter, id string, existing bool) {
+	j, err := a.cfg.Queue.Get(queue.DefaultTeam, id)
+	if err != nil {
+		a.internal(w)
+		return
 	}
-	if job.State == queue.Queued && job.Session != "" {
-		ahead, err := a.turnsAhead(job.ID)
-		if err != nil {
+	if turn := startedTurn(j); turn != "" {
+		writeJSON(w, http.StatusAccepted, a.startedRunning(j, turn, existing))
+		return
+	}
+	if j.Ended != nil {
+		a.notStarted(w, j)
+		return
+	}
+	st := Started{Session: j.Session, Turn: j.Turn, State: queue.TurnQueued, Existing: existing}
+	if j.Session != "" {
+		if st.Ahead, err = a.turnsAhead(j.ID); err != nil {
 			a.internal(w)
 			return
 		}
-		if ahead > 0 {
-			writeJSON(w, http.StatusAccepted, Started{Session: job.Session, Turn: job.Turn, State: queue.TurnQueued, Existing: existing, Ahead: ahead})
-			return
-		}
 	}
-	deadline := time.NewTimer(wait)
-	defer deadline.Stop()
-	tick := time.NewTicker(20 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		j, err := a.cfg.Queue.Get(queue.DefaultTeam, job.ID)
-		if err != nil {
-			a.internal(w)
-			return
-		}
-		if turn := startedTurn(j); turn != "" {
-			writeJSON(w, http.StatusAccepted, a.startedRunning(j, turn, existing))
-			return
-		}
-		if j.Ended != nil {
-			a.notStarted(w, j)
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-deadline.C:
-			writeJSON(w, http.StatusAccepted, Started{Session: j.Session, Turn: j.Turn, State: queue.TurnQueued, Existing: existing})
-			return
-		case <-tick.C:
-		}
-	}
+	writeJSON(w, http.StatusAccepted, st)
 }
 
 // turnsAhead counts the turns the job waits behind: its session's earlier

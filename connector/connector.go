@@ -678,16 +678,27 @@ func (c *Connector) apply(ctx context.Context, ref string, csFrom, csTo *workspa
 			}
 		}
 		// The same content is the same file only as the same kind: a
-		// regular file holding "link:x" is not the link to x.
-		is := func(f *workspace.File) bool {
+		// regular file holding "link:x" is not the link to x. And a file is a
+		// state only with that state's mode too — one chmod'ed since the base
+		// is not what the base recorded, as a changed file is not. A link's
+		// mode bits are the machine's, so its kind is all that compares.
+		contentIs := func(f *workspace.File) bool {
 			return f != nil && exists && cur == f.Hash && mode&fs.ModeSymlink == f.Mode&fs.ModeSymlink
+		}
+		is := func(f *workspace.File) bool {
+			return contentIs(f) && (!mode.IsRegular() || mode == f.Mode)
 		}
 		switch {
 		case why != "":
 			conflict.Files = append(conflict.Files, ConflictFile{st.Path, why})
-		case is(fb):
-			if mode.IsRegular() && mode.Perm() != fb.Mode.Perm() {
+		case contentIs(fb):
+			switch {
+			case !mode.IsRegular() || mode == fb.Mode:
+				// The target is already there, mode and all.
+			case is(fa):
 				ops = append(ops, &op{rel: st.Path, to: fb, chmod: true})
+			default:
+				conflict.Files = append(conflict.Files, ConflictFile{st.Path, WhyChanged})
 			}
 		case fb == nil && !exists:
 		case is(fa), fa == nil && !exists:

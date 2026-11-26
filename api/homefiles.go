@@ -29,6 +29,7 @@ const (
 	homeOffline  = "the folder's machine is offline; start agentbus runner there, and ask again"
 	homeSlow     = "the folder's machine did not answer within 15 seconds; ask again"
 	homeFailed   = "the folder's machine could not list its home"
+	homeRefused  = "a turn token reads a machine's home only from a session that works in that machine's folders as they are"
 )
 
 // GET /api/v0/folders/<ref>/home-files.
@@ -77,6 +78,15 @@ func (a *API) homeFiles(w http.ResponseWriter, r *http.Request, ref string) {
 	}
 	if machine == "" {
 		writeError(w, http.StatusNotFound, homeNoFolder)
+		return
+	}
+	// A machine's home is outside every copy: a turn token reads it only from
+	// a Direct session on that machine (O2.3, limit 1).
+	if reach, err := callerOf(r).limits.machines(a); err != nil {
+		a.internal(w)
+		return
+	} else if !reach.home(machine) {
+		writeError(w, http.StatusForbidden, homeRefused)
 		return
 	}
 	seen, err := a.cfg.Queue.MachineSeen(queue.DefaultTeam, machine)

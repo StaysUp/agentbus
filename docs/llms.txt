@@ -44,9 +44,18 @@ agentbus-api POST /api/v0/turns '{"agent":"<agent id>","prompt":"..."}'  # ask a
 ```
 
 `T` is a turn id (`t_` and 16 hex digits). `S` is a session id. `W` is a workspace id (`ws_` and 16
-hex digits), from `GET /api/v0/workspaces`. Your token reads your own session,
-the person's session you came from, and every session work from it started. It reads a turn of
-those by its id alone.
+hex digits), from `GET /api/v0/workspaces`.
+
+Your token may do what the person may, narrowed by three things only:
+
+1. **Where you work.** Working in the person's folder as it is (a Direct workspace), every
+   workspace on your machine. Working in a copy, your own workspace and the workspaces your
+   session made. You read, list, ask in, continue, stop, rename and archive their sessions, and
+   discard, update, close and apply their workspaces. You read a turn of those by its id alone.
+2. **The person's brakes.** Agents may apply (off by default), the command and tool rules, and
+   the limits on depth, jobs and cost.
+3. **Never your own brakes.** You never change the settings, the saved agents or the tools,
+   never see a token or a sign-in, and never answer an approval.
 
 ## The routes an agent uses
 
@@ -55,8 +64,10 @@ those by its id alone.
 | `GET /api/v0/agents` | The saved agents. Use an agent's `id`. |
 | `GET /api/v0/turns` | Turns, newest first; queued ones first. Facts only — no prompt or reply text. `?session=` picks a session (yours by default). |
 | `GET /api/v0/turns/{id}` | One turn in any state, with its whole `prompt` and `reply` (read from the record): also `state`, `number`, `cost_usd`; for a review `verdict` and `findings`. |
-| `POST /api/v0/turns` | Ask another agent: `{"agent","prompt"}` always opens a new session on its own copy. Your token cannot continue a session: to follow up, ask again. |
+| `POST /api/v0/turns` | Start a turn: `{"session","agent","prompt"}`, in a new session you opened with `POST /api/v0/sessions` or one that already ran. |
 | `POST /api/v0/turns/{id}/review` | Ask another agent to review a turn: `{"agent"}`. It starts a review turn. Pick an agent other than the turn's own. |
+| `GET /api/v0/sessions`, `GET /api/v0/workspaces` | The sessions and workspaces you may work in. |
+| `POST /api/v0/workspaces/{id}/update` | Bring the person's folder as it is now into a copy, under its unapplied work (after an apply was refused because the folder changed). `/discard` drops the copy's unapplied changes; `/close` removes the copy. |
 | `POST /api/v0/workspaces/{id}/apply` | Put the workspace's unapplied changes into the person's folder (optional `{"turn"}` in the body applies up to that turn). A 409 lists each file that changed there, and writes nothing. |
 | `POST /api/v0/turns/{id}/stop` | Stop a queued or running turn. It then reads `stopped`. |
 | `GET /api/v0/workspaces/{id}/changes` | A page of what applying the workspace's changes would do to the person's folder now: files with diffs against it, and conflicts. Writes nothing. The preview is stored and reused; `?fresh=true` takes a new one, `?before=` and `?event=` page the same one. |
@@ -81,7 +92,6 @@ work, ask for a review of your turn, then end your turn.
 
 ## Refusals
 
-A 403 says why: a session outside your tree; sending
-`"session"` to continue one (your token never continues a session); a folder outside yours; a call the person switched off in
-`[agent_api]` of the settings; a limit in `[limits]` (depth 2, 10 asks per turn, 30 per tree
-by default). A 404 means no such turn, session or agent. Errors are JSON: `{"error":"..."}`.
+A 403 says why, and it is one of the three: a session, workspace or folder outside your authority;
+a brake the person set (a call switched off in `[agent_api]` of the settings, a rule, a limit in
+`[limits]`: depth 2, 10 asks per turn, 30 per tree by default); or a route only the person calls. A 404 means no such turn, session or agent. Errors are JSON: `{"error":"..."}`.

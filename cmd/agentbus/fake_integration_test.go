@@ -138,20 +138,6 @@ func fakeAgent() {
 			resp.Body.Close()
 		}
 	}
-	// With AGENTBUS_FAKE_NET, a GET of each URL it lists (comma separated),
-	// through the proxy the environment names, as a tool's download goes.
-	// "net=<url> <status or no>" goes to stdout for each.
-	if v := os.Getenv("AGENTBUS_FAKE_NET"); v != "" {
-		c := &http.Client{Timeout: 5 * time.Second}
-		for _, u := range strings.Split(v, ",") {
-			if resp, err := c.Get(u); err == nil {
-				resp.Body.Close()
-				fmt.Printf("net=%s %d\n", u, resp.StatusCode)
-			} else {
-				fmt.Printf("net=%s no\n", u)
-			}
-		}
-	}
 	// With AGENTBUS_FAKE_CODEX_BODY, one model call as codex makes it: to the
 	// openai_base_url its -c argument names, or the base_url of the provider
 	// its -c arguments set, with the key its env_key names as the bearer, and
@@ -300,9 +286,9 @@ func fakeAgent() {
 		json.Unmarshal([]byte(b), &ask)
 		ask["session"] = sess.Session
 		bb, _ := json.Marshal(ask)
-		// An ask is async: a turn token cannot wait for a turn it starts (it runs
-		// in the asker's workspace lane after the asker's turn ends), so wait=false.
-		req, _ := http.NewRequest("POST", url+"/api/v0/turns?wait=false", strings.NewReader(string(bb)))
+		// An ask answers at once: the asked turn runs in the asker's workspace
+		// lane after the asker's turn ends.
+		req, _ := http.NewRequest("POST", url+"/api/v0/turns", strings.NewReader(string(bb)))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Authorization", "Bearer "+tok)
 		if resp, err := http.DefaultClient.Do(req); err == nil {

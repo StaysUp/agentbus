@@ -755,7 +755,7 @@ func TestDropPreviews(t *testing.T) {
 	q, _ := open(t)
 	mk := func(session string) Job {
 		t.Helper()
-		j, _, err := q.create(DefaultTeam, KindPreview, "", Spec{Session: ids.SessionID(session)}, Links{}, Limits{}, session, nil)
+		j, _, err := q.create(DefaultTeam, KindPreview, "", Spec{Session: ids.SessionID(session)}, Links{}, nil, session, nil)
 		if err != nil {
 			t.Fatal(err)
 		}

@@ -44,11 +44,15 @@ type route struct {
 	// token's grant must hold it. Every route that takes a token names one;
 	// New refuses a table where one does not.
 	action run.Action
-	// scope says how a request of a grant bound to a request tree (an agent
-	// turn's token) is confined to that tree (tokens.go). The zero value,
-	// scopeNone, refuses such a grant whatever its actions: a route that cannot
-	// say whose workspace it acts on is for a grant of every workspace.
-	scope int
+	// at says where the route acts (authority.go): a session, a turn, a
+	// workspace, none, or the body's. The door asks the grant whether it may do
+	// the route's action there (run.Grant.May). The zero value, atControl, is
+	// control's state as a whole, every workspace: a route that cannot say whose
+	// workspace it acts on is for a grant that reaches every workspace.
+	at int
+	// toolsSwitch marks the AgentBus tools (the tool server and the file
+	// tools): an agent's grant may not call them when tool:* is refused.
+	toolsSwitch bool
 	// turns says the turns token (Config.TurnsToken) may call the route. The
 	// zero value refuses it.
 	turns bool
@@ -139,9 +143,6 @@ var (
 	turnFailed = fail(http.StatusInternalServerError, "The store could not be written, or the agent's program would not start.")
 )
 
-// elsewhere is the file routes' 409: they act on control's disk only.
-var elsewhere = fail(http.StatusConflict, "The session's folder is on a machine other than control's: these routes act on control's disk only.")
-
 // streamDoc is the one description of the event stream's framing.
 const streamDoc = "Server-sent events. Every stored event after the cursor, in order, then new ones as they land. " +
 	"Without store and after it starts with new events only. Each message is `id: <store>/<seq>`, " +
@@ -159,12 +160,11 @@ var tags = []struct {
 	{name: "Sessions", doc: "A session is a conversation: its turns, in order. Read its history, search it, name it or close it. Create one in a workspace, then run its turns."},
 	{name: "Workspaces", doc: "A workspace is where turns run: it owns the folder, the machine and the sandbox mode (a copy behind a wall, or the folder as it is). Create one, then create a session in it, then run the session's turns. The folder and the mode are the workspace's; a session carries neither."},
 	{name: "Agents", doc: "Saved agents: a harness, how it reaches its model, the model and a name. A turn names one. And the harnesses, runners and folders a turn can use."},
-	{name: "Tools", doc: "The tools control serves to agents: the built-in ones and the person's own, in one stored format. List, add and remove them. The main token only."},
-	{name: "Files", doc: "Access to files and folders outside the session copy, gated on control."},
+	{name: "Tools", doc: "The tools control serves to agents: the built-in ones and the person's own, in one stored format. List, add and remove them. Only the main token adds or removes one: a tool's name is what the rules match."},
 	{name: "Reactions", doc: "An on is a standing instruction: when an event happens (for now, a turn completes), do something (for now, deliver that turn's reply to a session). Register one and remove it. A row on control; nothing waits. ask_agent registers one for itself."},
-	{name: "Settings", doc: "The policy and the instructions every turn gets, and the subscriptions control holds for runners. The main token only."},
-	{name: "Approvals", doc: "The commands the gateway held for a person (an ask entry, or a command on none of the lists under the ask default): list them and answer one, once, always or refuse. The main token only."},
-	{name: "Events", doc: "The record as a live stream, for a cockpit, an export or a program, and a program's own events. The main token only."},
+	{name: "Settings", doc: "The policy and the instructions every turn gets, and the subscriptions control holds for runners. Only the main token changes them or reads a subscription; a turn token may read the rest."},
+	{name: "Approvals", doc: "The commands the gateway held for a person (an ask entry, or a command on none of the lists under the ask default): list them and answer one, once, always or refuse. Only the main token answers one."},
+	{name: "Events", doc: "The record as a live stream, for a cockpit, an export or a program, and a program's own events."},
 	{name: "Service", doc: "Which build this is, and this description."},
 	{name: "Runners", doc: "Register a runner, and take work.", runner: true},
 	{name: "Attempts", doc: "Report an attempt: its start, lease, events, record, model calls and end.", runner: true},
@@ -184,17 +184,16 @@ var routes = slices.Concat([]route{
 		doc: "Start a turn: in a new session, or with session the next turn of that one. The reply names the turn at once; every event of the turn carries its id.\n\n" +
 			"Without session, agent, folder and prompt are required and the turn opens a new session. " +
 			"With session, agent and prompt are required and the turn continues that session, in its folder, on the agent named; " +
-			"a folder sent that differs from the session's is refused with 400. Only the main token continues a session: a turn token is refused with 403. " +
+			"a folder sent that differs from the session's is refused with 400. A turn token may continue any session it may read. " +
 			"The turn's turn.started, with the prompt, is stored before the reply.\n\n" +
 			"A session runs on one machine, the one that holds its folder, for its whole life: pick the machine (its machine id, from GET /api/v0/runners), " +
 			"then type a folder on it (folder) or name one it holds (folder_ref, from GET /api/v0/folders). Only that machine's runner takes the session's work.\n\n" +
-			"The reply waits up to 30 seconds for a runner to start the turn. A turn no runner starts by then answers 202 with state queued: " +
-			"it runs when a runner is free, and GET /api/v0/turns/{id} follows it.\n\n" +
-			"A session whose turn runs, or has turns waiting, is never refused: the new turn queues behind them and runs next, in order. " +
-			"It answers 202 at once with state queued and ahead, how many of the session's turns are before it.",
-		body:  TurnRequest{},
-		query: []param{{name: "wait", doc: "false returns once the turn is recorded (state queued), without waiting for a runner to start it; the reply still names the turn. Absent or true waits up to 30 seconds, as above. The ask_agent and review_turn apps send false, so a turn and the on for its reply are recorded in one call that never blocks."}},
-		scope: askTurn,
+			"The reply comes at once, once the turn is recorded; it never waits for a runner. It answers 202 with state queued: " +
+			"the turn runs when a runner is free, and GET /api/v0/turns/{id} follows it. A retry of a turn already running answers running.\n\n" +
+			"A session whose turn runs, or has turns waiting, is never refused: the new turn queues behind them and runs next, in order, " +
+			"and ahead says how many of the session's turns are before it.",
+		body: TurnRequest{},
+		at:   atBody,
 		// B15: ask_agent is no longer a tool on this route; it is a default app
 		// (apps.go, askAgentApp) that calls this operation (startTurn) in ONE step,
 		// with delivery set so the reply's on is recorded in the same write. The
@@ -221,7 +220,7 @@ var routes = slices.Concat([]route{
 			{name: "before", doc: "Only turns whose started_seq is below it: the next_before of the previous page.", integer: true, min: 1},
 			{name: "limit", doc: "Turns per page. 100 when absent.", integer: true, min: 1, max: maxTurnLimit}},
 		replies:   []reply{ok(200, TurnList{}, "A page of turns."), badRequest, storeFailed},
-		scope:     treeSessionQuery,
+		at:        atSessionQuery,
 		turns:     true,
 		wrappable: true,
 		serve:     plain((*API).turns)},
@@ -233,7 +232,7 @@ var routes = slices.Concat([]route{
 			"Poll it to wait for a turn to end, or stream from its store and seq.",
 		query:     []param{{name: "session", doc: turnSessionDoc}},
 		replies:   []reply{ok(200, OneTurn{}, "The turn."), badRequest, fail(404, "No such turn."), storeFailed},
-		scope:     treeTurn,
+		at:        atTurn,
 		turns:     true,
 		wrappable: true,
 		serve:     (*API).getTurn},
@@ -250,7 +249,7 @@ var routes = slices.Concat([]route{
 			fail(404, "This service keeps no queue, or no turn has this id."),
 			fail(409, "The turn has ended, or it is not a turn of this service."),
 			storeFailed},
-		scope: askedTurn,
+		at:    atJob,
 		turns: true,
 		serve: (*API).stopTurn},
 	{method: "POST", path: "/api/v0/ons", op: "registerOn", action: run.ActRun,
@@ -258,16 +257,17 @@ var routes = slices.Concat([]route{
 		summary: "Register an on",
 		doc: "Register a standing instruction: when the turn you name completes, its reply is delivered to a session as that session's next turn.\n\n" +
 			"This is the one primitive every reaction is built on; for now the only event is a turn completing. " +
-			"A turn token may name only a turn its own turn started, and the reply goes to its own session, so it leaves session out. " +
+			"A turn token may watch any turn it may read (the check GET /api/v0/turns/{id} uses), its own session's too, and the reply goes to a session it may read: its own when it leaves session out. " +
+			"An on a turn token registers counts as work its turn asked for, under the caps in Settings, Limits: Turns per request (max_jobs_per_turn) and Turns per request tree (max_jobs_per_tree). A cap reached is 403 and registers nothing; a retry with the key of an on already made returns it without counting again. " +
 			"The main token may watch any turn and names the session to deliver to. " +
 			"It is a row on control plus control's own check: nothing waits, and the reply arrives as a later turn. " +
 			"Dedup is by idempotency_key only: the same key for the same turn and session returns the on already registered, the same key with other fields is 409, and a request with no key always registers a new on (several ons may watch one turn). ask_agent registers one of these for itself.",
 		body: OnRequest{},
 		replies: []reply{ok(201, OnView{}, "The on."), turnRefused,
-			fail(403, "A turn token named a turn its tree did not start, or a session not its own."),
+			fail(403, "A turn token named a turn or a session it may not read, or its turn or request tree reached a cap on asked work (the message says which)."),
 			fail(404, "This service keeps no queue, or no turn has this id."),
 			fail(409, "The idempotency_key was already used to register an on for a different turn or session.")},
-		scope: onRegister,
+		at:    atBody,
 		serve: plain((*API).registerOn)},
 	{method: "DELETE", path: "/api/v0/ons/{id}", op: "removeOn", action: run.ActRun,
 		idDoc:   "An on's id (on_...), as POST /api/v0/ons named it.",
@@ -277,7 +277,7 @@ var routes = slices.Concat([]route{
 		replies: []reply{{status: 204, doc: "Removed.", empty: true}, turnRefused,
 			fail(403, "A turn token tried to remove an on another turn registered."),
 			fail(404, "This service keeps no queue, or no on has this id.")},
-		scope: onPath,
+		at:    atBody,
 		serve: (*API).removeOn},
 	{method: "GET", path: "/api/v0/turns/{id}/diff", op: "turnDiff", action: run.ActRead,
 		idDoc:   turnIDDoc,
@@ -287,7 +287,7 @@ var routes = slices.Concat([]route{
 			"files is the summary of the changed files (isolated, the checkpoints, the count); the files themselves page at GET /api/v0/turns/{id}/changes. model_calls summarises the model calls (count, usage, cost, per-model); they page at GET /api/v0/turns/{id}/calls. tools is the tool call count; they page at GET /api/v0/turns/{id}/tools, each with the commands it ran. files is null while the turn runs, and for a turn this service did not run.",
 		query:     []param{{name: "session", doc: turnSessionDoc}},
 		replies:   []reply{ok(200, TurnDiff{}, "The turn's diff summary."), badRequest, fail(404, "No such turn, or it has not started."), storeFailed},
-		scope:     treeTurn,
+		at:        atTurn,
 		turns:     true,
 		wrappable: true,
 		serve:     (*API).turnDiff},
@@ -302,7 +302,7 @@ var routes = slices.Concat([]route{
 			{name: "before", doc: "Only files before this position: the next_before of the previous page.", integer: true, min: 1},
 			{name: "limit", doc: "Files per page. 100 when absent.", integer: true, min: 1, max: maxTurnLimit}},
 		replies:   []reply{ok(200, TurnChangesPage{}, "A page of the turn's file changes."), badRequest, fail(404, "No such turn, or it has not started."), storeFailed},
-		scope:     treeTurn,
+		at:        atTurn,
 		turns:     true,
 		wrappable: true,
 		serve:     (*API).turnChanges},
@@ -317,7 +317,7 @@ var routes = slices.Concat([]route{
 			{name: "before", doc: "Only calls before this position: the next_before of the previous page.", integer: true, min: 1},
 			{name: "limit", doc: "Calls per page. 100 when absent.", integer: true, min: 1, max: maxTurnLimit}},
 		replies:   []reply{ok(200, TurnCallsPage{}, "A page of the turn's model calls."), badRequest, fail(404, "No such turn, or it has not started."), storeFailed},
-		scope:     treeTurn,
+		at:        atTurn,
 		turns:     true,
 		wrappable: true,
 		serve:     (*API).turnCalls},
@@ -332,7 +332,7 @@ var routes = slices.Concat([]route{
 			{name: "before", doc: "Only tool calls before this position: the next_before of the previous page.", integer: true, min: 1},
 			{name: "limit", doc: "Tool calls per page. 100 when absent.", integer: true, min: 1, max: maxTurnLimit}},
 		replies:   []reply{ok(200, TurnToolsPage{}, "A page of the turn's tool calls."), badRequest, fail(404, "No such turn, or it has not started."), storeFailed},
-		scope:     treeTurn,
+		at:        atTurn,
 		turns:     true,
 		wrappable: true,
 		serve:     (*API).turnTools},
@@ -345,7 +345,7 @@ var routes = slices.Concat([]route{
 			"The files are the changeset and each command's output is capped, so the read stays small; stream more from the store and seq. This reads the record, so it needs no runner and works after the turn's session is gone.",
 		query:     []param{{name: "session", doc: turnSessionDoc}},
 		replies:   []reply{ok(200, TurnRecord{}, "The turn's record."), badRequest, fail(404, "No such turn, or it has not started."), storeFailed},
-		scope:     treeTurn,
+		at:        atTurn,
 		turns:     true,
 		wrappable: true,
 		serve:     (*API).turnRecord},
@@ -357,7 +357,7 @@ var routes = slices.Concat([]route{
 			"context_tokens is the largest prompt the turn sent, the most one of its calls read: input + cache_read + cache_write, the vendor's own count. cache_read_tokens and fresh_tokens (input + cache_write) are summed over the turn's calls: how much was re-read from the cache against processed afresh, which drives the cost. made_of breaks that largest prompt into its parts from the request's own pieces (system, tools, messages), largest first; its note says what a vendor's request does not separate, such as a file read inside a tool result. made_of is null when no call carried usage or no request body is kept.",
 		query:     []param{{name: "session", doc: turnSessionDoc}},
 		replies:   []reply{ok(200, TurnContext{}, "The turn's context."), badRequest, fail(404, "No such turn, or it has not started."), storeFailed},
-		scope:     treeTurn,
+		at:        atTurn,
 		turns:     true,
 		wrappable: true,
 		serve:     (*API).turnContext},
@@ -375,7 +375,7 @@ var routes = slices.Concat([]route{
 		query:   []param{{name: "full", doc: "false leaves out each piece's json, for sizes and labels only. true when absent."}},
 		replies: []reply{ok(200, store.CallContext{}, "The call's request."), badRequest,
 			fail(404, "The turn has no such call, or no request body is stored for it."), storeFailed},
-		scope: treeTurn,
+		at:    atTurn,
 		serve: callOfTurn((*API).callContext)},
 	{method: "GET", path: "/api/v0/turns/{id}/calls/{call}/pieces/{n}", op: "callPiece", action: run.ActRead,
 		idDoc:   turnIDDoc,
@@ -384,7 +384,7 @@ var routes = slices.Concat([]route{
 		doc:     "One piece of a model call's request, or its reply, byte for byte.\n\n" + callPieceDoc,
 		replies: []reply{{status: 200, doc: "The piece's bytes, exactly as stored.", raw: true},
 			fail(404, "The turn has no such call, no request body is stored for it, it has no piece n, or no reply is kept."), storeFailed},
-		scope: treeTurn,
+		at:    atTurn,
 		serve: callOfTurn((*API).callPiece)},
 
 	{method: "POST", path: "/api/v0/workspaces", op: "createWorkspace", action: run.ActWorkspaceCreate,
@@ -394,9 +394,10 @@ var routes = slices.Concat([]route{
 			"A typed folder's machine checks and registers it, and the workspace keeps only its reference. With idempotency_key a retry returns the same workspace and makes nothing new.",
 		body:    WorkspaceRequest{},
 		replies: createReplies(ok(201, store.Workspace{}, "The workspace."), fail(404, "This service keeps no queue, or no such machine."), tooMany, stopping),
-		scope:   createWorkspaceTok,
+		at:      atBody,
 		serve:   plain((*API).createWorkspace)},
 	{method: "GET", path: "/api/v0/workspaces", op: "listWorkspaces", action: run.ActRead,
+		at:      atList,
 		tag:     "Workspaces",
 		summary: "List workspaces",
 		doc:     "Every workspace, newest first, each with its folder, machine, sandbox mode and apply state.",
@@ -408,9 +409,9 @@ var routes = slices.Concat([]route{
 		idDoc:   "A workspace id (ws_ and 16 hex digits), as POST /api/v0/workspaces named it. Another shape gets 404.",
 		doc:     "One workspace: its folder, folder reference, machine, sandbox mode, when it was created, its head turn (the latest with a changeset), the turn its latest apply went up to, and when its latest action was a discard.",
 		replies: []reply{ok(200, store.Workspace{}, "The workspace."), fail(404, "No such workspace."), storeFailed},
-		scope:   workspaceTok,
+		at:      atWorkspace,
 		serve:   (*API).getWorkspace},
-	{method: "POST", path: "/api/v0/workspaces/{id}/discard", op: "discardWorkspace", action: run.ActApply,
+	{method: "POST", path: "/api/v0/workspaces/{id}/discard", op: "discardWorkspace", action: run.ActCopy,
 		tag:     "Workspaces",
 		summary: "Discard a workspace's unapplied changes",
 		idDoc:   "A workspace id (ws_ and 16 hex digits). Another shape gets 404.",
@@ -422,8 +423,23 @@ var routes = slices.Concat([]route{
 			fail(404, "This service keeps no queue, or no such workspace."),
 			ok(409, DiscardState{}, "Refused: an apply or discard of the workspace is still running or waiting. Nothing was dropped."),
 			tooMany, fail(503, "The runner holding the copy has not been seen for a minute. Nothing was discarded."), storeFailed},
+		at:    atWorkspace,
 		serve: (*API).discardWorkspace},
-	{method: "POST", path: "/api/v0/workspaces/{id}/update", op: "updateWorkspace", action: run.ActApply,
+	{method: "POST", path: "/api/v0/workspaces/{id}/close", op: "closeWorkspace", action: run.ActCopy,
+		tag:     "Workspaces",
+		summary: "Close a workspace",
+		idDoc:   "A workspace id (ws_ and 16 hex digits). Another shape gets 404.",
+		doc: "Remove a sandbox workspace's copy to reclaim its disk. The person's folder is never touched. Close is reversible: the record and the turns stay, and the next turn rebuilds a fresh copy from the folder. No body is read.\n\n" +
+			"Like a discard, a close waits behind a running or queued turn in the workspace lane; changes not applied when it runs are dropped with the copy, so apply or discard them on the session first to keep them (the cockpit signals unapplied work). A finished close is a baseline reset: a later apply starts from the rebuilt copy's base, never the removed lineage. One apply, discard, update or close runs per workspace, so a close while one is still running or waiting is refused with 409. The reply waits up to 30 seconds; past that it is 202 with state queued or running. Every close joins the lane, even if an earlier close finished. It runs after preceding turns and succeeds if no copy remains.",
+		replies: []reply{ok(200, CloseState{}, "Closed: the copy was removed. already true: this workspace was permanently closed by an older build."),
+			ok(202, CloseState{}, "The close has not finished yet (it waits behind a running turn)."),
+			badRequest,
+			fail(404, "This service keeps no queue, or no such workspace."),
+			ok(409, CloseState{}, "Refused: an apply, discard, update or close of the workspace is still running or waiting. Nothing was removed."),
+			tooMany, fail(503, "The runner holding the copy has not been seen for a minute. Nothing was closed."), storeFailed},
+		at:    atWorkspace,
+		serve: (*API).closeWorkspace},
+	{method: "POST", path: "/api/v0/workspaces/{id}/update", op: "updateWorkspace", action: run.ActCopy,
 		tag:     "Workspaces",
 		summary: "Update a workspace's copy",
 		idDoc:   "A workspace id (ws_ and 16 hex digits). Another shape gets 404.",
@@ -439,6 +455,7 @@ var routes = slices.Concat([]route{
 			fail(404, "This service keeps no queue, or no such workspace."),
 			ok(409, UpdateState{}, "Refused: an apply, discard or update of the workspace is still running or waiting, or (a merge) a turn of it is. Nothing changed."),
 			tooMany, fail(503, "The runner holding the copy has not been seen for a minute. Nothing changed."), storeFailed},
+		at:    atWorkspace,
 		serve: (*API).updateWorkspace},
 	{method: "GET", path: "/api/v0/workspaces/{id}/changes", op: "workspaceChanges", action: run.ActRead,
 		tag:     "Workspaces",
@@ -460,7 +477,7 @@ var routes = slices.Concat([]route{
 			fail(409, "An apply of the workspace has not ended (ask again once it has), or the preview could not be made: error says why. Nothing was written."),
 			tooMany, fail(503, "The runner of the folder's machine has not been seen for a minute. Nothing was written."),
 			fail(504, "The folder's machine did not answer within 30 seconds. Nothing was written."), storeFailed},
-		scope: changesWorkspaceTok,
+		at:    atWorkspace,
 		serve: (*API).workspaceChanges},
 	{method: "POST", path: "/api/v0/workspaces/{id}/apply", op: "applyWorkspace", action: run.ActApply,
 		tag:     "Workspaces",
@@ -484,7 +501,7 @@ var routes = slices.Concat([]route{
 			fail(404, "This service keeps no queue, or no such workspace, or the named turn is not this service's."),
 			ok(409, ApplyState{}, "Refused or failed: error says why, and conflicts names each file in your folder that changed. Nothing was written on a conflict."),
 			tooMany, fail(503, "The runner of the folder's machine has not been seen for a minute. Nothing was written and no apply was made."), storeFailed},
-		scope: applyWorkspaceTok,
+		at:    atWorkspace,
 		serve: (*API).applyWorkspace},
 	{method: "POST", path: "/api/v0/sessions", op: "createSession", action: run.ActSessionCreate,
 		tag:     "Sessions",
@@ -498,10 +515,11 @@ var routes = slices.Concat([]route{
 		// turns), the same as an ask: choosing a folder and the Sandbox switch --
 		// POST /api/v0/workspaces -- stays with the main token (his ruling,
 		// 2026-11-22). The handler checks the named workspace exists (404).
-		scope: createSessionTok,
+		at:    atBody,
 		turns: true,
 		serve: plain((*API).createSession)},
 	{method: "GET", path: "/api/v0/sessions", op: "listSessions", action: run.ActRead,
+		at:      atList,
 		tag:     "Sessions",
 		summary: "List sessions",
 		doc: "A page of sessions, newest activity first, and the seq they were computed at.\n\n" +
@@ -520,7 +538,7 @@ var routes = slices.Concat([]route{
 		doc: "One session, as GET /api/v0/sessions lists it, and its copy: the runner that holds the session's isolated copy of its folder, " +
 			"and whether it is archived, closed and removed. A session that runs in the person's folder as it is has no copy.",
 		replies: []reply{ok(200, OneSession{}, "The session."), noSession, storeFailed},
-		scope:   treeSessionPath,
+		at:      atSession,
 		serve:   (*API).getSession},
 	{method: "PATCH", path: "/api/v0/sessions/{id}", op: "updateSession", action: run.ActRun,
 		tag:     "Sessions",
@@ -533,7 +551,7 @@ var routes = slices.Concat([]route{
 		body: SessionUpdate{},
 		replies: []reply{ok(200, Renamed{}, "Done."), badRequest,
 			fail(403, "A turn token's request is refused: error says why."), noSession, storeFailed},
-		scope: renameSession,
+		at:    atSession,
 		serve: (*API).updateSession},
 	{method: "GET", path: "/api/v0/sessions/{id}/events", op: "sessionEvents", action: run.ActRead,
 		tag:     "Sessions",
@@ -546,7 +564,7 @@ var routes = slices.Concat([]route{
 			{name: "kind", doc: "Only events of these kinds, comma separated, such as turn.started,turn.completed. Ignored with turn."},
 			{name: "limit", doc: "Events per page. 1000 when absent.", integer: true, min: 1, max: maxLimit}},
 		replies: []reply{ok(200, Page{}, "A page."), badRequest, mismatch, storeFailed},
-		scope:   treeSessionPath,
+		at:      atSession,
 		turns:   true,
 		serve:   (*API).sessionEvents},
 	{method: "GET", path: "/api/v0/sessions/{id}/search", op: "searchSession", action: run.ActRead,
@@ -558,7 +576,7 @@ var routes = slices.Concat([]route{
 			{name: "before", doc: "The next_before of the previous page. Absent: start from the newest."},
 			{name: "limit", doc: "Hits per page. 20 when absent.", integer: true, min: 1, max: maxSearchLimit}},
 		replies:   []reply{ok(200, store.SearchResult{}, "A page of hits."), badRequest, storeFailed},
-		scope:     treeSessionPath,
+		at:        atSession,
 		wrappable: true,
 		serve:     (*API).search},
 	{method: "GET", path: "/api/v0/sessions/{id}/context", op: "sessionContext", action: run.ActRead,
@@ -570,7 +588,7 @@ var routes = slices.Concat([]route{
 			{name: "before", doc: "Only turns before this position: the next_before of the previous page.", integer: true, min: 1},
 			{name: "limit", doc: "Turns per page. 100 when absent.", integer: true, min: 1, max: maxTurnLimit}},
 		replies:   []reply{ok(200, SessionContext{}, "The session's context."), badRequest, storeFailed},
-		scope:     treeSessionPath,
+		at:        atSession,
 		wrappable: true,
 		serve:     (*API).sessionContext},
 
@@ -581,7 +599,7 @@ var routes = slices.Concat([]route{
 			"A new data folder starts with none, under agentbus up as under agentbus server: add them from what GET /api/v0/harnesses reports. " +
 			"A data folder that already had agents keeps them.",
 		replies:   []reply{ok(200, AgentList{}, "The agents."), badRequest},
-		scope:     anyRead,
+		at:        atNothing,
 		wrappable: true,
 		serve:     plain((*API).listSaved)},
 	{method: "POST", path: "/api/v0/agents", op: "createAgent", action: run.ActAdmin,
@@ -603,7 +621,7 @@ var routes = slices.Concat([]route{
 		summary: "Get an agent",
 		doc:     "One saved agent.",
 		replies: []reply{ok(200, SavedAgent{}, "The agent."), badRequest, fail(404, "No such agent.")},
-		scope:   anyRead,
+		at:      atNothing,
 		serve:   (*API).getSaved},
 	{method: "PUT", path: "/api/v0/agents/{id}", op: "updateAgent", action: run.ActAdmin,
 		idDoc:   "A saved agent's id. Another shape gets 404.",
@@ -623,6 +641,7 @@ var routes = slices.Concat([]route{
 		replies: []reply{{status: 204, doc: "Removed.", empty: true}, badRequest, fail(404, "No such agent."), storeFailed},
 		serve:   (*API).removeSaved},
 	{method: "GET", path: "/api/v0/tools", op: "listTools", action: run.ActRead,
+		at:      atNothing,
 		tag:     "Tools",
 		summary: "List tools",
 		doc: "The tools control serves to agents, in a stable order: the built-in ones first, then the person's own. " +
@@ -640,6 +659,7 @@ var routes = slices.Concat([]route{
 		replies: []reply{ok(201, toolreg.Tool{}, "Added."), badRequest, fail(409, "A tool of that name already exists, or there are too many."), storeFailed},
 		serve:   plain((*API).createTool)},
 	{method: "GET", path: "/api/v0/tools/{id}", op: "getTool", action: run.ActRead,
+		at:      atNothing,
 		idDoc:   "A tool's name.",
 		tag:     "Tools",
 		summary: "Get a tool",
@@ -663,15 +683,16 @@ var routes = slices.Concat([]route{
 			"and once a minute after, and reports it; this service never runs an agent's program to answer. " +
 			"Just after a runner starts, the answer waits for its first report, up to 15 seconds.",
 		replies: []reply{ok(200, HarnessList{}, "The harnesses."), badRequest},
-		scope:   anyRead,
+		at:      atNothing,
 		serve:   plain((*API).listHarnesses)},
 	{method: "GET", path: "/api/v0/runners", op: "listRunners", action: run.ActRead,
+		at:      atNothing,
 		tag:     "Agents",
 		summary: "List runners",
 		doc: "The runners control knows, one per machine, for a person: each one's name, id, machine, role, labels, whether it is online, " +
 			"when it was last seen, its last probe of each harness with its version. Online means it asked for work in the last minute. " +
 			"pending lists the machines that ran agentbus login and wait for the person's approval. " +
-			"A runner that stopped stays listed, offline, until removed. A connector of a build before 0.5 is listed only while no runner reports its machine. No token is in the answer. Takes the main token only. No body is read.",
+			"A runner that stopped stays listed, offline, until removed. A connector of a build before 0.5 is listed only while no runner reports its machine. No token is in the answer. No body is read.",
 		replies: []reply{ok(200, RunnerList{}, "The runners."), badRequest, storeFailed},
 		serve:   plain((*API).listRunners)},
 	{method: "POST", path: "/api/v0/runners/pending/{id}/approve", op: "approveMachine", action: run.ActAdmin,
@@ -704,6 +725,7 @@ var routes = slices.Concat([]route{
 			fail(409, "It is online."), storeFailed},
 		serve: (*API).removeRunner},
 	{method: "GET", path: "/api/v0/folders", op: "listFolders", action: run.ActRead,
+		at:      atList,
 		tag:     "Agents",
 		summary: "List folders",
 		doc: "The folders the runners hold, each by its reference: a turn names one as folder_ref, with its machine as machine, and runs on that machine. " +
@@ -713,6 +735,7 @@ var routes = slices.Concat([]route{
 		replies: []reply{ok(200, FolderList{}, "The folders."), badRequest},
 		serve:   plain((*API).listFolders)},
 	{method: "GET", path: "/api/v0/folders/{id}/home-files", op: "folderHomeFiles", action: run.ActRead,
+		at:      atBody,
 		idDoc:   "A folder's reference (fld_ and 16 hex digits), from GET /api/v0/folders. Another shape gets 404.",
 		tag:     "Agents",
 		summary: "List the usual config files",
@@ -729,66 +752,38 @@ var routes = slices.Concat([]route{
 			fail(503, "The folder's machine is offline."), fail(504, "The folder's machine did not answer within 15 seconds."), storeFailed},
 		serve: (*API).homeFiles},
 
-	{method: "POST", path: "/api/v0/files/read", op: "readFile", action: run.ActRead,
-		tag:     "Files",
-		summary: "Read an outside file",
-		doc:     "Read a file outside the session copy, on control's machine. Only for a session whose folder is on control's own machine (agentbus up), or a call without a session; a session on another machine's runner gets 409, before any approval card.",
-		body:    ReadFileRequest{},
-		scope:   fileOp,
-		// B8 folder tools (read_file, list_folder, write_file) are hidden: not
-		// registered as tools, so no agent can call them (his call, 2026-11-23).
-		// The HTTP route stays for 0.9, when the file tools come back. An agent
-		// reaches files through its CLI's own built-in tools meanwhile.
-		replies: []reply{ok(200, ReadFileResponse{}, "The file content."), badRequest, fail(404, "File not found."), elsewhere, storeFailed},
-		serve:   plain((*API).readFile)},
-	{method: "POST", path: "/api/v0/files/list", op: "listFolder", action: run.ActRead,
-		tag:     "Files",
-		summary: "List an outside folder",
-		doc:     "List entries of a folder outside the session copy, on control's machine. Only for a session whose folder is on control's own machine (agentbus up), or a call without a session; a session on another machine's runner gets 409, before any approval card.",
-		body:    ListFolderRequest{},
-		scope:   fileOp,
-		// Hidden folder tool: not registered (see read_file above).
-		replies: []reply{ok(200, ListFolderResponse{}, "The folder entries."), badRequest, fail(404, "Folder not found."), elsewhere, storeFailed},
-		serve:   plain((*API).listFolder)},
-	{method: "POST", path: "/api/v0/files/write", op: "writeFile", action: run.ActRun,
-		tag:     "Files",
-		summary: "Write an outside file",
-		doc:     "Write a file outside the session copy, on control's machine. Only for a session whose folder is on control's own machine (agentbus up), or a call without a session; a session on another machine's runner gets 409, before any approval card.",
-		body:    WriteFileRequest{},
-		scope:   fileOp,
-		// Hidden folder tool: not registered (see read_file above).
-		replies: []reply{ok(200, WriteFileResponse{}, "File written."), badRequest, elsewhere, storeFailed},
-		serve:   plain((*API).writeFile)},
-
 	{method: "GET", path: "/api/v0/approvals", op: "listApprovals", action: run.ActRead,
+		at:      atList,
 		tag:     "Approvals",
 		summary: "List commands to approve",
 		doc: "The commands a person must answer: each one's id, its session and turn, the agent's shell tool, the commands, the entry of permissions.toml they matched (an ask entry, or one suggested from a command on no list), and when they were recorded. " +
 			"The gateway holds a call whose command matches ask, or is on none of the lists under the ask default, and records it here; the turn ends, nothing is held. GET it here, then POST your answer. " +
-			"Once answered a command leaves this list; its approval.decided event says how it ended. No token or header value is in the answer. Takes the main token only. No body is read.",
+			"Once answered a command leaves this list; its approval.decided event says how it ended. No token or header value is in the answer. No body is read.",
 		query:   []param{{name: "state", doc: `Only "pending" is kept here; decided commands are in the events. Absent or "pending" lists them.`}},
 		replies: []reply{ok(200, HeldCalls{}, "The commands to approve, oldest first."), badRequest, storeFailed},
 		serve:   plain((*API).listApprovals)},
-	{method: "POST", path: "/api/v0/approvals/{id}", op: "decideApproval", action: run.ActRun,
+	{method: "POST", path: "/api/v0/approvals/{id}", op: "decideApproval", action: run.ActAdmin,
 		idDoc:   "A command's id, from GET /api/v0/approvals. Another shape gets 404.",
 		tag:     "Approvals",
 		summary: "Answer a command",
 		doc: "Answer a held command, once, always or refuse. The gateway is holding the model's reply at the command: once releases it so the agent runs these commands in the same turn and writes nothing to the settings; always releases them and also moves each matched entry to allow in the settings, for later turns; refuse refuses the held call. No continuation turn is started for any of them (an allow runs in the turn already held). (allow is the old name for always.) " +
 			"An approval.decided event records the answer. Takes the main token only.",
 		body: Decision{},
-		replies: []reply{{status: 204, doc: "Answered.", empty: true}, badRequest, fail(404, "No command by that id, or it was answered already."),
-			fail(409, "That command is already being answered."), storeFailed},
+		replies: []reply{{status: 204, doc: "Answered.", empty: true}, badRequest, fail(404, "No command by that id."),
+			fail(409, "That command was answered already, or is being answered now."), storeFailed},
 		serve: (*API).decideApproval},
 	{method: "GET", path: "/api/v0/events", op: "streamEvents", action: run.ActRead,
+		at:      atSessionQuery,
 		tag:     "Events",
 		summary: "Stream events",
 		doc:     "A live stream of the record's events: every session's, or one session's. A cockpit follows it; an export reads it from the start.\n\n" + streamDoc,
 		query: []param{qStore, qAfter,
-			{name: "session", doc: "Only this session's events, plus the drops that name it."}},
+			{name: "session", doc: "Only this session's events, plus the drops that name it. An empty value names no session and is refused (403)."}},
 		replies: []reply{streamReply("The stream.", eventsExample), badRequest, mismatch, tooMany,
 			fail(500, "This connection cannot stream.")},
 		serve: plain((*API).stream)},
 	{method: "POST", path: "/api/v0/events", op: "writeEvent", action: run.ActRun,
+		at:      atBody,
 		tag:     "Events",
 		summary: "Write a program event",
 		doc:     "A program writes its own event, of a kind x.<program>.<name>, into a session's record.",
@@ -808,14 +803,14 @@ var routes = slices.Concat([]route{
 			"Each operation's tools are in its x-agentbus-tools. No session is kept: a token that has stopped working gets 401.",
 		body:    map[string]any{},
 		replies: []reply{{status: 200, doc: "The JSON-RPC answer.", raw: true}, {status: 202, doc: "A notification or a response, taken.", empty: true}, badRequest},
-		scope:   toolList,
-		turns:   true,
-		serve:   plain((*API).mcp)},
+		at:      atBody, toolsSwitch: true,
+		turns: true,
+		serve: plain((*API).mcp)},
 	{method: "GET", path: "/api/v0/version", op: "getVersion", action: run.ActRead,
+		at:      atNothing,
 		tag:     "Service",
 		summary: "Get the version",
-		doc: "Which build of AgentBus this service is: the values agentbus version prints. " +
-			"Takes the main token only. No body is read.",
+		doc:     "Which build of AgentBus this service is: the values agentbus version prints. No body is read.",
 		replies: []reply{ok(200, Version{}, "The version."), badRequest},
 		serve:   plain((*API).version)},
 	{method: "GET", path: "/api/v0/openapi.json", op: "openapi",

@@ -69,6 +69,8 @@ type Result struct {
 	// DiscardedEvent: a discard's workspace.discarded, by its id, in place of
 	// the outcome itself (as AppliedEvent is for an apply).
 	DiscardedEvent string `json:"discarded_event,omitempty"`
+	// ClosedEvent is the close's workspace.closed in the record.
+	ClosedEvent string `json:"closed_event,omitempty"`
 	// UpdatedEvent: an update's workspace.updated, by its id, in place of the
 	// outcome itself (as DiscardedEvent is for a discard).
 	UpdatedEvent string `json:"updated_event,omitempty"`

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/event"
+	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 )
@@ -167,8 +168,12 @@ func TestFailedFirstTurnLeavesTheCopy(t *testing.T) {
 	sess := e.makeSession(t, ws)
 	resp, raw := do(t, e.req(t, "POST", "/api/v0/turns",
 		strings.NewReader(`{"session":"`+sess+`","agent":"claude","prompt":"x"}`)))
-	if resp.StatusCode != http.StatusInternalServerError {
-		t.Fatalf("turn with a missing binary: %d %s, want it to fail to start", resp.StatusCode, raw)
+	var st Started
+	if resp.StatusCode != http.StatusAccepted || json.Unmarshal([]byte(raw), &st) != nil {
+		t.Fatalf("turn with a missing binary: %d %s, want 202", resp.StatusCode, raw)
+	}
+	if j := waitEnded(t, e, st.Turn); j.State != queue.Failed {
+		t.Fatalf("turn with a missing binary ended %s, want it to fail to start", j.State)
 	}
 	// It made the copy before the start failed; the failed turn did not remove it.
 	if _, err := os.Stat(filepath.Join(e.workdir, ws)); err != nil {
@@ -263,7 +268,7 @@ func TestFailedAskedTurnKeepsTheAskersCopy(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &sc); err != nil {
 		t.Fatal(err)
 	}
-	code, out = as(t, e, tok, "POST", "/api/v0/turns?wait=false", `{"session":"`+sc.Session+`","agent":"claude","prompt":"child"}`)
+	code, out = as(t, e, tok, "POST", "/api/v0/turns", `{"session":"`+sc.Session+`","agent":"claude","prompt":"child"}`)
 	if code != http.StatusAccepted {
 		t.Fatalf("asked turn: %d %s, want it recorded", code, out)
 	}
@@ -281,10 +286,10 @@ func TestFailedAskedTurnKeepsTheAskersCopy(t *testing.T) {
 	}
 }
 
-// R2: an ask is one turn. A turn token opens an asked session and starts its one
-// turn; a second turn to the same session is a continuation it may not do.
-// (Review P1.2.)
-func TestAskTokenCannotContinueTheAskedSession(t *testing.T) {
+// R2, replaced by O2.3 (his call, 2026-11-25): an ask was one turn. A turn
+// token now continues a session in its reach as its owner may: a second turn
+// to the session it asked in queues behind the first.
+func TestAskTokenContinuesTheAskedSession(t *testing.T) {
 	e, dir := reviewEnv(t)
 	ref, machine := e.folderRef(t, t.TempDir())
 	ws := e.makeWorkspace(t, ref, machine, true)
@@ -299,13 +304,12 @@ func TestAskTokenCannotContinueTheAskedSession(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &sc); err != nil {
 		t.Fatal(err)
 	}
-	if code, out := as(t, e, tok, "POST", "/api/v0/turns?wait=false", `{"session":"`+sc.Session+`","agent":"claude","prompt":"one"}`); code != http.StatusAccepted {
+	if code, out := as(t, e, tok, "POST", "/api/v0/turns", `{"session":"`+sc.Session+`","agent":"claude","prompt":"one"}`); code != http.StatusAccepted {
 		t.Fatalf("the asked turn: %d %s", code, out)
 	}
-	// A second turn to the same asked session is refused: a turn token does not
-	// continue a conversation.
-	if code, out := as(t, e, tok, "POST", "/api/v0/turns?wait=false", `{"session":"`+sc.Session+`","agent":"claude","prompt":"two"}`); code != http.StatusForbidden || !strings.Contains(out, "does not continue") {
-		t.Errorf("second turn to the asked session: %d %s, want 403 continuation refused", code, out)
+	// A second turn to the same asked session is a continuation, and queues.
+	if code, out := as(t, e, tok, "POST", "/api/v0/turns", `{"session":"`+sc.Session+`","agent":"claude","prompt":"two"}`); code != http.StatusAccepted {
+		t.Errorf("second turn to the asked session: %d %s, want 202", code, out)
 	}
 	release(dir, "hold")
 }

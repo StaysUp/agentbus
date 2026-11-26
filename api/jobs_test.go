@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -66,27 +67,26 @@ func newJobsEnvAt(t *testing.T, now func() time.Time) *env {
 // the enrollment token and runner tokens, never the main token or the turns
 // token. A turn asked for through the client API is the job a runner takes,
 // with the same turn id. The jobs API is gone.
-// An invalid wait refuses before any turn is queued or its idempotency key
-// consumed (found in review 2026-11-19): a later valid create with the same key
-// still starts a fresh turn.
-func TestTurnWaitInvalidQueuesNothing(t *testing.T) {
+// POST /api/v0/turns answers queued at once, with no runner to take the turn
+// (C1, 2026-11-25: wait is gone). A retry with the same key answers the same
+// turn, existing true, still queued.
+func TestTurnAnswersQueuedAtOnce(t *testing.T) {
 	e := newJobsEnv(t)
+	e.api.cfg.TurnWait = time.Hour // a wait would hold the reply past the client's timeout
 	sess := e.newSession(t, "/tmp", true)
-	body := `{"session":"` + sess + `","agent":"claude","prompt":"hi","idempotency_key":"k-wait-1"}`
-	if resp, raw := do(t, e.req(t, "POST", "/api/v0/turns?wait=bogus", strings.NewReader(body))); resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("POST ?wait=bogus: %d %s, want 400", resp.StatusCode, raw)
+	body := `{"session":"` + sess + `","agent":"claude","prompt":"hi","idempotency_key":"k-at-once"}`
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	var first, again Started
+	resp, raw := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(body)).WithContext(ctx))
+	if resp.StatusCode != http.StatusAccepted || json.Unmarshal([]byte(raw), &first) != nil ||
+		first.State != "queued" || first.Turn == "" || first.Existing || first.Ahead != 0 {
+		t.Fatalf("POST /turns: %d %s, want 202 queued at once", resp.StatusCode, raw)
 	}
-	// No turn was queued by the refused request.
-	resp, raw := do(t, e.req(t, "GET", "/api/v0/turns", nil))
-	var list TurnList
-	if json.Unmarshal([]byte(raw), &list) != nil || len(list.Turns) != 0 {
-		t.Fatalf("turns after a refused create: %s", raw)
-	}
-	// The key is free: a valid create with the same key starts a fresh turn.
 	resp, raw = do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(body)))
-	var st Started
-	if resp.StatusCode != http.StatusAccepted || json.Unmarshal([]byte(raw), &st) != nil || st.Turn == "" || st.Existing {
-		t.Fatalf("valid create reusing the key: %d %s, want a fresh turn", resp.StatusCode, raw)
+	if resp.StatusCode != http.StatusAccepted || json.Unmarshal([]byte(raw), &again) != nil ||
+		again.State != "queued" || again.Turn != first.Turn || !again.Existing {
+		t.Fatalf("retry: %d %s, want the same queued turn, existing", resp.StatusCode, raw)
 	}
 }
 
@@ -136,24 +136,24 @@ func TestArchiveQueuedFirstTurnSucceeds(t *testing.T) {
 	}
 }
 
-// A wait=false retry of a turn stopped before it started reports the stop, not
+// A retry of a turn stopped before it started reports the stop, not
 // a stale "queued" (found in review 2026-11-19): the async reply reads the
 // turn's real state.
-func TestTurnWaitFalseRetryAfterStop(t *testing.T) {
+func TestTurnRetryAfterStop(t *testing.T) {
 	e := newJobsEnv(t)
 	sess := e.newSession(t, "/tmp", true)
 	body := `{"session":"` + sess + `","agent":"claude","prompt":"hi","idempotency_key":"k-stop-1"}`
-	resp, raw := do(t, e.req(t, "POST", "/api/v0/turns?wait=false", strings.NewReader(body)))
+	resp, raw := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(body)))
 	var st Started
 	if resp.StatusCode != http.StatusAccepted || json.Unmarshal([]byte(raw), &st) != nil || st.State != "queued" || st.Turn == "" {
-		t.Fatalf("wait=false create: %d %s, want queued", resp.StatusCode, raw)
+		t.Fatalf("create: %d %s, want queued", resp.StatusCode, raw)
 	}
 	if resp, raw := do(t, e.req(t, "POST", "/api/v0/turns/"+st.Turn+"/stop", strings.NewReader(`{}`))); resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("stop the queued turn: %d %s", resp.StatusCode, raw)
 	}
 	// The retry must not say queued: the turn was stopped before it started.
-	if resp, raw := do(t, e.req(t, "POST", "/api/v0/turns?wait=false", strings.NewReader(body))); resp.StatusCode != http.StatusConflict {
-		t.Fatalf("wait=false retry after stop: %d %s, want 409 (stopped before it started)", resp.StatusCode, raw)
+	if resp, raw := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(body))); resp.StatusCode != http.StatusConflict {
+		t.Fatalf("retry after stop: %d %s, want 409 (stopped before it started)", resp.StatusCode, raw)
 	}
 }
 

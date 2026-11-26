@@ -60,7 +60,7 @@ func (a *API) search(w http.ResponseWriter, r *http.Request, session string) {
 	// A turn's own search is never a hit of it: in its own session, its own
 	// turn is left out, which the turn holds in its context anyway.
 	skip := ""
-	if g := grantOf(r); g != nil && g.Session == session {
+	if g := callerOf(r); g.Turn != "" && g.Session == session {
 		skip = g.Turn
 	}
 	res, err := a.cfg.Store.Search(store.SearchQuery{Session: session, Q: text, Before: q.Get("before"), Limit: limit,

@@ -25,6 +25,7 @@ type calls map[string][2]string
 func (c calls) AppendOnce(event.Event) (bool, error)            { return true, nil }
 func (c calls) ApprovalEvents() ([]event.Event, error)          { return nil, nil }
 func (c calls) Applied(ids.WorkspaceID) (applied.State, error)  { return applied.Empty(), nil }
+func (c calls) CostOfTurns([]string) (float64, error)           { return 0, nil }
 func (c calls) KeepReply(body.Reply) error                      { return nil }
 func (c calls) Continuation(string) (store.Continuation, error) { return store.Continuation{}, nil }
 func (c calls) CallSession(x string) (string, bool, error)      { v, ok := c[x]; return v[0], ok, nil }

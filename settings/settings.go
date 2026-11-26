@@ -107,6 +107,56 @@ func Read(s Store) (Snapshot, error) {
 	return out, nil
 }
 
+// ruleKeeper is a store that keeps the rules each turn took (DB.KeepRules).
+type ruleKeeper interface {
+	KeepRules(p Policy, v Version) error
+	Rules(v Version) (Policy, bool, error)
+}
+
+// Keep keeps p, the policy a turn takes at its start, under its version v, so
+// everything the turn does later is decided by the same rules (RulesOf). A
+// store that keeps no history keeps nothing: its turns can be held only to the
+// rules while the policy is still at v.
+func Keep(s Store, p Policy, v Version) error {
+	if k, ok := s.(ruleKeeper); ok {
+		return k.KeepRules(p, v)
+	}
+	return nil
+}
+
+// RulesOf is the policy a turn took at its start under version v: as s kept
+// it (Keep), or s's policy while it is still at v. found is false when s has
+// neither: the turn's rules are not known, and nothing may be decided by
+// other rules in their place.
+func RulesOf(s Store, v Version) (p Policy, found bool, err error) {
+	if k, ok := s.(ruleKeeper); ok {
+		if p, found, err = k.Rules(v); err != nil || found {
+			return p, found, err
+		}
+	}
+	p, cur, err := s.Policy()
+	if err != nil || cur != v {
+		return Policy{}, false, err
+	}
+	return p, true, nil
+}
+
+// FromRunner is the snapshot rs carries, checked as a runner checks what the
+// server sent it: a policy or instructions it refuses are an *Error.
+func FromRunner(rs RunnerSettings) (Snapshot, error) {
+	p := rs.Permissions
+	if err := p.Check(); err != nil {
+		return Snapshot{}, &Error{Setting: "permissions", Where: remoteWhere, Why: "the server sent a policy this runner refuses: " + err.Error(), Fix: remoteFix}
+	}
+	p.fill()
+	p.where, p.fix = folderWhere, folderFix
+	if err := CheckInstructions([]byte(rs.Instructions)); err != nil {
+		return Snapshot{}, &Error{Setting: "instructions", Where: remoteWhere, Why: "the server sent instructions this runner refuses: " + err.Error(), Fix: remoteFix}
+	}
+	return Snapshot{Policy: p, PolicyVersion: rs.PermissionsVersion, Instructions: rs.Instructions,
+		InstructionsVersion: rs.InstructionsVersion, Revision: rs.SettingsVersion}, nil
+}
+
 // Version names one state of a setting, for an ETag. It changes whenever the
 // setting does, by the API or by hand.
 type Version string
@@ -157,7 +207,7 @@ const (
 // dataFiles are the data folder's own files, which no turn may edit: a turn
 // that could would raise its own limits, or read a token.
 var dataFiles = []string{PolicyFile, InstructionsFile, AgentsFile, ToolsFile, "token", "turns_token",
-	"enroll_token", "events.db", "jobs.db", DBFile, "runner.json", "folders.json", filepath.Join("bin", APIClient)}
+	"enroll_token", "events.db", "jobs.db", DBFile, KeptRulesFile, "runner.json", "folders.json", filepath.Join("bin", APIClient)}
 
 // protected is dataFiles under dir.
 func protected(dir string) []string {

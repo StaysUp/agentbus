@@ -34,7 +34,6 @@ package api
 import (
 	"encoding/json"
 	"net/http"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -54,13 +53,14 @@ const maxToolHolds = 64
 // ok is true when the call may run (allowed outright, or a person allowed the
 // held call). A call that is not an agent's own (no turn token) or names a tool
 // the token cannot already call is not gated: ok is true and the route decides.
-func (a *API) gateToolCall(r *http.Request, inner *http.Request, g *run.Grant, st servedTool, args map[string]any) (ok bool, result toolResult) {
-	if g == nil || g.Turn == "" {
-		return true, toolResult{} // not an agent's own call: the route decides it
+func (a *API) gateToolCall(r *http.Request, inner *http.Request, c *caller, st servedTool, args map[string]any) (ok bool, result toolResult) {
+	if !c.limits.gated() {
+		return true, toolResult{} // not held to rules (the owner's own call): the route decides it
 	}
+	g := &c.Grant
 	// authorize (permission, not validation): may this caller use this session at
 	// all — the SAME check the route applies to a turn token (out of the token's
-	// tree, [agent_api] off), reusing allowTurn so there is no second
+	// tree, [agent_api] off), reusing the door (allow) so there is no second
 	// copy. Run before the decision, so a call the caller may not make is refused
 	// at once and never held. The route runs it again; it reads only, so twice is
 	// safe. The gate does NOT validate the tool's inputs — the tool validates its
@@ -70,30 +70,12 @@ func (a *API) gateToolCall(r *http.Request, inner *http.Request, g *run.Grant, s
 	if res, authorized := a.authorizeToolCall(inner, st.rt, *g); !authorized {
 		return false, res
 	}
-	// decide
-	rules, err := a.toolRules()
-	if err != nil {
-		return false, toolFail("the call could not be decided; try again")
-	}
+	// decide, by the rules the turn took at its start (O2.4)
+	rules := c.toolRules()
 	dec, rule := gateway.DecideTool(rules, st.def.Name)
 	if dec == gateway.Refuse {
 		a.recordToolRefused(g, st, args, rule)
 		return false, toolFail(refusedToolText(rule))
-	}
-	if isFolderServedTool(st) && a.cfg.Store != nil {
-		targetPath, _ := args["path"].(string)
-		if targetPath != "" {
-			if resolved, err := resolveFilePath(targetPath); err == nil {
-				targetPath = resolved
-			}
-			if resolved, err := resolveSymlinkPath(targetPath); err == nil {
-				targetPath = resolved
-			}
-			granted, err := a.cfg.Store.HasFolderGrant(g.Session, targetPath)
-			if err == nil && granted {
-				return true, toolResult{}
-			}
-		}
 	}
 	switch dec {
 	case gateway.Ask:
@@ -103,12 +85,12 @@ func (a *API) gateToolCall(r *http.Request, inner *http.Request, g *run.Grant, s
 	}
 }
 
-// authorizeToolCall runs the route's own turn-token check for this call before
-// the gate decides it, reusing allowTurn so there is no second copy of the
-// authorization to drift. authorized is false when the call is refused, and
+// authorizeToolCall runs the route's own door for this call before the gate
+// decides it, reusing allow so there is no second copy of the authorization to
+// drift. authorized is false when the call is refused, and
 // result is the refusal the agent reads — the same text the route would return,
-// so a refusal looks the same whether caught here or by the route. allowTurn
-// reads only, so the route running it again is safe.
+// so a refusal looks the same whether caught here or by the route. allow reads
+// only, so the route running it again is safe.
 func (a *API) authorizeToolCall(inner *http.Request, rt *route, g run.Grant) (result toolResult, authorized bool) {
 	id, vals, matched := rt.match(inner.URL.Path)
 	if !matched {
@@ -116,24 +98,10 @@ func (a *API) authorizeToolCall(inner *http.Request, rt *route, g run.Grant) (re
 	}
 	withValues(inner, vals)
 	rec := &toolRecorder{header: http.Header{}}
-	if _, ok := a.allowTurn(rec, inner, rt, id, g); !ok {
+	if _, ok := a.allow(rec, inner, rt, id, g); !ok {
 		return toolFail(toolStatus(rec.code) + ": " + strings.TrimSpace(rec.body.String())), false
 	}
 	return toolResult{}, true
-}
-
-// toolRules are the person's allow/ask/forbid lists as the gate reads them —
-// the SAME lists the command gate uses (permissions.toml). Unlisted is left at
-// its zero: DecideTool sets the per-call default from the tool's effect.
-func (a *API) toolRules() (gateway.Rules, error) {
-	if a.cfg.Settings == nil {
-		return gateway.Rules{}, nil
-	}
-	p, _, err := a.cfg.Settings.Policy()
-	if err != nil {
-		return gateway.Rules{}, err
-	}
-	return gateway.Rules{Allow: p.Allow, Ask: p.Ask, Forbid: p.Forbid}, nil
 }
 
 // holdToolCall holds an Ask tool call until a person answers or the hold times
@@ -163,11 +131,6 @@ func (a *API) holdToolCall(r *http.Request, g *run.Grant, st servedTool, args ma
 	moveRules := gateway.MatchingRules(ask, st.def.Name)
 	if !contains(moveRules, st.def.Name) {
 		moveRules = append(moveRules, st.def.Name)
-	}
-	if isFolderServedTool(st) {
-		if targetFolder := folderOfTool(st, args); targetFolder != "" {
-			moveRules = []string{targetFolder}
-		}
 	}
 	a.changed(event.Event{
 		Kind: event.ApprovalRequested, Session: g.Session, Turn: g.Turn, Approval: id,
@@ -335,56 +298,6 @@ func toolFail(msg string) toolResult {
 // begins "allowed" for an allow and nothing else does.
 func approvalWasAllowed(text string) bool {
 	return len(text) >= 7 && text[:7] == "allowed"
-}
-
-func isFolderRoute(path string) bool {
-	return path == "/api/v0/files/read" || path == "/api/v0/files/list" || path == "/api/v0/files/write"
-}
-
-func isFolderToolName(name string) bool {
-	return name == "read_file" || name == "list_folder" || name == "write_file"
-}
-
-func isFolderServedTool(st servedTool) bool {
-	if isFolderRoute(st.def.Run.Path) {
-		return true
-	}
-	if st.rt != nil && isFolderRoute(st.rt.path) {
-		return true
-	}
-	return isFolderToolName(st.def.Name)
-}
-
-func (a *API) isFolderTool(name string) bool {
-	if isFolderToolName(name) {
-		return true
-	}
-	if st, ok := a.servedByName(name); ok {
-		return isFolderServedTool(st)
-	}
-	return false
-}
-
-func isFolderTool(name string) bool {
-	return isFolderToolName(name)
-}
-
-func folderOfTool(st servedTool, args map[string]any) string {
-	p, _ := args["path"].(string)
-	if p == "" {
-		return ""
-	}
-	p, err := resolveFilePath(p)
-	if err != nil {
-		return ""
-	}
-	if resolved, err := resolveSymlinkPath(p); err == nil {
-		p = resolved
-	}
-	if st.def.Name == "list_folder" || (st.rt != nil && st.rt.path == "/api/v0/files/list") || st.def.Run.Path == "/api/v0/files/list" {
-		return p
-	}
-	return filepath.Dir(p)
 }
 
 // Hold and refusal texts: what the agent reads in place of a gated call's
