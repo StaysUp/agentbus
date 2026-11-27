@@ -3,7 +3,7 @@
 All notable changes to AgentBus. Full notes for each release are on the
 [releases page](https://github.com/staysup/agentbus/releases).
 
-## Unreleased
+## 0.6.7 (2026-11-27)
 
 ### Added
 - **An agent hands a long command to AgentBus, and its turn ends.** On Claude Code 2.1.332 a
@@ -119,8 +119,6 @@ All notable changes to AgentBus. Full notes for each release are on the
   oldest first, with its text and time. A turn can answer more than once, as when Claude Code
   resumes after its own background command ends; `reply` still holds the last. Before, the
   earlier answers showed only in the turn's events.
-
-### Changed
 - **Apply, discard, update and close answer at once.** Each queues its job and answers 202 with
   state `queued` and `event`: the id the record gives its outcome. None waits up to 30 seconds for
   the job to run any more. Poll
@@ -134,11 +132,29 @@ All notable changes to AgentBus. Full notes for each release are on the
   with its files; the files are on the outcome. Discard's reply has no `dropped_turns` and
   Update's has no `updated`, `conflicts`, `unresolved` or `unmergeable`: those are on the outcome
   too. `GET /api/v0/turns/{id}/diff`'s `apply` names its outcome's `event`.
+- **A Claude Code Copy session reaches GitHub and the package hosts, and writes your caches.**
+  Copy limits where an agent writes, not what it reads. `gh` and GitHub, the npm, PyPI, Go, Yarn
+  and crates.io hosts are on the sandbox's list, Go can check TLS, and your cache folders are
+  writable as the README promised. The copy allows no local sockets (`allowAllUnixSockets` is
+  false), so Docker, whose bind mounts would write outside the copy, does not work there: use a
+  Direct session. Socket grants in your own managed, MDM or user Claude Code settings still apply
+  in a Copy session; 0.6.8 closes that.
 - **A malformed `session` query is 400 for every caller.** On `GET /api/v0/events` and
   `GET /api/v0/turns`, a `session` sent twice, empty or not shaped as a session id is refused
   with 400, the owner's token included. A turn token sending it twice got 403 before.
 
 ### Fixed
+- **A file changed since the last checkpoint is read again, even with its old size and time**
+  ([#89](https://github.com/staysup/agentbus/issues/89)). A rename over a file of the same size
+  and time, or `touch -r`, made a checkpoint think it unchanged, and Apply said applied without it.
+  A file now also needs a ctime older than the last look. Thanks to Kunal Roy Choudhury
+  (`kunalgoesbyken`, #97).
+- **A session whose newest turn's history cannot be rebuilt goes on by transcript**
+  ([#100](https://github.com/staysup/agentbus/issues/100)). If `up` and its runner both died
+  mid-turn, every later turn of the session was refused with 409. Thanks to Kunal Roy Choudhury
+  (`kunalgoesbyken`, #101).
+- A test now proves Apply refuses a truncated changeset and writes nothing. Thanks to Rodrigo
+  Boratto (`rwrz`, #109).
 - **The owner's `GET /api/v0/events?session=` opened a stream of no session** instead of
   refusing. The door checked the query only for a token that does not reach everywhere.
 - **A reply the main token delivered into a session another tree had continued joined that
