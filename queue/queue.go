@@ -138,6 +138,19 @@ const (
 	// A "command" job (the person's "!" in 0.4) is retired: a "!" is now a
 	// message to the session's agent. One stored before is read as it is,
 	// and a runner refuses to run it.
+	// KindExec runs one shell command an agent's turn handed to AgentBus
+	// (POST /api/v0/commands, the run_command tool), in that turn's workspace,
+	// on the runner that holds it, so the turn can end while the command runs
+	// (H1). The job's turn column holds the command's id (c_ and 16 hex
+	// digits), the key its delivery on watches; JobByTurn never returns it.
+	// It waits in the workspace's lane behind the work made before it, so it
+	// starts once the asking turn has ended; while it runs, a turn the person
+	// sends does not wait for it, but a discard, update, close or put-away
+	// does, since those change or remove the copy under it (laneTake). It
+	// records no changes of its own: what it writes in a copy shows in the
+	// next turn's diff. Its end is command.ended in the record, and its on
+	// delivers its exit code and the end of its output to the asking session.
+	KindExec = "exec"
 )
 
 // Failure reasons.
@@ -147,6 +160,7 @@ const (
 	ReasonRunnerLost = "runner_lost" // the runner's lease expired while running
 	ReasonTimeout    = "timeout"
 	ReasonConflict   = "conflict" // an apply refused: files changed in the person's folder
+	ReasonExit       = "exit"     // a command (an exec job) exited with a code other than 0
 )
 
 // DefaultTeam is the one team every job and runner belongs to for now. The id
@@ -404,6 +418,11 @@ type Spec struct {
 	// its turn without its folder being checked again.
 	Typed        string `json:"-"`
 	TypedMachine string `json:"-"`
+	// Command and CommandTimeout, for an exec job: the shell command line
+	// (run by /bin/sh -c in the workspace's folder) and the most seconds it
+	// may run before the runner stops it.
+	Command        string `json:"command,omitempty"`
+	CommandTimeout int64  `json:"command_timeout,omitempty"`
 	// AllowOnce are command lines a person allowed once on an earlier card
 	// (api/approvals.go, decision "once"): the continuation turn's gateway
 	// lets exactly these run, this turn only, and nothing is written to the
@@ -1063,11 +1082,23 @@ func jobCopyKey(a string) string {
 // CopyKey keys the copy row. A queued job that is not due yet (not_before after
 // now, in nanoseconds) holds no place: a put-away waiting out its quiet time
 // never holds up the turn the person sends meanwhile.
+//
+// A command (KindExec, H1) stands in the same order as delegated work: an
+// agent asked for it, so it is never ahead of the person's work (laneOrder
+// class 1, as a delegated turn). A command waits for every lane job and
+// command a runner holds, and for each queued one ahead of it, so it starts
+// once the turn that asked for it has ended, never beside another command and
+// never beside a turn of the person's. A barrier (discard, update, close,
+// put-away) waits for a command as for a turn, since it would change or remove
+// the copy under it. A turn does NOT wait for a command: the person can talk to
+// the session while its long command runs.
 func laneTake(now int64) string {
-	return `j.kind IN ` + laneKinds + ` AND o.kind IN ` + laneKinds + `
-	AND ` + jobCopyKey("o") + ` = ` + jobCopyKey("j") + `
+	return jobCopyKey("o") + ` = ` + jobCopyKey("j") + `
 	AND (o.state IN ('taken','running') OR (o.state = 'queued' AND ` + due("o", now) + `
-		AND ` + laneOrder("o", now) + ` < ` + laneOrder("j", now) + `))`
+		AND ` + laneOrder("o", now) + ` < ` + laneOrder("j", now) + `))
+	AND ((j.kind IN ` + laneKinds + ` AND o.kind IN ` + laneKinds + `)
+		OR (j.kind = '` + KindExec + `' AND (o.kind IN ` + laneKinds + ` OR o.kind = '` + KindExec + `'))
+		OR (j.kind IN ` + barrierKinds + ` AND o.kind = '` + KindExec + `'))`
 }
 
 // due says the job of alias a may be taken now: it has no not_before, or it
@@ -1087,8 +1118,9 @@ const barrierKinds = `('discard','update','close','put_away')`
 //
 //   - segment: how many due barriers (barrierKinds) of the workspace were made
 //     before it. No job passes a barrier either way.
-//   - class, within a segment: 0 for the person's work, 1 for delegated work,
-//     2 for the barrier that closes the segment. The person's work is a turn
+//   - class, within a segment: 0 for the person's work, 1 for delegated work
+//     (a delegated turn, or a command: KindExec), 2 for the barrier that closes
+//     the segment. The person's work is a turn
 //     that is not delegated (Job.Delegated), and a delegated turn of a session
 //     the person has a later turn queued in, so a session's turns keep their
 //     order and the person's message never waits for its own session's
@@ -1104,7 +1136,7 @@ const barrierKinds = `('discard','update','close','put_away')`
 func laneOrder(a string, now int64) string {
 	return `((SELECT COUNT(*) FROM jobs lb WHERE lb.team = ` + a + `.team AND lb.kind IN ` + barrierKinds + `
 		AND lb.state = 'queued' AND ` + due("lb", now) + ` AND ` + jobCopyKey("lb") + ` = ` + jobCopyKey(a) + ` AND lb.rowid < ` + a + `.rowid),
-	CASE WHEN ` + a + `.kind != 'turn' THEN 2 WHEN NOT ` + delegatedJob(a) + ` THEN 0
+	CASE WHEN ` + a + `.kind = '` + KindExec + `' THEN 1 WHEN ` + a + `.kind != 'turn' THEN 2 WHEN NOT ` + delegatedJob(a) + ` THEN 0
 		WHEN EXISTS (SELECT 1 FROM jobs lp WHERE lp.team = ` + a + `.team AND lp.kind = 'turn' AND lp.state = 'queued'
 			AND lp.session = ` + a + `.session AND lp.rowid > ` + a + `.rowid AND NOT ` + delegatedJob("lp") + `) THEN 0
 		ELSE 1 END,
@@ -1258,8 +1290,11 @@ func (q *Queue) createAt(team, kind, key string, spec Spec, links Links, budget 
 		now := nanos(q.now())
 		job.ID = NewID("job_")
 		var turn any
-		if kind == KindTurn {
+		switch kind {
+		case KindTurn:
 			turn = NewID("t_")
+		case KindExec:
+			turn = NewID("c_") // the command's id, which its on watches
 		}
 		sb, _ := json.Marshal(spec)
 		lb, _ := json.Marshal(stored(links))
@@ -1287,7 +1322,11 @@ func (q *Queue) createAt(team, kind, key string, spec Spec, links Links, budget 
 		// drop. The on's key is the turn's key, namespaced (deliveryKey) so a retry
 		// dedups both yet it cannot collide with a standalone POST /ons; a keyless
 		// turn gives a keyless (always new) on.
-		if deliver != nil && kind == KindTurn && turn != nil {
+		if deliver != nil && (kind == KindTurn || kind == KindExec) && turn != nil {
+			event := OnTurnCompleted
+			if kind == KindExec {
+				event = OnCommandEnded
+			}
 			mk, err := json.Marshal(deliver.Maker)
 			if err != nil {
 				return fmt.Errorf("queue: delivery maker: %w", err)
@@ -1296,7 +1335,7 @@ func (q *Queue) createAt(team, kind, key string, spec Spec, links Links, budget 
 			// (budget): its turn is made in the asker's tree when the on fires.
 			if _, err := tx.Exec(`INSERT INTO ons(id, team, event, subject, session, maker, idem_key, created, limits) VALUES(?,?,?,?,?,?,?,?,?)
 				ON CONFLICT(team, idem_key) WHERE idem_key != '' DO NOTHING`,
-				NewID("on_"), team, OnTurnCompleted, turn, deliver.Session, string(mk), deliveryKey(key), now, limitsColumn(budget)); err != nil {
+				NewID("on_"), team, event, turn, deliver.Session, string(mk), deliveryKey(key), now, limitsColumn(budget)); err != nil {
 				return fmt.Errorf("queue: write delivery on: %w", err)
 			}
 		}
@@ -1627,7 +1666,7 @@ func (q *Queue) Take(runnerID string, lease time.Duration, lane Lane) (job Job, 
 			AND `+kinds+` AND COALESCE(json_extract(r.caps, '$.role'), '') = ''
 			AND (j.kind IN `+folderKinds+` OR `+jobCopyKey("j")+` IS NULL OR NOT EXISTS (SELECT 1 FROM copies s WHERE s.id = `+jobCopyKey("j")+` AND s.team = j.team)
 				OR EXISTS (SELECT 1 FROM copies s WHERE s.id = `+jobCopyKey("j")+` AND s.team = j.team AND s.runner = r.id AND s.closed IS NULL))
-			AND (j.kind NOT IN `+laneKinds+` OR NOT EXISTS (SELECT 1 FROM jobs o WHERE o.team = j.team AND o.id != j.id AND (`+laneTake(nanos(now))+`)))
+			AND ((j.kind NOT IN `+laneKinds+` AND j.kind != '`+KindExec+`') OR NOT EXISTS (SELECT 1 FROM jobs o WHERE o.team = j.team AND o.id != j.id AND (`+laneTake(nanos(now))+`)))
 			AND (`+machineTake+`) AND (`+labelsTake+`) AND (`+harnessTake+`)
 			ORDER BY j.created, j.id LIMIT 1`, runnerID, team, nanos(now.Add(-RunnerFresh))).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -2428,8 +2467,20 @@ func (q *Queue) SessionWorkspace(team string, session ids.SessionID) (ids.Worksp
 
 // JobByTurn reads the job of team that runs the turn with this id.
 func (q *Queue) JobByTurn(team, turn string) (Job, error) {
+	return q.jobBySubject(team, turn, `kind != '`+KindExec+`'`)
+}
+
+// JobByCommand reads the exec job of team that runs the command with this id
+// (c_...), as POST /api/v0/commands named it.
+func (q *Queue) JobByCommand(team, id string) (Job, error) {
+	return q.jobBySubject(team, id, `kind = '`+KindExec+`'`)
+}
+
+// jobBySubject reads the job whose turn column is id and whose kind passes
+// kinds (an SQL condition): a turn's, or a command's.
+func (q *Queue) jobBySubject(team, turn, kinds string) (Job, error) {
 	var id string
-	err := q.db.QueryRow(`SELECT id FROM jobs WHERE turn = ? AND team = ?`, turn, team).Scan(&id)
+	err := q.db.QueryRow(`SELECT id FROM jobs WHERE turn = ? AND team = ? AND `+kinds, turn, team).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Job{}, ErrNotFound
 	}

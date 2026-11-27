@@ -75,6 +75,9 @@ type Recorder interface {
 	// WorkspaceUsedAfter says whether the workspace was used after a record
 	// seq, for a put-away (queue.ActivityReader).
 	WorkspaceUsedAfter(ws ids.WorkspaceID, after int64) (bool, error)
+	// OpenHoldsOfTurn are the runs of a turn the record saw start and not end
+	// (closeOpenRuns).
+	OpenHoldsOfTurn(turn string) ([]store.OpenHold, error)
 	Finder
 }
 

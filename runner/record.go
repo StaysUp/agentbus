@@ -94,16 +94,18 @@ func (at *attempt) live(ctx context.Context, done <-chan struct{}) {
 	}
 }
 
-// forward sends what control lacks of the turn's events in session, a batch at
+// forward sends what control lacks of the turn's events in session, and says
+// whether control holds them all now (true when nothing is forwarded: the
+// runner writes control's own record). It sends a batch at
 // a time, from the runner's own record. A batch that cannot be sent waits for
 // the next time; at the end (final) each is tried a few times, then given up:
 // the job still finishes, and the turn stays in the runner's record. A runner
 // holds no secret, so each of its model calls went through control's relay,
 // which recorded the call from its own copy; the runner sends only the events
 // the relay cannot (relayedCall), never the calls themselves.
-func (at *attempt) forward(ctx context.Context, session string, final bool) {
+func (at *attempt) forward(ctx context.Context, session string, final bool) bool {
 	if !at.r.cfg.Forward || at.r.cfg.Store == nil || session == "" {
-		return
+		return true
 	}
 	at.fwdMu.Lock()
 	defer at.fwdMu.Unlock()
@@ -115,7 +117,10 @@ func (at *attempt) forward(ctx context.Context, session string, final bool) {
 	filter := store.Filter{Turn: at.job.Turn, TurnSession: session}
 	for range 10000 {
 		recs, more, err := at.r.cfg.Store.Page(s.after, filter, jobs.MaxBatch, MaxRecordBatch)
-		if err != nil || len(recs) == 0 {
+		if err != nil {
+			return false
+		}
+		if len(recs) == 0 {
 			break
 		}
 		b := jobs.RecordBatch{Number: at.a.Number}
@@ -142,13 +147,14 @@ func (at *attempt) forward(ctx context.Context, session string, final bool) {
 		}
 		if len(b.Events) > 0 && !at.send(ctx, "record", b, &jobs.RecordAck{}, tries) {
 			at.r.cfg.Logf("job %s: the turn's record could not be sent", at.job.ID)
-			return
+			return false
 		}
 		s.after = last
 		if !more && taken == len(recs) {
 			break
 		}
 	}
+	return true
 }
 
 // hasExchange says whether an event's data names a model call's exchange.

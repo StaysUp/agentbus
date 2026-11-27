@@ -149,7 +149,7 @@ func (q *Queue) putAwayWhy(tx *sql.Tx, team, id string, ws ids.WorkspaceID, beca
 	// Other work, and a put-away a runner already holds (a removal under way).
 	var busy int
 	if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND `+jobWorkspace+` = ? AND id != ? AND ended IS NULL
-		AND (kind IN ('turn','apply','discard','update','close') OR (kind = 'put_away' AND state IN ('taken','running')))`,
+		AND (kind IN ('turn','exec','apply','discard','update','close') OR (kind = 'put_away' AND state IN ('taken','running')))`,
 		team, string(ws), id).Scan(&busy); err != nil {
 		return "", fmt.Errorf("queue: read put-away lane: %w", err)
 	}

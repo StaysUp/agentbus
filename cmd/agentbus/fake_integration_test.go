@@ -332,8 +332,12 @@ func fakeAgent() {
 	// With AGENTBUS_FAKE_MCP, one tools/call to control's tool server
 	// ($AGENTBUS_URL/api/v0/mcp) with its own token, as Claude Code calls an
 	// AgentBus tool: the value is the call's params. "<status> <body>" goes to
-	// AGENTBUS_FAKE_MCP_OUT.
-	if p := os.Getenv("AGENTBUS_FAKE_MCP"); p != "" {
+	// AGENTBUS_FAKE_MCP_OUT. With AGENTBUS_FAKE_MCP_PROMPT set, only a turn
+	// whose prompt (the last argument) is that text calls it, so a delivered
+	// result's turn does not call it again.
+	if only := os.Getenv("AGENTBUS_FAKE_MCP_PROMPT"); only != "" && (len(os.Args) < 2 || os.Args[len(os.Args)-1] != only) {
+		// not this turn
+	} else if p := os.Getenv("AGENTBUS_FAKE_MCP"); p != "" {
 		fakePost("/api/v0/mcp", `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":`+p+`}`, os.Getenv("AGENTBUS_FAKE_MCP_OUT"))
 	}
 	// With AGENTBUS_FAKE_POST ("<path> <JSON body>"), one POST to control's

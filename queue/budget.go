@@ -65,6 +65,9 @@ func (q *Queue) ReadCostWith(r CostReader) { q.cost = r }
 // reply to the person's own session from its own turn), its session, which it
 // roots. Other jobs (applies, folders) belong to none.
 func treeOf(kind string, links Links, session string) string {
+	if kind == KindExec && links.Chain != nil {
+		return links.Chain.Root // a command is in the tree of the turn that asked for it
+	}
 	if kind != KindTurn {
 		return ""
 	}

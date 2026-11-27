@@ -67,6 +67,9 @@ const (
 	atTurn
 	// atJob: {id} is a turn with a job, in the job's session, to stop.
 	atJob
+	// atCommand: {id} is a command an agent handed to AgentBus, read and
+	// stopped as its asking session is.
+	atCommand
 	// atWorkspace: {id} is a workspace.
 	atWorkspace
 	// atBody: the body names the place, and the handler asks the grant:
@@ -326,6 +329,11 @@ func (l agentLimits) inReach(w http.ResponseWriter, s string) bool {
 // watches itself, would pass the caps.
 func (l agentLimits) watch(a *API, w http.ResponseWriter, j queue.Job, body *OnRequest) (string, queue.Maker, *queue.Chain, bool) {
 	found, ok, err := a.mayReadTurn(l.g, body.Turn, "")
+	if j.Kind == queue.KindExec {
+		// A command is read as its asking session is (GET /api/v0/commands/{id}).
+		found = true
+		ok, err = a.inAuthority(l.g, string(j.Spec.Session))
+	}
 	switch {
 	case err != nil:
 		a.internal(w)
@@ -375,7 +383,7 @@ func (l agentLimits) removeOn(a *API, w http.ResponseWriter, id string) bool {
 // reach. An on over the record is control's own (the built-in put-away): no
 // agent's.
 func (a *API) agentOn(g run.Grant, on queue.On) (bool, error) {
-	if on.Event != queue.OnTurnCompleted {
+	if !queue.Delivers(on.Event) {
 		return false, nil
 	}
 	if on.Maker.Turn == g.Turn && on.Maker.Session == g.Session {
@@ -589,6 +597,24 @@ func (a *API) within(w http.ResponseWriter, r *http.Request, rt *route, id strin
 		// The same reach as a read, so a child in a narrower copy cannot stop
 		// work in its parent's folders.
 		where, outside = run.InSession(string(j.Spec.Session)), turnStopRefused
+	case atCommand:
+		if a.cfg.Queue == nil {
+			writeError(w, http.StatusNotFound, noTurns)
+			return false
+		}
+		j, err := a.cfg.Queue.JobByCommand(queue.DefaultTeam, id)
+		switch {
+		case errors.Is(err, queue.ErrNotFound):
+			writeError(w, http.StatusNotFound, noCommand)
+			return false
+		case err != nil:
+			a.internal(w)
+			return false
+		}
+		where, outside = run.InSession(string(j.Spec.Session)), commandStopRefused
+		if rt.action == run.ActRead {
+			outside = turnSessionRefused
+		}
 	case atWorkspace:
 		where = run.InWorkspace(ids.WorkspaceID(id))
 	default:

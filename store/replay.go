@@ -30,6 +30,24 @@ func (s *Store) TurnStart(session, turn string) (prompt, replayFrom string, tran
 	return c.String + p.String, r.String, k.String == "transcript", true, nil
 }
 
+// TurnCommands reads what the turn.started of (session, turn) says of a command
+// the turn hands to AgentBus (harness.CommandLimit): run says it may run, why
+// says why not. found is false when the record holds no turn.started of it.
+// The first turn.started is the runner's, as TurnStart reads it.
+func (s *Store) TurnCommands(session, turn string) (run bool, why string, found bool, err error) {
+	var c sql.NullBool
+	var w sql.NullString
+	err = s.r.QueryRow(`SELECT json_extract(data, '$.commands_run'), json_extract(data, '$.command_limit')
+		FROM events WHERE session = ? AND turn = ? AND kind = 'turn.started' ORDER BY seq LIMIT 1`, session, turn).Scan(&c, &w)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, "", false, nil
+	}
+	if err != nil {
+		return false, "", false, fmt.Errorf("store: read a turn: %w", err)
+	}
+	return c.Valid && c.Bool, w.String, true, nil
+}
+
 // TurnText reads the whole prompt and whole reply of (session, turn) from the
 // record: the prompt is the person's own words (the turn.started's text,
 // never an earlier turn's transcript), and the reply is the text of the reply

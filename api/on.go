@@ -38,8 +38,8 @@ type OnRequest struct {
 // OnView is a registered on, as the API shows it. The queue's job id stays out.
 type OnView struct {
 	ID      string `json:"id" doc:"The on's id (on_...), to remove it with DELETE /api/v0/ons/{id}."`
-	Event   string `json:"event" doc:"The event it reacts to. For now, turn.completed."`
-	Turn    string `json:"turn" doc:"The turn it watches."`
+	Event   string `json:"event" doc:"The event it reacts to: turn.completed, or command.ended for a command an agent handed to AgentBus (POST /api/v0/commands)."`
+	Turn    string `json:"turn" doc:"The turn it watches, or for command.ended the command (c_...; GET /api/v0/commands/{id})."`
 	Session string `json:"session" doc:"The session its action delivers to."`
 	// By is who registered it, as the queue's Maker names it.
 	By *OnMaker `json:"by,omitempty" doc:"The turn whose token registered the on, and that turn's session. Absent for an on the main token registered."`
@@ -94,7 +94,15 @@ func (a *API) registerOn(w http.ResponseWriter, r *http.Request) {
 	}
 	// The subject turn must exist, whoever the caller is: a nonexistent one is
 	// 404, never a reaction that can never fire.
+	// It may also be a command an agent handed to AgentBus (c_...): its on
+	// watches command.ended, so a handover can move a command's delivery as it
+	// moves a turn's.
+	event := queue.OnTurnCompleted
 	j, err := a.cfg.Queue.JobByTurn(queue.DefaultTeam, body.Turn)
+	if errors.Is(err, queue.ErrNotFound) {
+		event = queue.OnCommandEnded
+		j, err = a.cfg.Queue.JobByCommand(queue.DefaultTeam, body.Turn)
+	}
 	switch {
 	case errors.Is(err, queue.ErrNotFound):
 		a.noJobOn(w, callerOf(r), &body)
@@ -124,7 +132,7 @@ func (a *API) registerOn(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	on, err := a.cfg.Queue.RegisterOnLinked(queue.DefaultTeam, queue.OnTurnCompleted, body.Turn, session, body.IdempotencyKey, maker, asked, queueLimits(c.rules))
+	on, err := a.cfg.Queue.RegisterOnLinked(queue.DefaultTeam, event, body.Turn, session, body.IdempotencyKey, maker, asked, queueLimits(c.rules))
 	var limit *queue.LimitError
 	switch {
 	case errors.As(err, &limit):
@@ -193,7 +201,7 @@ func (a *API) listOns(w http.ResponseWriter, r *http.Request) {
 	c := callerOf(r)
 	every := c.everywhere(run.ActRead)
 	for _, on := range ons {
-		if on.Event != queue.OnTurnCompleted || sent && on.Session != session {
+		if !queue.Delivers(on.Event) || sent && on.Session != session {
 			continue
 		}
 		if !every {

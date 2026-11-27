@@ -35,6 +35,16 @@ import (
 // on the record (RecordEvents, recordon.go), whose action is to queue a job.
 const OnTurnCompleted = "turn.completed"
 
+// OnCommandEnded is a command's event: the subject command (an exec job, by
+// its c_ id) has ended. Its action is to deliver the command's result, its
+// exit code and the end of its output, as a turn.completed on delivers a
+// turn's reply. Only POST /api/v0/commands records one, in the job's own write.
+const OnCommandEnded = "command.ended"
+
+// Delivers says an on of event delivers a result to a session (a turn's or a
+// command's), as opposed to one over a kind on the record, which queues a job.
+func Delivers(event string) bool { return event == OnTurnCompleted || event == OnCommandEnded }
+
 // ErrUnknownEvent: RegisterOn was given an event it does not know. Caught at
 // registration so a typo cannot become an on that never fires.
 var ErrUnknownEvent = errors.New("queue: unknown on event")
@@ -115,7 +125,7 @@ func (q *Queue) RegisterOn(team, event, subject, session, key string, maker Make
 func (q *Queue) RegisterOnLinked(team, event, subject, session, key string, maker Maker, asked *Chain, lim Limits) (On, error) {
 	// This path registers a turn's on (deliver its reply). An on over a kind
 	// on the record is control's own for now (RegisterRecordOn).
-	if event != OnTurnCompleted {
+	if !Delivers(event) {
 		return On{}, fmt.Errorf("%w: %q", ErrUnknownEvent, event)
 	}
 	if subject == "" || session == "" || (asked != nil && asked.By == "") {
@@ -187,7 +197,7 @@ func (q *Queue) RegisterOnLinked(team, event, subject, session, key string, make
 	return o, nil
 }
 
-// EndedTurns lists turn jobs that ended at or before atOrBefore, oldest end
+// EndedTurns lists turn and exec jobs that ended at or before atOrBefore, oldest end
 // first, from after (nil to start at the first), up to limit. The sweep's
 // reconciler (jobs.RecordTurnEnds) walks them to record each turn's end in the
 // record. atOrBefore is how the reconciler gives the finisher a head start: a
@@ -202,8 +212,8 @@ func (q *Queue) EndedTurns(after *Job, atOrBefore time.Time, limit int) ([]Job, 
 		ended, id = nanos(*after.Ended), after.ID
 	}
 	rows, err := q.db.Query(`SELECT `+jobCols+` FROM jobs
-		WHERE kind = ? AND ended IS NOT NULL AND ended <= ? AND (ended > ? OR (ended = ? AND id > ?))
-		ORDER BY ended, id LIMIT ?`, KindTurn, nanos(atOrBefore), ended, ended, id, limit)
+		WHERE kind IN (?, ?) AND ended IS NOT NULL AND ended <= ? AND (ended > ? OR (ended = ? AND id > ?))
+		ORDER BY ended, id LIMIT ?`, KindTurn, KindExec, nanos(atOrBefore), ended, ended, id, limit)
 	if err != nil {
 		return nil, fmt.Errorf("queue: list ended turns: %w", err)
 	}
@@ -360,9 +370,9 @@ func (q *Queue) FireOns(team string, ended func(turn string) (bool, error), to f
 	// set is small — a delivery on goes off as soon as it fires — and each ended
 	// check is an indexed lookup.
 	rows, err := q.db.Query(`SELECT o.id, o.subject, o.session, o.maker, o.limits FROM ons o
-		WHERE o.team = ? AND o.event = ? AND o.off IS NULL
+		WHERE o.team = ? AND o.event IN (?, ?) AND o.off IS NULL
 		AND NOT EXISTS (SELECT 1 FROM on_fires f WHERE f.on_id = o.id AND f.key = o.subject)
-		ORDER BY o.created, o.id`, team, OnTurnCompleted)
+		ORDER BY o.created, o.id`, team, OnTurnCompleted, OnCommandEnded)
 	if err != nil {
 		return 0, fmt.Errorf("queue: list ons: %w", err)
 	}
@@ -409,7 +419,9 @@ func (q *Queue) FireOns(team string, ended func(turn string) (bool, error), to f
 		case !done:
 			continue
 		}
-		j, err := q.JobByTurn(team, p.subject)
+		// The subject is a turn's or a command's job; ended has read its end
+		// from the record either way.
+		j, err := q.jobBySubject(team, p.subject, "1")
 		if err != nil {
 			return n, err
 		}

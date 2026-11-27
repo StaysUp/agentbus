@@ -23,7 +23,7 @@ copy. They reach the **person's folder** only when the workspace is **applied**:
 ## Calling the API from a turn
 
 A claude or codex turn may have the apps as tools of its own (when `[agent_api] tools = true`),
-from the MCP server `agentbus` at `POST /api/v0/mcp`: `ask_agent`, and any other app. Each does what
+from the MCP server `agentbus` at `POST /api/v0/mcp`: `ask_agent`, `review_turn`, `run_command`, and any other app. Each does what
 its route below does, with your turn's token. Reading the record (turns, diffs, sessions, saved
 agents), reviewing, applying and stopping a turn are the API's own routes, reached with
 `agentbus-api` (below), not tools.
@@ -41,6 +41,7 @@ agentbus-api GET /api/v0/turns/T/diff               # a turn's summary: counts, 
 agentbus-api GET /api/v0/turns/T/changes            # a page of the turn's changed files
 agentbus-api GET "/api/v0/sessions/S/search?q=cache" # search a session's history
 agentbus-api POST /api/v0/turns '{"agent":"<agent id>","prompt":"..."}'  # ask another agent
+agentbus-api POST /api/v0/commands '{"command":"make gate"}'  # run a long command, then end your turn
 ```
 
 `T` is a turn id (`t_` and 16 hex digits). `S` is a session id. `W` is a workspace id (`ws_` and 16
@@ -70,6 +71,8 @@ Your token may do what the person may, narrowed by three things only:
 | `POST /api/v0/workspaces/{id}/update` | Bring the person's folder as it is now into a copy, under its unapplied work (after an apply was refused because the folder changed). `/discard` drops the copy's unapplied changes; `/close` removes the copy. |
 | `POST /api/v0/workspaces/{id}/apply` | Put the workspace's unapplied changes into the person's folder (optional `{"turn"}` in the body applies up to that turn). A 409 lists each file that changed there, and writes nothing. |
 | `POST /api/v0/turns/{id}/stop` | Stop a queued or running turn. It then reads `stopped`. |
+| `POST /api/v0/commands` | Run a long shell command as AgentBus work: `{"command"}`, optional `timeout_minutes` (30 by default, at most 240). It answers at once with the command's id (`c_...`). |
+| `GET /api/v0/commands/{id}` | One command: its state, and once it ended its `exit_code`, the end of its `output` and why it failed. `POST /api/v0/commands/{id}/stop` stops it. |
 | `GET /api/v0/workspaces/{id}/changes` | A page of what applying the workspace's changes would do to the person's folder now: files with diffs against it, and conflicts. Writes nothing. The preview is stored and reused; `?fresh=true` takes a new one, `?before=` and `?event=` page the same one. |
 | `GET /api/v0/turns/{id}/diff` | A turn's summary: its agent and timing, how many files it changed, its model and tool call counts (with cost), and apply state. Each list is on its own paged route below. |
 | `GET /api/v0/turns/{id}/changes` | A page of the turn's changed files, each with its diff. `?before=` of the previous page's `next_before` for the next page. |
@@ -89,6 +92,22 @@ It names the agent, the turn, its state, the changed files, a review's verdict, 
 
 AgentBus agents are not your harness's own agents or subagents. To have another agent check your
 work, ask for a review of your turn, then end your turn.
+
+## Long commands
+
+A command that takes minutes, such as a gate, belongs to AgentBus, not to your turn. Hand it over
+with `run_command` (or `POST /api/v0/commands`), say so, and end your turn. Do not run it in the
+background: that keeps your turn running, and the person's messages wait behind it.
+
+It runs in your workspace, on the runner that holds it, under your command rules, once your turn
+has ended. A command your rules would hold for a person is refused, since no one is there to
+answer. When it ends, **its result comes back to your session as a later turn**: the command, how
+it ended, its exit code and the end of its output. While it runs, the person can still talk to
+your session. It does not get your turn's token. It never gets more than your turn may do:
+AgentBus has no wall of its own for a command yet, so it is refused, saying why, when your turn
+is limited in a way the command would escape (your turn may not edit, or your harness runs your
+commands in its own sandbox: Claude Code in a sandbox copy, codex always). Run it in your own
+shell there.
 
 ## Refusals
 

@@ -157,6 +157,7 @@ var tags = []struct {
 	runner    bool
 }{
 	{name: "Turns", doc: "A turn is one message to an agent, its reply and its changes. Every action is on a turn: start it, stop it, read its diff, apply its changes to the person's folder, ask another agent to review it, and read its model calls."},
+	{name: "Commands", doc: "A command is a long shell command, such as a 10 to 15 minute gate, that an agent's turn hands to AgentBus (the run_command tool) so the turn can end while it runs. It runs as a job in the turn's workspace, under the turn's command rules, and its end comes back to the turn's session as a new turn with its exit code and the end of its output. Read it and stop it here."},
 	{name: "Sessions", doc: "A session is a conversation: its turns, in order. Read its history, search it, name it or close it. Create one in a workspace, then run its turns."},
 	{name: "Workspaces", doc: "A workspace is where turns run: it owns the folder, the machine and the sandbox mode (a copy behind a wall, or the folder as it is). Create one, then create a session in it, then run the session's turns. The folder and the mode are the workspace's; a session carries neither. A sandbox copy whose work is all applied or discarded is put away by itself after a quiet time; the next turn makes a fresh one."},
 	{name: "Agents", doc: "Saved agents: a harness, how it reaches its model, the model and a name. A turn names one. And the harnesses, runners and folders a turn can use."},
@@ -849,7 +850,7 @@ var routes = slices.Concat([]route{
 			fail(http.StatusUnauthorized, "The code is wrong, used or expired."),
 			fail(http.StatusUnsupportedMediaType, "The body is not application/json.")},
 		public: true},
-}, runnerRoutes, settingsRoutes, subscriptionRoutes, keyRoutes(), []route{modelsRoute})
+}, commandRoutes, runnerRoutes, settingsRoutes, subscriptionRoutes, keyRoutes(), []route{modelsRoute})
 
 // match reports whether p is rt's path, the id in it, and the values of its
 // other parameters, by name.

@@ -22,6 +22,7 @@ import (
 // calls is a record that knows some calls: their session and turn.
 type calls map[string][2]string
 
+func (c calls) OpenHoldsOfTurn(string) ([]store.OpenHold, error)        { return nil, nil }
 func (c calls) AppendOnce(event.Event) (bool, error)                    { return true, nil }
 func (c calls) ApprovalEvents() ([]event.Event, error)                  { return nil, nil }
 func (c calls) Applied(ids.WorkspaceID) (applied.State, error)          { return applied.Empty(), nil }

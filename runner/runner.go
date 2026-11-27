@@ -838,6 +838,11 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	case job.Kind == queue.KindHome:
 		at.finish(ctx, r.homeWork(at))
 		return
+	case job.Kind == queue.KindExec:
+		if f, ok := r.execWork(ctx, at); ok {
+			at.finish(ctx, f)
+		}
+		return
 	case job.Kind != queue.KindTurn:
 		// A kind this runner does not run, such as a command job (the
 		// person's "!" in 0.4, retired) a control made before.
@@ -864,7 +869,7 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 		at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup, Result: mustJSON(refused)})
 		return
 	}
-	turn, err := r.cfg.Engine.Start(r.request(at))
+	turn, err := r.cfg.Engine.Start(r.request(ctx, at))
 	if err != nil {
 		res := queue.Result{Refused: "the turn could not be started", Status: http.StatusInternalServerError}
 		var rf *run.Refusal
@@ -922,10 +927,13 @@ func (r *Runner) setupStopped(ctx context.Context, at *attempt) bool {
 	return false
 }
 
+// errStartNotSent: a turn's start could not be sent to control's record.
+var errStartNotSent = errors.New("runner: the turn's start could not be sent")
+
 // request is the turn the attempt runs. Its id is the job's turn. A turn
 // job's first turn opens the session the queue named for it; a review opens
 // one of its own, in the reviewed job's folder, as a normal turn (B12).
-func (r *Runner) request(at *attempt) run.Request {
+func (r *Runner) request(ctx context.Context, at *attempt) run.Request {
 	sp := at.job.Spec
 	req := run.Request{Turn: at.job.Turn, Prompt: sp.Prompt, Model: sp.Model, Workspace: string(sp.Workspace),
 		IdempotencyKey: at.job.IdempotencyKey, AllowOnce: sp.AllowOnce}
@@ -948,6 +956,27 @@ func (r *Runner) request(at *attempt) run.Request {
 		// commands and tools here are decided by the same rules as its calls
 		// to control's API.
 		req.Settings, req.RulesError = at.settings, at.rulesErr
+	}
+	// The turn's start is in control's record before its child starts: the
+	// child may ask control at once for what control decides by that start (a
+	// command, by turn.started's commands_run), and the record that goes live
+	// later would come too late (2026-11-27: the gate's run_command test read
+	// no limit for a turn of a current runner, 1 run in 5). Tried as a final
+	// send is; a start control cannot take refuses the turn.
+	if r.cfg.Forward {
+		req.Recorded = func(session string) error {
+			// From here the turn is in control's record, so the attempt names
+			// its session at once: whatever ends the turn now, a child that
+			// fails to start too, sends its run.ended to control at finish
+			// (review P1, 2026-11-27: the session stayed open on control, and
+			// its next turn got 409). Engine.Start calls this on the attempt's
+			// own goroutine, before it returns.
+			at.session = session
+			if !at.forward(ctx, session, true) {
+				return errStartNotSent
+			}
+			return nil
+		}
 	}
 	// Control adds this runner's agents' credentials, and has none for
 	// this agent now: the engine refuses the turn in control's words. The

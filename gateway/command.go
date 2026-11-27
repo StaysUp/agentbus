@@ -64,6 +64,13 @@ func classify(r Rules, line string) (Decision, string) {
 	return dec, rule
 }
 
+// DecideCommand decides a whole command line by r, as the guard decides a
+// turn's shell command: the strictest decision over every simple command in
+// it. rule is the ask or forbid entry that drove an Ask or a Refuse, "" when
+// the unlisted default drove it. A command AgentBus runs for a turn (POST
+// /api/v0/commands) is decided by it, by the same rules.
+func DecideCommand(r Rules, line string) (Decision, string) { return classify(r, line) }
+
 // decideWords decides one simple command by its words: forbid wins, then ask,
 // then allow. A command on no list takes the unlisted default, unless soft — a
 // wrapper (env, sudo, sh -c) whose inner command is decided on its own and

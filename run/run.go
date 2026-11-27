@@ -343,7 +343,17 @@ type Request struct {
 	// for this continuation turn only (api/approvals.go, decision "once").
 	// The gateway lets exactly these run; nothing is written to the settings.
 	AllowOnce []string
+	// Recorded, when set, is called once the turn's start is in this engine's
+	// record (turn.started, context.added) and before its child starts. A
+	// runner of a server sends that record to control in it and returns only
+	// once control holds it: what control decides by the turn's start, such as
+	// whether a command of it may run (turn.started's commands_run), it reads
+	// from its own record before the child can ask. An error refuses the turn.
+	Recorded func(session string) error
 }
+
+// startNotRecorded refuses a turn whose start control's record could not take.
+const startNotRecorded = "the turn's start could not be sent to control's record, so the turn did not start"
 
 // Turn is a turn that started.
 type Turn struct {
@@ -447,7 +457,7 @@ func (e *Engine) Start(req Request) (*Turn, error) {
 	return e.start(turn{harness: req.Harness, folder: req.Folder, folderRef: req.FolderRef, workspace: req.Workspace, copy: req.Copy, session: id, id: req.Turn,
 		model: model, prompt: req.Prompt, key: req.IdempotencyKey,
 		agentID: req.AgentID, access: req.Access, keyEnv: req.KeyEnv, origin: req.Origin, root: req.Root, depth: req.Depth,
-		token: req.Token, apiURL: req.APIURL, standIn: req.StandIn, signin: req.Signin, allowOnce: req.AllowOnce,
+		token: req.Token, apiURL: req.APIURL, standIn: req.StandIn, signin: req.Signin, allowOnce: req.AllowOnce, recorded: req.Recorded,
 		settings: req.Settings, rulesErr: req.RulesError})
 }
 
@@ -600,7 +610,7 @@ func (e *Engine) next(req Request) (*Turn, error) {
 		recoveredFrom: recovered, recoveredWhy: recoveredWhy, continuity: continuity, model: model,
 		prompt: req.Prompt, context: context, key: req.IdempotencyKey,
 		agentID: agentID, access: access, keyEnv: keyEnv, origin: req.Origin, root: req.Root, depth: req.Depth,
-		token: req.Token, apiURL: req.APIURL, standIn: req.StandIn, signin: req.Signin, allowOnce: req.AllowOnce,
+		token: req.Token, apiURL: req.APIURL, standIn: req.StandIn, signin: req.Signin, allowOnce: req.AllowOnce, recorded: req.Recorded,
 		settings: req.Settings, rulesErr: req.RulesError}
 	if from != "" || continuity == ByTranscript {
 		// A fresh child: the history comes from the gateway, or from the
@@ -680,10 +690,11 @@ type turn struct {
 	origin                   *event.Origin
 	root                     string // the request tree's root session; "" for this one
 	depth                    int
-	token, apiURL            string   // control's token for the turn and its API (Request.Token)
-	standIn                  string   // the child's model credential (Request.StandIn); "" for its own
-	signin                   string   // why control has no credential for the agent now
-	allowOnce                []string // command lines allowed once for this turn, from an earlier card
+	token, apiURL            string                     // control's token for the turn and its API (Request.Token)
+	standIn                  string                     // the child's model credential (Request.StandIn); "" for its own
+	signin                   string                     // why control has no credential for the agent now
+	allowOnce                []string                   // command lines allowed once for this turn, from an earlier card
+	recorded                 func(session string) error // Request.Recorded
 }
 
 // start stores run.started and turn.started, starts t's child in a slot
@@ -952,6 +963,10 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		return nil, refuse(http.StatusBadRequest, why)
 	}
 	unkept := harness.Unkept(h, spec)
+	// What a command this turn hands to AgentBus may do, from the very spec
+	// the harness starts with (harness.CommandLimit), kept on turn.started
+	// for control to decide the command by.
+	commandLimit := harness.CommandLimit(h, spec)
 	args := h.Args(spec)
 	// The settings the harness takes in its environment rather than its
 	// command line (harness.TurnEnver).
@@ -1008,7 +1023,8 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Text: t.prompt, Harness: t.harness, Folder: t.folder, FolderRef: t.folderRef, Workspace: t.workspace,
 		ReplayFrom: t.replayFrom, Continuity: t.continuity, RecoveredFrom: t.recoveredFrom,
 		RecoveredReason: t.recoveredWhy, IdempotencyKey: t.key, AgentID: t.agentID, Access: t.access, KeyEnv: t.keyEnv,
-		Context: t.context, Model: t.model, Origin: t.origin, SettingsVersion: snap.Revision, RulesVersion: string(snap.PolicyVersion), Unkept: unkept}); err != nil {
+		Context: t.context, Model: t.model, Origin: t.origin, SettingsVersion: snap.Revision, RulesVersion: string(snap.PolicyVersion), Unkept: unkept,
+		CommandsRun: commandLimit == "", CommandLimit: commandLimit}); err != nil {
 		closeHold()
 		return nil, storeFailed
 	}
@@ -1019,6 +1035,14 @@ func (e *Engine) start(t turn) (*Turn, error) {
 			Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Added: added}); err != nil {
 			closeHold()
 			return nil, storeFailed
+		}
+	}
+	// The turn's start reaches control's record before the child can call
+	// control (Request.Recorded).
+	if t.recorded != nil {
+		if err := t.recorded(t.session); err != nil {
+			closeHoldWhy(startNotRecorded)
+			return nil, refuse(http.StatusServiceUnavailable, startNotRecorded)
 		}
 	}
 	// The output goes through pipes of our own, read by our own goroutines,

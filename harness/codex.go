@@ -202,6 +202,13 @@ func (codex) WireAPI(w APIWire) (env, args []string) {
 // gateway's guard, so nothing here refuses a turn before it starts. Read-only
 // turns retired in 0.6 (B12); a review runs like any turn, with the person's
 // own MCP servers loaded, not turned off.
+// ShellWall: codex runs every command in its own sandbox, read-only or
+// workspace-write, in a copy and in a direct folder alike (codex-cli 0.167.0,
+// 2026-11-27: Args always names --sandbox, since Turn.Walled retired in 0.6.4).
+func (codex) ShellWall(Turn) string {
+	return "codex runs your commands in its own sandbox (read-only or workspace-write)"
+}
+
 func (codex) Refuse(t Turn) string {
 	return ""
 }

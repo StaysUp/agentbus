@@ -630,6 +630,22 @@ func (s *Store) TurnEnded(turn string) (bool, error) {
 	return n > 0, nil
 }
 
+// Ended reports whether the record holds the end of subject: a turn's
+// turn.ended, or a command's command.ended (both keyed on turn). It is what a
+// delivery on reads to learn its subject ended (queue.FireOns).
+func (s *Store) Ended(subject string) (bool, error) {
+	if subject == "" {
+		return false, nil
+	}
+	var n int
+	err := s.r.QueryRow(`SELECT EXISTS(SELECT 1 FROM events WHERE turn = ? AND kind IN (?, ?))`,
+		subject, string(event.TurnEnded), string(event.CommandEnded)).Scan(&n)
+	if err != nil {
+		return false, fmt.Errorf("store: read ended: %w", err)
+	}
+	return n > 0, nil
+}
+
 // Known reports whether the store has any event of the session: a session
 // seen only through the gateway counts.
 func (s *Store) Known(id string) (bool, error) {
@@ -689,6 +705,31 @@ func (s *Store) OpenHolds(hi int64) ([]OpenHold, error) {
 		var h OpenHold
 		var hold sql.NullString
 		if err := rows.Scan(&h.Session, &hold, &h.Turn); err != nil {
+			return nil, fmt.Errorf("store: read holds: %w", err)
+		}
+		h.Hold = hold.String
+		out = append(out, h)
+	}
+	return out, rows.Err()
+}
+
+// OpenHoldsOfTurn lists the holds of turn opened and not closed: each run of
+// the turn whose run.started the record holds without its run.ended.
+func (s *Store) OpenHoldsOfTurn(turn string) ([]OpenHold, error) {
+	rows, err := s.r.Query(`SELECT session, json_extract(data, '$.hold') AS hold FROM events
+		WHERE turn = ? AND kind IN ('run.started', 'run.ended')
+		GROUP BY session, hold
+		HAVING SUM(kind = 'run.started') > 0 AND SUM(kind = 'run.ended') = 0
+		ORDER BY MIN(seq)`, turn)
+	if err != nil {
+		return nil, fmt.Errorf("store: read holds: %w", err)
+	}
+	defer rows.Close()
+	var out []OpenHold
+	for rows.Next() {
+		h := OpenHold{Turn: turn}
+		var hold sql.NullString
+		if err := rows.Scan(&h.Session, &hold); err != nil {
 			return nil, fmt.Errorf("store: read holds: %w", err)
 		}
 		h.Hold = hold.String

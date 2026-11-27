@@ -6,6 +6,29 @@ All notable changes to AgentBus. Full notes for each release are on the
 ## Unreleased
 
 ### Added
+- **An agent hands a long command to AgentBus, and its turn ends.** On Claude Code 2.1.332 a
+  background command keeps `claude -p` running until the command ends, so a 10 to 15 minute gate
+  held the turn, and the person's messages waited behind it. Coordinators ran gates with `nohup`
+  instead, which nothing recorded and nothing reported. Now an agent calls the `run_command` tool
+  (or `POST /api/v0/commands`) and ends its turn. The command is a job: it runs in the turn's
+  direct workspace (the folder itself), on the runner that holds it, under
+  the turn's command rules, once the turn has ended. While it runs, a turn the person sends does
+  not wait for it. When it ends, a new turn in the session carries the command, how it ended, its
+  exit code and the end of its output (16 KiB). `command.ended` records it, its delivery is an on
+  (`GET /api/v0/ons`, event `command.ended`), and `GET /api/v0/commands/{id}` and
+  `POST /api/v0/commands/{id}/stop` read and stop it. A command the rules would hold for a person
+  is refused, since no one is there to answer. It counts as work the turn asked for, under the
+  limits. A command never gets more than the turn that asked for it may do: AgentBus has no wall
+  of its own for a command yet, so it is refused, saying why, when the turn is limited in a way the
+  command would escape (edits forbidden or read-only, or its harness's own sandbox: Claude Code in
+  a sandbox copy, Codex always). The runner decides it once, at the turn's launch, from the limits
+  the harness starts with (`harness.CommandLimit`), and records it on the turn's `turn.started`
+  (`commands_run`, `command_limit`), which a runner sends to control before the turn's agent
+  starts, so control never reads ahead of it; control refuses by that record, and a turn whose
+  runner records no limit (an agentbus from before this) takes no command. A run control saw
+  start always ends there: when a turn's attempt ends, control closes any run of it whose end the
+  runner did not send (its agent failed to start, or the link lost the end), so the session's
+  next turn starts.
 - **AgentBus keeps each turn's history within a budget, by itself.** Own replay used to put the
   whole session in front of every turn, so a long session grew until its harness compacted. Now,
   at each turn's start, the history it builds fits a budget: 40% of the model's window by default,

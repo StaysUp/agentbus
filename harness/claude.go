@@ -163,6 +163,16 @@ func (claude) Edit(folders, protect []string) ([]string, string) {
 // gateway's guard.
 func (claude) Refuse(Turn) string { return "" }
 
+// ShellWall: in a copy Claude Code walls each command in its own sandbox
+// (Turn.Copy, Info.CopySandbox); in a direct folder its Bash runs unwalled,
+// held by the gateway's command rules only (2.1.332, 2026-11-27).
+func (claude) ShellWall(t Turn) string {
+	if t.Copy.Dir != "" {
+		return "Claude Code runs your commands in its own sandbox in this copy"
+	}
+	return ""
+}
+
 func (claude) OwnInstructions([]string, string) string { return "" }
 
 // OwnTools says the person's own MCP servers (OwnServers) name one as the

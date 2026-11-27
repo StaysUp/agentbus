@@ -219,6 +219,15 @@ const (
 	// The changes and the reply are elsewhere (turn.changed, the job result).
 	TurnEnded Kind = "turn.ended"
 
+	// CommandEnded: control's record that a command an agent handed to
+	// AgentBus (POST /api/v0/commands, the run_command tool) ended, whatever
+	// its outcome, once per command. Command holds its id, line, exit code,
+	// the end of its output and how long it ran; State is how it ended and
+	// Error why. Turn is the command's id (c_...), the key its delivery on
+	// watches, and Origin the turn that asked for it. Like turn.ended it is a
+	// reactor trigger and carries no session.
+	CommandEnded Kind = "command.ended"
+
 	// ChangesPreviewed: what applying a workspace's changes to the person's
 	// folder would do now, the dry run's result, stored so GET
 	// /workspaces/{id}/changes serves it from the record (one source) and pages
@@ -292,6 +301,7 @@ var Kinds = []KindInfo{
 	{WorkspaceUpdated, "The person's folder as it is now was merged into a sandbox workspace's copy (POST /api/v0/workspaces/{id}/update), so the session's work sits on top of it and the next Apply writes only that work: workspace and session name it, and updated holds the result (updated, merged or conflict), on a clean update or a merge the new baseline changeset (from, the folder now) and the merged changeset (to) with the folded turns, on a merge the files left with conflict markers (unresolved), on a conflict the files that conflicted, and who asked. Nothing is written to the folder; the copy's private git does the three-way merge. Stored once per update.", []string{"workspace", "updated"}},
 	{WorkspaceSnapshot, "The applied state of a workspace whose record was written before 0.6.6, when its outcome events did not yet carry all of it: workspace names it, and snapshot holds its appliable turns with their changesets and checkpoints, how far a successful apply went and what it wrote, the update in force and whether a merge left conflict markers. Written once, when control starts, from what control held then. It stands for every turn.changed, apply, discard and update of the workspace before it; later ones add to it.", []string{"workspace", "snapshot"}},
 	{TurnEnded, "A turn job ended, whatever its outcome: control writes it once per turn job for every ended turn (finished, failed, stopped, cancelled or its runner lost), so a reactor (a delivery) learns a turn ended from the record, not from the scheduler's job table. It is keyed on the turn and carries no session -- a reactor trigger, not part of a session's event stream. state is how it ended and error says why. The changes and the reply are not here: those are turn.changed and the job's result.", []string{"turn", "state"}},
+	{CommandEnded, "A command an agent handed to AgentBus ended (POST /api/v0/commands, the run_command tool), whatever its outcome: finished, failed (a non-zero exit, its time limit, or its runner lost) or stopped. Control writes it once per command, after the command's job has ended. turn is the command's id (c_...), the key its delivery on watches, and origin the turn that asked for it. command holds the line, exit_code, output (the end of stdout and stderr together, at most 16 KiB), output_bytes (all it wrote), timed_out and duration_ms; state is how it ended and error says why. No session: the asking session gets the result as a later turn.", []string{"turn", "state", "command"}},
 	{ChangesPreviewed, "What applying a workspace's changes to the person's folder would do now, the dry run of POST /api/v0/workspaces/{id}/apply computed on the folder's machine, nothing written: previewed holds the files it would write or remove (with diffs), the conflicts it would refuse, the turn it would apply up to and the turns it would carry. workspace names the workspace it is of (its session field is empty, so it never enters the session namespace). Stored so GET /api/v0/workspaces/{id}/changes serves and pages it from the record, as of this event's time; a new one is stored when a preview runs again (the workspace changed, or a fresh one was asked for). The file list can be cut (truncated) when too many to send; count still counts them all.", []string{"workspace", "previewed"}},
 	{PlanUsage, "How much of a subscription's plan is used in one of its windows, as the vendor said in the headers of a model reply that carried control's credential for that subscription: plan holds the subscription (the harness, such as claude), the connect its credential came from, the window, its length in minutes, the percent used, when it resets and the vendor's status word. " +
 		"exchange names the call it was read from. Stored when the reading changes, and again every 10 minutes at most while calls keep it the same. " +
@@ -581,6 +591,13 @@ type Event struct {
 	// Unkept, only on a run's turn.started: settings its agent has no way to
 	// keep, which the turn runs without, each one plain sentence.
 	Unkept []string `json:"unkept,omitempty" doc:"On a run's turn.started: the settings this turn's agent has no way to keep, so it ran without them, each in one plain sentence, such as agy's subagents. Show it as a quiet warning. Absent when it kept them all."`
+	// CommandsRun and CommandLimit, only on a run's turn.started: whether a
+	// command AgentBus runs for this turn (POST /api/v0/commands) may run, and
+	// why not (harness.CommandLimit), decided at launch from the turn's
+	// effective limits. A turn.started without CommandsRun (an older runner's)
+	// takes no command.
+	CommandsRun  bool   `json:"commands_run,omitempty" doc:"On a run's turn.started: a command this turn hands to AgentBus (POST /api/v0/commands) may run, since it would get no more than the turn itself may do. Absent: it is refused, with command_limit saying why."`
+	CommandLimit string `json:"command_limit,omitempty" doc:"On a run's turn.started without commands_run: why a command this turn hands to AgentBus would get more than the turn itself may do, such as edits forbidden or the harness's own sandbox."`
 	// IdempotencyKey and RequestHash, only on the turn.started of a turn
 	// started by POST /api/v0/turns with idempotency_key: the client's key,
 	// and the SHA-256 of the request's fields, so a retry with the same key
@@ -606,16 +623,17 @@ type Event struct {
 // Command is one shell command the person ran in a session's copy
 // (command.ran, retired in 0.5: only in older records).
 type Command struct {
-	ID   string `json:"id" doc:"The command's id, as the 0.4 route answered it: cmd_ and 16 hex digits."`
+	ID   string `json:"id" doc:"The command's id: on command.ended c_ and 16 hex digits, as POST /api/v0/commands answered it; on the retired events cmd_ and 16 hex digits."`
 	Line string `json:"line" doc:"The command line as sent, run by /bin/sh -c."`
 	// The rest only on command.ran.
-	ExitCode    int    `json:"exit_code,omitempty" doc:"On command.ran: its exit code, or 128 plus the signal that ended it. Absent means 0."`
-	TimedOut    bool   `json:"timed_out,omitempty" doc:"On command.ran: it ran past its time limit and was ended."`
+	ExitCode    int    `json:"exit_code,omitempty" doc:"On command.ran and command.ended: its exit code, or 128 plus the signal that ended it. Absent means 0 (on command.ended, or that it never ran: see state)."`
+	TimedOut    bool   `json:"timed_out,omitempty" doc:"On command.ran and command.ended: it ran past its time limit and was ended."`
+	Output      string `json:"output,omitempty" doc:"On command.ended: the end of what it wrote to stdout and stderr together, at most 16 KiB."`
 	Stdout      string `json:"stdout,omitempty" doc:"On command.ran: what it wrote to stdout, at most 64 KiB, the start kept."`
 	Stderr      string `json:"stderr,omitempty" doc:"On command.ran: what it wrote to stderr, at most 64 KiB, the start kept."`
-	OutputBytes int64  `json:"output_bytes,omitempty" doc:"On command.ran: all the bytes it wrote to stdout and stderr, kept or not."`
+	OutputBytes int64  `json:"output_bytes,omitempty" doc:"On command.ran and command.ended: all the bytes it wrote to stdout and stderr, kept or not."`
 	Truncated   bool   `json:"truncated,omitempty" doc:"On command.ran: some output was cut, as stdout or stderr went past 64 KiB."`
-	DurationMS  int64  `json:"duration_ms,omitempty" doc:"On command.ran: how long it ran."`
+	DurationMS  int64  `json:"duration_ms,omitempty" doc:"On command.ran and command.ended: how long it ran."`
 }
 
 // TurnChanges is what one turn changed (turn.changed).

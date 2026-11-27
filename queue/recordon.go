@@ -109,7 +109,7 @@ func (q *Queue) FireRecordOns(team string, read RecordReader, where func(ws stri
 		return 0, nil
 	}
 	rows, err := q.db.Query(`SELECT id, event, COALESCE(action, ''), COALESCE(cursor, 0) FROM ons
-		WHERE team = ? AND event != ? AND off IS NULL ORDER BY created, id`, team, OnTurnCompleted)
+		WHERE team = ? AND event NOT IN (?, ?) AND off IS NULL ORDER BY created, id`, team, OnTurnCompleted, OnCommandEnded)
 	if err != nil {
 		return 0, fmt.Errorf("queue: list ons: %w", err)
 	}
