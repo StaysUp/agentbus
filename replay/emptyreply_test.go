@@ -13,7 +13,7 @@ import (
 )
 
 // emptyWords is what the note for a reply that said nothing says.
-const emptyWords = "ended its turn here with an empty reply"
+const emptyWords = "reply here was empty"
 
 // emptyRow is one stored reply and what the history must do with it.
 type emptyRow struct {
@@ -22,8 +22,9 @@ type emptyRow struct {
 	reply, stop string
 	// silent: it said nothing, so exactly one note stands in for it.
 	silent bool
-	// keep lists what the history must still carry of it.
-	keep []string
+	// keep lists what the history must still carry of it; gone what it must
+	// not, such as an empty list the vendor refuses.
+	keep, gone []string
 }
 
 // emptyFormat is what the scenarios need to know of one format: how to store
@@ -114,7 +115,7 @@ func emptyClaude() emptyFormat {
 			{name: "blank-string", reply: msg(jsonQuote("  \n")), silent: true},
 			{name: "empty-text", reply: msg(list(txt(""))), silent: true},
 			{name: "blank-text", reply: msg(list(txt("\n\n"))), silent: true},
-			{name: "unicode-blank", reply: msg(list(txt("  　"))), silent: true},
+			{name: "unicode-blank", reply: msg(list(txt("\u00a0\u2003\u3000"))), silent: true},
 			{name: "two-blank", reply: msg(list(txt(" "), txt(""))), silent: true},
 			{name: "many-blank", reply: msg("[" + blankN(200, txt(" ")) + "]"), silent: true},
 			{name: "thinking-only", reply: msg(list(think)), silent: true, keep: []string{`"signature":"U0lHLXR3bw=="`}},
@@ -124,7 +125,7 @@ func emptyClaude() emptyFormat {
 			{name: "max-tokens-empty", reply: msg(`[]`), stop: "max_tokens", silent: true},
 			{name: "null-content", reply: msg(`null`), silent: true},
 			{name: "missing-content", reply: `{"role":"assistant"}`, silent: true},
-			{name: "zwsp", reply: msg(list(txt("​"))), keep: []string{jsonQuote("​")}},
+			{name: "zwsp", reply: msg(list(txt("\u200b"))), keep: []string{jsonQuote("\u200b")}},
 			{name: "server-tool-only", reply: msg(list(srv)), keep: []string{`srvtoolu_1`}},
 			{name: "blank-then-words", reply: msg(list(txt(" "), txt("ok2"))), keep: []string{`"ok2"`}},
 			{name: "words-then-blank", reply: msg(list(txt("ok2"), txt("\n"))), keep: []string{`"ok2"`}},
@@ -182,11 +183,11 @@ func emptyCodex() emptyFormat {
 			{name: "reasoning-blank", reply: items(reasoning1, msg("\n")), silent: true, keep: []string{reasoning1}},
 			{name: "blank-message", reply: items(msg("\n\n")), silent: true},
 			{name: "empty-text-message", reply: items(msg("")), silent: true},
-			{name: "unicode-blank", reply: items(msg("  　")), silent: true},
+			{name: "unicode-blank", reply: items(msg("\u00a0\u2003\u3000")), silent: true},
 			{name: "two-blank", reply: items(msg(" "), msg("")), silent: true},
 			{name: "many-blank", reply: "[" + blankN(200, msg(" ")) + "]", silent: true},
 			{name: "empty-content-list", reply: items(noParts), silent: true},
-			{name: "zwsp", reply: items(msg("​")), keep: []string{jsonQuote("​")}},
+			{name: "zwsp", reply: items(msg("\u200b")), keep: []string{jsonQuote("\u200b")}},
 			{name: "blank-then-words", reply: items(msg(" "), msg("ok2")), keep: []string{`"ok2"`}},
 			{name: "words-then-blank", reply: items(msg("ok2"), msg("\n")), keep: []string{`"ok2"`}},
 			{name: "reasoning-words", reply: items(reasoning1, answer1), keep: []string{reasoning1, answer1}},
@@ -234,7 +235,7 @@ func emptyChat() emptyFormat {
 		rows: []emptyRow{
 			{name: "empty-string", reply: asst(`"content":""`), silent: true},
 			{name: "blank-string", reply: asst(`"content":` + jsonQuote("  \n")), silent: true},
-			{name: "unicode-blank", reply: asst(`"content":` + jsonQuote("  　")), silent: true},
+			{name: "unicode-blank", reply: asst(`"content":` + jsonQuote("\u00a0\u2003\u3000")), silent: true},
 			{name: "null-content", reply: asst(`"content":null`), silent: true},
 			{name: "missing-content", reply: `{"role":"assistant"}`, silent: true},
 			{name: "empty-list", reply: asst(`"content":[]`), silent: true},
@@ -245,7 +246,13 @@ func emptyChat() emptyFormat {
 			{name: "reasoning-details-empty", reply: asst(`"content":null,"reasoning_details":` + details), silent: true, keep: []string{`"reasoning_details":` + details}},
 			{name: "length-empty", reply: asst(`"content":""`), stop: "length", silent: true},
 			{name: "filter-empty", reply: asst(`"content":""`), stop: "content_filter", silent: true},
-			{name: "zwsp", reply: asst(`"content":` + jsonQuote("​")), keep: []string{jsonQuote("​")}},
+			{name: "empty-tool-calls", reply: asst(`"content":"","tool_calls":[]`), silent: true, gone: []string{`"tool_calls":[]`}},
+			{name: "null-empty-tool-calls", reply: asst(`"content":null,"tool_calls":[]`), silent: true, gone: []string{`"tool_calls":[]`}},
+			{name: "null-audio-and-images", reply: asst(`"content":"","audio":null,"images":[]`), silent: true},
+			{name: "function-call", reply: asst(`"content":null,"function_call":{"name":"bash","arguments":"{}"}`), keep: []string{`"function_call"`}},
+			{name: "audio", reply: asst(`"content":null,"audio":{"id":"audio_1","expires_at":1}`), keep: []string{`"audio_1"`}},
+			{name: "images", reply: asst(`"content":"","images":[{"type":"image_url","image_url":{"url":"data:image/png;base64,AAAA"}}]`), keep: []string{`"images"`}},
+			{name: "zwsp", reply: asst(`"content":` + jsonQuote("\u200b")), keep: []string{jsonQuote("\u200b")}},
 			{name: "blank-part-then-words", reply: parts, keep: []string{parts}},
 			{name: "refusal-field", reply: asst(`"content":null,"refusal":"no"`), keep: []string{`"refusal":"no"`}},
 			{name: "refusal-part", reply: refPart, keep: []string{refPart}},
@@ -267,6 +274,15 @@ func emptyChatMessages(msgs []json.RawMessage) string {
 		}
 		var refusal string
 		if json.Unmarshal(field(m, "refusal"), &refusal) == nil && strings.TrimSpace(refusal) != "" {
+			continue
+		}
+		other := false
+		for _, k := range []string{"function_call", "audio", "images"} {
+			if v := field(m, k); len(v) > 0 && string(v) != "null" && string(v) != "[]" {
+				other = true
+			}
+		}
+		if other {
 			continue
 		}
 		c := field(m, "content")
@@ -426,6 +442,11 @@ func (f emptyFormat) check(t *testing.T, raw []byte, rows []emptyRow) {
 		for _, w := range row.keep {
 			if !strings.Contains(s, w) {
 				t.Errorf("%s: the request lacks %s", row.name, w)
+			}
+		}
+		for _, w := range row.gone {
+			if strings.Contains(s, w) {
+				t.Errorf("%s: the request still has %s", row.name, w)
 			}
 		}
 	}
