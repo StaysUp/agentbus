@@ -131,12 +131,20 @@ func (chatCompletions) asHistory(m json.RawMessage) (json.RawMessage, error) {
 	return body.Object(out), nil
 }
 
+// reply: the assistant message as the vendor sent it. One that said nothing
+// (content null, missing, blank or only blank text, and no tool call or
+// refusal) keeps its other fields, the reasoning among them, and gets the note
+// as its content, as a message with nothing in it is what the API refuses.
 func (chatCompletions) reply(rep body.Reply, stop string) ([]json.RawMessage, ending, error) {
 	if role(rep.Message) != "assistant" {
 		return nil, ending{}, errors.New("the kept reply is not an assistant message")
 	}
 	if stop != "tool_calls" && stop != "function_call" {
-		return []json.RawMessage{rep.Message}, ending{finished: true}, nil
+		m, err := withContentNote(rep.Message)
+		if err != nil {
+			return nil, ending{}, err
+		}
+		return []json.RawMessage{m}, ending{finished: true}, nil
 	}
 	ids, err := chatToolIDs(rep.Message)
 	if err != nil {
@@ -151,6 +159,71 @@ func (chatCompletions) reply(rep body.Reply, stop string) ([]json.RawMessage, en
 		}))
 	}
 	return []json.RawMessage{rep.Message}, e, nil
+}
+
+// withContentNote is message m with the note for an empty reply as its
+// content when it said nothing, and m as it was otherwise.
+func withContentNote(m json.RawMessage) (json.RawMessage, error) {
+	fields, err := body.Fields(m)
+	if err != nil {
+		return nil, err
+	}
+	if chatSaid(fields) {
+		return m, nil
+	}
+	note := jsonString(emptyReplyNote)
+	for i, f := range fields {
+		if f.Key == "content" {
+			fields[i].Value = note
+			return body.Object(fields), nil
+		}
+	}
+	return body.Object(append(fields, body.Field{Key: "content", Value: note})), nil
+}
+
+// chatSaid reports whether an assistant message's fields hold anything the
+// person would read: a tool call, a refusal, a text that is not blank, or a
+// part that is not text. A content of another shape counts as said.
+func chatSaid(fields []body.Field) bool {
+	for _, f := range fields {
+		switch f.Key {
+		case "tool_calls":
+			if calls, ok := body.Elements(f.Value); ok && len(calls) > 0 {
+				return true
+			}
+		case "refusal":
+			var s string
+			if json.Unmarshal(f.Value, &s) == nil && !body.Blank(s) {
+				return true
+			}
+		case "content":
+			if chatContentSaid(f.Value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func chatContentSaid(c json.RawMessage) bool {
+	if len(c) == 0 || string(c) == "null" {
+		return false
+	}
+	var s string
+	if json.Unmarshal(c, &s) == nil {
+		return !body.Blank(s)
+	}
+	parts, ok := body.Elements(c)
+	if !ok {
+		return true
+	}
+	for _, p := range parts {
+		var text string
+		if body.Label(p, "type") != "text" || json.Unmarshal(field(p, "text"), &text) != nil || !body.Blank(text) {
+			return true
+		}
+	}
+	return false
 }
 
 func chatToolIDs(m json.RawMessage) ([]string, error) {
