@@ -3,6 +3,15 @@
 All notable changes to AgentBus. Full notes for each release are on the
 [releases page](https://github.com/staysup/agentbus/releases).
 
+## Unreleased
+
+### Fixed
+- **A reply with nothing in it no longer stops a session** (#103). When the model ended a turn with
+  an empty reply, as it can right after tool results, the next turn replayed it as an empty
+  message and the vendor refused every turn after that. Claude, Codex and OpenCode sessions now
+  replay it as a short note from AgentBus, and the reasoning that came with it stays. A Codex
+  reply with no items is now kept, where before the session could not go on.
+
 ## 0.6.6 (2026-11-26)
 
 ### Added
