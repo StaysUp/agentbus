@@ -154,8 +154,9 @@ When you start a session you pick how it runs. The choice is remembered.
 
 - **Copy (default).** The session works in its own copy of your folder. The agent's commands write
   only inside the copy, plus temporary files and package caches; reads across your disk stay open.
-  The network, Docker and local services work as normal. Several sessions can work on the same code
-  without stepping on each other.
+  The network works as normal. For Claude Code it is a list of hosts, and Docker and other local
+  services need a Direct session; [Limits](#limits) says why. Several sessions can work on the
+  same code without stepping on each other.
 - **Direct.** The session works in your folder itself, like your terminal. Nothing is held back.
 - **Locked.** Copy, plus hidden secrets and no writing to the internet. This comes later; the
   selector shows it, disabled.
@@ -231,11 +232,19 @@ with `agentbus runner -capacity N`.
   git credentials work as in your terminal, and a `.env` in a folder you read is visible. Only the
   agents' own login files are hidden, so Connect's sign-in is used. Hiding secrets comes with
   **Locked**, later.
-- **Copy's network for Claude Code, Antigravity and OpenCode is a broad allow-list, not fully
-  open.** These run on a sandbox engine that refuses a wildcard, so AgentBus allows the gateway, the
-  package registries (npm, PyPI, Go, crates) and GitHub, plus localhost and Docker; widen it from
-  real use. Codex is the exception: its own sandbox takes a truly open network. Antigravity's Copy
-  wall is only partly verified so far.
+- **Claude Code's Copy network is an allow-list, not fully open.** Its sandbox engine has no open
+  setting and refuses `*`. AgentBus allows the gateway, localhost, GitHub (`gh` included), the
+  package registries (npm, Yarn, PyPI, Go, crates). A command that calls any other host is refused.
+  Go tools such as `gh` verify TLS as in your terminal.
+- **Docker does not work in a Claude Code Copy session.** Use a Direct session for it. A Docker bind
+  mount would let a command write outside the copy, so the copy allows no local sockets: Docker's,
+  Lima's and ssh-agent's are closed too. `limactl start` also writes under `~/.lima`, outside the
+  copy.
+- Socket grants in your own managed or MDM settings, and socket paths in your user settings, still
+  apply in a Copy session. This closes in 0.6.8.
+- Codex's Copy network is truly open. Antigravity and OpenCode have no command sandbox of their own
+  yet, and the gateway's check on file edits outside the copy reads Claude Code's calls only. So in
+  a Copy session their commands and file edits can write outside the copy.
 - On ext4 a copy is a full copy. A clone (APFS) or a reflink (xfs, btrfs) is used where the disk can
   make one.
 - AgentBus has no file tools of its own: an agent reaches files through its CLI's built-in tools,

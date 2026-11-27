@@ -229,9 +229,61 @@ func TestClaudeSandboxBlock(t *testing.T) {
 	if dom[0] != "gw.local:8787" {
 		t.Errorf("allowedDomains[0] = %q, want the gateway first", dom[0])
 	}
-	for _, want := range []string{"registry.npmjs.org", "pypi.org", "proxy.golang.org", "crates.io", "github.com"} {
+	// *.github.com is api.github.com, which gh pr checks needs (2026-11-27).
+	for _, want := range []string{"registry.npmjs.org", "pypi.org", "proxy.golang.org", "crates.io", "github.com",
+		"*.github.com"} {
 		if !slices.Contains(dom, want) {
 			t.Errorf("allowedDomains missing a registry/GitHub host %q: %v", want, dom)
+		}
+	}
+	// No Unix socket: Docker's would let a command ask the daemon, outside the
+	// sandbox, for a writable bind mount of any folder (Codex review
+	// t_1e9aabae3fae66cc; his call 2026-11-27). allowAllUnixSockets is false,
+	// said outright so a user's settings.json true loses to it (Codex review
+	// t_8f781ddd36b18f56), and no socket path is listed.
+	if v, ok := net["allowAllUnixSockets"]; !ok || v != false {
+		t.Errorf("network.allowAllUnixSockets = %v (set %v), want false: Copy allows no Unix socket", v, ok)
+	}
+	if v, ok := net["allowUnixSockets"]; ok {
+		t.Errorf("network.allowUnixSockets = %v, want it unset: Copy allows no Unix socket", v)
+	}
+	if raw, _ := json.Marshal(b); strings.Count(string(raw), "UnixSocket") != 1 {
+		t.Errorf("sandbox block names a Unix socket key other than allowAllUnixSockets: %s", raw)
+	}
+	// Go's TLS verifies through trustd on macOS: gh failed every HTTPS call
+	// without it.
+	if b["enableWeakerNetworkIsolation"] != true {
+		t.Errorf("enableWeakerNetworkIsolation = %v, want true (Go TLS: gh)", b["enableWeakerNetworkIsolation"])
+	}
+}
+
+// Every default Copy domain passes srt's own domain check, so Claude Code
+// takes the block: a "*" or a one-label wildcard ("*.com") is refused as
+// overly broad, and with failIfUnavailable the turn would not start. The rule
+// is srt's as bundled in Claude Code 2.1.332 (2026-11-27): a plain name with a
+// dot, "localhost", or "*." and a name of two labels or more.
+func TestClaudeCopyDomainsPassSrt(t *testing.T) {
+	ok := func(d string) bool {
+		if strings.ContainsAny(d, ":/") {
+			return false
+		}
+		if rest, wild := strings.CutPrefix(d, "*."); wild {
+			labels := strings.Split(rest, ".")
+			if len(labels) < 2 || slices.Contains(labels, "") {
+				return false
+			}
+			return true
+		}
+		return !strings.Contains(d, "*") && strings.Contains(d, ".") && !strings.HasPrefix(d, ".") && !strings.HasSuffix(d, ".")
+	}
+	for _, bad := range []string{"*", "*.com", "*.", "a*.b.com"} {
+		if ok(bad) {
+			t.Fatalf("the check takes %q, which srt refuses", bad)
+		}
+	}
+	for _, d := range claudeCopyDomains {
+		if !ok(d) {
+			t.Errorf("claudeCopyDomains has %q, which srt refuses as overly broad or malformed", d)
 		}
 	}
 }

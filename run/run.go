@@ -202,6 +202,10 @@ type Config struct {
 	AgentName func(id string) string
 	// Now is the clock. Nil means time.Now.
 	Now func() time.Time
+	// Caches are the cache folders a Copy turn's commands may write, from the
+	// host environment. Nil means copyCaches, the person's own; a test sets a
+	// fixed list, since the real one differs per system.
+	Caches func(env []string) []string
 	// Logf writes one line to the service log: a child starting and exiting.
 	// It is never given a token, a prompt or the child's output.
 	Logf func(format string, args ...any)
@@ -235,6 +239,9 @@ func New(cfg Config) (*Engine, error) {
 	}
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
+	}
+	if cfg.Caches == nil {
+		cfg.Caches = copyCaches
 	}
 	// The engine counts no turns: control counts each lane's places
 	// (queue/lanes.go), and a runner starts every job it takes. A session
@@ -926,7 +933,9 @@ func (e *Engine) start(t turn) (*Turn, error) {
 				deny = append(deny, f)
 			}
 		}
-		spec.Copy = harness.Copy{Dir: t.folder, DenyRead: deny, Hosts: hosts}
+		// The person's cache folders are writable too, as the README promises
+		// (copyCaches): a build keeps its cache, and the Keychain its MDS files.
+		spec.Copy = harness.Copy{Dir: t.folder, Write: e.cfg.Caches(hostEnv), DenyRead: deny, Hosts: hosts}
 		// The whole-process wall was skipped, so the turn is not Walled: a
 		// harness must not also turn its own sandbox off (harness.Turn.Walled).
 		spec.Walled = false

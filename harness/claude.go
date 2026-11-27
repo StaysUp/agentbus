@@ -282,7 +282,8 @@ func (claude) Args(t Turn) []string {
 	a := []string{"-p", "--output-format", "json"}
 	// Copy mode: Claude Code's own per-command sandbox, as a second --settings
 	// the engine folds into the gateway one (CombineSettings). Writes fenced to
-	// the copy, the login file hidden, the network a broad allow-list.
+	// the copy and the caches, the login file hidden, the network an allow-list,
+	// no Unix socket.
 	if t.Copy.Dir != "" {
 		sb, _ := json.Marshal(map[string]any{"sandbox": claudeSandboxBlock(t.Copy.Dir, t.Copy.Write, t.Copy.DenyRead, t.Copy.Hosts)})
 		a = append(a, "--settings", string(sb))
@@ -400,26 +401,39 @@ func claudeMCPConfig(url string) string {
 	return string(b)
 }
 
-// claudeCopyDomains is the default broad network allow-list for a Copy turn on
-// the srt-backed sandbox. srt refuses "*" ("overly broad... not allowed") and
-// requires a network block, so "open" is this list plus allowLocalBinding for
-// localhost (measured 2026-11-23 against srt v0.0.83; DESIGN_contain_mode "Copy
-// network: the honest limit"). The gateway host is added per run. Widen from
-// real use.
+// claudeCopyDomains is the default network allow-list for a Copy turn on the
+// srt-backed sandbox. Claude Code 2.1.332 (2026-11-27, read from its bundled
+// sandbox runtime) has no open network outside its CI env-scrub mode: it
+// always passes an allowedDomains list, so every command's traffic goes
+// through srt's proxy, and its domain check refuses "*" and a one-label
+// wildcard such as "*.com" ("Overly broad patterns ... are not allowed").
+// So Copy's network is this list, the gateway host added per run, and
+// localhost through allowLocalBinding. A host on no list is refused; the
+// README says so. Widen from real use.
+//
+// *.github.com is api.github.com and uploads.github.com, which gh needs
+// (gh pr checks failed without it, 2026-11-27). No Docker hosts: Docker's
+// socket is closed in Copy, so its daemon is not reachable anyway.
 var claudeCopyDomains = []string{
-	"registry.npmjs.org",
+	"github.com", "*.github.com", "*.githubusercontent.com", "ghcr.io",
+	"registry.npmjs.org", "registry.yarnpkg.com",
 	"pypi.org", "files.pythonhosted.org",
-	"proxy.golang.org", "sum.golang.org",
-	"crates.io", "static.crates.io",
-	"github.com", "codeload.github.com", "*.githubusercontent.com",
+	"proxy.golang.org", "sum.golang.org", "storage.googleapis.com",
+	"crates.io", "*.crates.io",
 }
 
 // claudeSandboxBlock is Claude Code's "sandbox" settings for a Copy turn: writes
 // fenced to the copy plus the extra writable paths (the per-run temp and tool
 // caches), reads open across the disk except denyRead (the CLI's own login
-// file, so Connect's stand-in is used), and the network a broad allow-list
-// (claudeCopyDomains plus hosts, e.g. the gateway) with localhost reachable
-// through allowLocalBinding. deniedDomains, denyWrite and allowRead are present
+// file, so Connect's stand-in is used), the network as open as srt allows
+// (claudeCopyDomains plus hosts, e.g. the gateway, with localhost through
+// allowLocalBinding and Go's TLS through trustd), and no Unix socket: Docker's
+// would let a command ask the daemon, outside the sandbox, for a writable bind
+// mount of any folder (Codex review t_1e9aabae3fae66cc; his call 2026-11-27,
+// no Docker in Copy for 0.6.7). allowAllUnixSockets is false and no
+// allowUnixSockets path is set, so srt allows no AF_UNIX connect unless the
+// person's own settings grant one (closed in 0.6.8).
+// deniedDomains, denyWrite and allowRead are present
 // and empty because srt's config requires them. Reads are open by default, so
 // allowRead stays empty and denyRead carves out the login file.
 func claudeSandboxBlock(copyDir string, write, denyRead, hosts []string) map[string]any {
@@ -439,6 +453,11 @@ func claudeSandboxBlock(copyDir string, write, denyRead, hosts []string) map[str
 		// backend that cannot start must fail the turn, not run it unconfined:
 		// Claude Code's default here is false (silent fail-open).
 		"failIfUnavailable": true,
+		// macOS: lets a command look up com.apple.trustd.agent, which Go's TLS
+		// uses to verify a certificate. Without it gh, docker login and other
+		// Go tools fail every HTTPS call (gh pr checks, 2026-11-27, Claude
+		// Code 2.1.332). Copy does not limit what an agent reaches; Locked will.
+		"enableWeakerNetworkIsolation": true,
 		"filesystem": map[string]any{
 			"allowRead":  []string{},
 			"denyRead":   denyRead,
@@ -449,6 +468,13 @@ func claudeSandboxBlock(copyDir string, write, denyRead, hosts []string) map[str
 			"allowedDomains":    domains,
 			"deniedDomains":     []string{},
 			"allowLocalBinding": true,
+			// No Unix socket, said outright: a user's settings.json true loses to
+			// this false (the first one set, after managed settings), so Docker's
+			// socket stays closed (Codex review t_8f781ddd36b18f56). Managed or
+			// MDM grants, and a user's allowUnixSockets paths, still apply; they
+			// are checked across every settings source in 0.6.8 (his call,
+			// 2026-11-27).
+			"allowAllUnixSockets": false,
 		},
 	}
 }

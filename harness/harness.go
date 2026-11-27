@@ -330,15 +330,15 @@ type OpenRouterWire struct {
 type Copy struct {
 	// Dir is the session's copy, the writable root; "" means not Copy mode.
 	Dir string
-	// Write are extra writable paths beyond Dir: the per-run temp and the tool
-	// caches, so a build does not break on a cold cache.
+	// Write are extra writable paths beyond Dir: the person's cache folders,
+	// so a build keeps its cache. The engine adds its own temp folder.
 	Write []string
 	// DenyRead are the CLI's own login files, hidden so the agent uses Connect's
 	// stand-in rather than the real token. Reads are otherwise open.
 	DenyRead []string
 	// Hosts are extra allowed network hosts (the gateway) on top of the
 	// harness's default allow-list. srt cannot open the network fully, so Copy's
-	// network is a broad allow-list (DESIGN_contain_mode, measured 2026-11-23).
+	// network is an allow-list (claudeCopyDomains, read 2026-11-27).
 	Hosts []string
 }
 
