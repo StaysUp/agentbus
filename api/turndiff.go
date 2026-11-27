@@ -177,6 +177,7 @@ type ApplyState struct {
 	Pruned    bool                  `json:"pruned,omitempty" doc:"The checkpoints before the turn's end were removed."`
 	Conflicts []queue.ApplyConflict `json:"conflicts,omitempty" doc:"On a refusal: each file in your folder that is neither as it was at the turn's start nor as the turn left it, with why. Nothing was written."`
 	Error     string                `json:"error,omitempty" doc:"Why it was refused or failed."`
+	Event     string                `json:"event,omitempty" doc:"The id the record gives the apply's outcome, workspace.applied, from the moment it is queued: an apply's route answers 202 naming it, and GET /api/v0/workspaces/{id}/outcome?event= reads it once the apply has run. There it holds the result, the files written, and on a refusal each file that refused it with why."`
 }
 
 // maxToolInput: a tool call's input is left out past this, with input_left_out.
@@ -585,7 +586,7 @@ func (a *API) applyState(turn string) (*ApplyState, error) {
 // applyStateOf is an apply job as the API shows it: its state from the
 // job, and once it has ended, what it did from its turn.applied.
 func (a *API) applyStateOf(j queue.Job) (ApplyState, error) {
-	st := ApplyState{Turn: j.Links.AppliesTurn, Session: j.Session, Turns: j.Links.AppliesTurns}
+	st := ApplyState{Turn: j.Links.AppliesTurn, Session: j.Session, Turns: j.Links.AppliesTurns, Event: jobs.OutcomeID(j)}
 	if b := j.Links.ApplyBy; b != nil {
 		st.By = &event.By{Kind: b.Kind, Session: b.Session, Turn: b.Turn}
 	}

@@ -94,8 +94,8 @@ type Config struct {
 	// and a stop cancels the job. Nil turns starting turns off: POST
 	// /api/v0/turns answers 404.
 	Queue *queue.Queue
-	// TurnWait bounds how long a changes preview or a turn's diff waits on a
-	// turn's job. Zero means DefaultTurnWait.
+	// TurnWait bounds how long a changes preview waits on its preview job,
+	// the one route that still waits for work (X3). Zero means DefaultTurnWait.
 	TurnWait time.Duration
 	// Engine is this process's own turn engine, when it runs turns: its live
 	// turns' own tokens are accepted here. Nil accepts none.

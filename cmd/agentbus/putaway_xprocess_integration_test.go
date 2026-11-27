@@ -99,9 +99,8 @@ func TestXProcSettledCopyIsPutAway(t *testing.T) {
 		return w.Closed != nil
 	}
 	start()
-	base := "/api/v0/workspaces/" + ws.Workspace
-	if code, raw := x.post(base+"/apply", map[string]any{}); code != 200 {
-		t.Fatalf("apply: %d %s", code, raw)
+	if e := x.act(ws.Workspace, "apply", map[string]any{}); e.Applied == nil || e.Applied.Result != "applied" {
+		t.Fatalf("apply: %+v", e)
 	}
 	if closed() {
 		t.Fatal("put away before its quiet time")

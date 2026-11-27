@@ -20,6 +20,7 @@ import (
 
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/ids"
+	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
@@ -339,38 +340,44 @@ func (a *API) getWorkspace(w http.ResponseWriter, _ *http.Request, id string) {
 	writeJSON(w, http.StatusOK, ws)
 }
 
-// DiscardState is the state of a workspace discard (POST
-// /api/v0/workspaces/{id}/discard): the copy's unapplied changes dropped.
-type DiscardState struct {
-	State        string   `json:"state,omitempty" doc:"queued, running, discarded, or failed (error says why)."`
-	Already      bool     `json:"already,omitempty" doc:"Nothing was unapplied, so nothing was dropped."`
-	DroppedTurns []string `json:"dropped_turns,omitempty" doc:"The turns whose file changes the discard dropped, oldest first. Their conversation stays."`
-	Error        string   `json:"error,omitempty" doc:"Why the discard failed."`
+// maxOutcomeID bounds the event query of GET /api/v0/workspaces/{id}/outcome.
+const maxOutcomeID = 128
+
+// workspaceOutcome serves GET /api/v0/workspaces/{id}/outcome?event=: the
+// outcome of one apply, discard, update or close, by the event its 202 named.
+func (a *API) workspaceOutcome(w http.ResponseWriter, r *http.Request, id string) {
+	q := r.URL.Query()
+	evt := q.Get("event")
+	if len(q["event"]) != 1 || !strings.HasPrefix(evt, "evt_") || len(evt) > maxOutcomeID {
+		writeError(w, http.StatusBadRequest, "event must be sent once: the event a workspace action's 202 named (evt_...)")
+		return
+	}
+	if _, found, err := a.cfg.Store.Workspace(ids.WorkspaceID(id)); err != nil {
+		a.internal(w)
+		return
+	} else if !found {
+		writeError(w, http.StatusNotFound, "no such workspace")
+		return
+	}
+	e, found, err := a.cfg.Store.WorkspaceOutcome(id, evt)
+	if err != nil {
+		a.internal(w)
+		return
+	}
+	if !found {
+		writeError(w, http.StatusNotFound, "no outcome with this event yet: the action has not run, or the event is not this workspace's")
+		return
+	}
+	writeJSON(w, http.StatusOK, e)
 }
 
-// discardStateOf reads a discard job's state and the HTTP status that reports
-// it: 200 discarded, 202 while it waits behind a running turn, and the runner's
-// own status for a failure (400 when the workspace's backend has no discard yet,
-// else 500).
-func (a *API) discardStateOf(j queue.Job) (DiscardState, int) {
-	switch {
-	case j.State == queue.Queued:
-		return DiscardState{State: "queued"}, http.StatusAccepted
-	case j.Ended == nil:
-		return DiscardState{State: "running"}, http.StatusAccepted
-	case j.State == queue.Finished:
-		return DiscardState{State: "discarded", DroppedTurns: j.Links.AppliesTurns}, http.StatusOK
-	default:
-		st := DiscardState{State: "failed", Error: "the discard did not finish"}
-		status := http.StatusInternalServerError
-		if r, _ := queue.ReadResult(j.Result); r.Refused != "" {
-			st.Error = r.Refused
-			if r.Status != 0 {
-				status = r.Status
-			}
-		}
-		return st, status
-	}
+// DiscardState is the answer to a workspace discard (POST
+// /api/v0/workspaces/{id}/discard): queued, or nothing to drop.
+type DiscardState struct {
+	State   string `json:"state,omitempty" doc:"queued: the discard was queued, and the record's event named by event is its outcome once it has run. failed: refused, as error says (another apply, discard, update or close still waits)."`
+	Already bool   `json:"already,omitempty" doc:"Nothing was unapplied, so nothing was dropped and nothing was queued."`
+	Event   string `json:"event,omitempty" doc:"On queued: the id the record gives the discard's outcome. workspace.discarded with it says what was dropped (dropped_turns); workspace.failed with it says why nothing was. GET /api/v0/workspaces/{id}/outcome?event= reads it once it has run."`
+	Error   string `json:"error,omitempty" doc:"Why the discard was refused."`
 }
 
 // discardWorkspace serves POST /api/v0/workspaces/{id}/discard: drop the
@@ -395,7 +402,7 @@ func (a *API) discardWorkspace(w http.ResponseWriter, r *http.Request, id string
 		writeError(w, http.StatusBadRequest, "this session works directly in your folder; only a sandbox copy can be discarded")
 		return
 	}
-	j, created, err := a.cfg.Queue.Discard(queue.DefaultTeam, wsID, ws.Machine, askedBy(r))
+	j, _, err := a.cfg.Queue.Discard(queue.DefaultTeam, wsID, ws.Machine, askedBy(r))
 	var removed *queue.RunnerRemovedError
 	switch {
 	case errors.Is(err, queue.ErrAllApplied):
@@ -423,25 +430,17 @@ func (a *API) discardWorkspace(w http.ResponseWriter, r *http.Request, id string
 		a.internal(w)
 		return
 	}
-	_ = created
-	// The discard waits behind a running turn in the workspace lane; await it.
-	if j.Ended == nil {
-		if j, err = a.awaitEnd(r.Context(), j); err != nil {
-			if r.Context().Err() == nil {
-				a.internal(w)
-			}
-			return
-		}
-	}
-	st, status := a.discardStateOf(j)
-	writeJSON(w, status, st)
+	// The discard is a new job in the workspace lane, and the reply comes at
+	// once, as Close's does: its outcome is the record's event it names.
+	writeJSON(w, http.StatusAccepted, DiscardState{State: "queued", Event: jobs.OutcomeID(j)})
 }
 
 // CloseState is the state of a workspace close (POST
 // /api/v0/workspaces/{id}/close): the copy removed to reclaim disk.
 type CloseState struct {
-	State   string `json:"state,omitempty" doc:"queued: the close was queued, and workspace.closed on the record says it ran. closed: already is true. failed: refused, as error says (another apply, discard, update or close still waits)."`
+	State   string `json:"state,omitempty" doc:"queued: the close was queued, and the record's event named by event is its outcome once it has run. closed: already is true. failed: refused, as error says (another apply, discard, update or close still waits)."`
 	Already bool   `json:"already,omitempty" doc:"The workspace was already closed, so nothing was removed."`
+	Event   string `json:"event,omitempty" doc:"On queued: the id the record gives the close's outcome. workspace.closed with it says the copy was removed; workspace.failed with it says why it was not. GET /api/v0/workspaces/{id}/outcome?event= reads it once it has run."`
 	Error   string `json:"error,omitempty" doc:"Why the close was refused."`
 }
 
@@ -469,7 +468,7 @@ func (a *API) closeWorkspace(w http.ResponseWriter, r *http.Request, id string) 
 		writeError(w, http.StatusBadRequest, "this session works directly in your folder; only a sandbox copy can be closed")
 		return
 	}
-	_, _, err = a.cfg.Queue.CloseWorkspace(queue.DefaultTeam, wsID, ws.Machine, askedBy(r))
+	j, _, err := a.cfg.Queue.CloseWorkspace(queue.DefaultTeam, wsID, ws.Machine, askedBy(r))
 	var removed *queue.RunnerRemovedError
 	switch {
 	case errors.Is(err, queue.ErrApplyBusy):
@@ -495,64 +494,20 @@ func (a *API) closeWorkspace(w http.ResponseWriter, r *http.Request, id string) 
 	// once, as a turn's does (0.6.7): its end is the record's
 	// workspace.closed. A wait here held a caller that closed many workspaces
 	// about 30 seconds each.
-	writeJSON(w, http.StatusAccepted, CloseState{State: "queued"})
+	writeJSON(w, http.StatusAccepted, CloseState{State: "queued", Event: jobs.OutcomeID(j)})
 }
 
-// UpdateState is the state of a workspace update (POST
-// /api/v0/workspaces/{id}/update): the person's folder merged into the copy.
+// UpdateState is the answer to a workspace update (POST
+// /api/v0/workspaces/{id}/update): queued, or refused.
 type UpdateState struct {
-	State       string   `json:"state,omitempty" doc:"queued, running, updated (the folder was merged in), conflict (the files in conflicts changed on both sides; nothing changed), or failed (error says why)."`
-	Updated     bool     `json:"updated,omitempty" doc:"The folder was merged into the copy; the next apply writes only the session's work."`
-	Conflicts   []string `json:"conflicts,omitempty" doc:"On a conflict: the files that changed on both sides, sorted. Nothing changed; ask the agent to resolve them in a turn."`
-	Unresolved  []string `json:"unresolved,omitempty" doc:"On a merge (state merged): the files that changed on both sides, sorted. The copy now holds each with both sides between conflict markers, for the agent to combine in its next turn; an apply refuses any file that still holds them."`
-	Unmergeable []string `json:"unmergeable,omitempty" doc:"On a merge that changed nothing (state conflict): the conflicting files conflict markers cannot show -- not text, a link, or removed on one side -- sorted. error says so in a sentence. The agent can still be asked to combine them in a turn."`
-	Error       string   `json:"error,omitempty" doc:"Why the update failed, or (a merge that changed nothing) why it could not merge."`
+	State string `json:"state,omitempty" doc:"queued: the update was queued, and the record's event named by event is its outcome once it has run. failed: refused, as error says (another apply, discard or update still waits, or a merge while a turn runs or waits)."`
+	Event string `json:"event,omitempty" doc:"On queued: the id the record gives the update's outcome. workspace.updated with it holds the result (updated, merged or conflict) and its files (conflicts, unresolved, unmergeable); workspace.failed with it says why nothing was merged. GET /api/v0/workspaces/{id}/outcome?event= reads it once it has run."`
+	Error string `json:"error,omitempty" doc:"Why the update was refused."`
 }
 
 // UpdateRequest is the optional body of POST /api/v0/workspaces/{id}/update.
 type UpdateRequest struct {
 	Mode string `json:"mode,omitempty" doc:"Absent or update: a conflict changes nothing. merge: a conflict leaves the conflicting files in the copy with both sides between conflict markers and moves the folder baseline, so the agent's next turn combines them and Apply then writes only the session's work. A merge is refused with 409 while a turn of the workspace runs or waits."`
-}
-
-// updateStateOf reads an update job's state and the HTTP status that reports it:
-// 200 for a finished update (updated or conflict, both normal outcomes), 202
-// while it waits behind a running turn, and the runner's own status for a real
-// failure (400 when the workspace's backend has no update, else 500).
-func (a *API) updateStateOf(j queue.Job) (UpdateState, int) {
-	switch {
-	case j.State == queue.Queued:
-		return UpdateState{State: "queued"}, http.StatusAccepted
-	case j.Ended == nil:
-		return UpdateState{State: "running"}, http.StatusAccepted
-	case j.State == queue.Finished:
-		r, _ := queue.ReadResult(j.Result)
-		if r.Update.Clean() && len(r.Update.Unresolved) > 0 {
-			return UpdateState{State: "merged", Updated: true, Unresolved: r.Update.Unresolved}, http.StatusOK
-		}
-		if r.Update.Clean() {
-			return UpdateState{State: "updated", Updated: true}, http.StatusOK
-		}
-		st := UpdateState{State: "conflict"}
-		if r.Update != nil {
-			st.Conflicts = r.Update.Conflicts
-			if len(r.Update.Unmergeable) > 0 {
-				st.Unmergeable = r.Update.Unmergeable
-				st.Error = "some files cannot be merged with conflict markers (not text, a link, or removed on one side): " +
-					strings.Join(r.Update.Unmergeable, ", ") + "; nothing changed"
-			}
-		}
-		return st, http.StatusOK
-	default:
-		st := UpdateState{State: "failed", Error: "the update did not finish"}
-		status := http.StatusInternalServerError
-		if r, _ := queue.ReadResult(j.Result); r.Refused != "" {
-			st.Error = r.Refused
-			if r.Status != 0 {
-				status = r.Status
-			}
-		}
-		return st, status
-	}
 }
 
 // updateWorkspace serves POST /api/v0/workspaces/{id}/update: merge the person's
@@ -586,7 +541,7 @@ func (a *API) updateWorkspace(w http.ResponseWriter, r *http.Request, id string)
 		writeError(w, http.StatusBadRequest, "mode must be update or merge")
 		return
 	}
-	j, created, err := a.cfg.Queue.Update(queue.DefaultTeam, wsID, ws.Machine, askedBy(r), body.Mode == "merge")
+	j, _, err := a.cfg.Queue.Update(queue.DefaultTeam, wsID, ws.Machine, askedBy(r), body.Mode == "merge")
 	var removed *queue.RunnerRemovedError
 	switch {
 	case errors.Is(err, queue.ErrApplyBusy):
@@ -614,18 +569,9 @@ func (a *API) updateWorkspace(w http.ResponseWriter, r *http.Request, id string)
 		a.internal(w)
 		return
 	}
-	_ = created
-	// The update waits behind a running turn in the workspace lane; await it.
-	if j.Ended == nil {
-		if j, err = a.awaitEnd(r.Context(), j); err != nil {
-			if r.Context().Err() == nil {
-				a.internal(w)
-			}
-			return
-		}
-	}
-	st, status := a.updateStateOf(j)
-	writeJSON(w, status, st)
+	// The update is a new job in the workspace lane, and the reply comes at
+	// once, as Close's does: its outcome is the record's event it names.
+	writeJSON(w, http.StatusAccepted, UpdateState{State: "queued", Event: jobs.OutcomeID(j)})
 }
 
 // ApplyRequest is the optional body of POST /api/v0/workspaces/{id}/apply.
@@ -694,29 +640,22 @@ func (a *API) applyWorkspace(w http.ResponseWriter, r *http.Request, id string) 
 		a.internal(w)
 		return
 	}
-	already := !created && j.Ended != nil
-	if j.Ended == nil {
-		if j, err = a.awaitEnd(r.Context(), j); err != nil {
-			if r.Context().Err() == nil {
-				a.internal(w)
-			}
-			return
-		}
-	}
+	// The reply comes at once, as Close's does: a new apply, or one of the
+	// same turn still waiting or running (its idempotency key, ApplyKey, makes
+	// requests at once one job), is 202 with the record's event that will be
+	// its outcome. Only an apply that already covers the turn and has ended is
+	// read whole: it is the record's already.
 	st, err := a.applyStateOf(j)
 	if err != nil {
 		a.internal(w)
 		return
 	}
-	st.Already = already
-	switch st.State {
-	case "applied":
-		writeJSON(w, http.StatusOK, st)
-	case "queued", "running":
+	if j.Ended == nil {
 		writeJSON(w, http.StatusAccepted, st)
-	default:
-		writeJSON(w, http.StatusConflict, st)
+		return
 	}
+	st.Already = !created
+	writeJSON(w, http.StatusOK, st)
 }
 
 // decodeApplyBody reads the optional apply body: an empty body is no turn, a

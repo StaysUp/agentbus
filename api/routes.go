@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/harness"
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
@@ -421,18 +422,29 @@ var routes = slices.Concat([]route{
 		tag:     "Workspaces",
 		summary: "Get a workspace",
 		idDoc:   "A workspace id (ws_ and 16 hex digits), as POST /api/v0/workspaces named it. Another shape gets 404.",
-		doc:     "One workspace: its folder, folder reference, machine, sandbox mode, when it was created, its head turn (the latest with a changeset), the turn its latest apply went up to, and when its latest action was a discard.",
+		doc:     "One workspace: its folder, folder reference, machine, sandbox mode, when it was created, its head turn (the latest with a changeset), the turn its latest apply went up to, when its latest action was a discard, and last_action: the newest outcome of an apply, discard, update or close, as the record holds it. Those four routes answer 202 before their work runs and name the event its outcome will be; GET /api/v0/workspaces/{id}/outcome reads it by that event.",
 		replies: []reply{ok(200, store.Workspace{}, "The workspace."), fail(404, "No such workspace."), storeFailed},
 		at:      atWorkspace,
 		serve:   (*API).getWorkspace},
+	{method: "GET", path: "/api/v0/workspaces/{id}/outcome", op: "workspaceOutcome", action: run.ActRead,
+		tag:     "Workspaces",
+		summary: "Get a workspace action's outcome",
+		idDoc:   "A workspace id (ws_ and 16 hex digits). Another shape gets 404.",
+		doc: "The outcome of one apply, discard, update or close of the workspace, by the event its 202 named: workspace.applied, workspace.discarded, workspace.updated, workspace.closed or workspace.failed, as the record holds it. " +
+			"404 until the action has run. Poll this to wait for your own action: last_action on GET /api/v0/workspaces/{id} is only the newest, so a later action can replace yours there before you read it. A turn token reads the outcomes of the workspaces in its authority, as it reads the workspace.",
+		query:   []param{{name: "event", doc: "The event a workspace action's 202 named (evt_...). Required, sent once."}},
+		replies: []reply{ok(200, event.Event{}, "The outcome."), badRequest, fail(404, "No such workspace, or no outcome with this event yet."), storeFailed},
+		at:      atWorkspace,
+		serve:   (*API).workspaceOutcome},
 	{method: "POST", path: "/api/v0/workspaces/{id}/discard", op: "discardWorkspace", action: run.ActCopy,
 		tag:     "Workspaces",
 		summary: "Discard a workspace's unapplied changes",
 		idDoc:   "A workspace id (ws_ and 16 hex digits). Another shape gets 404.",
 		doc: "Drop a sandbox workspace's unapplied changes: reset its copy to the last applied state, or to the folder as it was first copied when nothing was applied. The person's folder is never touched, and the conversation stays so the agent can try another way. No body is read.\n\n" +
-			"One apply or discard runs per workspace, so a discard while an apply or discard of the workspace is still running or waiting is refused with 409. A running TURN does not refuse it: the discard waits behind the turn in the lane, and what it drops is worked out when it runs, so a turn that ran while it waited is dropped and marked too. The reply waits up to 30 seconds; past that it is 202 with state queued or running. Nothing unapplied answers 200 with already true.",
-		replies: []reply{ok(200, DiscardState{}, "Discarded: dropped_turns lists the turns whose changes were dropped. already true: nothing was unapplied."),
-			ok(202, DiscardState{}, "The discard has not finished yet (it waits behind a running turn)."),
+			"One apply or discard runs per workspace, so a discard while an apply or discard of the workspace is still running or waiting is refused with 409. A running TURN does not refuse it: the discard waits behind the turn in the lane, and what it drops is worked out when it runs, so a turn that ran while it waited is dropped and marked too. Nothing unapplied answers 200 with already true.\n\n" +
+			"Otherwise the reply comes at once: 202 with state queued and event, the id the record gives the discard's outcome. Nothing waits for it to run. When it has, the record holds that event: workspace.discarded, with the turns it dropped (dropped_turns), or workspace.failed, with why nothing was dropped. GET /api/v0/workspaces/{id}/outcome?event= reads it.",
+		replies: []reply{ok(200, DiscardState{}, "Nothing to do: already true, nothing was unapplied."),
+			ok(202, DiscardState{}, "Queued: event names the outcome the record will hold once the discard has run."),
 			badRequest,
 			fail(404, "This service keeps no queue, or no such workspace."),
 			ok(409, DiscardState{}, "Refused: an apply or discard of the workspace is still running or waiting. Nothing was dropped."),
@@ -445,10 +457,10 @@ var routes = slices.Concat([]route{
 		idDoc:   "A workspace id (ws_ and 16 hex digits). Another shape gets 404.",
 		doc: "Remove a sandbox workspace's copy to reclaim its disk. The person's folder is never touched. Close is reversible: the record and the turns stay, and the next turn rebuilds a fresh copy from the folder. No body is read.\n\n" +
 			"Like a discard, a close waits behind a running or queued turn in the workspace lane; changes not applied when it runs are dropped with the copy, so apply or discard them on the session first to keep them (the cockpit signals unapplied work). A finished close is a baseline reset: a later apply starts from the rebuilt copy's base, never the removed lineage. One apply, discard, update or close runs per workspace, so a close while one is still running or waiting is refused with 409. Every close joins the lane, even if an earlier close finished. It runs after preceding turns and succeeds if no copy remains.\n\n" +
-			"The reply comes at once: 202 with state queued. Nothing waits for the close to run. When it has, the record holds workspace.closed for the workspace, and GET /api/v0/workspaces/{id} names it closed until its next turn starts. A close that fails records no workspace.closed and leaves the copy; send it again. A copy is never left part removed for a turn to use: it is made unusable before any file of it goes. A close that cannot move the copy out of its place changes nothing: the copy stays whole with its record, the workspace stays open, and a close sent again tries again. Once the copy is moved, a close always finishes: what cannot be removed at once is removed when the runner starts. A copy a stopped Open or a stopped close left with no record is removed by the next close. A lock (Finder's Locked, chflags uchg) or a closed mode on the copy's files does not stop a close: they are cleared on the copy, never on the folder.\n\n" +
+			"The reply comes at once: 202 with state queued and event, the id the record gives the close's outcome. Nothing waits for the close to run. When it has, the record holds that event: workspace.closed, and GET /api/v0/workspaces/{id} names the workspace closed until its next turn starts; or workspace.failed, with why, when the close did nothing and left the copy. Send it again then. GET /api/v0/workspaces/{id}/outcome?event= reads either. A copy is never left part removed for a turn to use: it is made unusable before any file of it goes. A close that cannot move the copy out of its place changes nothing: the copy stays whole with its record, the workspace stays open, and a close sent again tries again. Once the copy is moved, a close always finishes: what cannot be removed at once is removed when the runner starts. A copy a stopped Open or a stopped close left with no record is removed by the next close. A lock (Finder's Locked, chflags uchg) or a closed mode on the copy's files does not stop a close: they are cleared on the copy, never on the folder.\n\n" +
 			"A person rarely needs it: AgentBus puts a copy away by itself once its work is all applied or discarded and the workspace has been quiet for [workspaces] put_away_after_minutes (30 by default, 0 is off). It does the same as a close, and records workspace.closed with put_away. A copy with work not applied is never put away; if anything happened in the workspace since, it does nothing and records workspace.kept with why.",
 		replies: []reply{ok(200, CloseState{}, "Nothing to do: already true, this workspace was permanently closed by an older build."),
-			ok(202, CloseState{}, "Queued: the close runs after what waits in the workspace lane; workspace.closed on the record says it ran."),
+			ok(202, CloseState{}, "Queued: the close runs after what waits in the workspace lane; event names the outcome the record will hold once it has run."),
 			badRequest,
 			fail(404, "This service keeps no queue, or no such workspace."),
 			ok(409, CloseState{}, "Refused: an apply, discard, update or close of the workspace is still running or waiting. Nothing was removed."),
@@ -460,13 +472,13 @@ var routes = slices.Concat([]route{
 		summary: "Update a workspace's copy",
 		idDoc:   "A workspace id (ws_ and 16 hex digits). Another shape gets 404.",
 		doc: "Bring the person's folder as it is now into a sandbox workspace's copy, so the session's unapplied work sits on top of the folder and a later apply writes only that work. Use it when an apply was refused because the folder changed since the copy was made (another session applied, or the person edited). It is a three-way merge in the copy's private git: the last applied state as the base, the copy's work as one side, the folder now as the other. The person's folder is never written, only read. The body is optional: mode merge asks for a merge (below).\n\n" +
-			"A clean merge answers 200 with state updated: the copy now holds both the folder's changes and the session's, and the next apply writes just the session's work. A real conflict (the same lines changed on both sides) answers 200 with state conflict and the files in conflicts; nothing changed. Ignored files (node_modules and the like) are not merged.\n\n" +
-			"With mode merge, a conflict does not stop it: the copy gets each conflicting file with both sides between conflict markers, the folder baseline moves to the folder now, and it answers 200 with state merged and the files in unresolved. The markers are labelled this session and your folder. The agent's next turn combines them; until an apply or discard finishes, an apply refuses, as a conflict, any file that still holds them, whatever its path (a rename or a later update does not carry one past it). A conflict markers cannot show (a file that is not text, a link, or one removed on one side) makes the merge change nothing: state conflict, those files in unmergeable and error saying why, so no side's change is lost. A merge with no conflict is an update. A merge is refused with 409 while a turn of the workspace runs or waits, so the markers land between turns.\n\n" +
-			"One apply, discard or update runs per workspace, so an update while one of them is still running or waiting is refused with 409. A running TURN does not refuse it: the update waits behind the turn in the lane, and what it folds is worked out when it runs. The reply waits up to 30 seconds; past that it is 202 with state queued or running. A workspace that works in the folder as it is answers 400.",
+			"The reply comes at once: 202 with state queued and event, the id the record gives the update's outcome. Nothing waits for the update to run. When it has, the record holds that event, and GET /api/v0/workspaces/{id}/outcome?event= reads it: workspace.updated with its result, or workspace.failed with why nothing was merged.\n\n" +
+			"A clean merge is result updated: the copy now holds both the folder's changes and the session's, and the next apply writes just the session's work. A real conflict (the same lines changed on both sides) is result conflict with the files in conflicts; nothing changed. Ignored files (node_modules and the like) are not merged.\n\n" +
+			"With mode merge, a conflict does not stop it: the copy gets each conflicting file with both sides between conflict markers, the folder baseline moves to the folder now, and the result is merged with the files in unresolved. The markers are labelled this session and your folder. The agent's next turn combines them; until an apply or discard finishes, an apply refuses, as a conflict, any file that still holds them, whatever its path (a rename or a later update does not carry one past it). A conflict markers cannot show (a file that is not text, a link, or one removed on one side) makes the merge change nothing: result conflict, with those files in unmergeable, so no side's change is lost. A merge with no conflict is an update. A merge is refused with 409 while a turn of the workspace runs or waits, so the markers land between turns.\n\n" +
+			"One apply, discard or update runs per workspace, so an update while one of them is still running or waiting is refused with 409. A running TURN does not refuse it: the update waits behind the turn in the lane, and what it folds is worked out when it runs. A workspace that works in the folder as it is answers 400.",
 		body:    UpdateRequest{},
 		bodyOpt: true,
-		replies: []reply{ok(200, UpdateState{}, "updated: the folder was merged into the copy. conflict: conflicts lists the files; nothing changed. merged: unresolved lists the files left with conflict markers for the agent."),
-			ok(202, UpdateState{}, "The update has not finished yet (it waits behind a running turn)."),
+		replies: []reply{ok(202, UpdateState{}, "Queued: event names the outcome the record will hold once the update has run."),
 			badRequest,
 			fail(404, "This service keeps no queue, or no such workspace."),
 			ok(409, UpdateState{}, "Refused: an apply, discard or update of the workspace is still running or waiting, or (a merge) a turn of it is. Nothing changed."),
@@ -502,20 +514,23 @@ var routes = slices.Concat([]route{
 		doc: "Put the workspace's unapplied file changes into the person's folder: the folder its copy was made from. A turn works in the workspace's copy, so its changes reach the person's folder only by an apply. The body is optional: {turn} applies up to that turn (it and every earlier unapplied turn); no body, or {}, applies up to the workspace's head turn.\n\n" +
 			"The apply writes each file the unapplied turns added or changed, and removes each one they deleted. " +
 			"Before it writes anything it checks every file in the folder: one that is neither as it was at the changes' start nor already as they leave it refuses the whole apply, " +
-			"with 409, state refused, and each file in conflicts with why. Nothing is written then, so the agent can read why and make another turn. " +
+			"with result refused and each file in conflicts with why. Nothing is written then, so the agent can read why and make another turn. " +
 			"A file is never looked up through a link in the folder. A turn may put a folder where a link was, or change only the case of a name. " +
 			"After an update's merge left conflict markers in the copy, and until an apply or discard finishes, a file that still holds them (<<<<<<< this session ... >>>>>>> your folder) is refused the same way, until the agent combines it; a workspace with no such merge never checks. " +
 			"Applying again when nothing is unapplied is a no-op: 200 with already true. " +
 			"An apply that was refused may be asked for again. " +
-			"It runs on the runner of the folder's machine, in a place of its own, so it does not wait behind running turns. " +
-			"The reply waits up to 30 seconds; past that it is 202 with state queued or running, and GET /api/v0/workspaces/{id}/changes shows the state.",
+			"It runs on the runner of the folder's machine, in a place of its own, so it does not wait behind running turns.\n\n" +
+			"The reply comes at once: 202 with state queued and event, the id the record gives the apply's outcome. Nothing waits for the apply to run. " +
+			"The same request again while that apply waits or runs makes no second one: it answers 202 with the same event. " +
+			"When it has run, the record holds that event, workspace.applied, and GET /api/v0/workspaces/{id}/outcome?event= reads it: its result (applied, refused or failed), the files written, and on a refusal each file in conflicts with its path and why. " +
+			"GET /api/v0/turns/{id}/diff shows the apply's state too.",
 		body:    ApplyRequest{},
 		bodyOpt: true,
-		replies: []reply{ok(200, ApplyState{}, "Applied: files lists what was written. already true: nothing was unapplied, and nothing more was written."),
-			ok(202, ApplyState{}, "The apply has not finished yet."),
+		replies: []reply{ok(200, ApplyState{}, "Nothing to do: already true, nothing was unapplied, and nothing more was written. files lists what the apply that covers it wrote, when there is one."),
+			ok(202, ApplyState{}, "Queued (or an apply of the same turn already waits or runs): event names the outcome the record will hold once it has run."),
 			badRequest,
 			fail(404, "This service keeps no queue, or no such workspace, or the named turn is not this service's."),
-			ok(409, ApplyState{}, "Refused or failed: error says why, and conflicts names each file in your folder that changed. Nothing was written on a conflict."),
+			fail(409, "An apply of an earlier turn of the workspace has not ended, or a discard, update or close of it still waits or runs. Nothing was queued."),
 			tooMany, fail(503, "The runner of the folder's machine has not been seen for a minute. Nothing was written and no apply was made."), storeFailed},
 		at:    atWorkspace,
 		serve: (*API).applyWorkspace},

@@ -25,8 +25,23 @@ type updateAnswer struct {
 }
 
 func (c *client) update(ws string) (int, updateAnswer) {
+	return c.updateWith(ws, map[string]any{})
+}
+
+// updateWith posts an update of ws, which answers 202 at once, and answers
+// the outcome the reply named, read from the record.
+func (c *client) updateWith(ws string, body map[string]any) (int, updateAnswer) {
 	var u updateAnswer
-	code, _ := c.call("POST", "/api/v0/workspaces/"+ws+"/update", map[string]any{}, &u)
+	code, out := c.call("POST", "/api/v0/workspaces/"+ws+"/update", body, &u)
+	if code != http.StatusAccepted {
+		return code, u
+	}
+	e := awaitAction(c.t, c.get, ws, code, []byte(out))
+	if up := e.Updated; up != nil {
+		u = updateAnswer{State: up.Result, Updated: up.Result != "conflict", Conflicts: up.Conflicts, Unresolved: up.Unresolved, Error: up.Error}
+	} else if f := e.Failed; f != nil {
+		u = updateAnswer{State: "failed", Error: f.Error}
+	}
 	return code, u
 }
 
@@ -54,19 +69,19 @@ func TestUpdateFromFolderCleanThenApply(t *testing.T) {
 	}
 
 	// Apply is refused: a.txt changed in the folder since the checkpoint.
-	if code, a := c.apply(t1); code != http.StatusConflict || a.State != "refused" ||
+	if code, a := c.apply(t1); code != http.StatusAccepted || a.State != "refused" ||
 		len(a.Conflicts) != 1 || a.Conflicts[0].Path != "a.txt" {
-		t.Fatalf("apply before update: %d %+v, want 409 refused on a.txt", code, a)
+		t.Fatalf("apply before update: %d %+v, want 202 refused on a.txt", code, a)
 	}
 
 	// Update merges the folder into the copy.
-	if code, u := c.update(ws); code != 200 || u.State != "updated" || !u.Updated {
-		t.Fatalf("update: %d %+v, want 200 updated", code, u)
+	if code, u := c.update(ws); code != http.StatusAccepted || u.State != "updated" || !u.Updated {
+		t.Fatalf("update: %d %+v, want 202 updated", code, u)
 	}
 
 	// Apply now writes only the session's work, against the folder as it is now.
-	if code, a := c.apply(t1); code != 200 || a.State != "applied" {
-		t.Fatalf("apply after update: %d %+v, want 200 applied", code, a)
+	if code, a := c.apply(t1); code != http.StatusAccepted || a.State != "applied" {
+		t.Fatalf("apply after update: %d %+v, want 202 applied", code, a)
 	}
 	if got := fileText(t, filepath.Join(folder, "a.txt")); got != "ZERO\none\np1\n" {
 		t.Fatalf("a.txt after update+apply: %q, want the person's line and the session's", got)
@@ -98,15 +113,15 @@ func TestUpdateFromFolderConflictChangesNothing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if code, u := c.update(ws); code != 200 || u.State != "conflict" ||
+	if code, u := c.update(ws); code != http.StatusAccepted || u.State != "conflict" ||
 		len(u.Conflicts) != 1 || u.Conflicts[0] != "a.txt" {
-		t.Fatalf("conflicting update: %d %+v, want 200 conflict on a.txt", code, u)
+		t.Fatalf("conflicting update: %d %+v, want 202 conflict on a.txt", code, u)
 	}
 	// Nothing changed in the folder, and the apply is still refused.
 	if got := fileText(t, filepath.Join(folder, "a.txt")); got != "one\nHUMAN\n" {
 		t.Fatalf("folder a.txt changed on a conflict: %q", got)
 	}
-	if code, a := c.apply(t1); code != http.StatusConflict || a.State != "refused" {
+	if code, a := c.apply(t1); code != http.StatusAccepted || a.State != "refused" {
 		t.Fatalf("apply after a conflicting update: %d %+v, want still refused", code, a)
 	}
 }
@@ -131,9 +146,7 @@ func TestUpdateDirectWorkspaceRefused(t *testing.T) {
 }
 
 func (c *client) merge(ws string) (int, updateAnswer) {
-	var u updateAnswer
-	code, _ := c.call("POST", "/api/v0/workspaces/"+ws+"/update", map[string]any{"mode": "merge"}, &u)
-	return code, u
+	return c.updateWith(ws, map[string]any{"mode": "merge"})
 }
 
 // Merge, after an update reported a conflict: the copy gets the conflicting
@@ -153,13 +166,13 @@ func TestMergeLeavesMarkersThenApply(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(folder, "a.txt"), []byte("one\nHUMAN\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if code, u := c.update(ws); code != 200 || u.State != "conflict" {
-		t.Fatalf("update: %d %+v, want 200 conflict", code, u)
+	if code, u := c.update(ws); code != http.StatusAccepted || u.State != "conflict" {
+		t.Fatalf("update: %d %+v, want 202 conflict", code, u)
 	}
 
 	code, u := c.merge(ws)
-	if code != 200 || u.State != "merged" || len(u.Unresolved) != 1 || u.Unresolved[0] != "a.txt" {
-		t.Fatalf("merge: %d %+v, want 200 merged with a.txt unresolved", code, u)
+	if code != http.StatusAccepted || u.State != "merged" || len(u.Unresolved) != 1 || u.Unresolved[0] != "a.txt" {
+		t.Fatalf("merge: %d %+v, want 202 merged with a.txt unresolved", code, u)
 	}
 	if got := fileText(t, filepath.Join(folder, "a.txt")); got != "one\nHUMAN\n" {
 		t.Fatalf("the merge wrote the folder: a.txt = %q", got)
@@ -167,9 +180,9 @@ func TestMergeLeavesMarkersThenApply(t *testing.T) {
 
 	// The markers are still there: the apply refuses a.txt, writes nothing.
 	code, a := c.apply(t1)
-	if code != http.StatusConflict || a.State != "refused" || len(a.Conflicts) != 1 ||
+	if code != http.StatusAccepted || a.State != "refused" || len(a.Conflicts) != 1 ||
 		a.Conflicts[0].Path != "a.txt" || !strings.Contains(a.Conflicts[0].Why, "conflict markers") {
-		t.Fatalf("apply with markers: %d %+v, want 409 refused on a.txt for its markers", code, a)
+		t.Fatalf("apply with markers: %d %+v, want 202 refused on a.txt for its markers", code, a)
 	}
 	if got := fileText(t, filepath.Join(folder, "new.txt")); got != "<missing>" && got != "" {
 		t.Fatalf("an apply refused for markers wrote new.txt: %q", got)
@@ -178,17 +191,17 @@ func TestMergeLeavesMarkersThenApply(t *testing.T) {
 	// A plain update after the merge names nothing unresolved, yet the markers
 	// are still in the copy: the apply still refuses a.txt (review finding,
 	// 2026-11-24).
-	if code, u := c.update(ws); code != 200 || u.State != "updated" {
-		t.Fatalf("plain update after the merge: %d %+v, want 200 updated", code, u)
+	if code, u := c.update(ws); code != http.StatusAccepted || u.State != "updated" {
+		t.Fatalf("plain update after the merge: %d %+v, want 202 updated", code, u)
 	}
-	if code, a := c.apply(t1); code != http.StatusConflict || len(a.Conflicts) != 1 || a.Conflicts[0].Path != "a.txt" {
-		t.Fatalf("apply after merge and update: %d %+v, want 409 refused on a.txt", code, a)
+	if code, a := c.apply(t1); code != http.StatusAccepted || len(a.Conflicts) != 1 || a.Conflicts[0].Path != "a.txt" {
+		t.Fatalf("apply after merge and update: %d %+v, want 202 refused on a.txt", code, a)
 	}
 
 	// A turn combines the file (the stand-in's restore writes it whole).
 	t2 := c.turn(map[string]any{"session": t1.Session, "agent": "claude", "prompt": "restore"})
-	if code, a := c.apply(t2); code != 200 || a.State != "applied" {
-		t.Fatalf("apply after the merge turn: %d %+v, want 200 applied", code, a)
+	if code, a := c.apply(t2); code != http.StatusAccepted || a.State != "applied" {
+		t.Fatalf("apply after the merge turn: %d %+v, want 202 applied", code, a)
 	}
 	if got := fileText(t, filepath.Join(folder, "a.txt")); got != "one\n" {
 		t.Fatalf("a.txt after the merge turn and apply: %q", got)

@@ -84,7 +84,7 @@ func TestSessionChangesPreview(t *testing.T) {
 		t.Fatalf("preview: %+v", c)
 	}
 	code, st := applyAs(t, e, token, c.Turn)
-	if code != 200 {
+	if code != 202 || st.State != "applied" {
 		t.Fatalf("apply: %d %+v", code, st)
 	}
 	var paths []string
@@ -128,7 +128,7 @@ func TestSessionChangesPreview(t *testing.T) {
 		t.Fatalf("preview over the person's edit: %+v", c)
 	}
 	code, st = applyAs(t, e, token, c.Turn)
-	if code != 409 || len(st.Conflicts) != 1 || st.Conflicts[0].Path != c.Conflicts[0].Path || st.Conflicts[0].Why != c.Conflicts[0].Why {
+	if code != 202 || st.State != "refused" || len(st.Conflicts) != 1 || st.Conflicts[0].Path != c.Conflicts[0].Path || st.Conflicts[0].Why != c.Conflicts[0].Why {
 		t.Fatalf("apply after the preview: %d %+v, preview %+v", code, st, c.Conflicts)
 	}
 
@@ -249,8 +249,8 @@ func TestSessionChangesRerunsAfterRefusedApply(t *testing.T) {
 	// The person edits the file so the apply is refused; the refused apply
 	// still counts, so the cursor moves off the one the preview recorded.
 	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("mine\n"), 0o644)
-	if code, _ := applyAs(t, e, token, first.Turn); code != 409 {
-		t.Fatalf("apply should be refused: %d", code)
+	if code, st := applyAs(t, e, token, first.Turn); code != 202 || st.State != "refused" {
+		t.Fatalf("apply should be refused: %d %+v", code, st)
 	}
 	changesOf(t, e, first.Session)
 	if _, seq2, _, _ := e.store.LatestPreview(string(ws)); seq2 == seq1 {
@@ -545,7 +545,7 @@ func TestSessionChangesPinnedPageReportsStale(t *testing.T) {
 		t.Fatalf("no cached preview event: %+v", c)
 	}
 	// An apply moves the cursor off the cached preview.
-	if code, st := applyAs(t, e, token, first.Turn); code != 200 {
+	if code, st := applyAs(t, e, token, first.Turn); code != 202 || st.State != "applied" {
 		t.Fatalf("apply: %d %+v", code, st)
 	}
 	// Paging that now out-of-date preview by its event id reports it stale.

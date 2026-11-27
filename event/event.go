@@ -188,6 +188,14 @@ const (
 	// WorkspaceClosed records removal of a sandbox copy. The next turn rebuilds
 	// from the folder; the record and conversation stay.
 	WorkspaceClosed Kind = "workspace.closed"
+	// WorkspaceFailed records a discard, update or close of a sandbox
+	// workspace that ended without doing its work: the runner refused it, or
+	// was lost while it ran, or was removed before it took it. failed says
+	// which action and why. It takes the id the action's success would have
+	// taken (workspace.discarded, workspace.updated or workspace.closed), so
+	// one request has one outcome event in the record, whichever it is. An
+	// apply records its own refusals in workspace.applied.
+	WorkspaceFailed Kind = "workspace.failed"
 	// WorkspaceKept records a put-away that kept the copy: when it came due,
 	// the workspace was not quiet or not settled. put_away says why.
 	WorkspaceKept Kind = "workspace.kept"
@@ -255,6 +263,7 @@ type KindInfo struct {
 // is not one of them. A test checks that every Kind constant is listed.
 var Kinds = []KindInfo{
 	{WorkspaceClosed, "A sandbox workspace's copy was removed, by POST /api/v0/workspaces/{id}/close or by AgentBus putting it away. The record and turns stay. The next turn rebuilds from the folder. Resets all apply and update baselines of the removed copy. Stored once per close. put_away is present when AgentBus put the copy away by itself: the on and the event that queued it, when it was queued and when it came due.", []string{"workspace"}},
+	{WorkspaceFailed, "A discard, update or close of a sandbox workspace ended without doing its work (POST /api/v0/workspaces/{id}/discard, /update or /close): workspace names it, and failed holds the action (discard, update or close), why it failed (error), and who asked. The action may be sent again. It has the id the action's success event would have had, the event the route's 202 named, so one request has one outcome. A refused apply is not one: workspace.applied records it, with result refused and the files. Stored once per action. Show it as an error.", []string{"workspace", "failed"}},
 	{WorkspaceKept, "AgentBus came to put a sandbox workspace's copy away and kept it: workspace names it, and put_away holds the on and the event that queued the put-away, when it was queued, when it came due, and why it kept the copy (putting copies away was turned off, a put-away for a later event decides instead, other work waiting or running, the workspace used since, work not applied or discarded, no copy, or the record could not be read). Nothing was removed. Stored once per put-away.", []string{"workspace", "put_away"}},
 	{TurnStarted, "A person's message started a turn. Stored once per turn id; text holds their words; agent and folder name the run's agent and folder, empty when no run started the session. A turn started by POST /api/v0/turns has its turn.started stored by the API, with the prompt as sent, before its agent starts.", nil},
 	{ModelRequested, "The harness sent a request to the model: model and tools_offered.", nil},
@@ -504,7 +513,7 @@ type Event struct {
 	// is the workspace's mode, only on workspace.created: a pointer so its
 	// false (the person's real folder) is always present, told apart from a
 	// kind that carries no mode at all.
-	Workspace string `json:"workspace,omitempty" doc:"On workspace.created, workspace.applied, workspace.discarded and turn.started: the workspace the turn ran in (ws_ and 16 hex digits)."`
+	Workspace string `json:"workspace,omitempty" doc:"On workspace.created, workspace.applied, workspace.discarded, workspace.updated, workspace.closed, workspace.failed and turn.started: the workspace the turn ran in (ws_ and 16 hex digits)."`
 	Machine   string `json:"machine,omitempty" doc:"On workspace.created and folder.registered: the connector that owns the folder (con_ and 16 hex digits). Absent when no connector owns the folder, as for hook or gateway traffic."`
 	Sandbox   *bool  `json:"sandbox,omitempty" doc:"On workspace.created: the workspace's mode, true for a copy behind a wall and false for the person's real folder. Always present on workspace.created; absent on every other kind."`
 	// Folders, only on workspace.created of a workspace with several folders:
@@ -555,6 +564,8 @@ type Event struct {
 	PutAway *PutAway `json:"put_away,omitempty" doc:"On a workspace.closed AgentBus asked for itself, and on workspace.kept: the on and the record event that queued the put-away, when it was queued and came due, and on workspace.kept why the copy was kept."`
 	// Discarded, only on workspace.discarded: what the discard dropped.
 	Discarded *Discarded `json:"discarded,omitempty" doc:"On workspace.discarded: the changeset the workspace was reset to, the turns dropped, and who asked."`
+	// Failed, only on workspace.failed: the action that did nothing, and why.
+	Failed *Failed `json:"failed,omitempty" doc:"On workspace.failed: the action (discard, update or close), why it failed, and who asked."`
 	// Updated, only on workspace.updated: what the update from the folder did.
 	Updated *Updated `json:"updated,omitempty" doc:"On workspace.updated: the result, the new baseline (from) and merged (to) changesets on a clean update, the folded turns, the conflicting files on a conflict, and who asked."`
 	// Previewed, only on changes.previewed: the apply dry run's result.
@@ -714,6 +725,14 @@ type PutAway struct {
 	Queued time.Time `json:"queued" doc:"When the put-away was queued."`
 	Due    time.Time `json:"due,omitempty" doc:"When it came due: the event's time plus the quiet time of the settings ([workspaces] put_away_after_minutes)."`
 	Kept   string    `json:"kept,omitempty" doc:"On workspace.kept: why the copy was kept."`
+}
+
+// Failed is a workspace action that ended without doing its work
+// (workspace.failed).
+type Failed struct {
+	Action string `json:"action" doc:"discard, update or close: the route the request came to."`
+	Error  string `json:"error" doc:"Why it did nothing, in plain words."`
+	By     *By    `json:"by,omitempty" doc:"Who asked, by the kind of token it came with. Never the token itself. Absent on a close AgentBus asked for itself."`
 }
 
 // Discarded is what one discard dropped (workspace.discarded).

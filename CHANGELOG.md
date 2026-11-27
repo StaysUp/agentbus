@@ -47,6 +47,17 @@ All notable changes to AgentBus. Full notes for each release are on the
   `history.shortened` records each step. The budget is `budget` in
   `GET/PUT /api/v0/settings/compaction`; control sends it to every runner with its settings, so a
   runner on another machine keeps the same budget. Claude Code, Codex and OpenCode alike.
+- **A workspace's last action.** `GET /api/v0/workspaces/{id}` (and the list) adds `last_action`:
+  the newest outcome of an apply, discard, update or close, as the record holds it: a
+  quick look at what happened last. `GET /api/v0/workspaces/{id}/outcome?event=` reads one
+  action's outcome by the event its reply named (404 until it has run): the read a caller polls,
+  since a later action replaces `last_action`.
+- **`workspace.failed`.** A discard, update or close that ended without doing its work records it:
+  the action, why, and who asked. The runner refused it, its runner stopped answering while it
+  ran, or its runner was removed before it took it. Before, such a job recorded nothing, and only
+  a caller still waiting on the route heard why. It takes the id the action's success event would
+  have had, so one request has one outcome. A refused apply is still `workspace.applied` with
+  result `refused`.
 
 ### Changed
 - **Turns you send start at once.** A runner used to run 4 turns at once, whoever started them, so
@@ -110,9 +121,19 @@ All notable changes to AgentBus. Full notes for each release are on the
   earlier answers showed only in the turn's events.
 
 ### Changed
-- **Close answers at once.** `POST /api/v0/workspaces/{id}/close` queues the close and answers
-  202 with state `queued`; it no longer waits up to 30 seconds for the close to run. The record's
-  `workspace.closed` says when it ran. A close that fails records none and leaves the copy.
+- **Apply, discard, update and close answer at once.** Each queues its job and answers 202 with
+  state `queued` and `event`: the id the record gives its outcome. None waits up to 30 seconds for
+  the job to run any more. Poll
+  `GET /api/v0/workspaces/{id}/outcome?event=` with it until it answers 200: `workspace.applied` (result
+  applied, refused with each file in `conflicts` and why, or failed), `workspace.discarded` (with
+  `dropped_turns`), `workspace.updated` (updated, merged or conflict, with the files),
+  `workspace.closed`, or `workspace.failed`. Asking for the same apply while it waits or runs
+  makes no second one: it answers 202 with the same event. Nothing to do still answers 200 with
+  `already` true, and a refusal before anything is queued (another action waiting, a closed
+  copy, an offline machine) keeps its status. **Breaking:** a refused apply is no longer a 409
+  with its files; the files are on the outcome. Discard's reply has no `dropped_turns` and
+  Update's has no `updated`, `conflicts`, `unresolved` or `unmergeable`: those are on the outcome
+  too. `GET /api/v0/turns/{id}/diff`'s `apply` names its outcome's `event`.
 - **A malformed `session` query is 400 for every caller.** On `GET /api/v0/events` and
   `GET /api/v0/turns`, a `session` sent twice, empty or not shaped as a session id is refused
   with 400, the owner's token included. A turn token sending it twice got 403 before.

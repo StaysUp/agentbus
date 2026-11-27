@@ -1767,9 +1767,9 @@ func expire(tx *sql.Tx, now time.Time, a Attempt, j Job) error {
 	if err != nil {
 		return fmt.Errorf("queue: write job: %w", err)
 	}
-	// An apply that ended here has no finish, so nothing wrote its
-	// turn.applied: mark it due (lost.go).
-	if j.Kind == KindApply && (j.CancelRequested || a.State != Taken) {
+	// An apply, discard, update or close that ended here has no finish, so
+	// nothing wrote its outcome: mark it due (lost.go).
+	if lostOutcome(j.Kind) && (j.CancelRequested || a.State != Taken) {
 		if err := markOutcomeDue(tx, j.ID); err != nil {
 			return err
 		}

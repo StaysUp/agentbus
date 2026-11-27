@@ -72,7 +72,7 @@ func TestWorkspaceAppliedTurnResolvesByWorkspace(t *testing.T) {
 	sess := e.makeSession(t, ws)
 	turn := startTurn(t, e, `{"session":"`+sess+`","agent":"claude","prompt":"edit"}`)
 	waitEnded(t, e, turn.Turn)
-	if code, st := applyAs(t, e, token, turn.Turn); code != 200 || st.State != "applied" {
+	if code, st := applyAs(t, e, token, turn.Turn); code != 202 || st.State != "applied" {
 		t.Fatalf("apply: %d %+v", code, st)
 	}
 	var wsp store.Workspace

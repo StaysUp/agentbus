@@ -4,6 +4,7 @@ package api
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -95,7 +96,10 @@ func applyAs(t *testing.T, e *env, tok, turn string) (int, ApplyState) {
 	return applyWS(t, e, tok, wsOfTurn(t, e, turn), `{"turn":"`+turn+`"}`)
 }
 
-// applyWS posts an apply of ws with the given body (which may be empty).
+// applyWS posts an apply of ws with the given body (which may be empty). The
+// route answers 202 before the apply runs (async by default); on a 202 it waits
+// for the outcome the reply named and answers that, read from GET
+// /api/v0/workspaces/{ws} as a caller does.
 func applyWS(t *testing.T, e *env, tok, ws, body string) (int, ApplyState) {
 	t.Helper()
 	code, out := as(t, e, tok, "POST", "/api/v0/workspaces/"+ws+"/apply", body)
@@ -103,7 +107,41 @@ func applyWS(t *testing.T, e *env, tok, ws, body string) (int, ApplyState) {
 	if err := json.Unmarshal([]byte(out), &st); err != nil {
 		t.Fatalf("apply %s: %d %s", ws, code, out)
 	}
+	if code == http.StatusAccepted {
+		if st.State != "queued" && st.State != "running" || st.Event == "" {
+			t.Fatalf("apply %s: 202 %s, want queued with its event", ws, out)
+		}
+		return code, appliedState(awaitOutcome(t, e, ws, st.Event))
+	}
 	return code, st
+}
+
+// awaitOutcome waits for the outcome of a workspace action the route answered
+// 202 for: the event the reply named, read from GET /api/v0/workspaces/{ws}/outcome: the read the
+// route docs give every caller.
+func awaitOutcome(t *testing.T, e *env, ws, evt string) event.Event {
+	t.Helper()
+	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		var out event.Event
+		if code := getJSON(t, e, "/api/v0/workspaces/"+ws+"/outcome?event="+evt, &out); code == 200 && out.ID == evt {
+			return out
+		}
+	}
+	t.Fatalf("workspace %s: no outcome %s on the record", ws, evt)
+	return event.Event{}
+}
+
+// appliedState is an apply's outcome event as ApplyState shows an apply.
+func appliedState(e event.Event) ApplyState {
+	st := ApplyState{Turn: e.Turn, Session: e.Session, Event: e.ID}
+	if a := e.Applied; a != nil {
+		st.State, st.Turns, st.By, st.Error = a.Result, a.Turns, a.By, a.Error
+		st.Files, st.Count, st.Truncated, st.Pruned = a.Files, a.Count, a.Truncated, a.Pruned
+		for _, c := range a.Conflicts {
+			st.Conflicts = append(st.Conflicts, queue.ApplyConflict{Path: c.Path, Why: c.Why, Markers: c.Markers})
+		}
+	}
+	return st
 }
 
 // The workspace apply route: an empty body applies the head turn resolved from
@@ -119,7 +157,7 @@ func TestWorkspaceApplyRoute(t *testing.T) {
 	ws := wsOfTurn(t, e, first.Turn)
 
 	// An empty body applies the workspace's head turn (from the queue cursor).
-	if code, st := applyWS(t, e, token, ws, "{}"); code != 200 || st.State != "applied" || len(st.Files) == 0 {
+	if code, st := applyWS(t, e, token, ws, "{}"); code != 202 || st.State != "applied" || len(st.Files) == 0 {
 		t.Fatalf("empty-body apply: %d %+v", code, st)
 	}
 	// A second empty-body apply has nothing to do: 200 already.
@@ -262,7 +300,7 @@ func TestTurnDiffAndApply(t *testing.T) {
 	}
 
 	code, st := applyAs(t, e, token, first.Turn)
-	if code != 200 || st.State != "applied" || st.Already || !slices.Equal(st.Files, []string{"a.txt", "b.txt", "gone.txt"}) {
+	if code != 202 || st.State != "applied" || st.Already || !slices.Equal(st.Files, []string{"a.txt", "b.txt", "gone.txt"}) {
 		t.Fatalf("apply: %d %+v", code, st)
 	}
 	if st.By == nil || st.By.Kind != "person" || !slices.Equal(st.Turns, []string{first.Turn}) {
@@ -284,7 +322,7 @@ func TestTurnDiffAndApply(t *testing.T) {
 	waitEnded(t, e, second.Turn)
 	os.WriteFile(filepath.Join(folder, "a.txt"), []byte("mine\n"), 0o644)
 	code, st = applyAs(t, e, token, second.Turn)
-	if code != 409 || st.State != "refused" || len(st.Conflicts) != 1 || st.Conflicts[0].Path != "a.txt" ||
+	if code != 202 || st.State != "refused" || len(st.Conflicts) != 1 || st.Conflicts[0].Path != "a.txt" ||
 		st.Conflicts[0].Why != "changed in your folder since the checkpoint" || !strings.Contains(st.Error, "a.txt") {
 		t.Fatalf("apply over the person's edit: %d %+v", code, st)
 	}
@@ -319,7 +357,7 @@ func TestTurnDiffAndApply(t *testing.T) {
 	// folder, never the live copy), so a turn token applies an earlier turn's
 	// changes while its own turn runs, at once.
 	code, st = applyAs(t, e, tok, second.Turn)
-	if code != 200 || st.State != "applied" || !slices.Equal(st.Files, []string{"a.txt"}) || read("a.txt") != "one\nthree\n" {
+	if code != 202 || st.State != "applied" || !slices.Equal(st.Files, []string{"a.txt"}) || read("a.txt") != "one\nthree\n" {
 		t.Fatalf("apply by a turn token: %d %+v, a.txt %q", code, st, read("a.txt"))
 	}
 	if st.By == nil || st.By.Kind != "agent" || st.By.Session != first.Session || st.By.Turn != third.Turn ||
@@ -449,4 +487,19 @@ func TestTurnChangesAreTheCheckpointDiff(t *testing.T) {
 			}
 		})
 	}
+}
+
+// actWS posts a discard, update or close of ws, which answers 202 with the
+// event its outcome will be, and waits for that outcome on the record.
+func actWS(t *testing.T, e *env, tok, ws, action, body string) event.Event {
+	t.Helper()
+	code, out := as(t, e, tok, "POST", "/api/v0/workspaces/"+ws+"/"+action, body)
+	var st struct {
+		State string `json:"state"`
+		Event string `json:"event"`
+	}
+	if err := json.Unmarshal([]byte(out), &st); err != nil || code != http.StatusAccepted || st.State != "queued" || st.Event == "" {
+		t.Fatalf("%s %s: %d %s, want 202 queued with its event", action, ws, code, out)
+	}
+	return awaitOutcome(t, e, ws, st.Event)
 }

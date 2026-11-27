@@ -16,6 +16,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/staysup/agentbus/event"
 )
 
 // copyRunner is a runner process of a test that needs its process: to stop
@@ -208,9 +210,9 @@ func entriesIn(p string) int {
 	return n
 }
 
-// closeWorkspace sends Close and waits until the workspace reads closed later
-// than before. The reply is 202 (queued at once) or, from a build that waits
-// for the job, 200; either way the workspace's closed time says it ran.
+// closeWorkspace sends Close, which answers 202 queued at once, and waits for
+// its workspace.closed, then for the workspace to read closed later than
+// before.
 func (x *xproc) closeWorkspace(id string) {
 	x.t.Helper()
 	closed := func() time.Time {
@@ -227,8 +229,8 @@ func (x *xproc) closeWorkspace(id string) {
 		return *w.Closed
 	}
 	before := closed()
-	if code, raw := x.post("/api/v0/workspaces/"+id+"/close", nil); code != 200 && code != 202 {
-		x.t.Fatalf("close: %d %s", code, raw)
+	if e := x.act(id, "close", nil); e.Kind != event.WorkspaceClosed {
+		x.t.Fatalf("close: %+v", e)
 	}
 	if !waitLong(30*time.Second, func() bool { return closed().After(before) }) {
 		x.t.Fatal("the workspace did not read closed within 30s")
@@ -306,8 +308,8 @@ func closeLocked(t *testing.T, lock string) {
 	}
 	base := "/api/v0/workspaces/" + ws.Workspace
 	run()
-	if code, raw := x.post(base+"/apply", map[string]any{}); code != 200 {
-		t.Fatalf("apply: %d %s", code, raw)
+	if e := x.act(ws.Workspace, "apply", map[string]any{}); e.Applied == nil || e.Applied.Result != "applied" {
+		t.Fatalf("apply: %+v", e)
 	}
 	if lock == "copy closed and locked" {
 		// As a command in the copy can: its top folder and a file in it
@@ -341,7 +343,9 @@ func closeLocked(t *testing.T, lock string) {
 			t.Fatalf("the turn after the close changed %s: %s", name, raw)
 		}
 	}
-	x.post(base+"/apply", map[string]any{})
+	if e := x.act(ws.Workspace, "apply", map[string]any{}); e.Applied == nil || e.Applied.Result != "applied" {
+		t.Fatalf("apply after the close: %+v", e)
+	}
 	for name, want := range map[string]string{"notes.md": "notes\n", "src/app.js": "app\n", "contract.pdf": "pdf\n", "hello.txt": "hello\n"} {
 		if got, err := os.ReadFile(filepath.Join(folder, filepath.FromSlash(name))); err != nil || string(got) != want {
 			t.Fatalf("the folder's %s: %q %v", name, got, err)

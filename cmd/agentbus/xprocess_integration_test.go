@@ -36,6 +36,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/jobs"
 )
 
@@ -257,6 +258,14 @@ func (x *xproc) spawn(t *testing.T, tag string, args, env []string, ready *regex
 func (x *xproc) get(path string) (int, []byte) {
 	x.t.Helper()
 	return x.do("GET", path, nil)
+}
+
+// act sends a workspace action (apply, discard, update or close) to ws, which
+// answers 202 at once, and waits for its outcome on the record.
+func (x *xproc) act(ws, action string, body any) event.Event {
+	x.t.Helper()
+	code, raw := x.post("/api/v0/workspaces/"+ws+"/"+action, body)
+	return awaitAction(x.t, x.get, ws, code, raw)
 }
 
 // post sends POST path with a JSON body (a map or nil) and the main token.

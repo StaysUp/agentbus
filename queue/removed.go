@@ -72,6 +72,15 @@ func endRemovedTx(tx *sql.Tx, now time.Time) error {
 			Failed, ReasonSetup, string(res), nanos(now), nanos(now), g.id); err != nil {
 			return fmt.Errorf("queue: write job: %w", err)
 		}
+		// A discard, update or close ended here never ran, so nothing wrote
+		// its workspace.failed: mark it due, as for a lost runner (lost.go).
+		// Its route answered before it ran, so the record is where its caller
+		// reads why.
+		if _, err := tx.Exec(`UPDATE jobs SET result = json_set(result, '$.outcome_due', json('true'))
+			WHERE state = ? AND ended = ? AND kind IN ('discard','update','close') AND json_extract(result, '$.refused') = ?
+			AND json_extract(result, '$.outcome_due') IS NULL`, Failed, nanos(now), RunnerRemovedWhy(g.name)); err != nil {
+			return fmt.Errorf("queue: write job: %w", err)
+		}
 	}
 	return nil
 }

@@ -32,9 +32,9 @@ const MaxRunBody = 2 << 20
 // MaxPrompt bounds a turn's prompt, in bytes.
 const MaxPrompt = run.MaxPrompt
 
-// DefaultTurnWait bounds how long a request waits on a turn's job, when
-// Config.TurnWait is zero: a workspace's changes preview (changes.go) and a
-// turn's diff while it ends (turndiff.go). POST /api/v0/turns never waits.
+// DefaultTurnWait bounds how long a workspace's changes preview (changes.go)
+// waits on its preview job, when Config.TurnWait is zero. POST /api/v0/turns
+// and the workspace actions (apply, discard, update, close) never wait.
 const DefaultTurnWait = 30 * time.Second
 
 var runModel = run.ModelShape

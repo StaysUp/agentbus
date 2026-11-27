@@ -479,14 +479,11 @@ func (s *service) session(folder, tag string) (runResult, error) {
 		turn string
 		appl *time.Duration
 	}{{first.ws, first.id, &r.ApplyFirst}, {later.ws, later.id, &r.ApplyLater}} {
-		var ap struct {
-			State string `json:"state"`
-		}
 		t0 := time.Now()
-		code, err := s.call("POST", "/api/v0/workspaces/"+t.ws+"/apply", map[string]any{"turn": t.turn}, &ap)
+		result, err := s.apply(t.ws, t.turn)
 		*t.appl = time.Since(t0)
-		if err != nil || code != 200 || ap.State != "applied" {
-			return r, fmt.Errorf("apply of %s (workspace %s): %d %v, state %q", t.turn, t.ws, code, err, ap.State)
+		if err != nil || result != "applied" {
+			return r, fmt.Errorf("apply of %s (workspace %s): %v, result %q", t.turn, t.ws, err, result)
 		}
 	}
 	// The stand-in added bench-new.txt in the first turn and removed it in
@@ -495,6 +492,36 @@ func (s *service) session(folder, tag string) (runResult, error) {
 		return r, errors.New("after both applies the folder still holds bench-new.txt")
 	}
 	return r, nil
+}
+
+// apply asks for an apply of ws up to turn and waits for it to run. The route
+// answers 202 at once with the event its outcome will be; GET
+// /api/v0/workspaces/{id}/outcome?event= reads it once it has run. It answers
+// the apply's result: applied, refused or failed.
+func (s *service) apply(ws, turn string) (string, error) {
+	var q struct {
+		State string `json:"state"`
+		Event string `json:"event"`
+	}
+	code, err := s.call("POST", "/api/v0/workspaces/"+ws+"/apply", map[string]any{"turn": turn}, &q)
+	if err != nil || code != http.StatusAccepted || q.Event == "" {
+		return "", fmt.Errorf("apply: %d %v, state %q", code, err, q.State)
+	}
+	for deadline := time.Now().Add(5 * time.Minute); time.Now().Before(deadline); time.Sleep(2 * time.Millisecond) {
+		var e struct {
+			Applied *struct {
+				Result string `json:"result"`
+			} `json:"applied"`
+		}
+		code, err := s.call("GET", "/api/v0/workspaces/"+ws+"/outcome?event="+q.Event, nil, &e)
+		if err != nil || (code != 200 && code != 404) {
+			return "", fmt.Errorf("outcome: %d %v", code, err)
+		}
+		if code == 200 && e.Applied != nil {
+			return e.Applied.Result, nil
+		}
+	}
+	return "", errors.New("the apply did not run within 5 minutes")
 }
 
 type turnDone struct {

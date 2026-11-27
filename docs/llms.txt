@@ -20,6 +20,13 @@ copy. They reach the **person's folder** only when the workspace is **applied**:
 `POST /api/v0/workspaces/{id}/apply`. That writes the workspace's unapplied changes; an optional
 `{"turn"}` in the body applies only up to that turn, and no body applies up to its latest change.
 
+Apply, discard, update and close answer at once: 202 with `state` `queued` and `event`, the id the
+record gives the outcome. Nothing waits for the work. To read the outcome, poll
+`GET /api/v0/workspaces/W/outcome?event=E` (404 until it has run). `last_action` on
+`GET /api/v0/workspaces/W` is only the newest, so a later action can replace yours there. The outcome is `workspace.applied` (result `applied`, or `refused` with each file in `conflicts` and why), `workspace.discarded`,
+`workspace.updated` (result and files), `workspace.closed`, or `workspace.failed` (it did nothing,
+and `failed.error` says why).
+
 ## Calling the API from a turn
 
 A claude or codex turn may have the apps as tools of its own (when `[agent_api] tools = true`),
@@ -67,9 +74,9 @@ Your token may do what the person may, narrowed by three things only:
 | `GET /api/v0/turns/{id}` | One turn in any state, with its whole `prompt` and `reply` (read from the record): also `state`, `number`, `cost_usd`; for a review `verdict` and `findings`. |
 | `POST /api/v0/turns` | Start a turn: `{"session","agent","prompt"}`, in a new session you opened with `POST /api/v0/sessions` or one that already ran. |
 | `POST /api/v0/turns/{id}/review` | Ask another agent to review a turn: `{"agent"}`. It starts a review turn. Pick an agent other than the turn's own. |
-| `GET /api/v0/sessions`, `GET /api/v0/workspaces` | The sessions and workspaces you may work in. |
-| `POST /api/v0/workspaces/{id}/update` | Bring the person's folder as it is now into a copy, under its unapplied work (after an apply was refused because the folder changed). `/discard` drops the copy's unapplied changes; `/close` removes the copy. |
-| `POST /api/v0/workspaces/{id}/apply` | Put the workspace's unapplied changes into the person's folder (optional `{"turn"}` in the body applies up to that turn). A 409 lists each file that changed there, and writes nothing. |
+| `GET /api/v0/sessions`, `GET /api/v0/workspaces` | The sessions and workspaces you may work in. `GET /api/v0/workspaces/{id}` holds `last_action`, the newest outcome of an apply, discard, update or close. |
+| `POST /api/v0/workspaces/{id}/update` | Bring the person's folder as it is now into a copy, under its unapplied work (after an apply was refused because the folder changed). `/discard` drops the copy's unapplied changes; `/close` removes the copy. Each answers 202 with the outcome's `event` at once. |
+| `POST /api/v0/workspaces/{id}/apply` | Put the workspace's unapplied changes into the person's folder (optional `{"turn"}` in the body applies up to that turn). Answers 202 with the outcome's `event` at once. A refused apply writes nothing; its `last_action` lists each file that changed there. |
 | `POST /api/v0/turns/{id}/stop` | Stop a queued or running turn. It then reads `stopped`. |
 | `POST /api/v0/commands` | Run a long shell command as AgentBus work: `{"command"}`, optional `timeout_minutes` (30 by default, at most 240). It answers at once with the command's id (`c_...`). |
 | `GET /api/v0/commands/{id}` | One command: its state, and once it ended its `exit_code`, the end of its `output` and why it failed. `POST /api/v0/commands/{id}/stop` stops it. |

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
@@ -125,7 +126,7 @@ func TestSeveralFoldersReviewApply(t *testing.T) {
 	// one/a.txt is not written either.
 	os.WriteFile(filepath.Join(two, "inner", "b.txt"), []byte("MINE\n"), 0o644)
 	code, ap := applyWS(t, e, token, ws, "")
-	if code != 409 || len(ap.Conflicts) != 1 || ap.Conflicts[0].Path != "two/inner/b.txt" {
+	if code != 202 || ap.State != "refused" || len(ap.Conflicts) != 1 || ap.Conflicts[0].Path != "two/inner/b.txt" {
 		t.Fatalf("apply over a change in one folder: %d %+v", code, ap)
 	}
 	if b, _ := os.ReadFile(filepath.Join(one, "a.txt")); string(b) != "A1\n" {
@@ -134,7 +135,7 @@ func TestSeveralFoldersReviewApply(t *testing.T) {
 
 	// Put back, the apply writes each folder's part.
 	os.WriteFile(filepath.Join(two, "inner", "b.txt"), []byte("B1\n"), 0o644)
-	if code, ap = applyWS(t, e, token, ws, ""); code != 200 {
+	if code, ap = applyWS(t, e, token, ws, ""); code != 202 || ap.State != "applied" {
 		t.Fatalf("apply: %d %+v", code, ap)
 	}
 	for p, want := range map[string]string{filepath.Join(one, "a.txt"): "A2\n", filepath.Join(two, "inner", "b.txt"): "B2\n", filepath.Join(two, "new.txt"): "new\n"} {
@@ -148,9 +149,8 @@ func TestSeveralFoldersReviewApply(t *testing.T) {
 
 	// The person edits one/a.txt; an update brings it into the copy.
 	os.WriteFile(filepath.Join(one, "a.txt"), []byte("PERSON\n"), 0o644)
-	code, out := as(t, e, token, "POST", "/api/v0/workspaces/"+ws+"/update", "")
-	if code != 200 || !strings.Contains(out, `"updated":true`) {
-		t.Fatalf("update: %d %s", code, out)
+	if u := actWS(t, e, token, ws, "update", ""); u.Kind != event.WorkspaceUpdated || u.Updated == nil || u.Updated.Result != "updated" {
+		t.Fatalf("update: %+v", u)
 	}
 	if c := changesOf(t, e, sess); c.Unapplied {
 		t.Fatalf("after an update with no work of its own: %+v", c)
@@ -162,8 +162,8 @@ func TestSeveralFoldersReviewApply(t *testing.T) {
 	if c := changesOf(t, e, sess); !c.Unapplied {
 		t.Fatalf("the second turn's changes: %+v", c)
 	}
-	if code, out := as(t, e, token, "POST", "/api/v0/workspaces/"+ws+"/discard", ""); code != 200 {
-		t.Fatalf("discard: %d %s", code, out)
+	if d := actWS(t, e, token, ws, "discard", ""); d.Kind != event.WorkspaceDiscarded {
+		t.Fatalf("discard: %+v", d)
 	}
 	if c := changesOf(t, e, sess); c.Unapplied {
 		t.Fatalf("after a discard: %+v", c)

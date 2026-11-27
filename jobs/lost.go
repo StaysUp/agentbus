@@ -1,7 +1,8 @@
 package jobs
 
-// Outcomes of jobs that ended with no finish (queue/lost.go): an apply
-// whose runner was lost, and a put-away control kept when it came due.
+// Outcomes of jobs that ended with no finish (queue/lost.go): an apply,
+// discard, update or close whose runner was lost (or, but the apply, removed
+// before it took it), and a put-away control kept when it came due.
 // Control's sweep writes each one's event (workspace.applied,
 // workspace.kept) to the record, then swaps the job's due mark for the
 // event's id.
@@ -38,6 +39,11 @@ func CloseLostApplies(q *queue.Queue, rec Appender) (int, error) {
 			ws := queue.CopyKey(j.Spec.Workspace, j.Session)
 			e := event.Event{ID: appliedID(j), Kind: event.WorkspaceApplied, Time: endedAt(j), Workspace: string(ws), Session: j.Session,
 				Turn: j.Links.AppliesTurn, Applied: AppliedOf(j, res)}
+			if f, ok := FailedOf(j, res.Refused); ok && j.Kind != queue.KindPutAway {
+				// A discard, update or close whose runner was lost, or removed
+				// before it took it: it did nothing.
+				e = f
+			}
 			if j.Kind == queue.KindPutAway {
 				// A put-away control kept when it came due (queue/putaway.go).
 				e = event.Event{ID: keptID(j), Kind: event.WorkspaceKept, Time: endedAt(j), Workspace: string(ws), PutAway: PutAwayOf(j, res.Kept)}

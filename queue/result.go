@@ -84,6 +84,9 @@ type Result struct {
 	// UpdatedEvent: an update's workspace.updated, by its id, in place of the
 	// outcome itself (as DiscardedEvent is for a discard).
 	UpdatedEvent string `json:"updated_event,omitempty"`
+	// FailedEvent: a discard's, update's or close's workspace.failed, by its
+	// id, when the job ended without doing its work (in place of Refused).
+	FailedEvent string `json:"failed_event,omitempty"`
 	// Kept: a put-away that control ended without a runner, since the
 	// workspace was not quiet and settled when it came due: why it kept the
 	// copy. KeptEvent is its workspace.kept in the record, once written.

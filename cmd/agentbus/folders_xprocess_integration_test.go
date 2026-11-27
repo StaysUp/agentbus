@@ -81,8 +81,8 @@ func TestXProcSeveralFolders(t *testing.T) {
 	if want := []string{"one/a.txt", "two/inner/b.txt"}; !slices.Equal(paths, want) {
 		t.Fatalf("preview %v, want %v", paths, want)
 	}
-	if code, b := x.post("/api/v0/workspaces/"+ws.Workspace+"/apply", map[string]any{}); code != 200 {
-		t.Fatalf("apply: %d %s", code, b)
+	if e := x.act(ws.Workspace, "apply", map[string]any{}); e.Applied == nil || e.Applied.Result != "applied" {
+		t.Fatalf("apply: %+v", e)
 	}
 	for p, want := range map[string]string{filepath.Join(one, "a.txt"): "A2\n", filepath.Join(two, "inner", "b.txt"): "B2\n"} {
 		if got, _ := os.ReadFile(p); string(got) != want {

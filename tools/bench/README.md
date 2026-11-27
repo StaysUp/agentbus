@@ -46,8 +46,10 @@ as `gNN/dN/fNNN.txt`). Each run clones the fixture into a new folder (`cp -c` on
 2. `POST /api/v0/turns` with that session again: the later turn.
 3. `GET /api/v0/turns/{id}/diff` for each turn.
 4. `POST /api/v0/workspaces/{id}/apply` with `{turn}` for the first turn, then the later one (apply
-   is a workspace operation; both turns share the session's one workspace). The bench checks the
-   folder ends without the file the first turn added and the later one removed.
+   is a workspace operation; both turns share the session's one workspace). Each answers 202 at
+   once; the bench polls `GET /api/v0/workspaces/{id}/outcome?event=` every 2 ms with the event the
+   reply named. The bench checks the folder ends without the file the first turn added
+   and the later one removed.
 
 The service runs with `-replay=false`. Own replay continues a session from its stored model calls,
 and the stand-in makes none. So the later turn resumes by the result line the stand-in prints. The
@@ -69,7 +71,8 @@ Each cell is the median of the runs, with the worst in brackets.
   - **agent**: `turn.created` to `turn.ended`. The stand-in itself takes a few ms.
   - **checkpoint**: `turn.ended` to `workspace.changes`. The end checkpoint and the diff.
   - **finish**: `workspace.changes` to the job ended.
-- **diff** and **apply**: the call's round trip on the client.
+- **diff**: the call's round trip on the client. **apply**: from sending the apply to reading its
+  outcome on the record, on the client's clock.
 - **RSS idle**: the service's resident memory before each session; **RSS peak in turns**: the
   highest of samples every 50 ms during the two turns. Both sum every process of the service (on
   Linux `up` runs in a user namespace, as a second process), without the stand-in's.
