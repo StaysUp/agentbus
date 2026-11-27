@@ -109,6 +109,27 @@ func Open(path string) (*Store, error) {
 	return s, nil
 }
 
+// OpenReadOnly opens the store at path for reading only, beside a service
+// that may hold it: it takes no lock, makes no table and writes no id, and
+// every write fails. For tools that read a record, such as
+// tools/budgetcheck.
+func OpenReadOnly(path string) (*Store, error) {
+	q := url.Values{}
+	q.Add("mode", "ro")
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "query_only(1)")
+	r, err := sql.Open("sqlite", fileURI(path, q))
+	if err != nil {
+		return nil, fmt.Errorf("store: open: %w", err)
+	}
+	if err := r.QueryRow(`SELECT value FROM meta WHERE key = 'store'`).Scan(new(string)); err != nil {
+		_ = r.Close()
+		return nil, fmt.Errorf("store: open %s read-only: %w", path, err)
+	}
+	r.SetMaxOpenConns(4)
+	return &Store{r: r, w: r, subs: map[chan struct{}]struct{}{}}, nil
+}
+
 func openLocked(path string) (*Store, error) {
 	q := url.Values{}
 	q.Add("_pragma", "busy_timeout(5000)")
@@ -374,6 +395,9 @@ func (s *Store) Close() error {
 	}
 	s.closed = true
 	// The lock goes last, once the file is closed.
+	if s.lock == nil { // OpenReadOnly: one handle, no lock
+		return s.r.Close()
+	}
 	return errors.Join(s.r.Close(), s.w.Close(), s.lock.Close())
 }
 
