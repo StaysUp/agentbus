@@ -661,6 +661,9 @@ func (c *Connector) apply(ctx context.Context, ref string, csFrom, csTo *workspa
 	}
 	var ops []*op
 	var conflict Conflict
+	// The look again measures from here, before the first file is read: what
+	// the person writes after this has a change time of this or later.
+	began := time.Now().UnixNano()
 	look := newLookup(rt, steps)
 	// shown, for a dry run: each file an op or a conflict names, and the
 	// folder's file at that path as the check found it.
@@ -678,7 +681,15 @@ func (c *Connector) apply(ctx context.Context, ref string, csFrom, csTo *workspa
 		// by size, modification time and mode: one still so in the folder
 		// is as at from, without reading it.
 		if there && fa != nil && fa.Hash == "" && sameStat(rt, name, *fa) {
-			ops = append(ops, &op{rel: st.Path, to: fb, removeOnly: fb == nil, step: st, there: there, seen: seen})
+			o := &op{rel: st.Path, to: fb, removeOnly: fb == nil, step: st, there: there, seen: seen}
+			// One touched within Racy of the check may be written again with
+			// its stat as it is, so it is read now: the look again has no
+			// other record of what it held. A dry run or a check stops before
+			// the look again, so it reads nothing.
+			if !dry && (seen == nil || !workspace.Keeps(*fa, seen, began)) {
+				o.hash, _, _, _ = hashIn(rt, name)
+			}
+			ops = append(ops, o)
 			shown = append(shown, shownFile{rel: st.Path, to: fb, exists: true, mode: fa.Mode})
 			continue
 		}
@@ -820,7 +831,7 @@ func (c *Connector) apply(ctx context.Context, ref string, csFrom, csTo *workspa
 	// it, refuses the apply as the check would have, and nothing is written.
 	again := newLookup(rt, steps)
 	for _, o := range ops {
-		if why := changedSince(rt, again, o.step, o.there, o.seen, o.hash); why != "" {
+		if why := changedSince(rt, again, o.step, o.there, o.seen, o.hash, began); why != "" {
 			conflict.Files = append(conflict.Files, ConflictFile{o.rel, why})
 		}
 	}
@@ -1103,9 +1114,11 @@ func copyInto(rt *os.Root, tmp, src string, perm fs.FileMode) error {
 // changedSince says why the file of st, about to be written or removed, is no
 // longer as the conflict check found it (there; seen, and hash when it read
 // it) nor as st leaves it, or "" when it is one of the two. look is a new
-// lookup, before anything is written. A file whose stat changed is read
-// again, so one touched and not changed is still as it was.
-func changedSince(rt *os.Root, look *lookup, st workspace.Step, there bool, seen fs.FileInfo, hash string) string {
+// lookup, before anything is written; began is when the check began (Unix
+// nanoseconds). A file that workspace.Keeps says is still the one seen is
+// unchanged; any other is read again, so one touched and not changed is still
+// as it was.
+func changedSince(rt *os.Root, look *lookup, st workspace.Step, there bool, seen fs.FileInfo, hash string, began int64) string {
 	now, _, why := look.at(st)
 	if why != "" {
 		return why
@@ -1119,7 +1132,8 @@ func changedSince(rt *os.Root, look *lookup, st workspace.Step, there bool, seen
 	}
 	name := filepath.FromSlash(st.Path)
 	if there && seen != nil {
-		if fi, err := rt.Lstat(name); err == nil && fi.Mode() == seen.Mode() && fi.Size() == seen.Size() && fi.ModTime().Equal(seen.ModTime()) {
+		was := workspace.File{Size: seen.Size(), Mode: seen.Mode(), ModTime: seen.ModTime().UnixNano()}
+		if fi, err := rt.Lstat(name); err == nil && workspace.Keeps(was, fi, began) {
 			return ""
 		}
 	}
