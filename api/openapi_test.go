@@ -638,3 +638,30 @@ func TestOpenAPIStreamsHaveExamples(t *testing.T) {
 		t.Fatal("no stream replies found; the test checks nothing")
 	}
 }
+
+// The contract says what the route does with a turn whose program is missing:
+// it is queued and recorded, then ends failed, and a retry with the same key
+// answers that refusal. The 400, shared with the ons routes, no longer says
+// such a turn is refused with nothing stored.
+func TestOpenAPIStartTurnDescribesATurnThatCannotStart(t *testing.T) {
+	op := loadSpec(t).Paths.Find("/api/v0/turns").Post
+	for _, want := range []string{
+		"A turn that cannot start, such as one whose agent's program is not on the PATH of the machine that runs it, is still queued and recorded",
+		"A retry with the same idempotency_key then answers that refusal",
+	} {
+		if !strings.Contains(op.Description, want) {
+			t.Errorf("startTurn description lacks %q", want)
+		}
+	}
+	resp := op.Responses.Status(http.StatusBadRequest)
+	if resp == nil || resp.Value == nil || resp.Value.Description == nil {
+		t.Fatal("startTurn: no 400 described")
+	}
+	if want := "The request is refused; error says why."; *resp.Value.Description != want {
+		t.Errorf("startTurn 400 description = %q, want %q", *resp.Value.Description, want)
+	}
+	key := op.RequestBody.Value.Content.Get("application/json").Schema.Value.Properties["idempotency_key"]
+	if key == nil || key.Value == nil || !strings.Contains(key.Value.Description, "if that turn ended before it started, the retry answers its refusal") {
+		t.Errorf("idempotency_key description does not say what a retry of a turn that never started answers")
+	}
+}
