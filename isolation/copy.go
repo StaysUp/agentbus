@@ -264,7 +264,9 @@ func (copyBackend) UpdateFrom(s *Space, base string, folders FolderPaths, merge 
 }
 
 // Close takes the space's record away before any file of the copy goes
-// (retire), so a close that fails part way leaves no copy a turn can load.
+// (retire). A close that cannot move the copy out of its place puts the
+// record back, so the copy stays whole and loads; once the copy is moved, no
+// part of it is ever loaded again.
 func (copyBackend) Close(s *Space) error {
 	if s.Root != filepath.Join(s.Workdir, s.ID) {
 		return ErrOutside

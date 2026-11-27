@@ -67,7 +67,7 @@ func (gitBackend) Open(r Request) (*Space, error) {
 	}
 	// A worktree here with no record is one a failed attempt or a failed
 	// close left, perhaps part removed: it is removed, never used (remove.go).
-	if err := RemoveWorktree(r.Workdir, s.Repo, root); err != nil {
+	if err := retireWorktree(s); err != nil {
 		return nil, err
 	}
 	if err := makeWorktree(s.stopCtx(), s.Repo, s.Base, root); err != nil {
@@ -146,13 +146,23 @@ func (gitBackend) Close(s *Space) error {
 	if s.Root != filepath.Join(s.Workdir, s.ID) {
 		return ErrOutside
 	}
-	// The record before the worktree (remove.go): a worktree git removed
-	// part of is never loaded again. One whose removal failed stays for git
-	// (worktree prune), with no record.
-	if err := dropRecord(s); err != nil {
+	return retireWorktree(s)
+}
+
+// retireWorktree removes s's worktree as retire removes a copy: the record
+// and the worktree move aside, the record first, and a worktree that cannot
+// be moved keeps its record, whole (remove.go). Git's own entry for it goes
+// after, by prune, once the folder is gone. A worktree git locked (a stopped
+// `git worktree add` leaves "initializing") is unlocked first: prune and add
+// both refuse a locked one, even with its folder gone. Unlock finds it by
+// its path either way (measured on git 2.37.1).
+func retireWorktree(s *Space) error {
+	_, _ = git(s.Repo, "worktree", "unlock", s.Root)
+	if err := retire(s); err != nil {
 		return err
 	}
-	return RemoveWorktree(s.Workdir, s.Repo, s.Root)
+	_, err := git(s.Repo, "worktree", "prune")
+	return err
 }
 
 // carry copies into the worktree at root what git status lists in the
@@ -357,6 +367,8 @@ func RemoveWorktree(workdir, repo, dir string) error {
 	}
 	top, _, _ := strings.Cut(rel, string(filepath.Separator))
 	dir = filepath.Join(workdir, top)
+	// A worktree git locked is unlocked first: remove and prune refuse it.
+	_, _ = git(repo, "worktree", "unlock", dir)
 	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
 		_, _ = git(repo, "worktree", "prune")
 		return nil

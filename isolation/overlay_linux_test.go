@@ -1,6 +1,9 @@
 package isolation
 
 import (
+	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -274,5 +277,16 @@ func TestUnescapeMount(t *testing.T) {
 		if got := unescapeMount(in); got != want {
 			t.Errorf("%q: %q, want %q", in, got, want)
 		}
+	}
+}
+
+// Review evt_2dc8f5f466e43e2e P3: a stop fails the overlay's scan of its
+// snapshot; it does not leave the file out as if it were unreadable.
+func TestScanFailsOnAStop(t *testing.T) {
+	dir := t.TempDir()
+	fixture(t, dir, map[string]string{"a.txt": "a"})
+	stopped := func(string, string, fs.FileInfo) (string, error) { return "", context.Canceled }
+	if _, err := scan(dir, stopped); !errors.Is(err, context.Canceled) {
+		t.Fatalf("scan under a stop: %v", err)
 	}
 }

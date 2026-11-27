@@ -153,19 +153,22 @@ All notable changes to AgentBus. Full notes for each release are on the
   itself away, this could happen with no one pressing Close. Now a copy exists only while its
   record does: the record is written last when a copy is made and taken away first when one is
   removed, so a turn never runs in a half-made or half-removed copy, and nothing is applied from
-  one. Close clears locks and closed modes on the copy's own files (never on yours), so a command in
-  the copy cannot make it unremovable. A close that cannot move the copy out of its place puts the
+  one. Close clears locks and closed modes on the copy's own files and links (never on yours), so a
+  command in the copy cannot make it unremovable. A close that cannot move the copy out of its place puts the
   record back: the copy stays whole, the workspace stays open (no `workspace.closed`), and a close
   sent again tries again. What a close moved aside but could not remove is removed when the runner
   starts again, and a copy a stopped Open left with no record is removed by the next close. This
-  holds for the copy, overlay and git backends.
+  holds for the copy, overlay and git backends: a git worktree is moved aside the same way, then git
+  forgets it, and one a stopped `git worktree add` left locked is unlocked and removed by the next
+  turn or close.
 - **A stop now stops a copy that is being made** ([#95](https://github.com/staysup/agentbus/issues/95)).
   While a Copy workspace's first turn made its copy, a stop of the turn answered 202 but the turn
   kept running, and Ctrl-C to `agentbus up` (or a stopping `agentbus runner`) did not exit until the
   copy was done. Now every step of making a copy stops: the copy within one file or one 32 MiB
   piece of a big file, the hashes of its first checkpoint within one 32 MiB piece, a git worktree's
   `git worktree add` and its carried edits, and an overlay's snapshot. A copy whose stop came at any
-  step, its last included, never writes its record, so its turn never starts. A stopped turn reads
+  step, its last included, never writes its record, so its turn never starts. A stop fails a
+  checkpoint; it never leaves a file out as if it could not be read. A stopped turn reads
   stopped; a runner that stops fails the turn with `runner_stopped`. A copy made in one clonefile
   call on macOS is still quick and is not stopped part way.
 

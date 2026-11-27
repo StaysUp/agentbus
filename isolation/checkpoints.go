@@ -678,9 +678,11 @@ func removeAll(p string) error {
 		return nil
 	}
 	_ = filepath.WalkDir(p, func(q string, d fs.DirEntry, err error) error {
-		if err != nil || d.Type()&fs.ModeSymlink != 0 {
+		if err != nil {
 			return nil
 		}
+		// A link is unlocked itself (a clone keeps Finder's Locked on a link
+		// too), never chmodded: chmod follows it.
 		unlock(q)
 		if d.IsDir() {
 			_ = os.Chmod(q, 0o700)

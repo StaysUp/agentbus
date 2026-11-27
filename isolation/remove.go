@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sync"
 )
 
 // A space is on disk only while its record is: Load finds a space by its
@@ -18,11 +19,11 @@ import (
 // folder (#96). Go's module cache holds the same rule with its .partial file,
 // and containerd's snapshotter drops a snapshot's metadata before its folder.
 //
-// What such a copy leaves is moved aside, under the state folder, and removed
-// from there: <workdir>/.isolation/.removing never holds a space and never
-// names a job, so neither Load nor Open reads it. A file that cannot be
-// removed stays there, out of every copy's way, and SweepRemoved tries again
-// when a runner starts.
+// What such a copy leaves is moved aside and removed from there:
+// <workdir>/.removing never holds a space and never names a job, so neither
+// Load nor Open reads it, and it goes once it is empty, so a removal leaves
+// nothing behind. A file that cannot be removed stays there, out of every
+// copy's way, and SweepRemoved tries again when a runner starts.
 
 // record writes the record of a space Open has made, as every Open's last
 // step, and only while the stop has not come: a stopped Open leaves no
@@ -52,7 +53,17 @@ var renameCopy = os.Rename
 // name starts with a dot, so it is never a space id.
 const removingFolder = ".removing"
 
-func removingDir(workdir string) string { return filepath.Join(workdir, stateFolder, removingFolder) }
+func removingDir(workdir string) string { return filepath.Join(workdir, removingFolder) }
+
+// oldRemovingDir is where 9f37c6c kept it, under the state folder.
+func oldRemovingDir(workdir string) string {
+	return filepath.Join(workdir, stateFolder, removingFolder)
+}
+
+// removingMu makes making an aside folder and removing an empty
+// removingFolder one step each, so one removal never takes the folder from
+// under another's new aside.
+var removingMu sync.Mutex
 
 // retire takes s's record away, then moves its copy out of s.Root, then
 // removes both. It fails only while s's copy is still whole at s.Root, and
@@ -69,7 +80,7 @@ func retire(s *Space) error {
 	}
 	// The record first: from this rename on, no Load finds the space.
 	if err := moveAside(s.state(), aside, "state"); err != nil {
-		_ = os.Remove(aside)
+		doneAside(s.Workdir, aside)
 		return err
 	}
 	// Then the copy, out of the place the next Open makes one. A copy whose
@@ -90,10 +101,10 @@ func retire(s *Space) error {
 				return err
 			}
 		}
-		_ = removeAll(aside)
+		doneAside(s.Workdir, aside)
 		return err
 	}
-	_ = removeAll(aside)
+	doneAside(s.Workdir, aside)
 	return nil
 }
 
@@ -109,19 +120,30 @@ func dropRecord(s *Space) error {
 		return err
 	}
 	if err := moveAside(s.state(), aside, "state"); err != nil {
-		_ = os.Remove(aside)
+		doneAside(s.Workdir, aside)
 		return err
 	}
-	_ = removeAll(aside)
+	doneAside(s.Workdir, aside)
 	return nil
 }
 
 // newAside makes a fresh folder for what s leaves, under removingFolder.
 func newAside(s *Space) (string, error) {
+	removingMu.Lock()
+	defer removingMu.Unlock()
 	if err := os.MkdirAll(removingDir(s.Workdir), 0o700); err != nil {
 		return "", err
 	}
 	return os.MkdirTemp(removingDir(s.Workdir), s.ID+"-")
+}
+
+// doneAside removes aside as far as it can, and removingFolder once nothing
+// is left in it.
+func doneAside(workdir, aside string) {
+	_ = removeAll(aside)
+	removingMu.Lock()
+	defer removingMu.Unlock()
+	_ = os.Remove(removingDir(workdir))
 }
 
 // moveAside renames p into aside as name. A p that is not there is moved.
@@ -160,9 +182,16 @@ func RemoveLeft(workdir, id string) error {
 // SweepRemoved removes what closed spaces left under workdir and could not
 // be removed then. A runner calls it when it starts.
 func SweepRemoved(workdir string) error {
-	dir := removingDir(workdir)
-	if _, err := os.Lstat(dir); errors.Is(err, fs.ErrNotExist) {
-		return nil
+	removingMu.Lock()
+	defer removingMu.Unlock()
+	var first error
+	for _, dir := range []string{removingDir(workdir), oldRemovingDir(workdir)} {
+		if !exists(dir) {
+			continue
+		}
+		if err := removeAll(dir); err != nil && first == nil {
+			first = err
+		}
 	}
-	return removeAll(dir)
+	return first
 }

@@ -109,6 +109,9 @@ func Walk(root string, prev *Snapshot, hash Hasher) (*Snapshot, error) {
 			e.hash = old.Hash
 		} else {
 			h, err := hash(it.Rel, it.Path, info)
+			if Stopped(err) {
+				return nil, err // a stop fails the walk: no file is left out for it
+			}
 			if err != nil {
 				continue // unreadable: left out
 			}
@@ -141,6 +144,7 @@ func WalkParallel(root string, prev *Snapshot, hash Hasher, workers int) (*Snaps
 		info      fs.FileInfo
 		e         entry
 		ok        bool
+		err       error
 	}
 	var todo []*job
 	for _, it := range list {
@@ -169,6 +173,8 @@ func WalkParallel(root string, prev *Snapshot, hash Hasher, workers int) (*Snaps
 			for j := range next {
 				if h, err := hash(j.rel, j.path, j.info); err == nil {
 					j.e.hash, j.ok = h, true
+				} else {
+					j.err = err
 				}
 			}
 		}()
@@ -179,11 +185,20 @@ func WalkParallel(root string, prev *Snapshot, hash Hasher, workers int) (*Snaps
 	close(next)
 	wg.Wait()
 	for _, j := range todo {
+		if Stopped(j.err) {
+			return nil, j.err
+		}
 		if j.ok {
 			s.files[j.rel] = j.e
 		}
 	}
 	return s, nil
+}
+
+// Stopped says whether err is a stop (a context ended), which fails a walk,
+// rather than a file that could not be read, which a walk leaves out.
+func Stopped(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // FormatTimes is each file's modification time, one "<unix nanoseconds>

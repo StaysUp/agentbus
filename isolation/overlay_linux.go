@@ -333,6 +333,9 @@ func (overlayBackend) take(s *Space, t *trees, prev *treeState, save workspace.H
 				f.Hash = old.Hash
 			} else {
 				h, err := save(rel, p, info)
+				if workspace.Stopped(err) {
+					return err
+				}
 				if err != nil {
 					return ed.remove(rel)
 				}
@@ -643,6 +646,9 @@ func scan(root string, hash workspace.Hasher) (*workspace.Snapshot, error) {
 			continue
 		}
 		h, err := hash(it.Rel, it.Path, info)
+		if workspace.Stopped(err) {
+			return nil, err // a stop fails the scan: no file is left out for it
+		}
 		if err != nil {
 			continue
 		}

@@ -1,8 +1,11 @@
 package workspace
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
@@ -101,5 +104,27 @@ func TestManyFilesFit(t *testing.T) {
 		if f.Content != nil {
 			t.Fatalf("%s kept its content", f.Path)
 		}
+	}
+}
+
+// Review evt_2dc8f5f466e43e2e P3: a stop fails a walk; it does not leave the
+// file out as if it were unreadable. Before, Walk answered a snapshot without
+// the file, so a checkpoint taken under a stop recorded the file as removed.
+func TestWalkFailsOnAStop(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stopped := func(string, string, fs.FileInfo) (string, error) { return "", context.Canceled }
+	if _, err := Walk(dir, nil, stopped); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Walk under a stop: %v", err)
+	}
+	if _, err := WalkParallel(dir, nil, stopped, 2); !errors.Is(err, context.Canceled) {
+		t.Fatalf("WalkParallel under a stop: %v", err)
+	}
+	// An unreadable file is still left out, and the walk goes on.
+	unreadable := func(string, string, fs.FileInfo) (string, error) { return "", errors.New("unreadable") }
+	if s, err := Walk(dir, nil, unreadable); err != nil || s.Len() != 0 {
+		t.Fatalf("Walk of an unreadable file: %v", err)
 	}
 }

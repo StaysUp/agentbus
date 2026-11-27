@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -96,11 +98,15 @@ func TestSweepRemoved(t *testing.T) {
 		t.Fatalf("nothing to sweep: %v", err)
 	}
 	fixture(t, removingDir(wd), map[string]string{"ws_1-1/copy/a.txt": "a"})
+	// Where 9f37c6c put what it could not remove.
+	fixture(t, oldRemovingDir(wd), map[string]string{"ws_2-1/copy/a.txt": "a"})
 	if err := SweepRemoved(wd); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Lstat(removingDir(wd)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("left: %v", err)
+	for _, p := range []string{removingDir(wd), oldRemovingDir(wd)} {
+		if _, err := os.Lstat(p); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("%s left: %v", p, err)
+		}
 	}
 }
 
@@ -265,4 +271,106 @@ func gitInit(t *testing.T, dir string) {
 	gitIn(t, dir, "init", "-q")
 	gitIn(t, dir, "add", ".")
 	gitIn(t, dir, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "-m", "one")
+}
+
+// Review evt_2dc8f5f466e43e2e P2: a stopped `git worktree add` leaves a
+// worktree git locked ("initializing"), with its folder or without it. The
+// next Open of the id removes it and makes a fresh worktree. Before, a single
+// --force could not remove it, and prune left the missing one registered, so
+// add failed with "missing but locked worktree" and no turn could start.
+func TestGitOpenAfterAStoppedAdd(t *testing.T) {
+	for _, folder := range []string{"still there", "gone"} {
+		t.Run(folder, func(t *testing.T) {
+			src := t.TempDir()
+			fixture(t, src, map[string]string{"a.txt": "a"})
+			gitInit(t, src)
+			wd := filepath.Join(t.TempDir(), "w")
+			root := filepath.Join(wd, "ws_1")
+			gitIn(t, src, "worktree", "add", "-q", "--lock", "--reason", "initializing", root, "HEAD")
+			if folder == "gone" {
+				if err := os.RemoveAll(root); err != nil {
+					t.Fatal(err)
+				}
+			}
+			b, _ := Get(Git)
+			s, err := b.Open(Request{ID: "ws_1", Workdir: wd, Folder: src})
+			if err != nil {
+				t.Fatalf("open after a stopped add: %v", err)
+			}
+			if read(t, filepath.Join(s.Dir, "a.txt")) != "a" {
+				t.Fatal("the worktree is not the folder")
+			}
+			if err := b.Close(s); err != nil {
+				t.Fatal(err)
+			}
+			assertNoSpace(t, wd, "ws_1")
+			assertOnlyMainWorktree(t, src)
+		})
+	}
+}
+
+// Review evt_2dc8f5f466e43e2e P2: a git close that cannot move the worktree
+// out of its place keeps its record, and the worktree stays whole and
+// registered, so the workspace is usable and a later close finishes. Before,
+// the record went first and a failed `git worktree remove` left a worktree
+// with no record that every later Open failed on.
+func TestGitCloseThatCannotMoveKeepsTheRecord(t *testing.T) {
+	src := t.TempDir()
+	fixture(t, src, map[string]string{"a.txt": "a"})
+	gitInit(t, src)
+	b, s := open(t, Git, src)
+	fixture(t, s.Dir, map[string]string{"work.txt": "w"})
+	refused := errors.New("refused")
+	renameCopy = func(string, string) error { return refused }
+	err := b.Close(s)
+	renameCopy = os.Rename
+	if !errors.Is(err, refused) {
+		t.Fatalf("close: %v, want the refused move", err)
+	}
+	got, err := Load(s.Workdir, s.Root)
+	if err != nil {
+		t.Fatalf("the worktree lost its record: %v", err)
+	}
+	if read(t, filepath.Join(got.Dir, "a.txt")) != "a" || read(t, filepath.Join(got.Dir, "work.txt")) != "w" {
+		t.Fatal("the worktree is not whole")
+	}
+	if err := b.Close(got); err != nil {
+		t.Fatal(err)
+	}
+	assertNoSpace(t, s.Workdir, s.ID)
+	assertOnlyMainWorktree(t, src)
+}
+
+// A close that removes everything leaves nothing of its own in the workdir:
+// no aside folder, and nothing in the copy's place. A git Open refused after
+// its worktree was made is the case the refusal tests in cmd/agentbus hold.
+func TestCloseLeavesTheWorkdirClean(t *testing.T) {
+	src := t.TempDir()
+	fixture(t, src, map[string]string{"a.txt": "a"})
+	gitInit(t, src)
+	for _, name := range []string{Copy, Git} {
+		t.Run(name, func(t *testing.T) {
+			b, s := open(t, name, src)
+			if err := b.Close(s); err != nil {
+				t.Fatal(err)
+			}
+			for _, p := range []string{removingDir(s.Workdir), oldRemovingDir(s.Workdir), s.Root} {
+				if exists(p) {
+					t.Fatalf("%s left after close", p)
+				}
+			}
+		})
+	}
+}
+
+// assertOnlyMainWorktree says repo lists no worktree but its own.
+func assertOnlyMainWorktree(t *testing.T, repo string) {
+	t.Helper()
+	out, err := exec.Command("git", "-C", repo, "worktree", "list", "--porcelain").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(out), "worktree "); n != 1 {
+		t.Fatalf("the repo lists %d worktrees, want its own only:\n%s", n, out)
+	}
 }

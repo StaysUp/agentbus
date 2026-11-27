@@ -3,6 +3,7 @@ package isolation
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -124,5 +125,88 @@ func TestCloseCopyClosedAndLocked(t *testing.T) {
 	defer b.Close(again)
 	if read(t, filepath.Join(again.Dir, "notes.md")) != "n" || read(t, filepath.Join(again.Dir, "src/app.js")) != "js" {
 		t.Fatal("the next copy is not the folder")
+	}
+}
+
+// Review evt_2dc8f5f466e43e2e P2: a git worktree holding a locked file closes
+// whole, and git lists it no more. Before, `git worktree remove --force` exited
+// 255 on the lock, after the record was gone.
+func TestGitCloseWithALockedFile(t *testing.T) {
+	src := t.TempDir()
+	fixture(t, src, map[string]string{"a.txt": "a"})
+	gitInit(t, src)
+	b, s := open(t, Git, src)
+	fixture(t, s.Dir, map[string]string{"out/stuck.bin": "x"})
+	lockFile(t, filepath.Join(s.Dir, "out/stuck.bin"))
+	if err := b.Close(s); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	assertNoSpace(t, s.Workdir, s.ID)
+	assertOnlyMainWorktree(t, src)
+}
+
+// lockLink sets Finder's Locked on the link p itself (chflags -h uchg), and
+// clears it when the test ends.
+func lockLink(t *testing.T, p string) {
+	t.Helper()
+	if out, err := exec.Command("chflags", "-h", "uchg", p).CombinedOutput(); err != nil {
+		t.Fatalf("chflags -h: %v %s", err, out)
+	}
+	t.Cleanup(func() { exec.Command("chflags", "-h", "nouchg", p).Run() })
+}
+
+// Review evt_2dc8f5f466e43e2e P2: a locked link is unlocked as a locked file
+// is, so a close removes the whole copy and nothing waits aside. Before,
+// removeAll skipped links, the copy's move succeeded, and the aside copy was
+// never removed, by the close or by any runner start's sweep.
+func TestCloseCopyWithALockedLink(t *testing.T) {
+	for _, whose := range []string{"person's link", "agent's link"} {
+		t.Run(whose, func(t *testing.T) {
+			src := t.TempDir()
+			fixture(t, src, map[string]string{"a.txt": "a"})
+			if whose == "person's link" {
+				if err := os.Symlink("a.txt", filepath.Join(src, "to-a")); err != nil {
+					t.Fatal(err)
+				}
+				lockLink(t, filepath.Join(src, "to-a"))
+			}
+			b, s := open(t, Copy, src)
+			if whose == "agent's link" {
+				if err := os.Symlink("a.txt", filepath.Join(s.Dir, "to-a")); err != nil {
+					t.Fatal(err)
+				}
+				lockLink(t, filepath.Join(s.Dir, "to-a"))
+			}
+			if err := b.Close(s); err != nil {
+				t.Fatalf("close: %v", err)
+			}
+			assertNoSpace(t, s.Workdir, s.ID)
+			if whose == "person's link" {
+				var st syscall.Stat_t
+				if err := syscall.Lstat(filepath.Join(src, "to-a"), &st); err != nil || st.Flags&unix.UF_IMMUTABLE == 0 {
+					t.Fatalf("close cleared the lock on the person's link: %v", err)
+				}
+			}
+		})
+	}
+}
+
+// What a close left aside with a locked link in it goes at the next sweep.
+func TestSweepRemovesALockedLink(t *testing.T) {
+	wd := t.TempDir()
+	dir := filepath.Join(removingDir(wd), "ws_1-1", "copy")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "to-a")
+	if err := os.Symlink("a.txt", link); err != nil {
+		t.Fatal(err)
+	}
+	lockLink(t, link)
+	if err := SweepRemoved(wd); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	if _, err := os.Lstat(removingDir(wd)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("left: %v", err)
 	}
 }
