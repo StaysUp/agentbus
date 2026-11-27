@@ -57,7 +57,6 @@ func TestBuildRefusesPartReplies(t *testing.T) {
 		"incomplete":        replySSE(`{"type":"response.incomplete","response":{"status":"incomplete","output":[` + rMessage + `]}}`),
 		"failed":            replySSE(`{"type":"response.failed","response":{"status":"failed","output":[]}}`),
 		"stream error":      replySSE(`{"type":"error","message":"overloaded"}`, completedEvent(`[`+rMessage+`]`)),
-		"no items":          replySSE(completedEvent(`[]`)),
 		"not json":          "data: {nope\n\n",
 	} {
 		if _, _, err := (Adapter{}).Build(200, "text/event-stream", []byte(data)); err == nil {
@@ -66,6 +65,18 @@ func TestBuildRefusesPartReplies(t *testing.T) {
 	}
 	if _, _, err := (Adapter{}).Build(429, "application/json", []byte(`{"error":{}}`)); err == nil {
 		t.Error("a 429 was kept")
+	}
+}
+
+func TestBuildKeepsAnEmptyReply(t *testing.T) {
+	for name, tc := range map[string]struct{ contentType, data string }{
+		"stream":     {"text/event-stream", replySSE(completedEvent(`[]`))},
+		"plain JSON": {"application/json", `{"status":"completed","output":[]}`},
+	} {
+		msg, stop, err := Adapter{}.Build(200, tc.contentType, []byte(tc.data))
+		if err != nil || stop != "completed" || string(msg) != `[]` {
+			t.Errorf("%s: Build: %v %q %s", name, err, stop, msg)
+		}
 	}
 }
 

@@ -60,6 +60,19 @@ func TestBuildRebuildsAStreamedToolReply(t *testing.T) {
 	}
 }
 
+func TestBuildKeepsAnEmptyReply(t *testing.T) {
+	for name, tc := range map[string]struct{ contentType, data, want string }{
+		"stream with no delta": {"text/event-stream", "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n", `{"role":"assistant","content":""}`},
+		"null content":         {"application/json", `{"choices":[{"index":0,"message":{"role":"assistant","content":null},"finish_reason":"stop"}]}`, `{"role":"assistant","content":null}`},
+		"blank content":        {"application/json", `{"choices":[{"index":0,"message":{"role":"assistant","content":"\n"},"finish_reason":"length"}]}`, `{"role":"assistant","content":"\n"}`},
+	} {
+		msg, _, err := Adapter{}.Build(200, tc.contentType, []byte(tc.data))
+		if err != nil || string(msg) != tc.want {
+			t.Errorf("%s: Build: %v %s", name, err, msg)
+		}
+	}
+}
+
 func TestBuildRefusesWhatItCannotRebuild(t *testing.T) {
 	plain := string(fixture(t, "plain_response.sse"))
 	cut, _, _ := strings.Cut(plain, `"finish_reason":"stop"`)
