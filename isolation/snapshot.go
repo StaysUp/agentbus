@@ -165,6 +165,9 @@ func materialise(ctx context.Context, snap *Snapshot, dir string, mode fs.FileMo
 		removeAll(dir)
 		return nil, err
 	}
+	// Every hash is its blob's, true once its file was written: a later change
+	// of a file has a change time after this, which a checkpoint then sees.
+	out.SetTaken(time.Now())
 	if snap.Git != "" {
 		if !hexHash(snap.Git) {
 			removeAll(dir)

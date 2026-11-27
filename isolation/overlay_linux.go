@@ -329,7 +329,7 @@ func (overlayBackend) take(s *Space, t *trees, prev *treeState, save workspace.H
 			return ed.removeFile(rel)
 		case mode.IsRegular() || mode&fs.ModeSymlink != 0:
 			f := workspace.File{Size: info.Size(), Mode: mode, ModTime: info.ModTime().UnixNano()}
-			if old, ok := t.lookup(prev.Root, rel); ok && old.Size == f.Size && old.ModTime == f.ModTime && old.Mode == f.Mode && !racy(prev.Taken, old.ModTime) {
+			if old, ok := t.lookup(prev.Root, rel); ok && workspace.Keeps(old, info, prev.Taken) {
 				f.Hash = old.Hash
 			} else {
 				h, err := save(rel, p, info)
