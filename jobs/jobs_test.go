@@ -33,6 +33,12 @@ func newServer(t *testing.T) *httptest.Server {
 // client API that makes them is package api's.
 func newServerQ(t *testing.T) (*httptest.Server, *queue.Queue) {
 	t.Helper()
+	return newServerQWait(t, 200*time.Millisecond)
+}
+
+// newServerQWait is newServerQ with its own bound on a take's long poll.
+func newServerQWait(t *testing.T, maxWait time.Duration) (*httptest.Server, *queue.Queue) {
+	t.Helper()
 	q, err := queue.Open(filepath.Join(t.TempDir(), "jobs.db"), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -41,7 +47,7 @@ func newServerQ(t *testing.T) (*httptest.Server, *queue.Queue) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s, err := New(Config{Queue: q, Token: mainTok, EnrollToken: enrollTok, MaxWait: 200 * time.Millisecond, Folders: fr})
+	s, err := New(Config{Queue: q, Token: mainTok, EnrollToken: enrollTok, MaxWait: maxWait, Folders: fr})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -177,9 +183,11 @@ func TestTokenScopes(t *testing.T) {
 }
 
 // A take with nothing queued waits, then answers 204; a job created while it
-// waits is answered at once.
+// waits is answered at once. The server's bound on a take is the default, well
+// above the 5 s the second take asks for: under the 200 ms the other tests use,
+// a job made later than that on a loaded machine met a 204 (run 46015114918).
 func TestTakeLongPoll(t *testing.T) {
-	srv, q := newServerQ(t)
+	srv, q := newServerQWait(t, MaxWait)
 	a := enroll(t, srv, 1)
 	path := "/api/v0/runner/take"
 	start := time.Now()
