@@ -11,11 +11,11 @@
 [![Latest release](https://img.shields.io/github/v/release/staysup/agentbus)](https://github.com/staysup/agentbus/releases)
 [![CI](https://github.com/StaysUp/agentbus/actions/workflows/ci.yml/badge.svg)](https://github.com/StaysUp/agentbus/actions/workflows/ci.yml)
 
-[Quickstart](#quickstart) &nbsp;&bull;&nbsp; [Demo](https://github.com/user-attachments/assets/674686dc-394d-4431-9e0b-a48ef3d8ef9d) &nbsp;&bull;&nbsp; [Docs](#docs) &nbsp;&bull;&nbsp; [Releases](https://github.com/staysup/agentbus/releases)
+[Quickstart](#quickstart) &nbsp;&bull;&nbsp; [Demo](https://github.com/user-attachments/assets/06bb50b3-1b9a-4656-a2dd-fe836de0a87e) &nbsp;&bull;&nbsp; [Docs](#docs) &nbsp;&bull;&nbsp; [Releases](https://github.com/staysup/agentbus/releases)
 
 </div>
 
-[![AgentBus 0.5.9: Codex reviews Claude Code's change and finds a P1; every model call with its cost. Click to watch the 2-minute demo.](docs/assets/cockpit-059.png)](https://github.com/StaysUp/agentbus/releases/tag/v0.5.9)
+[![AgentBus 0.6.7: Claude Code builds a change in a copy of your folder, Codex reviews it, and the fix waits in Changes until you Apply. Click to watch the 1-minute demo.](docs/assets/cockpit-067.png)](https://github.com/StaysUp/agentbus/releases/tag/v0.6.7)
 
 AgentBus sits between your coding agents and every model vendor. It runs the agents you already
 have (Claude Code, Codex, Antigravity, OpenCode or any OpenRouter model) and tracks every step.
