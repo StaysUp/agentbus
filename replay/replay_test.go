@@ -851,3 +851,37 @@ func TestIdentityRecoveredFromTheStore(t *testing.T) {
 		t.Errorf("with the first call unread, got %+v, want a refusal", rw)
 	}
 }
+
+// emptyForTheAPI says what the API refuses in a message that is not the last
+// one: no content, content that is only whitespace, a text block that is only
+// whitespace, or a breakpoint on an empty text block or on a thinking block.
+func emptyForTheAPI(m json.RawMessage) string {
+	var s string
+	if json.Unmarshal(field(m, "content"), &s) == nil {
+		if strings.TrimSpace(s) == "" {
+			return "no content"
+		}
+		return ""
+	}
+	blocks, ok := body.Elements(field(m, "content"))
+	if !ok {
+		return ""
+	}
+	if len(blocks) == 0 {
+		return "no content"
+	}
+	for _, b := range blocks {
+		if t := body.Label(b, "type"); (t == "thinking" || t == "redacted_thinking") && len(field(b, "cache_control")) > 0 {
+			return "a breakpoint on a " + t + " block"
+		}
+		if body.Label(b, "type") != "text" {
+			continue
+		}
+		var text string
+		_ = json.Unmarshal(field(b, "text"), &text)
+		if strings.TrimSpace(text) == "" {
+			return "a text block with no text"
+		}
+	}
+	return ""
+}

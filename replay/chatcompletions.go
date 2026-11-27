@@ -131,12 +131,24 @@ func (chatCompletions) asHistory(m json.RawMessage) (json.RawMessage, error) {
 	return body.Object(out), nil
 }
 
+// reply: the assistant message as the vendor sent it. One that said nothing
+// (content null, missing, blank or only blank text, and no tool call, refusal,
+// audio or image) keeps its other fields, the reasoning among them, and gets
+// the note as its content, as a message with nothing in it is what the API
+// refuses. An empty tool_calls list goes: the API refuses that too. Reported on
+// PR #106 on 2026-11-27 (OpenCode passed an empty content through): not
+// captured live, no OpenCode version recorded. The shapes are in
+// emptyreply_test.go.
 func (chatCompletions) reply(rep body.Reply, stop string) ([]json.RawMessage, ending, error) {
 	if role(rep.Message) != "assistant" {
 		return nil, ending{}, errors.New("the kept reply is not an assistant message")
 	}
 	if stop != "tool_calls" && stop != "function_call" {
-		return []json.RawMessage{rep.Message}, ending{finished: true}, nil
+		m, err := withContentNote(rep.Message)
+		if err != nil {
+			return nil, ending{}, err
+		}
+		return []json.RawMessage{m}, ending{finished: true}, nil
 	}
 	ids, err := chatToolIDs(rep.Message)
 	if err != nil {
@@ -151,6 +163,96 @@ func (chatCompletions) reply(rep body.Reply, stop string) ([]json.RawMessage, en
 		}))
 	}
 	return []json.RawMessage{rep.Message}, e, nil
+}
+
+// withContentNote is message m with the note for an empty reply as its
+// content when it said nothing, and m as it was otherwise.
+func withContentNote(m json.RawMessage) (json.RawMessage, error) {
+	fields, err := body.Fields(m)
+	if err != nil {
+		return nil, err
+	}
+	if chatSaid(fields) {
+		return m, nil
+	}
+	note := jsonString(emptyReplyNote)
+	out := make([]body.Field, 0, len(fields)+1)
+	set := false
+	for _, f := range fields {
+		switch {
+		case f.Key == "content":
+			f.Value, set = note, true
+		case f.Key == "tool_calls" && !present(f.Value):
+			continue
+		}
+		out = append(out, f)
+	}
+	if !set {
+		out = append(out, body.Field{Key: "content", Value: note})
+	}
+	return body.Object(out), nil
+}
+
+// present reports whether a field's value holds anything: not null, not an
+// empty string, list or object.
+func present(v json.RawMessage) bool {
+	if els, ok := body.Elements(v); ok {
+		return len(els) > 0
+	}
+	if fields, err := body.Fields(v); err == nil {
+		return len(fields) > 0
+	}
+	var s string
+	if json.Unmarshal(v, &s) == nil {
+		return s != ""
+	}
+	return len(v) > 0 && string(v) != "null"
+}
+
+// chatSaid reports whether an assistant message's fields hold anything the
+// person would read: a tool call (tool_calls, or the older function_call), a
+// refusal, audio, images, a text that is not blank, or a part that is not
+// text. A content of another shape counts as said.
+func chatSaid(fields []body.Field) bool {
+	for _, f := range fields {
+		switch f.Key {
+		case "tool_calls", "function_call", "audio", "images":
+			if present(f.Value) {
+				return true
+			}
+		case "refusal":
+			var s string
+			if json.Unmarshal(f.Value, &s) == nil && !body.Blank(s) {
+				return true
+			}
+		case "content":
+			if chatContentSaid(f.Value) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func chatContentSaid(c json.RawMessage) bool {
+	if len(c) == 0 || string(c) == "null" {
+		return false
+	}
+	var s string
+	if json.Unmarshal(c, &s) == nil {
+		return !body.Blank(s)
+	}
+	parts, ok := body.Elements(c)
+	if !ok {
+		return true
+	}
+	for _, p := range parts {
+		var text string
+		if body.Label(p, "type") != "text" || json.Unmarshal(field(p, "text"), &text) != nil || !body.Blank(text) {
+			return true
+		}
+	}
+	return false
 }
 
 func chatToolIDs(m json.RawMessage) ([]string, error) {

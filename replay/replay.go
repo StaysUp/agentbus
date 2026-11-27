@@ -631,6 +631,76 @@ func noteMessage(text string) json.RawMessage {
 		{Key: "content", Value: joinArray([]json.RawMessage{block})}})
 }
 
+// emptyReplyNote stands in for a reply that said nothing, whatever stopped it:
+// an end_turn, a refusal, or a token limit that cut it off before any text.
+const emptyReplyNote = notePrefix + "The model's reply here was empty."
+
+// withoutBlankText is message m without its text blocks that are only
+// whitespace, and whether anything the person would read is left of it: a
+// text that is not blank, or a block that is not thinking. A message it
+// leaves as it was is returned as it was.
+func withoutBlankText(m json.RawMessage) (json.RawMessage, bool, error) {
+	fields, err := body.Fields(m)
+	if err != nil {
+		return nil, false, err
+	}
+	for i, f := range fields {
+		if f.Key != "content" {
+			continue
+		}
+		var s string
+		if json.Unmarshal(f.Value, &s) == nil {
+			return m, !body.Blank(s), nil
+		}
+		blocks, ok := body.Elements(f.Value)
+		if !ok {
+			return m, true, nil
+		}
+		kept := make([]json.RawMessage, 0, len(blocks))
+		said := false
+		for _, b := range blocks {
+			var text string
+			if body.Label(b, "type") == "text" && json.Unmarshal(field(b, "text"), &text) == nil && body.Blank(text) {
+				continue
+			}
+			if t := body.Label(b, "type"); t != "thinking" && t != "redacted_thinking" {
+				said = true
+			}
+			kept = append(kept, b)
+		}
+		if len(kept) == len(blocks) {
+			return m, said, nil
+		}
+		fields[i].Value = joinArray(kept)
+		return body.Object(fields), said, nil
+	}
+	return m, false, nil
+}
+
+// withNote is message m with the note for an empty reply after its blocks: a
+// reply of thinking alone keeps its thinking, which the API wants back as it
+// was, and the note is the text it did not have. A message with no block is
+// the note alone.
+func withNote(m json.RawMessage) (json.RawMessage, error) {
+	fields, err := body.Fields(m)
+	if err != nil {
+		return nil, err
+	}
+	for i, f := range fields {
+		if f.Key != "content" {
+			continue
+		}
+		blocks, ok := body.Elements(f.Value)
+		if !ok || len(blocks) == 0 {
+			break
+		}
+		note := body.Object([]body.Field{{Key: "type", Value: json.RawMessage(`"text"`)}, {Key: "text", Value: jsonString(emptyReplyNote)}})
+		fields[i].Value = joinArray(append(blocks, note))
+		return body.Object(fields), nil
+	}
+	return noteMessage(emptyReplyNote), nil
+}
+
 // toolUseIDs lists the ids of an assistant message's tool_use blocks, the
 // client tools that wait for a tool_result. A server tool's block
 // (server_tool_use) carries its own result and is not listed.
@@ -1038,6 +1108,23 @@ func (claude) reply(rep body.Reply, stop string) ([]json.RawMessage, ending, err
 	m, err := asHistory(rep.Message)
 	if err != nil {
 		return nil, ending{}, err
+	}
+	// An empty reply (an end_turn with nothing said, as the model can give
+	// right after tool results) cannot be sent back: the API refuses a message
+	// with no content anywhere but last, and a text block that is only
+	// whitespace; the breakpoint cannot sit on a thinking block either. A note
+	// stands in for what it did not say. Seen 2026-11-26 as issue #103, from
+	// Anthropic's docs on empty end_turn replies and the refusal text quoted
+	// there: not captured live, no Claude Code version recorded. The shapes
+	// are in emptyreply_test.go.
+	m, said, err := withoutBlankText(m)
+	if err != nil {
+		return nil, ending{}, err
+	}
+	if !said {
+		if m, err = withNote(m); err != nil {
+			return nil, ending{}, err
+		}
 	}
 	if stop != "tool_use" {
 		return []json.RawMessage{m}, ending{finished: true}, nil

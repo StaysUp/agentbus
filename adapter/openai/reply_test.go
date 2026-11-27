@@ -2,6 +2,7 @@ package openai
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -57,7 +58,6 @@ func TestBuildRefusesPartReplies(t *testing.T) {
 		"incomplete":        replySSE(`{"type":"response.incomplete","response":{"status":"incomplete","output":[` + rMessage + `]}}`),
 		"failed":            replySSE(`{"type":"response.failed","response":{"status":"failed","output":[]}}`),
 		"stream error":      replySSE(`{"type":"error","message":"overloaded"}`, completedEvent(`[`+rMessage+`]`)),
-		"no items":          replySSE(completedEvent(`[]`)),
 		"not json":          "data: {nope\n\n",
 	} {
 		if _, _, err := (Adapter{}).Build(200, "text/event-stream", []byte(data)); err == nil {
@@ -66,6 +66,60 @@ func TestBuildRefusesPartReplies(t *testing.T) {
 	}
 	if _, _, err := (Adapter{}).Build(429, "application/json", []byte(`{"error":{}}`)); err == nil {
 		t.Error("a 429 was kept")
+	}
+}
+
+func TestBuildKeepsAnEmptyReply(t *testing.T) {
+	for name, tc := range map[string]struct{ contentType, data string }{
+		"stream":     {"text/event-stream", replySSE(completedEvent(`[]`))},
+		"plain JSON": {"application/json", `{"status":"completed","output":[]}`},
+	} {
+		msg, stop, err := Adapter{}.Build(200, tc.contentType, []byte(tc.data))
+		if err != nil || stop != "completed" || string(msg) != `[]` {
+			t.Errorf("%s: Build: %v %q %s", name, err, stop, msg)
+		}
+	}
+}
+
+// An empty completed reply is the model saying nothing only when the stream
+// showed no item at all. An item announced and never finished, or any other
+// sign of output, means the adapter missed what the model said, and that reply
+// is not stored as an empty one.
+func TestBuildKeepsAnEmptyReplyOnlyWhenNoItemWasSeen(t *testing.T) {
+	quiet := []string{`{"type":"response.created","response":{"status":"in_progress"}}`,
+		`{"type":"response.in_progress","response":{"status":"in_progress"}}`,
+		`{"type":"codex.rate_limits","plan_type":"plus"}`}
+	added := func(i int) string {
+		return fmt.Sprintf(`{"type":"response.output_item.added","output_index":%d,"item":{"type":"message","id":"m%d","role":"assistant","content":[]}}`, i, i)
+	}
+	done := func(i int) string {
+		return fmt.Sprintf(`{"type":"response.output_item.done","output_index":%d,"item":%s}`, i, rMessage)
+	}
+	for _, tc := range []struct {
+		name   string
+		events []string
+		want   string
+	}{
+		{"no item events", nil, `[]`},
+		{"an item added and never done", []string{added(0)}, ""},
+		{"two added and one done", []string{added(0), added(1), done(0)}, ""},
+		{"a content part added", []string{`{"type":"response.content_part.added","output_index":0,"part":{"type":"output_text","text":""}}`}, ""},
+		{"a text delta", []string{`{"type":"response.output_text.delta","output_index":0,"delta":"ki"}`}, ""},
+		{"a reasoning event", []string{`{"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"x"}`}, ""},
+		{"an item added and done", []string{added(0), done(0)}, `[` + rMessage + `]`},
+	} {
+		events := append(append([]string{}, quiet...), tc.events...)
+		events = append(events, completedEvent(`[]`))
+		msg, stop, err := Adapter{}.Build(200, "text/event-stream", []byte(replySSE(events...)))
+		if tc.want == "" {
+			if err == nil {
+				t.Errorf("%s: kept as %s", tc.name, msg)
+			}
+			continue
+		}
+		if err != nil || stop != "completed" || string(msg) != tc.want {
+			t.Errorf("%s: Build: %v %q %s, want %s", tc.name, err, stop, msg, tc.want)
+		}
 	}
 }
 
