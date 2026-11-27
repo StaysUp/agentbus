@@ -39,6 +39,11 @@ func (agy) Info() Info {
 		// $HOME/.gemini; no variable moves that folder. A home of its own
 		// starts signed out (agy then prints a login link and waits).
 		ConfigDir: ".gemini",
+		// In Copy mode agy walls each command in its own terminal sandbox
+		// (agySettings). Its file tools are held to the copy by its own
+		// permission rules, which allow write_file and edit_file only under
+		// the turn's folder.
+		CopySandbox: true,
 		// agy acp --login, with HOME set to a folder of control's own and a
 		// D-Bus address that reaches no bus, prints a link and reads the pasted code from
 		// its terminal. It keeps the sign-in in a plain JSON file in that
@@ -291,6 +296,22 @@ func agySettings(t Turn) string {
 		perm["deny"] = deny
 	}
 	v := map[string]any{"allowNonWorkspaceAccess": false, "permissions": perm}
+	if t.Copy.Dir != "" {
+		// Copy mode: agy's terminal sandbox, the setting --sandbox turns on,
+		// here for this run only. It runs each
+		// run_command with only its working folder, the copy, and the temp
+		// folders (/tmp, and $TMPDIR on macOS) writable, hides agy's own
+		// ~/.gemini, sign-in included, and gives the command no network.
+		// Its writable paths and network take no list, so Copy.Write and
+		// Copy.Hosts are not used. BypassSandbox is denied with no prompt, a
+		// .agents/settings.json in the folder did not turn the sandbox off,
+		// and a command it cannot wall does not run. Measured with
+		// run_command against a local Gemini endpoint: agy 1.5.17 on macOS
+		// (Seatbelt) and 1.5.18 on Linux (its own namespaces, with or
+		// without bwrap; refused to run in a container with no user
+		// namespaces), 2026-11-26.
+		v["enableTerminalSandbox"] = true
+	}
 	if t.Access == API {
 		// The Gemini API, with the key in GEMINI_API_KEY (WireAPI):
 		// "Set modelProvider: \"gemini\" in settings.json, export

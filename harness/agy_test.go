@@ -67,6 +67,30 @@ func TestAgyArgs(t *testing.T) {
 	}
 }
 
+// A Copy turn turns agy's terminal sandbox on for the run; any other turn
+// leaves agy's own setting alone.
+func TestAgyCopySandbox(t *testing.T) {
+	h := agy{}
+	if !h.Info().CopySandbox {
+		t.Fatal("agy walls its own commands in Copy mode")
+	}
+	sandbox := func(tn Turn) any {
+		a := h.Args(tn)
+		var s map[string]any
+		if err := json.Unmarshal([]byte(a[slices.Index(a, "--settings")+1]), &s); err != nil {
+			t.Fatal(err)
+		}
+		return s["enableTerminalSandbox"]
+	}
+	edit := Writes{Edit: []string{"/copy"}}
+	if got := sandbox(Turn{Writes: edit, Allow: []string{"*"}, Copy: Copy{Dir: "/copy", Hosts: []string{"127.0.0.1:8787"}}}); got != true {
+		t.Errorf("copy: enableTerminalSandbox %v", got)
+	}
+	if got := sandbox(Turn{Writes: edit, Allow: []string{"*"}}); got != nil {
+		t.Errorf("direct: enableTerminalSandbox %v, want it unset", got)
+	}
+}
+
 // The one object --output-format json prints (agy 1.5.5, 2026-11-11).
 func TestAgyResumeID(t *testing.T) {
 	h := agy{}
