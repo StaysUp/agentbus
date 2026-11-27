@@ -51,7 +51,9 @@ All notable changes to AgentBus. Full notes for each release are on the
   carried the history, a compacted one goes on as the harness sent it (Codex's under the session's
   thread id, as the turn's other requests). The gateway judges every main request once, by the
   layout test it forwards by, in every turn, and records the verdict on the call as
-  `history.compacted`; that record is the only place a compaction is decided. Nothing depends on the harness's summary: the next turn is built from the
+  `history.compacted`. That one test is the only place a compaction is decided: in a turn that
+  carries a history the recorded verdict says, and in a turn with none own replay applies the same
+  test to the stored request, which is the agent's own. Nothing depends on the harness's summary: the next turn is built from the
   record, from the turn's last request before the compaction, then a note that the turn went on,
   how many calls followed and the model's last words. A request not in the fresh layout before any
   request carried the history is still refused.
@@ -106,6 +108,13 @@ All notable changes to AgentBus. Full notes for each release are on the
   the summary (0.6.7).
 - A history step that changed nothing is no longer recorded as `history.shortened`; the
   compaction note says "1 more model call".
+- **A retry of a turn that had ended answered `running`.** `POST /api/v0/turns` sent again with the
+  key of a turn that already ended now answers how it ended (`finished`, `failed` or `stopped`), as
+  `GET /api/v0/turns/{id}` does, with no `base_url`.
+- **An on over a turn with no job answered "no such turn".** `POST /api/v0/ons` for a turn you may
+  read but that no job of this service ran (an older turn, or one recorded at the gateway) now
+  answers 409 and says why: nothing reports that turn's end, so no on could react to it. A turn you
+  may not read still gets what any such turn gets.
 - **An OpenRouter call on your own provider key (BYOK) was recorded as $0 and complete**
   ([#94](https://github.com/staysup/agentbus/issues/94)). On a BYOK call OpenRouter's `usage.cost`
   holds only its own fee, often 0, and the provider's charge is in

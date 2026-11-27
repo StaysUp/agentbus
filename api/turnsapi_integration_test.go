@@ -187,11 +187,15 @@ func TestIdempotencyKey(t *testing.T) {
 		t.Fatalf("retry once started: %d %s", code, out)
 	}
 	waitRunEnded(t, e.store, first.Session)
+	waitEnded(t, e, first.Turn)
 	resp, out = do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(body)))
 	var s Started
 	_ = json.Unmarshal([]byte(out), &s)
-	if resp.StatusCode != 202 || s.Session != first.Session || s.Turn != first.Turn || !s.Existing {
-		t.Fatalf("retry: %d %s, first %+v", resp.StatusCode, out, first)
+	// A retry once the turn has ended says how it ended, never running
+	// (review of dd2dcb1), and names no gateway.
+	if resp.StatusCode != 202 || s.Session != first.Session || s.Turn != first.Turn || !s.Existing ||
+		s.State != "finished" || s.BaseURL != "" {
+		t.Fatalf("retry: %d %s, first %+v, want existing and finished", resp.StatusCode, out, first)
 	}
 	// The turns token gets the same answer.
 	if got, out := asTok(t, e, turnsTok, "POST", "/api/v0/turns", body); got != 202 || !strings.Contains(out, `"existing":true`) {

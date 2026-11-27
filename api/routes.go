@@ -181,15 +181,14 @@ var routes = slices.Concat([]route{
 	{method: "POST", path: "/api/v0/turns", op: "startTurn", action: run.ActRun,
 		tag:     "Turns",
 		summary: "Start a turn",
-		doc: "Start a turn: in a new session, or with session the next turn of that one. The reply names the turn at once; every event of the turn carries its id.\n\n" +
-			"Without session, agent, folder and prompt are required and the turn opens a new session. " +
-			"With session, agent and prompt are required and the turn continues that session, in its folder, on the agent named; " +
-			"a folder sent that differs from the session's is refused with 400. A turn token may continue any session it may read. " +
-			"The turn's turn.started, with the prompt, is stored before the reply.\n\n" +
-			"A session runs on one machine, the one that holds its folder, for its whole life: pick the machine (its machine id, from GET /api/v0/runners), " +
-			"then type a folder on it (folder) or name one it holds (folder_ref, from GET /api/v0/folders). Only that machine's runner takes the session's work.\n\n" +
+		doc: "Start the next turn of a session. The reply names the turn at once; every event of the turn carries its id.\n\n" +
+			"session, agent and prompt are required: the turn continues that session, in its workspace (the folder and the mode), on the agent named. " +
+			"A first turn takes three calls: POST /api/v0/workspaces, POST /api/v0/sessions, then this one. A turn token may continue any session it may read. " +
+			"The turn is queued before the reply; its turn.started, with the prompt, is stored once a runner starts it.\n\n" +
+			"A session runs on its workspace's machine for its whole life, and only that machine's runner takes its work: " +
+			"the machine is picked, and the folder typed or named, when the workspace is made.\n\n" +
 			"The reply comes at once, once the turn is recorded; it never waits for a runner. It answers 202 with state queued: " +
-			"the turn runs once no turn runs in its workspace (one copy runs one turn at a time) and its session's earlier turns have ended, and GET /api/v0/turns/{id} follows it. A retry of a turn already running answers running.\n\n" +
+			"the turn runs once no turn runs in its workspace (one copy runs one turn at a time) and its session's earlier turns have ended, and GET /api/v0/turns/{id} follows it. A retry of a turn already running answers running; one of a turn that has ended answers how it ended.\n\n" +
 			"A turn the main token sends is the person's: it is not counted against any limit, and it goes ahead of delegated turns of its workspace that have not started, since those hold no copy yet. No job passes a discard, update or close of the workspace. A turn a turn token sends is delegated work: " +
 			"one runner runs at most [limits] max_delegated_at_once of those at once (8 by default; GET /api/v0/runners says how many are busy and waiting), and the rest wait, oldest first.\n\n" +
 			"A session whose turn runs, or has turns waiting, is never refused: the new turn queues behind them and runs next, in order, " +
@@ -263,13 +262,14 @@ var routes = slices.Concat([]route{
 			"A turn token may watch any turn it may read (the check GET /api/v0/turns/{id} uses), its own session's too, and the reply goes to a session it may read: its own when it leaves session out. " +
 			"An on a turn token registers counts as work its turn asked for, under the caps in Settings, Limits: Turns per request (max_jobs_per_turn) and Turns per request tree (max_jobs_per_tree). A cap reached is 403 and registers nothing; a retry with the key of an on already made returns it without counting again. " +
 			"The main token may watch any turn and names the session to deliver to. " +
+			"Only a turn this service ran as a job can be watched: a turn the record holds with no job (an older one, or one recorded at the gateway) is 409, since nothing reports its end. " +
 			"It is a row on control plus control's own check: nothing waits, and the reply arrives as a later turn. " +
 			"Dedup is by idempotency_key only: the same key for the same turn and session returns the on already registered, the same key with other fields is 409, and a request with no key always registers a new on (several ons may watch one turn). ask_agent registers one of these for itself.",
 		body: OnRequest{},
 		replies: []reply{ok(201, OnView{}, "The on."), turnRefused,
 			fail(403, "A turn token named a turn or a session it may not read, or its turn or request tree reached a cap on asked work (the message says which)."),
 			fail(404, "This service keeps no queue, or no turn has this id."),
-			fail(409, "The idempotency_key was already used to register an on for a different turn or session.")},
+			fail(409, "The idempotency_key was already used to register an on for a different turn or session, or the turn was not run as a job of this service, so no on can react to its end (the message says which).")},
 		at:    atBody,
 		serve: plain((*API).registerOn)},
 	{method: "GET", path: "/api/v0/ons", op: "listOns", action: run.ActRead,

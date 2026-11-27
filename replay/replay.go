@@ -1303,9 +1303,11 @@ func (r *Replayer) mark(m map[[2]string]bool, session, turn string) bool {
 	return true
 }
 
-// compactedEvent records, on one request's call, that its harness had
-// compacted it and it went on as the harness sent it: what people see. The
-// history reads the same fact from the request itself (compacted).
+// compactedEvent is the gateway's verdict on one request, recorded on its
+// call: its harness had compacted it, and it went on as the harness sent it.
+// The history reads it through compacted: in a turn that carries a history
+// this verdict is the only record of a compaction; in a turn with no earlier
+// history the same test is applied to the stored request.
 func compactedEvent() []event.Event {
 	return []event.Event{{Kind: event.HistoryCompacted,
 		Text: "The agent's harness compacted its context in this request. AgentBus let it through as the harness sent it; the next turn is built from AgentBus's record, not from the harness's summary."}}

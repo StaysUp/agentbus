@@ -92,6 +92,7 @@ const (
 
 type world struct {
 	skew   atomic.Int64 // added to the queue's clock
+	jobsDB string       // the queue's file
 	q      *queue.Queue
 	st     *store.Store
 	eng    *run.Engine
@@ -130,8 +131,8 @@ func newWorld(t *testing.T, capacity int, record ...bool) *world {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := &world{}
-	q, err := queue.Open(filepath.Join(dir, "jobs.db"), func() time.Time { return time.Now().Add(time.Duration(w.skew.Load())) })
+	w := &world{jobsDB: filepath.Join(dir, "jobs.db")}
+	q, err := queue.Open(w.jobsDB, func() time.Time { return time.Now().Add(time.Duration(w.skew.Load())) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,8 +144,14 @@ func newWorld(t *testing.T, capacity int, record ...bool) *world {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The lease is control's own (jobs.Lease). The queue has one connection,
+	// so a heartbeat waits for every write before it, and a slow commit under
+	// the gate's parallel load held one past a 2 s lease: control failed a
+	// running folder job (runner_lost) and refused its finish with 409
+	// (2026-11-26; TestHeartbeatWaitsOutASlowQueue). A test that needs a
+	// lease to lapse moves the queue's clock (skew), never waits.
 	cfg := jobs.Config{Queue: q, Token: mainTok, EnrollToken: enrollTok,
-		Lease: 2 * time.Second, Heartbeat: 50 * time.Millisecond, MaxWait: 200 * time.Millisecond, Folders: fr, Blobs: bs}
+		Lease: jobs.Lease, Heartbeat: 50 * time.Millisecond, MaxWait: 200 * time.Millisecond, Folders: fr, Blobs: bs}
 	if withRecord {
 		cfg.Record = st
 	}

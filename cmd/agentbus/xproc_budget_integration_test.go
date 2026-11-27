@@ -127,10 +127,19 @@ func TestXProcHistoryBudget(t *testing.T) {
 	waitFor(t, "history.shortened in control's record", func() bool {
 		return hasKind(x.recordKinds(session), "history.shortened")
 	})
-	// Every request stays under the budget plus the turn's own work.
-	for _, b := range v.with("turn four") {
-		if len(b) > 40000 {
-			t.Errorf("turn four sent %d bytes: the history was not kept within the budget", len(b))
+	// Every request of turn four stays within the budget plus the turn's own
+	// work: 4,000 tokens of history at replay's 2.66 bytes a token, and at
+	// most the fake's own longest request. Unshortened, its second request
+	// carries three earlier 6 KB results and is ~27 KB (review of 676a77a: a
+	// bound of 40,000 bytes passed that too).
+	limit := 4000*266/100 + len(loop)
+	got := v.with("turn four")
+	if len(got) == 0 {
+		t.Fatal("turn four reached no vendor")
+	}
+	for _, b := range got {
+		if len(b) > limit {
+			t.Errorf("turn four sent %d bytes, over %d: the history was not kept within the budget", len(b), limit)
 		}
 	}
 }

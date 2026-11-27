@@ -97,7 +97,7 @@ func (a *API) registerOn(w http.ResponseWriter, r *http.Request) {
 	j, err := a.cfg.Queue.JobByTurn(queue.DefaultTeam, body.Turn)
 	switch {
 	case errors.Is(err, queue.ErrNotFound):
-		writeError(w, http.StatusNotFound, noTurn)
+		a.noJobOn(w, callerOf(r), &body)
 		return
 	case err != nil:
 		a.internal(w)
@@ -144,6 +144,28 @@ func (a *API) registerOn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, onView(on))
+}
+
+const onNoJob = "this turn was not run as a job of this service (an older turn, or one recorded at the gateway), so nothing reports its end and no on can react to it"
+
+// noJobOn answers an on over a turn with no job. The caller's own check comes
+// first (limits.watch), so a turn token that may not read such a turn gets
+// what it gets for any turn it cannot read. A turn that passes it, and that
+// the record holds, is 409: it is there, but an on over it could never fire
+// (FireOns reads the turn.ended its job's end writes, and the job's reply).
+// Review of dd2dcb1: every such turn got 404, a readable one too.
+func (a *API) noJobOn(w http.ResponseWriter, c *caller, body *OnRequest) {
+	if _, _, _, ok := c.limits.watch(a, w, queue.Job{}, body); !ok {
+		return
+	}
+	switch session, err := a.sessionOfTurn(body.Turn, ""); {
+	case err != nil:
+		a.internal(w)
+	case session == "":
+		writeError(w, http.StatusNotFound, noTurn)
+	default:
+		writeError(w, http.StatusConflict, onNoJob)
+	}
 }
 
 // GET /api/v0/ons: the turns' ons still waiting to react, oldest first, the

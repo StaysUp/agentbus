@@ -49,8 +49,9 @@ const (
 	// HistoryShortened: own replay shortened the history it puts in front of
 	// a turn, to keep it within the history budget. History says the step.
 	// HistoryCompacted: the gateway's verdict on one main-thread call, that
-	// its harness had compacted it; it went on as sent. The only record of a
-	// compaction own replay reads.
+	// its harness had compacted it; it went on as sent. Own replay reads it
+	// in a turn that carries a history; in a turn with none it applies the
+	// same test to the stored request (replay's compacted).
 	HistoryShortened Kind = "history.shortened"
 	HistoryCompacted Kind = "history.compacted"
 
