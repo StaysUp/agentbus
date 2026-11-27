@@ -4,7 +4,8 @@
 (`agentbus up`). It is not part of the release binary.
 
 It starts its own `agentbus up` on a free port with a scratch data folder, and a stand-in agent in
-place of `claude`. The stand-in appends a line to three files, adds or removes one file, and exits
+place of `claude`. The data folder holds a made-up claude subscription, since every turn takes its
+sign-in from control; the stand-in makes no model call, so it is never sent. The stand-in appends a line to three files, adds or removes one file, and exits
 at once. So no number here holds model time. At the end the bench stops the service and removes the
 scratch folder.
 
@@ -38,10 +39,11 @@ For each size it writes one fixture of text files (200 B to 16 KB, the same on e
 as `gNN/dN/fNNN.txt`). Each run clones the fixture into a new folder (`cp -c` on macOS,
 `cp --reflink=auto` on Linux) and runs one session there:
 
-1. `POST /api/v0/turns` with a new session. The bench polls the turn's job every 2 ms until it has
-   ended, in the service's own queue (`jobs.db` in its data folder): the job and its attempt are
-   internal, not in the client API.
-2. `POST /api/v0/turns` with that session: the later turn.
+1. `POST /api/v0/workspaces` on the folder (a Copy workspace) and `POST /api/v0/sessions` in it,
+   then `POST /api/v0/turns` with that session: the first turn. The bench polls the turn's job
+   every 2 ms until it has ended, in the service's own queue (`jobs.db` in its data folder): the
+   job and its attempt are internal, not in the client API.
+2. `POST /api/v0/turns` with that session again: the later turn.
 3. `GET /api/v0/turns/{id}/diff` for each turn.
 4. `POST /api/v0/workspaces/{id}/apply` with `{turn}` for the first turn, then the later one (apply
    is a workspace operation; both turns share the session's one workspace). The bench checks the
@@ -56,7 +58,8 @@ file work of a turn is the same either way.
 Each cell is the median of the runs, with the worst in brackets.
 
 - **total**: from sending `POST /turns` to seeing the job ended, on the client's clock.
-- **POST reply**: until the `POST /turns` reply, which comes once the runner has started the turn.
+- **POST reply**: until the `POST /turns` reply, which comes once the turn is queued: it never
+  waits for a runner.
 - The rest come from the job's own times and its attempt's events, which the runner reports and
   the queue keeps (read from `jobs.db`), on the service's clock:
   - **queue**: job created to taken by the runner.

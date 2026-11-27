@@ -3,10 +3,11 @@ package queue
 import (
 	"encoding/json"
 	"errors"
-	"github.com/staysup/agentbus/ids"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/staysup/agentbus/ids"
 )
 
 func asked(session, turn, root string, depth int) Links {
@@ -107,6 +108,36 @@ func TestSessionRoot(t *testing.T) {
 	}
 }
 
+// A session's tree is its first turn job's, never a later one's (O2.3 review
+// P2): a session the person started, which another tree then continued (a
+// delivery from that tree's turn), still has no tree, so an owner's delivery
+// into it joins none. And a session asked in one tree stays in it when another
+// tree continues it.
+func TestSessionChainIsTheFirstTurns(t *testing.T) {
+	q, _ := open(t)
+	continued := func(session string, root string, depth int) {
+		t.Helper()
+		// A delivered result: another tree's chain, no asking turn (By empty).
+		if _, _, err := q.CreateTurnLinked(DefaultTeam, "", Spec{Session: ids.SessionID(session), Harness: "claude", Folder: "/x", Prompt: "result"},
+			Links{Chain: &Chain{Root: root, Depth: depth}}, testLimits, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	own := job(t, q, "")
+	continued(own.Session, "pA", 1)
+	if root, depth, err := q.SessionChain(DefaultTeam, own.Session); err != nil || root != "" || depth != 0 {
+		t.Fatalf("the person's session continued by tree pA: %q %d %v, want no tree", root, depth, err)
+	}
+	c, err := askTurn(q, asked("pB", "t_b", "pB", 2), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	continued(c.Session, "pA", 1)
+	if root, depth, err := q.SessionChain(DefaultTeam, c.Session); err != nil || root != "pB" || depth != 2 {
+		t.Fatalf("a session asked in tree pB, continued by pA: %q %d %v, want pB at 2", root, depth, err)
+	}
+}
+
 // Asked work that ends is delivered once, as a turn job in the asking
 // session, after the turn running there; the person's own work never is.
 func TestDeliver(t *testing.T) {
@@ -176,6 +207,12 @@ func TestDeliver(t *testing.T) {
 		d.Links.Chain != nil {
 		t.Fatalf("delivery: %+v %+v", d, d.Links)
 	}
+	// The child an agent asked for is delegated work; the reply into the
+	// person's own session is not, so it never waits for delegated places
+	// (lanes.go).
+	if !isDelegated(t, q, child) || isDelegated(t, q, *d) {
+		t.Fatalf("child delegated %v, delivery into the person's session delegated %v", isDelegated(t, q, child), isDelegated(t, q, *d))
+	}
 	for _, want := range []string{"[AgentBus]", "not from the person", "Agent: claude", "Folder: /w/1", "Changed files: 2",
 		"- a.go (modified)", "- b.go (added)", "the whole answer", "Session: " + child.Session} {
 		if !strings.Contains(d.Spec.Prompt, want) {
@@ -183,7 +220,7 @@ func TestDeliver(t *testing.T) {
 		}
 	}
 	// It waits for the parent's turn, then runs.
-	if _, _, ok, _, err := q.Take(r.ID, lease, false); err != nil || ok {
+	if _, _, ok, _, err := q.Take(r.ID, lease, LaneInteractive); err != nil || ok {
 		t.Fatalf("took the delivery while the parent runs: %v %v", ok, err)
 	}
 	if _, err := q.End(r.ID, pa.ID, pa.Number, Finish{Status: Finished, Session: parent.Session,

@@ -182,8 +182,9 @@ type Request struct {
 	// (copy backend only): each folder, copied under the copy's top in a
 	// folder of its name.
 	Places []Place
-	// Ctx, when not nil, stops a copy built from a snapshot while its
-	// blobs are fetched.
+	// Ctx, when not nil, stops the copy while it is made: a folder copied
+	// file by file, a snapshot's blobs fetched, the first checkpoint. Open
+	// then answers Ctx's error, and what it made has no record (remove.go).
 	Ctx context.Context
 }
 
@@ -239,6 +240,18 @@ type Space struct {
 	start time.Time
 	// base, while a copy built from a snapshot takes its Base: its files.
 	base *workspace.Snapshot
+	// stop, while Open makes the copy: the request's context, so the Base's
+	// hashes stop with it. record clears it.
+	stop context.Context
+}
+
+// stopCtx is what stops work on s: Open's context while it makes the copy,
+// else one that never ends.
+func (s *Space) stopCtx() context.Context {
+	if s.stop != nil {
+		return s.stop
+	}
+	return context.Background()
 }
 
 // SpaceFolder is one folder of a copy of several: the folder under the copy's

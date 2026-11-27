@@ -56,7 +56,7 @@ func newMigEnv(t *testing.T) *migEnv {
 // take takes and starts the next job (a folder job with folder).
 func (e *migEnv) take(folder bool) (queue.Job, queue.Attempt) {
 	e.t.Helper()
-	j, a, ok, _, err := e.q.Take(e.r.ID, time.Minute, folder)
+	j, a, ok, _, err := e.q.Take(e.r.ID, time.Minute, laneOf(folder))
 	if err != nil || !ok {
 		e.t.Fatalf("take: %v %v", ok, err)
 	}

@@ -389,7 +389,8 @@ func TestRefusalsSayWhy(t *testing.T) {
 	src.turns["t1"] = fakeTurn{prompt: ft.prompt}
 	src.addCall(t, "t1", "x-c", `{"model":"claude-x","messages":[{"role":"user","content":"Summary: a word."},{"role":"system","content":"`+sys1+`"}],`+top+`}`, t1Reply, "end_turn")
 	src.turns["t1"] = fakeTurn{prompt: ft.prompt, exchanges: append(src.turns["t1"].exchanges, ft.exchanges...)}
-	if _, err := r.Base("s"); !errors.As(err, &no) || !strings.Contains(no.Why, "turn t1's last main-thread request x-c no longer carries the turn's prompt") {
+	// A compacted last request is rebuilt from the record (compactedHistory).
+	if _, err := r.Base("s"); err != nil {
 		t.Errorf("err %v", err)
 	}
 }

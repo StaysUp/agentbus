@@ -44,7 +44,12 @@ type Config struct {
 	EnrollToken string
 	Name        string
 	Labels      []string
-	Capacity    int // jobs at once; 0 means run.DefaultMaxRuns
+	// Capacity is the most delegated turns (turns agents started) this
+	// machine runs at once, whatever the settings say; control takes the
+	// smaller of the two. 0 means jobs.MaxCapacity: the settings decide
+	// ([limits] max_delegated_at_once). The person's own turns are never
+	// counted (queue/lanes.go).
+	Capacity int
 	// Version is this runner's release, such as 0.6.0 ("dev" for a build from
 	// a clone). The runner refuses to start against a control whose release is
 	// older, so control is upgraded first. Empty, or either side not a release,
@@ -165,7 +170,7 @@ var ErrNotSignedIn = errors.New("this machine is not signed in to this control, 
 // ErrNotSignedIn.
 func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 	if cfg.Capacity == 0 {
-		cfg.Capacity = run.DefaultMaxRuns
+		cfg.Capacity = jobs.MaxCapacity
 	}
 	if cfg.StopWait == 0 {
 		cfg.StopWait = time.Minute
@@ -384,24 +389,40 @@ func (r *Runner) ID() string { return r.id }
 // (settings.Remote). It is never logged.
 func (r *Runner) Token() string { return r.token }
 
-// Run takes and runs jobs, Capacity at once, until ctx ends, and with its
-// folders as many as queue.FolderCapacity folder jobs besides, so an apply
-// never waits behind running turns. A job still running then has its turn
-// stopped and is finished as failed with reason runner_stopped.
+// Run takes and runs jobs until ctx ends: in each turn lane (queue.Lane),
+// one take at a time, running every job it gets beside the others, since
+// control counts the lane's places (the delegated limit; interactive work is
+// not counted); and, with its folders, as many as queue.FolderCapacity folder
+// jobs besides, so an apply never waits behind running turns. A job still
+// running then has its turn stopped and is finished as failed with reason
+// runner_stopped.
 func (r *Runner) Run(ctx context.Context) {
 	// What a runner here left mounted, if it did not stop cleanly, is
 	// unmounted first; each session mounts its copy again when it next
 	// runs. Every mount goes when this runner stops.
 	r.unmount("start")
 	defer r.unmount("stop")
+	// What a close could not remove waits, with no record, out of every
+	// copy's way (isolation/remove.go).
+	for _, wd := range r.workdirs() {
+		if err := isolation.SweepRemoved(wd); err != nil {
+			r.cfg.Logf("isolation.sweep_failed workdir=%q", wd)
+		}
+	}
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go r.report(ctx, &wg)
-	for range r.cfg.Capacity {
+	for _, lane := range []queue.Lane{queue.LaneInteractive, queue.LaneDelegated} {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r.loop(ctx, false)
+			r.loop(ctx, lane, func(j queue.Job, a queue.Attempt) {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					r.work(ctx, j, a)
+				}()
+			})
 		}()
 	}
 	if r.cfg.FolderSide != nil {
@@ -409,7 +430,7 @@ func (r *Runner) Run(ctx context.Context) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				r.loop(ctx, true)
+				r.loop(ctx, queue.LaneFolders, func(j queue.Job, a queue.Attempt) { r.work(ctx, j, a) })
 			}()
 		}
 	}
@@ -455,13 +476,14 @@ func (r *Runner) loadIn(load func(workdir string) (*isolation.Space, error)) (*i
 	return nil, err
 }
 
-// loop takes and runs one job at a time until ctx ends: folder jobs of this
-// machine with folders, else turns and reviews.
-func (r *Runner) loop(ctx context.Context, folders bool) {
+// loop takes the jobs of lane, one take at a time, until ctx ends, and hands
+// each to do: a folder loop runs it before its next take, a turn lane's runs
+// it beside the others.
+func (r *Runner) loop(ctx context.Context, lane queue.Lane, do func(queue.Job, queue.Attempt)) {
 	for ctx.Err() == nil {
 		var t jobs.TakenWork
 		status, err := call(ctx, r.cfg.HTTP, r.cfg.Queue+"/api/v0/runner/take", r.token,
-			jobs.TakeRequest{WaitMS: jobs.MaxWait.Milliseconds(), Protocol: jobs.ProtocolVersion, Folders: folders}, &t)
+			jobs.TakeRequest{WaitMS: jobs.MaxWait.Milliseconds(), Protocol: jobs.ProtocolVersion, Lane: lane}, &t)
 		switch {
 		case ctx.Err() != nil:
 			return
@@ -484,7 +506,7 @@ func (r *Runner) loop(ctx context.Context, folders bool) {
 		case t.Job == nil || t.Attempt == nil:
 			continue
 		}
-		r.work(ctx, *t.Job, *t.Attempt)
+		do(*t.Job, *t.Attempt)
 	}
 }
 
@@ -535,8 +557,17 @@ func (r *Runner) remove(w queue.Workspace) error {
 			wd = r.cfg.OldWorkdir
 		}
 		return isolation.RemoveWorktree(wd, w.Repo, w.Folder)
+	case w.Space != "":
+		// A copy with no record: an Open stopped part way, or a close that
+		// stopped after the record went. What is in its place goes now, so the
+		// workspace never reads closed with files still there.
+		for _, wd := range r.workdirs() {
+			if err := isolation.RemoveLeft(wd, w.Space); err != nil {
+				return err
+			}
+		}
 	}
-	return nil // a copy with no record: nothing of it is left
+	return nil
 }
 
 // attempt is one attempt in progress: its events not yet sent, and what its
@@ -797,7 +828,8 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	case job.Kind == queue.KindDiscard:
 		at.finish(ctx, r.discardWork(at))
 		return
-	case job.Kind == queue.KindClose:
+	case job.Kind == queue.KindClose || job.Kind == queue.KindPutAway:
+		// A put-away control let go is a close: the copy goes, the record stays.
 		at.finish(ctx, r.closeWork(at))
 		return
 	case job.Kind == queue.KindUpdate:
@@ -813,7 +845,15 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 			Result: mustJSON(queue.Result{Refused: fmt.Sprintf("this runner does not run jobs of kind %q", job.Kind), Status: http.StatusBadRequest})})
 		return
 	}
-	refused := r.prepare(ctx, at)
+	// The copy is made under the attempt's own context: a cancel, a stale
+	// attempt or the runner stopping ends it there, as it ends a running
+	// turn in follow (#95).
+	pctx, stopPrep := attemptContext(ctx, at)
+	refused := r.prepare(pctx, at)
+	stopPrep()
+	if refused != nil && r.setupStopped(ctx, at) {
+		return
+	}
 	if refused != nil {
 		// prepare may have loaded the copy (at.space/at.ws) before a later step
 		// refused -- loadSpace succeeds, then checkpointStart fails (an overlay
@@ -852,6 +892,34 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	// B15: no review teardown here. A review is a normal turn; its session and
 	// copy follow the same lifecycle as any asked turn's (the ask app closes an
 	// asked session when it is safe, later in milestone C).
+}
+
+// setupStopped ends an attempt whose setup a stop ended, as the stop asks
+// and as follow ends a running turn: a stale attempt finishes nothing, a
+// cancel is cancelled, and a runner stopping fails it with
+// ReasonRunnerStopped. Whatever the setup left (a copy half made) has no
+// record, so nothing loads it (isolation/remove.go). It answers false when
+// no stop came, and the setup's own refusal stands.
+func (r *Runner) setupStopped(ctx context.Context, at *attempt) bool {
+	at.space, at.ws = nil, nil
+	res := mustJSON(queue.Result{Error: "the turn was stopped before it started"})
+	select {
+	case <-at.stale:
+		r.cfg.Logf("job %s attempt %d is no longer current; its setup was stopped", at.job.ID, at.a.Number)
+		return true
+	default:
+	}
+	select {
+	case <-at.cancel:
+		at.finish(ctx, queue.Finish{Status: queue.Cancelled, Result: res})
+		return true
+	default:
+	}
+	if ctx.Err() != nil {
+		at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: ReasonRunnerStopped, Result: res})
+		return true
+	}
+	return false
 }
 
 // request is the turn the attempt runs. Its id is the job's turn. A turn
@@ -952,7 +1020,7 @@ func (r *Runner) prepare(ctx context.Context, at *attempt) *queue.Result {
 		}
 		at.ref = sp.RepoRef
 		b, _ := isolation.Get(isolation.Git)
-		return r.isolate(at, b, isolation.Request{Repo: repo, Base: sp.Base, Ref: sp.RepoRef})
+		return r.isolate(ctx, at, b, isolation.Request{Repo: repo, Base: sp.Base, Ref: sp.RepoRef})
 	case len(sp.Folders) > 0:
 		// A workspace with several folders: one copy holds each side by side,
 		// made by the copy backend, whatever the isolation setting names (only
@@ -977,7 +1045,7 @@ func (r *Runner) prepare(ctx context.Context, at *attempt) *queue.Result {
 			places[i] = isolation.Place{Name: string(p.Name), Folder: folder, Ref: p.Ref}
 		}
 		b, _ := isolation.Get(isolation.Copy)
-		return r.isolate(at, b, isolation.Request{Places: places})
+		return r.isolate(ctx, at, b, isolation.Request{Places: places})
 	case sp.Folder != "" || sp.FolderRef != "":
 		// A continuation whose workspace already has a copy loads it here, before
 		// the source folder is resolved or checked (os.Stat below), so a
@@ -1025,7 +1093,7 @@ func (r *Runner) prepare(ctx context.Context, at *attempt) *queue.Result {
 				setting = settings.IsolationAuto
 			}
 			if b, ok := isolation.For(setting, folder); ok {
-				return r.isolate(at, b, isolation.Request{Folder: folder, Ref: at.ref})
+				return r.isolate(ctx, at, b, isolation.Request{Folder: folder, Ref: at.ref})
 			}
 		}
 		at.folder = folder
@@ -1186,7 +1254,7 @@ func (r *Runner) closeWork(at *attempt) queue.Finish {
 	}
 	if err := r.remove(w); err != nil {
 		return queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup,
-			Result: mustJSON(queue.Result{Refused: "the copy could not be removed, so nothing was closed", Status: http.StatusInternalServerError})}
+			Result: mustJSON(queue.Result{Refused: "the copy could not be removed, so the workspace stays open", Status: http.StatusInternalServerError})}
 	}
 	return queue.Finish{Status: queue.Finished}
 }
@@ -1359,8 +1427,8 @@ func (r *Runner) updateWork(ctx context.Context, at *attempt) queue.Finish {
 }
 
 // isolate opens a session's first job's copy with b, and its turn starts
-// from the copy's first checkpoint.
-func (r *Runner) isolate(at *attempt, b isolation.Backend, req isolation.Request) *queue.Result {
+// from the copy's first checkpoint. The copy stops being made when ctx ends.
+func (r *Runner) isolate(ctx context.Context, at *attempt, b isolation.Backend, req isolation.Request) *queue.Result {
 	if r.cfg.Workdir == "" {
 		return &queue.Result{Refused: "this runner has no workdir for isolated copies"}
 	}
@@ -1374,7 +1442,7 @@ func (r *Runner) isolate(at *attempt, b isolation.Backend, req isolation.Request
 			req.ID = at.job.Session
 		}
 	}
-	req.Workdir = r.cfg.Workdir
+	req.Workdir, req.Ctx = r.cfg.Workdir, ctx
 	// One copy per workspace, made once: two first turns of one workspace (a
 	// caller started two of its sessions at once) would otherwise both find no
 	// copy and both open <workdir>/<req.ID>, racing in the copy backend. The

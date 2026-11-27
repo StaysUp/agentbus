@@ -53,7 +53,7 @@ func (e *outcomeEnv) take(t *testing.T, kind string) (queue.Job, string) {
 	t.Helper()
 	var taken TakenWork
 	folders := kind == queue.KindApply || kind == queue.KindFolder
-	if code := send(t, e.srv, e.tok, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion, Folders: folders}, &taken); code != 200 || taken.Job.Kind != kind {
+	if code := send(t, e.srv, e.tok, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion, Lane: laneOf(folders)}, &taken); code != 200 || taken.Job.Kind != kind {
 		t.Fatalf("take: %d %+v", code, taken.Job)
 	}
 	base := "/api/v0/runner/attempts/" + taken.Attempt.ID

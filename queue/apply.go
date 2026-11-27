@@ -598,8 +598,10 @@ func (q *Queue) copyRunner(team string, ws ids.WorkspaceID) (closed, removed, fr
 // discard both move the applied point, so at most one runs per workspace.
 func (q *Queue) jobsInFlight(team string, ws ids.WorkspaceID, kinds string) (bool, error) {
 	var n int
+	// A put-away a runner holds is a close in progress; one still queued is not
+	// busy work: it is decided when due and keeps the copy if anything happened.
 	err := q.db.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND `+jobWorkspace+` = ?
-		AND kind IN (`+kinds+`) AND ended IS NULL`, team, string(ws)).Scan(&n)
+		AND (kind IN (`+kinds+`) OR (kind = 'put_away' AND state IN ('taken','running'))) AND ended IS NULL`, team, string(ws)).Scan(&n)
 	if err != nil {
 		return false, fmt.Errorf("queue: jobs in flight: %w", err)
 	}

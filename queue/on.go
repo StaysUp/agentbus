@@ -3,9 +3,11 @@ package queue
 // The on primitive: a standing instruction on control, "when this event
 // happens, do this". It is a row (the ons table) plus the control loop's
 // existing check (FireOns, called where Deliver was); nothing waits on
-// control. B13 has one event and one action:
+// control. An on has an event and an action:
 //
 //	on turn.completed -> start a turn in a session with the subject turn's reply.
+//	on <a kind on the record> -> queue a job (recordon.go), such as the
+//	   built-in put-away of a workspace whose work was applied or discarded.
 //
 // This is what today's delivery already does (asked.go, Deliver); the on row
 // generalises it so later events (apply, a timer, before-apply) are the same
@@ -28,7 +30,9 @@ import (
 	"github.com/staysup/agentbus/workspace"
 )
 
-// OnTurnCompleted is B13's only event: the subject turn has ended.
+// OnTurnCompleted is the turn's event: the subject turn has ended. Its action
+// is to deliver the turn's reply. The other events an on may watch are kinds
+// on the record (RecordEvents, recordon.go), whose action is to queue a job.
 const OnTurnCompleted = "turn.completed"
 
 // ErrUnknownEvent: RegisterOn was given an event it does not know. Caught at
@@ -77,6 +81,9 @@ type On struct {
 	Session string `json:"session"`
 	Maker   Maker  `json:"maker"`
 	Created int64  `json:"created"`
+	// Action is what the on does when it fires. The zero Action delivers the
+	// subject turn's reply to Session (turn.completed).
+	Action Action `json:"action"`
 }
 
 // B15 (his call (a), 2026-11-19): a turn create MAY record its delivery on in
@@ -106,6 +113,8 @@ func (q *Queue) RegisterOn(team, event, subject, session, key string, maker Make
 // *LimitError and stores nothing. A retry with a key already used returns its
 // on without counting again. nil asked is RegisterOn: no cap.
 func (q *Queue) RegisterOnLinked(team, event, subject, session, key string, maker Maker, asked *Chain, lim Limits) (On, error) {
+	// This path registers a turn's on (deliver its reply). An on over a kind
+	// on the record is control's own for now (RegisterRecordOn).
 	if event != OnTurnCompleted {
 		return On{}, fmt.Errorf("%w: %q", ErrUnknownEvent, event)
 	}
@@ -214,32 +223,46 @@ func (q *Queue) EndedTurns(after *Job, atOrBefore time.Time, limit int) ([]Job, 
 func onByKey(tx *sql.Tx, team, key string) (On, error) {
 	o := On{Team: team}
 	var mk string
-	switch err := tx.QueryRow(`SELECT id, event, subject, session, maker, created FROM ons WHERE team = ? AND idem_key = ?`,
-		team, key).Scan(&o.ID, &o.Event, &o.Subject, &o.Session, &mk, &o.Created); {
+	var act string
+	switch err := tx.QueryRow(`SELECT id, event, subject, session, maker, created, COALESCE(action, '') FROM ons WHERE team = ? AND idem_key = ?`,
+		team, key).Scan(&o.ID, &o.Event, &o.Subject, &o.Session, &mk, &o.Created, &act); {
 	case errors.Is(err, sql.ErrNoRows):
 		return On{}, ErrNotFound
 	case err != nil:
 		return On{}, fmt.Errorf("queue: read on: %w", err)
 	}
-	if err := json.Unmarshal([]byte(mk), &o.Maker); err != nil {
-		return On{}, fmt.Errorf("queue: read on: %w", err)
+	if err := readOn(&o, mk, act); err != nil {
+		return On{}, err
 	}
 	return o, nil
+}
+
+// readOn fills o's maker and action from their stored JSON.
+func readOn(o *On, maker, action string) error {
+	if err := json.Unmarshal([]byte(maker), &o.Maker); err != nil {
+		return fmt.Errorf("queue: read on: %w", err)
+	}
+	if action != "" {
+		if err := json.Unmarshal([]byte(action), &o.Action); err != nil {
+			return fmt.Errorf("queue: read on: %w", err)
+		}
+	}
+	return nil
 }
 
 // GetOn reads an on by id, off or not; ErrNotFound if none.
 func (q *Queue) GetOn(team, id string) (On, error) {
 	o := On{ID: id, Team: team}
-	var mk string
-	switch err := q.db.QueryRow(`SELECT event, subject, session, maker, created FROM ons WHERE id = ? AND team = ?`,
-		id, team).Scan(&o.Event, &o.Subject, &o.Session, &mk, &o.Created); {
+	var mk, act string
+	switch err := q.db.QueryRow(`SELECT event, subject, session, maker, created, COALESCE(action, '') FROM ons WHERE id = ? AND team = ?`,
+		id, team).Scan(&o.Event, &o.Subject, &o.Session, &mk, &o.Created, &act); {
 	case errors.Is(err, sql.ErrNoRows):
 		return On{}, ErrNotFound
 	case err != nil:
 		return On{}, fmt.Errorf("queue: read on: %w", err)
 	}
-	if err := json.Unmarshal([]byte(mk), &o.Maker); err != nil {
-		return On{}, fmt.Errorf("queue: read on: %w", err)
+	if err := readOn(&o, mk, act); err != nil {
+		return On{}, err
 	}
 	return o, nil
 }
@@ -277,7 +300,7 @@ func (q *Queue) RemoveOn(team, id string) error {
 
 // ListOns returns the team's live (not off) ons, oldest first.
 func (q *Queue) ListOns(team string) ([]On, error) {
-	rows, err := q.db.Query(`SELECT id, event, subject, session, maker, created FROM ons
+	rows, err := q.db.Query(`SELECT id, event, subject, session, maker, created, COALESCE(action, '') FROM ons
 		WHERE team = ? AND off IS NULL ORDER BY created, id`, team)
 	if err != nil {
 		return nil, fmt.Errorf("queue: list ons: %w", err)
@@ -286,12 +309,12 @@ func (q *Queue) ListOns(team string) ([]On, error) {
 	var out []On
 	for rows.Next() {
 		o := On{Team: team}
-		var mk string
-		if err := rows.Scan(&o.ID, &o.Event, &o.Subject, &o.Session, &mk, &o.Created); err != nil {
+		var mk, act string
+		if err := rows.Scan(&o.ID, &o.Event, &o.Subject, &o.Session, &mk, &o.Created, &act); err != nil {
 			return nil, fmt.Errorf("queue: list ons: %w", err)
 		}
-		if err := json.Unmarshal([]byte(mk), &o.Maker); err != nil {
-			return nil, fmt.Errorf("queue: list ons: %w", err)
+		if err := readOn(&o, mk, act); err != nil {
+			return nil, err
 		}
 		out = append(out, o)
 	}

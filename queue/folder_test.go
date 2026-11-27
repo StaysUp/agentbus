@@ -31,7 +31,7 @@ func TestFolderJob(t *testing.T) {
 	if got := takes(t, q, connA); got != "" {
 		t.Fatalf("a turn place took the folder job %s", got)
 	}
-	taken, _, ok, _, err := q.Take(connA.ID, lease, true)
+	taken, _, ok, _, err := q.Take(connA.ID, lease, LaneFolders)
 	if err != nil || !ok || taken.ID != j.ID || taken.Spec.Folder != "/home/me/code" {
 		t.Fatalf("the named connector took %+v %v %v", taken.Spec, ok, err)
 	}
@@ -61,7 +61,7 @@ func TestFolderJob(t *testing.T) {
 
 	// A connector not seen within RunnerFresh is not listed.
 	clk.add(RunnerFresh + time.Second)
-	if _, _, _, _, err := q.Take(connB.ID, lease, true); err != nil {
+	if _, _, _, _, err := q.Take(connB.ID, lease, LaneFolders); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := q.Machines(DefaultTeam); strings.Join(got, ",") != conB {
@@ -82,7 +82,7 @@ func TestFolderPathNeverStored(t *testing.T) {
 	conn := capsRunner(t, q, nil, &Capabilities{Connector: conA})
 	const path = "/home/me/very-private-folder-name"
 	lost, _ := q.RegisterFolder(DefaultTeam, conA, path)
-	if j, _, ok, _, _ := q.Take(conn.ID, lease, true); !ok || j.Spec.Folder != path {
+	if j, _, ok, _, _ := q.Take(conn.ID, lease, LaneFolders); !ok || j.Spec.Folder != path {
 		t.Fatalf("take: %+v %v", j.Spec, ok)
 	}
 	waiting, _ := q.RegisterFolder(DefaultTeam, conB, path+"-2")
@@ -107,7 +107,7 @@ func TestFolderPathNeverStored(t *testing.T) {
 			t.Errorf("job %s did not end: %+v", id, got)
 		}
 	}
-	if _, _, ok, _, _ := q.Take(conn.ID, lease, true); ok {
+	if _, _, ok, _, _ := q.Take(conn.ID, lease, LaneFolders); ok {
 		t.Fatal("an ended folder job was taken again")
 	}
 }

@@ -48,3 +48,6 @@ func (overlayBackend) UpdateFrom(*Space, string, FolderPaths, bool) (UpdateResul
 	return UpdateResult{}, errOverlayLinux
 }
 func (overlayBackend) Close(*Space) error { return errOverlayLinux }
+
+// unmountLeft has nothing to unmount where no overlay mounts.
+func unmountLeft(string) error { return nil }

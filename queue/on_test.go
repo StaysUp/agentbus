@@ -856,6 +856,11 @@ func TestDeliveryStaysInTheAskersTree(t *testing.T) {
 		if ds[0].Tree != parent.Session {
 			t.Fatalf("delivery to %s is recorded in tree %q, want %s", s, ds[0].Tree, parent.Session)
 		}
+		// A reply into a session the person did not start is delegated work
+		// (lanes.go): it waits for a delegated place.
+		if !isDelegated(t, q, ds[0]) {
+			t.Fatalf("delivery to %s is not delegated", s)
+		}
 		delivered = append(delivered, ds[0])
 	}
 	// What a delivered turn asks for counts against the asker's tree: two asked

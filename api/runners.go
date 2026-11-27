@@ -22,14 +22,15 @@ type RunnerInfo struct {
 	Role string `json:"role" doc:"runner: the one program of its machine, which holds its folders and runs its sessions. connector: a connector of a build before 0.5, which takes no work from this build."`
 	// Machine is the runner's machine id, which a new session names. The
 	// runner's own (sign-in) id is ID; a client addresses a machine by this.
-	Machine  string    `json:"machine,omitempty" doc:"The id of the runner's machine (con_ and 16 hex digits): a new session on this machine names it as machine, with a folder typed for that machine. A client addresses a machine by this; the runner's own sign-in id is id. Absent before its first report."`
-	Online   bool      `json:"online" doc:"It asked control for work in the last minute."`
-	LastSeen time.Time `json:"last_seen" doc:"When it last asked control for work."`
-	Enrolled time.Time `json:"enrolled" doc:"When it enrolled."`
-	Capacity int       `json:"capacity" doc:"How many jobs it runs at once."`
-	Labels   []string  `json:"labels" doc:"The labels it enrolled with. Empty when none."`
-	OS       string    `json:"os,omitempty" doc:"Its operating system, as Go names it, such as linux or darwin. Absent before its first report."`
-	Arch     string    `json:"arch,omitempty" doc:"Its processor, as Go names it, such as amd64 or arm64. Absent before its first report."`
+	Machine   string          `json:"machine,omitempty" doc:"The id of the runner's machine (con_ and 16 hex digits): a new session on this machine names it as machine, with a folder typed for that machine. A client addresses a machine by this; the runner's own sign-in id is id. Absent before its first report."`
+	Online    bool            `json:"online" doc:"It asked control for work in the last minute."`
+	LastSeen  time.Time       `json:"last_seen" doc:"When it last asked control for work."`
+	Enrolled  time.Time       `json:"enrolled" doc:"When it enrolled."`
+	Capacity  int             `json:"capacity" doc:"The most delegated turns its machine runs at once, whatever the settings say: its -capacity, or 64 when it set none. Turns the person sends are not counted."`
+	Delegated RunnerDelegated `json:"delegated" doc:"Its delegated turns (turns agents started): how many it may run at once, and how many it runs now."`
+	Labels    []string        `json:"labels" doc:"The labels it enrolled with. Empty when none."`
+	OS        string          `json:"os,omitempty" doc:"Its operating system, as Go names it, such as linux or darwin. Absent before its first report."`
+	Arch      string          `json:"arch,omitempty" doc:"Its processor, as Go names it, such as amd64 or arm64. Absent before its first report."`
 	// Harnesses: the runner's last probe of each harness.
 	Harnesses []RunnerProbe `json:"harnesses" doc:"Its last probe of each harness, in the order it reported them. Empty for a connector, and before its first probe ends."`
 }
@@ -41,7 +42,7 @@ type PendingMachine struct {
 	OS       string    `json:"os,omitempty" doc:"Its operating system, as it reported it."`
 	Arch     string    `json:"arch,omitempty" doc:"Its processor, as it reported it."`
 	Labels   []string  `json:"labels" doc:"The labels it asked for. Empty when none."`
-	Capacity int       `json:"capacity" doc:"How many jobs it will run at once."`
+	Capacity int       `json:"capacity" doc:"The most delegated turns it will run at once, whatever the settings say."`
 	Asked    time.Time `json:"asked" doc:"When it asked."`
 	Expires  time.Time `json:"expires" doc:"When it stops waiting: then agentbus login must be run again."`
 }
@@ -54,10 +55,28 @@ type RunnerProbe struct {
 	SignedIn *bool  `json:"signed_in,omitempty" doc:"From the harness's own offline status command there. Absent when it gave no clear answer."`
 }
 
+// RunnerDelegated is one runner's delegated turns.
+type RunnerDelegated struct {
+	AtOnce int `json:"at_once" doc:"How many delegated turns it runs at once: [limits] max_delegated_at_once in the settings, or its capacity when that is smaller."`
+	Busy   int `json:"busy" doc:"How many delegated turns it has taken or runs now."`
+	// Waiting: the delegated turns only this runner can take.
+	Waiting int `json:"waiting" doc:"How many delegated turns wait for one of its places: those of a workspace whose copy it holds, or of a session on its machine. A first turn that names no machine may go to any runner, so it counts only in the list's own waiting."`
+}
+
+// Delegated is how delegated work stands across the runners.
+type Delegated struct {
+	AtOnce  int `json:"at_once" doc:"[limits] max_delegated_at_once in the settings now: how many delegated turns one runner runs at once. A change holds for the next turn a runner takes, with no restart."`
+	Busy    int `json:"busy" doc:"Delegated turns taken or running now, on every runner."`
+	Waiting int `json:"waiting" doc:"Delegated turns waiting for a place: queued, due, and not waiting for an earlier job of their own workspace. Each runner's own waiting counts those bound to it; this counts every one."`
+}
+
 // RunnerList is the answer to GET /api/v0/runners.
 type RunnerList struct {
 	Runners []RunnerInfo     `json:"runners" doc:"Newest seen first, one per machine. A runner that stopped stays listed, offline, until the person removes it. A connector of a build before 0.5 is listed only while no runner reports its machine."`
 	Pending []PendingMachine `json:"pending" doc:"Machines that ran agentbus login and wait for the person, oldest first. None of them takes work. Empty when none."`
+	// Delegated: the limit on turns agents start, as a screen shows it
+	// ("8 at once, 5 busy, 2 waiting").
+	Delegated Delegated `json:"delegated" doc:"Delegated turns (turns agents started, and the replies delivered into sessions agents started), counted apart from the person's own turns, which are not limited and start at once."`
 }
 
 func (a *API) listRunners(w http.ResponseWriter, r *http.Request) {
@@ -66,7 +85,17 @@ func (a *API) listRunners(w http.ResponseWriter, r *http.Request) {
 	}
 	list := []RunnerInfo{}
 	pending := []PendingMachine{}
+	var del Delegated
 	if a.cfg.Queue != nil {
+		count, err := a.cfg.Queue.Delegated(queue.DefaultTeam)
+		if err != nil {
+			a.internal(w)
+			return
+		}
+		del = Delegated{AtOnce: count.AtOnce, Waiting: count.Waiting}
+		for _, n := range count.Busy {
+			del.Busy += n
+		}
 		logins, err := a.cfg.Queue.PendingLogins(queue.DefaultTeam)
 		if err != nil {
 			a.internal(w)
@@ -94,10 +123,12 @@ func (a *API) listRunners(w http.ResponseWriter, r *http.Request) {
 			if rn.Caps != nil && rn.Caps.Role == queue.RoleConnector && held[rn.Caps.MachineID()] {
 				continue
 			}
-			list = append(list, runnerInfo(rn, now))
+			v := runnerInfo(rn, now)
+			v.Delegated = RunnerDelegated{AtOnce: min(count.AtOnce, rn.Capacity), Busy: count.Busy[rn.ID], Waiting: count.WaitingFor[rn.ID]}
+			list = append(list, v)
 		}
 	}
-	writeJSON(w, http.StatusOK, RunnerList{list, pending})
+	writeJSON(w, http.StatusOK, RunnerList{list, pending, del})
 }
 
 // runnerInfo is rn as a person reads it, online when seen within

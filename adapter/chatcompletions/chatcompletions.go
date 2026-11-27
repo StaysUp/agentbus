@@ -258,8 +258,9 @@ type usage struct {
 	PromptTokensDetails struct {
 		CachedTokens int `json:"cached_tokens"`
 	} `json:"prompt_tokens_details"`
-	// Cost is OpenRouter's charge for the call, in US dollars.
-	Cost *float64 `json:"cost"`
+	// OpenRouterCost is OpenRouter's charge for the call: cost, is_byok and
+	// cost_details.
+	adapter.OpenRouterCost
 	// CostTicks is xAI's charge for the call, in units of 1e-10 US dollars
 	// (litellm's xai chat transformation and its test, 37756000 ticks =
 	// $0.0037756; read 2026-11-24, not yet seen live here). A negative count
@@ -269,16 +270,17 @@ type usage struct {
 }
 
 // charge is the vendor's own charge for the call in US dollars, or nil when
-// it reported none: OpenRouter's cost, else xAI's ticks.
-func (u *usage) charge() *float64 {
-	if u.Cost != nil {
-		return u.Cost
+// it reported none: OpenRouter's cost, else xAI's ticks. partial is true when
+// the charge leaves out part of what the call cost.
+func (u *usage) charge() (usd *float64, partial bool) {
+	if usd, partial := u.OpenRouterCost.Charge(); usd != nil {
+		return usd, partial
 	}
 	if u.CostTicks != nil && *u.CostTicks >= 0 {
 		usd := float64(*u.CostTicks) / 1e10
-		return &usd
+		return &usd, false
 	}
-	return nil
+	return nil, false
 }
 
 // UnmarshalJSON reads usage and notes any field name the known lists do not
@@ -460,8 +462,8 @@ func fromReply(r parsed, problem string, u *adapter.Unknowns) []event.Event {
 			OutputTokens:    x.CompletionTokens,
 			CacheReadTokens: x.PromptTokensDetails.CachedTokens,
 			ServiceTier:     r.serviceTier,
-			CostUSD:         x.charge(),
 		}
+		resp.Usage.CostUSD, resp.Usage.CostPartial = x.charge()
 		for _, x := range x.unknown {
 			u.Admit(x)
 		}

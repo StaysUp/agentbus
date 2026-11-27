@@ -271,3 +271,32 @@ func TestOpenRouterCost(t *testing.T) {
 		t.Errorf("a cost with none sent: %v", *evs[0].Usage.CostUSD)
 	}
 }
+
+// An OpenRouter call on the person's own provider key (BYOK) reports only
+// OpenRouter's fee in usage.cost; the provider's charge is
+// cost_details.upstream_inference_cost (issue #94, OpenRouter's usage
+// accounting page, 2026-11-26). The call's cost is both, in the reply and in
+// the stream, and is_byok is a known name. Without the upstream cost the fee
+// alone is partial.
+func TestOpenRouterBYOKCost(t *testing.T) {
+	const byok = `"cost":0,"is_byok":true,"cost_details":{"upstream_inference_cost":0.000232,` +
+		`"upstream_inference_prompt_cost":0.000132,"upstream_inference_completions_cost":0.0001}`
+	for name, evs := range map[string][]event.Event{
+		"json": respond(t, "application/json", `{"model":"anthropic/claude-sonnet-5.5","role":"assistant","content":[{"type":"text","text":"x"}],"stop_reason":"end_turn",
+			"usage":{"input_tokens":33,"output_tokens":5,`+byok+`}}`),
+		"stream": respond(t, "text/event-stream", stream(
+			`{"type":"message_start","message":{"model":"anthropic/claude-sonnet-5.5","usage":{"input_tokens":33,"output_tokens":1,"cost":0}}}`,
+			`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":5,`+byok+`}}`,
+			`{"type":"message_stop"}`)),
+	} {
+		wantUnexpected(t, evs)
+		if u := evs[0].Usage; u == nil || u.CostUSD == nil || *u.CostUSD != 0.000232 || u.CostPartial {
+			t.Errorf("%s: usage %+v", name, u)
+		}
+	}
+	evs := respond(t, "application/json", `{"model":"m","content":[],"stop_reason":"end_turn",
+		"usage":{"input_tokens":33,"output_tokens":5,"cost":0,"is_byok":true,"cost_details":{"upstream_inference_cost":null}}}`)
+	if u := evs[0].Usage; u == nil || u.CostUSD == nil || *u.CostUSD != 0 || !u.CostPartial {
+		t.Errorf("no upstream cost: usage %+v", u)
+	}
+}

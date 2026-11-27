@@ -140,7 +140,8 @@ func refusedChat(t *testing.T, rw gateway.Rewrite, want string) {
 }
 
 // Layouts the gateway does not know are refused, never sent without the
-// history; another system prompt (a subagent) passes unchanged.
+// history; a main request the harness compacted passes as sent, recorded
+// once; another system prompt (a subagent) passes unchanged.
 func TestChatCompletionsLayouts(t *testing.T) {
 	t.Run("compacted main request", func(t *testing.T) {
 		_, r := chatTwoTurns(t)
@@ -148,7 +149,8 @@ func TestChatCompletionsLayouts(t *testing.T) {
 			t.Fatal("first request not spliced")
 		}
 		compacted := chatReq("glm", chatSysMsg(chatSys), chatUser("summary of earlier turns"))
-		refusedChat(t, r.Rewrite("s", "t2", []byte(compacted)), "as after a compaction")
+		passedCompacted(t, r.Rewrite("s", "t2", []byte(compacted)))
+		passedCompacted(t, r.Rewrite("s", "t2", []byte(compacted)))
 	})
 	t.Run("another system prompt passes", func(t *testing.T) {
 		_, r := chatTwoTurns(t)

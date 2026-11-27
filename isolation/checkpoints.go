@@ -18,6 +18,7 @@ package isolation
 // <seq>-<name>.snap.json, is turned into a tree when first read (migrate).
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -261,9 +262,12 @@ type keeper interface {
 // changing); any other file is recorded by size, modification time and mode
 // only. Each link is saved too, under objects, as a link costs nothing to
 // keep: an apply that puts a link back as the Base had it reads it there.
-func baseHasher(start time.Time, objects string) workspace.Hasher {
+func baseHasher(ctx context.Context, start time.Time, objects string) workspace.Hasher {
 	since := start.Add(-workspace.Racy).UnixNano()
 	return func(rel, p string, info fs.FileInfo) (string, error) {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		if info.Mode()&fs.ModeSymlink != 0 {
 			if err := os.MkdirAll(objects, 0o700); err != nil {
 				return "", err
@@ -273,7 +277,7 @@ func baseHasher(start time.Time, objects string) workspace.Hasher {
 		if info.ModTime().UnixNano() < since {
 			return "", nil
 		}
-		return workspace.Hash(rel, p, info)
+		return workspace.HashContext(ctx, rel, p, info)
 	}
 }
 
@@ -311,6 +315,9 @@ func checkpoint(s *Space, name string, k keeper) (Checkpoint, error) {
 	}
 	var saved []string
 	save := func(_, p string, _ fs.FileInfo) (string, error) {
+		if err := s.stopCtx().Err(); err != nil {
+			return "", err
+		}
 		h, err := saveObject(p, s.objectDir())
 		if err == nil {
 			saved = append(saved, h)
@@ -666,13 +673,19 @@ func readRegular(rt *os.Root, name string, max int) ([]byte, bool) {
 func removeState(s *Space) error { return removeAll(s.state()) }
 
 // removeAll is os.RemoveAll that also removes what a read-only folder holds,
-// as a copied module cache has.
+// as a copied module cache has, and a file or folder locked on macOS (Finder's
+// Locked, which a clone keeps): p is always the runner's own, a copy or a
+// space's record, never the person's folder.
 func removeAll(p string) error {
 	if err := os.RemoveAll(p); err == nil {
 		return nil
 	}
 	_ = filepath.WalkDir(p, func(q string, d fs.DirEntry, err error) error {
-		if err == nil && d.IsDir() {
+		if err != nil || d.Type()&fs.ModeSymlink != 0 {
+			return nil
+		}
+		unlock(q)
+		if d.IsDir() {
 			_ = os.Chmod(q, 0o700)
 		}
 		return nil
