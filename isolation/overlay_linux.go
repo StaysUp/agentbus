@@ -117,7 +117,7 @@ func (overlayBackend) Open(r Request) (*Space, error) {
 		if err := lowerFromSnapshot(ctxOf(r), s, r.Snapshot); err != nil {
 			return fail(err)
 		}
-	} else if err := snapshot(ctxOf(r), s, filepath.Clean(r.Folder), time.Now()); err != nil {
+	} else if err := snapshot(ctxOf(r), s, filepath.Clean(r.Folder), s.readNow()); err != nil {
 		return fail(err)
 	}
 	// The upper layer's own folder is the copy's top folder: it has the

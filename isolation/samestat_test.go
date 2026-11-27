@@ -168,9 +168,6 @@ func TestCheckpointSeesAFileWhoseSizeAndTimeDidNotChange(t *testing.T) {
 		for _, turn := range []int{1, 2} {
 			for _, op := range ops {
 				t.Run(c.name+"/turn "+string(rune('0'+turn))+"/"+op.name, func(t *testing.T) {
-					if c.name == Copy && op.inPlace {
-						t.Skip("git compares a change time to the second, and the copy is a moment old")
-					}
 					src := t.TempDir()
 					fixture(t, src, map[string]string{"old.go": "package one\n", "new.go": "package two\n", "x": "x", "e1": "", "e2": ""})
 					must(t, os.Symlink("aaaa", filepath.Join(src, "l")))

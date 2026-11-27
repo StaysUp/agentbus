@@ -33,7 +33,7 @@ func (cs *Changeset) Under(p Place) *Changeset {
 		return nil
 	}
 	pre := p.Prefix()
-	out := &Changeset{Space: cs.Space, Checkpoint: cs.Checkpoint, Snapshot: cs.Snapshot, Truncated: cs.Truncated, Files: []FileChange{}}
+	out := &Changeset{Space: cs.Space, Checkpoint: cs.Checkpoint, Snapshot: cs.Snapshot, BaseTaken: cs.BaseTaken, Truncated: cs.Truncated, Files: []FileChange{}}
 	for _, f := range cs.Files {
 		if !strings.HasPrefix(f.Path, pre) || len(f.Path) == len(pre) {
 			continue

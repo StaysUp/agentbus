@@ -376,7 +376,7 @@ func gitErr(ctx context.Context) error {
 // folder is written and the folder's own .git is never seen (GIT_DIR is the
 // private repo). The built-in ignores (info/exclude) and the folder's own
 // .gitignore are respected, the same as a checkpoint.
-func (s *Space) commitFolder(ctx context.Context, folder, parent, tmp string, ign ignorer) (commit string, modes map[string]string, err error) {
+func (s *Space) commitFolder(ctx context.Context, folder, parent, tmp string) (commit string, modes map[string]string, err error) {
 	idx := filepath.Join(tmp, "theirs.idx")
 	// Seed the index from the merge base's tree first, so a file the base tracked
 	// that now matches a .gitignore rule but is still present in the folder stays
@@ -387,8 +387,14 @@ func (s *Space) commitFolder(ctx context.Context, folder, parent, tmp string, ig
 		return "", nil, err
 	}
 	if s.Nested {
-		// The person's side by the copy's one rule (nested.go).
-		if err := s.stageTree(ctx, folder, idx, ign, nil); err != nil {
+		// The person's side by the copy's one rule (nested.go): git's answer
+		// of the person's own repos, each found from the person's folder.
+		w, err := s.newWork(ctx, folder, []string{""}, nil)
+		if err != nil {
+			return "", nil, err
+		}
+		defer w.close()
+		if err := s.stageTree(ctx, folder, idx, w, nil); err != nil {
 			return "", nil, err
 		}
 	} else if _, _, code, aerr := s.runGitIn(ctx, folder, idx, "add", "-A", "--ignore-errors"); aerr != nil && code != 1 {
@@ -434,7 +440,7 @@ func (s *Space) commitTheirs(ctx context.Context, folders FolderPaths, parent, b
 		if err != nil {
 			return "", nil, err
 		}
-		return s.commitFolder(ctx, src, parent, tmp, s.ignorer(src))
+		return s.commitFolder(ctx, src, parent, tmp)
 	}
 	idx := filepath.Join(tmp, "theirs.idx")
 	if _, err := s.shadowGitIn(ctx, s.Dir, idx, "read-tree", parent); err != nil {
@@ -451,7 +457,7 @@ func (s *Space) commitTheirs(ctx context.Context, folders FolderPaths, parent, b
 		if err != nil {
 			return "", nil, err
 		}
-		ign, err := s.folderIgnorer(ctx, filepath.Join(tmp, "rules-"+strconv.Itoa(i)), src)
+		w, err := s.newWork(ctx, src, []string{""}, nil)
 		if err != nil {
 			return "", nil, err
 		}
@@ -462,7 +468,9 @@ func (s *Space) commitTheirs(ctx context.Context, folders FolderPaths, parent, b
 		if _, _, code, _ := s.runGitIn(ctx, src, sub, "read-tree", parent+":"+f.Name); code != 0 {
 			os.Remove(sub)
 		}
-		if err := s.stageTree(ctx, src, sub, ign, nil); err != nil {
+		err = s.stageTree(ctx, src, sub, w, nil)
+		w.close()
+		if err != nil {
 			return "", nil, err
 		}
 		out, _, _, err := s.runGitIn(ctx, src, sub, "ls-files", "-s", "-z")
@@ -498,33 +506,6 @@ func (s *Space) commitTheirs(ctx context.Context, folders FolderPaths, parent, b
 		return "", nil, err
 	}
 	return commit, modes, nil
-}
-
-// folderIgnorer is the copy's rules for one folder of a copy of several, read
-// from the person's folder src: the built-in list at the folder's top (as the
-// copy's info/exclude holds it under the folder's name) and the folder's own
-// .gitignore files. It asks git through a repo of its own at dir, which holds
-// only that list.
-func (s *Space) folderIgnorer(ctx context.Context, dir, src string) (ignorer, error) {
-	if err := os.MkdirAll(filepath.Join(dir, "info"), 0o700); err != nil {
-		return nil, err
-	}
-	for _, sub := range []string{"objects", "refs"} {
-		if err := os.MkdirAll(filepath.Join(dir, sub), 0o700); err != nil {
-			return nil, err
-		}
-	}
-	if err := os.WriteFile(filepath.Join(dir, "HEAD"), []byte("ref: refs/heads/main\n"), 0o600); err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(filepath.Join(dir, "info", "exclude"), []byte(strings.Join(gitBuiltinIgnore, "\n")+"\n"), 0o600); err != nil {
-		return nil, err
-	}
-	args := s.gitBaseArgsWT(src)
-	args[0] = "--git-dir=" + dir
-	return func(ctx context.Context, paths []string) (map[string]bool, error) {
-		return checkIgnore(ctx, args, src, paths)
-	}, nil
 }
 
 // underFolder says whether a copy path is inside one of a copy's folders.

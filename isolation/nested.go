@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"github.com/staysup/agentbus/workspace"
 )
 
 // A committed repo inside a copy's folder is a repo the person keeps there: a
@@ -22,11 +24,13 @@ import (
 // A copy made since 0.6.6 (Space.Nested) does not use `git add`. One rule
 // decides what it records, the same at every checkpoint and on both sides of
 // an update: every file under its top, a nested repo's included, except a .git
-// (file or folder) at any depth and what the copy's ignore rules leave out (the
-// .gitignore files along the path, the nested repo's own among them, and the
-// built-in list), and a file the record already holds stays held while it is
-// there, as git never ignores a tracked file. A nested repo is a plain folder:
-// nothing about it is kept or decided apart. The list is made by our own walk
+// (file or folder) at any depth and what git says is not the work, and a file
+// the record already holds stays held while it is there, as git never ignores
+// a tracked file. Since 0.6.7 git is asked at every checkpoint, of the repo
+// that owns each path (gitwork.go): what it tracks is the work, and its own
+// rules alone say what else is left out. A held or tracked file is found by
+// the disk, under the name the folder lists it by (spelled), so neither case
+// nor Unicode form can hide it. The list is made by our own walk
 // (walkTree), which never follows a symbolic link and asks git only which
 // paths its rules ignore (check-ignore --no-index); git then hashes and records
 // what changed (diff-files, update-index), and never records a path beyond a
@@ -35,19 +39,21 @@ import (
 // (cleanTree), never a .git: a repo's own history is never touched.
 
 // stageTree records the files of the folder workTree into the index indexFile
-// (the copy's own when empty) by the one rule above. ign answers which of a
-// list of paths (relative, folders ending in /) the ignore rules leave out.
-func (s *Space) stageTree(ctx context.Context, workTree, indexFile string, ign ignorer, held map[string]bool) error {
-	listed, _, _, err := walkTree(ctx, workTree, ign)
-	if err != nil {
-		return err
-	}
+// (the copy's own when empty) by the one rule above. rules is git's answer,
+// asked as the walk goes, of which files there are the work (gitwork.go).
+func (s *Space) stageTree(ctx context.Context, workTree, indexFile string, rules treeRules, held map[string]bool) error {
 	// Every change goes into a copy of the index, put in place only once all
 	// are made: a stop or a failure part way leaves the index as it was, never
 	// with removals made and additions not.
 	real := indexFile
 	if real == "" {
 		real = filepath.Join(s.gitShadowDir(), "index")
+	}
+	// When the index was last written (copyIndex keeps it): git's stat cache
+	// is trusted only for a file changed in no way since well before then.
+	var written int64
+	if fi, err := os.Stat(real); err == nil {
+		written = fi.ModTime().UnixNano()
 	}
 	work := real + ".agentbus-stage"
 	if err := copyIndex(real, work); err != nil {
@@ -67,37 +73,35 @@ func (s *Space) stageTree(ctx context.Context, workTree, indexFile string, ign i
 	}
 	// What the record holds is what the latest checkpoint holds (held) and
 	// what the index holds: an index a stop left behind cannot make a held file
-	// look new, and so ignored.
-	keep := func(p string) bool { return held[p] || tracked[p] }
+	// look new, and so ignored. Each is found where the disk has it and named
+	// as the folder lists it (spelled), so the rules never leave one out: a
+	// file leaves the record only when the disk no longer has it. What each
+	// repo in the tree tracks now is added as the walk finds the repo.
+	want := map[string]bool{}
+	for p := range held {
+		want[p] = true
+	}
+	for p := range tracked {
+		want[p] = true
+	}
+	keep, err := spelled(workTree, want)
+	if err != nil {
+		return err
+	}
+	listed, _, _, err := walkTree(ctx, workTree, rules, keep)
+	if err != nil {
+		return err
+	}
 	var add, remove []string
 	for p := range listed {
 		if !tracked[p] {
 			add = append(add, p)
 		}
 	}
-	// Held but left out by the rules: still held while it is there (git never
-	// ignores a tracked file); gone, it is removed.
-	for p := range held {
-		if listed[p] || tracked[p] {
-			continue
-		}
-		here, err := present(workTree, p)
-		if err != nil {
-			return err
-		}
-		if here {
-			add = append(add, p)
-		}
-	}
+	// What the index holds that the folder does not list by that name: gone,
+	// or now spelt another way (added above under the listing's name).
 	for p := range tracked {
-		if listed[p] {
-			continue
-		}
-		here, err := present(workTree, p)
-		if err != nil {
-			return err
-		}
-		if !here || !keep(p) {
+		if !listed[p] {
 			remove = append(remove, p)
 		}
 	}
@@ -106,14 +110,34 @@ func (s *Space) stageTree(ctx context.Context, workTree, indexFile string, ign i
 	if err != nil {
 		return gitErr(ctx)
 	}
-	gone := map[string]bool{}
-	for _, p := range remove {
-		gone[p] = true
-	}
+	changed := map[string]bool{}
 	for _, p := range strings.Split(string(out), "\x00") {
-		if p != "" && tracked[p] && !gone[p] {
-			add = append(add, p)
+		if p != "" && tracked[p] && listed[p] {
+			changed[p] = true
 		}
+	}
+	// git's cache compares a change time to the second, so a file edited
+	// with its time put back in the second the index was written reads as
+	// unchanged. One rule decides instead, the one every checkpoint keeps a
+	// hash by (workspace.Keeps): a file whose change or modification time
+	// is not well before the index was written is taken out and hashed
+	// again.
+	for p := range tracked {
+		if !listed[p] || changed[p] {
+			continue
+		}
+		fi, err := os.Lstat(filepath.Join(workTree, filepath.FromSlash(p)))
+		if err != nil {
+			return errNotRead
+		}
+		self := workspace.File{Size: fi.Size(), Mode: fi.Mode(), ModTime: fi.ModTime().UnixNano()}
+		if written == 0 || !workspace.Keeps(self, fi, written) {
+			remove = append(remove, p)
+			changed[p] = true
+		}
+	}
+	for p := range changed {
+		add = append(add, p)
 	}
 	sort.Strings(add)
 	sort.Strings(remove)
@@ -178,7 +202,12 @@ func (s *Space) headFiles(ctx context.Context) map[string]bool {
 // does not rebuild node_modules), and so does every .git: a nested repo keeps
 // its own history, whichever turn made it.
 func (s *Space) cleanTree(ctx context.Context) error {
-	listed, dirs, _, err := walkTree(ctx, s.Dir, s.ignorer(s.Dir))
+	w, err := s.copyWork(ctx)
+	if err != nil {
+		return err
+	}
+	defer w.close()
+	listed, dirs, _, err := walkTree(ctx, s.Dir, w, nil)
 	if err != nil {
 		return err
 	}
@@ -206,18 +235,6 @@ func (s *Space) cleanTree(ctx context.Context) error {
 		_ = os.Remove(filepath.Join(s.Dir, filepath.FromSlash(d)))
 	}
 	return nil
-}
-
-// ignorer answers which of paths (relative to a work tree, folders ending in
-// /) the ignore rules leave out.
-type ignorer func(ctx context.Context, paths []string) (map[string]bool, error)
-
-// ignorer is the copy's rules for the folder workTree: its private repo's
-// info/exclude (the built-in list) and the .gitignore files under workTree.
-func (s *Space) ignorer(workTree string) ignorer {
-	return func(ctx context.Context, paths []string) (map[string]bool, error) {
-		return checkIgnore(ctx, s.gitBaseArgsWT(workTree), workTree, paths)
-	}
 }
 
 // checkIgnore runs git check-ignore --no-index over paths with the given git
@@ -264,11 +281,24 @@ func checkIgnore(ctx context.Context, base []string, workTree string, paths []st
 // symbolic links (never followed), at any depth, nested repos' included, but
 // no .git and nothing the rules leave out, a folder they leave out not entered.
 // It answers the files, the folders it entered, and the folders that hold a
-// .git (nested repos), by slash path. The rules are asked once per depth, for
+// .git (nested repos), by slash path. As it lists each folder it tells rules
+// whether a .git is there, and keeps whatever the repo there tracks, the
+// folders on the way to it entered. The rules are asked once per depth, for
 // every entry of that depth at once. A folder that cannot be read fails the
 // walk: its files are not gone, so they must not be recorded as removed. Only
 // a folder that is gone by the time it is read (a turn removed it) is skipped.
-func walkTree(ctx context.Context, root string, ign ignorer) (map[string]bool, []string, []string, error) {
+func walkTree(ctx context.Context, root string, rules treeRules, held map[string]bool) (map[string]bool, []string, []string, error) {
+	// A folder on the way to a kept file is entered, whatever the rules say.
+	keep, keepDirs := map[string]bool{}, map[string]bool{}
+	hold := func(m map[string]bool) {
+		for p := range m {
+			keep[p] = true
+			for d := path.Dir(p); d != "."; d = path.Dir(d) {
+				keepDirs[d] = true
+			}
+		}
+	}
+	hold(held)
 	files := map[string]bool{}
 	var dirs, repos []string
 	level := []string{""}
@@ -287,6 +317,15 @@ func walkTree(ctx context.Context, root string, ign ignorer) (map[string]bool, [
 				}
 				return nil, nil, nil, errNotRead
 			}
+			hasGit := false
+			for _, de := range des {
+				hasGit = hasGit || de.Name() == ".git"
+			}
+			tracked, err := rules.repo(ctx, d, hasGit)
+			if err != nil {
+				return nil, nil, nil, err
+			}
+			hold(tracked)
 			for _, de := range des {
 				if de.Name() == ".git" {
 					if d != "" {
@@ -308,18 +347,21 @@ func walkTree(ctx context.Context, root string, ign ignorer) (map[string]bool, [
 		if err := ctx.Err(); err != nil {
 			return nil, nil, nil, err
 		}
-		ignored, err := ign(ctx, ask)
+		ignored, err := rules.ignored(ctx, ask)
 		if err != nil {
 			return nil, nil, nil, err
 		}
 		level = level[:0:0]
 		for _, e := range entries {
 			if e.dir {
-				if !ignored[e.rel+"/"] {
+				// A folder holding its own .git is a repo: it, not a rule of
+				// the repo above, says what in it is the work (gitwork.go),
+				// so it is entered before any rule is asked about it.
+				if !ignored[e.rel+"/"] || keepDirs[e.rel] || holdsGit(filepath.Join(root, filepath.FromSlash(e.rel))) {
 					dirs = append(dirs, e.rel)
 					level = append(level, e.rel)
 				}
-			} else if !ignored[e.rel] {
+			} else if !ignored[e.rel] || keep[e.rel] {
 				files[e.rel] = true
 			}
 		}
@@ -328,37 +370,117 @@ func walkTree(ctx context.Context, root string, ign ignorer) (map[string]bool, [
 	return files, dirs, repos, nil
 }
 
+// holdsGit says whether the folder dir holds a .git (folder or file): a repo
+// of its own, a nested one or a submodule.
+func holdsGit(dir string) bool {
+	_, err := os.Lstat(filepath.Join(dir, ".git"))
+	return err == nil
+}
+
+// errSpelling: the disk has a file by a name its folder does not list, and no
+// one listed name is another spelling of it, so which file it is is not
+// known; nothing is recorded rather than the file taken as gone.
+var errSpelling = errors.New("isolation: a file's name could not be matched to how its folder lists it, so nothing was recorded")
+
 // errNotRead: a folder of the copy or of the person's folder could not be
 // read, so what it holds is not known; nothing is recorded as removed.
 var errNotRead = errors.New("isolation: a folder could not be read, so its files were not recorded")
 
-// present says whether rel is a file or a link under root that is reached
-// without passing a link: every folder on the way a real folder. A path that
-// cannot be looked at (a folder on the way not readable) is an error, never an
-// absent file.
-func present(root, rel string) (bool, error) {
-	cur := root
-	parts := strings.Split(rel, "/")
-	for i, c := range parts {
-		if c == ".git" {
-			return false, nil
+// spelled finds each of paths under root as the folder lists it: the name
+// its folder's listing gives the file, and that name only. A name is looked
+// up as written first; where the listing has no such name, the disk is asked
+// which listed name, another spelling of it (workspace.SameName), is the same
+// file (os.SameFile), so a name the disk takes
+// as another spelling of it (case on a disk that does not tell case apart,
+// composed or decomposed Unicode on one that does not tell them apart) finds
+// the file under its listed name, and on a disk that tells them apart finds
+// nothing. That is how git, with core.ignorecase and core.precomposeunicode,
+// matches its index to a folder, but with the disk's own rule, not a fold of
+// ours. Only a regular file or a link counts, reached through real folders,
+// never a .git. A path not found is left out; a folder on the way that cannot
+// be read is an error, never an absent file.
+func spelled(root string, paths map[string]bool) (map[string]bool, error) {
+	out := map[string]bool{}
+	// Each folder's listing, read once: its names in order, and each name's
+	// kind as the listing gives it (no look-up of its own).
+	type listing struct {
+		names []string
+		kind  map[string]fs.FileMode
+	}
+	lists := map[string]*listing{}
+	list := func(dir string) (*listing, error) {
+		if l, ok := lists[dir]; ok {
+			return l, nil
 		}
-		cur = filepath.Join(cur, c)
-		fi, err := os.Lstat(cur)
-		if errors.Is(err, fs.ErrNotExist) {
-			return false, nil
+		des, err := os.ReadDir(filepath.Join(root, filepath.FromSlash(dir)))
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return nil, errNotRead
 		}
-		if err != nil {
-			return false, errNotRead
+		l := &listing{kind: map[string]fs.FileMode{}}
+		for _, de := range des {
+			l.names = append(l.names, de.Name())
+			l.kind[de.Name()] = de.Type()
 		}
-		if i < len(parts)-1 && !fi.IsDir() {
-			return false, nil
+		lists[dir] = l
+		return l, nil
+	}
+	for p := range paths {
+		dir, ok := "", true
+		parts := strings.Split(p, "/")
+		for i, c := range parts {
+			l, err := list(dir)
+			if err != nil {
+				return nil, err
+			}
+			name := c
+			if _, listed := l.kind[c]; !listed {
+				// The disk has a name it takes as c, or none. Only a listed
+				// name that is another spelling of c may stand in for it
+				// (workspace.SameName), and only the one the look-up of c lands
+				// on: a hard link under another name is the same file, never
+				// the same name. Where the disk has c but no one listed name
+				// is that spelling, nothing is recorded rather than the file
+				// taken as gone.
+				fi, err := os.Lstat(filepath.Join(root, filepath.FromSlash(path.Join(dir, c))))
+				if err != nil {
+					ok = false
+					break
+				}
+				name = ""
+				for _, n := range l.names {
+					if !workspace.SameName(n, c) {
+						continue
+					}
+					fn, err := os.Lstat(filepath.Join(root, filepath.FromSlash(path.Join(dir, n))))
+					if err != nil || !os.SameFile(fi, fn) {
+						continue
+					}
+					if name != "" {
+						return nil, errSpelling
+					}
+					name = n
+				}
+				if name == "" {
+					return nil, errSpelling
+				}
+			}
+			if name == "" || name == ".git" {
+				ok = false
+				break
+			}
+			kind := l.kind[name]
+			last := i == len(parts)-1
+			if !last && !kind.IsDir() || last && !(kind.IsRegular() || kind&fs.ModeSymlink != 0) {
+				ok = false
+				break
+			}
+			dir = path.Join(dir, name)
 		}
-		if i == len(parts)-1 && !(fi.Mode().IsRegular() || fi.Mode()&fs.ModeSymlink != 0) {
-			return false, nil
+		if ok {
+			out[dir] = true
 		}
 	}
-	return true, nil
+	return out, nil
 }
 
 // reposUnder are the folders under root (not root itself) that hold a .git,
@@ -456,6 +578,48 @@ func folderIgnores(folders []SpaceFolder) []string {
 		}
 	}
 	return out
+}
+
+// commonDir is the git folder that holds a repo's config and info: gitdir
+// itself, or for a worktree the main repo's, which its commondir file names.
+func commonDir(gitdir string) string {
+	b, err := os.ReadFile(filepath.Join(gitdir, "commondir"))
+	if err != nil {
+		return gitdir
+	}
+	p := strings.TrimSpace(string(b))
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(gitdir, p)
+	}
+	return filepath.Clean(p)
+}
+
+// globalExcludes is the excludes file git status reads for this user when no
+// repo names one: the user's core.excludesFile, else git's default,
+// $XDG_CONFIG_HOME/git/ignore or ~/.config/git/ignore. Read by git from the
+// user's own config, the only part of it the private repo reads.
+func (s *Space) globalExcludes(ctx context.Context) string {
+	cmd := exec.CommandContext(ctx, "git", append(s.gitBaseArgsWT(s.Dir), "config", "--global", "--get", "--path", "core.excludesFile")...)
+	cmd.Dir = s.Dir
+	var env []string
+	for _, kv := range sealedGitEnv() {
+		if kv != "GIT_CONFIG_GLOBAL=/dev/null" {
+			env = append(env, kv)
+		}
+	}
+	cmd.Env = env
+	if out, err := cmd.Output(); err == nil {
+		if p := strings.TrimSpace(string(out)); p != "" {
+			return p
+		}
+	}
+	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
+		return filepath.Join(x, "git", "ignore")
+	}
+	if h, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(h, ".config", "git", "ignore")
+	}
+	return ""
 }
 
 // escapeIgnore escapes a path for a gitignore pattern, so it matches that path

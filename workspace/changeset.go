@@ -19,6 +19,12 @@ type Changeset struct {
 	// Snapshot: the base's snapshot id, when every file of the base was
 	// hashed; empty on the local fast path, which does not hash the base.
 	Snapshot string `json:"snapshot,omitempty"`
+	// BaseTaken: when the copy began reading the person's folder for its
+	// base, in Unix nanoseconds; 0 when not known. A base file recorded
+	// without a hash is as the folder held it then, so the folder side takes
+	// a file as that one, without reading it, only when Keeps says so at
+	// this time: its change time is older, which no one can set back.
+	BaseTaken int64 `json:"base_taken,omitempty"`
 	// Files, sorted by path.
 	Files []FileChange `json:"files"`
 	// Truncated: the copy had more files than a checkpoint holds, so the

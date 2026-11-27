@@ -107,7 +107,7 @@ func (l *lookup) removed(p string, fi fs.FileInfo) string {
 	// No step spells fi as the folder does: a step that removes it removes
 	// it in whatever spelling.
 	for _, f := range l.files() {
-		if l.removes[f.path] && os.SameFile(f.info, fi) {
+		if l.removes[f.path] && workspace.SameName(f.path, p) && os.SameFile(f.info, fi) {
 			return f.path
 		}
 	}
@@ -116,13 +116,14 @@ func (l *lookup) removed(p string, fi fs.FileInfo) string {
 
 // other is the path of another step that fi, found at p, belongs to: one
 // the folder lists as spelled, while it does not list p. Hard links are two
-// files, each listed.
+// files, each listed, and never another spelling of each other
+// (workspace.SameName).
 func (l *lookup) other(p string, fi fs.FileInfo) string {
 	if l.listed(p) {
 		return ""
 	}
 	for _, f := range l.files() {
-		if f.listed && os.SameFile(f.info, fi) {
+		if f.listed && workspace.SameName(f.path, p) && os.SameFile(f.info, fi) {
 			return f.path
 		}
 	}

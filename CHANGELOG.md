@@ -3,6 +3,59 @@
 All notable changes to AgentBus. Full notes for each release are on the
 [releases page](https://github.com/staysup/agentbus/releases).
 
+## Unreleased
+
+### Fixed
+- **A file moved over another of the same size and time is no longer lost**
+  ([#89](https://github.com/staysup/agentbus/issues/89), [#97](https://github.com/staysup/agentbus/pull/97)).
+  A checkpoint trusts a file's size, time and mode only when its ctime is also older than the last
+  look. The system sets ctime on every write, rename, link and chmod, and nothing can set it back.
+  Before, `mv new.go old.go` in an overlay copy kept `old.go`'s old content in the record, and Apply
+  removed `new.go` and said applied. An edit that put the time back (`touch -r`, `cp -p`,
+  `rsync -t`) was missed the same way. A Copy workspace records its checkpoints through git, whose
+  stat cache compares ctime to the second, so such an edit made in the same second as the copy
+  was missed there too. It now holds git's cache to the same rule, and hashes again any file whose
+  ctime or time is within 2 seconds of the copy's last record. Thanks to `kunalgoesbyken` (#97).
+- **Apply no longer writes over a file the person moved in**. The same rule now holds in your
+  folder. Where a copy's Base recorded a file by size, time and mode only (an overlay copy), Apply
+  took a file still showing them as untouched and wrote over it. So when you moved another file of
+  the same size and time over it during the session, its content was lost. Apply now trusts that
+  only when the file's ctime is older than when the copy began reading your folder. Otherwise it
+  reads the file, and refuses the apply as changed when it cannot show the file is the Base's. The
+  same holds when a copy reads a file's Base content from your folder. A changeset now records that
+  time (`base_taken`); one made before 0.6.8 has none, so such a file refuses rather than being
+  trusted.
+- **Edits to committed build output reach Review and Apply**
+  ([#87](https://github.com/staysup/agentbus/issues/87)). Before, an edit to a committed file
+  under `dist/`, `build/`, `target/` or another built-in folder, or to a file added with
+  `git add -f` past your `.gitignore`, never reached Review or Apply, and Apply said applied. A
+  Copy workspace now asks git at every checkpoint, and on your side of every Update, which files
+  are the work, of the repo each file is in: your folder's own, each nested repo and each
+  submodule, each found the way git finds it. A file that repo tracks is always recorded, so one
+  removed in a turn and made again in a later one is recorded again rather than applied as removed.
+  What else is left out is that repo's own rules only: its `.gitignore` files, its
+  `.git/info/exclude` and its `core.excludesFile` (a relative one read from its work tree, as git
+  does), else yours. The built-in list (`node_modules/`, `dist/`, `build/`, `target/` and the rest)
+  still applies at your folder's top, but git applies it, less any built-in folder git finds a
+  tracked file in. So a new file beside a committed one reaches Apply in `dist/` and in `Dist/`
+  alike, a `node_modules/` your repo does not ignore stays out, and a parent repo's rules no longer
+  reach into a nested repo, as `git status` there does not read them. A folder that holds its own `.git` is that repo's
+  to decide, even where a rule of the repo above leaves the folder out; a repo the agent makes in
+  the copy is asked as it is now. Submodules opened as the
+  folder, worktrees, split indexes and SHA-256 repos are read too; an index git cannot read fails
+  the checkpoint instead of dropping its files. A tracked file is found under the name your folder
+  lists it by, so a case rename of a force-added `config.local` to `Config.local` is a rename, and a
+  name your disk keeps in another Unicode form than git's index is found too. Only another spelling
+  of the same name stands in for it, never a hard link under another name. This holds for
+  copies made from 0.6.8 on; start a new session for an older one.
+- **A case-only rename reaches the folder on a disk that ignores case**
+  ([#76](https://github.com/staysup/agentbus/issues/76)). On such a disk (macOS by default, ext4
+  with casefold) a look-up of `button.tsx` finds `Button.tsx`, so a checkpoint took the old name
+  as still there. Renaming `button.tsx` to `Button.tsx`, or `comp/` to `Comp/`, left Review empty,
+  and Apply said applied with the folder unchanged. A name now counts only as its folder lists
+  it. The rename shows in Review, applies, is put back by a Discard, and comes in with an Update
+  when the person makes it. This holds for Copy workspaces made since 0.6.6.
+
 ## 0.6.7 (2026-11-27)
 
 ### Added

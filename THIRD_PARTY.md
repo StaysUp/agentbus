@@ -53,3 +53,11 @@ entry, and run the tests: `api/docs_test.go` checks that `/docs` serves the file
   (`credentials/pty*.go`).
 - Source: https://go.googlesource.com/sys
 - License: BSD 3-Clause, Copyright 2009 The Go Authors.
+
+### golang.org/x/text v0.14.0
+
+- What: Unicode normalization (`unicode/norm`), so two spellings of one file name, composed and
+  decomposed, compare as the disk takes them (`workspace/samename.go`). It was already in the
+  binary through kin-openapi; 0.6.8 uses it directly.
+- Source: https://go.googlesource.com/text
+- License: BSD 3-Clause, Copyright 2009 The Go Authors.

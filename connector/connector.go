@@ -316,9 +316,10 @@ func (c *Connector) keepSnapshot(ref string, s *workspace.Snapshot) {
 	}
 }
 
-// Lend opens the file rel of the folder ref while it is a regular file with
-// f's size, modification time and mode (isolation.Lender).
-func (c *Connector) Lend(ref, rel string, f workspace.File) (io.ReadCloser, func() bool, bool) {
+// Lend opens the file rel of the folder ref while it is a regular file that
+// asBase says is the Base's f, for a Base that began reading the folder at
+// taken (isolation.Lender).
+func (c *Connector) Lend(ref, rel string, f workspace.File, taken int64) (io.ReadCloser, func() bool, bool) {
 	dir, err := c.path(ref)
 	if err != nil || !f.Mode.IsRegular() {
 		return nil, nil, false
@@ -336,7 +337,7 @@ func (c *Connector) Lend(ref, rel string, f workspace.File) (io.ReadCloser, func
 			return false
 		}
 		defer r2.Close()
-		return sameStat(r2, name, f)
+		return asBase(r2, name, f, taken)
 	}
 	if !same() {
 		rt.Close()
@@ -660,10 +661,12 @@ func (c *Connector) apply(ctx context.Context, ref string, csFrom, csTo *workspa
 		name := filepath.FromSlash(st.Path)
 		fa, fb := st.From, st.To
 		there, respelt, why := look.at(st)
-		// A file the base recorded without a hash is as the base saw it,
-		// by size, modification time and mode: one still so in the folder
-		// is as at from, without reading it.
-		if there && fa != nil && fa.Hash == "" && sameStat(rt, name, *fa) {
+		// A file the base recorded without a hash is as the base saw it
+		// when nothing about it changed since the base began reading the
+		// folder (asBase): it is as at from, without reading it. Any other
+		// is read, and one the base left unhashed then cannot be shown to
+		// be as at from, so it refuses the apply as changed.
+		if there && fa != nil && fa.Hash == "" && asBase(rt, name, *fa, csTo.BaseTaken) {
 			ops = append(ops, &op{rel: st.Path, to: fb, removeOnly: fb == nil})
 			shown = append(shown, shownFile{rel: st.Path, to: fb, exists: true, mode: fa.Mode})
 			continue
@@ -1068,11 +1071,16 @@ func copyInto(rt *os.Root, tmp, src string, perm fs.FileMode) error {
 	return err
 }
 
-// sameStat says whether the file name of rt has f's size, modification time
-// and mode.
-func sameStat(rt *os.Root, name string, f workspace.File) bool {
+// asBase says whether the file name of rt is, without reading it, the file f
+// that a Base which began reading the folder at taken recorded: the one rule
+// a checkpoint keeps a hash by (workspace.Keeps). Size, time and mode alone
+// are no proof: a file moved over another keeps its own time, and touch -r,
+// cp -p and rsync -t set any time; its change time, which no one can set
+// back, must be older than taken too. A taken of 0 (a changeset made before
+// 0.6.7) proves nothing.
+func asBase(rt *os.Root, name string, f workspace.File, taken int64) bool {
 	fi, err := rt.Lstat(name)
-	return err == nil && fi.Mode() == f.Mode && fi.Size() == f.Size && fi.ModTime().UnixNano() == f.ModTime
+	return err == nil && taken != 0 && workspace.Keeps(f, fi, taken)
 }
 
 // hashIn hashes the file name of rt as workspace.Walk does. A missing file

@@ -495,3 +495,29 @@ func TestApplyUnhashedThroughALink(t *testing.T) {
 		t.Fatalf("e/x: %q", got)
 	}
 }
+
+// A hard link of the person's under another name is the same file, never
+// another spelling of the name: a turn that respells button.tsx to Button.tsx
+// and edits Archive.tsx, the person's hard link to it, finds each by its own
+// name (Codex review t_631a1bb6f9d48cda).
+func TestApplyRespellingIsNotAHardLink(t *testing.T) {
+	folder := t.TempDir()
+	if !caseBlind(t, folder) {
+		t.Skip("this disk tells names that differ only in case apart")
+	}
+	base := map[string]string{"button.tsx": "x", "Archive.tsx": "x"}
+	tree(t, folder, map[string]string{"button.tsx": "x"})
+	if err := os.Link(filepath.Join(folder, "button.tsx"), filepath.Join(folder, "Archive.tsx")); err != nil {
+		t.Skip("no hard links here")
+	}
+	c, ref := newConnector(t, folder)
+	h := turnChanges(t, c, base, map[string]string{"Button.tsx": "x", "Archive.tsx": "y"})
+	got, err := c.Apply(context.Background(), ref, "", h)
+	if err != nil {
+		t.Fatalf("apply: %+v %v", got, err)
+	}
+	want := map[string]string{"Button.tsx": "x", "Archive.tsx": "y"}
+	if now := held(t, folder); !reflect.DeepEqual(now, want) {
+		t.Fatalf("the folder holds %v, want %v", now, want)
+	}
+}

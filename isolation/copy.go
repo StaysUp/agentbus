@@ -62,12 +62,19 @@ func (copyBackend) Open(r Request) (*Space, error) {
 		return nil, err
 	}
 	s.start = time.Now()
+	s.BaseTaken = s.start.UnixNano()
 	method, err := cloneTree(ctxOf(r), source, s.Root)
 	if err != nil {
 		retire(s)
 		return nil, err
 	}
 	s.Method = method
+	// A worktree's or a submodule's repo, read from the person's folder before
+	// its .git file goes (gitwork.go).
+	if err := saveFolderGit(source, s.folderGitDir("")); err != nil {
+		retire(s)
+		return nil, err
+	}
 	if fi, err := os.Lstat(filepath.Join(s.Root, ".git")); err == nil && !fi.IsDir() {
 		if err := os.Remove(filepath.Join(s.Root, ".git")); err != nil {
 			retire(s)
@@ -135,6 +142,7 @@ func openPlaces(r Request) (*Space, error) {
 		return nil, err
 	}
 	s.start = time.Now()
+	s.BaseTaken = s.start.UnixNano()
 	for _, p := range r.Places {
 		dst := filepath.Join(s.Root, p.Name)
 		// The folder's real path, never a link into the person's folder.
@@ -151,6 +159,10 @@ func openPlaces(r Request) (*Space, error) {
 		// The slowest way any folder was copied names the copy's method.
 		if s.Method == "" || method == MethodCopy || (method == MethodReflink && s.Method == MethodClone) {
 			s.Method = method
+		}
+		if err := saveFolderGit(src, s.folderGitDir(p.Name)); err != nil {
+			retire(s)
+			return nil, err
 		}
 		if fi, err := os.Lstat(filepath.Join(dst, ".git")); err == nil && !fi.IsDir() {
 			if err := os.Remove(filepath.Join(dst, ".git")); err != nil {

@@ -302,7 +302,7 @@ func TestLend(t *testing.T) {
 	c, ref := newConnector(t, folder)
 	fi, _ := os.Lstat(filepath.Join(folder, "a.txt"))
 	f := workspace.File{Size: fi.Size(), Mode: fi.Mode(), ModTime: fi.ModTime().UnixNano()}
-	r, same, ok := c.Lend(ref, "a.txt", f)
+	r, same, ok := c.Lend(ref, "a.txt", f, time.Now().Add(time.Minute).UnixNano())
 	if !ok {
 		t.Fatal("not lent")
 	}
@@ -311,13 +311,13 @@ func TestLend(t *testing.T) {
 		t.Fatal("not the same")
 	}
 	write(t, folder, map[string]string{"a.txt": "two!\n"})
-	if _, _, ok := c.Lend(ref, "a.txt", f); ok {
+	if _, _, ok := c.Lend(ref, "a.txt", f, time.Now().Add(time.Minute).UnixNano()); ok {
 		t.Fatal("lent a changed file")
 	}
-	if _, _, ok := c.Lend("fld_0000000000000000", "a.txt", f); ok {
+	if _, _, ok := c.Lend("fld_0000000000000000", "a.txt", f, time.Now().Add(time.Minute).UnixNano()); ok {
 		t.Fatal("lent from a folder it does not own")
 	}
-	if _, _, ok := c.Lend(ref, "../a.txt", f); ok {
+	if _, _, ok := c.Lend(ref, "../a.txt", f, time.Now().Add(time.Minute).UnixNano()); ok {
 		t.Fatal("lent from outside the folder")
 	}
 }
