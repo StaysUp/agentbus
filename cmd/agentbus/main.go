@@ -1,6 +1,6 @@
 // Command agentbus runs the framework on this machine.
 //
-//	agentbus up [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-max-runs 4]
+//	agentbus up [-listen 127.0.0.1:8787] [-origin http://localhost:5173]
 //	agentbus server [-listen 127.0.0.1:8787]
 //	agentbus runner -server URL
 //	agentbus version
@@ -261,8 +261,9 @@ type config struct {
 	// noReplay turns own replay off: claude's and codex's next turns use the
 	// vendor's resume. The zero value, replay on, is the default.
 	noReplay bool
-	// maxRuns bounds the turns running at once. Zero means the API's default.
-	maxRuns int
+	// capacity is a runner's -capacity: the most delegated turns its machine
+	// runs at once. Zero means the settings decide (runner.Config.Capacity).
+	capacity int
 	// For tests: how often a runner heartbeats, and how long POST
 	// /api/v0/turns waits for a turn to start. Zero means the defaults.
 	heartbeat, turnWait time.Duration
@@ -755,7 +756,7 @@ func start(c config) (*service, error) {
 		// continuation of a session that already has a clean home — still uses
 		// it (run/run.go decides per turn).
 		homes := filepath.Join(c.home, homesDir)
-		eng, err = engine.New(engine.Config{Store: st, BaseURL: baseURL, MaxRuns: c.maxRuns, ReplayBase: replayBase, AgentName: agentName, Homes: homes, Personal: c.mode == modeUp,
+		eng, err = engine.New(engine.Config{Store: st, BaseURL: baseURL, ReplayBase: replayBase, AgentName: agentName, Homes: homes, Personal: c.mode == modeUp,
 			Settings: cfgStore, Protect: protect, APIDir: apiLink(c.home, c.self, svcLog), Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace, Logf: svcLog.Printf,
 			RunLog: func(session string, data []byte) {
 				// The session id is the service's own hex, so it is a plain
@@ -1200,7 +1201,7 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 // a copy is made by clone or overlay and no file is sent over HTTP. A runner
 // of a server keeps its own store, with the server's behind it.
 func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfile.Log) error {
-	capacity := s.eng.MaxRuns()
+	capacity := runnerCapacity(c.capacity)
 	name := c.runnerName
 	if name == "" {
 		name, _ = os.Hostname()

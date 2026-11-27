@@ -277,6 +277,9 @@ func (x *xproc) do(method, path string, body any) (int, []byte) {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
+	if method == "PUT" {
+		req.Header.Set("If-Match", "*") // a settings PUT replaces whatever is there
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		x.t.Fatalf("%s %s: %v", method, path, err)

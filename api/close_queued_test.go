@@ -22,7 +22,7 @@ func TestCloseAnswersQueuedAtOnce(t *testing.T) {
 	// A runner of the folder's machine is seen, so a close can be queued for
 	// it. Nothing takes the close.
 	r := e.req(t, "POST", "/api/v0/runner/register", strings.NewReader(
-		`{"name":"r","capacity":1,"protocol":5,"capabilities":{"connector":"`+machine+`"}}`))
+		`{"name":"r","capacity":1,"protocol":6,"capabilities":{"connector":"`+machine+`"}}`))
 	r.Header.Set("Authorization", "Bearer "+enrollTok)
 	if resp, raw := do(t, r); resp.StatusCode != http.StatusCreated {
 		t.Fatalf("register: %d %s", resp.StatusCode, raw)

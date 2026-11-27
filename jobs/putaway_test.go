@@ -120,7 +120,7 @@ func TestPutAwayOutcomesInTheRecord(t *testing.T) {
 	// put-away of an event before that turn keeps it.
 	settle("evt_discard_2")
 	e.oldTurn(ids.SessionID(first.Session), "", "", false)
-	if _, _, ok, _, err := e.q.Take(e.r.ID, time.Minute, false); err != nil || ok {
+	if _, _, ok, _, err := e.q.Take(e.r.ID, time.Minute, queue.LaneInteractive); err != nil || ok {
 		t.Fatalf("take after the turn: ok %v err %v, want nothing", ok, err)
 	}
 	if n, err := CloseLostApplies(e.q, e.st); err != nil || n != 1 {

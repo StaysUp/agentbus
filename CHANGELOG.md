@@ -26,6 +26,26 @@ All notable changes to AgentBus. Full notes for each release are on the
   runner on another machine keeps the same budget. Claude Code, Codex and OpenCode alike.
 
 ### Changed
+- **Turns you send start at once.** A runner used to run 4 turns at once, whoever started them, so
+  builders a coordinator started could fill every place and hold your own messages in the queue
+  (10+ minutes on 2026-11-26). Now your turns have a lane of their own and are not counted. They
+  wait only for a turn already running in their workspace (one copy runs one turn) and their
+  session's earlier turns. Within a workspace your turn goes ahead of the turns agents asked for
+  that have not started yet, such as `ask_agent` builders queued in the coordinator's workspace; no
+  job passes a discard, update or close. The limit holds only for delegated work, the turns
+  agents start (in any session, the person's own included: who asked decides it) and the replies
+  delivered into sessions agents started. It is 8 by default, set by
+  `[limits] max_delegated_at_once` in the settings (1 to 64), and a change holds for the next turn
+  a runner takes, with no restart. `GET /api/v0/runners` says how it stands: `delegated` with
+  `at_once`, `busy` and `waiting`, and each runner's own (its `waiting` counts the turns bound to
+  it by its copy or its machine). Control counts the places; a runner runs
+  every job it takes, and the engine no longer refuses a fifth turn with 429.
+- **`agentbus up -max-runs` is retired.** It is ignored, with a note saying where the limit is now.
+  `agentbus runner -capacity N` stays, as a machine's own ceiling on delegated turns; without it
+  the settings decide.
+- **Runner protocol 6.** A take names its lane (`folders`, `delegated` or `interactive`) in place
+  of `folders`. A runner and control of different releases refuse each other with a plain message:
+  upgrade both.
 - **A harness that compacts inside a turn is let through.** Own replay used to refuse a main
   request the harness had compacted, which stopped the turn. Now, once a request of the turn has
   carried the history, a compacted one goes on as the harness sent it (Codex's under the session's

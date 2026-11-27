@@ -207,6 +207,12 @@ func TestDeliver(t *testing.T) {
 		d.Links.Chain != nil {
 		t.Fatalf("delivery: %+v %+v", d, d.Links)
 	}
+	// The child an agent asked for is delegated work; the reply into the
+	// person's own session is not, so it never waits for delegated places
+	// (lanes.go).
+	if !isDelegated(t, q, child) || isDelegated(t, q, *d) {
+		t.Fatalf("child delegated %v, delivery into the person's session delegated %v", isDelegated(t, q, child), isDelegated(t, q, *d))
+	}
 	for _, want := range []string{"[AgentBus]", "not from the person", "Agent: claude", "Folder: /w/1", "Changed files: 2",
 		"- a.go (modified)", "- b.go (added)", "the whole answer", "Session: " + child.Session} {
 		if !strings.Contains(d.Spec.Prompt, want) {
@@ -214,7 +220,7 @@ func TestDeliver(t *testing.T) {
 		}
 	}
 	// It waits for the parent's turn, then runs.
-	if _, _, ok, _, err := q.Take(r.ID, lease, false); err != nil || ok {
+	if _, _, ok, _, err := q.Take(r.ID, lease, LaneInteractive); err != nil || ok {
 		t.Fatalf("took the delivery while the parent runs: %v %v", ok, err)
 	}
 	if _, err := q.End(r.ID, pa.ID, pa.Number, Finish{Status: Finished, Session: parent.Session,

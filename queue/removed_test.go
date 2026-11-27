@@ -19,7 +19,7 @@ func TestRemovedRunnerEndsItsSessionsWork(t *testing.T) {
 	}
 	other := capsRunner(t, q, nil, nil)
 	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
-	j, a, ok, _, err := q.Take(r.ID, lease, false)
+	j, a, ok, _, err := q.Take(r.ID, lease, LaneInteractive)
 	if err != nil || !ok || j.ID != first.ID {
 		t.Fatalf("take: %v %v", ok, err)
 	}
@@ -36,7 +36,7 @@ func TestRemovedRunnerEndsItsSessionsWork(t *testing.T) {
 		t.Fatalf("apply: %v", err)
 	}
 	c.add(2 * RunnerFresh) // the runner went offline; the other one is seen again
-	if _, _, ok, _, err := q.Take(other.ID, lease, false); err != nil || ok {
+	if _, _, ok, _, err := q.Take(other.ID, lease, LaneInteractive); err != nil || ok {
 		t.Fatalf("the other runner took a job: %v %v", ok, err)
 	}
 	if err := q.RemoveRunner(DefaultTeam, r.ID); err != nil {
@@ -85,7 +85,7 @@ func TestRemovedRunnerEndsWorkQueuedLater(t *testing.T) {
 			t.Fatal(err)
 		}
 		first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
-		j, a, ok, _, err := q.Take(r.ID, lease, false)
+		j, a, ok, _, err := q.Take(r.ID, lease, LaneInteractive)
 		if err != nil || !ok || j.ID != first.ID {
 			t.Fatalf("take: %v %v", ok, err)
 		}
@@ -104,7 +104,7 @@ func TestRemovedRunnerEndsWorkQueuedLater(t *testing.T) {
 			t.Fatal(err)
 		}
 		next := makeJob(t, q, Spec{Session: ids.SessionID(j.Session)})
-		if got, _, ok, _, err := q.Take(r.ID, lease, false); err != nil || !ok || got.ID != next.ID {
+		if got, _, ok, _, err := q.Take(r.ID, lease, LaneInteractive); err != nil || !ok || got.ID != next.ID {
 			t.Fatalf("take next: %v %v", ok, err)
 		}
 		c.add(2 * RunnerFresh)

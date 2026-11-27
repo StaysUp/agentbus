@@ -36,7 +36,7 @@ func defaultPolicy() Policy {
 		Isolation:  IsolationAuto,
 		HomeFiles:  []string{},
 		AgentAPI:   AgentAPI{Apply: &off},
-		Limits:     Limits{MaxDepth: num(2), MaxJobsPerTurn: num(10), MaxJobsPerTree: num(30), MaxCostUSDPerTree: &cost},
+		Limits:     Limits{MaxDepth: num(2), MaxJobsPerTurn: num(10), MaxJobsPerTree: num(30), MaxDelegatedAtOnce: num(8), MaxCostUSDPerTree: &cost},
 		Workspaces: Workspaces{PutAwayAfterMinutes: num(30)},
 	}
 }

@@ -189,7 +189,9 @@ var routes = slices.Concat([]route{
 			"A session runs on one machine, the one that holds its folder, for its whole life: pick the machine (its machine id, from GET /api/v0/runners), " +
 			"then type a folder on it (folder) or name one it holds (folder_ref, from GET /api/v0/folders). Only that machine's runner takes the session's work.\n\n" +
 			"The reply comes at once, once the turn is recorded; it never waits for a runner. It answers 202 with state queued: " +
-			"the turn runs when a runner is free, and GET /api/v0/turns/{id} follows it. A retry of a turn already running answers running.\n\n" +
+			"the turn runs once no turn runs in its workspace (one copy runs one turn at a time) and its session's earlier turns have ended, and GET /api/v0/turns/{id} follows it. A retry of a turn already running answers running.\n\n" +
+			"A turn the main token sends is the person's: it is not counted against any limit, and it goes ahead of delegated turns of its workspace that have not started, since those hold no copy yet. No job passes a discard, update or close of the workspace. A turn a turn token sends is delegated work: " +
+			"one runner runs at most [limits] max_delegated_at_once of those at once (8 by default; GET /api/v0/runners says how many are busy and waiting), and the rest wait, oldest first.\n\n" +
 			"A session whose turn runs, or has turns waiting, is never refused: the new turn queues behind them and runs next, in order, " +
 			"and ahead says how many of the session's turns are before it.",
 		body: TurnRequest{},
@@ -201,7 +203,7 @@ var routes = slices.Concat([]route{
 		// ships no tool of its own. "A turn is a turn." It stays wrappable, so a
 		// person may still build a custom tool (or app step) on it.
 		wrappable: true,
-		replies: []reply{ok(202, Started{}, "The turn: running, or queued behind the session's earlier turns or for a runner."), turnRefused,
+		replies: []reply{ok(202, Started{}, "The turn: running, or queued behind the session's earlier turns, or, for delegated work, for a place."), turnRefused,
 			fail(403, "A turn token's request is refused: error says why, such as a cap on asked work."),
 			fail(404, "This service keeps no queue, or the session sent has no events."),
 			fail(409, "The session sent cannot be continued from here, it is closed, its machine was removed, or the idempotency key names another turn. A session whose turn is running is not refused: the new turn waits behind it (queued)."),
@@ -705,6 +707,8 @@ var routes = slices.Concat([]route{
 		doc: "The runners control knows, one per machine, for a person: each one's name, id, machine, role, labels, whether it is online, " +
 			"when it was last seen, its last probe of each harness with its version. Online means it asked for work in the last minute. " +
 			"pending lists the machines that ran agentbus login and wait for the person's approval. " +
+			"delegated says how the limit on delegated turns stands: how many one runner runs at once ([limits] max_delegated_at_once), how many are busy and how many wait for a place, and each runner's own. " +
+			"Turns the person sends are not counted and start at once; only a turn running in their workspace, or their session's own earlier turn, holds one back. " +
 			"A runner that stopped stays listed, offline, until removed. A connector of a build before 0.5 is listed only while no runner reports its machine. No token is in the answer. No body is read.",
 		replies: []reply{ok(200, RunnerList{}, "The runners."), badRequest, storeFailed},
 		serve:   plain((*API).listRunners)},

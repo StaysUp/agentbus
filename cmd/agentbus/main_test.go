@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/credentials"
+	"github.com/staysup/agentbus/jobs"
 )
 
 func startService(t *testing.T, home string, upstreamURL string) *service {
@@ -299,12 +300,23 @@ func TestTurnsTokenMadeAndScoped(t *testing.T) {
 	}
 }
 
+// -max-runs was retired in 0.6.7: a command that still sets it starts, and is
+// told where the limit is now. A runner's -capacity stays, as its machine's
+// own ceiling; without it the settings decide.
 func TestMaxRunsFlag(t *testing.T) {
 	var b bytes.Buffer
-	for _, v := range []string{"0", "-1", "x", "65"} {
-		b.Reset()
-		if code := run([]string{"up", "-max-runs", v}, func(string) string { return t.TempDir() }, &b, &b); code != 2 {
-			t.Errorf("-max-runs %s: exit %d, want 2", v, code)
-		}
+	c, ok := parse([]string{"up", "-max-runs", "4"}, t.TempDir(), &b)
+	if !ok || !strings.Contains(b.String(), "-max-runs was retired in 0.6.7") || !strings.Contains(b.String(), "max_delegated_at_once") {
+		t.Fatalf("up -max-runs 4: ok %v, %q", ok, b.String())
+	}
+	if c.capacity != 0 {
+		t.Fatalf("-max-runs set a capacity: %d", c.capacity)
+	}
+	b.Reset()
+	if _, ok := parse([]string{"up"}, t.TempDir(), &b); !ok || b.Len() != 0 {
+		t.Fatalf("up: ok %v, %q", ok, b.String())
+	}
+	if runnerCapacity(0) != jobs.MaxCapacity || runnerCapacity(3) != 3 {
+		t.Fatalf("runner capacity: %d %d", runnerCapacity(0), runnerCapacity(3))
 	}
 }

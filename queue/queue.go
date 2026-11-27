@@ -723,6 +723,8 @@ type Queue struct {
 	activity ActivityReader
 	// putAwayOn reads whether putting copies away is on now (putaway.go).
 	putAwayOn PutAwaySetting
+	// delegatedAtOnce reads the delegated lane's limit now (lanes.go).
+	delegatedAtOnce DelegatedSetting
 	// cost reads what turns cost from the record (ReadCostWith), for the
 	// cost cap (budget.go).
 	cost CostReader
@@ -1052,23 +1054,61 @@ func jobCopyKey(a string) string {
 }
 
 // laneTake is Take's one rule of a WORKSPACE's lane, for a job j and another job
-// o: j waits for o. A workspace's copy-changing jobs (laneKinds) are one line,
-// first in, first out -- an asked session's turns share the asker's line, since
-// both name the one workspace -- so each waits for one that runs, and for one
-// made before it that is still queued. "Made before" is the row's order in the
-// jobs table (rowid), the order the jobs were made in, not their created time
-// or id: two jobs made in the same clock tick, or across a clock step back, still
-// run in the order they were made, so a close made after a queued turn always
-// runs after it. The lane key is the workspace, or the session for
-// a job with no workspace (its own workspace), as CopyKey keys the copy row.
-// A queued job that is not due yet (not_before after now, in nanoseconds)
-// holds no place: a put-away waiting out its quiet time never holds up the
-// turn the person sends meanwhile.
+// o: j waits for o. A workspace's copy-changing jobs (laneKinds) share its one
+// copy, so they run one at a time -- an asked session's turns share the
+// asker's line, since both name the one workspace. j waits for any job of the
+// lane that a runner holds (taken or running), and for each queued one that
+// comes before it in the lane's order (laneOrder). The lane key is the
+// workspace, or the session for a job with no workspace (its own workspace), as
+// CopyKey keys the copy row. A queued job that is not due yet (not_before after
+// now, in nanoseconds) holds no place: a put-away waiting out its quiet time
+// never holds up the turn the person sends meanwhile.
 func laneTake(now int64) string {
 	return `j.kind IN ` + laneKinds + ` AND o.kind IN ` + laneKinds + `
-	AND COALESCE(NULLIF(json_extract(o.spec, '$.workspace'), ''), o.session) = COALESCE(NULLIF(json_extract(j.spec, '$.workspace'), ''), j.session)
-	AND (o.state IN ('taken','running') OR (o.state = 'queued' AND o.rowid < j.rowid
-		AND (o.not_before IS NULL OR o.not_before <= ` + strconv.FormatInt(now, 10) + `)))`
+	AND ` + jobCopyKey("o") + ` = ` + jobCopyKey("j") + `
+	AND (o.state IN ('taken','running') OR (o.state = 'queued' AND ` + due("o", now) + `
+		AND ` + laneOrder("o", now) + ` < ` + laneOrder("j", now) + `))`
+}
+
+// due says the job of alias a may be taken now: it has no not_before, or it
+// has passed.
+func due(a string, now int64) string {
+	return `(` + a + `.not_before IS NULL OR ` + a + `.not_before <= ` + strconv.FormatInt(now, 10) + `)`
+}
+
+// barrierKinds are the lane jobs that are not turns: a discard, update, close
+// or put-away. They keep the order they were made in against every job of the
+// lane, so a close made after a queued turn always runs after it, and a turn
+// made after a discard always runs after it.
+const barrierKinds = `('discard','update','close','put_away')`
+
+// laneOrder is where the queued lane job of alias a stands in its workspace's
+// order, as a row value compared with <: (segment, class, rowid).
+//
+//   - segment: how many due barriers (barrierKinds) of the workspace were made
+//     before it. No job passes a barrier either way.
+//   - class, within a segment: 0 for the person's work, 1 for delegated work,
+//     2 for the barrier that closes the segment. The person's work is a turn
+//     that is not delegated (Job.Delegated), and a delegated turn of a session
+//     the person has a later turn queued in, so a session's turns keep their
+//     order and the person's message never waits for its own session's
+//     earlier turn to be passed over. A queued delegated turn holds no copy, so
+//     the person's turn goes ahead of it (his call, 2026-11-26: his messages
+//     to his coordinator waited behind builders the coordinator had asked for
+//     in the same workspace). A turn a runner holds still blocks everything.
+//   - rowid: the order the jobs were made in, not their created time or id,
+//     so two jobs made in the same clock tick still run in that order.
+//
+// It is a total order, so two jobs of one workspace never both see the lane
+// free: of any two queued, exactly one comes first.
+func laneOrder(a string, now int64) string {
+	return `((SELECT COUNT(*) FROM jobs lb WHERE lb.team = ` + a + `.team AND lb.kind IN ` + barrierKinds + `
+		AND lb.state = 'queued' AND ` + due("lb", now) + ` AND ` + jobCopyKey("lb") + ` = ` + jobCopyKey(a) + ` AND lb.rowid < ` + a + `.rowid),
+	CASE WHEN ` + a + `.kind != 'turn' THEN 2 WHEN NOT ` + delegatedJob(a) + ` THEN 0
+		WHEN EXISTS (SELECT 1 FROM jobs lp WHERE lp.team = ` + a + `.team AND lp.kind = 'turn' AND lp.state = 'queued'
+			AND lp.session = ` + a + `.session AND lp.rowid > ` + a + `.rowid AND NOT ` + delegatedJob("lp") + `) THEN 0
+		ELSE 1 END,
+	` + a + `.rowid)`
 }
 
 // SessionHasWork says the SESSION has a turn job that has not ended. It is kept
@@ -1520,15 +1560,19 @@ func workspaceOf(db querier, j Job) (*Workspace, error) {
 // knows goes only to that session's runner, and a session's turn
 // jobs run one at a time, so a next turn waits for the one before it. Reviews
 // never wait:
-// each runs in a session of its own. The capacity check and the claim
-// are one transaction. ok is false when there is no job; cleanup may still be
-// set.
+// each runs in a session of its own. The count of the lane's places and the
+// claim are one transaction. ok is false when there is no job; cleanup may
+// still be set.
 //
-// folders asks for a folder job (folderKinds: an apply, a typed folder's
-// check) of the runner's own machine, in one of its FolderCapacity folder
-// places; without it the take is for a turn or a review, in one
-// of its capacity's places. So an apply never waits behind running turns.
-func (q *Queue) Take(runnerID string, lease time.Duration, folders bool) (job Job, att Attempt, ok bool, cleanup *Workspace, err error) {
+// lane says which of the runner's places the take is for (lanes.go): a folder
+// job of its own machine, in one of its FolderCapacity folder places, so an
+// apply never waits behind running turns; a delegated turn, in one of its
+// delegated places; or interactive work, which is not counted.
+func (q *Queue) Take(runnerID string, lease time.Duration, lane Lane) (job Job, att Attempt, ok bool, cleanup *Workspace, err error) {
+	if !lane.Known() {
+		return job, att, false, nil, ErrBadState
+	}
+	folders := lane == LaneFolders
 	err = q.tx(func(tx *sql.Tx) error {
 		now := q.now()
 		if _, err := sweepTx(tx, now); err != nil {
@@ -1552,18 +1596,18 @@ func (q *Queue) Take(runnerID string, lease time.Duration, folders bool) (job Jo
 		// cleanup return and the runner's clean/remove path stay for release,
 		// which will mark a copy for removal under its own guard. Until then a
 		// copy is removed by nothing.
-		// Folder jobs and the rest count against their own places.
-		kinds, places := `j.kind NOT IN `+folderKinds, capacity
-		if folders {
-			kinds, places = `j.kind IN `+folderKinds, FolderCapacity
-		}
-		var busy int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM attempts a JOIN jobs j ON j.id = a.job WHERE a.runner = ? AND a.state IN ('taken','running') AND `+kinds,
-			runnerID).Scan(&busy); err != nil {
-			return fmt.Errorf("queue: count attempts: %w", err)
-		}
-		if busy >= places {
-			return nil
+		// Each lane counts against its own places; interactive work is not
+		// counted (lanes.go).
+		kinds, places := q.laneOf(lane, capacity)
+		if places >= 0 {
+			var busy int
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM attempts a JOIN jobs j ON j.id = a.job WHERE a.runner = ? AND a.state IN ('taken','running') AND `+kinds,
+				runnerID).Scan(&busy); err != nil {
+				return fmt.Errorf("queue: count attempts: %w", err)
+			}
+			if busy >= places {
+				return nil
+			}
 		}
 		// A put-away now due on this runner is decided before any job is
 		// chosen, in this transaction (putaway.go): kept, it ends here; one

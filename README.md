@@ -190,11 +190,29 @@ their defaults are in `/docs`, under Settings).
   settings, skills, MCP servers and logins. **Use my config** fills the list. Sign-ins are never
   copied.
 - **Limits:** how much work one message may cause: how deep agents may ask each other, how many
-  turns, and the cost.
+  turns, and the cost; and how many turns agents start may run at once (see [Limits](#limits)).
 
 Whether a session runs Direct, Copy or Locked is a per-session choice in **New Session**, not a
 global setting; see [How a session runs](#how-a-session-runs-direct-copy-locked). A Copy's folder is
 cloned copy-on-write where the disk supports it, so a big `node_modules` costs nothing to copy.
+
+## Limits
+
+Turns you send start at once. They wait only for a turn already running in their workspace (one
+copy runs one turn at a time) and for their own session's earlier turns. They never wait for work
+agents asked for that has not started yet, even in the same workspace: your message goes ahead of it.
+
+Turns agents start are **delegated** work: a turn an agent asks for (`ask_agent`, a review it
+starts, a turn it sends with `agentbus-api`), in any session, your own included, and a reply
+AgentBus delivers into a session an agent started. Who asked decides it, not where the turn runs. One runner runs at most
+**8** of them at once. More wait in the queue, oldest first, and start as places free up. A reply
+delivered into your own session counts as yours.
+
+The number is `[limits] max_delegated_at_once` in the settings
+(`/api/v0/settings/permissions`), 1 to 64. A change holds for the next turn a runner takes, with no
+restart. The Runners page shows how it stands, such as "8 at once, 5 busy, 2 waiting"
+(`delegated` in `GET /api/v0/runners`). A runner on another machine can set its own lower ceiling
+with `agentbus runner -capacity N`.
 
 ## Known limits
 

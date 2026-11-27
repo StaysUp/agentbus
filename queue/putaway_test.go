@@ -99,7 +99,7 @@ func (r *putAwayRig) fire() (int, error) {
 // takeNone says no job is taken now.
 func (r *putAwayRig) takeNone(t *testing.T) {
 	t.Helper()
-	if j, _, ok, _, err := r.q.Take(r.rn.ID, lease, false); err != nil || ok {
+	if j, _, ok, _, err := r.q.Take(r.rn.ID, lease, LaneInteractive); err != nil || ok {
 		t.Fatalf("took %s (%s), want nothing: err %v", j.ID, j.Kind, err)
 	}
 }

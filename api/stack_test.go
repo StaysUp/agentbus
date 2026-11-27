@@ -22,8 +22,10 @@ import (
 // stack is what a turn needs behind the API, as agentbus up has it: the job
 // queue, the jobs API, the engine and a runner that takes jobs over HTTP.
 type stack struct {
-	wire        run.Wire
-	maxRuns     int
+	wire run.Wire
+	// capacity is the runner's own ceiling of delegated turns; 0: the
+	// settings decide.
+	capacity    int
 	permissions string
 	grace       time.Duration
 	turnsToken  bool
@@ -49,9 +51,6 @@ func stackEnv(t *testing.T, s stack) *env {
 	srv := httptest.NewUnstartedServer(nil)
 	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
 	base := "http://127.0.0.1:" + port
-	if s.maxRuns == 0 {
-		s.maxRuns = run.DefaultMaxRuns
-	}
 	// permissions is a permissions.toml path: its folder is the settings'.
 	var cfgStore settings.Store
 	if s.permissions != "" {
@@ -60,7 +59,7 @@ func stackEnv(t *testing.T, s stack) *env {
 	if s.settings != nil {
 		cfgStore = s.settings
 	}
-	runCfg := run.Config{Store: st, BaseURL: base, Wire: s.wire, MaxRuns: s.maxRuns, Settings: cfgStore,
+	runCfg := run.Config{Store: st, BaseURL: base, Wire: s.wire, Settings: cfgStore,
 		RunGrace: s.grace}
 	if s.homes != "" {
 		runCfg.Homes = s.homes
@@ -82,7 +81,7 @@ func stackEnv(t *testing.T, s stack) *env {
 		t.Fatal(err)
 	}
 	js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollTok, Heartbeat: 50 * time.Millisecond,
-		MaxWait: 500 * time.Millisecond, Folders: fr, Blobs: bs, Record: st})
+		MaxWait: 500 * time.Millisecond, Folders: fr, Blobs: bs, Record: st, Settings: cfgStore})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +100,7 @@ func stackEnv(t *testing.T, s stack) *env {
 	// As in agentbus up: one runner holds the folders, sharing the blob
 	// store on disk.
 	conn := &connector.Connector{Folders: fr, Store: bs, State: filepath.Join(dir, "connector")}
-	rn, err := runner.Enroll(ctx, runner.Config{Queue: base, EnrollToken: enrollTok, Name: "test", Capacity: s.maxRuns,
+	rn, err := runner.Enroll(ctx, runner.Config{Queue: base, EnrollToken: enrollTok, Name: "test", Capacity: s.capacity,
 		Engine: eng, Store: st, Workdir: filepath.Join(dir, "sessions"), Settings: cfgStore, Logf: t.Logf, Folders: fr,
 		FolderSide: connector.Jobs{Connector: conn}, Lender: conn, Blobs: bs, BlobSink: bs})
 	if err != nil {

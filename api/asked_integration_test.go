@@ -36,12 +36,6 @@ func askEnv(t *testing.T) (*env, string) {
 
 // askEnvWith is askEnv with permissions.toml at perm ("" for none).
 func askEnvWith(t *testing.T, perm string) (*env, string) {
-	return askEnvCap(t, perm, 16)
-}
-
-// askEnvCap is askEnvWith with a chosen runner capacity, so a test can hold the
-// one slot and keep an asked turn queued.
-func askEnvCap(t *testing.T, perm string, maxRuns int) (*env, string) {
 	t.Helper()
 	dir := t.TempDir()
 	script := `for a; do p="$a"; done; echo '{"type":"result","session_id":"sid-'$$'"}'; ` +
@@ -52,7 +46,7 @@ func askEnvCap(t *testing.T, perm string, maxRuns int) (*env, string) {
 		return run.Launch{Path: "/bin/sh", Args: []string{"-c", script, "sh"},
 			Env: []string{"PATH=/usr/bin:/bin", "D=" + dir, "ANTHROPIC_BASE_URL=" + baseURL}}, nil
 	}
-	return stackEnv(t, stack{wire: wire, maxRuns: maxRuns, permissions: perm}), dir
+	return stackEnv(t, stack{wire: wire, permissions: perm}), dir
 }
 
 // firstTurn runs the three calls a first turn now needs (POST /workspaces, POST
@@ -450,26 +444,27 @@ func TestReviewTurnAppNoTurnDelivers(t *testing.T) {
 
 // ask_agent's startTurn step does not wait for a runner (POST /turns never
 // waits, C1 2026-11-25): it returns once the turn is recorded, so registerOn runs in
-// the same tool call even while the turn is only queued. Here the root turn
-// holds the one runner slot, so the asked turn cannot start during the call —
-// yet the app returns its id and its on is registered. When root ends and the
-// asked turn finally runs, its reply still delivers.
+// the same tool call even while the turn is only queued. Here the asked session
+// is in root's workspace (ask_agent opens it there), so the asked turn waits in
+// the workspace's lane while root runs, and cannot start during the call — yet
+// the app returns its id and its on is registered. When root ends and the asked
+// turn finally runs, its reply still delivers.
 func TestAskAgentAppQueuedStillGetsOn(t *testing.T) {
 	perm := filepath.Join(t.TempDir(), settings.PolicyFile)
 	if err := os.WriteFile(perm, []byte("allow = [\"ask_agent\"]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	e, dir := askEnvCap(t, perm, 1) // one runner slot: root occupies it
+	e, dir := askEnvWith(t, perm)
 	repo := gitRepo(t)
 	root := e.firstTurn(t, repo, "claude", "root", true)
-	tok := tokenOf(t, dir, "root") // root is running now, holding the slot
+	tok := tokenOf(t, dir, "root") // root is running now, in the workspace's lane
 
 	turn, _ := callAskAgent(t, e, tok,
 		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ask_agent","arguments":{"agent":"claude","prompt":"quick"}}}`)
 	if turn == "" {
 		t.Fatal("ask_agent returned no turn")
 	}
-	// The asked turn is only queued: no runner is free to start it.
+	// The asked turn is only queued: root holds the workspace's lane.
 	j, err := e.q.JobByTurn(queue.DefaultTeam, turn)
 	if err != nil || j.State != queue.Queued {
 		t.Fatalf("asked turn state %q (err %v), want queued", j.State, err)
@@ -488,12 +483,76 @@ func TestAskAgentAppQueuedStillGetsOn(t *testing.T) {
 	if !found {
 		t.Fatalf("no on watching the queued turn %s for %s: %+v", turn, root.Session, ons)
 	}
-	// Release root; the slot frees, the asked turn runs and ends, and its reply
+	// Release root; the lane frees, the asked turn runs and ends, and its reply
 	// delivers back to root through the on registered while it was queued.
 	release(dir, "root")
 	got := deliverUntil(t, e, root.Session, 1)
 	if got[0].Origin == nil || got[0].Origin.Turn != turn {
 		t.Fatalf("the queued turn's reply did not deliver: %+v", got)
+	}
+}
+
+// The 2026-11-26 case through the API and a runner over HTTP (Grok review
+// evt_e3e61c1e333c80c6, P1): the person's coordinator asks for three builders
+// while its turn runs; ask_agent opens their sessions in its workspace, so
+// they queue in its lane. The person then sends the coordinator a message.
+// When the coordinator's turn ends, the message runs before any builder: a
+// queued delegated turn holds no copy. Before the fix it ran after all three.
+func TestPersonsMessageGoesAheadOfAskedBuilders(t *testing.T) {
+	perm := filepath.Join(t.TempDir(), settings.PolicyFile)
+	if err := os.WriteFile(perm, []byte("allow = [\"ask_agent\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e, dir := askEnvWith(t, perm)
+	root := e.firstTurn(t, gitRepo(t), "claude", "root", true)
+	tok := tokenOf(t, dir, "root")
+	for i, b := range []string{"b1", "b2", "b3"} {
+		turn, _ := callAskAgent(t, e, tok, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"ask_agent","arguments":{"agent":"claude","prompt":%q}}}`, i+1, b))
+		if j, err := e.q.JobByTurn(queue.DefaultTeam, turn); err != nil || j.State != queue.Queued {
+			t.Fatalf("builder %s: %q %v, want queued behind the coordinator", b, j.State, err)
+		}
+	}
+	msg := startTurn(t, e, fmt.Sprintf(`{"session":%q,"agent":"claude","prompt":"next"}`, root.Session))
+	if msg.State != "queued" || msg.Ahead != 1 {
+		t.Fatalf("the person's message: %+v, want queued behind the coordinator's running turn only", msg)
+	}
+	release(dir, "root")
+	tokenOf(t, dir, "next")
+	for _, b := range []string{"b1", "b2", "b3"} {
+		if _, err := os.Stat(filepath.Join(dir, "args-"+b)); err == nil {
+			t.Fatalf("builder %s ran before the person's message", b)
+		}
+	}
+	for _, p := range []string{"next", "b1", "b2", "b3"} {
+		release(dir, p)
+	}
+}
+
+// Through the API (Codex review evt_ffeb7b5ccdb2ee05): a turn token that
+// starts a turn in its own root session, the person's session, starts
+// delegated work, counted against the limit. The person's own next message in
+// that session is not.
+func TestAgentTurnInTheRootSessionIsDelegated(t *testing.T) {
+	e, dir := askEnvWith(t, "")
+	root := e.firstTurn(t, gitRepo(t), "claude", "root", true)
+	tok := tokenOf(t, dir, "root")
+	code, out := as(t, e, tok, "POST", "/api/v0/turns", fmt.Sprintf(`{"session":%q,"agent":"claude","prompt":"again"}`, root.Session))
+	var st Started
+	if code != 202 || json.Unmarshal([]byte(out), &st) != nil {
+		t.Fatalf("the agent's turn: %d %s", code, out)
+	}
+	j, err := e.q.JobByTurn(queue.DefaultTeam, st.Turn)
+	d, derr := e.q.JobDelegated(queue.DefaultTeam, j.ID)
+	if err != nil || derr != nil || !d || j.Tree != j.Session {
+		t.Fatalf("the agent's turn in its root session: %+v %v, want delegated", j, err)
+	}
+	mine := startTurn(t, e, fmt.Sprintf(`{"session":%q,"agent":"claude","prompt":"mine"}`, root.Session))
+	m, err := e.q.JobByTurn(queue.DefaultTeam, mine.Turn)
+	if d, derr := e.q.JobDelegated(queue.DefaultTeam, m.ID); err != nil || derr != nil || d {
+		t.Fatalf("the person's message: %+v %v, want not delegated", m, err)
+	}
+	for _, p := range []string{"root", "again", "mine"} {
+		release(dir, p)
 	}
 }
 

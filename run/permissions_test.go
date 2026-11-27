@@ -183,7 +183,7 @@ func TestUnknownAccessHoldsNoSlot(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	e, err := New(Config{Store: st, BaseURL: "http://127.0.0.1:1", MaxRuns: 1,
+	e, err := New(Config{Store: st, BaseURL: "http://127.0.0.1:1",
 		Wire: func(agent, baseURL string, _ Access) (Launch, error) { return Launch{}, ErrNotFound }})
 	if err != nil {
 		t.Fatal(err)

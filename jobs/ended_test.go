@@ -36,7 +36,7 @@ func endTurn(t *testing.T, q *queue.Queue, r queue.Runner, status, reason string
 	if _, _, err := q.Create(queue.DefaultTeam, queue.KindTurn, "", queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"}, queue.Links{}); err != nil {
 		t.Fatal(err)
 	}
-	jb, a, ok, _, err := q.Take(r.ID, testLease, false)
+	jb, a, ok, _, err := q.Take(r.ID, testLease, queue.LaneInteractive)
 	if err != nil || !ok {
 		t.Fatalf("take: ok=%v err=%v", ok, err)
 	}

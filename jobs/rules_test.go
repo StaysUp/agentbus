@@ -37,7 +37,7 @@ func TestTurnRulesPinnedAtStart(t *testing.T) {
 	r := enroll(t, srv, 1)
 	makeJob(t, q, queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"})
 	var taken TakenWork
-	if code := send(t, srv, r.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, &taken); code != 200 || taken.Attempt == nil {
+	if code := send(t, srv, r.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion, Lane: queue.LaneInteractive}, &taken); code != 200 || taken.Attempt == nil {
 		t.Fatalf("take: %d", code)
 	}
 	att := "/api/v0/runner/attempts/" + taken.Attempt.ID + "/start"
@@ -89,7 +89,7 @@ func startTwice(t *testing.T, st settings.Store, edit func()) (first, again Atte
 	r := enroll(t, srv, 1)
 	makeJob(t, q, queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"})
 	var taken TakenWork
-	if code := send(t, srv, r.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, &taken); code != 200 || taken.Attempt == nil {
+	if code := send(t, srv, r.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion, Lane: queue.LaneInteractive}, &taken); code != 200 || taken.Attempt == nil {
 		t.Fatalf("take: %d", code)
 	}
 	att := "/api/v0/runner/attempts/" + taken.Attempt.ID + "/start"

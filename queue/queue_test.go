@@ -57,7 +57,7 @@ func job(t *testing.T, q *Queue, key string) Job {
 
 func take(t *testing.T, q *Queue, r Runner) (Job, Attempt) {
 	t.Helper()
-	j, a, ok, _, err := q.Take(r.ID, lease, false)
+	j, a, ok, err := takeEither(q, r)
 	if err != nil || !ok {
 		t.Fatalf("take: ok %v err %v", ok, err)
 	}
@@ -67,7 +67,7 @@ func take(t *testing.T, q *Queue, r Runner) (Job, Attempt) {
 // takeFolder is take of a folder job, in one of the runner's folder places.
 func takeFolder(t *testing.T, q *Queue, r Runner) (Job, Attempt) {
 	t.Helper()
-	j, a, ok, _, err := q.Take(r.ID, lease, true)
+	j, a, ok, _, err := q.Take(r.ID, lease, LaneFolders)
 	if err != nil || !ok {
 		t.Fatalf("take a folder job: ok %v err %v", ok, err)
 	}
@@ -119,8 +119,19 @@ func TestStates(t *testing.T) {
 }
 
 func takeAny(q *Queue, r Runner) (Attempt, bool, error) {
-	_, a, ok, _, err := q.Take(r.ID, lease, false)
+	_, a, ok, err := takeEither(q, r)
 	return a, ok, err
+}
+
+// takeEither takes the next job of the interactive lane, or else of the
+// delegated one, as a runner's two turn takes would between them.
+func takeEither(q *Queue, r Runner) (Job, Attempt, bool, error) {
+	j, a, ok, _, err := q.Take(r.ID, lease, LaneInteractive)
+	if err != nil || ok {
+		return j, a, ok, err
+	}
+	j, a, ok, _, err = q.Take(r.ID, lease, LaneDelegated)
+	return j, a, ok, err
 }
 
 // A finish sent twice answers the same; a different finish of the same
@@ -311,12 +322,13 @@ func TestCancel(t *testing.T) {
 	}
 }
 
-// A runner holds at most its capacity of taken and running attempts.
+// A runner holds at most its capacity of taken and running delegated turns,
+// even when the settings allow more.
 func TestCapacity(t *testing.T) {
 	q, _ := open(t)
 	r := runner(t, q, 3)
 	for range 5 {
-		job(t, q, "")
+		delegated(t, q)
 	}
 	var held []Attempt
 	for range 3 {
@@ -339,7 +351,7 @@ func TestCapacity(t *testing.T) {
 	q2, _ := open(t)
 	r2 := runner(t, q2, 3)
 	for range 10 {
-		job(t, q2, "")
+		delegated(t, q2)
 	}
 	var wg sync.WaitGroup
 	var mu sync.Mutex
@@ -454,7 +466,7 @@ func TestSessionAffinityAndClose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, att, ok, _, err := q.Take(a.ID, lease, false)
+	_, att, ok, _, err := q.Take(a.ID, lease, LaneInteractive)
 	if err != nil || !ok || att.Job != first.ID {
 		t.Fatalf("take: %v %v", ok, err)
 	}
@@ -467,10 +479,10 @@ func TestSessionAffinityAndClose(t *testing.T) {
 		t.Fatalf("first: %+v %v", done.Workspace, err)
 	}
 	next, _, _ := q.Create(DefaultTeam, KindTurn, "", Spec{Session: ids.SessionID(s1), Prompt: "two"}, Links{})
-	if _, _, ok, _, _ := q.Take(b.ID, lease, false); ok {
+	if _, _, ok, _, _ := q.Take(b.ID, lease, LaneInteractive); ok {
 		t.Fatal("another runner took the session's job")
 	}
-	j, att2, ok, _, err := q.Take(a.ID, lease, false)
+	j, att2, ok, _, err := q.Take(a.ID, lease, LaneInteractive)
 	if err != nil || !ok || j.ID != next.ID || j.Workspace == nil || j.Workspace.Folder != "/w/job_1" {
 		t.Fatalf("the session's runner: %+v %v %v", j.Workspace, ok, err)
 	}
@@ -494,10 +506,10 @@ func TestSessionAffinityAndClose(t *testing.T) {
 	}
 	// Delete-on-close is retired: Take hands no cleanup, to this runner or any
 	// other, so the closed session's copy is kept, not removed.
-	if _, _, _, c, err := q.Take(b.ID, lease, false); err != nil || c != nil {
+	if _, _, _, c, err := q.Take(b.ID, lease, LaneInteractive); err != nil || c != nil {
 		t.Fatalf("another runner got a cleanup: %+v %v", c, err)
 	}
-	if _, _, _, c, err := q.Take(a.ID, lease, false); err != nil || c != nil {
+	if _, _, _, c, err := q.Take(a.ID, lease, LaneInteractive); err != nil || c != nil {
 		t.Fatalf("the session's runner got a cleanup: %+v %v", c, err)
 	}
 	// The row stays closed with its copy present: nothing was removed.
@@ -515,7 +527,7 @@ func TestUnknownSessionAnyRunner(t *testing.T) {
 	q, _ := open(t)
 	r := runner(t, q, 1)
 	j, _, _ := q.Create(DefaultTeam, KindTurn, "", Spec{Session: "outside", Prompt: "x"}, Links{})
-	got, _, ok, _, err := q.Take(r.ID, lease, false)
+	got, _, ok, _, err := q.Take(r.ID, lease, LaneInteractive)
 	if err != nil || !ok || got.ID != j.ID || got.Workspace != nil {
 		t.Fatalf("%+v %v %v", got, ok, err)
 	}

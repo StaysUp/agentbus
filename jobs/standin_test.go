@@ -69,7 +69,7 @@ func TestStandIn(t *testing.T) {
 		if _, _, err := q.Create(queue.DefaultTeam, queue.KindTurn, "", queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"}, queue.Links{}); err != nil {
 			t.Fatal(err)
 		}
-		_, a, ok, _, err := q.Take(rn.ID, 30*time.Second, false)
+		_, a, ok, _, err := q.Take(rn.ID, 30*time.Second, queue.LaneInteractive)
 		if err != nil || !ok {
 			t.Fatalf("take: %v %v", ok, err)
 		}

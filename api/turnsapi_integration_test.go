@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,22 +15,56 @@ import (
 
 	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
+	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 )
 
 // heldEnv starts an API with a whole stack whose turns run a shell that marks
-// <dir>/child-<pid> and waits for <dir>/release, with at most maxRuns at
-// once. A turn no runner starts within 2 seconds answers queued.
-func heldEnv(t *testing.T, maxRuns int) (*env, string) {
+// <dir>/child-<pid> and waits for <dir>/release. A turn no runner starts
+// within 2 seconds answers queued.
+func heldEnv(t *testing.T) (*env, string) {
 	t.Helper()
+	dir := t.TempDir()
+	// It names its session first, as claude does, so a session whose turn was
+	// stopped can still be continued.
+	script := `echo '{"type":"result","session_id":"sid-'$$'"}'; : > "$D/child-$$"; i=0; while [ ! -e "$D/release" ] && [ $i -lt 1000 ]; do sleep 0.02; i=$((i+1)); done`
+	wire := func(agent, baseURL string, _ run.Access) (run.Launch, error) {
+		return run.Launch{Path: "/bin/sh", Args: []string{"-c", script, "sh"}, Env: []string{"PATH=/usr/bin:/bin", "D=" + dir}}, nil
+	}
+	e := stackEnv(t, stack{wire: wire, turnsToken: true, turnWait: 2 * time.Second})
+	t.Cleanup(func() { os.WriteFile(filepath.Join(dir, "release"), nil, 0o600) })
+	return e, dir
+}
+
+// The person's turns are not counted (queue/lanes.go): with one delegated
+// place and a runner whose own capacity is 1, three turns sent to three
+// sessions all run at once. Before 0.6.7 the third waited for a place, and on
+// 2026-11-26 his messages waited 10+ minutes behind builders his coordinator
+// had started.
+func TestPersonsTurnsStartAtOnce(t *testing.T) {
 	dir := t.TempDir()
 	script := `: > "$D/child-$$"; i=0; while [ ! -e "$D/release" ] && [ $i -lt 1000 ]; do sleep 0.02; i=$((i+1)); done`
 	wire := func(agent, baseURL string, _ run.Access) (run.Launch, error) {
 		return run.Launch{Path: "/bin/sh", Args: []string{"-c", script, "sh"}, Env: []string{"PATH=/usr/bin:/bin", "D=" + dir}}, nil
 	}
-	e := stackEnv(t, stack{wire: wire, maxRuns: maxRuns, turnsToken: true, turnWait: 2 * time.Second})
+	perm := filepath.Join(t.TempDir(), settings.PolicyFile)
+	if err := os.WriteFile(perm, []byte("[limits]\nmax_delegated_at_once = 1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e := stackEnv(t, stack{wire: wire, turnsToken: true, capacity: 1, permissions: perm})
 	t.Cleanup(func() { os.WriteFile(filepath.Join(dir, "release"), nil, 0o600) })
-	return e, dir
+	folder := t.TempDir()
+	for i := range 3 {
+		body := `{"session":"` + e.newSession(t, folder, true) + `","agent":"claude","prompt":"p` + strconv.Itoa(i) + `"}`
+		if code, out := asTok(t, e, turnsTok, "POST", "/api/v0/turns", body); code != 202 {
+			t.Fatalf("turn %d: %d %s", i, code, out)
+		}
+	}
+	for deadline := time.Now().Add(10 * time.Second); children(t, dir) < 3; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d of the person's 3 turns run at once, want 3", children(t, dir))
+		}
+	}
 }
 
 func children(t *testing.T, dir string) int {
@@ -44,7 +79,7 @@ func children(t *testing.T, dir string) int {
 // Requests sent at once under one key start one turn and one child, and all
 // of them name that turn. GET /api/v0/turns/{id} follows it to its end.
 func TestIdempotentStartStartsOneChild(t *testing.T) {
-	e, dir := heldEnv(t, 4)
+	e, dir := heldEnv(t)
 	sess := e.newSession(t, t.TempDir(), true)
 	body := `{"session":"` + sess + `","agent":"claude","prompt":"hello","idempotency_key":"job-1"}`
 	const n = 6
@@ -189,56 +224,66 @@ func TestIdempotencyKey(t *testing.T) {
 	}
 }
 
-// With MaxRuns 1 a second turn is queued while the first runs: the answer
-// says queued, with its turn and session. The turns token may stop
-// a turn. Once the first has ended the second runs, and the same request
+// A second turn of a session is queued while its first runs: the answer
+// says queued, with its turn and session. A turn of another session starts at
+// once beside them (the person's turns are not counted), and the turns token
+// may stop it. Once the first has ended the second runs, and the same request
 // with its key then names its turn.
-func TestMaxRunsQueuesAndStopWithTurnsToken(t *testing.T) {
-	e, dir := heldEnv(t, 1)
+func TestQueuedBehindItsSessionAndStopWithTurnsToken(t *testing.T) {
+	e, dir := heldEnv(t)
 	folder := t.TempDir()
 	sess1 := e.newSession(t, folder, true)
 	code, out := asTok(t, e, turnsTok, "POST", "/api/v0/turns", `{"session":"`+sess1+`","agent":"claude","prompt":"one"}`)
 	if code != 202 {
 		t.Fatalf("first: %d %s", code, out)
 	}
-	var first Started
-	_ = json.Unmarshal([]byte(out), &first)
-	second := `{"session":"` + e.newSession(t, folder, true) + `","agent":"claude","prompt":"two","idempotency_key":"k2"}`
+	for deadline := time.Now().Add(10 * time.Second); children(t, dir) < 1; time.Sleep(20 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the first turn did not start")
+		}
+	}
+	second := `{"session":"` + sess1 + `","agent":"claude","prompt":"two","idempotency_key":"k2"}`
 	code, out = asTok(t, e, turnsTok, "POST", "/api/v0/turns", second)
 	var queued Started
 	_ = json.Unmarshal([]byte(out), &queued)
-	if code != 202 || queued.State != "queued" || queued.Turn == "" || queued.Session == "" {
-		t.Fatalf("second: %d %s, want 202 queued with its turn", code, out)
+	if code != 202 || queued.State != "queued" || queued.Turn == "" || queued.Session != sess1 || queued.Ahead != 1 {
+		t.Fatalf("second: %d %s, want 202 queued behind the first", code, out)
+	}
+	code, out = asTok(t, e, turnsTok, "POST", "/api/v0/turns", `{"session":"`+e.newSession(t, folder, true)+`","agent":"claude","prompt":"other"}`)
+	var other Started
+	_ = json.Unmarshal([]byte(out), &other)
+	if code != 202 {
+		t.Fatalf("other: %d %s", code, out)
 	}
 	// The stop is sent once the agent runs, so it stops a running turn and
 	// the run ends. (A stop while the copy is still being made ends the turn
 	// before any run starts, so no run.ended would come: #95.)
-	for deadline := time.Now().Add(10 * time.Second); children(t, dir) == 0; time.Sleep(10 * time.Millisecond) {
+	for deadline := time.Now().Add(10 * time.Second); children(t, dir) < 2; time.Sleep(20 * time.Millisecond) {
 		if time.Now().After(deadline) {
-			t.Fatal("the first turn's agent never started")
+			t.Fatal("a turn of another session did not start beside the first")
 		}
 	}
-	if code, out := asTok(t, e, turnsTok, "POST", "/api/v0/turns/"+first.Turn+"/stop", ""); code != 202 {
+	if code, out := asTok(t, e, turnsTok, "POST", "/api/v0/turns/"+other.Turn+"/stop", ""); code != 202 {
 		t.Fatalf("stop: %d %s", code, out)
 	}
-	waitRunEnded(t, e.store, first.Session)
-	code, s, out := untilStarted(t, func() (int, string) { return asTok(t, e, turnsTok, "POST", "/api/v0/turns", second) })
-	if code != 202 || s.State != "running" || s.Turn != queued.Turn || !s.Existing || s.Session != queued.Session {
-		t.Fatalf("second, after the first ended: %d %s", code, out)
-	}
+	waitRunEnded(t, e.store, other.Session)
 	// A stopped turn reads stopped: one word, whichever side is asked.
-	if _, one := asTok(t, e, turnsTok, "GET", "/api/v0/turns/"+first.Turn, ""); !strings.Contains(one, `"stopped":true`) || !strings.Contains(one, `"state":"stopped"`) {
+	if _, one := asTok(t, e, turnsTok, "GET", "/api/v0/turns/"+other.Turn, ""); !strings.Contains(one, `"stopped":true`) || !strings.Contains(one, `"state":"stopped"`) {
 		t.Fatalf("the stopped turn: %s", one)
 	}
-	if j := waitEnded(t, e, first.Turn); j.State != queue.Cancelled || queue.TurnState(j.State) != "stopped" {
+	if j := waitEnded(t, e, other.Turn); j.State != queue.Cancelled || queue.TurnState(j.State) != "stopped" {
 		t.Fatalf("the stopped turn's job: %s", j.State)
 	}
 	// A stop of a turn that has ended gets 409; of no turn, 404.
-	if code, _ := asTok(t, e, turnsTok, "POST", "/api/v0/turns/"+first.Turn+"/stop", ""); code != 409 {
+	if code, _ := asTok(t, e, turnsTok, "POST", "/api/v0/turns/"+other.Turn+"/stop", ""); code != 409 {
 		t.Fatalf("a second stop: %d, want 409", code)
 	}
 	if code, _ := asTok(t, e, turnsTok, "POST", "/api/v0/turns/t_none/stop", ""); code != 404 {
 		t.Fatalf("a stop of no turn: %d, want 404", code)
 	}
-	_ = dir
+	os.WriteFile(filepath.Join(dir, "release"), nil, 0o600)
+	code, st, out := untilStarted(t, func() (int, string) { return asTok(t, e, turnsTok, "POST", "/api/v0/turns", second) })
+	if code != 202 || st.State == "queued" || st.Turn != queued.Turn || !st.Existing || st.Session != sess1 {
+		t.Fatalf("second, after the first ended: %d %s", code, out)
+	}
 }

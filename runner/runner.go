@@ -44,7 +44,12 @@ type Config struct {
 	EnrollToken string
 	Name        string
 	Labels      []string
-	Capacity    int // jobs at once; 0 means run.DefaultMaxRuns
+	// Capacity is the most delegated turns (turns agents started) this
+	// machine runs at once, whatever the settings say; control takes the
+	// smaller of the two. 0 means jobs.MaxCapacity: the settings decide
+	// ([limits] max_delegated_at_once). The person's own turns are never
+	// counted (queue/lanes.go).
+	Capacity int
 	// Version is this runner's release, such as 0.6.0 ("dev" for a build from
 	// a clone). The runner refuses to start against a control whose release is
 	// older, so control is upgraded first. Empty, or either side not a release,
@@ -165,7 +170,7 @@ var ErrNotSignedIn = errors.New("this machine is not signed in to this control, 
 // ErrNotSignedIn.
 func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 	if cfg.Capacity == 0 {
-		cfg.Capacity = run.DefaultMaxRuns
+		cfg.Capacity = jobs.MaxCapacity
 	}
 	if cfg.StopWait == 0 {
 		cfg.StopWait = time.Minute
@@ -384,10 +389,13 @@ func (r *Runner) ID() string { return r.id }
 // (settings.Remote). It is never logged.
 func (r *Runner) Token() string { return r.token }
 
-// Run takes and runs jobs, Capacity at once, until ctx ends, and with its
-// folders as many as queue.FolderCapacity folder jobs besides, so an apply
-// never waits behind running turns. A job still running then has its turn
-// stopped and is finished as failed with reason runner_stopped.
+// Run takes and runs jobs until ctx ends: in each turn lane (queue.Lane),
+// one take at a time, running every job it gets beside the others, since
+// control counts the lane's places (the delegated limit; interactive work is
+// not counted); and, with its folders, as many as queue.FolderCapacity folder
+// jobs besides, so an apply never waits behind running turns. A job still
+// running then has its turn stopped and is finished as failed with reason
+// runner_stopped.
 func (r *Runner) Run(ctx context.Context) {
 	// What a runner here left mounted, if it did not stop cleanly, is
 	// unmounted first; each session mounts its copy again when it next
@@ -404,11 +412,17 @@ func (r *Runner) Run(ctx context.Context) {
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go r.report(ctx, &wg)
-	for range r.cfg.Capacity {
+	for _, lane := range []queue.Lane{queue.LaneInteractive, queue.LaneDelegated} {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r.loop(ctx, false)
+			r.loop(ctx, lane, func(j queue.Job, a queue.Attempt) {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					r.work(ctx, j, a)
+				}()
+			})
 		}()
 	}
 	if r.cfg.FolderSide != nil {
@@ -416,7 +430,7 @@ func (r *Runner) Run(ctx context.Context) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				r.loop(ctx, true)
+				r.loop(ctx, queue.LaneFolders, func(j queue.Job, a queue.Attempt) { r.work(ctx, j, a) })
 			}()
 		}
 	}
@@ -462,13 +476,14 @@ func (r *Runner) loadIn(load func(workdir string) (*isolation.Space, error)) (*i
 	return nil, err
 }
 
-// loop takes and runs one job at a time until ctx ends: folder jobs of this
-// machine with folders, else turns and reviews.
-func (r *Runner) loop(ctx context.Context, folders bool) {
+// loop takes the jobs of lane, one take at a time, until ctx ends, and hands
+// each to do: a folder loop runs it before its next take, a turn lane's runs
+// it beside the others.
+func (r *Runner) loop(ctx context.Context, lane queue.Lane, do func(queue.Job, queue.Attempt)) {
 	for ctx.Err() == nil {
 		var t jobs.TakenWork
 		status, err := call(ctx, r.cfg.HTTP, r.cfg.Queue+"/api/v0/runner/take", r.token,
-			jobs.TakeRequest{WaitMS: jobs.MaxWait.Milliseconds(), Protocol: jobs.ProtocolVersion, Folders: folders}, &t)
+			jobs.TakeRequest{WaitMS: jobs.MaxWait.Milliseconds(), Protocol: jobs.ProtocolVersion, Lane: lane}, &t)
 		switch {
 		case ctx.Err() != nil:
 			return
@@ -491,7 +506,7 @@ func (r *Runner) loop(ctx context.Context, folders bool) {
 		case t.Job == nil || t.Attempt == nil:
 			continue
 		}
-		r.work(ctx, *t.Job, *t.Attempt)
+		do(*t.Job, *t.Attempt)
 	}
 }
 

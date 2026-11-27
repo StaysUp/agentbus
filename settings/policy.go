@@ -87,6 +87,8 @@ max_depth = 2                # levels of asking below the person's turn
 max_jobs_per_turn = 10       # turns and reviews one turn may ask for, ons it registers included
 max_jobs_per_tree = 30       # turns and reviews one request tree may ask for in all, ons included
 max_cost_usd_per_tree = 0.0  # USD the turns of one request tree may cost before it gets no more; 0 is off
+max_delegated_at_once = 8    # turns agents started that one runner runs at once, 1 to 64; more wait.
+                             # Turns you send are not counted: they start at once.
 
 # What a turn's own token may call.
 [agent_api]
@@ -123,6 +125,13 @@ const (
 	DefaultMaxDepth       = 2
 	DefaultMaxJobsPerTurn = 10
 	DefaultMaxJobsPerTree = 30
+	// DefaultMaxDelegatedAtOnce is how many delegated turns (turns agents
+	// started) one runner runs at once (his call, 2026-11-26: measured on a
+	// 10-core, 16 GB Mac, an agent process takes ~60 MB, so CPU and memory are
+	// not the limit). Turns the person sends are not counted.
+	DefaultMaxDelegatedAtOnce = 8
+	// MaxDelegatedAtOnce bounds the setting, as a runner's capacity is bounded.
+	MaxDelegatedAtOnce = 64
 	// DefaultPutAwayAfterMinutes is how long a settled workspace stays quiet
 	// before its copy is put away (his call, 2026-11-26).
 	DefaultPutAwayAfterMinutes = 30
@@ -166,6 +175,15 @@ type Workspaces struct {
 	PutAwayAfterMinutes *int `toml:"put_away_after_minutes" json:"put_away_after_minutes,omitempty" doc:"Minutes a sandbox workspace whose work is all applied or discarded stays quiet before AgentBus puts its copy away by itself. A copy with work not applied is never touched; the next turn makes a fresh copy. 0 is off. Absent in a PUT: 30."`
 }
 
+// DelegatedAtOnce is how many delegated turns one runner runs at once
+// ([limits] max_delegated_at_once).
+func (p Policy) DelegatedAtOnce() int {
+	if v := p.Limits.MaxDelegatedAtOnce; v != nil {
+		return *v
+	}
+	return DefaultMaxDelegatedAtOnce
+}
+
 // PutAwayAfter is how long a settled workspace stays quiet before its copy is
 // put away; false when putting copies away is off.
 func (p Policy) PutAwayAfter() (time.Duration, bool) {
@@ -179,10 +197,11 @@ func (p Policy) PutAwayAfter() (time.Duration, bool) {
 // Limits are the caps on work agents ask for ([limits]). A pointer is a key
 // left out; once read from a store each is set.
 type Limits struct {
-	MaxDepth          *int     `toml:"max_depth" json:"max_depth,omitempty" doc:"Levels of asking below the person's turn. Absent in a PUT: 2."`
-	MaxJobsPerTurn    *int     `toml:"max_jobs_per_turn" json:"max_jobs_per_turn,omitempty" doc:"Turns and reviews one turn may ask for. An on the turn registers with POST /api/v0/ons counts as one. Absent in a PUT: 10."`
-	MaxJobsPerTree    *int     `toml:"max_jobs_per_tree" json:"max_jobs_per_tree,omitempty" doc:"Turns and reviews one request tree may ask for in all. An on a turn of the tree registers with POST /api/v0/ons counts as one. Absent in a PUT: 30."`
-	MaxCostUSDPerTree *float64 `toml:"max_cost_usd_per_tree" json:"max_cost_usd_per_tree,omitempty" doc:"USD the turns of one request tree may cost in all before it gets no more turns: no asked work, and no reply an on delivers. Only the tree's own turns count, wherever they ran. 0 is off. Absent in a PUT: 0."`
+	MaxDepth           *int     `toml:"max_depth" json:"max_depth,omitempty" doc:"Levels of asking below the person's turn. Absent in a PUT: 2."`
+	MaxJobsPerTurn     *int     `toml:"max_jobs_per_turn" json:"max_jobs_per_turn,omitempty" doc:"Turns and reviews one turn may ask for. An on the turn registers with POST /api/v0/ons counts as one. Absent in a PUT: 10."`
+	MaxJobsPerTree     *int     `toml:"max_jobs_per_tree" json:"max_jobs_per_tree,omitempty" doc:"Turns and reviews one request tree may ask for in all. An on a turn of the tree registers with POST /api/v0/ons counts as one. Absent in a PUT: 30."`
+	MaxDelegatedAtOnce *int     `toml:"max_delegated_at_once" json:"max_delegated_at_once,omitempty" doc:"Delegated turns one runner runs at once: turns an agent started, and the replies delivered into sessions agents started. More wait in the queue, oldest first. Turns the person sends, and replies delivered into the person's own sessions, are not counted and start at once. A change holds for the next turn a runner takes, with no restart. 1 to 64. Absent in a PUT: 8."`
+	MaxCostUSDPerTree  *float64 `toml:"max_cost_usd_per_tree" json:"max_cost_usd_per_tree,omitempty" doc:"USD the turns of one request tree may cost in all before it gets no more turns: no asked work, and no reply an on delivers. Only the tree's own turns count, wherever they ran. 0 is off. Absent in a PUT: 0."`
 }
 
 // DefaultPolicy is the policy of a missing or empty file.
@@ -221,6 +240,7 @@ func (p *Policy) fill() {
 	setInt(&p.Limits.MaxDepth, DefaultMaxDepth)
 	setInt(&p.Limits.MaxJobsPerTurn, DefaultMaxJobsPerTurn)
 	setInt(&p.Limits.MaxJobsPerTree, DefaultMaxJobsPerTree)
+	setInt(&p.Limits.MaxDelegatedAtOnce, DefaultMaxDelegatedAtOnce)
 	setInt(&p.Workspaces.PutAwayAfterMinutes, DefaultPutAwayAfterMinutes)
 	if p.Limits.MaxCostUSDPerTree == nil {
 		off := 0.0
@@ -248,6 +268,9 @@ func (p *Policy) Check() error {
 		if l.v != nil && *l.v < 0 {
 			return fmt.Errorf("[limits] %s must be 0 or more", l.name)
 		}
+	}
+	if v := p.Limits.MaxDelegatedAtOnce; v != nil && (*v < 1 || *v > MaxDelegatedAtOnce) {
+		return fmt.Errorf("[limits] max_delegated_at_once must be 1 to %d", MaxDelegatedAtOnce)
 	}
 	if v := p.Workspaces.PutAwayAfterMinutes; v != nil && *v < 0 {
 		return errors.New("[workspaces] put_away_after_minutes must be 0 (off) or more")
@@ -530,6 +553,7 @@ func FormatPolicy(p Policy) []byte {
 		"home_files":       p.HomeFiles,
 		"limits.max_depth": *p.Limits.MaxDepth, "limits.max_jobs_per_turn": *p.Limits.MaxJobsPerTurn,
 		"limits.max_jobs_per_tree": *p.Limits.MaxJobsPerTree, "limits.max_cost_usd_per_tree": *p.Limits.MaxCostUSDPerTree,
+		"limits.max_delegated_at_once":      *p.Limits.MaxDelegatedAtOnce,
 		"agent_api.apply":                   *p.AgentAPI.Apply,
 		"workspaces.put_away_after_minutes": *p.Workspaces.PutAwayAfterMinutes,
 	}

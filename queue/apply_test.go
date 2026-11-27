@@ -447,7 +447,7 @@ func TestSessionFromBeforeKeepsItsRunner(t *testing.T) {
 	home := capsRunner(t, q, nil, &Capabilities{Connector: conA})
 	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
 	// As 0.4 took it: bound to the far runner.
-	j, a, ok, _, err := q.Take(home.ID, lease, false)
+	j, a, ok, _, err := q.Take(home.ID, lease, LaneInteractive)
 	if err != nil || !ok || j.ID != first.ID {
 		t.Fatalf("take: %v %v", ok, err)
 	}
@@ -510,18 +510,25 @@ func TestApplyDoesNotWaitForRunningTurn(t *testing.T) {
 	}
 }
 
-// Folder jobs have places of their own: an apply is taken while every turn
-// place is busy, and at most FolderCapacity folder jobs run at once.
+// Folder jobs have places of their own: an apply is taken while every
+// delegated place is busy, and at most FolderCapacity folder jobs run at once.
 func TestFolderPlacesBesideTurns(t *testing.T) {
 	q, _ := open(t)
 	r, err := q.RegisterRunner(DefaultTeam, "r", nil, 1, HashToken(NewID("tok_")), &Capabilities{Connector: conA})
 	if err != nil {
 		t.Fatal(err)
 	}
-	makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA})
-	makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA})
-	if takes(t, q, r) == "" || takes(t, q, r) != "" {
-		t.Fatal("a runner of capacity 1 did not take exactly one turn")
+	for range 2 {
+		if _, _, err := q.CreateTurnLinked(DefaultTeam, "", Spec{Harness: "claude", FolderRef: refX, Machine: conA, Prompt: "hi"},
+			asked("p", NewID("t_"), "p", 1), testLimits, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, ok := takeLane(t, q, r, LaneDelegated); !ok {
+		t.Fatal("a runner of capacity 1 took no delegated turn")
+	}
+	if _, ok := takeLane(t, q, r, LaneDelegated); ok {
+		t.Fatal("a runner of capacity 1 took a second delegated turn")
 	}
 	for i := range FolderCapacity + 1 {
 		if _, err := q.RegisterFolder(DefaultTeam, conA, "/p/"+string(rune('a'+i))); err != nil {
@@ -709,7 +716,7 @@ func TestSessionEndsWithItsFirstTurn(t *testing.T) {
 				t.Fatalf("behind the first turn: %v", err)
 			}
 			c.end(t, q, clk, rn, first)
-			if j, _, ok, _, err := q.Take(rn.ID, lease, false); err != nil || ok {
+			if j, _, ok, _, err := q.Take(rn.ID, lease, LaneInteractive); err != nil || ok {
 				t.Fatalf("a runner took a turn: %v %v: %s (first %s, next %s)", ok, err, j.ID, first.ID, next.ID)
 			}
 			got := state(t, q, next.ID)
