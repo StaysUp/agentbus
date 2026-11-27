@@ -43,6 +43,9 @@ type fakeVendor struct {
 	// ctype, when set, is the reply's Content-Type instead, its body the
 	// same: a format the adapter may not read.
 	ctype string
+	// models, when set, is the JSON reply to GET /backend-api/codex/models:
+	// the models the ChatGPT account may use.
+	models string
 }
 
 func newFakeVendor(t *testing.T) *fakeVendor {
@@ -53,8 +56,13 @@ func newFakeVendor(t *testing.T) *fakeVendor {
 		v.auths = append(v.auths, r.URL.Path+" "+r.Header.Get("Authorization"))
 		v.accounts = append(v.accounts, r.Header.Get("ChatGPT-Account-ID"))
 		v.keys = append(v.keys, r.URL.Path+" "+r.Header.Get("X-Api-Key")+"|"+r.Header.Get("X-Goog-Api-Key"))
-		stream, ctype := v.stream, v.ctype
+		stream, ctype, models := v.stream, v.ctype, v.models
 		v.mu.Unlock()
+		if models != "" && r.Method == http.MethodGet && r.URL.Path == "/backend-api/codex/models" {
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, models)
+			return
+		}
 		if stream != nil {
 			w.Header()["Content-Type"] = nil // no type at all, not a sniffed one
 			w.Write(stream)
@@ -523,6 +531,61 @@ func TestRunnerUsesConnectedCodexSubscription(t *testing.T) {
 		list.Subscriptions[2].Harness != "codex" || !list.Subscriptions[2].Connected || !list.Subscriptions[2].Renews {
 		t.Fatalf("subscriptions: %d %+v", code, list)
 	}
+}
+
+// codex on its ChatGPT sign-in, on a runner of its own, asks the models its
+// account may use from the model_catalog_url its turn is wired with, and
+// picks its default from them (#112: without one it ran on its built-in
+// default, which the account refused). The ask goes from the runner's
+// gateway, on the turn's own path, through control's relay, which adds the
+// sign-in and its account and records the call in the turn.
+func TestRunnerCodexSubscriptionTurnAsksTheAccountsModels(t *testing.T) {
+	ns := startNoSecrets(t)
+	list := `{"models":[{"slug":"gpt-6-luna","visibility":"list"},{"slug":"gpt-5.6-terra","visibility":"list"}]}`
+	ns.chat.mu.Lock()
+	ns.chat.models = list
+	ns.chat.mu.Unlock()
+	catalog := filepath.Join(t.TempDir(), "catalog")
+	t.Setenv("AGENTBUS_FAKE_CALL", "")
+	t.Setenv("AGENTBUS_FAKE_CODEX_CATALOG", catalog)
+	if err := subscriptionStore(ns.serverHome).Keep("codex", credentials.Signin{Token: "fake-chatgpt-access-for-tests",
+		Refresh: "fake-chatgpt-refresh-for-tests", Account: "fake-account-1", Expires: time.Now().Add(time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	j := queueTurn(t, ns.server, ns.tok, map[string]any{"agent": "codex", "folder_ref": ns.ref, "connector": ns.connector, "prompt": "hello"})
+	if jj := waitJob(t, ns.server, ns.tok, j.ID); jj.State != queue.Finished {
+		t.Fatalf("job %s %s %s", jj.State, jj.Reason, jj.Result)
+	}
+	// codex got the account's list, through the runner's gateway on the
+	// turn's own path.
+	if b, _ := os.ReadFile(catalog); string(b) != "200 "+list {
+		t.Fatalf("codex's ask for its models got %q", b)
+	}
+	var rep fakeReport
+	b, _ := os.ReadFile(ns.report)
+	json.Unmarshal(b, &rep)
+	want := `model_providers.agentbus_chatgpt.model_catalog_url="http://` + ns.runner.addr + "/s/" + j.Session + "/t/" + j.Turn + `/backend-api/codex/models"`
+	if !strings.Contains(strings.Join(rep.Args, "\n"), want) {
+		t.Fatalf("codex's arguments %q, want %s", rep.Args, want)
+	}
+	// The vendor saw the sign-in kept on control, never the placeholder.
+	if got := ns.chat.seen(); len(got) != 1 || got[0] != "/backend-api/codex/models Bearer fake-chatgpt-access-for-tests" || ns.chat.accounts[0] != "fake-account-1" {
+		t.Fatalf("the vendor saw %v %v", got, ns.chat.accounts)
+	}
+	// The call is in control's record, by its status, in the turn.
+	waitFor(t, "the ask in the server's record", func() bool {
+		recs, _ := ns.server.store.After(0, store.Filter{Turn: j.Turn}, 1000)
+		for _, r := range recs {
+			var e struct {
+				Call, Session, Turn string
+				Status              int
+			}
+			if r.Kind == "vendor.called" && json.Unmarshal(r.Data, &e) == nil && e.Call == "GET /backend-api/codex/models" {
+				return e.Session == j.Session && e.Turn == j.Turn && e.Status == http.StatusOK
+			}
+		}
+		return false
+	})
 }
 
 // agy on its Google sign-in, connected on the server: agy's own home there

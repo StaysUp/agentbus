@@ -141,6 +141,11 @@ All notable changes to AgentBus. Full notes for each release are on the
   and Apply said applied with the folder unchanged. A name now counts only as its folder lists
   it. The rename shows in Review, applies, is put back by a Discard, and comes in with an Update
   when the person makes it. This holds for Copy workspaces made since 0.6.6.
+- **A Codex agent on a ChatGPT sign-in with no model named failed its first turn**
+  ([#112](https://github.com/staysup/agentbus/issues/112)). Codex ran on its built-in default, a
+  model the account may not offer, and the turn ended with the vendor's refusal. Codex now gets the
+  account's own list of models on every turn, so its default comes from that list, as it does when
+  you run codex yourself.
 
 ## 0.6.7 (2026-11-27)
 

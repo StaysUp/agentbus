@@ -133,9 +133,31 @@ func TestCodexModelsCache(t *testing.T) {
 	}
 }
 
-// codex's model server: wired as a relayed turn, with the provider's
-// model_catalog_url at the relay's list of models, the file sign-in store,
-// and app-server last (codex-cli 0.164.0, 2026-11-14).
+// A relayed turn's provider names the relay's list of models as its
+// model_catalog_url, once: without it a turn that names no model ran on
+// codex's built-in default, gpt-6.2-sol, which the ChatGPT account refused;
+// with it, on gpt-6-luna, the account's own (codex-cli 0.171.0, 2026-11-27,
+// #112).
+func TestCodexWireRelayNamesTheModelCatalog(t *testing.T) {
+	env, args := codex{}.WireRelay("http://127.0.0.1:8787/s/s1/t/t_1", "abs_x")
+	want := `model_providers.agentbus_chatgpt.model_catalog_url="http://127.0.0.1:8787/s/s1/t/t_1/backend-api/codex/models"`
+	n := 0
+	for i, a := range args {
+		if strings.Contains(a, "model_catalog_url") {
+			n++
+			if a != want || i == 0 || args[i-1] != "-c" {
+				t.Fatalf("%q", args)
+			}
+		}
+	}
+	if n != 1 || len(env) != 1 || env[0] != "AGENTBUS_CODEX_TOKEN=abs_x" {
+		t.Fatalf("%q\n%q", env, args)
+	}
+}
+
+// codex's model server: wired as a relayed turn, whose provider names the
+// relay's list of models as its model_catalog_url, with the file sign-in
+// store, and app-server last (codex-cli 0.164.0, 2026-11-14).
 func TestCodexWireModels(t *testing.T) {
 	env, args := codex{}.WireModels("http://127.0.0.1:9/relay/chatgpt", "abm_x")
 	want := []string{"-c", "model_provider=agentbus_chatgpt",
