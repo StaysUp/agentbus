@@ -145,3 +145,95 @@ func TestCaseRenameBesideAHardLink(t *testing.T) {
 		t.Error("the ignored hard link reached the folder")
 	}
 }
+
+// A nested repo whose git folder is spelled .GIT, on a disk that ignores
+// case: git finds it as the repo's .git (it looks the name up on the disk),
+// so the repo it names says what in it is the work. Before, the walk matched
+// ".git" by its exact spelling: the repo went unseen, the parent's rules
+// reached into it, and an edit to its force-added file never checkpointed.
+func TestNestedRepoSpelledInCapitals(t *testing.T) {
+	src := t.TempDir()
+	caseBlind(t, src)
+	commitIn(t, src, map[string]string{"a.txt": "a1\n"})
+	inner := filepath.Join(src, "inner")
+	forceAdded(t, inner, "config.local")
+	if err := os.Rename(filepath.Join(inner, ".git"), filepath.Join(inner, ".GIT")); err != nil {
+		t.Fatal(err)
+	}
+	gitDo(t, inner, "ls-files", "--error-unmatch", "config.local")
+	b, s := open(t, Copy, src)
+	fixture(t, s.Dir, map[string]string{"inner/config.local": "mode=2\n"})
+	if _, err := b.Checkpoint(s, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := changesetNames(t, s, "t1"); !reflect.DeepEqual(got, []string{"inner/config.local"}) {
+		t.Fatalf("changeset: %v, want [inner/config.local]", got)
+	}
+	// A discard keeps the repo's own history.
+	if err := b.RestoreTo(s, Base); err != nil {
+		t.Fatal(err)
+	}
+	gitDo(t, filepath.Join(s.Dir, "inner"), "rev-parse", "--verify", "HEAD")
+}
+
+// A folder spelled .GIT (or .Git) is a .git, at any depth and on any disk:
+// git never records a path through one, whatever its case, so it is never
+// the work, and a discard never removes what it holds. Before, the walk listed
+// its files as the work: git skipped them, and the discard's clean, finding
+// them unrecorded, removed them, a repo's history among them.
+func TestDotGitInAnyCaseIsKept(t *testing.T) {
+	src := t.TempDir()
+	commitIn(t, src, map[string]string{"a.txt": "a1\n"})
+	b, s := open(t, Copy, src)
+	fixture(t, s.Dir, map[string]string{"a.txt": "a2\n", "sub/.Git/HEAD": "x\n", ".GIT-notes": "n\n"})
+	if _, err := b.Checkpoint(s, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := changesetNames(t, s, "t1"); !reflect.DeepEqual(got, []string{".GIT-notes", "a.txt"}) {
+		t.Fatalf("changeset: %v, want [.GIT-notes a.txt]", got)
+	}
+	if err := b.RestoreTo(s, Base); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, filepath.Join(s.Dir, "sub", ".Git", "HEAD")); got != "x\n" {
+		t.Fatalf("sub/.Git/HEAD after a discard: %q", got)
+	}
+}
+
+// A name the disk folds by Unicode's full case folding, which simple folding
+// does not cover (ß and SS on APFS): a tracked straße.txt renamed to
+// STRASSE.txt is a rename the checkpoint records and Apply makes. Before, no
+// listed name was "another spelling" of it, and the checkpoint failed.
+func TestRenameTheDiskFoldsFully(t *testing.T) {
+	src := t.TempDir()
+	caseBlind(t, src)
+	probe := filepath.Join(src, "straße")
+	if err := os.WriteFile(probe, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := os.Lstat(filepath.Join(src, "STRASSE"))
+	os.Remove(probe)
+	if err != nil {
+		t.Skip("this disk does not fold ß as SS")
+	}
+	forceAdded(t, src, "straße.local")
+	b, s := open(t, Copy, src)
+	if err := os.Rename(filepath.Join(s.Dir, "straße.local"), filepath.Join(s.Dir, "temporary")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(s.Dir, "temporary"), filepath.Join(s.Dir, "STRASSE.local")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Checkpoint(s, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := changesetNames(t, s, "t1"), []string{"STRASSE.local", "straße.local"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("changeset: %v, want %v", got, want)
+	}
+	if _, err := applyIn(t, s, src, Base, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(onDisk(t, src), " "); got != ".gitignore STRASSE.local a.txt" {
+		t.Fatalf("the folder after the apply: %s", got)
+	}
+}

@@ -56,7 +56,7 @@ type gitWork struct {
 	saved func(top string) string // the git folder saveFolderGit kept for a top, or ""
 	tmp   string
 	fold  []string
-	glob  string // the user's excludes file, or ""
+	glob  string // the user's excludes file, or "" for none
 	n     int
 	regs  map[string][]string // a repo's folder: its check-ignore git arguments
 }
@@ -139,11 +139,11 @@ func (w *gitWork) repo(ctx context.Context, dir string, hasGit bool) (map[string
 		return nil, err
 	}
 	var tracked []string
-	exfile, common := "", ""
+	exfile, exset, common := "", false, ""
 	if gitDir != "" {
 		common = commonDir(gitDir)
 		format := ""
-		format, exfile = w.repoConfig(ctx, filepath.Join(common, "config"))
+		format, exfile, exset = w.repoConfig(ctx, filepath.Join(common, "config"))
 		if format != "" && format != "sha1" {
 			cfg := "[core]\n\trepositoryformatversion = 1\n[extensions]\n\tobjectformat = " + format + "\n"
 			if err := os.WriteFile(filepath.Join(sd, "config"), []byte(cfg), 0o600); err != nil {
@@ -200,7 +200,9 @@ func (w *gitWork) repo(ctx context.Context, dir string, hasGit bool) (map[string
 		}
 	}
 	if gitDir != "" {
-		if exfile == "" {
+		// Set, even to "" (no excludes file), the repo's wins; unset, the
+		// user's, as git reads them.
+		if !exset {
 			exfile = w.glob
 		}
 		if exfile != "" {
@@ -253,14 +255,16 @@ func (w *gitWork) git(ctx context.Context, sd, work, index string, args ...strin
 }
 
 // repoConfig is the object format and core.excludesFile a repo's config file
-// sets, read by git from that file only (nothing run, no includes).
-func (w *gitWork) repoConfig(ctx context.Context, config string) (format, excludes string) {
+// sets, read by git from that file only (nothing run, no includes). exset
+// says the file sets core.excludesFile, "" among the values: git then reads
+// no excludes file, never the user's.
+func (w *gitWork) repoConfig(ctx context.Context, config string) (format, excludes string, exset bool) {
 	if _, err := os.Stat(config); err != nil {
-		return "", ""
+		return "", "", false
 	}
 	out, _, code, _ := w.s.runGit(ctx, "config", "--file", config, "--path", "--get-regexp", `^(extensions\.objectformat|core\.excludesfile)$`)
 	if code != 0 {
-		return "", ""
+		return "", "", false
 	}
 	for _, l := range strings.Split(string(out), "\n") {
 		k, v, _ := strings.Cut(l, " ")
@@ -268,10 +272,10 @@ func (w *gitWork) repoConfig(ctx context.Context, config string) (format, exclud
 		case "extensions.objectformat":
 			format = strings.ToLower(strings.TrimSpace(v))
 		case "core.excludesfile":
-			excludes = strings.TrimSpace(v)
+			excludes, exset = strings.TrimSpace(v), true
 		}
 	}
-	return format, excludes
+	return format, excludes, exset
 }
 
 // matching says which of rules (by index) git, as names compare here, takes

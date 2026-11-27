@@ -24,7 +24,8 @@ import (
 // A copy made since 0.6.6 (Space.Nested) does not use `git add`. One rule
 // decides what it records, the same at every checkpoint and on both sides of
 // an update: every file under its top, a nested repo's included, except a .git
-// (file or folder) at any depth and what git says is not the work, and a file
+// (file or folder, in any case: isDotGit) at any depth and what git says is
+// not the work, and a file
 // the record already holds stays held while it is there, as git never ignores
 // a tracked file. Since 0.6.7 git is asked at every checkpoint, of the repo
 // that owns each path (gitwork.go): what it tracks is the work, and its own
@@ -317,9 +318,15 @@ func walkTree(ctx context.Context, root string, rules treeRules, held map[string
 				}
 				return nil, nil, nil, errNotRead
 			}
+			// A repo is here when the disk finds a .git, as git looks it up:
+			// on a disk that ignores case, a .GIT is that .git.
 			hasGit := false
 			for _, de := range des {
-				hasGit = hasGit || de.Name() == ".git"
+				hasGit = hasGit || isDotGit(de.Name())
+			}
+			hasGit = hasGit && holdsGit(filepath.Join(root, filepath.FromSlash(d)))
+			if hasGit && d != "" {
+				repos = append(repos, d)
 			}
 			tracked, err := rules.repo(ctx, d, hasGit)
 			if err != nil {
@@ -327,10 +334,7 @@ func walkTree(ctx context.Context, root string, rules treeRules, held map[string
 			}
 			hold(tracked)
 			for _, de := range des {
-				if de.Name() == ".git" {
-					if d != "" {
-						repos = append(repos, d)
-					}
+				if isDotGit(de.Name()) {
 					continue
 				}
 				rel := path.Join(d, de.Name())
@@ -371,10 +375,18 @@ func walkTree(ctx context.Context, root string, rules treeRules, held map[string
 }
 
 // holdsGit says whether the folder dir holds a .git (folder or file): a repo
-// of its own, a nested one or a submodule.
+// of its own, a nested one or a submodule. The disk is asked, as git asks it,
+// so a .GIT counts where the disk takes it as .git.
 func holdsGit(dir string) bool {
 	_, err := os.Lstat(filepath.Join(dir, ".git"))
 	return err == nil
+}
+
+// isDotGit says whether name is .git in any case. git never records a path
+// through such a name, whatever its case and on every disk (its verify_path),
+// so none is ever the work, and a walk never lists or removes what one holds.
+func isDotGit(name string) bool {
+	return strings.EqualFold(name, ".git")
 }
 
 // errSpelling: the disk has a file by a name its folder does not list, and no
@@ -464,7 +476,7 @@ func spelled(root string, paths map[string]bool) (map[string]bool, error) {
 					return nil, errSpelling
 				}
 			}
-			if name == "" || name == ".git" {
+			if name == "" || isDotGit(name) {
 				ok = false
 				break
 			}
@@ -491,7 +503,7 @@ func reposUnder(root string) ([]string, error) {
 		if err != nil {
 			return errNotRead
 		}
-		if d.Name() == ".git" && p != filepath.Join(root, ".git") {
+		if isDotGit(d.Name()) && filepath.Dir(p) != root {
 			rel, _ := filepath.Rel(root, filepath.Dir(p))
 			repos = append(repos, filepath.ToSlash(rel))
 			if d.IsDir() {
@@ -595,9 +607,9 @@ func commonDir(gitdir string) string {
 }
 
 // globalExcludes is the excludes file git status reads for this user when no
-// repo names one: the user's core.excludesFile, else git's default,
-// $XDG_CONFIG_HOME/git/ignore or ~/.config/git/ignore. Read by git from the
-// user's own config, the only part of it the private repo reads.
+// repo names one: the user's core.excludesFile when set ("" is none), else
+// git's default, $XDG_CONFIG_HOME/git/ignore or ~/.config/git/ignore. Read by
+// git from the user's own config, the only part of it the private repo reads.
 func (s *Space) globalExcludes(ctx context.Context) string {
 	cmd := exec.CommandContext(ctx, "git", append(s.gitBaseArgsWT(s.Dir), "config", "--global", "--get", "--path", "core.excludesFile")...)
 	cmd.Dir = s.Dir
@@ -609,9 +621,7 @@ func (s *Space) globalExcludes(ctx context.Context) string {
 	}
 	cmd.Env = env
 	if out, err := cmd.Output(); err == nil {
-		if p := strings.TrimSpace(string(out)); p != "" {
-			return p
-		}
+		return strings.TrimSpace(string(out)) // set: "" says none, as git reads it
 	}
 	if x := os.Getenv("XDG_CONFIG_HOME"); x != "" {
 		return filepath.Join(x, "git", "ignore")

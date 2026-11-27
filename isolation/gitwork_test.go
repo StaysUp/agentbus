@@ -270,3 +270,108 @@ func TestARepoMadeInTheCopyWins(t *testing.T) {
 		t.Fatalf("changeset: %v, want [added.local]", got)
 	}
 }
+
+// excludesHome points git's user config at a folder of the test's own, whose
+// default excludes file ($XDG_CONFIG_HOME/git/ignore) leaves out *.log.
+func excludesHome(t *testing.T) string {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, "xdg"))
+	fixture(t, home, map[string]string{"xdg/git/ignore": "*.log\n"})
+	return home
+}
+
+// A repo that sets core.excludesFile to "" reads no excludes file, as git
+// does: the user's *.log rule does not apply, so notes.log is the work.
+// Before, an empty value was taken as unset and the user's file was read.
+func TestEmptyExcludesFileIsNone(t *testing.T) {
+	excludesHome(t)
+	src := t.TempDir()
+	commitIn(t, src, map[string]string{"a.txt": "a1\n"})
+	gitDo(t, src, "config", "core.excludesFile", "")
+	fixture(t, src, map[string]string{"notes.log": "n\n"})
+	b, s := open(t, Copy, src)
+	fixture(t, s.Dir, map[string]string{"notes.log": "n2\n", "a.txt": "a2\n"})
+	if _, err := b.Checkpoint(s, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := changesetNames(t, s, "t1"); !reflect.DeepEqual(got, []string{"a.txt", "notes.log"}) {
+		t.Fatalf("changeset: %v, want [a.txt notes.log]: git ignores nothing here", got)
+	}
+}
+
+// The same for the user's own config: core.excludesFile = "" there means no
+// excludes file, not git's default one.
+func TestEmptyGlobalExcludesFileIsNone(t *testing.T) {
+	home := excludesHome(t)
+	fixture(t, home, map[string]string{".gitconfig": "[core]\n\texcludesFile =\n"})
+	src := t.TempDir()
+	commitIn(t, src, map[string]string{"a.txt": "a1\n"})
+	b, s := open(t, Copy, src)
+	fixture(t, s.Dir, map[string]string{"notes.log": "n\n"})
+	if _, err := b.Checkpoint(s, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := changesetNames(t, s, "t1"); !reflect.DeepEqual(got, []string{"notes.log"}) {
+		t.Fatalf("changeset: %v, want [notes.log]", got)
+	}
+}
+
+// And unset still means the user's: their default excludes file leaves
+// notes.log out.
+func TestUnsetExcludesFileIsTheUsers(t *testing.T) {
+	excludesHome(t)
+	src := t.TempDir()
+	commitIn(t, src, map[string]string{"a.txt": "a1\n"})
+	b, s := open(t, Copy, src)
+	fixture(t, s.Dir, map[string]string{"notes.log": "n\n", "a.txt": "a2\n"})
+	if _, err := b.Checkpoint(s, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := changesetNames(t, s, "t1"); !reflect.DeepEqual(got, []string{"a.txt"}) {
+		t.Fatalf("changeset: %v, want [a.txt]", got)
+	}
+}
+
+// A SHA-256 repo nested in a SHA-1 one, and one opened in a copy of several
+// folders: each index is read by a git of its own format, so a force-added
+// file in each is the work.
+func TestSHA256NestedAndInPlaces(t *testing.T) {
+	probe := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", "--object-format=sha256", probe).CombinedOutput(); err != nil {
+		t.Skipf("no SHA-256 repos here: %s", out)
+	}
+	sha := func(dir string) {
+		t.Helper()
+		if out, err := exec.Command("git", "init", "-q", "--object-format=sha256", dir).CombinedOutput(); err != nil {
+			t.Fatalf("%s", out)
+		}
+		fixture(t, dir, map[string]string{".gitignore": "*.local\n", "a.txt": "a1\n", "config.local": "mode=1\n"})
+		gitDo(t, dir, "add", "a.txt", ".gitignore")
+		gitDo(t, dir, "add", "-f", "config.local")
+		gitDo(t, dir, "commit", "-q", "-m", "c")
+	}
+	src := t.TempDir()
+	commitIn(t, src, map[string]string{"top.txt": "t\n"})
+	sha(filepath.Join(src, "inner"))
+	b, s := open(t, Copy, src)
+	fixture(t, s.Dir, map[string]string{"inner/config.local": "mode=2\n"})
+	if _, err := b.Checkpoint(s, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := changesetNames(t, s, "t1"); !reflect.DeepEqual(got, []string{"inner/config.local"}) {
+		t.Fatalf("nested: changeset %v", got)
+	}
+	one, two := t.TempDir(), t.TempDir()
+	sha(one)
+	fixture(t, two, map[string]string{"b": "b"})
+	pb, ps := openPlacesT(t, []Place{{Name: "one", Folder: one, Ref: "fld_1"}, {Name: "two", Folder: two, Ref: "fld_2"}})
+	fixture(t, ps.Dir, map[string]string{"one/config.local": "mode=2\n"})
+	if _, err := pb.Checkpoint(ps, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := changesetNames(t, ps, "t1"); !reflect.DeepEqual(got, []string{"one/config.local"}) {
+		t.Fatalf("places: changeset %v", got)
+	}
+}
