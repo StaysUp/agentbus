@@ -26,13 +26,13 @@ func TestListRunners(t *testing.T) {
 		return resp.StatusCode, raw
 	}
 	const machine, gone = "con_0123456789abcdef", "con_fedcba9876543210"
-	code, raw := register(`{"name":"mac","capacity":4,"labels":["gpu"],"protocol":5,"capabilities":{"os":"darwin","arch":"arm64","connector":"` + machine + `",` +
+	code, raw := register(`{"name":"mac","capacity":4,"labels":["gpu"],"protocol":6,"capabilities":{"os":"darwin","arch":"arm64","connector":"` + machine + `",` +
 		`"harnesses":[{"name":"claude","found":true,"version":"2.1.319","signed_in":true},{"name":"codex","found":false}]}}`)
 	var run jobs.Enrolled
 	if code != http.StatusCreated || json.Unmarshal([]byte(raw), &run) != nil || run.Token == "" {
 		t.Fatalf("register: %d %s", code, raw)
 	}
-	if code, raw := register(`{"name":"mac","capacity":1,"protocol":5,"capabilities":{"role":"connector","connector":"` + machine + `"}}`); code != http.StatusBadRequest ||
+	if code, raw := register(`{"name":"mac","capacity":1,"protocol":6,"capabilities":{"role":"connector","connector":"` + machine + `"}}`); code != http.StatusBadRequest ||
 		!strings.Contains(raw, "agentbus connector was retired") {
 		t.Fatalf("a connector registered: %d %s", code, raw)
 	}
@@ -108,7 +108,7 @@ func TestPendingMachines(t *testing.T) {
 	e := newJobsEnv(t)
 	ask := func() jobs.LoginStarted {
 		t.Helper()
-		r := e.req(t, "POST", "/api/v0/runner/login", strings.NewReader(`{"name":"vm","capacity":2,"protocol":5,"capabilities":{"os":"linux","arch":"arm64",`+
+		r := e.req(t, "POST", "/api/v0/runner/login", strings.NewReader(`{"name":"vm","capacity":2,"protocol":6,"capabilities":{"os":"linux","arch":"arm64",`+
 			`"sandbox":{"can":false,"why":"AppArmor refuses user namespaces"}}}`))
 		r.Header.Del("Authorization")
 		resp, raw := do(t, r)

@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,15 +22,14 @@ import (
 type runs struct {
 	mu       sync.Mutex
 	stopping bool
-	max      int             // Config.MaxRuns
-	n        int             // slots taken, starting or running
 	busy     map[string]bool // sessions with a turn starting or running
 	live     map[*exec.Cmd]*liveTurn
 	byTurn   map[string]*liveTurn // the same runs, by turn id, for Stop
 	wg       sync.WaitGroup
 }
 
-// take reserves a slot for session, or says why not.
+// take marks session busy, or says why not: a session runs one turn at a
+// time. How many sessions run at once is control's to count (queue/lanes.go).
 func (rs *runs) take(session string) (int, string) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
@@ -41,14 +39,10 @@ func (rs *runs) take(session string) (int, string) {
 	if rs.busy[session] {
 		return http.StatusConflict, TurnRunning
 	}
-	if rs.n >= rs.max {
-		return http.StatusTooManyRequests, strconv.Itoa(rs.max) + " runs are already running; wait for one to end and retry"
-	}
 	if rs.busy == nil {
 		rs.busy = map[string]bool{}
 	}
 	rs.busy[session] = true
-	rs.n++
 	return 0, ""
 }
 
@@ -85,12 +79,11 @@ func (rs *runs) isStopping() bool {
 	return rs.stopping
 }
 
-// release frees session's slot; cmd is the child that held it, or nil if
+// release frees session; cmd is the child that held it, or nil if
 // none started.
 func (rs *runs) release(cmd *exec.Cmd, session string) {
 	rs.mu.Lock()
 	defer rs.mu.Unlock()
-	rs.n--
 	delete(rs.busy, session)
 	if cmd != nil {
 		if lt := rs.live[cmd]; lt != nil {

@@ -360,7 +360,7 @@ func changesQueue(t *testing.T, waits ...time.Duration) (e *env, q *queue.Queue,
 		Text: "hi", Harness: "claude"}); err != nil {
 		t.Fatal(err)
 	}
-	tj, at, ok, _, err := q.Take(r.ID, 30*time.Second, false)
+	tj, at, ok, _, err := q.Take(r.ID, 30*time.Second, queue.LaneInteractive)
 	if err != nil || !ok {
 		t.Fatalf("take: %v %v", ok, err)
 	}
@@ -386,7 +386,7 @@ func changesQueue(t *testing.T, waits ...time.Duration) (e *env, q *queue.Queue,
 // endJob takes the next job on r (a folder job with folder) and ends it.
 func endJob(t *testing.T, q *queue.Queue, r queue.Runner, folder bool, f queue.Finish) queue.Job {
 	t.Helper()
-	j, at, ok, _, err := q.Take(r.ID, 30*time.Second, folder)
+	j, at, ok, _, err := q.Take(r.ID, 30*time.Second, laneOf(folder))
 	if err != nil || !ok {
 		t.Fatalf("take: %v %v", ok, err)
 	}

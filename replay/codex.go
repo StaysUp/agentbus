@@ -131,12 +131,12 @@ func (codex) asHistory(m json.RawMessage) (json.RawMessage, error) {
 // goes on (end_turn false, on the response, which the kept reply's stop
 // reason carries, or on an output message) did not finish, as Claude's
 // tool_use or pause_turn does not.
-func (codex) reply(rep body.Reply, _ string) ([]json.RawMessage, ending, error) {
+func (codex) reply(rep body.Reply, _, unanswered string) ([]json.RawMessage, ending, error) {
 	items, ok := body.Elements(rep.Message)
 	if !ok || len(items) == 0 {
 		return nil, ending{}, errors.New("the kept reply is not a list of items")
 	}
-	outputs, asked, err := openai.Unanswered(items, notFinished)
+	outputs, asked, err := openai.Unanswered(items, unanswered)
 	if err != nil {
 		return nil, ending{}, err
 	}
@@ -282,27 +282,48 @@ func (codex) build(req request, h *history, _ string) ([]byte, func(http.Header)
 		}
 	}
 	items = append(items, tail...)
-
-	fresh, okFresh := openai.ThreadID(req.fields)
-	rename := okFresh && h.thread != "" && fresh != h.thread
 	for i, f := range req.fields {
-		switch {
-		case f.Key == "input":
+		if f.Key == "input" {
 			req.fields[i].Value = joinArray(items)
-		case rename:
-			req.fields[i].Value = bytes.ReplaceAll(f.Value, []byte(fresh), []byte(h.thread))
 		}
 	}
-	var hdr func(http.Header)
-	if rename {
-		old := h.thread
-		hdr = func(hd http.Header) {
-			for _, vs := range hd {
-				for i, v := range vs {
-					vs[i] = strings.ReplaceAll(v, fresh, old)
-				}
+	out, hdr := renameThread(req.fields, h.thread)
+	return out, hdr, nil
+}
+
+// renameThread is the request with its fresh thread id made thread
+// everywhere but the input, and the header edit that does the same: every
+// request of a replayed turn goes out, and is recorded, under the session's
+// one thread id. nil, nil when there is nothing to rename.
+func renameThread(fields []body.Field, thread string) ([]byte, func(http.Header)) {
+	fresh, ok := openai.ThreadID(fields)
+	if !ok || thread == "" || fresh == thread {
+		return body.Object(fields), nil
+	}
+	for i, f := range fields {
+		if f.Key != "input" {
+			fields[i].Value = bytes.ReplaceAll(f.Value, []byte(fresh), []byte(thread))
+		}
+	}
+	return body.Object(fields), func(hd http.Header) {
+		for _, vs := range hd {
+			for i, v := range vs {
+				vs[i] = strings.ReplaceAll(v, fresh, thread)
 			}
 		}
 	}
-	return body.Object(req.fields), hdr, nil
+}
+
+// passOn: the compacted request, its conversation untouched, under the
+// session's thread id as the turn's other requests are, so the record reads
+// it as the same thread and the next turn finds the compaction
+// (compactedHistory). Without it the stored request named the fresh
+// process's thread, and the next turn's history skipped it as another
+// thread's (review t_9f7ff3c2866b0f64).
+func (codex) passOn(req request, h *history) ([]byte, func(http.Header)) {
+	out, hdr := renameThread(req.fields, h.thread)
+	if hdr == nil {
+		return nil, nil
+	}
+	return out, hdr
 }

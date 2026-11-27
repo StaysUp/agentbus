@@ -158,10 +158,10 @@ var tags = []struct {
 }{
 	{name: "Turns", doc: "A turn is one message to an agent, its reply and its changes. Every action is on a turn: start it, stop it, read its diff, apply its changes to the person's folder, ask another agent to review it, and read its model calls."},
 	{name: "Sessions", doc: "A session is a conversation: its turns, in order. Read its history, search it, name it or close it. Create one in a workspace, then run its turns."},
-	{name: "Workspaces", doc: "A workspace is where turns run: it owns the folder, the machine and the sandbox mode (a copy behind a wall, or the folder as it is). Create one, then create a session in it, then run the session's turns. The folder and the mode are the workspace's; a session carries neither."},
+	{name: "Workspaces", doc: "A workspace is where turns run: it owns the folder, the machine and the sandbox mode (a copy behind a wall, or the folder as it is). Create one, then create a session in it, then run the session's turns. The folder and the mode are the workspace's; a session carries neither. A sandbox copy whose work is all applied or discarded is put away by itself after a quiet time; the next turn makes a fresh one."},
 	{name: "Agents", doc: "Saved agents: a harness, how it reaches its model, the model and a name. A turn names one. And the harnesses, runners and folders a turn can use."},
 	{name: "Tools", doc: "The tools control serves to agents: the built-in ones and the person's own, in one stored format. List, add and remove them. Only the main token adds or removes one: a tool's name is what the rules match."},
-	{name: "Reactions", doc: "An on is a standing instruction: when an event happens (for now, a turn completes), do something (for now, deliver that turn's reply to a session). Register one and remove it. A row on control; nothing waits. ask_agent registers one for itself."},
+	{name: "Reactions", doc: "An on is a standing instruction: when an event happens, do something. A turn's on watches a turn complete and delivers its reply to a session; register one and remove it here, and ask_agent registers one for itself. An on may also watch a kind on the record and queue a job: control's built-in ons put a sandbox copy away once its work is applied or discarded and it has been quiet. A row on control; nothing waits."},
 	{name: "Settings", doc: "The policy and the instructions every turn gets, and the subscriptions control holds for runners. Only the main token changes them or reads a subscription; a turn token may read the rest."},
 	{name: "Approvals", doc: "The commands the gateway held for a person (an ask entry, or a command on none of the lists under the ask default): list them and answer one, once, always or refuse. Only the main token answers one."},
 	{name: "Events", doc: "The record as a live stream, for a cockpit, an export or a program, and a program's own events."},
@@ -181,15 +181,16 @@ var routes = slices.Concat([]route{
 	{method: "POST", path: "/api/v0/turns", op: "startTurn", action: run.ActRun,
 		tag:     "Turns",
 		summary: "Start a turn",
-		doc: "Start a turn: in a new session, or with session the next turn of that one. The reply names the turn at once; every event of the turn carries its id.\n\n" +
-			"Without session, agent, folder and prompt are required and the turn opens a new session. " +
-			"With session, agent and prompt are required and the turn continues that session, in its folder, on the agent named; " +
-			"a folder sent that differs from the session's is refused with 400. A turn token may continue any session it may read. " +
-			"The turn's turn.started, with the prompt, is stored before the reply.\n\n" +
-			"A session runs on one machine, the one that holds its folder, for its whole life: pick the machine (its machine id, from GET /api/v0/runners), " +
-			"then type a folder on it (folder) or name one it holds (folder_ref, from GET /api/v0/folders). Only that machine's runner takes the session's work.\n\n" +
+		doc: "Start the next turn of a session. The reply names the turn at once; every event of the turn carries its id.\n\n" +
+			"session, agent and prompt are required: the turn continues that session, in its workspace (the folder and the mode), on the agent named. " +
+			"A first turn takes three calls: POST /api/v0/workspaces, POST /api/v0/sessions, then this one. A turn token may continue any session it may read. " +
+			"The turn is queued before the reply; its turn.started, with the prompt, is stored once a runner starts it.\n\n" +
+			"A session runs on its workspace's machine for its whole life, and only that machine's runner takes its work: " +
+			"the machine is picked, and the folder typed or named, when the workspace is made.\n\n" +
 			"The reply comes at once, once the turn is recorded; it never waits for a runner. It answers 202 with state queued: " +
-			"the turn runs when a runner is free, and GET /api/v0/turns/{id} follows it. A retry of a turn already running answers running.\n\n" +
+			"the turn runs once no turn runs in its workspace (one copy runs one turn at a time) and its session's earlier turns have ended, and GET /api/v0/turns/{id} follows it. A retry of a turn already running answers running; one of a turn that has ended answers how it ended.\n\n" +
+			"A turn the main token sends is the person's: it is not counted against any limit, and it goes ahead of delegated turns of its workspace that have not started, since those hold no copy yet. No job passes a discard, update or close of the workspace. A turn a turn token sends is delegated work: " +
+			"one runner runs at most [limits] max_delegated_at_once of those at once (8 by default; GET /api/v0/runners says how many are busy and waiting), and the rest wait, oldest first.\n\n" +
 			"A session whose turn runs, or has turns waiting, is never refused: the new turn queues behind them and runs next, in order, " +
 			"and ahead says how many of the session's turns are before it.",
 		body: TurnRequest{},
@@ -201,7 +202,7 @@ var routes = slices.Concat([]route{
 		// ships no tool of its own. "A turn is a turn." It stays wrappable, so a
 		// person may still build a custom tool (or app step) on it.
 		wrappable: true,
-		replies: []reply{ok(202, Started{}, "The turn: running, or queued behind the session's earlier turns or for a runner."), turnRefused,
+		replies: []reply{ok(202, Started{}, "The turn: running, or queued behind the session's earlier turns, or, for delegated work, for a place."), turnRefused,
 			fail(403, "A turn token's request is refused: error says why, such as a cap on asked work."),
 			fail(404, "This service keeps no queue, or the session sent has no events."),
 			fail(409, "The session sent cannot be continued from here, it is closed, its machine was removed, or the idempotency key names another turn. A session whose turn is running is not refused: the new turn waits behind it (queued)."),
@@ -216,7 +217,7 @@ var routes = slices.Concat([]route{
 			"A turn that ended before it started, such as one stopped while queued, is listed among them where it was asked for, on one page only. " +
 			"Page older turns with before set to the next_before of the page before. Stream from the list's store and seq to follow new events.",
 		query: []param{
-			{name: "session", doc: "Only this session's turns."},
+			{name: "session", doc: "Only this session's turns. Sent twice, empty or not a session id, it is refused (400), whoever asks."},
 			{name: "before", doc: "Only turns whose started_seq is below it: the next_before of the previous page.", integer: true, min: 1},
 			{name: "limit", doc: "Turns per page. 100 when absent.", integer: true, min: 1, max: maxTurnLimit}},
 		replies:   []reply{ok(200, TurnList{}, "A page of turns."), badRequest, storeFailed},
@@ -229,6 +230,7 @@ var routes = slices.Concat([]route{
 		tag:     "Turns",
 		summary: "Get a turn",
 		doc: "One turn, from the moment it is asked for: its state (queued, running, finished, failed or stopped), its agent, prompt and reply, its cost, and for a review its verdict and findings.\n\n" +
+			"A turn can answer more than once (Claude Code resumes after its own background command ends): replies holds every answer, oldest first, with its text and time, and reply is the text of the last. " +
 			"Poll it to wait for a turn to end, or stream from its store and seq.",
 		query:     []param{{name: "session", doc: turnSessionDoc}},
 		replies:   []reply{ok(200, OneTurn{}, "The turn."), badRequest, fail(404, "No such turn."), storeFailed},
@@ -240,7 +242,7 @@ var routes = slices.Concat([]route{
 		idDoc:   turnIDDoc,
 		tag:     "Turns",
 		summary: "Stop a turn",
-		doc: "Stop a queued or running turn. A queued turn never starts. A running turn's agent and every process it started end, as when the service stops.\n\n" +
+		doc: "Stop a queued or running turn. A queued turn never starts. A running turn's agent and every process it started end, as when the service stops. A turn whose copy of the folder is still being made stops making it, and never starts; what was copied is never used.\n\n" +
 			"Its runner hears the stop within 2 seconds, sends SIGTERM to the turn's whole process tree, then SIGKILL after 5 seconds to what still runs. " +
 			"The reply comes at once; the turn reads stopped once the tree has ended. " +
 			"The session's next turn continues after it, and the model is told that the person stopped it. " +
@@ -260,22 +262,33 @@ var routes = slices.Concat([]route{
 			"A turn token may watch any turn it may read (the check GET /api/v0/turns/{id} uses), its own session's too, and the reply goes to a session it may read: its own when it leaves session out. " +
 			"An on a turn token registers counts as work its turn asked for, under the caps in Settings, Limits: Turns per request (max_jobs_per_turn) and Turns per request tree (max_jobs_per_tree). A cap reached is 403 and registers nothing; a retry with the key of an on already made returns it without counting again. " +
 			"The main token may watch any turn and names the session to deliver to. " +
+			"Only a turn this service ran as a job can be watched: a turn the record holds with no job (an older one, or one recorded at the gateway) is 409, since nothing reports its end. " +
 			"It is a row on control plus control's own check: nothing waits, and the reply arrives as a later turn. " +
 			"Dedup is by idempotency_key only: the same key for the same turn and session returns the on already registered, the same key with other fields is 409, and a request with no key always registers a new on (several ons may watch one turn). ask_agent registers one of these for itself.",
 		body: OnRequest{},
 		replies: []reply{ok(201, OnView{}, "The on."), turnRefused,
 			fail(403, "A turn token named a turn or a session it may not read, or its turn or request tree reached a cap on asked work (the message says which)."),
 			fail(404, "This service keeps no queue, or no turn has this id."),
-			fail(409, "The idempotency_key was already used to register an on for a different turn or session.")},
+			fail(409, "The idempotency_key was already used to register an on for a different turn or session, or the turn was not run as a job of this service, so no on can react to its end (the message says which).")},
 		at:    atBody,
 		serve: plain((*API).registerOn)},
+	{method: "GET", path: "/api/v0/ons", op: "listOns", action: run.ActRead,
+		at:      atList,
+		tag:     "Reactions",
+		summary: "List ons",
+		doc: "The ons still waiting to react, oldest first: each one's id, the turn it watches, the session it delivers to, and the turn that registered it. An on that has fired, or was removed, is not listed. Control's built-in ons over the record (the put-away) are not listed either.\n\n" +
+			"The main token lists every on. A turn token lists the ons it may remove with DELETE /api/v0/ons/{id}: those its own turn registered, and those that deliver to a session it may read. " +
+			"With session, only the ons that deliver to that session. No body is read.",
+		query:   []param{{name: "session", doc: "Only the ons that deliver to this session. Sent twice, empty or not a session id, it is refused (400)."}},
+		replies: []reply{ok(200, OnList{}, "The ons."), badRequest, storeFailed},
+		serve:   plain((*API).listOns)},
 	{method: "DELETE", path: "/api/v0/ons/{id}", op: "removeOn", action: run.ActRun,
 		idDoc:   "An on's id (on_...), as POST /api/v0/ons named it.",
 		tag:     "Reactions",
 		summary: "Remove an on",
-		doc:     "Remove an on: it stops reacting. Removing one already removed, or one that has fired, is accepted. A turn token may remove only an on its own turn registered. No body is read.",
+		doc:     "Remove an on: it stops reacting. Removing one already removed, or one that has fired, is accepted. A turn token may remove an on its own turn registered, or one that delivers to a session it may read (GET /api/v0/ons lists both), never one of control's built-in ons (the put-away). No body is read.",
 		replies: []reply{{status: 204, doc: "Removed.", empty: true}, turnRefused,
-			fail(403, "A turn token tried to remove an on another turn registered."),
+			fail(403, "A turn token tried to remove an on another turn registered that delivers to a session it may not read, or one of control's built-in ons."),
 			fail(404, "This service keeps no queue, or no on has this id.")},
 		at:    atBody,
 		serve: (*API).removeOn},
@@ -430,9 +443,11 @@ var routes = slices.Concat([]route{
 		summary: "Close a workspace",
 		idDoc:   "A workspace id (ws_ and 16 hex digits). Another shape gets 404.",
 		doc: "Remove a sandbox workspace's copy to reclaim its disk. The person's folder is never touched. Close is reversible: the record and the turns stay, and the next turn rebuilds a fresh copy from the folder. No body is read.\n\n" +
-			"Like a discard, a close waits behind a running or queued turn in the workspace lane; changes not applied when it runs are dropped with the copy, so apply or discard them on the session first to keep them (the cockpit signals unapplied work). A finished close is a baseline reset: a later apply starts from the rebuilt copy's base, never the removed lineage. One apply, discard, update or close runs per workspace, so a close while one is still running or waiting is refused with 409. The reply waits up to 30 seconds; past that it is 202 with state queued or running. Every close joins the lane, even if an earlier close finished. It runs after preceding turns and succeeds if no copy remains.",
-		replies: []reply{ok(200, CloseState{}, "Closed: the copy was removed. already true: this workspace was permanently closed by an older build."),
-			ok(202, CloseState{}, "The close has not finished yet (it waits behind a running turn)."),
+			"Like a discard, a close waits behind a running or queued turn in the workspace lane; changes not applied when it runs are dropped with the copy, so apply or discard them on the session first to keep them (the cockpit signals unapplied work). A finished close is a baseline reset: a later apply starts from the rebuilt copy's base, never the removed lineage. One apply, discard, update or close runs per workspace, so a close while one is still running or waiting is refused with 409. Every close joins the lane, even if an earlier close finished. It runs after preceding turns and succeeds if no copy remains.\n\n" +
+			"The reply comes at once: 202 with state queued. Nothing waits for the close to run. When it has, the record holds workspace.closed for the workspace, and GET /api/v0/workspaces/{id} names it closed until its next turn starts. A close that fails records no workspace.closed and leaves the copy; send it again. A copy is never left part removed for a turn to use: it is made unusable before any file of it goes. A close that cannot move the copy out of its place changes nothing: the copy stays whole with its record, the workspace stays open, and a close sent again tries again. Once the copy is moved, a close always finishes: what cannot be removed at once is removed when the runner starts. A copy a stopped Open or a stopped close left with no record is removed by the next close. A lock (Finder's Locked, chflags uchg) or a closed mode on the copy's files does not stop a close: they are cleared on the copy, never on the folder.\n\n" +
+			"A person rarely needs it: AgentBus puts a copy away by itself once its work is all applied or discarded and the workspace has been quiet for [workspaces] put_away_after_minutes (30 by default, 0 is off). It does the same as a close, and records workspace.closed with put_away. A copy with work not applied is never put away; if anything happened in the workspace since, it does nothing and records workspace.kept with why.",
+		replies: []reply{ok(200, CloseState{}, "Nothing to do: already true, this workspace was permanently closed by an older build."),
+			ok(202, CloseState{}, "Queued: the close runs after what waits in the workspace lane; workspace.closed on the record says it ran."),
 			badRequest,
 			fail(404, "This service keeps no queue, or no such workspace."),
 			ok(409, CloseState{}, "Refused: an apply, discard, update or close of the workspace is still running or waiting. Nothing was removed."),
@@ -692,6 +707,8 @@ var routes = slices.Concat([]route{
 		doc: "The runners control knows, one per machine, for a person: each one's name, id, machine, role, labels, whether it is online, " +
 			"when it was last seen, its last probe of each harness with its version. Online means it asked for work in the last minute. " +
 			"pending lists the machines that ran agentbus login and wait for the person's approval. " +
+			"delegated says how the limit on delegated turns stands: how many one runner runs at once ([limits] max_delegated_at_once), how many are busy and how many wait for a place, and each runner's own. " +
+			"Turns the person sends are not counted and start at once; only a turn running in their workspace, or their session's own earlier turn, holds one back. " +
 			"A runner that stopped stays listed, offline, until removed. A connector of a build before 0.5 is listed only while no runner reports its machine. No token is in the answer. No body is read.",
 		replies: []reply{ok(200, RunnerList{}, "The runners."), badRequest, storeFailed},
 		serve:   plain((*API).listRunners)},
@@ -778,7 +795,7 @@ var routes = slices.Concat([]route{
 		summary: "Stream events",
 		doc:     "A live stream of the record's events: every session's, or one session's. A cockpit follows it; an export reads it from the start.\n\n" + streamDoc,
 		query: []param{qStore, qAfter,
-			{name: "session", doc: "Only this session's events, plus the drops that name it. An empty value names no session and is refused (403)."}},
+			{name: "session", doc: "Only this session's events, plus the drops that name it. Sent twice, empty or not a session id, it is refused (400), whoever asks."}},
 		replies: []reply{streamReply("The stream.", eventsExample), badRequest, mismatch, tooMany,
 			fail(500, "This connection cannot stream.")},
 		serve: plain((*API).stream)},

@@ -60,6 +60,9 @@ func TestReplayQueries(t *testing.T) {
 		{ID: "8", Kind: event.ModelResponded, Session: "s", Turn: "t1", Exchange: "x-3", Status: 529, Error: "overloaded"},
 		{ID: "9", Kind: event.ModelResponded, Session: "s", Turn: "t1", Exchange: "x-1", Status: 200, StopReason: "max_tokens"},
 		{ID: "10", Kind: event.ModelRequested, Session: "s", Turn: "t1", Exchange: "x-5"}, // its reply event lost
+		// The gateway's verdict on x-4: compacted (another turn's does not count).
+		{ID: "10a", Kind: event.HistoryCompacted, Session: "s", Turn: "t1", Exchange: "x-4"},
+		{ID: "10b", Kind: event.HistoryCompacted, Session: "s", Turn: "t2", Exchange: "x-1"},
 		{ID: "11", Kind: event.TurnStarted, Session: "s", Turn: "t2", Text: "second", ReplayFrom: "t1"},
 		{ID: "12", Kind: event.TurnStarted, Session: "other", Turn: "t9", Text: "elsewhere"},
 	} {
@@ -82,8 +85,8 @@ func TestReplayQueries(t *testing.T) {
 	// is still listed.
 	// A reply's error is carried, so a reply that did not arrive whole is
 	// never read as finished from its stop reason alone.
-	want := []Call{{"x-5", false, 0, "", ""}, {"x-4", true, 200, "end_turn", ""}, {"x-3", true, 529, "", "overloaded"},
-		{"x-1", true, 200, "max_tokens", ""}}
+	want := []Call{{"x-5", false, 0, "", "", false}, {"x-4", true, 200, "end_turn", "", true}, {"x-3", true, 529, "", "overloaded", false},
+		{"x-1", true, 200, "max_tokens", "", false}}
 	if got, err := s.TurnCalls("s", "t1"); err != nil || !reflect.DeepEqual(got, want) {
 		t.Errorf("calls %v %v\nwant %v", got, err, want)
 	}

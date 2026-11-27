@@ -60,7 +60,7 @@ func TestRunnerReadsOnlyItsOwnBlobs(t *testing.T) {
 		sd.cs = put(b)
 		makeJob(t, q, queue.Spec{Harness: "claude", Prompt: "p", Session: ids.SessionID("s_" + name)})
 		var taken TakenWork
-		if code := send(t, srv, sd.tok, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, &taken); code != 200 || taken.Job == nil {
+		if code := send(t, srv, sd.tok, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion, Lane: queue.LaneInteractive}, &taken); code != 200 || taken.Job == nil {
 			t.Fatalf("take %s: %d", name, code)
 		}
 		base := "/api/v0/runner/attempts/" + taken.Attempt.ID

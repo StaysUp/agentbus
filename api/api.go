@@ -356,6 +356,23 @@ const MaxStreams = 32
 
 var sessionID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 
+// sessionQuery is the session query of a route that filters by it
+// (atSessionQuery): the session, and whether one was sent. A value sent twice,
+// empty or not shaped as a session id is 400. The door checks it for every
+// grant (allow), before it asks whether the grant reaches everywhere, so a
+// handler reads the query as checked. ok false has answered.
+func sessionQuery(w http.ResponseWriter, r *http.Request) (session string, sent, ok bool) {
+	vs, sent := r.URL.Query()["session"]
+	if !sent {
+		return "", false, true
+	}
+	if len(vs) != 1 || !sessionID.MatchString(vs[0]) {
+		writeError(w, http.StatusBadRequest, "session must be sent once and match "+sessionID.String())
+		return "", true, false
+	}
+	return vs[0], true, true
+}
+
 func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// A body must arrive whole, soon, and small: a client that sends part of
 	// one and waits would otherwise hold this goroutine for good. Only a

@@ -73,10 +73,9 @@ type usage struct {
 	// ServerToolUse counts the tools Anthropic ran itself, such as
 	// web_search_requests. Kept whole: new counts appear as new tools do.
 	ServerToolUse map[string]int `json:"server_tool_use"`
-	// Cost is OpenRouter's charge for the call, in US dollars (its credits).
-	// cost_details next to it splits the upstream cost and is not read.
-	// Seen 2026-11-13 on OpenRouter replies (TODO fw 0.5.6).
-	Cost             *float64 `json:"cost"`
+	// OpenRouterCost is OpenRouter's charge for the call: cost, is_byok and
+	// cost_details. Seen 2026-11-13 on OpenRouter replies.
+	adapter.OpenRouterCost
 	outputIncomplete bool
 	// unknown holds the field names this adapter does not know, for
 	// schema.unexpected.
@@ -140,10 +139,11 @@ var (
 	knownReplyRoles = adapter.Names("assistant")
 	// knownUsage: seen in message_start and message_delta, plus
 	// server_tool_use (read). iterations and output_tokens_details are seen
-	// and not read.
+	// and not read. cost and cost_details are OpenRouter's (seen), is_byok
+	// too (documented, adapter.OpenRouterCost).
 	knownUsage = adapter.Names("input_tokens", "output_tokens", "cache_creation_input_tokens",
 		"cache_read_input_tokens", "cache_creation", "service_tier", "speed", "inference_geo",
-		"server_tool_use", "iterations", "output_tokens_details", "cost", "cost_details")
+		"server_tool_use", "iterations", "output_tokens_details", "cost", "cost_details", "is_byok")
 	knownCacheCreation = adapter.Names("ephemeral_5m_input_tokens", "ephemeral_1h_input_tokens")
 )
 
@@ -577,8 +577,8 @@ func fromReply(r reply, status int, problem string) []event.Event {
 			Speed:            u.Speed,
 			InferenceGeo:     u.InferenceGeo,
 			ServerToolUse:    u.ServerToolUse,
-			CostUSD:          u.Cost,
 		}
+		resp.Usage.CostUSD, resp.Usage.CostPartial = u.Charge()
 		if cc := u.CacheCreation; cc != nil {
 			resp.Usage.CacheWrite5mTokens = cc.Ephemeral5m
 			resp.Usage.CacheWrite1hTokens = cc.Ephemeral1h
@@ -749,8 +749,10 @@ func readStream(body []byte, u *adapter.Unknowns) (reply, string, error) {
 				if u.ServerToolUse != nil {
 					r.Usage.ServerToolUse = u.ServerToolUse
 				}
+				// message_delta's cost replaces message_start's whole, with
+				// its is_byok and cost_details.
 				if u.Cost != nil {
-					r.Usage.Cost = u.Cost
+					r.Usage.OpenRouterCost = u.OpenRouterCost
 				}
 				// Like the counts above, a zero split here does not replace
 				// message_start's.

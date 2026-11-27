@@ -46,9 +46,6 @@ import (
 	"github.com/staysup/agentbus/store"
 )
 
-// DefaultMaxRuns bounds the runs at once, when Config.MaxRuns is zero.
-const DefaultMaxRuns = 4
-
 // MaxPrompt bounds a turn's prompt, in bytes.
 const MaxPrompt = 256 << 10
 
@@ -161,9 +158,6 @@ type Config struct {
 	// replay will not continue from that turn. Nil stores run.ended at
 	// once.
 	Settle func(session, turn string) bool
-	// MaxRuns bounds the turns running at once. Past it Start refuses with
-	// 429. Zero means DefaultMaxRuns.
-	MaxRuns int
 	// RunGrace is how long a stop waits after SIGTERM before SIGKILL. Zero
 	// means 5 seconds.
 	RunGrace time.Duration
@@ -238,14 +232,10 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
-	if cfg.MaxRuns == 0 {
-		cfg.MaxRuns = DefaultMaxRuns
-	}
-	if cfg.MaxRuns < 0 {
-		return nil, errors.New("run: MaxRuns below zero")
-	}
+	// The engine counts no turns: control counts each lane's places
+	// (queue/lanes.go), and a runner starts every job it takes. A session
+	// still runs one turn at a time (runs.take).
 	e := &Engine{cfg: cfg}
-	e.runs.max = cfg.MaxRuns
 	if _, err := cfg.Store.CloseStaleHolds(cfg.Now().UTC(), newEventID); err != nil {
 		return nil, err
 	}
@@ -256,13 +246,9 @@ func New(cfg Config) (*Engine, error) {
 // the engine's TurnSink). Call it before the first turn.
 func (e *Engine) SetSettle(f func(session, turn string) bool) { e.cfg.Settle = f }
 
-// MaxRuns is how many turns may run at once.
-func (e *Engine) MaxRuns() int { return e.cfg.MaxRuns }
-
 // Refusal is why a turn did not start. Status says what kind, in HTTP's
 // words: 400 for the request or the service's own setup, 404 for a session no
-// event names, 409 for a session that cannot take this turn now, 429 at the
-// run limit, 500 for a store that cannot be written, 503 while stopping.
+// event names, 409 for a session that cannot take this turn now, 500 for a store that cannot be written, 503 while stopping.
 // Nothing ran.
 type Refusal struct {
 	Status int

@@ -37,6 +37,7 @@ func changedID(j queue.Job) string { return "evt_tc_" + j.ID }
 func appliedID(j queue.Job) string { return "evt_ta_" + j.ID }
 func discardID(j queue.Job) string { return "evt_wd_" + j.ID }
 func closedID(j queue.Job) string  { return "evt_wx_" + j.ID }
+func keptID(j queue.Job) string    { return "evt_wk_" + j.ID }
 func updateID(j queue.Job) string  { return "evt_wu_" + j.ID }
 
 // registeredID is the id of a folder's folder.registered, by its reference and
@@ -173,12 +174,12 @@ func keepOutcomes(rec Recorder, j queue.Job, f queue.Finish) (kept json.RawMessa
 			return nil, err
 		}
 		res.Refused, res.DiscardedEvent, moved = "", e.ID, true
-	case queue.KindClose:
+	case queue.KindClose, queue.KindPutAway:
 		if res.ClosedEvent != "" || j.State != queue.Finished {
 			break
 		}
 		ws := queue.CopyKey(j.Spec.Workspace, j.Session)
-		e := event.Event{ID: closedID(j), Kind: event.WorkspaceClosed, Time: now, Workspace: string(ws)}
+		e := event.Event{ID: closedID(j), Kind: event.WorkspaceClosed, Time: now, Workspace: string(ws), PutAway: PutAwayOf(j, "")}
 		if _, err := rec.AppendOnce(e); err != nil {
 			return nil, err
 		}
@@ -218,6 +219,22 @@ func keepOutcomes(rec Recorder, j queue.Job, f queue.Finish) (kept json.RawMessa
 		return nil, nil
 	}
 	return json.Marshal(res)
+}
+
+// PutAwayOf is a put-away job's why, for its workspace.closed or, with kept,
+// its workspace.kept. nil for any other job.
+func PutAwayOf(j queue.Job, kept string) *event.PutAway {
+	if j.Kind != queue.KindPutAway {
+		return nil
+	}
+	p := &event.PutAway{Queued: j.Created.UTC(), Kept: kept}
+	if b := j.Links.Because; b != nil {
+		p.On, p.Event = b.On, b.Event
+	}
+	if j.NotBefore != nil {
+		p.Due = j.NotBefore.UTC()
+	}
+	return p
 }
 
 func endedAt(j queue.Job) time.Time {

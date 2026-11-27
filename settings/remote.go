@@ -27,6 +27,7 @@ type RunnerSettings struct {
 	Instructions        string  `json:"instructions" doc:"The text every turn gets, before {session} is filled in."`
 	InstructionsVersion Version `json:"instructions_version" doc:"The instructions' version."`
 	SettingsVersion     int64   `json:"settings_version" doc:"The settings version these were read at: it moves up by one with every change of the settings. A turn records it on its turn.started. 0 from a server before 0.5."`
+	Budget              float64 `json:"budget,omitempty" doc:"The history budget own replay keeps a turn's history within, a share of the model's window (budget of GET /api/v0/settings/compaction). Absent from a server before 0.6.7: the runner takes the default, 0.4."`
 }
 
 // Remote reads the server's settings.
@@ -95,6 +96,20 @@ func (r *Remote) Snapshot() (Snapshot, error) {
 		return Snapshot{}, err
 	}
 	return FromRunner(s)
+}
+
+// Budget is the server's history budget, read fresh: a runner's own replay
+// keeps each turn's history within the share the person set on the server.
+// A server that sends none (older than 0.6.7) gives the default.
+func (r *Remote) Budget() (float64, error) {
+	s, err := r.fetch(SettingCompaction)
+	if err != nil {
+		return 0, err
+	}
+	if s.Budget <= 0 || s.Budget > 1 {
+		return DefaultCompaction().BudgetShare(), nil
+	}
+	return s.Budget, nil
 }
 
 // SetPolicy is refused: a runner's settings are the server's.

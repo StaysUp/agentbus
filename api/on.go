@@ -1,7 +1,8 @@
 package api
 
-// POST /api/v0/ons and DELETE /api/v0/ons/{id}: register and remove an on, the
-// standing instruction "when this event happens, do this" (queue/on.go). B13
+// POST /api/v0/ons, GET /api/v0/ons and DELETE /api/v0/ons/{id}: register,
+// list and remove an on, the standing instruction "when this event happens, do
+// this" (queue/on.go). B13
 // has one event, a turn completing, and one action, deliver that turn's reply
 // to a session as its next turn. It is the public form of what ask_agent
 // registers for itself (runs.go): the primitive every later reaction is built
@@ -11,16 +12,18 @@ package api
 // for any turn it may read (mayReadTurn, the check GET /api/v0/turns/{id}
 // uses), its own session's too, and its result is delivered to a session it
 // may read (its own when it names none); it may remove an on its own turn made
-// or one that delivers to a session it may read. Such an on counts as work its
-// turn asked for, under the per-turn and per-tree caps ([limits]
-// max_jobs_per_turn, max_jobs_per_tree). The main token may register an on for
-// any turn, naming the session to deliver to, and remove any on.
+// or one that delivers to a session it may read, and it lists those same ons
+// (agentOn). Such an on counts as work its turn asked for, under the per-turn
+// and per-tree caps ([limits] max_jobs_per_turn, max_jobs_per_tree). The main
+// token may register an on for any turn, naming the session to deliver to, and
+// list and remove any on.
 
 import (
 	"errors"
 	"net/http"
 
 	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/run"
 )
 
 // OnRequest is the body of POST /api/v0/ons.
@@ -38,6 +41,28 @@ type OnView struct {
 	Event   string `json:"event" doc:"The event it reacts to. For now, turn.completed."`
 	Turn    string `json:"turn" doc:"The turn it watches."`
 	Session string `json:"session" doc:"The session its action delivers to."`
+	// By is who registered it, as the queue's Maker names it.
+	By *OnMaker `json:"by,omitempty" doc:"The turn whose token registered the on, and that turn's session. Absent for an on the main token registered."`
+}
+
+// OnMaker is the turn that registered an on.
+type OnMaker struct {
+	Session string `json:"session" doc:"The registering turn's session."`
+	Turn    string `json:"turn" doc:"The registering turn."`
+}
+
+// OnList is the reply of GET /api/v0/ons.
+type OnList struct {
+	Ons []OnView `json:"ons" doc:"The ons waiting to react, oldest first. Empty when none."`
+}
+
+// onView is on as the API shows it.
+func onView(on queue.On) OnView {
+	v := OnView{ID: on.ID, Event: on.Event, Turn: on.Subject, Session: on.Session}
+	if on.Maker.Turn != "" {
+		v.By = &OnMaker{Session: on.Maker.Session, Turn: on.Maker.Turn}
+	}
+	return v
 }
 
 const (
@@ -72,7 +97,7 @@ func (a *API) registerOn(w http.ResponseWriter, r *http.Request) {
 	j, err := a.cfg.Queue.JobByTurn(queue.DefaultTeam, body.Turn)
 	switch {
 	case errors.Is(err, queue.ErrNotFound):
-		writeError(w, http.StatusNotFound, noTurn)
+		a.noJobOn(w, callerOf(r), &body)
 		return
 	case err != nil:
 		a.internal(w)
@@ -118,7 +143,72 @@ func (a *API) registerOn(w http.ResponseWriter, r *http.Request) {
 		a.internal(w)
 		return
 	}
-	writeJSON(w, http.StatusCreated, OnView{ID: on.ID, Event: on.Event, Turn: on.Subject, Session: on.Session})
+	writeJSON(w, http.StatusCreated, onView(on))
+}
+
+const onNoJob = "this turn was not run as a job of this service (an older turn, or one recorded at the gateway), so nothing reports its end and no on can react to it"
+
+// noJobOn answers an on over a turn with no job. The caller's own check comes
+// first (limits.watch), so a turn token that may not read such a turn gets
+// what it gets for any turn it cannot read. A turn that passes it, and that
+// the record holds, is 409: it is there, but an on over it could never fire
+// (FireOns reads the turn.ended its job's end writes, and the job's reply).
+// Review of dd2dcb1: every such turn got 404, a readable one too.
+func (a *API) noJobOn(w http.ResponseWriter, c *caller, body *OnRequest) {
+	if _, _, _, ok := c.limits.watch(a, w, queue.Job{}, body); !ok {
+		return
+	}
+	switch session, err := a.sessionOfTurn(body.Turn, ""); {
+	case err != nil:
+		a.internal(w)
+	case session == "":
+		writeError(w, http.StatusNotFound, noTurn)
+	default:
+		writeError(w, http.StatusConflict, onNoJob)
+	}
+}
+
+// GET /api/v0/ons: the turns' ons still waiting to react, oldest first, the
+// ones the caller may remove: every one for the main token; for a turn token,
+// agentOn's, the rule of DELETE /api/v0/ons/{id}. Control's own ons over the
+// record (the put-away) are not listed: no caller registers or removes them.
+func (a *API) listOns(w http.ResponseWriter, r *http.Request) {
+	if !noBody(w, r) {
+		return
+	}
+	session, sent, ok := sessionQuery(w, r)
+	if !ok {
+		return
+	}
+	out := OnList{Ons: []OnView{}}
+	if a.cfg.Queue == nil {
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
+	ons, err := a.cfg.Queue.ListOns(queue.DefaultTeam)
+	if err != nil {
+		a.internal(w)
+		return
+	}
+	c := callerOf(r)
+	every := c.everywhere(run.ActRead)
+	for _, on := range ons {
+		if on.Event != queue.OnTurnCompleted || sent && on.Session != session {
+			continue
+		}
+		if !every {
+			in, err := a.agentOn(c.Grant, on)
+			if err != nil {
+				a.internal(w)
+				return
+			}
+			if !in {
+				continue
+			}
+		}
+		out.Ons = append(out.Ons, onView(on))
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // DELETE /api/v0/ons/{id}

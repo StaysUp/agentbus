@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // Close, rebuild, preview and apply through control and a separate runner.
@@ -82,9 +83,18 @@ func TestXProcCloseRebuildPreservesBase(t *testing.T) {
 			if code, raw := x.post(base+"/"+prior, map[string]any{}); code != 200 {
 				t.Fatalf("prior %s: %d %s", prior, code, raw)
 			}
-			if code, raw := x.post(base+"/close", nil); code != 200 {
-				t.Fatalf("close: %d %s", code, raw)
+			// Close answers at once, queued (0.6.7); the runner's removal of the
+			// copy shows on the record as the workspace's closed time.
+			if code, raw := x.post(base+"/close", nil); code != 202 {
+				t.Fatalf("close: %d %s, want 202 queued", code, raw)
 			}
+			waitFor(t, "the close to run", func() bool {
+				code, raw := x.get(base)
+				var w struct {
+					Closed *time.Time `json:"closed"`
+				}
+				return code == 200 && json.Unmarshal(raw, &w) == nil && w.Closed != nil
+			})
 			if got, err := os.ReadFile(filepath.Join(folder, "kept.txt")); err != nil || string(got) != "keep\n" {
 				t.Fatalf("folder after close: %q %v", got, err)
 			}
