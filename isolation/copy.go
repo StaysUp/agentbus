@@ -397,11 +397,14 @@ func writeBase(s *Space, files *workspace.Snapshot) error {
 // copyTree copies the folder src to dst, which must not exist: folders,
 // files and symbolic links, with their modes and modification times. A file
 // it cannot read, a socket or a device, is left out, as a Snapshot leaves it
-// out. Each file is a reflink where the disk has them. It stops with ctx's
-// error when ctx ends, within one entry or one chunk of a file, and leaves
-// what it copied for its caller to remove (#95).
+// out. Each file is a reflink where the disk has them, and a file with
+// several names is copied once: the later names are links to that copy. It
+// stops with ctx's error when ctx ends, within one entry or one chunk of a
+// file, and leaves what it copied for its caller to remove (#95).
 func copyTree(ctx context.Context, src, dst string) (string, error) {
 	files, linked := 0, 0
+	// Where a file with several names was first copied, by disk and inode.
+	first := map[[2]uint64]string{}
 	err := filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
@@ -436,6 +439,17 @@ func copyTree(ctx context.Context, src, dst string) (string, error) {
 				return err
 			}
 		case info.Mode().IsRegular():
+			id, names, known := fileID(info)
+			shared := known && names > 1
+			if made, seen := first[id]; shared && seen {
+				// A path inside dst, so a turn writing through this name
+				// never reaches the person's folder. A refused link gets the bytes.
+				if err := os.Link(made, to); err == nil {
+					files++
+					linked++
+					return nil
+				}
+			}
 			ok, err := copyFile(ctx, p, to, info.Mode().Perm(), true)
 			if errors.Is(err, errUnreadable) {
 				return nil
@@ -448,6 +462,9 @@ func copyTree(ctx context.Context, src, dst string) (string, error) {
 				linked++
 			}
 			_ = os.Chtimes(to, info.ModTime(), info.ModTime())
+			if _, seen := first[id]; shared && !seen {
+				first[id] = to
+			}
 		}
 		return nil
 	})
