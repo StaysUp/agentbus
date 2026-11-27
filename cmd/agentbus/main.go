@@ -716,15 +716,7 @@ func start(c config) (*service, error) {
 					r = chatReplay
 				}
 			}
-			p, err := r.Base(session)
-			var no *replay.NoBase
-			if errors.As(err, &no) {
-				return engine.ReplayPlan{Refused: no.Why}, nil
-			}
-			if err != nil {
-				return engine.ReplayPlan{}, err
-			}
-			return engine.ReplayPlan{Turn: p.Turn, Failed: p.Failed}, nil
+			return replayPlan(r.Base(session))
 		}
 	}
 	baseURL := "http://" + agentAddr(ln.Addr())
@@ -1026,6 +1018,20 @@ func start(c config) (*service, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// replayPlan is the engine's plan for a replayer's Base answer. A session
+// replay cannot continue says why, and whether that turn's history can never
+// be rebuilt (replay.ErrUnusable) rather than not stored yet.
+func replayPlan(p replay.Plan, err error) (engine.ReplayPlan, error) {
+	var no *replay.NoBase
+	if errors.As(err, &no) {
+		return engine.ReplayPlan{Refused: no.Why, Unusable: errors.Is(err, replay.ErrUnusable)}, nil
+	}
+	if err != nil {
+		return engine.ReplayPlan{}, err
+	}
+	return engine.ReplayPlan{Turn: p.Turn, Failed: p.Failed}, nil
 }
 
 // sweep settles expired leases, and delivers the results of asked work, every

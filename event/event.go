@@ -560,13 +560,13 @@ type Event struct {
 	// Unsettled, only on a run's run.ended: the gateway could not
 	// confirm that all of the turn's model calls were stored (it gave up
 	// waiting, or a queue was full), so the turn may be missing calls.
-	Unsettled bool `json:"unsettled,omitempty" doc:"On a run's run.ended: the gateway could not confirm that every model call of the turn was stored, so the turn may be missing calls. Own replay does not continue from such a turn."`
+	Unsettled bool `json:"unsettled,omitempty" doc:"On a run's run.ended: the gateway could not confirm that every model call of the turn was stored, so the turn may be missing calls. Own replay does not continue from such a turn: the next turn gets the earlier turns as plain text (continuity transcript)."`
 	// Stopped, only on a run's run.ended: the person stopped the turn
 	// (POST /api/v0/turns/{id}/stop) while its child ran.
 	Stopped bool `json:"stopped,omitempty" doc:"On a run's run.ended: the person stopped the turn with POST /api/v0/turns/{id}/stop while its child ran. The session's next turn continues after it, told that the person stopped it."`
 	// Continuity, only on a next turn's turn.started: how it reaches the
 	// session's earlier turns, "replay", "resume" or "transcript".
-	Continuity string `json:"continuity,omitempty" doc:"On the turn.started of a session's next turn started by POST /api/v0/turns: replay (own replay, see replay_from), resume (the vendor's resume_id) or transcript (the turn's harness differs from the previous turn's, so it got the earlier turns as plain text, see context). Absent on a first turn."`
+	Continuity string `json:"continuity,omitempty" doc:"On the turn.started of a session's next turn started by POST /api/v0/turns: replay (own replay, see replay_from), resume (the vendor's resume_id) or transcript (the turn's harness differs from the previous turn's, or the previous turn's history cannot be rebuilt, so it got the earlier turns as plain text, see context). Absent on a first turn."`
 	// Context, only on the turn.started of a next turn: the earlier turns as
 	// plain text when its continuity is transcript (before 0.5, then the
 	// person's shell commands since the previous turn). The agent's prompt

@@ -41,26 +41,28 @@ func turnWith(t *testing.T, st *store.Store, n int, agentID, agent, model, promp
 // The transcript names each turn's agent by its saved name and model, or by
 // its harness, gives the person's words and the final reply, oldest first,
 // says when a turn had no reply, and sits between a head and a foot that
-// say what it is.
+// say what it is: a switch of agent, or a history that cannot be rebuilt.
 func TestTranscript(t *testing.T) {
 	e, st := transcriptEngine(t, map[string]string{"a_1": "Claude Code · haiku"})
 	turnWith(t, st, 1, "a_1", "claude", "claude-haiku", "remember OSPREY-9", "OK")
 	turnWith(t, st, 2, "", "codex", "gpt-x", "which word?", "OSPREY-9")
 	turnWith(t, st, 3, "a_gone", "claude", "", "stopped early", "")
-	got, err := e.transcript("s", 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	want := transcriptHead +
-		"--- Turn 1, the person to Claude Code · haiku (model claude-haiku) ---\nremember OSPREY-9\n\n" +
-		"--- Turn 1, Claude Code · haiku (model claude-haiku) replied ---\nOK\n\n" +
-		"--- Turn 2, the person to Codex (model gpt-x) ---\nwhich word?\n\n" +
-		"--- Turn 2, Codex (model gpt-x) replied ---\nOSPREY-9\n\n" +
-		"--- Turn 3, the person to Claude Code ---\nstopped early\n\n" +
-		"--- Turn 3, Claude Code replied ---\n(no reply: the turn ended without one)\n\n" +
-		transcriptFoot
-	if got != want {
-		t.Errorf("transcript\n got %q\nwant %q", got, want)
+	for _, head := range []string{transcriptHead, transcriptLostHead} {
+		got, err := e.transcript("s", 10, head)
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := head +
+			"--- Turn 1, the person to Claude Code · haiku (model claude-haiku) ---\nremember OSPREY-9\n\n" +
+			"--- Turn 1, Claude Code · haiku (model claude-haiku) replied ---\nOK\n\n" +
+			"--- Turn 2, the person to Codex (model gpt-x) ---\nwhich word?\n\n" +
+			"--- Turn 2, Codex (model gpt-x) replied ---\nOSPREY-9\n\n" +
+			"--- Turn 3, the person to Claude Code ---\nstopped early\n\n" +
+			"--- Turn 3, Claude Code replied ---\n(no reply: the turn ended without one)\n\n" +
+			transcriptFoot
+		if got != want {
+			t.Errorf("transcript\n got %q\nwant %q", got, want)
+		}
 	}
 }
 
@@ -73,18 +75,20 @@ func TestTranscriptBudget(t *testing.T) {
 	for i := 1; i <= 9; i++ {
 		turnWith(t, st, i, "", "claude", "m", "q"+string(rune('0'+i)), big)
 	}
-	got, err := e.transcript("s", 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) > TranscriptMax {
-		t.Errorf("%d bytes, over %d", len(got), TranscriptMax)
-	}
-	if !strings.Contains(got, "--- Turn 9, the person") || strings.Contains(got, "--- Turn 1, the person") ||
-		!strings.Contains(got, " earlier turns are left out: they do not fit.]") || !strings.Contains(got, " [… cut]") {
-		t.Errorf("transcript kept the wrong turns or marks:\n%.600s", got)
-	}
-	if got, _ := e.transcript("s", MaxPrompt-100); got != "" {
-		t.Errorf("a prompt near MaxPrompt still got %d bytes of transcript", len(got))
+	for _, head := range []string{transcriptHead, transcriptLostHead} {
+		got, err := e.transcript("s", 10, head)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) > TranscriptMax {
+			t.Errorf("%d bytes, over %d", len(got), TranscriptMax)
+		}
+		if !strings.Contains(got, "--- Turn 9, the person") || strings.Contains(got, "--- Turn 1, the person") ||
+			!strings.Contains(got, " earlier turns are left out: they do not fit.]") || !strings.Contains(got, " [… cut]") {
+			t.Errorf("transcript kept the wrong turns or marks:\n%.600s", got)
+		}
+		if got, _ := e.transcript("s", MaxPrompt-100, head); got != "" {
+			t.Errorf("a prompt near MaxPrompt still got %d bytes of transcript", len(got))
+		}
 	}
 }
