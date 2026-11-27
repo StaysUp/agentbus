@@ -209,6 +209,35 @@ func TestApplyAllOrNothing(t *testing.T) {
 	}
 }
 
+// A changeset from a copy with more files than a checkpoint holds lists only
+// part of the changes, so applying it would write part of the turn and say
+// applied. Apply and its preview refuse it, whichever end is cut, the first
+// apply from the base included, and write nothing.
+func TestApplyRefusesATruncatedChangeset(t *testing.T) {
+	folder := t.TempDir()
+	write(t, folder, map[string]string{"a.txt": "one\n"})
+	c, ref := newConnector(t, folder)
+	files := []workspace.FileChange{{Path: "a.txt", Base: fileOf("one\n", 0o644), Now: fileOf("A\n", 0o644)}}
+	whole := putChangeset(t, c, workspace.Changeset{Space: "job_1", Checkpoint: "t1", Files: files},
+		map[string]string{"a": "A\n"})
+	cut := putChangeset(t, c, workspace.Changeset{Space: "job_1", Checkpoint: "t2", Files: files, Truncated: true}, nil)
+	for _, tc := range []struct{ name, from, to string }{
+		{"to a cut checkpoint from the base", "", cut},
+		{"to a cut checkpoint from a whole one", whole, cut},
+		{"from a cut checkpoint", cut, whole},
+	} {
+		if _, err := c.Apply(context.Background(), ref, tc.from, tc.to); !errors.Is(err, ErrTruncated) {
+			t.Errorf("apply %s: %v, want ErrTruncated", tc.name, err)
+		}
+		if _, err := c.Preview(context.Background(), ref, tc.from, tc.to); !errors.Is(err, ErrTruncated) {
+			t.Errorf("preview %s: %v, want ErrTruncated", tc.name, err)
+		}
+		if got := text(t, filepath.Join(folder, "a.txt")); got != "one\n" {
+			t.Fatalf("apply %s wrote: a.txt is %q", tc.name, got)
+		}
+	}
+}
+
 // A mode the person changed in the folder is a local change, as a content
 // change is: an apply reports it instead of writing the turn's mode over it,
 // and its preview reports the same conflict. The turn's own chmod still
