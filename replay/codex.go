@@ -132,7 +132,9 @@ func (codex) asHistory(m json.RawMessage) (json.RawMessage, error) {
 // reason carries, or on an output message) did not finish, as Claude's
 // tool_use or pause_turn does not. A finished reply that said nothing (no
 // items, reasoning alone, messages of blank text) keeps its items, the
-// reasoning byte for byte, and gets the note after them.
+// reasoning byte for byte, and gets the note after them. Reported on PR #106
+// on 2026-11-27 (a reply with no items failed): not captured live, no codex-cli
+// version recorded. The shapes are in emptyreply_test.go.
 func (c codex) reply(rep body.Reply, _ string) ([]json.RawMessage, ending, error) {
 	items, ok := body.Elements(rep.Message)
 	if !ok {

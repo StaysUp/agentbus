@@ -631,8 +631,9 @@ func noteMessage(text string) json.RawMessage {
 		{Key: "content", Value: joinArray([]json.RawMessage{block})}})
 }
 
-// emptyReplyNote stands in for a reply that said nothing.
-const emptyReplyNote = notePrefix + "The model ended its turn here with an empty reply."
+// emptyReplyNote stands in for a reply that said nothing, whatever stopped it:
+// an end_turn, a refusal, or a token limit that cut it off before any text.
+const emptyReplyNote = notePrefix + "The model's reply here was empty."
 
 // withoutBlankText is message m without its text blocks that are only
 // whitespace, and whether anything the person would read is left of it: a
@@ -1112,7 +1113,10 @@ func (claude) reply(rep body.Reply, stop string) ([]json.RawMessage, ending, err
 	// right after tool results) cannot be sent back: the API refuses a message
 	// with no content anywhere but last, and a text block that is only
 	// whitespace; the breakpoint cannot sit on a thinking block either. A note
-	// stands in for what it did not say.
+	// stands in for what it did not say. Seen 2026-11-26 as issue #103, from
+	// Anthropic's docs on empty end_turn replies and the refusal text quoted
+	// there: not captured live, no Claude Code version recorded. The shapes
+	// are in emptyreply_test.go.
 	m, said, err := withoutBlankText(m)
 	if err != nil {
 		return nil, ending{}, err
