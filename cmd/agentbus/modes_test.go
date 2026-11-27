@@ -33,7 +33,7 @@ func TestModeFlags(t *testing.T) {
 		{[]string{"runner", "-server", "http://127.0.0.1:1", "-capacity", "65"}, "-capacity must be 1 to 64"},
 		{[]string{"runner", "-server", "http://127.0.0.1:1", "-max-runs", "2"}, "not defined: -max-runs"},
 		{[]string{"server", "-max-runs", "2"}, "not defined: -max-runs"},
-		{[]string{"up", "-max-runs", "0"}, "-max-runs must be 1 to 64"},
+		{[]string{"runner", "-server", "http://127.0.0.1:1", "-capacity", "-1"}, "-capacity must be 1 to 64"},
 	} {
 		var b bytes.Buffer
 		if code := run(c.args, env, &b, &b); code != 2 || !strings.Contains(b.String(), c.want) {

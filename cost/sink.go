@@ -30,7 +30,8 @@ func (s Sink) Emit(e event.Event) {
 
 // Event prices the usage of one model.responded. Usage nil prices nothing and
 // is incomplete: absent usage is unknown, not zero. A cost the vendor
-// reported (Usage.CostUSD) is the price, and the table is not read.
+// reported (Usage.CostUSD) is the price, and the table is not read; it is
+// incomplete when the vendor says it is partial.
 //
 // The call is priced at the tier and speed the vendor reported. No reported
 // speed is standard speed: speed is a request opt-in, and fast mode reports
@@ -44,6 +45,9 @@ func (t *Table) Event(e event.Event) Result {
 	// The vendor's own charge is the cost: OpenRouter bills by its own
 	// prices, which the table does not hold.
 	if u.CostUSD != nil {
+		if u.CostPartial {
+			return Result{USD: *u.CostUSD, Missing: []string{"the vendor's cost leaves out part of the charge"}}
+		}
 		if u.OutputIncomplete {
 			return Result{USD: *u.CostUSD, Missing: []string{"the reply ended before its final count"}}
 		}

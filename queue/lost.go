@@ -50,11 +50,12 @@ func (q *Queue) OutcomesDue(after *Job, limit int) ([]Job, error) {
 }
 
 // KeepOutcome swaps job id's due mark for the id of the event that now
-// holds its outcome in the record: an apply's turn.applied. A job not
-// marked due is left as it is.
-func (q *Queue) KeepOutcome(id, applied string) error {
-	if _, err := q.db.Exec(`UPDATE jobs SET result = json_set(json_remove(result, '$.outcome_due'), '$.applied_event', ?)
-		WHERE id = ? AND ended IS NOT NULL AND json_extract(result, '$.outcome_due')`, applied, id); err != nil {
+// holds its outcome in the record: an apply's turn.applied, a kept
+// put-away's workspace.kept. A job not marked due is left as it is.
+func (q *Queue) KeepOutcome(id, evt string) error {
+	if _, err := q.db.Exec(`UPDATE jobs SET result = json_set(json_remove(result, '$.outcome_due'),
+			CASE kind WHEN 'put_away' THEN '$.kept_event' ELSE '$.applied_event' END, ?)
+		WHERE id = ? AND ended IS NOT NULL AND json_extract(result, '$.outcome_due')`, evt, id); err != nil {
 		return fmt.Errorf("queue: write job: %w", err)
 	}
 	return nil

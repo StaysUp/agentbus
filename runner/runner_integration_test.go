@@ -92,6 +92,7 @@ const (
 
 type world struct {
 	skew   atomic.Int64 // added to the queue's clock
+	jobsDB string       // the queue's file
 	q      *queue.Queue
 	st     *store.Store
 	eng    *run.Engine
@@ -123,15 +124,15 @@ func newWorld(t *testing.T, capacity int, record ...bool) *world {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng, err := run.New(run.Config{Store: st, BaseURL: "http://127.0.0.1:1", MaxRuns: capacity, RunGrace: time.Second,
+	eng, err := run.New(run.Config{Store: st, BaseURL: "http://127.0.0.1:1", RunGrace: time.Second,
 		Wire: func(agent, baseURL string, _ run.Access) (run.Launch, error) {
 			return run.Launch{Path: self, Env: append(os.Environ(), "RUNNER_FAKE_AGENT=1", "RUNNER_FAKE_LOG="+log)}, nil
 		}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := &world{}
-	q, err := queue.Open(filepath.Join(dir, "jobs.db"), func() time.Time { return time.Now().Add(time.Duration(w.skew.Load())) })
+	w := &world{jobsDB: filepath.Join(dir, "jobs.db")}
+	q, err := queue.Open(w.jobsDB, func() time.Time { return time.Now().Add(time.Duration(w.skew.Load())) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -143,8 +144,14 @@ func newWorld(t *testing.T, capacity int, record ...bool) *world {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The lease is control's own (jobs.Lease). The queue has one connection,
+	// so a heartbeat waits for every write before it, and a slow commit under
+	// the gate's parallel load held one past a 2 s lease: control failed a
+	// running folder job (runner_lost) and refused its finish with 409
+	// (2026-11-26; TestHeartbeatWaitsOutASlowQueue). A test that needs a
+	// lease to lapse moves the queue's clock (skew), never waits.
 	cfg := jobs.Config{Queue: q, Token: mainTok, EnrollToken: enrollTok,
-		Lease: 2 * time.Second, Heartbeat: 50 * time.Millisecond, MaxWait: 200 * time.Millisecond, Folders: fr, Blobs: bs}
+		Lease: jobs.Lease, Heartbeat: 50 * time.Millisecond, MaxWait: 200 * time.Millisecond, Folders: fr, Blobs: bs}
 	if withRecord {
 		cfg.Record = st
 	}
@@ -216,6 +223,22 @@ func (w *world) create(t *testing.T, spec queue.Spec) queue.Job {
 	return j
 }
 
+// createAsked makes a turn job an agent asked for: delegated work, in a new
+// session of the tree person is the root of (queue/lanes.go).
+func (w *world) createAsked(t *testing.T, spec queue.Spec) queue.Job {
+	t.Helper()
+	if spec.Folder == "" && spec.Repo == "" && spec.Session == "" {
+		spec.Folder = w.folder
+	}
+	j, _, err := w.q.CreateTurnLinked(queue.DefaultTeam, "", spec,
+		queue.Links{Chain: &queue.Chain{Root: "person", Depth: 1, By: queue.NewID("t_"), BySession: "person"}},
+		queue.Limits{MaxDepth: 2, MaxPerTurn: 10, MaxPerTree: 30}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return j
+}
+
 func (w *world) job(t *testing.T, id string) queue.Job {
 	t.Helper()
 	j, err := w.q.Get(queue.DefaultTeam, id)
@@ -244,21 +267,26 @@ func result(t *testing.T, j queue.Job) queue.Result {
 	return r
 }
 
-// Three jobs on a runner of capacity 2: two turns run at once and the third
-// waits in the queue. Every job ends finished. Its attempt is its turn: the
-// turn the record holds has the attempt's id, in the session the queue named
-// when the job was made.
+// Three delegated jobs on a runner of capacity 2: two turns run at once and
+// the third waits in the queue. The person's turns are not counted: two more,
+// sent meanwhile, run beside them at once. Every job ends finished. Its
+// attempt is its turn: the turn the record holds has the attempt's id, in the
+// session the queue named when the job was made.
 func TestJobsRunAsTurns(t *testing.T) {
 	w := newWorld(t, 2)
 	var ids []string
 	for range 3 {
-		ids = append(ids, w.create(t, queue.Spec{Harness: "claude", Prompt: "hold", Model: "haiku"}).ID)
+		ids = append(ids, w.createAsked(t, queue.Spec{Harness: "claude", Prompt: "hold", Model: "haiku"}).ID)
 	}
 	waitFor(t, "two turns", func() bool { return len(w.runs()) == 2 })
 	time.Sleep(200 * time.Millisecond)
 	if n := len(w.runs()); n != 2 {
-		t.Fatalf("%d turns past capacity 2", n)
+		t.Fatalf("%d delegated turns past capacity 2", n)
 	}
+	for range 2 {
+		ids = append(ids, w.create(t, queue.Spec{Harness: "claude", Prompt: "hold", Model: "haiku"}).ID)
+	}
+	waitFor(t, "the person's two turns beside them", func() bool { return len(w.runs()) == 4 })
 	w.release()
 	for _, id := range ids {
 		waitFor(t, "job "+id, func() bool { return w.job(t, id).Ended != nil })
@@ -688,7 +716,7 @@ func TestEnrollRefusesOlderControl(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng, err := run.New(run.Config{Store: st, BaseURL: "http://127.0.0.1:1", MaxRuns: 1, RunGrace: time.Second,
+	eng, err := run.New(run.Config{Store: st, BaseURL: "http://127.0.0.1:1", RunGrace: time.Second,
 		Wire: func(string, string, run.Access) (run.Launch, error) { return run.Launch{}, nil }})
 	if err != nil {
 		t.Fatal(err)
@@ -735,7 +763,7 @@ func TestSavedIdentityRefusesOlderControl(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	eng, err := run.New(run.Config{Store: st, BaseURL: "http://127.0.0.1:1", MaxRuns: 1, RunGrace: time.Second,
+	eng, err := run.New(run.Config{Store: st, BaseURL: "http://127.0.0.1:1", RunGrace: time.Second,
 		Wire: func(string, string, run.Access) (run.Launch, error) { return run.Launch{}, nil }})
 	if err != nil {
 		t.Fatal(err)

@@ -74,6 +74,11 @@ type Result struct {
 	// UpdatedEvent: an update's workspace.updated, by its id, in place of the
 	// outcome itself (as DiscardedEvent is for a discard).
 	UpdatedEvent string `json:"updated_event,omitempty"`
+	// Kept: a put-away that control ended without a runner, since the
+	// workspace was not quiet and settled when it came due: why it kept the
+	// copy. KeptEvent is its workspace.kept in the record, once written.
+	Kept      string `json:"kept,omitempty"`
+	KeptEvent string `json:"kept_event,omitempty"`
 	// OutcomeDue: the job ended with no finish (its runner was lost), so
 	// no finisher wrote its outcome; control's sweep writes it to the
 	// record and sets the pointer in its place (OutcomesDue, KeepOutcome).

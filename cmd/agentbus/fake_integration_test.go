@@ -119,6 +119,25 @@ func fakeAgent() {
 	if b := os.Getenv("AGENTBUS_FAKE_BODY"); b != "" {
 		calls = []string{b}
 	}
+	// With AGENTBUS_FAKE_BODIES, a JSON object from a turn's prompt (the
+	// last argument) to the model calls it makes, "*" for any other prompt;
+	// @PROMPT@ in a body is the prompt, as a JSON string's inside. So one
+	// runner's agent makes different calls in each turn of a session.
+	if bs := os.Getenv("AGENTBUS_FAKE_BODIES"); bs != "" {
+		var byPrompt map[string][]string
+		if json.Unmarshal([]byte(bs), &byPrompt) == nil {
+			p := os.Args[len(os.Args)-1]
+			list, ok := byPrompt[p]
+			if !ok {
+				list = byPrompt["*"]
+			}
+			q, _ := json.Marshal(p)
+			calls = nil
+			for _, b := range list {
+				calls = append(calls, strings.ReplaceAll(b, "@PROMPT@", string(q[1:len(q)-1])))
+			}
+		}
+	}
 	for _, body := range calls {
 		req, _ := http.NewRequest("POST", claudeGatewayEnv("ANTHROPIC_BASE_URL")+"/v1/messages", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")

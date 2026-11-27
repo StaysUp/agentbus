@@ -174,7 +174,8 @@ var settingsRoutes = []route{
 			"shown in the context view as \"compacts at ~Y%\". Every field is filled: a vendor the person never changed reads as its built-in default. " +
 			"Only opencode and Gemini CLI publish a real point in their own open source; Claude Code and Codex publish none, so their default here is a " +
 			"stated choice, never a hidden number. Which vendor's number is the vendor's own and which is a stated default is in each field's description; " +
-			"the context view labels it (compaction_source).\n\nETag is the compaction points' version: send it back in If-Match to change them.",
+			"the context view labels it (compaction_source). budget is AgentBus's own history budget: the share of the window that own replay keeps each turn's carried history within " +
+			"(0.4 by default), well below every harness's point, so a long session does not grow until its harness compacts (history.shortened records each step).\n\nETag is the compaction points' version: send it back in If-Match to change them.",
 		replies:   []reply{ok(200, settings.Compaction{}, "The compaction points, every field filled."), settingsBroken, noSettings},
 		versioned: true,
 		serve:     plain((*API).getCompaction)},
@@ -183,8 +184,8 @@ var settingsRoutes = []route{
 		summary: "Change the compaction points",
 		doc: "Change the compaction points. Each field is a share of the window in (0, 1], such as 0.8. A field left out keeps its built-in default. " +
 			"The settings database keeps only the fields whose value differs from the default, so a later build that changes a default reaches a vendor the " +
-			"person never set. The context view's next read shows the new point.\n\n" + versionDoc +
-			"The change and its settings.changed event (keys: the vendors whose point changed, never the numbers) are saved together. A PUT that changes nothing makes no event.",
+			"person never set. The context view's next read shows the new point; own replay reads budget at each turn's start.\n\n" + versionDoc +
+			"The change and its settings.changed event (keys: the vendors whose point changed, and budget, never the numbers) are saved together. A PUT that changes nothing makes no event.",
 		body: settings.Compaction{},
 		replies: []reply{ok(200, settings.Compaction{}, "The compaction points, as stored, every field filled."),
 			fail(http.StatusBadRequest, "A value is refused; error names the vendor."), settingsReadOnly, settingsChanged, settingsNoMatch, noSettings,

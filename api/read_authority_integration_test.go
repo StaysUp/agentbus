@@ -113,8 +113,10 @@ func TestTurnTokenReadsItsAuthority(t *testing.T) {
 	// Review P1, 2026-11-25: an empty place is a missing place, refused at
 	// the door for every token, never read as "no place" and allowed. The
 	// event stream with ?session= streamed the events of no session, the
-	// changes.previewed diffs of every workspace among them.
-	for who, tok := range map[string]string{"builder in a copy": btok, "direct coordinator": coord} {
+	// changes.previewed diffs of every workspace among them. Review P2 of
+	// O2.3: the owner's token skipped the check (it reaches everywhere) and
+	// got a stream; the shape is now 400 for every token, the owner's too.
+	for who, tok := range map[string]string{"builder in a copy": btok, "direct coordinator": coord, "owner": token} {
 		// A stream the door lets through stays open, so the check has a
 		// deadline: an open stream fails it rather than hang the test.
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -122,12 +124,12 @@ func TestTurnTokenReadsItsAuthority(t *testing.T) {
 		r.Header.Set("Authorization", "Bearer "+tok)
 		resp, err := http.DefaultClient.Do(r)
 		if err != nil {
-			t.Errorf("%s: GET /api/v0/events?session=: %v, want 403", who, err)
+			t.Errorf("%s: GET /api/v0/events?session=: %v, want 400", who, err)
 		} else {
 			out, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			if resp.StatusCode != 403 || !strings.Contains(string(out), turnSessionRefused) {
-				t.Errorf("%s: GET /api/v0/events?session=: %d %s, want 403", who, resp.StatusCode, out)
+			if resp.StatusCode != 400 {
+				t.Errorf("%s: GET /api/v0/events?session=: %d %s, want 400", who, resp.StatusCode, out)
 			}
 		}
 		cancel()

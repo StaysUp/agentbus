@@ -571,6 +571,15 @@ func (d *DB) Compaction() (Compaction, Version, error) {
 	return s.compactionOf()
 }
 
+// Budget is the history budget (Compaction's budget).
+func (d *DB) Budget() (float64, error) {
+	c, _, err := d.Compaction()
+	if err != nil {
+		return 0, err
+	}
+	return c.BudgetShare(), nil
+}
+
 // SetCompaction stores c as the person's compaction points when they are
 // still at match. Only the fields that differ from the built-in defaults are
 // kept, so a later build that changes a default reaches a field the person

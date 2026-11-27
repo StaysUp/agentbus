@@ -262,7 +262,8 @@ func refusedWith(t *testing.T, rw gateway.Rewrite, want string) {
 }
 
 // Layouts the gateway does not know are refused, never sent without the
-// history; another thread (a subagent) passes unchanged.
+// history; a main request the harness compacted passes as sent, recorded;
+// another thread (a subagent) passes unchanged.
 func TestCodexLayouts(t *testing.T) {
 	ctx := context("b", "read-only")
 	t.Run("compacted main request", func(t *testing.T) {
@@ -271,7 +272,19 @@ func TestCodexLayouts(t *testing.T) {
 			t.Fatal("first request not spliced")
 		}
 		compacted := codexReq(thread2, append(ctx, prompt("b", p2), `{"type":"compaction","encrypted_content":"Q09NUA=="}`)...)
-		refusedWith(t, r.Rewrite("s", "t2", []byte(compacted)), "as after a compaction")
+		rw := r.Rewrite("s", "t2", []byte(compacted))
+		if rw.Refuse != nil || rw.Replayed != 0 || len(rw.Events) != 1 || rw.Events[0].Kind != event.HistoryCompacted {
+			t.Fatalf("compacted: %+v", rw.Events)
+		}
+		// The input goes on untouched; only the thread id is the session's.
+		if field2(t, rw.Body, "input") != field2(t, []byte(compacted), "input") || strings.Contains(string(rw.Body), thread2) {
+			t.Fatalf("body %s", rw.Body)
+		}
+		h := http.Header{"Session-Id": {thread2}}
+		rw.Header(h)
+		if h.Get("Session-Id") != thread1 {
+			t.Fatalf("header %v", h)
+		}
 	})
 	t.Run("model item before the prompt", func(t *testing.T) {
 		_, r := codexTwoTurns(t)

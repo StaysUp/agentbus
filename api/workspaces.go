@@ -440,33 +440,9 @@ func (a *API) discardWorkspace(w http.ResponseWriter, r *http.Request, id string
 // CloseState is the state of a workspace close (POST
 // /api/v0/workspaces/{id}/close): the copy removed to reclaim disk.
 type CloseState struct {
-	State   string `json:"state,omitempty" doc:"queued, running, closed, or failed (error says why)."`
+	State   string `json:"state,omitempty" doc:"queued: the close was queued, and workspace.closed on the record says it ran. closed: already is true. failed: refused, as error says (another apply, discard, update or close still waits)."`
 	Already bool   `json:"already,omitempty" doc:"The workspace was already closed, so nothing was removed."`
-	Error   string `json:"error,omitempty" doc:"Why the close failed."`
-}
-
-// closeStateOf reads a close job's state and the HTTP status that reports it:
-// 200 closed, 202 while it is queued or running, and the runner's own status
-// for a failure (else 500).
-func (a *API) closeStateOf(j queue.Job) (CloseState, int) {
-	switch {
-	case j.State == queue.Queued:
-		return CloseState{State: "queued"}, http.StatusAccepted
-	case j.Ended == nil:
-		return CloseState{State: "running"}, http.StatusAccepted
-	case j.State == queue.Finished:
-		return CloseState{State: "closed"}, http.StatusOK
-	default:
-		st := CloseState{State: "failed", Error: "the close did not finish"}
-		status := http.StatusInternalServerError
-		if r, _ := queue.ReadResult(j.Result); r.Refused != "" {
-			st.Error = r.Refused
-			if r.Status != 0 {
-				status = r.Status
-			}
-		}
-		return st, status
-	}
+	Error   string `json:"error,omitempty" doc:"Why the close was refused."`
 }
 
 // closeWorkspace serves POST /api/v0/workspaces/{id}/close: remove the
@@ -493,7 +469,7 @@ func (a *API) closeWorkspace(w http.ResponseWriter, r *http.Request, id string) 
 		writeError(w, http.StatusBadRequest, "this session works directly in your folder; only a sandbox copy can be closed")
 		return
 	}
-	j, created, err := a.cfg.Queue.CloseWorkspace(queue.DefaultTeam, wsID, ws.Machine, askedBy(r))
+	_, _, err = a.cfg.Queue.CloseWorkspace(queue.DefaultTeam, wsID, ws.Machine, askedBy(r))
 	var removed *queue.RunnerRemovedError
 	switch {
 	case errors.Is(err, queue.ErrApplyBusy):
@@ -515,18 +491,11 @@ func (a *API) closeWorkspace(w http.ResponseWriter, r *http.Request, id string) 
 		a.internal(w)
 		return
 	}
-	_ = created
-	// The close waits behind any queued lane job; await it.
-	if j.Ended == nil {
-		if j, err = a.awaitEnd(r.Context(), j); err != nil {
-			if r.Context().Err() == nil {
-				a.internal(w)
-			}
-			return
-		}
-	}
-	st, status := a.closeStateOf(j)
-	writeJSON(w, status, st)
+	// The close is a new job in the workspace lane, and the reply comes at
+	// once, as a turn's does (0.6.7): its end is the record's
+	// workspace.closed. A wait here held a caller that closed many workspaces
+	// about 30 seconds each.
+	writeJSON(w, http.StatusAccepted, CloseState{State: "queued"})
 }
 
 // UpdateState is the state of a workspace update (POST

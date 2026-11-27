@@ -29,7 +29,6 @@ import (
 
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
-	engine "github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/runner"
 )
 
@@ -70,14 +69,17 @@ func (c config) modeName() string {
 	return c.mode
 }
 
-const usage = `usage: agentbus up     [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false] [-max-runs 4] [-open]
+const usage = `usage: agentbus up     [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false] [-open]
        agentbus server [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false]
-       agentbus runner -server URL [-capacity 4] [-name NAME] [-folder DIR]... [-labels a,b] [-listen 127.0.0.1:0] [-replay=false]
+       agentbus runner -server URL [-capacity N] [-name NAME] [-folder DIR]... [-labels a,b] [-listen 127.0.0.1:0] [-replay=false]
        agentbus login URL [runner's flags]   (on a machine, once: sign it in to the control at URL; approve it on the Runners page)
        agentbus version
 
 For agents and scripts:
        agentbus api METHOD PATH [BODY]   (inside a turn: calls this service with the turn's token)`
+
+// maxRunsRetired is what agentbus up says of -max-runs since 0.6.7.
+const maxRunsRetired = "-max-runs was retired in 0.6.7 and is ignored: turns you send start at once, and turns agents start are limited by [limits] max_delegated_at_once in the settings (8 by default; a change holds with no restart)"
 
 // connectRemoved is what agentbus connect says since 0.5: the cockpit's
 // Connect keeps a subscription's sign-in on control instead.
@@ -115,14 +117,15 @@ func parse(args []string, home string, stderr io.Writer) (config, bool) {
 		origin = fl.String("origin", "", "lock the API to this one browser origin, such as http://localhost:5173; without it any origin may call the API, and the token still guards every call")
 		fl.Var(&hostList, "host", "another name the API answers to on loopback, such as host.lima.internal, the name a Lima VM reaches this machine's loopback by; repeat it for each one")
 	}
-	maxRuns := new(int)
+	capacity := new(int)
+	retiredMaxRuns := new(int)
 	openOn := new(bool)
 	switch c.mode {
 	case modeUp:
 		fl.BoolVar(openOn, "open", false, "also open the cockpit's sign-in link in this desktop's browser; without it the link is only printed")
-		fl.IntVar(maxRuns, "max-runs", engine.DefaultMaxRuns, "how many turns the built-in runner runs at once, 1 to 64; more wait in the queue")
+		fl.IntVar(retiredMaxRuns, "max-runs", 0, "retired in 0.6.7 and ignored: the limit on turns agents start is [limits] max_delegated_at_once in the settings, and turns you send are not counted")
 	case modeRunner:
-		fl.IntVar(maxRuns, "capacity", engine.DefaultMaxRuns, "how many jobs this runner runs at once, 1 to 64")
+		fl.IntVar(capacity, "capacity", 0, "the most turns agents started that this machine runs at once, 1 to 64, whatever the settings say; without it the settings decide ([limits] max_delegated_at_once). Turns a person sends are not counted")
 	}
 	var server, runnerName, gatewayMode, labels *string
 	var folderList folderFlags
@@ -148,15 +151,18 @@ func parse(args []string, home string, stderr io.Writer) (config, bool) {
 		fmt.Fprintf(stderr, "%s: unexpected argument %q\n", name, fl.Arg(0))
 		return c, false
 	}
-	if c.mode != modeServer && (*maxRuns < 1 || *maxRuns > jobs.MaxCapacity) {
-		flagName := "-max-runs"
-		if c.mode == modeRunner {
-			flagName = "-capacity"
-		}
-		fmt.Fprintf(stderr, "%s: %s must be 1 to 64\n", name, flagName)
+	if c.mode == modeRunner && *capacity != 0 && (*capacity < 1 || *capacity > jobs.MaxCapacity) {
+		fmt.Fprintf(stderr, "%s: -capacity must be 1 to 64\n", name)
 		return c, false
 	}
-	c.listen, c.noReplay, c.maxRuns = *listen, !*replayOn, *maxRuns
+	// compat 0.6.7: drop -max-runs. A command from before it keeps starting,
+	// told where the limit is now.
+	fl.Visit(func(f *flag.Flag) {
+		if f.Name == "max-runs" {
+			fmt.Fprintf(stderr, "%s: %s\n", name, maxRunsRetired)
+		}
+	})
+	c.listen, c.noReplay, c.capacity = *listen, !*replayOn, *capacity
 	c.noOpen = c.mode == modeUp && !*openOn
 	if origin != nil {
 		c.origin = *origin

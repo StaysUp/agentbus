@@ -43,7 +43,7 @@ func takesFolder(t *testing.T, q *Queue, r Runner) string {
 
 func takesKind(t *testing.T, q *Queue, r Runner, folders bool) string {
 	t.Helper()
-	j, _, ok, _, err := q.Take(r.ID, lease, folders)
+	j, _, ok, _, err := q.Take(r.ID, lease, laneOf(folders))
 	if err != nil {
 		t.Fatal(err)
 	}

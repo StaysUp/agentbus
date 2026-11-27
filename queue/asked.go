@@ -74,27 +74,33 @@ func (q *Queue) CreateTurnLinked(team, key string, spec Spec, links Links, lim L
 }
 
 // SessionRoot is the root of the request tree a session was started in: the
-// Chain.Root of its first turn job that has one, or of the asked review that
-// runs in it: a review runs in a session of its own, which control names when
-// it makes the job (Links.ReviewSession).
-// "" for a session the person started, or one the queue does not know.
+// Chain.Root of its first turn job. "" for a session the person started, or
+// one the queue does not know.
 func (q *Queue) SessionRoot(team, session string) (string, error) {
 	root, _, err := q.SessionChain(team, session)
 	return root, err
 }
 
-// SessionChain is the request tree a session's own turns belong to: the root and
-// depth of its first rooted turn job, or ("", 0) for a session the person
-// started (which has no tree). A delivered result the main token asked for
-// joins the RECEIVING session's tree with these; one a turn asked for joins the
-// asking turn's tree instead (deliverResult). B15 dropped the review kind, so
-// only turn jobs carry a chain here.
+// SessionChain is the request tree a session's own turns belong to: the root
+// and depth of its FIRST turn job, or ("", 0) when that job has no chain (a
+// session the person started, which has no tree) or the session has no job. A
+// delivered result the main token asked for joins the RECEIVING session's tree
+// with these; one a turn asked for joins the asking turn's tree instead
+// (deliverResult).
+//
+// Only the first job decides. A later turn in the session may carry another
+// tree's chain, such as a delivery another tree's turn sent into it; that tree
+// continued the session, it did not start it. Reading the first job with a
+// chain took that tree for a session the person started, so an owner's
+// delivery into it joined a tree it was never in (O2.3 review P2). Ties of
+// created, at the clock's resolution, go to the job stored first (rowid), as
+// firstSpec reads a workspace's first turn.
 func (q *Queue) SessionChain(team, session string) (root string, depth int, err error) {
 	var r sql.NullString
 	var d sql.NullInt64
 	e := q.db.QueryRow(`SELECT json_extract(links, '$.chain.root'), json_extract(links, '$.chain.depth')
 		FROM jobs WHERE team = ? AND kind = 'turn' AND session = ?
-		AND json_extract(links, '$.chain.root') IS NOT NULL ORDER BY created, id LIMIT 1`, team, session).Scan(&r, &d)
+		ORDER BY created, rowid LIMIT 1`, team, session).Scan(&r, &d)
 	if errors.Is(e, sql.ErrNoRows) {
 		return "", 0, nil
 	}

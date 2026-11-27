@@ -8,6 +8,7 @@ package workspace
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -57,7 +58,16 @@ type Snapshot struct {
 type Hasher func(rel, path string, info fs.FileInfo) (string, error)
 
 // Hash is the Hasher Walk uses by default: a file's content, a link's target.
-func Hash(_, path string, info fs.FileInfo) (string, error) {
+func Hash(rel, path string, info fs.FileInfo) (string, error) {
+	return HashContext(context.Background(), rel, path, info)
+}
+
+// HashContext is Hash that stops with ctx's error when ctx ends, within one
+// piece of a big file.
+func HashContext(ctx context.Context, _, path string, info fs.FileInfo) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if info.Mode()&fs.ModeSymlink != 0 {
 		target, err := os.Readlink(path)
 		if err != nil {
@@ -65,7 +75,7 @@ func Hash(_, path string, info fs.FileInfo) (string, error) {
 		}
 		return hashBytes([]byte("link:" + target)), nil
 	}
-	return hashFile(path)
+	return hashFile(ctx, path)
 }
 
 // Walk records every file under root. A file that Keeps says is still the one
@@ -349,7 +359,7 @@ func HashOf(p string) (string, fs.FileMode, error) {
 		}
 		return hashBytes([]byte("link:" + target)), info.Mode(), nil
 	case info.Mode().IsRegular():
-		h, err := hashFile(p)
+		h, err := hashFile(context.Background(), p)
 		return h, info.Mode(), err
 	}
 	return "", info.Mode(), errors.New("not a file")
@@ -367,15 +377,27 @@ func hashBytes(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func hashFile(p string) (string, error) {
+// hashPiece is how much of a file hashFile reads between two looks at ctx.
+const hashPiece = 32 << 20
+
+func hashFile(ctx context.Context, p string) (string, error) {
 	f, err := os.Open(p)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		n, err := io.CopyN(h, f, hashPiece)
+		if err == io.EOF || (err == nil && n < hashPiece) {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }

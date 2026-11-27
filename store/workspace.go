@@ -47,7 +47,7 @@ type Workspace struct {
 	// was a discard, so its unapplied changes were dropped and no apply has run
 	// since. Nil otherwise.
 	DiscardedAt *time.Time `json:"discarded_at,omitempty" doc:"When the workspace's latest action was a discard. Absent when its latest action was an apply, or it has neither."`
-	Closed      *time.Time `json:"closed,omitempty" doc:"When the copy was removed by Close. Absent once a later turn starts and rebuilds it."`
+	Closed      *time.Time `json:"closed,omitempty" doc:"When the copy was removed, by Close or by AgentBus putting it away once its work was settled and quiet. Absent once a later turn starts and rebuilds it."`
 }
 
 // WorkspaceFolder is one folder of a workspace.
