@@ -95,6 +95,16 @@ All notable changes to AgentBus. Full notes for each release are on the
   with 400, the owner's token included. A turn token sending it twice got 403 before.
 
 ### Fixed
+- **An edit to a file your repo tracks under an ignored path now reaches Review and Apply**
+  ([#87](https://github.com/staysup/agentbus/issues/87)). In a Copy session, a turn's edit to a
+  committed file that an ignore rule matches (a committed `dist/`, `build/` or `target/`, which the
+  copy's built-in list leaves out, or a file added with `git add -f` that your `.gitignore` matches)
+  was left out of the turn's changes: Apply answered applied and the folder kept the old file. Now,
+  when the folder is the top of its own git repo (a `.git` folder there), a file that repo tracks is
+  never left out by the ignore rules, on the copy's side and on the folder's side of an update
+  alike, and in each folder of a workspace with several. A folder inside a repo, a linked worktree
+  or a repo with a split or sparse index keeps the rules as before. Untracked build output still
+  stays out. A new session gets the new rule; a copy made before keeps the rule it was made with.
 - **The owner's `GET /api/v0/events?session=` opened a stream of no session** instead of
   refusing. The door checked the query only for a token that does not reach everywhere.
 - **A reply the main token delivered into a session another tree had continued joined that

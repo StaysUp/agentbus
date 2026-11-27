@@ -78,7 +78,7 @@ func (copyBackend) Open(r Request) (*Space, error) {
 	// first commit (Base) is the copy as opened. space.json is written only
 	// after the repo and its Base are made, so a copy with a record always has
 	// a working shadow, and a crash before then is remade from scratch.
-	s.Nested = true
+	s.Nested, s.Tracked = true, true
 	if err := s.initShadow(ctxOf(r)); err != nil {
 		copyBackend{}.Close(s)
 		return nil, err
@@ -163,7 +163,7 @@ func openPlaces(r Request) (*Space, error) {
 	// One private git for the whole copy, its work tree the copy's top: each
 	// folder's files, a repo's among them (nested.go), and what a turn puts
 	// beside the folders are recorded in one history.
-	s.Nested = true
+	s.Nested, s.Tracked = true, true
 	if err := s.initShadow(ctxOf(r)); err != nil {
 		copyBackend{}.Close(s)
 		return nil, err

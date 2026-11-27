@@ -350,3 +350,83 @@ func closeLocked(t *testing.T, lock string) {
 	// The fresh copy goes as the first did.
 	x.closeWorkspace(ws.Workspace)
 }
+
+// #87 through control and a separate runner, in a Copy: a turn rewrites a
+// committed dist/index.js (the built-in list names dist/), a file added with
+// `git add -f` that the folder's .gitignore matches, and src/main.js. Apply
+// writes all three to the folder; a new untracked file under dist/ stays in
+// the copy. Before, only src/main.js was listed and applied.
+func TestXProcTrackedIgnoredFileApplied(t *testing.T) {
+	folder := t.TempDir()
+	for name, body := range map[string]string{".gitignore": "*.local\n", "src/main.js": "m1\n", "dist/index.js": "d1\n", "config.local": "l1\n"} {
+		p := filepath.Join(folder, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitRun(t, folder, "init", "-q")
+	gitRun(t, folder, "add", "-A")
+	gitRun(t, folder, "add", "-f", "config.local")
+	gitRun(t, folder, "-c", "commit.gpgSign=false", "commit", "-q", "-m", "one")
+
+	x := &xproc{t: t, bin: agentbusBinary(t), serverHome: t.TempDir()}
+	// Copy on every system: auto is the overlay on Linux, which has no ignore rules.
+	isolationSetting(t, x.serverHome, "copy")
+	connectFake(t, x.serverHome, "claude")
+	addr := x.spawn(t, "server", []string{"server", "-listen", "127.0.0.1:0", "-replay=false"},
+		append(os.Environ(), "AGENTBUS_HOME="+x.serverHome), reListening)
+	x.base, x.tok = "http://"+addr, readToken(t, x.serverHome)
+	x.setAgentEnv("AGENTBUS_FAKE_WRITE=src/main.js=m2\n;dist/index.js=d2\n;config.local=l2\n;dist/new.js=n\n",
+		`AGENTBUS_FAKE_STDOUT={"type":"result","session_id":"tracked-ignored","result":"done"}`)
+	x.startCopyRunner(t, "far", folder)
+	f := x.folders()[0]
+	code, raw := x.post("/api/v0/workspaces", map[string]any{"machine": f.Machine, "folder_ref": f.Ref})
+	var ws struct {
+		Workspace string `json:"workspace"`
+	}
+	if code != 201 || json.Unmarshal(raw, &ws) != nil {
+		t.Fatalf("workspace: %d %s", code, raw)
+	}
+	code, raw = x.post("/api/v0/sessions", map[string]any{"workspace": ws.Workspace})
+	var session struct {
+		Session string `json:"session"`
+	}
+	if code != 201 || json.Unmarshal(raw, &session) != nil {
+		t.Fatalf("session: %d %s", code, raw)
+	}
+	code, turn := x.startTurnX(map[string]any{"session": session.Session, "agent": "claude", "prompt": "edit"})
+	if code/100 != 2 {
+		t.Fatalf("turn: %d %+v", code, turn)
+	}
+	if !waitLong(30*time.Second, func() bool { return x.turnState(turn.Turn) == "finished" }) {
+		t.Fatalf("the turn reads %q", x.turnState(turn.Turn))
+	}
+	base := "/api/v0/workspaces/" + ws.Workspace
+	code, raw = x.get(base + "/changes?fresh=true")
+	if code != 200 {
+		t.Fatalf("changes: %d %s", code, raw)
+	}
+	for _, name := range []string{"src/main.js", "dist/index.js", "config.local"} {
+		if !strings.Contains(string(raw), name) {
+			t.Fatalf("the changes leave out %s: %s", name, raw)
+		}
+	}
+	if strings.Contains(string(raw), "dist/new.js") {
+		t.Fatalf("the changes list an untracked file under dist/: %s", raw)
+	}
+	if code, raw := x.post(base+"/apply", map[string]any{}); code != 200 {
+		t.Fatalf("apply: %d %s", code, raw)
+	}
+	for name, want := range map[string]string{"src/main.js": "m2\n", "dist/index.js": "d2\n", "config.local": "l2\n"} {
+		if got, err := os.ReadFile(filepath.Join(folder, filepath.FromSlash(name))); err != nil || string(got) != want {
+			t.Fatalf("the folder's %s: %q %v", name, got, err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(folder, "dist", "new.js")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("apply wrote an untracked file under dist/: %v", err)
+	}
+	x.closeWorkspace(ws.Workspace)
+}

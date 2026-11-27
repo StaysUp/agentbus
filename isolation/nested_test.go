@@ -844,3 +844,234 @@ func TestHeldIsTheCheckpoint(t *testing.T) {
 		}
 	}
 }
+
+// #87: a file the folder's own repo tracks is recorded whatever the ignore
+// rules say, as git never ignores a tracked file. Before, the copy's rule held
+// only what its own record held, which never held such a file: a turn's edit
+// to a committed dist/index.js, or to a file added with `git add -f`, was left
+// out of the changes, Review and Apply (0.6.5 and 0.6.6, measured 2026-11-26).
+
+// trackedSrc is a repo with src/main.js and a committed dist/ (no ignore rule
+// of the folder's names dist; the built-in list does), names with a space, a
+// non-ASCII letter and a leading colon among its files, and config.local, which
+// its .gitignore matches, added with `git add -f`.
+func trackedSrc(t *testing.T) string {
+	t.Helper()
+	src := t.TempDir()
+	commitRepo(t, src, map[string]string{
+		".gitignore":          "*.local\n",
+		"src/main.js":         "m1",
+		"dist/index.js":       "d1",
+		"dist/a b.js":         "s1",
+		"dist/ünï/x.js":       "u1",
+		"dist/:(top)colon.js": "c1",
+	})
+	fixture(t, src, map[string]string{"config.local": "l1"})
+	gitIn(t, src, "add", "-f", "config.local")
+	gitIn(t, src, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-q", "-m", "local")
+	return src
+}
+
+// Cases 1 and 2: a turn edits a committed file under dist/ (each odd name
+// too) and a file added with `git add -f`; the checkpoint lists each, and a
+// restore brings each back.
+func TestTrackedIgnoredFileRecorded(t *testing.T) {
+	b, s := open(t, Copy, trackedSrc(t))
+	if !s.hasShadow() || !s.Nested {
+		t.Skip("the copy made no shadow repo on this disk")
+	}
+	fixture(t, s.Dir, map[string]string{
+		"src/main.js": "m2", "dist/index.js": "d2", "dist/a b.js": "s2",
+		"dist/ünï/x.js": "u2", "dist/:(top)colon.js": "c2", "config.local": "l2",
+	})
+	if _, err := b.Checkpoint(s, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"config.local", "dist/:(top)colon.js", "dist/a b.js", "dist/index.js", "dist/ünï/x.js", "src/main.js"}
+	if got := changesetNames(t, s, "t1"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("changeset: %v, want %v", got, want)
+	}
+	if got := diffNames(t, b, s, Base, "t1"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("diff: %v, want %v", got, want)
+	}
+	if err := b.RestoreTo(s, Base); err != nil {
+		t.Fatal(err)
+	}
+	if read(t, filepath.Join(s.Dir, "dist", "index.js")) != "d1" || read(t, filepath.Join(s.Dir, "config.local")) != "l1" {
+		t.Fatal("a restore to Base did not bring the tracked files back")
+	}
+}
+
+// Case 3: what the folder's repo does not track stays out, under dist/ (at
+// any depth) and where its .gitignore matches, beside a tracked file's edit.
+func TestUntrackedIgnoredFileStaysOut(t *testing.T) {
+	b, s := open(t, Copy, trackedSrc(t))
+	if !s.hasShadow() || !s.Nested {
+		t.Skip("the copy made no shadow repo on this disk")
+	}
+	fixture(t, s.Dir, map[string]string{
+		"dist/index.js": "d2", "dist/new.js": "n", "dist/ünï/new.js": "n", "dist/out/deep.js": "n",
+		"other.local": "o", "build/out.o": "o",
+	})
+	if _, err := b.Checkpoint(s, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := changesetNames(t, s, "t1"); !reflect.DeepEqual(got, []string{"dist/index.js"}) {
+		t.Fatalf("changeset: %v, want only the tracked file", got)
+	}
+	// A restore keeps what the rules leave out, as before.
+	if err := b.RestoreTo(s, Base); err != nil {
+		t.Fatal(err)
+	}
+	if read(t, filepath.Join(s.Dir, "dist", "new.js")) != "n" || read(t, filepath.Join(s.Dir, "other.local")) != "o" {
+		t.Fatal("a restore removed an untracked ignored file")
+	}
+}
+
+// Cases 4 and 5 for a copy of several folders: each folder's repo says what it
+// tracks, under the folder's name in the copy. A tracked dist/ in one is
+// recorded; the other, not a repo, leaves its dist/ out; and an update sees
+// the person's edit of the tracked file.
+func TestPlacesTrackedIgnoredFile(t *testing.T) {
+	one, two := t.TempDir(), t.TempDir()
+	commitRepo(t, one, map[string]string{"a": "a", "dist/index.js": "d1"})
+	fixture(t, two, map[string]string{"b": "b", "dist/index.js": "x1"})
+	b, s := openPlacesT(t, []Place{{Name: "one", Folder: one, Ref: "fld_1"}, {Name: "two", Folder: two, Ref: "fld_2"}})
+	fixture(t, s.Dir, map[string]string{"one/dist/index.js": "d2", "two/dist/index.js": "x2"})
+	if _, err := b.Checkpoint(s, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := changesetNames(t, s, "t1"); !reflect.DeepEqual(got, []string{"one/dist/index.js"}) {
+		t.Fatalf("changeset: %v", got)
+	}
+	paths := func(ref string) (string, bool) {
+		if ref == "fld_1" {
+			return one, true
+		}
+		return two, ref == "fld_2"
+	}
+	if err := b.RestoreTo(s, Base); err != nil {
+		t.Fatal(err)
+	}
+	fixture(t, one, map[string]string{"dist/index.js": "d3", "dist/added.js": "a"})
+	gitIn(t, one, "add", "dist/added.js")
+	gitIn(t, one, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-q", "-m", "added")
+	fixture(t, two, map[string]string{"dist/index.js": "x3"})
+	res, err := b.UpdateFrom(s, "", paths, false)
+	if err != nil || !res.Clean {
+		t.Fatalf("update: %+v %v", res, err)
+	}
+	if got := changesetNames(t, s, res.Theirs); !reflect.DeepEqual(got, []string{"one/dist/added.js", "one/dist/index.js"}) {
+		t.Fatalf("theirs holds, beside base: %v", got)
+	}
+	if read(t, filepath.Join(s.Dir, "one", "dist", "index.js")) != "d3" || read(t, filepath.Join(s.Dir, "one", "dist", "added.js")) != "a" {
+		t.Fatal("the update did not bring the person's tracked files into the copy")
+	}
+}
+
+// Case 5: an update reads the person's side by the same rule. The person edits
+// the committed dist/index.js; the update brings it into the copy, and the
+// session's own edit of another tracked file under dist/ is still its own.
+func TestUpdateSeesTrackedIgnoredFile(t *testing.T) {
+	src := trackedSrc(t)
+	b, s := open(t, Copy, src)
+	if !s.hasShadow() || !s.Nested {
+		t.Skip("the copy made no shadow repo on this disk")
+	}
+	fixture(t, s.Dir, map[string]string{"dist/a b.js": "s2"})
+	if _, err := b.Checkpoint(s, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	// The person edits a tracked file, and commits a new one the copy's own
+	// repo has never seen: only the folder's index says it is tracked.
+	fixture(t, src, map[string]string{"dist/index.js": "d3", "dist/added.js": "a", "dist/untracked.js": "u"})
+	gitIn(t, src, "add", "dist/added.js")
+	gitIn(t, src, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-q", "-m", "added")
+	res, err := b.UpdateFrom(s, "", at(src), false)
+	if err != nil || !res.Clean {
+		t.Fatalf("update: %+v %v", res, err)
+	}
+	if got := changesetNames(t, s, res.Theirs); !reflect.DeepEqual(got, []string{"dist/added.js", "dist/index.js"}) {
+		t.Fatalf("theirs holds, beside base: %v", got)
+	}
+	if read(t, filepath.Join(s.Dir, "dist", "index.js")) != "d3" || read(t, filepath.Join(s.Dir, "dist", "added.js")) != "a" {
+		t.Fatal("the update did not bring the person's tracked files into the copy")
+	}
+	if got := diffNames(t, b, s, res.Theirs, res.Merged); !reflect.DeepEqual(got, []string{"dist/a b.js"}) {
+		t.Fatalf("theirs..merged = %v, want the session's work", got)
+	}
+}
+
+// Case 6: a folder that is not a git repo has nothing tracked, so the rules
+// leave dist/ out as before.
+func TestNotARepoLeavesDistOut(t *testing.T) {
+	src := t.TempDir()
+	fixture(t, src, map[string]string{"a": "a1", "dist/index.js": "d1"})
+	b, s := open(t, Copy, src)
+	if !s.hasShadow() || !s.Nested {
+		t.Skip("the copy made no shadow repo on this disk")
+	}
+	fixture(t, s.Dir, map[string]string{"a": "a2", "dist/index.js": "d2"})
+	if _, err := b.Checkpoint(s, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := changesetNames(t, s, "t1"); !reflect.DeepEqual(got, []string{"a"}) {
+		t.Fatalf("changeset: %v", got)
+	}
+}
+
+// A copy made before 0.6.7 (no tracked in its record) keeps the rules it was
+// made with: its Base left a tracked dist/index.js out, so a checkpoint leaves
+// it out too, and a discard to Base does not remove it from the copy (review
+// round 1 of #87, 2026-11-27).
+func TestTrackedLegacyCopyUnchanged(t *testing.T) {
+	src := t.TempDir()
+	commitRepo(t, src, map[string]string{"a": "a1"})
+	fixture(t, src, map[string]string{"dist/index.js": "d1"})
+	b, s := open(t, Copy, src)
+	if !s.hasShadow() || !s.Nested {
+		t.Skip("the copy made no shadow repo on this disk")
+	}
+	// Base was made without dist/index.js, as a copy made before staged it;
+	// the folder's repo, in the copy, tracks it now.
+	s.Tracked = false // as space.json reads for a copy made before
+	gitIn(t, s.Dir, "add", "dist/index.js")
+	gitIn(t, s.Dir, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgSign=false", "commit", "-q", "-m", "dist")
+	fixture(t, s.Dir, map[string]string{"a": "a2", "dist/index.js": "d2"})
+	if _, err := b.Checkpoint(s, "t1"); err != nil {
+		t.Fatal(err)
+	}
+	if got := changesetNames(t, s, "t1"); !reflect.DeepEqual(got, []string{"a"}) {
+		t.Errorf("changeset: %v, want the rules the copy was made with", got)
+	}
+	if err := b.RestoreTo(s, Base); err != nil {
+		t.Fatal(err)
+	}
+	if got := read(t, filepath.Join(s.Dir, "dist", "index.js")); got != "d2" {
+		t.Fatalf("a discard to Base changed a file its rules leave out: %q", got)
+	}
+}
+
+// A new copy, of one folder or of several, is made with the rule, and its
+// record says so after a reload.
+func TestNewCopyTracked(t *testing.T) {
+	src := t.TempDir()
+	fixture(t, src, map[string]string{"a": "a"})
+	_, s := open(t, Copy, src)
+	if !s.hasShadow() {
+		t.Skip("the copy made no shadow repo on this disk")
+	}
+	one, two := t.TempDir(), t.TempDir()
+	fixture(t, one, map[string]string{"a": "a"})
+	fixture(t, two, map[string]string{"b": "b"})
+	_, m := openPlacesT(t, []Place{{Name: "one", Folder: one, Ref: "fld_1"}, {Name: "two", Folder: two, Ref: "fld_2"}})
+	for _, sp := range []*Space{s, m} {
+		if !sp.Tracked {
+			t.Fatalf("a new copy %s is not tracked", sp.ID)
+		}
+		again, err := LoadID(sp.Workdir, sp.ID)
+		if err != nil || !again.Tracked {
+			t.Fatalf("load %s: %+v %v", sp.ID, again, err)
+		}
+	}
+}

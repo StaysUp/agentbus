@@ -222,6 +222,11 @@ type Space struct {
 	// files of every committed repo inside it, as its own (nested.go). A copy
 	// made before records such a repo by its commit only, as it always has.
 	Nested bool `json:"nested,omitempty"`
+	// Tracked, for a shadow copy made since 0.6.7: its ignore rules never
+	// leave out a file the folder's own repo tracks (nested.go). A copy made
+	// before keeps the rules it was made with, so its Base and its later
+	// checkpoints, a discard and an update all read the same.
+	Tracked bool `json:"tracked,omitempty"`
 	// Folders, for a copy of several folders: each folder, in order, by the
 	// name of the folder under the copy's top that holds it, and its
 	// reference. Empty for a copy of one folder, which is the copy's top.

@@ -254,7 +254,11 @@ func (s *Space) initShadow(ctx context.Context) error {
 func (s *Space) shadowAdd(ctx context.Context) error {
 	if s.Nested {
 		// One rule for every file, a nested repo's included (nested.go).
-		return s.stageTree(ctx, s.Dir, "", s.ignorer(s.Dir), s.headFiles(ctx))
+		ign, err := s.ignorer(ctx, s.Dir)
+		if err != nil {
+			return err
+		}
+		return s.stageTree(ctx, s.Dir, "", ign, s.headFiles(ctx))
 	}
 	_, _, code, err := s.runGit(ctx, "add", "-A", "--ignore-errors")
 	if err != nil && code != 1 {

@@ -24,8 +24,14 @@ import (
 // an update: every file under its top, a nested repo's included, except a .git
 // (file or folder) at any depth and what the copy's ignore rules leave out (the
 // .gitignore files along the path, the nested repo's own among them, and the
-// built-in list), and a file the record already holds stays held while it is
-// there, as git never ignores a tracked file. A nested repo is a plain folder:
+// built-in list). As git never ignores a tracked file, the rules never leave
+// out a file the folder's own repo tracks (the index of the .git folder at the
+// folder's top: the copy's, or the person's folder's on the other side of an
+// update; each folder's own in a copy of several), nor a folder that holds one,
+// and a file the record already holds stays held while it is there. Untracked
+// build output stays out (#87). That part holds for a copy made since 0.6.7
+// (Space.Tracked); a copy made before keeps the rules it was made with, so its
+// Base and what comes after agree. A nested repo is a plain folder:
 // nothing about it is kept or decided apart. The list is made by our own walk
 // (walkTree), which never follows a symbolic link and asks git only which
 // paths its rules ignore (check-ignore --no-index); git then hashes and records
@@ -178,7 +184,11 @@ func (s *Space) headFiles(ctx context.Context) map[string]bool {
 // does not rebuild node_modules), and so does every .git: a nested repo keeps
 // its own history, whichever turn made it.
 func (s *Space) cleanTree(ctx context.Context) error {
-	listed, dirs, _, err := walkTree(ctx, s.Dir, s.ignorer(s.Dir))
+	ign, err := s.ignorer(ctx, s.Dir)
+	if err != nil {
+		return err
+	}
+	listed, dirs, _, err := walkTree(ctx, s.Dir, ign)
 	if err != nil {
 		return err
 	}
@@ -213,11 +223,89 @@ func (s *Space) cleanTree(ctx context.Context) error {
 type ignorer func(ctx context.Context, paths []string) (map[string]bool, error)
 
 // ignorer is the copy's rules for the folder workTree: its private repo's
-// info/exclude (the built-in list) and the .gitignore files under workTree.
-func (s *Space) ignorer(workTree string) ignorer {
-	return func(ctx context.Context, paths []string) (map[string]bool, error) {
-		return checkIgnore(ctx, s.gitBaseArgsWT(workTree), workTree, paths)
+// info/exclude (the built-in list) and the .gitignore files under workTree,
+// less what the folder's own repo tracks (repoFiles) in a copy made since
+// 0.6.7 (Space.Tracked). For the top of a copy of several folders, that is
+// what each folder's repo tracks, under its name.
+func (s *Space) ignorer(ctx context.Context, workTree string) (ignorer, error) {
+	inRepo := map[string]bool{}
+	switch {
+	case !s.Tracked:
+		// A copy made before keeps the rules it was made with.
+	case workTree == s.Dir && len(s.Folders) > 0:
+		for _, f := range s.Folders {
+			if err := s.repoFiles(ctx, filepath.Join(workTree, f.Name), f.Name+"/", inRepo); err != nil {
+				return nil, err
+			}
+		}
+	default:
+		if err := s.repoFiles(ctx, workTree, "", inRepo); err != nil {
+			return nil, err
+		}
 	}
+	base := s.gitBaseArgsWT(workTree)
+	return keepTracked(func(ctx context.Context, paths []string) (map[string]bool, error) {
+		return checkIgnore(ctx, base, workTree, paths)
+	}, inRepo), nil
+}
+
+// keepTracked is ign, except that it never leaves out a path inRepo names: a
+// file the folder's own repo tracks, or a folder (ending in /) that holds one,
+// so the walk enters it. What else such a folder holds the rules still leave
+// out, as git does a file under an ignored folder.
+func keepTracked(ign ignorer, inRepo map[string]bool) ignorer {
+	if len(inRepo) == 0 {
+		return ign
+	}
+	return func(ctx context.Context, paths []string) (map[string]bool, error) {
+		out, err := ign(ctx, paths)
+		if err != nil {
+			return nil, err
+		}
+		for p := range out {
+			if inRepo[p] {
+				delete(out, p)
+			}
+		}
+		return out, nil
+	}
+}
+
+// repoFiles adds to inRepo, each behind prefix, the files the git repo at the
+// top of folder tracks, and every folder above one (ending in /): what its own
+// index holds, as git never ignores a tracked file. Only a .git folder at the
+// top counts. A .git file (a linked worktree's, a submodule's) points outside
+// the folder, and the copy leaves it out, so the other side of an update must
+// too, or the two would disagree. A folder inside a repo, not at its top, has
+// no .git and nothing tracked, and nor has a repo whose index cannot be read
+// on its own (a split or sparse index). The index is read by the private repo,
+// never by the folder's: its config, which in a copy the agent can write
+// (core.fsmonitor runs a program on a read), is never seen.
+func (s *Space) repoFiles(ctx context.Context, folder, prefix string, inRepo map[string]bool) error {
+	if fi, err := os.Lstat(filepath.Join(folder, ".git")); err != nil || !fi.IsDir() {
+		return nil
+	}
+	index := filepath.Join(folder, ".git", "index")
+	if fi, err := os.Lstat(index); err != nil || !fi.Mode().IsRegular() {
+		return nil // nothing added yet, or no plain file to read
+	}
+	out, _, _, err := s.runGitFull(ctx, folder, index, "ls-files", "-z")
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return nil
+	}
+	for _, p := range strings.Split(string(out), "\x00") {
+		if p == "" {
+			continue
+		}
+		inRepo[prefix+p] = true
+		for d := path.Dir(prefix + p); d != "." && !inRepo[d+"/"]; d = path.Dir(d) {
+			inRepo[d+"/"] = true
+		}
+	}
+	return nil
 }
 
 // checkIgnore runs git check-ignore --no-index over paths with the given git

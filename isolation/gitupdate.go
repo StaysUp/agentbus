@@ -375,7 +375,8 @@ func gitErr(ctx context.Context) error {
 // through a throwaway index with the folder as the work tree, so nothing in the
 // folder is written and the folder's own .git is never seen (GIT_DIR is the
 // private repo). The built-in ignores (info/exclude) and the folder's own
-// .gitignore are respected, the same as a checkpoint.
+// .gitignore are respected, and what the folder's repo tracks is kept, by ign,
+// the same as a checkpoint.
 func (s *Space) commitFolder(ctx context.Context, folder, parent, tmp string, ign ignorer) (commit string, modes map[string]string, err error) {
 	idx := filepath.Join(tmp, "theirs.idx")
 	// Seed the index from the merge base's tree first, so a file the base tracked
@@ -434,7 +435,11 @@ func (s *Space) commitTheirs(ctx context.Context, folders FolderPaths, parent, b
 		if err != nil {
 			return "", nil, err
 		}
-		return s.commitFolder(ctx, src, parent, tmp, s.ignorer(src))
+		ign, err := s.ignorer(ctx, src)
+		if err != nil {
+			return "", nil, err
+		}
+		return s.commitFolder(ctx, src, parent, tmp, ign)
 	}
 	idx := filepath.Join(tmp, "theirs.idx")
 	if _, err := s.shadowGitIn(ctx, s.Dir, idx, "read-tree", parent); err != nil {
@@ -503,8 +508,9 @@ func (s *Space) commitTheirs(ctx context.Context, folders FolderPaths, parent, b
 // folderIgnorer is the copy's rules for one folder of a copy of several, read
 // from the person's folder src: the built-in list at the folder's top (as the
 // copy's info/exclude holds it under the folder's name) and the folder's own
-// .gitignore files. It asks git through a repo of its own at dir, which holds
-// only that list.
+// .gitignore files, less what the folder's own repo tracks (repoFiles) when
+// the copy was made with that rule (Space.Tracked), as the copy's side reads.
+// It asks git through a repo of its own at dir, which holds only that list.
 func (s *Space) folderIgnorer(ctx context.Context, dir, src string) (ignorer, error) {
 	if err := os.MkdirAll(filepath.Join(dir, "info"), 0o700); err != nil {
 		return nil, err
@@ -520,11 +526,17 @@ func (s *Space) folderIgnorer(ctx context.Context, dir, src string) (ignorer, er
 	if err := os.WriteFile(filepath.Join(dir, "info", "exclude"), []byte(strings.Join(gitBuiltinIgnore, "\n")+"\n"), 0o600); err != nil {
 		return nil, err
 	}
+	inRepo := map[string]bool{}
+	if s.Tracked {
+		if err := s.repoFiles(ctx, src, "", inRepo); err != nil {
+			return nil, err
+		}
+	}
 	args := s.gitBaseArgsWT(src)
 	args[0] = "--git-dir=" + dir
-	return func(ctx context.Context, paths []string) (map[string]bool, error) {
+	return keepTracked(func(ctx context.Context, paths []string) (map[string]bool, error) {
 		return checkIgnore(ctx, args, src, paths)
-	}, nil
+	}, inRepo), nil
 }
 
 // underFolder says whether a copy path is inside one of a copy's folders.
