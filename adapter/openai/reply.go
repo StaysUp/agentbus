@@ -30,6 +30,9 @@ import (
 // codex goes on with the turn after such a reply, so it is not the turn's
 // last.
 //
+// An empty list is a reply too, one where the model said nothing: it is
+// kept as an empty list, for the replay to stand a note in for it.
+//
 // Only a whole, completed reply is kept. A stream that ended before
 // response.completed, reported an error, or ended incomplete or failed gives
 // an error: a replay never carries part of a reply.
@@ -123,9 +126,6 @@ func completed(r terminal, done map[int]json.RawMessage) (json.RawMessage, strin
 			}
 			items = append(items, done[i])
 		}
-	}
-	if len(items) == 0 {
-		return nil, "", errors.New("openai reply: the response has no output items")
 	}
 	for _, it := range items {
 		if body.Label(it, "type") == "" {
@@ -237,6 +237,30 @@ func ContextKey(raw json.RawMessage) (key string, content json.RawMessage, ok bo
 func IsModelItem(raw json.RawMessage) bool {
 	it, ok := parse(raw)
 	return ok && isModelItem(it)
+}
+
+// Said reports whether a reply's items say anything the person would read:
+// an item that is not reasoning, and not a message of blank text alone. A
+// reply of no items, of reasoning alone, or of messages with no text says
+// nothing. A tool call, a refusal and any item it cannot read count as said.
+func Said(items []json.RawMessage) bool {
+	for _, raw := range items {
+		it, ok := parse(raw)
+		if !ok {
+			return true
+		}
+		switch it.Type {
+		case "reasoning":
+		case "message", "":
+			s, err := text(it.Content, "")
+			if err != nil || !body.Blank(s) || len(nonTextParts(it.Content)) > 0 {
+				return true
+			}
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 // IsCompaction reports whether an item is codex's compaction of its history.

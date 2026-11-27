@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"time"
 )
 
@@ -136,6 +137,11 @@ func Elements(raw json.RawMessage) (out []json.RawMessage, ok bool) {
 	}
 	return out, true
 }
+
+// Blank reports whether s says nothing: it is empty or only whitespace. A
+// model reply of nothing but blank text is as empty as one with no content,
+// and every format's replay reads it the same way.
+func Blank(s string) bool { return strings.TrimSpace(s) == "" }
 
 // IsString reports whether raw is a JSON string.
 func IsString(raw json.RawMessage) bool { return len(raw) > 0 && raw[0] == '"' }

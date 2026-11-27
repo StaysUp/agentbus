@@ -130,10 +130,12 @@ func (codex) asHistory(m json.RawMessage) (json.RawMessage, error) {
 // that compacted the conversation cannot be replayed; one that says the turn
 // goes on (end_turn false, on the response, which the kept reply's stop
 // reason carries, or on an output message) did not finish, as Claude's
-// tool_use or pause_turn does not.
-func (codex) reply(rep body.Reply, _ string) ([]json.RawMessage, ending, error) {
+// tool_use or pause_turn does not. A finished reply that said nothing (no
+// items, reasoning alone, messages of blank text) keeps its items, the
+// reasoning byte for byte, and gets the note after them.
+func (c codex) reply(rep body.Reply, _ string) ([]json.RawMessage, ending, error) {
 	items, ok := body.Elements(rep.Message)
-	if !ok || len(items) == 0 {
+	if !ok {
 		return nil, ending{}, errors.New("the kept reply is not a list of items")
 	}
 	outputs, asked, err := openai.Unanswered(items, notFinished)
@@ -150,6 +152,8 @@ func (codex) reply(rep body.Reply, _ string) ([]json.RawMessage, ending, error) 
 		return items, ending{asked: true, results: outputs}, nil
 	case rep.Stop != "completed" || openai.Continues(items):
 		return items, ending{}, nil
+	case !openai.Said(items):
+		return append(items, c.note(emptyReplyNote)), ending{finished: true}, nil
 	}
 	return items, ending{finished: true}, nil
 }

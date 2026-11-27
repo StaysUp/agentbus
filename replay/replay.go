@@ -649,7 +649,7 @@ func withoutBlankText(m json.RawMessage) (json.RawMessage, bool, error) {
 		}
 		var s string
 		if json.Unmarshal(f.Value, &s) == nil {
-			return m, strings.TrimSpace(s) != "", nil
+			return m, !body.Blank(s), nil
 		}
 		blocks, ok := body.Elements(f.Value)
 		if !ok {
@@ -659,7 +659,7 @@ func withoutBlankText(m json.RawMessage) (json.RawMessage, bool, error) {
 		said := false
 		for _, b := range blocks {
 			var text string
-			if body.Label(b, "type") == "text" && json.Unmarshal(field(b, "text"), &text) == nil && strings.TrimSpace(text) == "" {
+			if body.Label(b, "type") == "text" && json.Unmarshal(field(b, "text"), &text) == nil && body.Blank(text) {
 				continue
 			}
 			if t := body.Label(b, "type"); t != "thinking" && t != "redacted_thinking" {
