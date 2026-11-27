@@ -40,7 +40,7 @@ func askEnvWith(t *testing.T, perm string) (*env, string) {
 	dir := t.TempDir()
 	script := `for a; do p="$a"; done; echo '{"type":"result","session_id":"sid-'$$'"}'; ` +
 		`case "$p" in "[AgentBus]"*) printf '%s' "$p" > "$D/delivered-$$"; exit 0;; quick|"Review a change"*|"Review the changes"*) exit 0;; esac; ` +
-		`printf '%s\n' "$@" > "$D/args-$p"; env > "$D/env-$p.tmp"; pwd > "$D/pwd-$p"; mv "$D/env-$p.tmp" "$D/env-$p"; ` +
+		`printf '%s\n' "$@" > "$D/args-$p"; env > "$D/env-$p.tmp"; pwd > "$D/pwd-$p.tmp"; mv "$D/pwd-$p.tmp" "$D/pwd-$p"; mv "$D/env-$p.tmp" "$D/env-$p"; ` +
 		`i=0; while [ ! -e "$D/release-$p" ] && [ $i -lt 1500 ]; do sleep 0.02; i=$((i+1)); done`
 	wire := func(agent, baseURL string, _ run.Access) (run.Launch, error) {
 		return run.Launch{Path: "/bin/sh", Args: []string{"-c", script, "sh"},
@@ -84,6 +84,10 @@ func tokenOf(t *testing.T, dir, prompt string) string {
 
 func release(dir, prompt string) { os.WriteFile(filepath.Join(dir, "release-"+prompt), nil, 0o600) }
 
+// pwdOf waits for the working folder the turn of prompt wrote. A fake agent
+// writes it to a .tmp file and renames it, so the file appears whole: written
+// in place, it exists empty until the shell writes the folder, and a read in
+// between returns "" (seen on Ubuntu CI, 2026-11-26).
 func pwdOf(t *testing.T, dir, prompt string) string {
 	t.Helper()
 	p := filepath.Join(dir, "pwd-"+prompt)
@@ -134,9 +138,18 @@ func waitAskedTurn(t *testing.T, e *env, session string) store.Turn {
 	return store.Turn{}
 }
 
+// deliverWait is how long deliverUntil waits for a reply. A delivery follows a
+// chain of turns (the asker ends, the asked turn runs and ends, the on fires,
+// the reply turn starts), and under -race every queue call waits in line for
+// the queue's one database connection behind each runner slot's take. A poll
+// that takes 0.1ms idle took up to 1.9s there, and a loaded macOS CI runner
+// went past 15s (PR #109, 2026-11-27). A reply that never comes still fails.
+const deliverWait = 2 * time.Minute
+
+// deliverUntil waits until session holds want delivered results.
 func deliverUntil(t *testing.T, e *env, session string, want int) []store.Turn {
 	t.Helper()
-	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+	for deadline := time.Now().Add(deliverWait); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
 		// Mirror the sweep: record each ended turn's end, then fire the ons
 		// that read it from the record (C0).
 		if _, _, err := jobs.RecordTurnEnds(e.q, e.store, nil, time.Now().Add(time.Hour), 200); err != nil {
