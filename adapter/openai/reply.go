@@ -31,7 +31,11 @@ import (
 // last.
 //
 // An empty list is a reply too, one where the model said nothing: it is
-// kept as an empty list, for the replay to stand a note in for it.
+// kept as an empty list, for the replay to stand a note in for it, but only
+// when the stream showed no sign of an item. An item announced and never
+// finished, or any other output event, means the adapter missed what the model
+// said, and the reply is not kept. Reported on PR #106 on 2026-11-27 (a reply
+// with no items failed): not captured live, no codex-cli version recorded.
 //
 // Only a whole, completed reply is kept. A stream that ended before
 // response.completed, reported an error, or ended incomplete or failed gives
@@ -47,11 +51,12 @@ func (Adapter) Build(status int, contentType string, data []byte) (json.RawMessa
 	if err := json.Unmarshal(data, &r); err != nil {
 		return nil, "", errors.New("openai reply: not one JSON object")
 	}
-	return completed(r, nil)
+	return completed(r, nil, seen{})
 }
 
 func buildStream(data []byte) (json.RawMessage, string, error) {
 	done := map[int]json.RawMessage{}
+	var sn seen
 	sc := bufio.NewScanner(bytes.NewReader(data))
 	sc.Buffer(make([]byte, 64*1024), 64*1024*1024)
 	for sc.Scan() {
@@ -72,6 +77,7 @@ func buildStream(data []byte) (json.RawMessage, string, error) {
 		if err := json.Unmarshal([]byte(line), &ev); err != nil {
 			return nil, "", errors.New("openai reply: a stream event is not JSON")
 		}
+		sn.note(ev.Type, ev.OutputIndex)
 		switch ev.Type {
 		case "response.output_item.done":
 			done[ev.OutputIndex] = ev.Item
@@ -84,7 +90,7 @@ func buildStream(data []byte) (json.RawMessage, string, error) {
 			if err := json.Unmarshal(ev.Response, &r); err != nil {
 				return nil, "", errors.New("openai reply: response.completed carries no response")
 			}
-			return completed(r, done)
+			return completed(r, done, sn)
 		}
 	}
 	if err := sc.Err(); err != nil {
@@ -104,8 +110,33 @@ type terminal struct {
 	EndTurn *bool           `json:"end_turn"`
 }
 
+// seen is what a stream showed of its items before its terminal event.
+type seen struct {
+	// added holds the output index of each item announced.
+	added map[int]bool
+	// output says an event other than the response's own bookkeeping came.
+	output bool
+}
+
+// note records one event. The events of a response that carries no item are
+// its created, in-progress, queued and completed events, and ones that are
+// not the response's (codex.rate_limits).
+func (s *seen) note(typ string, index int) {
+	if typ == "response.output_item.added" {
+		if s.added == nil {
+			s.added = map[int]bool{}
+		}
+		s.added[index] = true
+	}
+	switch typ {
+	case "response.created", "response.in_progress", "response.queued", "response.completed":
+	default:
+		s.output = s.output || strings.HasPrefix(typ, "response.")
+	}
+}
+
 // completed checks a terminal response and returns its output list.
-func completed(r terminal, done map[int]json.RawMessage) (json.RawMessage, string, error) {
+func completed(r terminal, done map[int]json.RawMessage, sn seen) (json.RawMessage, string, error) {
 	output := r.Output
 	if r.Status != "completed" {
 		return nil, "", errors.New("openai reply: the response is not completed")
@@ -113,6 +144,13 @@ func completed(r terminal, done map[int]json.RawMessage) (json.RawMessage, strin
 	items, ok := body.Elements(output)
 	if !ok {
 		return nil, "", errors.New("openai reply: the response has no output list")
+	}
+	if len(items) == 0 {
+		for i := range sn.added {
+			if _, ok := done[i]; !ok {
+				return nil, "", errors.New("openai reply: an output item was announced and never finished")
+			}
+		}
 	}
 	if len(items) == 0 && len(done) > 0 {
 		idx := make([]int, 0, len(done))
@@ -126,6 +164,9 @@ func completed(r terminal, done map[int]json.RawMessage) (json.RawMessage, strin
 			}
 			items = append(items, done[i])
 		}
+	}
+	if len(items) == 0 && sn.output {
+		return nil, "", errors.New("openai reply: the stream carried output but the response lists no items")
 	}
 	for _, it := range items {
 		if body.Label(it, "type") == "" {
