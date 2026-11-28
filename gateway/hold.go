@@ -206,6 +206,24 @@ func (b *guardBody) startHold() {
 	b.hold.activate() // holdPending -> holdActive
 	now := b.g.now()
 	b.holdStart, b.holdPinged, b.holdPolled = now, now, now
+	// The hold's pings are written by the proxy between two Reads, so a ping
+	// the agent stops reading blocks the next Read, and with it the poll and
+	// the deadline. Each write to the agent must end by the hold's deadline:
+	// one that cannot fails then, the proxy closes the body, and Close ends
+	// the hold as its timeout does.
+	b.setWriteDeadline(b.holdDeadline())
+}
+
+// holdDeadline is when an active hold times out.
+func (b *guardBody) holdDeadline() time.Time { return b.holdStart.Add(b.g.holdTimeoutDur()) }
+
+// setWriteDeadline sets the deadline of each write to the agent's
+// connection; the zero time clears it. A call with no connection of its own
+// to set (a test's, or a writer that cannot) keeps none.
+func (b *guardBody) setWriteDeadline(t time.Time) {
+	if b.ex != nil && b.ex.writeDeadline != nil {
+		_ = b.ex.writeDeadline(t)
+	}
 }
 
 // holdStep waits for the soonest of the next poll, the next ping, the deadline,
@@ -222,7 +240,7 @@ func (b *guardBody) holdStep() {
 		return
 	}
 	now := b.g.now()
-	deadline := b.holdStart.Add(b.g.holdTimeoutDur())
+	deadline := b.holdDeadline()
 	if !now.Before(deadline) {
 		if b.hold.finish() {
 			b.timeoutHold()
@@ -294,6 +312,7 @@ func (b *guardBody) pollDecision() (allow, decided bool) {
 // person's POST already recorded approval.decided, so nothing is recorded here.
 func (b *guardBody) endHold(allow bool) {
 	// finish() already moved the lifecycle to holdDone; here we act on the answer.
+	b.setWriteDeadline(time.Time{}) // the reply is written as any other
 	if !allow {
 		b.refuseHeldAll(holdRefusedText)
 	}
@@ -305,6 +324,7 @@ func (b *guardBody) endHold(allow bool) {
 // and the turn ends with no automatic next turn (his call, 2026-11-17).
 func (b *guardBody) timeoutHold() {
 	// finish() already moved the lifecycle to holdDone; here we refuse and record.
+	b.setWriteDeadline(time.Time{}) // the refusal is written as any other reply
 	b.refuseHeldAll(holdTimeoutText)
 	b.recordDecided("no one answered in time")
 	b.flush()

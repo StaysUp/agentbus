@@ -378,13 +378,20 @@ func (g *Gateway) guardReply(ctx context.Context, ex *exchange, rules Rules, all
 func (b *guardBody) Close() error {
 	// A hold still live when the body is closed — the proxy gave up on a ping
 	// write, or tore the request down — ends the approval, so it is not left
-	// pending. finish() wins only from a pending or active hold, so an
+	// pending. Past the hold's deadline that is its timeout: a ping write the
+	// agent never read failed at it. finish() wins only from a pending or active hold, so an
 	// inline-refused reply (which stays holdNone though registerApproval set its
 	// holdID) records nothing, and holdStep's own ending and this one stay one
 	// winner. The proxy closes the body only after its copy loop's last Read
 	// returns, so this never races holdStep.
-	if b.hold.finish() {
-		b.recordDecided("the agent's connection closed before an answer")
+	if active := b.hold.state() == holdActive; b.hold.finish() {
+		if active && !b.g.now().Before(b.holdDeadline()) {
+			// Its time ran out while a ping waited on an agent that stopped
+			// reading (startHold's write deadline): a timeout, as any other.
+			b.timeoutHold()
+		} else {
+			b.recordDecided("the agent's connection closed before an answer")
+		}
 	}
 	err := b.src.Close()
 	b.finished()

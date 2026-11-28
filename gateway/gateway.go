@@ -285,6 +285,11 @@ type exchange struct {
 	// signin: the subscription of control's the call carries, or zero
 	// (plan.go).
 	signin Signin
+	// writeDeadline sets the deadline of each write to the agent's
+	// connection (http.ResponseController), which a hold sets so a ping the
+	// agent does not read cannot keep it past its time (hold.go). nil where
+	// the call has no connection of its own to set.
+	writeDeadline func(time.Time) error
 
 	// unknowns keeps each schema.unexpected shape once per exchange, and at
 	// most adapter.MaxUnexpected, across the request and the reply.
@@ -566,6 +571,8 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, session, runTurn
 		call:    call,
 		name:    callName(r),
 		model:   call.Model(r.URL.Path),
+
+		writeDeadline: http.NewResponseController(w).SetWriteDeadline,
 	}
 	if rl != nil {
 		ex.signin = rl.Signin

@@ -81,6 +81,11 @@ All notable changes to AgentBus. Full notes for each release are on the
   as the check would have, naming each file; nothing is written. A stop during that look writes
   nothing either. (#102; the fix is Kunal Roy Choudhury's, from #107.)
 - **Apply leaves alone a file already as it would write it**, and does not list it as written.
+- **A held tool call ends on time when the agent stops reading.** While a call waits for a
+  person's answer, the gateway pings the agent. A ping the agent did not read blocked the hold, so
+  the approval stayed pending past its 60 seconds, for as long as the agent kept the connection
+  open. Each write to the agent now has the hold's deadline: one that cannot finish fails then,
+  and the hold ends as its timeout does, the call refused with "no one answered in time".
 - **When a turn ended, and how, is decided once, by control.** A turn's end is its job's end on
   control: a finish control took, or an attempt it found lost. `GET /api/v0/turns` reads the turn's
   state from there once its job has ended, and a run's `run.ended` says only how its agent ended.
