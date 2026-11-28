@@ -394,6 +394,10 @@ func writeBase(s *Space, files *workspace.Snapshot) error {
 	return nil
 }
 
+// setTimes sets a copied file's times. It is os.Chtimes; a test makes it
+// keep whole seconds only, as some disks do.
+var setTimes = os.Chtimes
+
 // copyTree copies the folder src to dst, which must not exist: folders,
 // files and symbolic links, with their modes and modification times. A file
 // it cannot read, a socket or a device, is left out, as a Snapshot leaves it
@@ -447,7 +451,7 @@ func copyTree(ctx context.Context, src, dst string) (string, error) {
 			if ok {
 				linked++
 			}
-			_ = os.Chtimes(to, info.ModTime(), info.ModTime())
+			_ = setTimes(to, info.ModTime(), info.ModTime())
 		}
 		return nil
 	})

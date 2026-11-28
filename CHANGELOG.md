@@ -81,6 +81,12 @@ All notable changes to AgentBus. Full notes for each release are on the
   as the check would have, naming each file; nothing is written. A stop during that look writes
   nothing either. (#102; the fix is Kunal Roy Choudhury's, from #107.)
 - **Apply leaves alone a file already as it would write it**, and does not list it as written.
+- **Apply no longer refuses a big file the turn changed in a Linux overlay copy.** A file over
+  256 KiB whose size changed, or that the turn removed, reached Apply without its Base content's
+  hash. Apply could then pass it only on its times, and refused it as "changed in your folder"
+  where they could not show it: on a disk that keeps times to the second only (a Mac folder shared
+  into Docker, a network share, FAT), or for a file whose change time was recent. The copy now
+  hashes the Base content of every file a turn changes, so Apply compares content.
 - **When a turn ended, and how, is decided once, by control.** A turn's end is its job's end on
   control: a finish control took, or an attempt it found lost. `GET /api/v0/turns` reads the turn's
   state from there once its job has ended, and a run's `run.ended` says only how its agent ended.
