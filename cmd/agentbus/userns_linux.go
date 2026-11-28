@@ -62,24 +62,30 @@ const usernsPerm = "perm: "
 func apparmorHint() string { return netjail.AppArmorAdvice() }
 
 // userns runs the service in its own namespace where it should: for up and
-// runner, on Linux, not root, unless AGENTBUS_USERNS=off. done is true when
+// runner, on Linux, not root, unless AGENTBUS_USERNS=off. doctor runs in one
+// the same way, so its overlay line says what up would get, and says
+// nothing of the namespace itself: its own lines do. done is true when
 // this process has nothing more to do: it was the parent and the child ran
 // the service, ending with code. Otherwise the service runs in this
 // process: in the namespace (the child), or outside it, with the reason
 // given to isolation. main calls it, never run, so a test's process is
 // never started again.
 func userns(args []string, getenv func(string) string, stderr io.Writer) (code int, done bool) {
-	if len(args) == 0 || (args[0] != "up" && args[0] != modeRunner) {
+	if len(args) == 0 || (args[0] != "up" && args[0] != modeRunner && args[0] != "doctor") {
 		return 0, false
 	}
+	isDoctor := args[0] == "doctor"
 	logf := log.New(stderr, "agentbus: ", log.LstdFlags).Printf
+	if isDoctor {
+		logf = func(string, ...any) {}
+	}
 	if getenv(usernsEnv) == usernsChild {
 		os.Unsetenv(usernsEnv)
 		home, err := dataFolder(getenv)
 		if err != nil {
 			home = ""
 		}
-		return usernsInside(home, logf)
+		return usernsInside(home, isDoctor, logf)
 	}
 	if os.Geteuid() == 0 {
 		return 0, false
@@ -175,8 +181,9 @@ func exitCode(cmd *exec.Cmd) int {
 
 // usernsInside readies the namespace in the child and tells the parent on
 // fd 3: "ok", or why not, after which the child ends and the parent runs
-// the service outside.
-func usernsInside(home string, logf func(string, ...any)) (int, bool) {
+// the service outside. doctor makes no workdir: it tries an overlay in a
+// folder of its own (copyWay).
+func usernsInside(home string, isDoctor bool, logf func(string, ...any)) (int, bool) {
 	report := os.NewFile(3, "userns-report")
 	refuse := func(why string) (int, bool) {
 		fmt.Fprintln(report, why)
@@ -196,6 +203,11 @@ func usernsInside(home string, logf func(string, ...any)) (int, bool) {
 	// must not inherit them. Every thread holds its own set.
 	if err := clearAmbient(); err != nil {
 		return refuse("the capabilities could not be cleared before agents start: " + err.Error())
+	}
+	if isDoctor {
+		fmt.Fprintln(report, "ok")
+		report.Close()
+		return 0, false
 	}
 	if home == "" {
 		return refuse("the data folder could not be found")

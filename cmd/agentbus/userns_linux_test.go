@@ -9,7 +9,7 @@ import (
 	"github.com/staysup/agentbus/isolation"
 )
 
-// Only up and runner start themselves again in a namespace; AGENTBUS_USERNS
+// Only up, runner and doctor start themselves again in a namespace; AGENTBUS_USERNS
 // =off keeps them out, and an overlay's refusal says so.
 func TestUsernsOnlyWhereItShould(t *testing.T) {
 	env := func(k string) string {
@@ -18,7 +18,7 @@ func TestUsernsOnlyWhereItShould(t *testing.T) {
 		}
 		return ""
 	}
-	for _, args := range [][]string{nil, {"server"}, {"version"}, {"api", "GET", "/api/v0/turns"}, {"up"}, {"runner", "-server", "http://x"}} {
+	for _, args := range [][]string{nil, {"server"}, {"version"}, {"api", "GET", "/api/v0/turns"}, {"up"}, {"doctor"}, {"runner", "-server", "http://x"}} {
 		if code, done := userns(args, env, io.Discard); done || code != 0 {
 			t.Fatalf("%v: done %v, code %d", args, done, code)
 		}

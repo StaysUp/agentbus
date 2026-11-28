@@ -76,6 +76,7 @@ const usage = `usage: agentbus up     [-listen 127.0.0.1:8787] [-origin http://l
        agentbus server [-listen 127.0.0.1:8787] [-origin http://localhost:5173] [-replay=false]
        agentbus runner -server URL [-capacity N] [-name NAME] [-folder DIR]... [-labels a,b] [-listen 127.0.0.1:0] [-replay=false]
        agentbus login URL [runner's flags]   (on a machine, once: sign it in to the control at URL; approve it on the Runners page)
+       agentbus doctor   (checks this machine before the first run; needs no service running)
        agentbus version
 
 For agents and scripts:

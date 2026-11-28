@@ -3,6 +3,7 @@
 //	agentbus up [-listen 127.0.0.1:8787] [-origin http://localhost:5173]
 //	agentbus server [-listen 127.0.0.1:8787]
 //	agentbus runner -server URL
+//	agentbus doctor
 //	agentbus version
 //
 // modes.go says what each mode runs. up starts one service on one address, 127.0.0.1:8787 unless -listen says
@@ -129,6 +130,9 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	if err != nil {
 		own.Print(err)
 		return 1
+	}
+	if args[0] == "doctor" {
+		return runDoctor(args[1:], home, getenv, stdout, stderr)
 	}
 	if args[0] == "login" {
 		return runLogin(args[1:], home, stdout, stderr, systemLogin())

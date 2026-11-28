@@ -14,6 +14,13 @@ All notable changes to AgentBus. Full notes for each release are on the
   bwrap, socat and ripgrep. Nothing runs inside the wall yet. A turn that must run in a wall goes
   only to a runner that can build it. Any other runner refuses it and says why, and the turn ends
   failed with that reason.
+- **`agentbus doctor` checks a machine before the first run.** It prints one line per check, each
+  failed one with its fix: which of `claude`, `codex`, `agy` and `opencode` are on PATH, which
+  subscriptions are connected and which keys are set, a variable such as `ANTHROPIC_BASE_URL` that
+  would make an agent's turns refuse, how Copy copies a folder here (APFS clone, overlay, or file
+  by file), AppArmor on Ubuntu, the data folder and its disk's free space, and whether the cockpit
+  is packed in. It needs no service running, leaves nothing behind, and exits 1 when a check
+  fails.
 
 ### Changed
 - **An on watches a session, not one turn.** `POST /api/v0/ons` takes
