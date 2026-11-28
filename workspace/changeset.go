@@ -1,8 +1,10 @@
 package workspace
 
 import (
+	"encoding/json"
 	"errors"
 	"sort"
+	"unicode/utf8"
 )
 
 // Changeset is what a session's copy holds at one checkpoint that differs
@@ -38,6 +40,40 @@ type FileChange struct {
 	Path string `json:"path"`
 	Base *File  `json:"base,omitempty"`
 	Now  *File  `json:"now,omitempty"`
+}
+
+// fileChangeJSON is a FileChange as it is written. A file name is bytes, and
+// on Linux they need not be UTF-8, but a JSON string must be: encoding/json
+// writes U+FFFD for each bad byte, so such a name read back is another name,
+// and an apply would act on that one. PathRaw carries the name's own bytes
+// beside Path, only for a name that is not valid UTF-8, and a reader takes
+// them as the path. A name that is valid UTF-8 is written as it always was,
+// and a changeset written before PathRaw reads as it did.
+type fileChangeJSON struct {
+	Path    string `json:"path"`
+	PathRaw []byte `json:"path_raw,omitempty"`
+	Base    *File  `json:"base,omitempty"`
+	Now     *File  `json:"now,omitempty"`
+}
+
+func (f FileChange) MarshalJSON() ([]byte, error) {
+	j := fileChangeJSON{Path: f.Path, Base: f.Base, Now: f.Now}
+	if !utf8.ValidString(f.Path) {
+		j.PathRaw = []byte(f.Path)
+	}
+	return json.Marshal(j)
+}
+
+func (f *FileChange) UnmarshalJSON(b []byte) error {
+	var j fileChangeJSON
+	if err := json.Unmarshal(b, &j); err != nil {
+		return err
+	}
+	*f = FileChange{Path: j.Path, Base: j.Base, Now: j.Now}
+	if j.PathRaw != nil {
+		f.Path = string(j.PathRaw)
+	}
+	return nil
 }
 
 // Step is one file an apply changes: the folder must hold From (nil: no file
