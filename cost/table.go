@@ -98,6 +98,15 @@ var builtin = []Price{
 		},
 		Residency: 1.1,
 	},
+	{
+		Vendor: Anthropic, Model: "claude-fable-5-2",
+		Tiers: map[Tier]Rates{
+			Standard: anthropicRates(8, 10, 16, 0.20, 40),
+			Batch:    anthropicRates(4, 5, 8, 0.10, 20),
+			Fast:     anthropicRates(16, 20, 32, 0.40, 80),
+		},
+		Residency: 1.1,
+	},
 
 	// OpenAI, columns: input, output, cached input, 30m write, 12h write.
 	{

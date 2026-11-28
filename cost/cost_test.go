@@ -56,6 +56,19 @@ func TestPriceBuiltin(t *testing.T) {
 			InputTokens: 1000, OutputTokens: 2000, CacheReadTokens: 3000,
 			CacheWrite5mTokens: 4000, CacheWrite1hTokens: 5000,
 		}, 0.0523, true},
+		{"fable 5.2 all classes", Call{
+			Vendor: Anthropic, Model: "claude-fable-5-2",
+			InputTokens: million, OutputTokens: million, CacheReadTokens: million,
+			CacheWrite5mTokens: million, CacheWrite1hTokens: million,
+		}, 8 + 40 + 0.20 + 10 + 16, true},
+		{"fable 5.2 batch", Call{
+			Vendor: Anthropic, Model: "claude-fable-5-2", ServiceTier: "batch",
+			InputTokens: million, OutputTokens: million,
+		}, 4 + 20, true},
+		{"fable 5.2 fast", Call{
+			Vendor: Anthropic, Model: "claude-fable-5-2", Speed: "fast",
+			InputTokens: million, OutputTokens: million,
+		}, 16 + 80, true},
 		{"fable all classes", Call{
 			Vendor: Anthropic, Model: "claude-fable-5-1",
 			InputTokens: million, OutputTokens: million, CacheReadTokens: million,
@@ -113,7 +126,7 @@ func TestPriceBuiltin(t *testing.T) {
 
 func TestBuiltinTableIsWellFormed(t *testing.T) {
 	want := []string{
-		"anthropic/claude-fable-5-1", "anthropic/claude-haiku-5-5", "anthropic/claude-opus-5-5",
+		"anthropic/claude-fable-5-1", "anthropic/claude-fable-5-2", "anthropic/claude-haiku-5-5", "anthropic/claude-opus-5-5",
 		"anthropic/claude-sonnet-5-5", "openai/gpt-6-astra", "openai/gpt-6-luna",
 		"openai/gpt-6-sol", "openai/gpt-6.1-sol",
 	}
@@ -163,6 +176,7 @@ func TestBuiltinStandardRatesPinned(t *testing.T) {
 	}{
 		{OpenAI, "gpt-6-astra", 10, 50},
 		{OpenAI, "gpt-6-luna", 0.10, 0.50},
+		{Anthropic, "claude-fable-5-2", 8, 40},
 	}
 	table := Default()
 	for _, tc := range cases {
