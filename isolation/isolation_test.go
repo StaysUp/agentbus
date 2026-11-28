@@ -407,6 +407,49 @@ func TestCopyTreeByFiles(t *testing.T) {
 	}
 }
 
+// A file with several names is one file in the copy too: the later names
+// are links to the first, not copies of its bytes. They link inside the
+// copy, never at the person's folder, or a turn's write would reach it.
+func TestCopyTreeKeepsHardLinks(t *testing.T) {
+	src, dst := t.TempDir(), filepath.Join(t.TempDir(), "c")
+	fixture(t, src, map[string]string{"store/blob.bin": "one blob"})
+	first := filepath.Join(src, "store", "blob.bin")
+	names := []string{"store/blob.bin"}
+	for i := range 3 {
+		name := fmt.Sprintf("store/link%d.bin", i)
+		if err := os.Link(first, filepath.Join(src, filepath.FromSlash(name))); err != nil {
+			t.Skip("no hard links here")
+		}
+		names = append(names, name)
+	}
+	if _, err := copyTree(context.Background(), src, dst); err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.Stat(filepath.Join(dst, "store", "blob.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range names {
+		got, err := os.Stat(filepath.Join(dst, filepath.FromSlash(name)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !os.SameFile(want, got) {
+			t.Errorf("%s is its own file in the copy, not a link to the first", name)
+		}
+		if body := read(t, filepath.Join(dst, filepath.FromSlash(name))); body != "one blob" {
+			t.Errorf("%s holds %q", name, body)
+		}
+	}
+	folder, err := os.Stat(first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if os.SameFile(folder, want) {
+		t.Fatal("the copy shares the folder's file: a turn's write would reach the person's folder")
+	}
+}
+
 // A folder of a few thousand files: how long each step takes. The figures
 // are logged, not asserted, since they are the disk's.
 func TestBigFolderTimes(t *testing.T) {

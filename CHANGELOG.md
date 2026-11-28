@@ -151,6 +151,9 @@ All notable changes to AgentBus. Full notes for each release are on the
   and Apply said applied with the folder unchanged. A name now counts only as its folder lists
   it. The rename shows in Review, applies, is put back by a Discard, and comes in with an Update
   when the person makes it. This holds for Copy workspaces made since 0.6.6.
+- **A hard-linked file no longer takes extra disk space in a Copy workspace**
+  ([#93](https://github.com/staysup/agentbus/issues/93)). It was copied once
+  per name (a 32 MB file with 8 names took 257 MB); now it is copied once.
 
 ## 0.6.7 (2026-11-27)
 
