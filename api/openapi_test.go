@@ -492,6 +492,20 @@ func TestOpenAPISchemasMatchTypes(t *testing.T) {
 	}
 }
 
+// A turn's rules_version is in the description with its own doc tag, and
+// optional: a queued turn, or one whose turn.started recorded none, has no
+// such field (#121).
+func TestOpenAPITurnRulesVersion(t *testing.T) {
+	turn := loadSpec(t).Components.Schemas["Turn"].Value
+	f, _ := reflect.TypeFor[store.Turn]().FieldByName("RulesVersion")
+	if p := turn.Properties["rules_version"]; p == nil || p.Value.Description != f.Tag.Get("doc") {
+		t.Fatalf("Turn.rules_version: %+v, want the doc tag of store.Turn.RulesVersion", p)
+	}
+	if slices.Contains(turn.Required, "rules_version") {
+		t.Error("Turn.rules_version is required, want optional")
+	}
+}
+
 // A new field on a struct is described from its tags alone: its doc tag is
 // its description, it is required unless omitempty, and a pointer without
 // omitempty may be null. This is the path event.Event's fields take.
