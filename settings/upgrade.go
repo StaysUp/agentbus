@@ -294,7 +294,8 @@ func lockDir(path string) (func(), error) {
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		f.Close()
 		if errors.Is(err, syscall.EWOULDBLOCK) {
-			return nil, errors.New("another agentbus service uses this data folder")
+			return nil, errors.New("another agentbus service uses this data folder, " + filepath.Dir(path) +
+				". Stop it, or start this one on its own data folder by setting AGENTBUS_HOME")
 		}
 		return nil, fmt.Errorf("settings: lock: %w", err)
 	}

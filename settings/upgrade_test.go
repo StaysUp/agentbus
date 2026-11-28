@@ -347,8 +347,14 @@ func TestUpgradeRefusedWhileAnotherServiceRuns(t *testing.T) {
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := upgrade(dir).Run(); err == nil || !strings.Contains(err.Error(), "another agentbus service") {
-		t.Fatalf("got %v", err)
+	_, _, err = upgrade(dir).Run()
+	if err == nil {
+		t.Fatal("a second service took the data folder")
+	}
+	for _, want := range []string{"another agentbus service", dir, "Stop it", "AGENTBUS_HOME"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("message %q does not say %q", err, want)
+		}
 	}
 	if len(copies(t, dir)) != 0 {
 		t.Fatal("a copy was made")
