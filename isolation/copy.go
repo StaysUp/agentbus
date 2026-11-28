@@ -451,6 +451,10 @@ func copyTree(ctx context.Context, src, dst string) (string, error) {
 				linked++
 			}
 			_ = os.Chtimes(to, info.ModTime(), info.ModTime())
+			if files == 1 && ctx.Value(holdCopy{}) != nil {
+				<-ctx.Done()
+				return ctx.Err()
+			}
 		}
 		return nil
 	})

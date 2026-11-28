@@ -179,6 +179,10 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		}
 		c.startDelay = time.Duration(n) * time.Millisecond
 	}
+	// Env only, like the start delay: a cross-process test holds a copy part
+	// made until the runner hears the stop, so it always stops a copy that is
+	// not whole.
+	c.holdCopy = getenv("AGENTBUS_TEST_HOLD_COPY") == "1"
 	if ms := getenv("AGENTBUS_TEST_HOLD_MS"); ms != "" {
 		n, err := strconv.Atoi(ms)
 		if err != nil || n <= 0 {
@@ -257,6 +261,9 @@ type config struct {
 	// startDelay, test only (AGENTBUS_TEST_START_DELAY_MS): a runner holds
 	// each taken job this long before its start.
 	startDelay time.Duration
+	// holdCopy, test only (AGENTBUS_TEST_HOLD_COPY=1): a runner's copy made
+	// file by file waits after its first file until it is stopped.
+	holdCopy bool
 	// cloudCode is agy's Code Assist host; nil means cloudCode above.
 	cloudCode *url.URL
 	// openrouter is OpenRouter's API; nil means openrouter above.
@@ -1299,7 +1306,7 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 		LookPath: c.lookPath, Environ: c.environ,
 		Wall:    func(ctx context.Context) wall.Result { return wall.Probe(ctx, exec.LookPath, c.environ()) },
 		Workdir: filepath.Join(c.home, copiesDir), OldWorkdir: filepath.Join(c.home, oldCopiesDir), StateFile: filepath.Join(c.home, runnerState), Settings: s.settings,
-		Forward: true, NoSecrets: c.noSecrets(), StartDelay: c.startDelay,
+		Forward: true, NoSecrets: c.noSecrets(), StartDelay: c.startDelay, HoldCopy: c.holdCopy,
 		Finishes: filepath.Join(c.home, finishesDir)}
 	if c.builtin != nil && c.builtin.process {
 		retire := make(chan struct{})

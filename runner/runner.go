@@ -132,6 +132,10 @@ type Config struct {
 	// StartDelay, for tests only, holds a taken job this long before its
 	// start (AGENTBUS_TEST_START_DELAY_MS).
 	StartDelay time.Duration
+	// HoldCopy, for tests only (AGENTBUS_TEST_HOLD_COPY=1): a copy made file
+	// by file waits after its first file until its turn is stopped or this
+	// runner stops (isolation.Request.HoldCopy).
+	HoldCopy bool
 
 	// StopWait bounds how long a runner waits for a stopped turn to end
 	// before it lets go of the job. Zero means one minute.
@@ -1875,7 +1879,7 @@ func (r *Runner) isolate(ctx context.Context, at *attempt, b isolation.Backend, 
 			req.ID = at.job.Session
 		}
 	}
-	req.Workdir, req.Ctx = r.cfg.Workdir, ctx
+	req.Workdir, req.Ctx, req.HoldCopy = r.cfg.Workdir, ctx, r.cfg.HoldCopy
 	// One copy per workspace, made once: two first turns of one workspace (a
 	// caller started two of its sessions at once) would otherwise both find no
 	// copy and both open <workdir>/<req.ID>, racing in the copy backend. The

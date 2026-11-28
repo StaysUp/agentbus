@@ -191,6 +191,10 @@ type Request struct {
 	// file by file, a snapshot's blobs fetched, the first checkpoint. Open
 	// then answers Ctx's error, and what it made has no record (remove.go).
 	Ctx context.Context
+	// HoldCopy, for tests only (AGENTBUS_TEST_HOLD_COPY): a folder copied file
+	// by file stops after its first file and waits there until Ctx ends, so a
+	// test always stops a copy that is not whole. Without Ctx it does nothing.
+	HoldCopy bool
 }
 
 // Space is one session's isolated copy.
@@ -594,10 +598,17 @@ func holds(folder, workdir string) bool {
 // ctxOf is r's context, or one that never ends.
 func ctxOf(r Request) context.Context {
 	if r.Ctx != nil {
+		if r.HoldCopy {
+			return context.WithValue(r.Ctx, holdCopy{}, true)
+		}
 		return r.Ctx
 	}
 	return context.Background()
 }
+
+// holdCopy marks a context whose copy waits after its first file until the
+// context ends (Request.HoldCopy).
+type holdCopy struct{}
 
 // checkOpen checks what every backend's Open needs.
 func checkOpen(r Request) error {

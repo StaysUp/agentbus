@@ -374,3 +374,50 @@ func assertOnlyMainWorktree(t *testing.T, repo string) {
 		t.Fatalf("the repo lists %d worktrees, want its own only:\n%s", n, out)
 	}
 }
+
+// HoldCopy (a test hook, AGENTBUS_TEST_HOLD_COPY): a copy made file by file
+// stops after its first file and waits until its context ends, then answers
+// that context's error, so a cross-process test always stops a copy that is
+// not whole (TestXProcStopWhileTheCopyIsMade).
+func TestHoldCopyWaitsAfterTheFirstFileUntilTheStop(t *testing.T) {
+	src, dst := t.TempDir(), filepath.Join(t.TempDir(), "copy")
+	for _, n := range []string{"a.txt", "b.txt", "c.txt"} {
+		if err := os.WriteFile(filepath.Join(src, n), []byte("x\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := copyTree(ctxOf(Request{Ctx: ctx, HoldCopy: true}), src, dst)
+		done <- err
+	}()
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		if _, err := os.Stat(filepath.Join(dst, "a.txt")); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the first file was never copied")
+		}
+	}
+	select {
+	case err := <-done:
+		t.Fatalf("the copy ended before the stop: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	if _, err := os.Stat(filepath.Join(dst, "b.txt")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("a held copy went past its first file: %v", err)
+	}
+	stop()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("a held copy answered %v once stopped, want its context's error", err)
+	}
+	// Without the hold, the same copy is made whole.
+	whole := filepath.Join(t.TempDir(), "copy")
+	if _, err := copyTree(ctxOf(Request{Ctx: context.Background()}), src, whole); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(whole, "c.txt")); err != nil {
+		t.Fatalf("a copy with no hold is not whole: %v", err)
+	}
+}

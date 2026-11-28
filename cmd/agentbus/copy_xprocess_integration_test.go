@@ -115,10 +115,16 @@ func waitLong(d time.Duration, cond func() bool) bool {
 // runner stopping). Before, the copy went on to the end: the stop answered
 // 202 and the turn stayed running, and the runner did not exit until the copy
 // was made. What the copy left has no record: no turn runs in it.
+//
+// The runner hears a stop at its next heartbeat, up to 2 s after it is sent,
+// and a fast machine could finish the copy first (Linux CI, 2026-11-27). So
+// the runner holds the copy after its first file until the stop reaches it
+// (AGENTBUS_TEST_HOLD_COPY), and the test always stops a copy that is not
+// whole.
 func TestXProcStopWhileTheCopyIsMade(t *testing.T) {
-	// Enough files that a copy made file by file takes several heartbeats.
-	// On macOS one file nobody can read makes clonefile refuse the folder,
-	// so it is copied file by file there too (as on another volume).
+	// Many files, so the copy is far from whole when it is held. On macOS
+	// one file nobody can read makes clonefile refuse the folder, so it is
+	// copied file by file there too (as on another volume).
 	folder := t.TempDir()
 	const files = 30000
 	for i := range files {
@@ -142,31 +148,34 @@ func TestXProcStopWhileTheCopyIsMade(t *testing.T) {
 			addr := x.spawn(t, "server", []string{"server", "-listen", "127.0.0.1:0", "-replay=false"},
 				append(os.Environ(), "AGENTBUS_HOME="+x.serverHome), reListening)
 			x.base, x.tok = "http://"+addr, readToken(t, x.serverHome)
-			x.setAgentEnv(`AGENTBUS_FAKE_STDOUT={"type":"result","session_id":"copy-stop","result":"done"}`)
+			x.setAgentEnv(`AGENTBUS_FAKE_STDOUT={"type":"result","session_id":"copy-stop","result":"done"}`,
+				"AGENTBUS_TEST_HOLD_COPY=1")
 			rn := x.startCopyRunner(t, "far", folder)
 			f := x.folders()[0]
 			code, turn := x.startTurnX(map[string]any{"folder_ref": f.Ref, "machine": f.Machine, "agent": "claude", "prompt": "edit"})
 			if code/100 != 2 {
 				t.Fatalf("turn: %d %+v", code, turn)
 			}
-			// The copy is under way once its folder holds a few files.
+			// The copy is under way, and held, once it holds its first file:
+			// the copy's top, its first folder and that file.
 			var copyDir string
 			if !waitLong(30*time.Second, func() bool {
 				entries, _ := os.ReadDir(rn.copies())
 				for _, e := range entries {
 					if !strings.HasPrefix(e.Name(), ".") {
 						copyDir = filepath.Join(rn.copies(), e.Name())
-						sub, _ := os.ReadDir(copyDir)
-						return len(sub) > 2
+						return entriesIn(copyDir) >= 3
 					}
 				}
 				return false
 			}) {
 				t.Fatal("the copy never started")
 			}
-			// The folder's every entry but the unreadable file, which no copy holds.
+			// The folder's every entry but the unreadable file, which no copy
+			// holds. A whole copy means the hold did not hold, and the test
+			// did not stop a copy being made.
 			if n, all := entriesIn(copyDir), entriesIn(folder)-1; n >= all {
-				t.Skipf("the copy was made (%d of %d entries) before the stop could reach it", n, all)
+				t.Fatalf("the copy was made whole (%d of %d entries) before the stop", n, all)
 			}
 			stopped := time.Now()
 			switch how {
