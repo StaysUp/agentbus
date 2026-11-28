@@ -646,15 +646,11 @@ func (s *Store) Continuation(id string) (Continuation, error) {
 	}
 	c.Harness, c.Folder, c.FolderRef, c.ResumeID = agent.String, folder.String, folderRef.String, resume.String
 	c.AgentID, c.Access, c.KeyEnv, c.Model = agentID.String, access.String, keyEnv.String, model.String
-	holds, err := s.OpenHolds(s.Last())
+	holds, err := s.openHoldsOfSession(id, s.Last())
 	if err != nil {
 		return c, err
 	}
-	for _, h := range holds {
-		if h.Session == id {
-			c.Open = true
-		}
-	}
+	c.Open = len(holds) > 0
 	return c, nil
 }
 
@@ -776,11 +772,28 @@ type OpenHold struct {
 
 // OpenHolds lists the holds opened and not closed, up to seq hi.
 func (s *Store) OpenHolds(hi int64) ([]OpenHold, error) {
-	rows, err := s.r.Query(`SELECT session, json_extract(data, '$.hold') AS hold, MAX(turn) FROM events
-		WHERE seq <= ? AND kind IN ('run.started', 'run.ended')
+	return s.openHolds(openHoldsWhere(`seq <= ?`), hi)
+}
+
+// openHoldsOfSession is OpenHolds of one session: it reads that session's
+// run events only, so a next turn's cost does not grow with other sessions.
+func (s *Store) openHoldsOfSession(session string, hi int64) ([]OpenHold, error) {
+	return s.openHolds(openHoldsWhere(`session = ? AND seq <= ?`), session, hi)
+}
+
+// openHoldsWhere is the query of OpenHolds over the run events that match
+// where. A hold is open while it has a run.started and no run.ended, counted
+// by session and hold, so one hold id in two sessions is two holds.
+func openHoldsWhere(where string) string {
+	return `SELECT session, json_extract(data, '$.hold') AS hold, MAX(turn) FROM events
+		WHERE ` + where + ` AND kind IN ('run.started', 'run.ended')
 		GROUP BY session, hold
 		HAVING SUM(kind = 'run.started') > 0 AND SUM(kind = 'run.ended') = 0
-		ORDER BY MIN(seq)`, hi)
+		ORDER BY MIN(seq)`
+}
+
+func (s *Store) openHolds(query string, args ...any) ([]OpenHold, error) {
+	rows, err := s.r.Query(query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("store: read holds: %w", err)
 	}
