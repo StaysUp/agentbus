@@ -66,7 +66,10 @@ type Turn struct {
 	// IdempotencyKey is the key the turn was started with, so a client that
 	// lost the reply to POST /api/v0/turns can still find its turn.
 	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"The idempotency_key POST /api/v0/turns was sent with, from the turn's turn.started."`
-	RulesVersion   string `json:"rules_version,omitempty" doc:"The version of the permissions this turn took at its turn.started. Absent if the start event did not record a version."`
+	// RulesVersion, from the turn's turn.started: the permissions it ran
+	// under, so a client can tell which rules decided its commands without
+	// reading the record.
+	RulesVersion string `json:"rules_version,omitempty" doc:"From the turn's turn.started: the version of the permissions the turn ran under, the ETag GET /api/v0/settings/permissions sent at its start, without the quotes. A change of the permissions applies from the next turn. Absent while the turn is queued, for a turn an agent started on its own through the gateway, and for a turn recorded before turn.started carried it."`
 	// Usage, CostUSD and CostComplete follow Session's rules, over the
 	// turn's own model.responded events.
 	Usage        *event.Usage `json:"usage" doc:"Sums the turn's replies that carried usage. Null when none did: unknown, never zero."`
