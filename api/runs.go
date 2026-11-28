@@ -52,7 +52,7 @@ type TurnRequest struct {
 	Model   string `json:"model,omitempty" doc:"Passed only as the value of --model, for this turn only. Absent: the named agent's model, as it is when the turn is asked for; an agent with none runs on its harness's own default."`
 	// IdempotencyKey makes a retry safe: a client whose request timed out
 	// sends it again with the same key and gets the same turn.
-	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"Optional, 1 to 128 characters of A-Z, a-z, 0-9 and . _ : -. A retry with the same key and the same fields answers 202 with the turn the key first started, existing true, and starts nothing. The same key with other fields gets 409. A request refused with 400 used no key."`
+	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"Optional, 1 to 128 characters of A-Z, a-z, 0-9 and . _ : -. A retry with the same key and the same fields answers 202 with the turn the key first started, existing true, and starts nothing; if that turn ended before it started, the retry answers its refusal instead, with its status and words. The same key with other fields gets 409. A request refused before it was queued used no key."`
 	// delivery was a field here until 0.6.8; a body that sends it is 410
 	// (deliveryGone): an on over the session (POST /api/v0/ons) replaces it.
 }

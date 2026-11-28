@@ -138,10 +138,8 @@ func createReplies(success reply, extra ...reply) []reply {
 
 // startTurn's 400 and 500, saying what each means for a turn.
 var (
-	turnRefused = fail(http.StatusBadRequest, "The request is refused; error says why. "+
-		"This includes an agent whose program is not on the service's PATH: error names the agent and how to install it, "+
-		"and nothing is stored. GET /api/v0/harnesses shows which harnesses the service finds.")
-	turnFailed = fail(http.StatusInternalServerError, "The store could not be written, or the agent's program would not start.")
+	turnRefused = fail(http.StatusBadRequest, "The request is refused; error says why.")
+	turnFailed  = fail(http.StatusInternalServerError, "The store could not be written, or the agent's program would not start.")
 )
 
 // streamDoc is the one description of the event stream's framing.
@@ -193,6 +191,10 @@ var routes = slices.Concat([]route{
 			"the turn runs once no turn runs in its workspace (one copy runs one turn at a time) and its session's earlier turns have ended, and GET /api/v0/turns/{id} follows it. A retry of a turn already running answers running; one of a turn that has ended answers how it ended.\n\n" +
 			"A turn the main token sends is the person's: it is not counted against any limit, and it goes ahead of delegated turns of its workspace that have not started, since those hold no copy yet. No job passes a discard, update or close of the workspace. A turn a turn token sends is delegated work: " +
 			"one runner runs at most [limits] max_delegated_at_once of those at once (8 by default; GET /api/v0/runners says how many are busy and waiting), and the rest wait, oldest first.\n\n" +
+			"A turn that cannot start, such as one whose agent's program is not on the PATH of the machine that runs it, is still queued and recorded: " +
+			"it ends failed, and GET /api/v0/turns/{id} gives the reason as error, naming the agent and how to install it. " +
+			"A retry with the same idempotency_key then answers that refusal, with its status (400 for a missing program) and words, and starts nothing. " +
+			"GET /api/v0/harnesses shows which harnesses the service finds.\n\n" +
 			"A session whose turn runs, or has turns waiting, is never refused: the new turn queues behind them and runs next, in order, " +
 			"and ahead says how many of the session's turns are before it.\n\n" +
 			"To have the turn's reply delivered to another session, register an on over its session first (POST /api/v0/ons, event turn.completed, filter.session). The delivery field was removed in 0.6.8: a body that sends it is 410.",

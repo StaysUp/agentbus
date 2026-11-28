@@ -291,3 +291,27 @@ func TestQueuedBehindItsSessionAndStopWithTurnsToken(t *testing.T) {
 		t.Fatalf("second, after the first ended: %d %s", code, out)
 	}
 }
+
+// A turn whose program is missing is stored: the first reply is 202 queued, the
+// turn then reads failed with the engine's words, and a retry with the same
+// idempotency_key answers that refusal (400) and queues nothing new.
+func TestMissingProgramIsStoredAndARetryAnswersItsRefusal(t *testing.T) {
+	e := turnsEnv(t, func(agent, baseURL string, _ run.Access) (run.Launch, error) { return run.Launch{}, run.ErrNotFound })
+	s := e.newSession(t, t.TempDir(), true)
+	body := `{"session":"` + s + `","agent":"claude","prompt":"x","idempotency_key":"k1"}`
+	resp, out := do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(body)))
+	var st Started
+	if resp.StatusCode != 202 || json.Unmarshal([]byte(out), &st) != nil || st.State != "queued" {
+		t.Fatalf("first: %d %s, want 202 queued", resp.StatusCode, out)
+	}
+	if got := endedTurn(t, e, st.Turn); got.State != "failed" || !strings.Contains(got.Error, "is not on the service's PATH") {
+		t.Fatalf("the turn: %+v, want failed with the engine's words", got)
+	}
+	resp, out = do(t, e.req(t, "POST", "/api/v0/turns", strings.NewReader(body)))
+	if resp.StatusCode != 400 || !strings.Contains(out, "is not on the service's PATH") {
+		t.Fatalf("retry with the same key: %d %s, want 400 with the refusal", resp.StatusCode, out)
+	}
+	if jobs, _ := e.q.List(queue.DefaultTeam, queue.Filter{Kind: queue.KindTurn}, 10); len(jobs) != 1 {
+		t.Fatalf("%d turn jobs, want 1: the retry queues nothing new", len(jobs))
+	}
+}

@@ -1231,7 +1231,8 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 			res.Refused, res.Status = rf.Msg, rf.Status
 		}
 		// No turn started, so it touches no copy: it records no changeset and no
-		// turn.changed (AGENTS.md: a turn that cannot start stores nothing). A
+		// turn.changed. The turn still ends failed with its reason, which the
+		// finish below records (AGENTS.md: a turn that cannot start ends failed). A
 		// turn never removes the copy -- the copy belongs to the workspace, not
 		// the turn, and another session may be running in it or hold unapplied
 		// edits (his rule, 2026-11-21; removal is a workspace event, not a turn's
