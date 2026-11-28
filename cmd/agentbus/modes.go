@@ -2,8 +2,9 @@ package main
 
 // One program, three ways to run it:
 //
-//	agentbus up      the API, the job queue, the record, the gateway and a
-//	                 runner, in one process: one person on one machine
+//	agentbus up      the API, the job queue, the record and the gateway, and
+//	                 a runner as a process of its own that outlives a restart
+//	                 of up (builtin.go): one person on one machine
 //	agentbus server  the API, the job queue, the record, the gateway and the
 //	                 blob store, with no runner: the runners of other
 //	                 machines pull from it
@@ -16,8 +17,8 @@ package main
 // retired in 0.5: it now says what to run instead (connectorRetired).
 //
 // Every runner, the built-in one of up too, talks to its queue through the
-// runner protocol over HTTP. File data goes through the server's blob store;
-// in up the two share it on disk.
+// runner protocol over HTTP. File data goes through the server's blob store,
+// and each runner keeps its own (blob-cache/) and sends what control lacks.
 
 import (
 	"flag"
@@ -51,16 +52,18 @@ const (
 )
 
 // noSecrets: a process that runs turns whose agents' credentials come from
-// control — a runner, through the server's relay, and agentbus up, through its
-// own. Every such process holds no secret: a runner gets its sign-ins from
-// control, not from the machine.
+// control: every runner, up's built-in one too, through control's relay. A
+// runner holds no secret: it gets its sign-ins from control, not from the
+// machine.
 func (c config) noSecrets() bool { return c.hasEngine() }
 
 // hasQueue: the service keeps the job queue (up, server).
 func (c config) hasQueue() bool { return c.mode != modeRunner }
 
-// hasEngine: the service runs turns on this machine (up, runner).
-func (c config) hasEngine() bool { return c.mode != modeServer }
+// hasEngine: the service runs turns on this machine: a runner. up runs its
+// built-in runner as a process of its own (builtin.go) since 0.6.7, so a
+// restart of up leaves its turns running.
+func (c config) hasEngine() bool { return c.mode == modeRunner }
 
 func (c config) modeName() string {
 	if c.mode == modeUp {

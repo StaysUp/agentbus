@@ -169,10 +169,23 @@ func startServerTwoUpstreams(t *testing.T, anthropic, chatgpt string, harnesses 
 // then until control lists the runner's folders, so a turn sent after it
 // returns has a machine to run on.
 func (x *xproc) addRunner(name string, folders ...string) {
+	x.t.Helper()
+	x.addRunnerVia(x.base, name, folders...)
+}
+
+// addRunnerVia is addRunner with the runner reaching control at server, such
+// as a proxy in front of it. It signs in at control directly.
+func (x *xproc) addRunnerVia(server, name string, folders ...string) {
 	t := x.t
 	t.Helper()
 	home := t.TempDir()
 	signInRunner(t, x.base, x.tok, home, name)
+	t.Cleanup(func() {
+		if t.Failed() {
+			b, _ := os.ReadFile(filepath.Join(home, "logs", "service.log"))
+			t.Logf("runner %s service.log:\n%s", name, b)
+		}
+	})
 	bin := fakeAgentDir(t)
 	env := append(os.Environ(),
 		"AGENTBUS_HOME="+home,
@@ -184,7 +197,7 @@ func (x *xproc) addRunner(name string, folders ...string) {
 		"CODEX_HOME="+t.TempDir(),
 	)
 	env = append(env, x.agentEnv...)
-	args := []string{"runner", "-server", x.base, "-name", name}
+	args := []string{"runner", "-server", server, "-name", name}
 	for _, f := range folders {
 		args = append(args, "-folder", f)
 	}

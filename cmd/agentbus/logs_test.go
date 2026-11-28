@@ -29,7 +29,9 @@ func waitLog(t *testing.T, home string, want ...string) string {
 		if err != nil {
 			return false
 		}
-		s = string(b)
+		// up's built-in runner, a process of its own, writes runner.log.
+		r, _ := os.ReadFile(filepath.Join(home, "logs", "runner.log"))
+		s = string(b) + string(r)
 		for _, w := range want {
 			if !strings.Contains(s, w) {
 				return false

@@ -93,12 +93,22 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: open the lock file: %w", err)
 	}
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		lock.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+	// agentbus up looks at its built-in runner's lock for a moment (held,
+	// cmd/agentbus/builtin.go), so a busy lock is tried for a second before
+	// the store reads in use.
+	for start := time.Now(); ; time.Sleep(20 * time.Millisecond) {
+		err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			lock.Close()
+			return nil, fmt.Errorf("store: lock: %w", err)
+		}
+		if time.Since(start) > time.Second {
+			lock.Close()
 			return nil, ErrInUse
 		}
-		return nil, fmt.Errorf("store: lock: %w", err)
 	}
 	s, err := openLocked(path)
 	if err != nil {
@@ -331,6 +341,22 @@ func (s *Store) AppendForKey(e event.Event, idPath string) (existingID, existing
 func (s *Store) appendLocked(e event.Event) (out event.Event, stored bool, err error) {
 	if s.closed {
 		return e, false, ErrClosed
+	}
+	// One run.ended per hold: a hold is a run, and it ends once. Whoever
+	// writes it first (the engine, a runner's forwarded record, control's
+	// sweep for a turn whose job ended without it) closes the hold; a later
+	// one is not stored, so a turn never has two competing ends. The check
+	// and the write are one step under the store's lock.
+	if e.Kind == event.RunEnded && e.Hold != "" {
+		var n int
+		if err := s.w.QueryRow(`SELECT COUNT(*) FROM events WHERE session = ? AND kind = 'run.ended'
+			AND json_extract(data, '$.hold') = ?`, e.Session, e.Hold).Scan(&n); err != nil {
+			return e, false, fmt.Errorf("store: read %s: %w", e.Kind, err)
+		}
+		if n > 0 {
+			e.Seq = 0
+			return e, false, nil
+		}
 	}
 	e.Seq = s.last + 1
 	// The record names its owner on every event, beside the actor. An event
@@ -780,4 +806,16 @@ func (s *Store) CloseStaleHolds(now time.Time, newID func() string) (int, error)
 		}
 	}
 	return len(holds), nil
+}
+
+// CopyTo writes a copy of the whole record to a new file at path, consistent
+// as of one moment, while the store stays open. agentbus up gives its built-in
+// runner, a process of its own since 0.6.7, its first record this way.
+func (s *Store) CopyTo(path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.w.Exec(`VACUUM INTO ?`, path); err != nil {
+		return fmt.Errorf("store: copy: %w", err)
+	}
+	return nil
 }

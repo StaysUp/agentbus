@@ -28,7 +28,69 @@ All notable changes to AgentBus. Full notes for each release are on the
   control registers; `GET /api/v0/ons` lists it with `turn`, as before. An on over a session is
   listed with `filter` in place of `turn`.
 
+### Changed
+- **Restarting `agentbus up` no longer stops running turns.** `up`'s built-in runner is now a
+  process of its own, started by `up`, as a runner on another machine is. Stopping `up` (Ctrl-C, or
+  a restart to upgrade it) leaves the runner and its turns running. They finish and reach the
+  record once `up` is back, after a few seconds or after minutes. A model call made while `up` is
+  away waits for it, up to two minutes. Before, every running turn ended with exit 143,
+  `runner_stopped`.
+  - When `up` comes back from another build, or with another option for its runner
+    (`-replay=false`), the runner of the earlier build finishes its running
+    turns, takes no new ones, and then leaves. `up` then starts a runner of its own build. Turns
+    asked for in between wait in the queue until then.
+  - The runner leaves on its own when no agent of its runs and `up` is gone, so a stopped `up`
+    leaves no process behind. A turn's end it could not send is kept in `finishes/`, and the next
+    runner sends it when `up` is started again.
+  - The runner keeps its own record in `runner/events.db`, a copy of `up`'s the first time, and its
+    log in `logs/runner.log` (its own output in `logs/runner.out`). It shares the rest of `up`'s
+    data folder: the folders, the session copies and its identity.
+  - Its agents call the runner's own gateway, which relays to `up`. `up`'s own address no longer
+    serves model paths (404), and `POST /api/v0/turns` no longer returns `base_url` on `up`, as on
+    `server`. A turn's stand-in sent on another turn's path is refused by the runner's gateway
+    (403) and recorded nowhere, on every runner now, not only `up`'s.
+  - Control names a runner's turn's folder in its record from the turn's workspace, and gives a
+    runner the saved agents' names with each turn's start, so a session that changes agent still
+    names the earlier ones.
+
 ### Fixed
+- **When a turn ended, and how, is decided once, by control.** A turn's end is its job's end on
+  control: a finish control took, or an attempt it found lost. `GET /api/v0/turns` reads the turn's
+  state from there once its job has ended, and a run's `run.ended` says only how its agent ended.
+  Before, a turn whose agent finished but whose changes control never got read `finished`, with
+  no changes to apply. This follows Buildkite and Temporal: the server records a job's end once
+  and refuses a second; the agent learns it from the server's answer.
+- **A turn that ended while control was away stayed "running"**, and a control restart longer
+  than the 30-second lease ended every running turn with `runner_lost`. Control renews every
+  running lease when it starts. A runner keeps no clock of its own over a turn: it stops one only
+  when control answers that the turn is no longer its own. So a turn goes on through a restart of
+  `up` or `server` of any length, and through a dropped link shorter than the lease.
+- **A turn control found lost while its runner could not reach it no longer shares its copy.**
+  The next turn of that workspace waits until the runner has heard and stopped the lost one's
+  agent. In a copy everything waits for everything earlier, a lost turn or command still
+  stopping among them, with one exception: a turn runs beside a command (`run_command`).
+  A command, a discard, an update, a close or a put-away waits for all of it.
+- **A turn's end is never dropped before control answered it.** A runner keeps it in
+  `finishes/` until control took it or answered that the turn is no longer current. The turn's
+  record goes before its finish: a runner that leaves while control does not answer the record
+  keeps the end for the next runner, which sends both. A record control answers with a server
+  error three times is given up, as Buildkite gives up a job's failed log chunks: the finish goes,
+  and control closes the run whose end it did not get.
+- **A turn never ends finished unless control holds its changes.** A reply cut after its
+  headers, or no answer, is tried again as the finish is. If control keeps refusing the changes,
+  or the copy cannot be read, the turn ends failed (`changes_not_kept`) and says so.
+- **A turn taken just before a restart ran 30 seconds late.** Control now queues such a turn
+  again as soon as it starts, since nothing was spent on it, and a runner takes it at once.
+- **A finished turn whose last record never reached control blocked its session**
+  ([#98](https://github.com/staysup/agentbus/issues/98)). Control now closes the turn's open run
+  with the attempt, and the turn reads as its job ended. A run ends once: the record keeps the
+  first `run.ended` of a run. Thanks to ayush585 for the report and the two tests.
+- **A turn whose agent could not start left its reason only in the runner's own record.** Its
+  `run.ended` now reaches control's record, as a started turn's does.
+- **A runner stopped while control did not answer a turn's start never stopped.** It tried the
+  start again without pause. It now drops the start, which control queues again when it is back.
+- **A turn could edit up's built-in runner's record.** `runner/events.db` and `runner/build` are
+  now among the data folder's files no turn may edit.
 - **A file moved over another of the same size and time is no longer lost**
   ([#89](https://github.com/staysup/agentbus/issues/89), [#97](https://github.com/staysup/agentbus/pull/97)).
   A checkpoint trusts a file's size, time and mode only when its ctime is also older than the last

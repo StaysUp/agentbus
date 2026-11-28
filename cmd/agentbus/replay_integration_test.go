@@ -261,10 +261,8 @@ func TestReplayFallsBackToResumeForOldSessions(t *testing.T) {
 	// A session that used replay, now with nothing to replay: the earlier
 	// turns as text.
 	id2, _ := startRun(t, svc, tok, "claude", claudeResultA)
-	if _, _, err := svc.store.Append(event.Event{ID: "evt_r", Kind: event.TurnStarted, Time: time.Now(), Session: id2,
-		Turn: "t_replayed", Text: "x", ReplayFrom: "t_old", Continuity: "replay"}); err != nil {
-		t.Fatal(err)
-	}
+	appendBoth(t, svc, event.Event{ID: "evt_r", Kind: event.TurnStarted, Time: time.Now(), Session: id2,
+		Turn: "t_replayed", Text: "x", ReplayFrom: "t_old", Continuity: "replay"})
 	code, out, raw = postMessage(t, svc, tok, id2, map[string]any{"prompt": "next"})
 	if code != http.StatusAccepted {
 		t.Fatalf("%d %s, want 202 by transcript", code, raw)
@@ -272,6 +270,18 @@ func TestReplayFallsBackToResumeForOldSessions(t *testing.T) {
 	waitClosedN(t, svc, id2, 2)
 	if c, from := continuityOf(t, svc, id2, out["turn"].(string)); c != "transcript" || from != "" {
 		t.Errorf("continuity %q replay_from %q, want transcript and none", c, from)
+	}
+}
+
+// appendBoth stores e in control's record and in up's built-in runner's,
+// which judges a session's continuation from its own (builtin.go): a past
+// turn a test writes by hand must be in both, as a real one is.
+func appendBoth(t *testing.T, svc *service, e event.Event) {
+	t.Helper()
+	for _, st := range []*store.Store{svc.store, svc.inRunner.store} {
+		if _, _, err := st.Append(e); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -301,8 +311,11 @@ func TestRunEndedWaitsForSettle(t *testing.T) {
 	svc := runServiceWith(t, home, nil, 0, "http://127.0.0.1:1", false)
 	tok := readToken(t, home)
 	settled := make(chan bool, 1)
-	svc.eng.SetSettle(func(session, turn string) bool {
-		closedYet := len(closedEvents(runEvents(t, svc.store, session))) > 0
+	// The engine and the record it writes run.ended to are the built-in
+	// runner's (builtin.go).
+	run := svc.inRunner
+	run.eng.SetSettle(func(session, turn string) bool {
+		closedYet := len(closedEvents(runEvents(t, run.store, session))) > 0
 		time.Sleep(50 * time.Millisecond)
 		settled <- closedYet
 		return true
@@ -321,10 +334,8 @@ func TestReplayedSessionRefusedWithReplayOff(t *testing.T) {
 	svc := runService(t, home, nil, 0) // replay off
 	tok := readToken(t, home)
 	id, _ := startRun(t, svc, tok, "claude", claudeResultA)
-	if _, _, err := svc.store.Append(event.Event{ID: "evt_r", Kind: event.TurnStarted, Time: time.Now(), Session: id,
-		Turn: "t_replayed", Text: "x", ReplayFrom: "t_old", Continuity: "replay"}); err != nil {
-		t.Fatal(err)
-	}
+	appendBoth(t, svc, event.Event{ID: "evt_r", Kind: event.TurnStarted, Time: time.Now(), Session: id,
+		Turn: "t_replayed", Text: "x", ReplayFrom: "t_old", Continuity: "replay"})
 	code, _, raw := postMessage(t, svc, tok, id, map[string]any{"prompt": "next"})
 	if code != http.StatusConflict || !strings.Contains(raw, "continued by own replay") {
 		t.Errorf("%d %s, want 409 naming own replay", code, raw)

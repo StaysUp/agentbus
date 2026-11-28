@@ -1921,6 +1921,41 @@ func (q *Queue) Sweep() (int, error) {
 	return n, err
 }
 
+// RenewLeases gives every running attempt a lease of its own from now, and
+// says how many. Control calls it once when it starts, before it serves or
+// sweeps: while control was away no runner could heartbeat, so the time it
+// was away is no runner's fault. A runner still working answers within the
+// new lease; one that is gone loses it then. A lease already longer is kept.
+// A taken attempt no runner started is queued again at once, as its lease
+// running out would: nothing was spent, and its runner, retrying its start,
+// is told it is no longer current, so the next take runs the job now, not a
+// lease later, and a runner that left with it holds nothing (runner/lease.go).
+func (q *Queue) RenewLeases(lease time.Duration) (int, error) {
+	var n int64
+	err := q.tx(func(tx *sql.Tx) error {
+		now := q.now()
+		until := nanos(now.Add(lease))
+		res, err := tx.Exec(`UPDATE attempts SET lease_until = ? WHERE state = 'running' AND finish_hash IS NULL
+			AND lease_until < ?`, until, until)
+		if err != nil {
+			return fmt.Errorf("queue: write attempt: %w", err)
+		}
+		if n, err = res.RowsAffected(); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE attempts SET lease_until = ? WHERE state = 'taken' AND finish_hash IS NULL`,
+			nanos(now)-1); err != nil {
+			return fmt.Errorf("queue: write attempt: %w", err)
+		}
+		_, err = sweepTx(tx, now)
+		return err
+	})
+	if err == nil {
+		q.wake()
+	}
+	return int(n), err
+}
+
 // Start moves a taken attempt to running and renews its lease. Starting a
 // running attempt again answers the same. cancel is true when the job was
 // asked to stop: the runner then finishes it as cancelled.

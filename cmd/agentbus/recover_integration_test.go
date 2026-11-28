@@ -159,7 +159,8 @@ var pidOf = regexp.MustCompile(`message\.start session=\S+ agent=claude turn=(\S
 
 func childPID(t *testing.T, home, turn string) int {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(home, "logs", "service.log"))
+	// up's built-in runner, which starts the agents, writes runner.log.
+	b, err := os.ReadFile(filepath.Join(home, "logs", "runner.log"))
 	if err != nil {
 		t.Fatal(err)
 	}

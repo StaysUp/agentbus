@@ -102,6 +102,17 @@ func fakeAgent() {
 	if os.Getenv("AGENTBUS_FAKE_IGNORE_TERM") == "1" {
 		signal.Ignore(syscall.SIGTERM)
 	}
+	// With AGENTBUS_FAKE_TERM_MARK, SIGTERM writes that file, then the agent
+	// exits 143, as a stopped agent does: a test sees when it was stopped.
+	if p := os.Getenv("AGENTBUS_FAKE_TERM_MARK"); p != "" {
+		term := make(chan os.Signal, 1)
+		signal.Notify(term, syscall.SIGTERM)
+		go func() {
+			<-term
+			os.WriteFile(p, []byte("stopped"), 0o600)
+			os.Exit(143)
+		}()
+	}
 	if p := os.Getenv("AGENTBUS_FAKE_MARK"); p != "" {
 		os.WriteFile(p, []byte("ran"), 0o600)
 	}
@@ -404,11 +415,38 @@ func fakeAgent() {
 		os.Rename(p+".tmp", p) // whole or absent, never half written
 	}
 	if p := os.Getenv("AGENTBUS_FAKE_WAIT"); p != "" {
-		for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); {
+		// AGENTBUS_FAKE_WAIT_S waits that many seconds at most, not 20.
+		wait := 20 * time.Second
+		if n, err := strconv.Atoi(os.Getenv("AGENTBUS_FAKE_WAIT_S")); err == nil && n > 0 {
+			wait = time.Duration(n) * time.Second
+		}
+		for deadline := time.Now().Add(wait); time.Now().Before(deadline); {
 			if _, err := os.Stat(p); err == nil {
 				break
 			}
 			time.Sleep(10 * time.Millisecond)
+		}
+	}
+	// With AGENTBUS_FAKE_CALL_AFTER, that one model call, as Claude Code
+	// makes it, after the wait: it writes the reply's status to
+	// AGENTBUS_FAKE_CALL_OUT, when set.
+	if b := os.Getenv("AGENTBUS_FAKE_CALL_AFTER"); b != "" {
+		req, _ := http.NewRequest("POST", claudeGatewayEnv("ANTHROPIC_BASE_URL")+"/v1/messages", strings.NewReader(b))
+		req.Header.Set("Content-Type", "application/json")
+		if tok := claudeGatewayEnv("ANTHROPIC_AUTH_TOKEN"); tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+		} else if tok := claudeGatewayEnv("CLAUDE_CODE_OAUTH_TOKEN"); tok != "" {
+			req.Header.Set("Authorization", "Bearer "+tok)
+			req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+		}
+		status := 0
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			status = resp.StatusCode
+		}
+		if out := os.Getenv("AGENTBUS_FAKE_CALL_OUT"); out != "" {
+			os.WriteFile(out, []byte(strconv.Itoa(status)), 0o600)
 		}
 	}
 	code, _ := strconv.Atoi(os.Getenv("AGENTBUS_FAKE_EXIT"))

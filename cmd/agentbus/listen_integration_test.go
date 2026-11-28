@@ -118,9 +118,11 @@ func TestNonLoopbackHandsAgentsLoopback(t *testing.T) {
 	want := "http://127.0.0.1:" + port
 	out, _ := postRunRunning(t, svc, tok, map[string]any{"agent": "claude", "folder": t.TempDir(), "prompt": "hi"})
 	id, _ := out["session"].(string)
+	// The gateway is the built-in runner's, which listens on loopback only;
+	// control's API is still handed as its loopback address.
 	base, _ := out["base_url"].(string)
-	if !strings.HasPrefix(base, want+"/s/"+id+"/t/") {
-		t.Fatalf("base_url %q, want under %s", base, want)
+	if !strings.HasPrefix(base, "http://127.0.0.1:") || !strings.Contains(base, "/s/"+id+"/t/") {
+		t.Fatalf("base_url %q, want a loopback gateway of the turn", base)
 	}
 	waitClosed(t, svc.store, id)
 	r := readReport(t, report)

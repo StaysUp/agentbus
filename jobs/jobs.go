@@ -696,6 +696,11 @@ type AttemptStarted struct {
 	// turn is refused with it.
 	Settings     *settings.RunnerSettings `json:"settings,omitempty"`
 	RulesRefused *RulesRefusal            `json:"rules_refused,omitempty"`
+	// AgentNames, on a turn's attempt, are the saved agents' names by their
+	// id: a turn on another harness than its session's latest names the
+	// earlier turns' agents by them (run.Config.AgentName). The saved agents
+	// live on control; a runner keeps none.
+	AgentNames map[string]string `json:"agent_names,omitempty"`
 }
 
 // RulesRefusal is a setting control cannot use, so a turn cannot start: where
@@ -741,6 +746,12 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request, rn queue.Runner) 
 				return
 			default:
 				st.Settings = rules
+			}
+			if s.cfg.Agents != nil {
+				st.AgentNames = map[string]string{}
+				for _, ag := range s.cfg.Agents.List() {
+					st.AgentNames[ag.ID] = ag.Name
+				}
 			}
 		}
 	}

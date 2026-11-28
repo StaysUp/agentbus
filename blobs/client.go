@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"hash"
 	"io"
@@ -58,7 +57,11 @@ func (c Client) do(ctx context.Context, method, path string, body io.Reader, siz
 	}
 	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, errors.New("blobs: the control plane could not be reached")
+		return nil, ErrUnreachable
+	}
+	if resp.StatusCode >= 500 {
+		resp.Body.Close()
+		return nil, fmt.Errorf("%w: answered %d", ErrUnreachable, resp.StatusCode)
 	}
 	return resp, nil
 }
@@ -79,7 +82,8 @@ func (c Client) Missing(ctx context.Context, hs []string) ([]string, error) {
 	}
 	var r MissingReply
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&r); err != nil {
-		return nil, errors.New("blobs: the missing reply could not be read")
+		// Cut after its headers: no whole answer, as no answer.
+		return nil, fmt.Errorf("%w: the missing reply could not be read", ErrUnreachable)
 	}
 	return r.Missing, nil
 }

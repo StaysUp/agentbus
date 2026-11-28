@@ -10,6 +10,11 @@
 // only to the runner that reports it (queue.Take), so a session runs on its
 // folder's machine. A runner that keeps its data folder keeps the id.
 //
+// Two processes of one data folder share the file: agentbus up registers the
+// folders a person names, and its runner, a process of its own, reads them.
+// Each read takes in what the other wrote (refresh), and each write merges
+// with the file under a lock beside it, so neither loses the other's folders.
+//
 // It imports nothing of the module. Control packages never import it
 // (cmd/agentbus/layers_test.go): in agentbus up the API reaches it through
 // an interface (queue.FolderIssuer) wired by the command.
@@ -27,6 +32,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -117,6 +123,13 @@ type Registry struct {
 	machine string
 	folders map[string]entry
 	copies  []string // the folders that hold session copies (CopiesIn)
+	seen    stamp    // the file as last read or written (refresh)
+}
+
+// stamp tells whether the file changed since it was last read.
+type stamp struct {
+	mod  time.Time
+	size int64
 }
 
 type entry struct {
@@ -154,6 +167,7 @@ func Open(path string) (*Registry, error) {
 		for k, v := range f.Folders {
 			r.folders[k] = v
 		}
+		r.seen = stampOf(path)
 		return r, nil
 	case !errors.Is(err, os.ErrNotExist):
 		return nil, errors.New("folders: " + filepath.Base(path) + " cannot be read")
@@ -188,6 +202,7 @@ func (r *Registry) Register(path string) (string, error) {
 	ref := Ref(path)
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.refresh()
 	e, ok := r.folders[ref]
 	now := time.Now().UTC()
 	// The time is written at most once a minute per folder: a busy session
@@ -211,6 +226,7 @@ func (r *Registry) Register(path string) (string, error) {
 func (r *Registry) Path(ref string) (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.refresh()
 	e, ok := r.folders[ref]
 	return e.Path, ok
 }
@@ -304,6 +320,7 @@ type Folder struct {
 // copies are left out (CopiesIn).
 func (r *Registry) List(max int) []Folder {
 	r.mu.Lock()
+	r.refresh()
 	type kv struct {
 		ref string
 		e   entry
@@ -335,9 +352,13 @@ func (r *Registry) List(max int) []Folder {
 	return out
 }
 
-// save writes the file with mode 0600, by rename. The lock is held, or the
+// save writes the file with mode 0600, by rename, under the lock beside it,
+// once what another process wrote since is merged in. The lock is held, or the
 // registry is not shared yet.
 func (r *Registry) save() error {
+	unlock := lockFile(r.path + ".lock")
+	defer unlock()
+	r.merge()
 	b, _ := json.Marshal(file{Machine: r.machine, Folders: r.folders})
 	tmp := r.path + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o600); err != nil {
@@ -346,7 +367,59 @@ func (r *Registry) save() error {
 	if err := os.Rename(tmp, r.path); err != nil {
 		return errors.New("folders: " + filepath.Base(r.path) + " could not be written")
 	}
+	r.seen = stampOf(r.path)
 	return nil
+}
+
+// refresh takes in what another process wrote to the file since it was last
+// read. r.mu is held.
+func (r *Registry) refresh() {
+	if st := stampOf(r.path); st != r.seen {
+		r.merge()
+		r.seen = st
+	}
+}
+
+// merge adds the file's folders to the registry's: a folder either side holds
+// is kept, with the later of its two registrations. The file's machine id is
+// the registry's (Open). A file that cannot be read adds nothing. r.mu is held.
+func (r *Registry) merge() {
+	b, err := os.ReadFile(r.path)
+	if err != nil {
+		return
+	}
+	var f file
+	if json.Unmarshal(b, &f) != nil {
+		return
+	}
+	for k, v := range f.Folders {
+		if e, ok := r.folders[k]; !ok || v.Used.After(e.Used) {
+			r.folders[k] = v
+		}
+	}
+}
+
+func stampOf(path string) stamp {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return stamp{}
+	}
+	return stamp{fi.ModTime(), fi.Size()}
+}
+
+// lockFile holds an exclusive lock on path until the answer is called. A lock
+// that cannot be taken is no lock: the write still goes, as before the file
+// was shared.
+func lockFile(path string) func() {
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return func() {}
+	}
+	if syscall.Flock(int(f.Fd()), syscall.LOCK_EX) != nil {
+		f.Close()
+		return func() {}
+	}
+	return func() { f.Close() }
 }
 
 func connectorShape(s string) bool {

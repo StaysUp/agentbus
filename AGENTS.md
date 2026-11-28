@@ -55,8 +55,9 @@ may hold other projects' Go code. Go's own tools skip folders that start with `_
   other part reads that memory. Teams depend on one control while their runners are many machines.
   (2026-11-16: approvals listed from one gateway's memory never showed a remote runner's request.)
 - **One gateway path everywhere.** A runner on control's machine and a runner on another machine take
-  the same path, so what works locally works across machines. (Target: `agentbus up` runs its
-  built-in runner with its own local gateway, as a remote runner does.)
+  the same path, so what works locally works across machines. `agentbus up` runs its built-in
+  runner as a process of its own, with its own gateway and record, as a remote runner does
+  (`cmd/agentbus/builtin.go`), so a restart of `up` leaves its turns running.
 - **Test across processes.** A feature that touches the gateway or the runner gets a test with
   control and a separate runner process, not only the built-in runner of `agentbus up`. Before a
   release, a live check with a real runner on another machine.

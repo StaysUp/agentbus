@@ -45,6 +45,9 @@ var (
 	ErrNotFound = errors.New("blobs: no blob of that hash")
 	ErrBadHash  = errors.New("blobs: the content does not have the hash it was sent with")
 	ErrTooBig   = errors.New("blobs: the blob is bigger than a blob may be")
+	// ErrUnreachable is a call to the control plane that got no answer, or
+	// a 5xx: worth trying again once control is back.
+	ErrUnreachable = errors.New("blobs: the control plane could not be reached")
 )
 
 // Source reads blobs.

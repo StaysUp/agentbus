@@ -74,6 +74,9 @@ type Gateway struct {
 	pingInterval time.Duration
 	pollInterval time.Duration
 	prefix       string // cut from the vendor path before anything reads it (SetPrefix)
+	// upWait: how long a call whose next hop refuses the connection is held
+	// and tried again (SetUpstreamWait, waitUp); zero sends the error on.
+	upWait time.Duration
 	// sendExchange: each call's exchange goes upstream in ExchangeHeader
 	// (SendExchange).
 	sendExchange bool
@@ -185,7 +188,7 @@ func New(upstream *url.URL, a adapter.Adapter, sink event.Sink) *Gateway {
 				r.Out.Header.Set(ExchangeHeader, ex.id)
 			}
 		},
-		Transport:      refuser{transport},
+		Transport:      refuser{waitUp{g: g, next: transport}},
 		FlushInterval:  -1,
 		ModifyResponse: g.modifyResponse,
 		ErrorHandler:   g.errorHandler,

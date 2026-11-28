@@ -79,6 +79,22 @@ func (a *API) view(t store.Turn, j *queue.Job) Turn {
 	if j.Ended == nil && v.State != queue.TurnQueued && v.State != queue.TurnStopped {
 		v.State, v.Ended = queue.TurnRunning, nil
 	}
+	// Once its job has ended, how the turn ended is the job's: control
+	// decides it once, as the job ends (runner/lease.go), and the record's
+	// run.ended says only how the agent ended. A turn whose agent finished
+	// but whose changes control never got ended failed, and reads so.
+	if j.Ended != nil && j.Kind == queue.KindTurn {
+		if s := queue.TurnState(j.State); s != v.State && (s == queue.TurnFinished || s == queue.TurnFailed || s == queue.TurnStopped) {
+			v.State = s
+			if v.Ended == nil {
+				v.Ended = j.Ended
+			}
+			if s == queue.TurnFailed && v.Error == "" {
+				res, _ := queue.ReadResult(j.Result)
+				v.Error = firstNonEmpty(firstNonEmpty(res.Error, res.Refused), j.Reason)
+			}
+		}
+	}
 	return v
 }
 

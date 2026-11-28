@@ -6,7 +6,10 @@ package jobs
 // /api/v0/sessions, /turns, /calls), while the turn runs. Each event keeps
 // its id, so a batch sent twice is stored once. No runner path reaches
 // the control plane: an event's folder (the copy's, on the runner) is
-// dropped; its folder_ref stays.
+// dropped; its folder_ref stays. A turn's start and its run's name the folder
+// control's own record holds for the job's workspace instead: the person's
+// folder on agentbus up, whose built-in runner is a process of its own, and
+// none on a server, which knows another machine's folder by reference only.
 
 import (
 	"encoding/json"
@@ -72,6 +75,9 @@ type Recorder interface {
 	// CostOfTurns is what the turns named have cost, for the queue's cost
 	// cap (queue.CostReader).
 	CostOfTurns(turns []string) (float64, error)
+	// Workspace is a workspace as control's record holds it: its folder, for
+	// a runner's turn.started and run.started (record).
+	Workspace(id ids.WorkspaceID) (store.Workspace, bool, error)
 	// WorkspaceUsedAfter says whether the workspace was used after a record
 	// seq, for a put-away (queue.ActivityReader).
 	WorkspaceUsedAfter(ws ids.WorkspaceID, after int64) (bool, error)
@@ -97,6 +103,10 @@ func (s *Server) record(w http.ResponseWriter, r *http.Request, rn queue.Runner)
 		return
 	}
 	turn := j.Turn
+	folder := ""
+	if w, ok, err := s.cfg.Record.Workspace(queue.CopyKey(j.Spec.Workspace, j.Session)); err == nil && ok {
+		folder = w.Folder
+	}
 	evs := make([]event.Event, 0, len(b.Events))
 	for _, raw := range b.Events {
 		var e event.Event
@@ -112,6 +122,9 @@ func (s *Server) record(w http.ResponseWriter, r *http.Request, rn queue.Runner)
 			return
 		}
 		e.Seq, e.Folder = 0, ""
+		if e.Kind == event.TurnStarted || e.Kind == event.RunStarted {
+			e.Folder = folder
+		}
 		evs = append(evs, e)
 	}
 	// One rule: every event is of the session control assigned the job.
@@ -178,8 +191,11 @@ const RunnerLostText = "The runner stopped answering; send the turn again."
 // CloseLost stores run.ended, unsettled, for each hold the record has
 // open whose turn's attempt lease ran out. Its runner stopped
 // during the turn, so nothing else closes it: the cockpit would show the
-// turn running, and the session would take no next turn. It is what
-// store.CloseStaleHolds does at start for this process's own turns.
+// turn running, and the session would take no next turn. A turn whose
+// attempt ended by a finish has its open runs closed by the finisher, before
+// the job ends (closeOpenRuns): between the two, every run control saw start
+// ends there. It is what store.CloseStaleHolds does at start for an engine's
+// own turns.
 func CloseLost(q *queue.Queue, st *store.Store, now time.Time) (int, error) {
 	holds, err := st.OpenHolds(st.Last())
 	if err != nil || len(holds) == 0 {

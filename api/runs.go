@@ -62,7 +62,7 @@ type Started struct {
 	Session string `json:"session" doc:"The turn's session: a new one, or the session sent. A review's is a session of its own."`
 	Turn    string `json:"turn" doc:"The turn's id. Every event of the turn carries it in turn; GET /api/v0/turns/{id} follows it from now on."`
 	State   string `json:"state" doc:"running: a runner started it. queued: it waits behind the session's earlier turns (ahead says how many), or for a runner. It runs next, in order. A retry of a turn that has ended says how it ended: finished, failed or stopped."`
-	BaseURL string `json:"base_url,omitempty" doc:"The address the agent uses, <service>/s/<session>/t/<turn>. Present only when this service runs the turn itself (agentbus up). Absent while queued, and on a server, where the turn runs on another machine's runner and that runner serves its gateway."`
+	BaseURL string `json:"base_url,omitempty" doc:"The address the agent uses, <service>/s/<session>/t/<turn>. Present only when this service runs the turn itself. Absent while queued, and since 0.6.7 on agentbus up too: every turn runs on a runner, and that runner serves its gateway (up's built-in runner is a process of its own)."`
 	// Existing marks the answer to a retry: the idempotency key had already
 	// made this turn.
 	Existing bool `json:"existing,omitempty" doc:"True when idempotency_key had already made this turn, so nothing new was made."`
@@ -278,9 +278,9 @@ const noTurns = "this service starts no turns: it keeps no queue"
 func (a *API) startedRunning(j queue.Job, turn string, existing bool) Started {
 	st := Started{Session: j.Session, Turn: turn, State: queue.TurnRunning, Existing: existing}
 	// BaseURL is the turn's gateway, which only this service serves, and only
-	// when it runs turns itself. A server runs no turns of its own: the gateway
-	// is on the runner that ran it, a machine this service does not serve, so
-	// BaseURL is left out rather than pointing at control.
+	// when it runs turns itself. Control runs no turns of its own, up included
+	// since 0.6.7: the gateway is on the runner that ran it, which this service
+	// does not serve, so BaseURL is left out rather than pointing at control.
 	if a.cfg.Engine != nil {
 		st.BaseURL = a.cfg.BaseURL + "/s/" + j.Session + "/t/" + turn
 	}

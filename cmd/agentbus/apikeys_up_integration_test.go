@@ -124,7 +124,7 @@ func TestUpAPIKeyOnlyOnRecordedCalls(t *testing.T) {
 			if !strings.HasPrefix(placeholder, jobs.StandInPrefix) {
 				t.Fatalf("the agent's placeholder: %q", placeholder)
 			}
-			base := "http://" + svc.addr + "/s/" + session + "/t/" + turn + "/key/" + tc.harness
+			base := turnBase(t, svc, session, turn) + "/key/" + tc.harness
 			send := func(call string) (int, string) {
 				method, target, _ := strings.Cut(call, " ")
 				req, _ := http.NewRequest(method, base+target, strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"x"}],"contents":[{"role":"user","parts":[{"text":"x"}]}]}`))
