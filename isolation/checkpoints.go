@@ -378,21 +378,20 @@ func checkpoint(s *Space, name string, k keeper) (Checkpoint, error) {
 }
 
 // learnBase hashes the Base content of each file in changed that the
-// earlier side holds unhashed, where it is needed: a file of the same size
-// (it may be only touched), or a small one (its diff shows the Base
-// content). Each hash learned is kept in the space's learned record, which
-// learnedFix lays over every checkpoint holding the file unhashed. A big
-// file whose size changed stays unhashed: it changed, and reading it would
-// cost a read of the whole file. It answers the saved files it made.
+// earlier side holds unhashed: a file of the same size may be only touched,
+// a small one's diff shows its Base content, and an apply of any of them
+// needs it, since only a hash shows that the folder's file is still as the
+// Base saw it once its times no longer can (a disk that keeps times to the
+// second only, a file whose change time is recent). Each hash learned is
+// kept in the space's learned record, which learnedFix lays over every
+// checkpoint holding the file unhashed. A big file's content is hashed, not
+// saved. It answers the saved files it made.
 func learnBase(s *Space, k keeper, changed []fileDiff) ([]string, error) {
 	var saved []string
 	var learned map[string]workspace.File
 	for _, d := range changed {
 		p := d.a
 		if !d.inA || p.Hash != "" || !p.Mode.IsRegular() {
-			continue
-		}
-		if p.Size > MaxFileDiff && !(d.inB && d.b.Size == p.Size) {
 			continue
 		}
 		if learned == nil {
