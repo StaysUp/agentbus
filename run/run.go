@@ -66,6 +66,11 @@ var SessionShape = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 type Launch struct {
 	Path string
 	Env  []string
+	// Keep names the variables of Env the wiring set itself (the harness's
+	// endpoint, its placeholder or key, its own settings). A turn in a home
+	// of its own keeps them; of the rest of Env it keeps only the few every
+	// program needs (cleanEnv).
+	Keep []string
 	Args []string
 	// HomeFiles are files the child needs in the session's own home, by
 	// path in it, such as agy's placeholder sign-in (harness.HomeFiles).
@@ -197,6 +202,11 @@ type Config struct {
 	// that already has one — gets one from Homes. A compute runner (Personal
 	// false) runs every turn in a clean per-session home.
 	Personal bool
+	// PassEnv names more variables of the service's own environment that a
+	// turn in a home of its own keeps, beyond the few every program needs
+	// (cleanEnv): such a turn gets no other of the service's variables, so
+	// none of this machine's secrets reach its agent unless named here.
+	PassEnv []string
 	// AgentName names a saved agent by its id in the transcript a turn on
 	// another harness gets; "" or a nil func names it by harness and model.
 	AgentName func(id string) string
@@ -825,7 +835,7 @@ func (e *Engine) start(t turn) (*Turn, error) {
 	}
 	if e.cfg.Homes != "" && needsCleanHome {
 		var made bool
-		cmd.Env, made, err = e.home(t.session, makeClean, h, cmd.Env)
+		cmd.Env, made, err = e.home(t.session, makeClean, h, cmd.Env, l.Keep)
 		// A home made for a turn that does not start goes again: no session
 		// owns it.
 		defer func() {

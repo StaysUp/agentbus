@@ -411,6 +411,18 @@ All notable changes to AgentBus. Full notes for each release are on the
   tools were hidden on 2026-11-23 and nothing called the routes. An agent reaches files through its
   CLI's own tools. A record made before keeps its old grants table; nothing reads it.
 
+### Changed (breaking)
+- **A turn in a home of its own gets an environment of its own.** Every runner turn, and an `up`
+  turn that already runs in a clean home (an agy relay, or a session that already has one), now
+  keeps only an allow list of the machine's variables: `PATH`, `HOME`, `USER`, `LOGNAME`, `SHELL`,
+  `TMPDIR`, the locale, `TERM`, the proxy and CA certificate variables, the turn's own and what its
+  harness's wiring sets. Before, such an agent inherited the runner's whole environment, so a
+  runner's `GH_TOKEN`, cloud keys or another harness's config folder reached every agent it ran. A
+  setup whose tools read another variable (`GOPRIVATE`, `NPM_TOKEN`, a custom `JAVA_HOME`) names it
+  with the new `-pass-env A,B` flag on `up` and `runner`. The proxy variables are kept so the
+  agent's tools reach the network as the person's shell does; a proxy URL that carries a password
+  reaches the agent with it. Personal `up` turns in the person's real home are unchanged.
+
 ### Fixed
 - **A delivered reply escaped its request tree's limits.** A turn could make an empty session and
   have a reply delivered there. The delivered turn started a new tree at depth zero, with fresh

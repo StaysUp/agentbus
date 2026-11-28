@@ -38,7 +38,7 @@ func TestXProcPersonsTurnsStartAtOnce(t *testing.T) {
 		"PATH="+fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"AGENTBUS_FAKE_AGENT=1", "ANTHROPIC_BASE_URL=", "OPENAI_BASE_URL=", "CODEX_HOME="+t.TempDir())
 	runnerEnv = append(runnerEnv, x.agentEnv...)
-	x.spawn(t, "runner:far", []string{"runner", "-server", x.base, "-name", "far", "-capacity", "1", "-folder", folder, "-replay=false"}, runnerEnv, reRunnerReady)
+	x.spawn(t, "runner:far", []string{"runner", "-server", x.base, "-name", "far", "-capacity", "1", "-folder", folder, "-pass-env", x.fakePassEnv(), "-replay=false"}, runnerEnv, reRunnerReady)
 	x.waitFolders(1)
 	f := x.folders()[0]
 

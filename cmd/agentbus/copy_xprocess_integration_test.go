@@ -38,7 +38,7 @@ func (x *xproc) startCopyRunner(t *testing.T, name, folder string) *copyRunner {
 		"PATH="+fakeAgentDir(t)+string(os.PathListSeparator)+os.Getenv("PATH"),
 		"AGENTBUS_FAKE_AGENT=1", "ANTHROPIC_BASE_URL=", "OPENAI_BASE_URL=", "CODEX_HOME="+t.TempDir())
 	env = append(env, x.agentEnv...)
-	cmd := exec.Command(x.bin, "runner", "-server", x.base, "-name", name, "-folder", folder, "-replay=false")
+	cmd := exec.Command(x.bin, "runner", "-server", x.base, "-name", name, "-folder", folder, "-pass-env", x.fakePassEnv(), "-replay=false")
 	cmd.Env = env
 	stderr, err := cmd.StderrPipe()
 	if err != nil {

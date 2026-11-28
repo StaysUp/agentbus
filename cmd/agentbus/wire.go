@@ -94,7 +94,15 @@ func runWire(getenv func(string) string, environ func() []string, lookPath func(
 		if err != nil {
 			return engine.Launch{}, engine.ErrNotFound
 		}
-		return engine.Launch{Path: bin, Env: childEnv(environ(), env), Args: pre, HomeFiles: files}, nil
+		// A turn in a home of its own keeps what the wiring set, and the
+		// variable that holds its OpenRouter key: opencode reads the key by
+		// that name from its environment ({env:NAME} in its config), so its
+		// wiring sets no copy of it.
+		keep := envNames(env)
+		if acc.Kind == harness.OpenRouter && acc.KeyEnv != "" {
+			keep = append(keep, acc.KeyEnv)
+		}
+		return engine.Launch{Path: bin, Env: childEnv(environ(), env), Keep: keep, Args: pre, HomeFiles: files}, nil
 	}
 }
 
@@ -112,6 +120,16 @@ const openRouterPrefix = "/openrouter"
 // providerKeyEnv holds a provider agent's placeholder in its child's
 // environment, where the harness's config reads it (harness.OpenRouterWire).
 const providerKeyEnv = "AGENTBUS_PROVIDER_KEY"
+
+// envNames are the names of env's variables, each NAME=value.
+func envNames(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		k, _, _ := strings.Cut(kv, "=")
+		out = append(out, k)
+	}
+	return out
+}
 
 // childEnv is the parent's environment with each of set replacing any entry
 // of the same name. The parent's own environment is not changed.

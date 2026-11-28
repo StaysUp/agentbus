@@ -387,7 +387,7 @@ func runLaunchCase(t *testing.T, self string, c launchCase) string {
 	var logs, replayAsked []string
 	lastTurn := map[string]string{}
 	cfg := engine.Config{Store: st, BaseURL: "http://127.0.0.1:8787", Wire: runWire(getenv, func() []string { return environ }, lookPath),
-		Settings: settings.NewFiles(data), APIDir: filepath.Join(data, "bin"),
+		Settings: settings.NewFiles(data), APIDir: filepath.Join(data, "bin"), PassEnv: []string{launchDirEnv},
 		Protect: []string{permPath, instrPath, filepath.Join(data, "agents.json")},
 		// The real cache folders differ per system (run/caches.go); a fixed one
 		// under the host home keeps the golden the same on Linux and macOS.

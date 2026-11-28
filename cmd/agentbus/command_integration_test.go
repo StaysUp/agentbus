@@ -104,7 +104,7 @@ func newCommandEnvOf(t *testing.T, slow time.Duration, program string, pass func
 		controlURL = px.URL
 	}
 	signInRunner(t, controlURL, tok, runnerHome, "far")
-	r, err := start(config{mode: modeRunner, listen: "127.0.0.1:0", home: runnerHome, upstream: mustURL("http://127.0.0.1:1"),
+	r, err := start(config{mode: modeRunner, passEnv: fakeEnv, listen: "127.0.0.1:0", home: runnerHome, upstream: mustURL("http://127.0.0.1:1"),
 		chatgpt: mustURL("http://127.0.0.1:1"), logf: t.Logf, lookPath: func(string) (string, error) { return program, nil }, noReplay: true,
 		server: controlURL, runnerName: "far", folders: []string{folder}})
 	if err != nil {
