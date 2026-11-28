@@ -1,6 +1,8 @@
 package queue
 
 import (
+	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 
@@ -207,6 +209,93 @@ func TestOwnerOnOverACommandDelivers(t *testing.T) {
 	}
 	if n != 2 {
 		t.Fatalf("%d deliveries of the command, want 2", n)
+	}
+}
+
+// A command's result whose delivery is refused (its agent was removed) is
+// reported to the receiving session. A report that fails leaves the one-shot
+// on live, so the next sweep refuses again and reports it once, and no sweep
+// queues a turn (#122).
+func TestRefusedCommandNoticeSurvivesAFailedReport(t *testing.T) {
+	q, _ := open(t)
+	rn := capsRunner(t, q, nil, &Capabilities{Connector: conA})
+	first := makeJob(t, q, Spec{Harness: "claude", AgentID: "a_1", FolderRef: refX, Machine: conA, Isolate: true})
+	run(t, q, rn, Result{Changeset: hexOf('1'), Checkpoint: "cp1"})
+	ws, sess := ids.WorkspaceID(first.Session), first.Session
+	c := commandIn(t, q, ws, sess, first.Turn, "make gate")
+	cj, ca := startTaken(t, q, rn)
+	if cj.ID != c.ID {
+		t.Fatalf("took %s, want the command", cj.ID)
+	}
+	if _, err := q.End(rn.ID, ca.ID, ca.Number, Finish{Status: Finished, Result: mustResult(Result{ExitCode: ptr(0)})}); err != nil {
+		t.Fatal(err)
+	}
+	var onID string
+	if err := q.db.QueryRow(`SELECT id FROM ons WHERE subject = ?`, c.Turn).Scan(&onID); err != nil {
+		t.Fatalf("the command's delivery on: %v", err)
+	}
+	type refusal struct{ on, session, turn, why string }
+	injected := errors.New("injected: the record is not writable")
+	calls := 0
+	var notices []refusal
+	q.ReportRefusedWith(func(on, session string, work Job, why string) error {
+		calls++
+		if calls == 1 {
+			return injected
+		}
+		notices = append(notices, refusal{on, session, work.Turn, why})
+		return nil
+	})
+	const removed = "agent a_1 was removed, pick another"
+	agent := func(Spec) (Spec, string) { return Spec{}, removed }
+	turns := func() int {
+		list, err := q.List(DefaultTeam, Filter{Kind: KindTurn}, 50)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return len(list)
+	}
+	before := turns()
+	// sweep runs one check of the ons, driven here in place of control's tick,
+	// and says whether the on is handled after it: its fire written, or off.
+	sweep := func(name string) (int, bool, error) {
+		n, err := q.FireOns(DefaultTeam, func(s string) (bool, error) { return s == c.Turn, nil }, nil, nil, agent)
+		var fired sql.NullString
+		var off sql.NullInt64
+		if err := q.db.QueryRow(`SELECT off, (SELECT error FROM on_fires WHERE on_id = ons.id AND key = ?) FROM ons WHERE id = ?`,
+			c.Turn, onID).Scan(&off, &fired); err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("%s sweep answered %d, %v; reporter calls %d, notices %d; on_fires %q (written %v), on off %v",
+			name, n, err, calls, len(notices), fired.String, fired.Valid, off.Valid)
+		return n, fired.Valid || off.Valid, err
+	}
+	n, handled, err := sweep("first")
+	if !errors.Is(err, injected) || n != 0 {
+		t.Errorf("the first sweep answered %d, %v, want the reporter's error", n, err)
+	}
+	if calls != 1 {
+		t.Fatalf("the reporter was called %d times, want once", calls)
+	}
+	if handled {
+		t.Errorf("after the failed report the on is handled, want it live for the next sweep")
+	}
+	n, handled, err = sweep("second")
+	if err != nil || n != 0 {
+		t.Errorf("the second sweep answered %d, %v", n, err)
+	}
+	if want := (refusal{onID, sess, c.Turn, removed}); len(notices) != 1 || notices[0] != want {
+		t.Fatalf("the receiving session has %d notices, want exactly 1 (%+v): %+v", len(notices), want, notices)
+	}
+	if !handled {
+		t.Errorf("after the notice the on is still live")
+	}
+	if got := turns(); got != before {
+		t.Errorf("%d turns after the sweeps, want %d: a refused delivery queues none", got, before)
+	}
+	// Handled now: a third sweep reports nothing more.
+	if n, _, err := sweep("third"); err != nil || n != 0 || calls != 2 || len(notices) != 1 {
+		t.Errorf("the third sweep: %d %v, reporter calls %d, notices %d", n, err, calls, len(notices))
 	}
 }
 
