@@ -586,10 +586,7 @@ func (a *API) applyState(turn string) (*ApplyState, error) {
 // applyStateOf is an apply job as the API shows it: its state from the
 // job, and once it has ended, what it did from its turn.applied.
 func (a *API) applyStateOf(j queue.Job) (ApplyState, error) {
-	st := ApplyState{Turn: j.Links.AppliesTurn, Session: j.Session, Turns: j.Links.AppliesTurns, Event: jobs.OutcomeID(j)}
-	if b := j.Links.ApplyBy; b != nil {
-		st.By = &event.By{Kind: b.Kind, Session: b.Session, Turn: b.Turn}
-	}
+	st := applyHead(j)
 	switch {
 	case j.State == queue.Queued:
 		st.State = "queued"
@@ -611,6 +608,16 @@ func (a *API) applyStateOf(j queue.Job) (ApplyState, error) {
 		st.Conflicts = append(st.Conflicts, queue.ApplyConflict{Path: c.Path, Why: c.Why, Markers: c.Markers})
 	}
 	return st, nil
+}
+
+// applyHead is what an apply's answer says of its job whatever its state:
+// the turns it applies, who asked, and the event that will be its outcome.
+func applyHead(j queue.Job) ApplyState {
+	st := ApplyState{Turn: j.Links.AppliesTurn, Session: j.Session, Turns: j.Links.AppliesTurns, Event: jobs.OutcomeID(j)}
+	if b := j.Links.ApplyBy; b != nil {
+		st.By = &event.By{Kind: b.Kind, Session: b.Session, Turn: b.Turn}
+	}
+	return st
 }
 
 // askedBy is who sent request r, as an apply's turn.applied names it: an
