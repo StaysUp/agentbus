@@ -188,7 +188,7 @@ func TestWorkspaceFromABaseAcrossProcesses(t *testing.T) {
 			c.ws = map[string]string{}
 		}
 		c.ws[sc.Session] = ws.Workspace
-		if code, a := c.apply(t2); code != 200 || a.State != "applied" {
+		if code, a := c.apply(t2); code != http.StatusAccepted || a.State != "applied" {
 			t.Fatalf("apply: %d %+v", code, a)
 		}
 		for p, want := range map[string]string{"seen.txt": "feature online\n", "second.txt": "again\n", "env-seen.txt": "SECRET=1\n"} {
