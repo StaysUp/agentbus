@@ -396,6 +396,32 @@ func fakeAgent() {
 		}
 		os.WriteFile(filepath.Join(os.Getenv("HOME"), "left-by-a-turn"), nil, 0o600)
 	}
+	// With AGENTBUS_FAKE_FILES, a line added to that file for each turn: a
+	// JSON object with the turn's folder and every file in it (.git left out)
+	// with its content, as the turn found them before it wrote anything.
+	if p := os.Getenv("AGENTBUS_FAKE_FILES"); p != "" {
+		cwd, _ := os.Getwd()
+		files := map[string]string{}
+		filepath.WalkDir(cwd, func(f string, d os.DirEntry, err error) error {
+			if err != nil {
+				return nil
+			}
+			if d.IsDir() && d.Name() == ".git" {
+				return filepath.SkipDir
+			}
+			if d.Type().IsRegular() {
+				rel, _ := filepath.Rel(cwd, f)
+				b, _ := os.ReadFile(f)
+				files[filepath.ToSlash(rel)] = string(b)
+			}
+			return nil
+		})
+		line, _ := json.Marshal(map[string]any{"cwd": cwd, "files": files})
+		if f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600); err == nil {
+			f.Write(append(line, '\n'))
+			f.Close()
+		}
+	}
 	// With AGENTBUS_FAKE_WRITE, files the turn writes in its folder: rel=content
 	// pairs, separated by ';'.
 	if w := os.Getenv("AGENTBUS_FAKE_WRITE"); w != "" {

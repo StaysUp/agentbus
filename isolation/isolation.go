@@ -182,6 +182,11 @@ type Request struct {
 	// (copy backend only): each folder, copied under the copy's top in a
 	// folder of its name.
 	Places []Place
+	// From, in place of Folder, Snapshot, Repo and Places: the copy is made
+	// from another space on this runner, as it was at its checkpoint
+	// FromCheckpoint (fork.go). Copy backend only.
+	From           *Space
+	FromCheckpoint string
 	// Ctx, when not nil, stops the copy while it is made: a folder copied
 	// file by file, a snapshot's blobs fetched, the first checkpoint. Open
 	// then answers Ctx's error, and what it made has no record (remove.go).
@@ -233,6 +238,10 @@ type Space struct {
 	// older than this (workspace.Keeps). 0 for a copy made before 0.6.7, or
 	// one whose Base hashed every file.
 	BaseTaken int64 `json:"base_taken,omitempty"`
+	// From and FromCheckpoint, for a copy made from another copy (fork.go):
+	// the source space's id and the checkpoint the copy's Base holds.
+	From           string `json:"from,omitempty"`
+	FromCheckpoint string `json:"from_checkpoint,omitempty"`
 	// Fallback: why the backend asked for could not be used, and which one
 	// was, as For's choice fell back. Empty when it was used.
 	Fallback string `json:"fallback,omitempty"`

@@ -28,8 +28,16 @@ import (
 )
 
 // RecordEvents are the kinds on the record an on may watch: events that name
-// the workspace they happened in, so the job the on queues has a workspace.
-var RecordEvents = []string{"workspace.applied", "workspace.discarded"}
+// the workspace they happened in (turn.ended through its turn), so the job the
+// on queues has a workspace.
+var RecordEvents = []string{"workspace.applied", "workspace.discarded", putAwayOnEnd}
+
+// putAwayOnEnd: a put-away queued by a turn's end is for a workspace made from
+// another's copy only. Its changes are never applied, so its copy has nothing
+// left to wait for once its turn ends, and it goes with no quiet time: no one
+// continues in it. Any other workspace keeps its copy until its work is
+// applied or discarded.
+const putAwayOnEnd = "turn.ended"
 
 // QueueKinds are the job kinds an on's action may queue.
 var QueueKinds = []string{KindPutAway}
@@ -147,7 +155,7 @@ func (q *Queue) FireRecordOns(team string, read RecordReader, where func(ws stri
 			return n, err
 		}
 		for _, e := range evs {
-			job, why, err := q.fireRecordOn(team, o.id, o.action, e, where, after)
+			job, why, err := q.fireRecordOn(team, o.id, o.kind, o.action, e, where, after)
 			if errors.Is(err, ErrFull) {
 				return n, nil // the queue is full: the cursor stays, try again later
 			}
@@ -176,7 +184,7 @@ func (q *Queue) FireRecordOns(team string, read RecordReader, where func(ws stri
 
 // fireRecordOn does on's action for record event e: the job it queued, or why
 // it queued none.
-func (q *Queue) fireRecordOn(team, on string, action Action, e RecordEvent, where func(ws string) (DeliverTo, bool, error), after func(kind string) (time.Duration, bool)) (job, why string, err error) {
+func (q *Queue) fireRecordOn(team, on, kind string, action Action, e RecordEvent, where func(ws string) (DeliverTo, bool, error), after func(kind string) (time.Duration, bool)) (job, why string, err error) {
 	if action.Queue != KindPutAway {
 		return "", "this on's action is not known to this build", nil
 	}
@@ -195,7 +203,13 @@ func (q *Queue) fireRecordOn(team, on string, action Action, e RecordEvent, wher
 		return "", "the workspace has no copy of its own", nil
 	}
 	due := e.Time.Add(wait)
-	spec := Spec{Workspace: ids.WorkspaceID(to.Workspace), Machine: to.Machine}
+	if kind == putAwayOnEnd {
+		if to.Fork == nil {
+			return "", "only a workspace made from another's copy is put away when its turn ends", nil
+		}
+		due = e.Time
+	}
+	spec := Spec{Workspace: ids.WorkspaceID(to.Workspace), Machine: to.Machine, Fork: to.Fork}
 	links := Links{Because: &Because{On: on, Event: e.ID, Seq: e.Seq}}
 	// The key is the on and the event, so the job is queued once even when the
 	// fire's own row was not written (a stop between the two). A '/' keeps it

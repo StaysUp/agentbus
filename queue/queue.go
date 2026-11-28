@@ -449,6 +449,20 @@ type Spec struct {
 	// turn as before. No route sets it yet: step 1 of
 	// plans/DESIGN_one_wall.md only reports the wall.
 	Wall string `json:"wall,omitempty"`
+	// Fork, on a job of a workspace made from another workspace's copy: the
+	// source and the checkpoint its copy is made from. Filled by control from
+	// the record, never by a caller. A turn that finds no copy of its
+	// workspace makes one from the source's (forkTake sends it to the runner
+	// that holds the source), and a put-away of the workspace does not wait
+	// for its changes to be applied, since they never are.
+	Fork *Fork `json:"fork,omitempty"`
+}
+
+// Fork is where a workspace made from another workspace's copy comes from:
+// the source workspace and the checkpoint of its copy.
+type Fork struct {
+	Workspace  ids.WorkspaceID `json:"workspace"`
+	Checkpoint string          `json:"checkpoint"`
 }
 
 // Places are the workspace's folders as the job names them: each of Folders,
@@ -1091,6 +1105,16 @@ const laneKinds = `('turn','discard','update','close','put_away')`
 // so no `session IS NULL` / `session != ”` proxy can diverge from it -- a
 // session-less job (a discard) is keyed by its workspace, never treated as
 // needing no copy or no affinity.
+// forkTake: a job of a workspace made from another workspace's copy, whose
+// own copy is not made yet, goes to the runner that holds the source's open
+// copy, the only one that can make it. With no open copy of the source
+// anywhere, any runner the other rules allow takes it, and its turn ends
+// failed with why, rather than waiting for a copy that will not come.
+var forkTake = `json_extract(j.spec, '$.fork.workspace') IS NULL
+	OR EXISTS (SELECT 1 FROM copies s WHERE s.id = ` + jobCopyKey("j") + ` AND s.team = j.team AND s.closed IS NULL)
+	OR NOT EXISTS (SELECT 1 FROM copies f WHERE f.id = json_extract(j.spec, '$.fork.workspace') AND f.team = j.team AND f.closed IS NULL)
+	OR EXISTS (SELECT 1 FROM copies f WHERE f.id = json_extract(j.spec, '$.fork.workspace') AND f.team = j.team AND f.closed IS NULL AND f.runner = r.id)`
+
 func jobCopyKey(a string) string {
 	return `COALESCE(NULLIF(json_extract(` + a + `.spec, '$.workspace'), ''), ` + a + `.session)`
 }
@@ -1695,7 +1719,7 @@ func (q *Queue) Take(runnerID string, lease time.Duration, lane Lane) (job Job, 
 			AND (j.kind IN `+folderKinds+` OR `+jobCopyKey("j")+` IS NULL OR NOT EXISTS (SELECT 1 FROM copies s WHERE s.id = `+jobCopyKey("j")+` AND s.team = j.team)
 				OR EXISTS (SELECT 1 FROM copies s WHERE s.id = `+jobCopyKey("j")+` AND s.team = j.team AND s.runner = r.id AND s.closed IS NULL))
 			AND ((j.kind NOT IN `+laneKinds+` AND j.kind != '`+KindExec+`') OR NOT EXISTS (SELECT 1 FROM jobs o WHERE o.team = j.team AND o.id != j.id AND (`+laneTake(nanos(now))+`)))
-			AND (`+machineTake+`) AND (`+labelsTake+`) AND (`+harnessTake+`) AND (`+wallTake+`)
+			AND (`+machineTake+`) AND (`+labelsTake+`) AND (`+harnessTake+`) AND (`+wallTake+`) AND (`+forkTake+`)
 			ORDER BY j.created, j.id LIMIT 1`, runnerID, team, nanos(now.Add(-RunnerFresh)), nanos(now.Add(-RunnerFresh))).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil

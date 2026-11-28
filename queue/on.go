@@ -322,6 +322,8 @@ type DeliverTo struct {
 	// Folders, in place of FolderRef, for a workspace with several folders.
 	Folders []workspace.Place
 	Isolate bool
+	// Fork: the workspace is made from another workspace's copy (Spec.Fork).
+	Fork *Fork
 }
 
 func (q *Queue) FireOns(team string, ended func(turn string) (bool, error), to func(session string) (DeliverTo, bool, error), name func(id string) string, agent AgentOf) (int, error) {

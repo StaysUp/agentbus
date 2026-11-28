@@ -167,6 +167,15 @@ func Places(w store.Workspace) []workspace.Place {
 	return out
 }
 
+// ForkOf is where a workspace made from another workspace's copy comes from,
+// as a job names it, or nil for a workspace made from its folders.
+func ForkOf(w store.Workspace) *queue.Fork {
+	if w.From == nil {
+		return nil
+	}
+	return &queue.Fork{Workspace: ids.WorkspaceID(w.From.Workspace), Checkpoint: w.From.Checkpoint}
+}
+
 // lastPart is the last part of a folder's path, as typed or as kept: ~ alone is
 // the home.
 func lastPart(p string) string {

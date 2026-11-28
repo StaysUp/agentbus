@@ -102,7 +102,10 @@ type WorkspaceRequest struct {
 	// folders, all on one machine. Its copy holds each folder side by side
 	// under one top, named by the folder's last path part.
 	Folders []WorkspaceFolderRequest `json:"folders,omitempty" doc:"In place of folder and folder_ref: the folders of a workspace with several, 1 to 8, all on the machine named by machine. The workspace keeps each folder in order with a name: the last part of its path, in letters, digits, . _ and - (any other character becomes -), at most 64 bytes, and -2, -3 for a second of the same name. Its turns run at the top of one copy that holds each folder side by side under its name, and their changes name each file by its folder's name and its path inside the folder. Needs sandbox true."`
-	Sandbox *bool                    `json:"sandbox,omitempty" doc:"True (the default): turns run in a copy of the folder behind a wall, and their changes are applied on request. False: turns run in the folder as it is."`
+	// From, in place of folder, folder_ref and folders: the workspace is made
+	// from another workspace's copy at one of its checkpoints.
+	From    *WorkspaceFromRequest `json:"from,omitempty" doc:"In place of folder, folder_ref and folders: make the workspace from another workspace's copy, as it was at one of its checkpoints. The new workspace has that workspace's folders, machine and sandbox mode (always true). Its first turn makes its copy on the runner that holds the other workspace's copy: the files the checkpoint recorded, and the ignored folders (node_modules, build caches) as the other copy holds them then. That turn ends failed when the other copy no longer holds the checkpoint, or is gone. Its turns' changes are recorded like any, but never applied or updated: apply and update refuse it. Once a turn of it ends, AgentBus puts its copy away, as [workspaces] put_away_after_minutes allows, without the quiet time."`
+	Sandbox *bool                 `json:"sandbox,omitempty" doc:"True (the default): turns run in a copy of the folder behind a wall, and their changes are applied on request. False: turns run in the folder as it is."`
 	// IdempotencyKey makes a retry safe: the same key returns the same workspace.
 	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"Optional, 1 to 128 characters of A-Z, a-z, 0-9 and . _ : -. A retry with the same key returns the workspace the key first created and makes nothing new."`
 }
@@ -139,6 +142,10 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 	if msg := checkIdempotencyKey(body.IdempotencyKey); msg != "" {
 		writeError(w, http.StatusBadRequest, msg)
+		return
+	}
+	if body.From != nil {
+		a.createForkWorkspace(w, r, body)
 		return
 	}
 	// Cheap validation, before the key check: a bad request is refused whether
@@ -533,6 +540,10 @@ func (a *API) updateWorkspace(w http.ResponseWriter, r *http.Request, id string)
 		writeError(w, http.StatusBadRequest, "this session works directly in your folder; there is nothing to update into a copy")
 		return
 	}
+	if ws.From != nil {
+		writeError(w, http.StatusBadRequest, forkNotApplied)
+		return
+	}
 	body, ok := decodeOptional[UpdateRequest](w, r, "the body must be a JSON object with an optional mode (update or merge), or empty")
 	if !ok {
 		return
@@ -603,6 +614,10 @@ func (a *API) applyWorkspace(w http.ResponseWriter, r *http.Request, id string) 
 	}
 	if !ws.Sandbox {
 		writeError(w, http.StatusBadRequest, applyNotSandbox)
+		return
+	}
+	if ws.From != nil {
+		writeError(w, http.StatusBadRequest, forkNotApplied)
 		return
 	}
 	body, ok := decodeApplyBody(w, r)

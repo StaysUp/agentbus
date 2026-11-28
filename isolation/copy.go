@@ -33,6 +33,9 @@ type copyBackend struct{}
 func (copyBackend) Name() string { return Copy }
 
 func (copyBackend) Open(r Request) (*Space, error) {
+	if r.From != nil {
+		return openFork(r)
+	}
 	if len(r.Places) > 0 {
 		return openPlaces(r)
 	}

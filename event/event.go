@@ -398,6 +398,13 @@ type WorkspaceFolderEntry struct {
 	FolderRef string `json:"folder_ref" doc:"The folder's reference (fld_ and 16 hex digits)."`
 }
 
+// WorkspaceFrom is where a workspace made from another workspace's copy
+// comes from, on its workspace.created.
+type WorkspaceFrom struct {
+	Workspace  string `json:"workspace" doc:"The workspace whose copy this one is made from (ws_ and 16 hex digits)."`
+	Checkpoint string `json:"checkpoint" doc:"The checkpoint of that copy this workspace's copy holds at its start: base, or a turn of that workspace that changed files."`
+}
+
 // Event is one step of an agent's work.
 //
 // The gateway fills ID, Time, Session, Exchange, Vendor and Client. An adapter
@@ -528,6 +535,9 @@ type Event struct {
 	// empty, so no reader takes one folder for the whole workspace. A
 	// workspace with one folder keeps it in Folder and FolderRef, as before.
 	Folders []WorkspaceFolderEntry `json:"folders,omitempty" doc:"On workspace.created of a workspace with several folders: each folder, in order. Absent for a workspace with one folder, which names it in folder and folder_ref."`
+	// MadeFrom, only on workspace.created of a workspace made from another
+	// workspace's copy: that workspace and the checkpoint of its copy.
+	MadeFrom *WorkspaceFrom `json:"made_from,omitempty" doc:"On workspace.created of a workspace made from another workspace's copy: that workspace and the checkpoint its copy starts from. Its folders, machine and mode are the other workspace's."`
 	// AgentID, Access and KeyEnv, on a run's turn.started and run.started:
 	// the saved agent the run started, how it reaches its model, and for an
 	// OpenRouter agent the name of the variable that holds its key. Never

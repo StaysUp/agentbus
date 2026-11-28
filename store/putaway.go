@@ -1,10 +1,13 @@
 package store
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
+	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/ids"
 )
 
@@ -62,5 +65,23 @@ func (s *Store) EventsOfKind(kind string, after int64, limit int) ([]KindEvent, 
 		e.ID, e.Workspace, e.Turn, e.Time = head.ID, head.Workspace, head.Turn, time.Unix(0, when).UTC()
 		out = append(out, e)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	// An event that names a turn but no workspace (turn.ended) happened in the
+	// workspace that turn ran in, as its turn.started says.
+	for i := range out {
+		if out[i].Workspace != "" || out[i].Turn == "" {
+			continue
+		}
+		var ws sql.NullString
+		err := s.r.QueryRow(`SELECT COALESCE(NULLIF(json_extract(data, '$.workspace'), ''), session) FROM events
+			WHERE turn = ? AND kind = ? ORDER BY seq LIMIT 1`, out[i].Turn, string(event.TurnStarted)).Scan(&ws)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("store: read events: %w", err)
+		}
+		out[i].Workspace = ws.String
+	}
+	return out, nil
 }

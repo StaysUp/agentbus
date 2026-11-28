@@ -393,6 +393,7 @@ var agentRefusals = map[string]string{
 	`API.workspaceAuthority: agentNoWorkspace`:                                 limWhere,
 	`API.workspaceAuthority: agentPathRefused`:                                 limWhere,
 	`API.homeFiles: homeRefused`:                                               limWhere,
+	`API.createForkWorkspace: fromOutsideReach`:                                limWhere,
 	// Commands an agent hands to AgentBus (H1).
 	`API.within: commandStopRefused`:                         limWhere,
 	`API.runCommand: commandOnlyTurns`:                       limNoAgent, // the main token and the turns token: no turn to run it for

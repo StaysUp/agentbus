@@ -1244,7 +1244,7 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 					if err != nil || !ok {
 						return queue.DeliverTo{}, false, err
 					}
-					return queue.DeliverTo{Workspace: w.ID, FolderRef: w.FolderRef, Folders: api.Places(w), Machine: w.Machine, Isolate: w.Sandbox}, true, nil
+					return queue.DeliverTo{Workspace: w.ID, FolderRef: w.FolderRef, Folders: api.Places(w), Machine: w.Machine, Isolate: w.Sandbox, Fork: api.ForkOf(w)}, true, nil
 				}
 				if n, err := s.queue.FireOns(queue.DefaultTeam, s.store.Ended, deliverTo, name, s.deliveredAgent); err != nil {
 					svcLog.Printf("queue.fire_ons_failed")
@@ -1375,7 +1375,7 @@ func (s *service) workspacePlace(ws string) (queue.DeliverTo, bool, error) {
 	if err != nil || !ok {
 		return queue.DeliverTo{}, false, err
 	}
-	return queue.DeliverTo{Workspace: w.ID, FolderRef: w.FolderRef, Folders: api.Places(w), Machine: w.Machine, Isolate: w.Sandbox}, true, nil
+	return queue.DeliverTo{Workspace: w.ID, FolderRef: w.FolderRef, Folders: api.Places(w), Machine: w.Machine, Isolate: w.Sandbox, Fork: api.ForkOf(w)}, true, nil
 }
 
 // jobDelay is how long a job an on over the record queues waits before a

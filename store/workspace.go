@@ -35,6 +35,10 @@ type Workspace struct {
 	// one folder as the whole workspace). Empty for a workspace with no folder.
 	Folders []WorkspaceFolder `json:"folders,omitempty" doc:"The workspace's folders, in order. One for a workspace with one folder, which folder and folder_ref also name; several for a workspace made with several, whose folder and folder_ref are then absent."`
 	Created time.Time         `json:"created" doc:"When the workspace was created."`
+	// From: the workspace's copy is made from another workspace's copy, at one
+	// of its checkpoints (workspace.created's made_from). Nil for one made from
+	// its folders.
+	From *event.WorkspaceFrom `json:"from,omitempty" doc:"For a workspace made from another workspace's copy: that workspace and the checkpoint its copy starts from. Its changes are kept in the record and never applied to the folders. Absent for a workspace made from its folders."`
 	// HeadTurn is the workspace's latest turn that recorded a changeset
 	// (turn.changed), the turn an apply would go up to. Empty when no turn of
 	// the workspace has ended with a changeset.
@@ -74,14 +78,14 @@ const resolvedWorkspace = `COALESCE(NULLIF(json_extract(ts.data, '$.workspace'),
 // workspace.created names it.
 func (s *Store) Workspace(id ids.WorkspaceID) (w Workspace, found bool, err error) {
 	w.ID = string(id)
-	var folder, ref, machine, list sql.NullString
+	var folder, ref, machine, list, from sql.NullString
 	var sandbox int
 	var created int64
 	err = s.r.QueryRow(`SELECT json_extract(data, '$.folder'), json_extract(data, '$.folder_ref'),
 			json_extract(data, '$.machine'), COALESCE(json_extract(data, '$.sandbox'), 0), time,
-			json_extract(data, '$.folders')
+			json_extract(data, '$.folders'), json_extract(data, '$.made_from')
 		FROM events WHERE kind = ? AND json_extract(data, '$.workspace') = ? ORDER BY seq LIMIT 1`,
-		string(event.WorkspaceCreated), string(id)).Scan(&folder, &ref, &machine, &sandbox, &created, &list)
+		string(event.WorkspaceCreated), string(id)).Scan(&folder, &ref, &machine, &sandbox, &created, &list, &from)
 	if errors.Is(err, sql.ErrNoRows) {
 		return w, false, nil
 	}
@@ -101,6 +105,13 @@ func (s *Store) Workspace(id ids.WorkspaceID) (w Workspace, found bool, err erro
 		// A workspace with one folder, and every one made before several: a list
 		// of one, with no name, as its copy is the folder itself.
 		w.Folders = []WorkspaceFolder{{Folder: w.Folder, FolderRef: w.FolderRef}}
+	}
+	if from.String != "" {
+		var f event.WorkspaceFrom
+		if err := json.Unmarshal([]byte(from.String), &f); err != nil {
+			return w, false, fmt.Errorf("store: read workspace source: %w", err)
+		}
+		w.From = &f
 	}
 	w.Sandbox = sandbox != 0
 	w.Created = time.Unix(0, created).UTC()

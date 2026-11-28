@@ -1425,6 +1425,31 @@ func (r *Runner) prepare(ctx context.Context, at *attempt) *queue.Result {
 		at.ref = sp.RepoRef
 		b, _ := isolation.Get(isolation.Git)
 		return r.isolate(ctx, at, b, isolation.Request{Repo: repo, Base: sp.Base, Ref: sp.RepoRef})
+	case sp.Fork != nil:
+		// A workspace made from another workspace's copy: its copy, once made,
+		// loads like any; the first turn makes it from the source's copy on this
+		// runner, as it was at the checkpoint (isolation, fork.go). The source's
+		// own folders are never read.
+		if w := at.job.Workspace; w != nil && w.Kind == queue.WorkspaceCopy {
+			if res, reused := r.loadCopy(at, *w); reused {
+				return res
+			}
+		}
+		if !sp.Isolate {
+			return &queue.Result{Refused: "a workspace made from another workspace's copy runs in a copy", Status: http.StatusBadRequest}
+		}
+		src, err := r.loadSpace(queue.Workspace{Space: string(sp.Fork.Workspace)})
+		if err == nil {
+			// An overlay copy left unmounted after a restart is mounted again
+			// before its files are read.
+			err = isolation.Remount(src)
+		}
+		if err != nil {
+			return &queue.Result{Refused: forkNoSource, Status: http.StatusConflict}
+		}
+		at.ref = sp.FolderRef
+		b, _ := isolation.Get(isolation.Copy)
+		return r.isolate(ctx, at, b, isolation.Request{From: src, FromCheckpoint: sp.Fork.Checkpoint, Ref: sp.FolderRef})
 	case len(sp.Folders) > 0:
 		// A workspace with several folders: one copy holds each side by side,
 		// made by the copy backend, whatever the isolation setting names (only
@@ -1538,6 +1563,10 @@ func (r *Runner) prepare(ctx context.Context, at *attempt) *queue.Result {
 	}
 	return r.useFolder(at)
 }
+
+// forkNoSource: a workspace made from another's copy found no copy of the
+// source on this runner: it was closed or put away before the first turn ran.
+const forkNoSource = "the workspace this one is made from has no copy on this runner any more (it was closed or put away), so this workspace's copy cannot be made"
 
 // workspaceDir is where a session's workspace is on this runner: its
 // space's folder, a folder used as it is, or the path a session made
@@ -1913,6 +1942,10 @@ func (r *Runner) isolate(ctx context.Context, at *attempt, b isolation.Backend, 
 	}
 	if s.Fallback != "" {
 		ready["fallback"] = s.Fallback
+	}
+	if s.From != "" {
+		ready["from"] = s.From
+		ready["from_checkpoint"] = s.FromCheckpoint
 	}
 	at.event("workspace.ready", ready)
 	return nil

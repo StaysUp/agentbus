@@ -80,6 +80,12 @@ func (a *API) workspaceChanges(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 	sandbox := wsp.Sandbox
+	if wsp.From != nil {
+		// Its changes are never applied, so there is no apply to preview.
+		writeJSON(w, http.StatusOK, WorkspaceChangesPage{Workspace: id, Isolated: true, Store: a.cfg.Store.ID(),
+			Files: []PreviewFile{}, Conflicts: []event.RefusedFile{}, Why: forkNotApplied})
+		return
+	}
 	q := r.URL.Query()
 	// Paging a preview already served: read the pinned event and page it, so
 	// every page is of the same snapshot even if the folder changes meanwhile.

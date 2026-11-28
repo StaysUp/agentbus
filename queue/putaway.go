@@ -74,7 +74,7 @@ const (
 // record; one that may go is left queued, for this take to choose. A put-away
 // whose workspace has no copy row ends kept too: there is nothing on disk.
 func (q *Queue) decidePutAways(tx *sql.Tx, runnerID, team string, now time.Time) error {
-	rows, err := tx.Query(`SELECT j.id, j.links, `+jobCopyKey("j")+`,
+	rows, err := tx.Query(`SELECT j.id, j.links, `+jobCopyKey("j")+`, json_extract(j.spec, '$.fork.workspace') IS NOT NULL,
 			EXISTS (SELECT 1 FROM copies s WHERE s.id = `+jobCopyKey("j")+` AND s.team = j.team)
 		FROM jobs j WHERE j.team = ? AND j.kind = 'put_away' AND j.state = 'queued'
 		AND j.not_before <= `+strconv.FormatInt(nanos(now), 10)+`
@@ -86,12 +86,12 @@ func (q *Queue) decidePutAways(tx *sql.Tx, runnerID, team string, now time.Time)
 	}
 	type due struct {
 		id, links, ws string
-		hasCopy       bool
+		fork, hasCopy bool
 	}
 	var ds []due
 	for rows.Next() {
 		var d due
-		if err := rows.Scan(&d.id, &d.links, &d.ws, &d.hasCopy); err != nil {
+		if err := rows.Scan(&d.id, &d.links, &d.ws, &d.fork, &d.hasCopy); err != nil {
 			rows.Close()
 			return fmt.Errorf("queue: read put-aways: %w", err)
 		}
@@ -106,7 +106,7 @@ func (q *Queue) decidePutAways(tx *sql.Tx, runnerID, team string, now time.Time)
 		_ = json.Unmarshal([]byte(d.links), &l)
 		why := KeptNoCopy
 		if d.hasCopy {
-			if why, err = q.putAwayWhy(tx, team, d.id, ids.WorkspaceID(d.ws), l.Because); err != nil {
+			if why, err = q.putAwayWhy(tx, team, d.id, ids.WorkspaceID(d.ws), d.fork, l.Because); err != nil {
 				return err
 			}
 		}
@@ -130,7 +130,7 @@ func (q *Queue) decidePutAways(tx *sql.Tx, runnerID, team string, now time.Time)
 // a discard and then an apply, and the apply's on fire first): every older one
 // ends kept for it, and it is not held up by them. So a settled copy always
 // has one put-away that can still go.
-func (q *Queue) putAwayWhy(tx *sql.Tx, team, id string, ws ids.WorkspaceID, because *Because) (string, error) {
+func (q *Queue) putAwayWhy(tx *sql.Tx, team, id string, ws ids.WorkspaceID, fork bool, because *Because) (string, error) {
 	if q.putAwayOn == nil || !q.putAwayOn() {
 		return KeptOff, nil
 	}
@@ -165,6 +165,11 @@ func (q *Queue) putAwayWhy(tx *sql.Tx, team, id string, ws ids.WorkspaceID, beca
 	}
 	if used {
 		return KeptUsed, nil
+	}
+	if fork {
+		// A workspace made from another's copy is never applied: its changes
+		// are in the record, so its copy holds nothing it must keep.
+		return "", nil
 	}
 	st, err := q.applied(ws)
 	if err != nil {
