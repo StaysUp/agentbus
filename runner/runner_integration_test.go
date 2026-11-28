@@ -164,14 +164,23 @@ func newWorld(t *testing.T, capacity int, record ...bool) *world {
 	if err != nil {
 		t.Fatal(err)
 	}
+	setDir := filepath.Join(dir, "settings")
+	if err := os.MkdirAll(setDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	set := settings.NewFiles(setDir)
 	// The lease is control's own (jobs.Lease). The queue has one connection,
 	// so a heartbeat waits for every write before it, and a slow commit under
 	// the gate's parallel load held one past a 2 s lease: control failed a
 	// running folder job (runner_lost) and refused its finish with 409
 	// (2026-11-26; TestHeartbeatWaitsOutASlowQueue). A test that needs a
 	// lease to lapse moves the queue's clock (skew), never waits.
+	//
+	// Control reads the same settings as the runner, as in agentbus up: a
+	// turn runs under the rules control pins on its attempt.
 	cfg := jobs.Config{Queue: q, Token: mainTok, EnrollToken: enrollTok,
-		Lease: jobs.Lease, Heartbeat: 50 * time.Millisecond, MaxWait: 200 * time.Millisecond, Folders: fr, Blobs: bs}
+		Lease: jobs.Lease, Heartbeat: 50 * time.Millisecond, MaxWait: 200 * time.Millisecond, Folders: fr, Blobs: bs,
+		Settings: set}
 	if withRecord {
 		cfg.Record = st
 	}
@@ -183,11 +192,6 @@ func newWorld(t *testing.T, capacity int, record ...bool) *world {
 	ctx, cancel := context.WithCancel(context.Background())
 	// One runner holds the folders and does their jobs, as on every machine.
 	conn := &connector.Connector{Folders: fr, Store: bs, State: filepath.Join(dir, "connector")}
-	setDir := filepath.Join(dir, "settings")
-	if err := os.MkdirAll(setDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	set := settings.NewFiles(setDir)
 	r, err := Enroll(ctx, Config{Queue: plane.URL, EnrollToken: enrollTok, Name: "test", Capacity: capacity,
 		Engine: eng, Store: st, StopWait: 5 * time.Second, Logf: t.Logf, Workdir: filepath.Join(dir, "worktrees"), Folders: fr,
 		FolderSide: connector.Jobs{Connector: conn}, Lender: conn, Blobs: bs, BlobSink: worldSink(bs), Settings: set})
