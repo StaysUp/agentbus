@@ -1187,6 +1187,13 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 				} else if n > 0 {
 					svcLog.Printf("queue.results_delivered n=%d", n)
 				}
+				// An on over a session: each of its turns that ended since
+				// the on's cursor delivers its reply (queue/watchon.go).
+				if n, err := s.queue.FireWatchOns(queue.DefaultTeam, s.recordEvents, deliverTo, name, s.deliveredAgent); err != nil {
+					svcLog.Printf("queue.fire_watch_ons_failed")
+				} else if n > 0 {
+					svcLog.Printf("queue.results_delivered n=%d", n)
+				}
 				// An on over the record: an event of its kind recorded since
 				// its cursor queues its job (queue/recordon.go), such as the
 				// put-away of a workspace whose work is settled.
@@ -1288,7 +1295,7 @@ func (s *service) recordEvents(kind string, after int64, limit int) ([]queue.Rec
 	}
 	out := make([]queue.RecordEvent, len(evs))
 	for i, e := range evs {
-		out[i] = queue.RecordEvent{ID: e.ID, Seq: e.Seq, Time: e.Time, Workspace: e.Workspace}
+		out[i] = queue.RecordEvent{ID: e.ID, Seq: e.Seq, Time: e.Time, Workspace: e.Workspace, Turn: e.Turn}
 	}
 	return out, nil
 }

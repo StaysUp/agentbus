@@ -9,8 +9,8 @@ package queue
 //
 // The caps, [limits] in permissions.toml, keep a chain of agents asking
 // agents from running away. They are checked in one place, where any job is
-// made (budget.go, checkBudget). An on a turn token registers through POST
-// /api/v0/ons counts under the per-turn and per-tree caps too (countAsked).
+// made (budget.go, checkBudget). Registering an on is free; each turn it
+// delivers counts as work its maker asked for (deliverResult).
 
 import (
 	"database/sql"
@@ -65,7 +65,8 @@ func turnsOrReviews(n int) string {
 // behind it in the queue. B15 (his call (a), 2026-11-19): if deliver is set, it
 // records the delivery on in that same transaction, so starting the turn and
 // arranging its reply are one atomic write under one authorization. A nil
-// deliver registers no on; POST /api/v0/ons registers one separately.
+// deliver registers no on. The API passes none since 0.6.8: a turn's reply is
+// delivered by an on over its session (watchon.go).
 func (q *Queue) CreateTurnLinked(team, key string, spec Spec, links Links, lim Limits, deliver *Delivery) (Job, bool, error) {
 	var budget *Limits
 	if links.Chain != nil && links.Chain.By != "" {
@@ -218,9 +219,9 @@ func (q *Queue) deliverResult(team, onID, toSession, askingTurn string, j Job, t
 			return "", "", err
 		}
 		from = asking.Spec
-		cause = &Chain{Root: asking.Session}
+		cause = &Chain{Root: asking.Session, By: asking.Turn, BySession: string(asking.Session)}
 		if c := asking.Links.Chain; c != nil {
-			cause = &Chain{Root: c.Root, Depth: c.Depth}
+			cause.Root, cause.Depth = c.Root, c.Depth
 		}
 	} else if c := j.Links.Chain; j.Kind == KindExec && c != nil && c.By != "" {
 		// A command runs no agent of its own, so an on the main token made over
@@ -246,27 +247,31 @@ func (q *Queue) deliverResult(team, onID, toSession, askingTurn string, j Job, t
 	spec.Harness, spec.AgentID, spec.Access, spec.KeyEnv, spec.AgentModel = from.Harness, from.AgentID, from.Access, from.KeyEnv, from.AgentModel
 	res := &ResultOf{Job: j.ID, Kind: j.Kind, Session: resultSession(j), Turn: j.Turn, Agent: agentName(j.Spec)}
 	links := Links{ResultOf: res}
-	// Work a request tree causes stays in that tree, whatever session it lands
-	// in (his rule, 2026-11-25). A delivery a turn asked for (its on, or the
-	// delivery recorded with its ask) takes the ASKING turn's root and depth,
-	// never the receiving session's: an empty session has no tree, so taking
-	// its tree gave the delivery a new root at depth zero with fresh caps, and
-	// a turn could repeat that to pass the depth, job and cost limits (review
-	// P1, 2026-11-25). Because its Chain.Root is the asker's tree, it is
-	// recorded in that tree (treeOf), its cost counts toward that tree's cost
-	// cap, and work IT asks for counts against the tree. It is not itself asked
-	// work (By is empty), so the job caps do not count it; the on that asked for
-	// it is counted instead (countAsked), and the ask_agent on is covered by its
-	// job. The cost cap is checked for it (checkBudget). Being in a tree widens
-	// no reach: reach is by workspace (inAuthority), never by tree.
+	// Who pays for a delivered turn is decided here, once, for every on (his
+	// rule, 2026-11-28, replacing "a delivery is free"). A delivery an on of a
+	// turn makes is a turn of the tree of the turn that registered the on, as
+	// if that turn had asked for it: its chain is the maker's root, the
+	// maker's depth plus one, and the maker as By. So it counts against the
+	// maker's per-turn cap and the tree's cap, and is held to the depth cap,
+	// in create (checkBudget), and every reader of chain.by sees it as asked
+	// work of that tree (the lanes, the caps). A chain of ons, each delivered
+	// turn registering the next, then stops at the same limits as a chain of
+	// asks, whatever the cost cap (Codex review t_58b5f94f2ace24d3, P1: six
+	// continuations with both limits at 1). The record still names it a
+	// result: its origin reads ResultOf first (runner.go, turnview.go).
+	//
+	// One delivery stays free: the person's own turn (depth 0) delivering into
+	// the session it roots, such as a coordinator hearing its builders. That
+	// is the person's root-level turn and carries no chain, as the person's
+	// turns do.
+	//
 	// An on the main token registered has no asking turn and no tree that
 	// caused it, so the delivery joins the receiving session's own tree, or
 	// none for a session the person started: a main-token delivery never pulls
 	// an unrelated session into the subject's tree.
-	// A reply to the person's own session, from its own turn, is that session's
-	// root-level turn, and so carries no chain, as the person's turns do.
 	if cause != nil {
 		if cause.Root != toSession || cause.Depth != 0 {
+			cause.Depth++
 			links.Chain = cause
 		}
 	} else if root, depth, err := q.SessionChain(team, toSession); err != nil {
@@ -347,6 +352,10 @@ func hashLinks(l Links) Links {
 	}
 	return l
 }
+
+// ResultSession is the session asked work ran in, as a delivered result names
+// it.
+func ResultSession(j Job) string { return resultSession(j) }
 
 // resultSession is the session asked work ran in: a turn's own, or for a
 // review the session of its own turn, from its result.

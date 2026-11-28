@@ -5,6 +5,29 @@ All notable changes to AgentBus. Full notes for each release are on the
 
 ## Unreleased
 
+### Changed
+- **An on watches a session, not one turn.** `POST /api/v0/ons` takes
+  `{"event":"turn.completed","filter":{"session":"S"}}`. Every turn of S that ends from then on has
+  its reply delivered to a session, your own by default. It stays until you remove it. So a
+  coordinator that watches a builder's session hears each of its turns, including the later turn
+  that carries a review the builder asked for. A turn token may watch and deliver only within its
+  reach. An on may not deliver in a circle (409). A second on for the same pair returns the first.
+- **ask_agent and review_turn register that on themselves.** Each opens a session, registers an on
+  over it for the asking session, then starts the turn. The result of any later turn of that session
+  comes back too. You no longer need to register an on by hand for each review.
+- **Registering an on is free; what it delivers counts.** Each turn an on delivers is a turn the
+  on's maker asked for: one level below it, counted under Depth, Turns per request and Turns per
+  request tree. So a chain of ons stops where a chain of asks does. One delivery stays free: your
+  own turn hearing back in the session you started, so a coordinator's ons and results no longer
+  use up its tree. A delivery past a cap is not made; `delivery.refused` in its session says why.
+
+### Removed
+- **The on over one turn, and `delivery` on `POST /api/v0/turns`.** Both answer 410 with a message
+  saying what to send instead: register an on over the session first, then start the turn. A
+  command's result (`POST /api/v0/commands`) is still delivered by an on over that command, which
+  control registers; `GET /api/v0/ons` lists it with `turn`, as before. An on over a session is
+  listed with `filter` in place of `turn`.
+
 ### Fixed
 - **A file moved over another of the same size and time is no longer lost**
   ([#89](https://github.com/staysup/agentbus/issues/89), [#97](https://github.com/staysup/agentbus/pull/97)).

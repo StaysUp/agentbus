@@ -380,9 +380,7 @@ var agentRefusals = map[string]string{
 	`API.askChecks: turnNoSession`:              limWhere, // no session named: nowhere to run
 	`API.askChecks: turnSessionRefused`:         limWhere,
 	`API.run: limit.Msg`:                        limBrake, // depth, job and cost caps (queue/budget.go)
-	`API.registerOn: limit.Msg`:                 limBrake,
 	`agentLimits.inReach: turnSessionRefused`:   limWhere,
-	`agentLimits.watch: turnOnRefused`:          limWhere,
 	`agentLimits.removeOn: turnOnRemoveRefused`: limWhere,
 	`API.writeEvent: turnSessionRefused`:        limWhere,
 	// Sessions and workspaces.

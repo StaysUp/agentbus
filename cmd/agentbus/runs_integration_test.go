@@ -442,7 +442,7 @@ func TestRunRefusals(t *testing.T) {
 		noAgent   = "agent is required: name the saved agent this turn runs on (GET /api/v0/agents lists them)"
 		badPrompt = "prompt must be from 1 byte to 256 KiB, with no NUL byte"
 		badModel  = "model must match ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
-		badBody   = "the body must be one JSON object with session, agent and prompt, and optionally model, delivery and idempotency_key, at most 2 MiB"
+		badBody   = "the body must be one JSON object with session, agent and prompt, and optionally model and idempotency_key, at most 2 MiB"
 	)
 	for _, tc := range []struct {
 		name string

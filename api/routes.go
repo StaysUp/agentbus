@@ -163,7 +163,7 @@ var tags = []struct {
 	{name: "Workspaces", doc: "A workspace is where turns run: it owns the folder, the machine and the sandbox mode (a copy behind a wall, or the folder as it is). Create one, then create a session in it, then run the session's turns. The folder and the mode are the workspace's; a session carries neither. A sandbox copy whose work is all applied or discarded is put away by itself after a quiet time; the next turn makes a fresh one."},
 	{name: "Agents", doc: "Saved agents: a harness, how it reaches its model, the model and a name. A turn names one. And the harnesses, runners and folders a turn can use."},
 	{name: "Tools", doc: "The tools control serves to agents: the built-in ones and the person's own, in one stored format. List, add and remove them. Only the main token adds or removes one: a tool's name is what the rules match."},
-	{name: "Reactions", doc: "An on is a standing instruction: when an event happens, do something. A turn's on watches a turn complete and delivers its reply to a session; register one and remove it here, and ask_agent registers one for itself. An on may also watch a kind on the record and queue a job: control's built-in ons put a sandbox copy away once its work is applied or discarded and it has been quiet. A row on control; nothing waits."},
+	{name: "Reactions", doc: "An on is a standing instruction: when an event happens, do something. The on you register watches an event kind on the record with a filter: every turn.completed in one session, delivered to another session as its next turn. Register one, list it and remove it here; ask_agent and review_turn register one over the session they open. Control also keeps ons of its own: a command's delivery (POST /api/v0/commands), and built-in ons that put a sandbox copy away once its work is applied or discarded and it has been quiet. A row on control; nothing waits."},
 	{name: "Settings", doc: "The policy and the instructions every turn gets, and the subscriptions control holds for runners. Only the main token changes them or reads a subscription; a turn token may read the rest."},
 	{name: "Approvals", doc: "The commands the gateway held for a person (an ask entry, or a command on none of the lists under the ask default): list them and answer one, once, always or refuse. Only the main token answers one."},
 	{name: "Events", doc: "The record as a live stream, for a cockpit, an export or a program, and a program's own events."},
@@ -194,20 +194,23 @@ var routes = slices.Concat([]route{
 			"A turn the main token sends is the person's: it is not counted against any limit, and it goes ahead of delegated turns of its workspace that have not started, since those hold no copy yet. No job passes a discard, update or close of the workspace. A turn a turn token sends is delegated work: " +
 			"one runner runs at most [limits] max_delegated_at_once of those at once (8 by default; GET /api/v0/runners says how many are busy and waiting), and the rest wait, oldest first.\n\n" +
 			"A session whose turn runs, or has turns waiting, is never refused: the new turn queues behind them and runs next, in order, " +
-			"and ahead says how many of the session's turns are before it.",
+			"and ahead says how many of the session's turns are before it.\n\n" +
+			"To have the turn's reply delivered to another session, register an on over its session first (POST /api/v0/ons, event turn.completed, filter.session). The delivery field was removed in 0.6.8: a body that sends it is 410.",
 		body: TurnRequest{},
 		at:   atBody,
 		// B15: ask_agent is no longer a tool on this route; it is a default app
-		// (apps.go, askAgentApp) that calls this operation (startTurn) in ONE step,
-		// with delivery set so the reply's on is recorded in the same write. The
-		// route stays — the app and an agent's own agentbus-api both call it — but
-		// ships no tool of its own. "A turn is a turn." It stays wrappable, so a
-		// person may still build a custom tool (or app step) on it.
+		// (apps.go, askAgentApp) that opens a session, registers an on over it
+		// (registerOn), then calls this operation (startTurn). The route stays —
+		// the app and an agent's own agentbus-api both call it — but ships no
+		// tool of its own. "A turn is a turn." It stays wrappable, so a person
+		// may still build a custom tool (or app step) on it. Its delivery field
+		// was removed in 0.6.8 (410): no shortcuts in the API.
 		wrappable: true,
 		replies: []reply{ok(202, Started{}, "The turn: running, or queued behind the session's earlier turns, or, for delegated work, for a place."), turnRefused,
 			fail(403, "A turn token's request is refused: error says why, such as a cap on asked work."),
 			fail(404, "This service keeps no queue, or the session sent has no events."),
 			fail(409, "The session sent cannot be continued from here, it is closed, its machine was removed, or the idempotency key names another turn. A session whose turn is running is not refused: the new turn waits behind it (queued)."),
+			fail(http.StatusGone, "The body sent delivery, removed in 0.6.8: register an on over the session (POST /api/v0/ons) instead."),
 			fail(http.StatusTooManyRequests, "Too many turns are waiting; wait for some to end."), turnFailed, stopping},
 		turns: true,
 		serve: plain((*API).run)},
@@ -259,26 +262,29 @@ var routes = slices.Concat([]route{
 	{method: "POST", path: "/api/v0/ons", op: "registerOn", action: run.ActRun,
 		tag:     "Reactions",
 		summary: "Register an on",
-		doc: "Register a standing instruction: when the turn you name completes, its reply is delivered to a session as that session's next turn.\n\n" +
-			"This is the one primitive every reaction is built on; for now the only event is a turn completing. " +
-			"A turn token may watch any turn it may read (the check GET /api/v0/turns/{id} uses), its own session's too, and the reply goes to a session it may read: its own when it leaves session out. " +
-			"An on a turn token registers counts as work its turn asked for, under the caps in Settings, Limits: Turns per request (max_jobs_per_turn) and Turns per request tree (max_jobs_per_tree). A cap reached is 403 and registers nothing; a retry with the key of an on already made returns it without counting again. " +
-			"The main token may watch any turn and names the session to deliver to. " +
-			"Only a turn this service ran as a job can be watched: a turn the record holds with no job (an older one, or one recorded at the gateway) is 409, since nothing reports its end. " +
-			"It is a row on control plus control's own check: nothing waits, and the reply arrives as a later turn. " +
-			"Dedup is by idempotency_key only: the same key for the same turn and session returns the on already registered, the same key with other fields is 409, and a request with no key always registers a new on (several ons may watch one turn). ask_agent registers one of these for itself.",
+		doc: "Register a standing instruction over an event kind on the record: every turn.completed in the session filter.session names, from now on, has its reply delivered to a session as that session's next turn. " +
+			"For example, a coordinator watches a builder's session and hears each of its turns, a review's result too.\n\n" +
+			"It fires once for each turn of the watched session that ends after it is registered, however the turn ended, and stays until DELETE /api/v0/ons/{id} removes it. " +
+			"A turn token may watch a session it may read, its own too, and the replies go to a session it may read: its own when it leaves session out. " +
+			"The main token may watch any session and names the session to deliver to. " +
+			"Registering an on costs nothing. Each turn it delivers is a turn the registering turn asked for: one level below it, counted under Depth, Turns per request and Turns per request tree, and held to the cost cap (Settings, Limits). One delivery is free: the person's own turn hearing back in the session it started. A delivery past a cap is not made, and delivery.refused in the session it was for says why. " +
+			"An on may not deliver in a circle: the session it delivers to may not be the one it watches, nor one whose replies already reach the watched session through other ons (409). " +
+			"A second on with the same event, filter and session returns the first, so a reply is delivered once, and an idempotency_key sent with it is bound to that first on. " +
+			"The same key with the same fields always returns the on it names, removed or not, so a retry never makes a second; with other fields it is 409. ask_agent and review_turn register one of these over the session they open.\n\n" +
+			"The on over one turn (a body with turn) was removed in 0.6.8 and answers 410.",
 		body: OnRequest{},
-		replies: []reply{ok(201, OnView{}, "The on."), turnRefused,
-			fail(403, "A turn token named a turn or a session it may not read, or its turn or request tree reached a cap on asked work (the message says which)."),
-			fail(404, "This service keeps no queue, or no turn has this id."),
-			fail(409, "The idempotency_key was already used to register an on for a different turn or session, or the turn was not run as a job of this service, so no on can react to its end (the message says which).")},
+		replies: []reply{ok(201, OnView{}, "The on, new or the one already registered."), turnRefused,
+			fail(403, "A turn token named a session it may not read."),
+			fail(404, "This service keeps no queue, or a session named does not exist."),
+			fail(409, "The on would deliver in a circle, or the idempotency_key was already used for an on with other fields (the message says which)."),
+			fail(http.StatusGone, "The body named one turn (turn), a form removed in 0.6.8: watch the turn's session instead.")},
 		at:    atBody,
 		serve: plain((*API).registerOn)},
 	{method: "GET", path: "/api/v0/ons", op: "listOns", action: run.ActRead,
 		at:      atList,
 		tag:     "Reactions",
 		summary: "List ons",
-		doc: "The ons still waiting to react, oldest first: each one's id, the turn it watches, the session it delivers to, and the turn that registered it. An on that has fired, or was removed, is not listed. Control's built-in ons over the record (the put-away) are not listed either.\n\n" +
+		doc: "The ons still waiting to react, oldest first: each one's id, its event, what it watches (filter.session for an on over a session; turn for an on over one turn or command, which control registers for a command, or was made before 0.6.8), the session it delivers to, and the turn that registered it. An on over one turn is gone once it has fired; any on is gone once removed. Control's built-in ons over the record (the put-away) are not listed.\n\n" +
 			"The main token lists every on. A turn token lists the ons it may remove with DELETE /api/v0/ons/{id}: those its own turn registered, and those that deliver to a session it may read. " +
 			"With session, only the ons that deliver to that session. No body is read.",
 		query:   []param{{name: "session", doc: "Only the ons that deliver to this session. Sent twice, empty or not a session id, it is refused (400)."}},

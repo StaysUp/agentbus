@@ -5,7 +5,10 @@ package queue
 // existing check (FireOns, called where Deliver was); nothing waits on
 // control. An on has an event and an action:
 //
-//	on turn.completed -> start a turn in a session with the subject turn's reply.
+//	on turn.completed in a session -> start a turn in another session with
+//	   each ended turn's reply (watchon.go): the public on, POST /api/v0/ons.
+//	on turn.completed of one turn, or command.ended of one command -> the
+//	   same, once (this file): control's own since 0.6.8, a command's delivery.
 //	on <a kind on the record> -> queue a job (recordon.go), such as the
 //	   built-in put-away of a workspace whose work was applied or discarded.
 //
@@ -13,10 +16,9 @@ package queue
 // generalises it so later events (apply, a timer, before-apply) are the same
 // primitive with another event, not another mechanism.
 //
-// A turn.completed on is one-shot: it fires once, when its subject turn ends,
-// and is then off. So it has a definite end, which is how "an on cannot set
-// itself off forever" holds for B13 (there is no repeating on yet; a repeating
-// one, C3, must carry an end or be ended by off). A fire is recorded in
+// An on over one turn is one-shot: it fires once, when its subject turn ends,
+// and is then off. An on over a session repeats until it is removed, and may
+// not deliver in a circle (watchon.go). A fire is recorded in
 // on_fires, keyed by the subject turn, so a second sweep or a control restart
 // never fires it twice: the same safety the deliveries table gives delivery.
 
@@ -61,9 +63,9 @@ type Maker struct {
 // transaction as the turn: when the turn completes, its reply is delivered to
 // Session, run on Maker.Turn's agent. Start and deliver are then one write under
 // the one authorization that starts the turn (his call (a), 2026-11-19), so no
-// later, separately-authorized step can be lost — closing the two-step app's
-// token-lifetime window found across three review rounds. The ask_agent and
-// review_turn apps set it; POST /api/v0/ons stays for every other case.
+// later, separately-authorized step can be lost. Since 0.6.8 only POST
+// /api/v0/commands sets it (a command's result); a turn's delivery is an on
+// over its session, registered before the turn (watchon.go).
 type Delivery struct {
 	Session string
 	Maker   Maker
@@ -94,87 +96,41 @@ type On struct {
 	// Action is what the on does when it fires. The zero Action delivers the
 	// subject turn's reply to Session (turn.completed).
 	Action Action `json:"action"`
+	// Filter, on an on over a session (watchon.go), names the session whose
+	// turns it watches; Subject is then empty. Zero on an on over one turn.
+	Filter OnFilter `json:"filter"`
 }
 
-// B15 (his call (a), 2026-11-19): a turn create MAY record its delivery on in
-// the same transaction, when POST /api/v0/turns is given a delivery (see
-// create and Delivery). That is how the ask_agent and review_turn apps deliver,
-// in one atomic write. RegisterOn below is the separate, public path POST
-// /api/v0/ons uses for every other case.
-
-// RegisterOn stores an on and returns it. event must be known; subject (the
-// turn watched) and session (where the action starts its turn) are required.
+// RegisterOn stores a one-shot on over one turn (or one command) and returns
+// it. It is control's own since 0.6.8: the public API registers ons over a
+// session (RegisterWatchOn, watchon.go), and a command's on is recorded with
+// its job (create's Delivery). event must be known; subject (the turn watched)
+// and session (where the action starts its turn) are required.
 //
 // Dedup is by idempotency_key ONLY, the SAME mechanism POST /api/v0/turns uses
 // (his call, 2026-11-19): a non-empty key already used returns the on it made
-// (same subject and session), so an app's registerOn step, run with a key
-// derived from the tool call, is a no-op on a retry; a reused key with other
-// fields is ErrKeyConflict. There is no one-on-per-subject rule — several ons
-// may watch one turn — so a key is never left unbound by a subject collision
-// (the round-3 finding). A keyless on is always a new registration.
+// (same subject and session); a reused key with other fields is
+// ErrKeyConflict. A keyless on is always a new registration. An on counts as
+// no asked work (0.6.8): it delivers a result, it is not new work.
 func (q *Queue) RegisterOn(team, event, subject, session, key string, maker Maker) (On, error) {
-	return q.RegisterOnLinked(team, event, subject, session, key, maker, nil, Limits{})
-}
-
-// RegisterOnLinked is RegisterOn for an on a turn token registers: asked is
-// the token's request tree and turn (Root and By; Depth is not read), and the
-// on counts as asked work under lim's per-turn and per-tree caps,
-// checked in the insert's own transaction (countAsked). A cap reached is a
-// *LimitError and stores nothing. A retry with a key already used returns its
-// on without counting again. nil asked is RegisterOn: no cap.
-func (q *Queue) RegisterOnLinked(team, event, subject, session, key string, maker Maker, asked *Chain, lim Limits) (On, error) {
-	// This path registers a turn's on (deliver its reply). An on over a kind
-	// on the record is control's own for now (RegisterRecordOn).
 	if !Delivers(event) {
 		return On{}, fmt.Errorf("%w: %q", ErrUnknownEvent, event)
 	}
-	if subject == "" || session == "" || (asked != nil && asked.By == "") {
+	if subject == "" || session == "" {
 		return On{}, ErrBadState
 	}
 	mk, err := json.Marshal(maker)
 	if err != nil {
 		return On{}, fmt.Errorf("queue: register on: %w", err)
 	}
-	// The on records that it counts as asked work, and the caps its maker
-	// was held to, which hold the turn it delivers (checkBudget). Who asked
-	// is its maker, and the maker's tree is its own job's (countAsked): no
-	// copy here.
-	var countsAsked, budget any
-	if asked != nil {
-		countsAsked, budget = 1, limitsColumn(&lim)
-	}
 	o := On{ID: NewID("on_"), Team: team, Event: event, Subject: subject, Session: session, Maker: maker, Created: nanos(q.now())}
 	err = q.tx(func(tx *sql.Tx) error {
-		// A key already used returns its on (same subject and session, so a
-		// retry is a no-op) or is a conflict, the rule POST /api/v0/turns applies
-		// to a key with other fields. Read before the caps, so a retry is never
-		// refused for the on it made itself.
-		if key != "" {
-			existing, err := onByKey(tx, team, key)
-			switch {
-			case err == nil:
-				if existing.Subject != subject || existing.Session != session {
-					return ErrKeyConflict
-				}
-				o = existing
-				return nil
-			case !errors.Is(err, ErrNotFound):
-				return err
-			}
-		}
-		if asked != nil {
-			if err := countAsked(tx, team, *asked, lim); err != nil {
-				return err
-			}
-		}
 		// The insert and the dedup are ONE atomic statement: ON CONFLICT on the
-		// key index, not a read-then-insert. Two concurrent requests with the same
-		// key then both land here, one inserts and the other does nothing (never a
-		// uniqueness error, the round-4 finding). A keyless on never conflicts
-		// (the index is partial on idem_key != '') and is always new.
-		res, err := tx.Exec(`INSERT INTO ons(id, team, event, subject, session, maker, idem_key, created, asked, limits) VALUES(?,?,?,?,?,?,?,?,?,?)
+		// key index, not a read-then-insert. A keyless on never conflicts (the
+		// index is partial on idem_key != '') and is always new.
+		res, err := tx.Exec(`INSERT INTO ons(id, team, event, subject, session, maker, idem_key, created) VALUES(?,?,?,?,?,?,?,?)
 			ON CONFLICT(team, idem_key) WHERE idem_key != '' DO NOTHING`,
-			o.ID, o.Team, o.Event, o.Subject, o.Session, string(mk), key, o.Created, countsAsked, budget)
+			o.ID, o.Team, o.Event, o.Subject, o.Session, string(mk), key, o.Created)
 		if err != nil {
 			return fmt.Errorf("queue: register on: %w", err)
 		}
@@ -229,26 +185,34 @@ func (q *Queue) EndedTurns(after *Job, atOrBefore time.Time, limit int) ([]Job, 
 	return out, rows.Err()
 }
 
-// onByKey reads the on registered with idempotency key, or ErrNotFound.
+// onByKey reads the on idempotency key names, or ErrNotFound: the on it made,
+// or the on it was bound to when it returned one already live (on_keys).
 func onByKey(tx *sql.Tx, team, key string) (On, error) {
 	o := On{Team: team}
 	var mk string
 	var act string
-	switch err := tx.QueryRow(`SELECT id, event, subject, session, maker, created, COALESCE(action, '') FROM ons WHERE team = ? AND idem_key = ?`,
-		team, key).Scan(&o.ID, &o.Event, &o.Subject, &o.Session, &mk, &o.Created, &act); {
+	var filter string
+	switch err := tx.QueryRow(`SELECT id, event, subject, session, maker, created, COALESCE(action, ''), COALESCE(filter, '') FROM ons
+		WHERE team = ?1 AND (idem_key = ?2 OR id = (SELECT on_id FROM on_keys WHERE team = ?1 AND key = ?2)) ORDER BY idem_key = ?2 DESC LIMIT 1`,
+		team, key).Scan(&o.ID, &o.Event, &o.Subject, &o.Session, &mk, &o.Created, &act, &filter); {
 	case errors.Is(err, sql.ErrNoRows):
 		return On{}, ErrNotFound
 	case err != nil:
 		return On{}, fmt.Errorf("queue: read on: %w", err)
 	}
-	if err := readOn(&o, mk, act); err != nil {
+	if err := readOn(&o, mk, act, filter); err != nil {
 		return On{}, err
 	}
 	return o, nil
 }
 
-// readOn fills o's maker and action from their stored JSON.
-func readOn(o *On, maker, action string) error {
+// readOn fills o's maker, action and filter from their stored JSON.
+func readOn(o *On, maker, action, filter string) error {
+	if filter != "" {
+		if err := json.Unmarshal([]byte(filter), &o.Filter); err != nil {
+			return fmt.Errorf("queue: read on: %w", err)
+		}
+	}
 	if err := json.Unmarshal([]byte(maker), &o.Maker); err != nil {
 		return fmt.Errorf("queue: read on: %w", err)
 	}
@@ -263,15 +227,15 @@ func readOn(o *On, maker, action string) error {
 // GetOn reads an on by id, off or not; ErrNotFound if none.
 func (q *Queue) GetOn(team, id string) (On, error) {
 	o := On{ID: id, Team: team}
-	var mk, act string
-	switch err := q.db.QueryRow(`SELECT event, subject, session, maker, created, COALESCE(action, '') FROM ons WHERE id = ? AND team = ?`,
-		id, team).Scan(&o.Event, &o.Subject, &o.Session, &mk, &o.Created, &act); {
+	var mk, act, filter string
+	switch err := q.db.QueryRow(`SELECT event, subject, session, maker, created, COALESCE(action, ''), COALESCE(filter, '') FROM ons WHERE id = ? AND team = ?`,
+		id, team).Scan(&o.Event, &o.Subject, &o.Session, &mk, &o.Created, &act, &filter); {
 	case errors.Is(err, sql.ErrNoRows):
 		return On{}, ErrNotFound
 	case err != nil:
 		return On{}, fmt.Errorf("queue: read on: %w", err)
 	}
-	if err := readOn(&o, mk, act); err != nil {
+	if err := readOn(&o, mk, act, filter); err != nil {
 		return On{}, err
 	}
 	return o, nil
@@ -310,7 +274,7 @@ func (q *Queue) RemoveOn(team, id string) error {
 
 // ListOns returns the team's live (not off) ons, oldest first.
 func (q *Queue) ListOns(team string) ([]On, error) {
-	rows, err := q.db.Query(`SELECT id, event, subject, session, maker, created, COALESCE(action, '') FROM ons
+	rows, err := q.db.Query(`SELECT id, event, subject, session, maker, created, COALESCE(action, ''), COALESCE(filter, '') FROM ons
 		WHERE team = ? AND off IS NULL ORDER BY created, id`, team)
 	if err != nil {
 		return nil, fmt.Errorf("queue: list ons: %w", err)
@@ -319,11 +283,11 @@ func (q *Queue) ListOns(team string) ([]On, error) {
 	var out []On
 	for rows.Next() {
 		o := On{Team: team}
-		var mk, act string
-		if err := rows.Scan(&o.ID, &o.Event, &o.Subject, &o.Session, &mk, &o.Created, &act); err != nil {
+		var mk, act, filter string
+		if err := rows.Scan(&o.ID, &o.Event, &o.Subject, &o.Session, &mk, &o.Created, &act, &filter); err != nil {
 			return nil, fmt.Errorf("queue: list ons: %w", err)
 		}
-		if err := readOn(&o, mk, act); err != nil {
+		if err := readOn(&o, mk, act, filter); err != nil {
 			return nil, err
 		}
 		out = append(out, o)
@@ -370,7 +334,7 @@ func (q *Queue) FireOns(team string, ended func(turn string) (bool, error), to f
 	// set is small — a delivery on goes off as soon as it fires — and each ended
 	// check is an indexed lookup.
 	rows, err := q.db.Query(`SELECT o.id, o.subject, o.session, o.maker, o.limits FROM ons o
-		WHERE o.team = ? AND o.event IN (?, ?) AND o.off IS NULL
+		WHERE o.team = ? AND o.event IN (?, ?) AND o.subject != '' AND o.off IS NULL
 		AND NOT EXISTS (SELECT 1 FROM on_fires f WHERE f.on_id = o.id AND f.key = o.subject)
 		ORDER BY o.created, o.id`, team, OnTurnCompleted, OnCommandEnded)
 	if err != nil {
@@ -439,6 +403,7 @@ func (q *Queue) FireOns(team string, ended func(turn string) (bool, error), to f
 		if why == "" {
 			n++
 		}
+		q.reportRefused(p.id, p.session, j, why)
 		if _, err := q.db.Exec(`INSERT INTO on_fires(on_id, key, job, error, created) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING`,
 			p.id, p.subject, did, why, nanos(q.now())); err != nil {
 			return n, fmt.Errorf("queue: write on fire: %w", err)

@@ -8,7 +8,7 @@ import (
 
 // Who asked is stored once: a job keeps the asking turn (chain.by), never its
 // session, which is read back from the asking turn's own job; an on keeps its
-// maker and that it counts, never a copy of the maker's tree (O2.1).
+// maker, never a copy of the maker's tree (O2.1).
 func TestWhoAskedStoredOnce(t *testing.T) {
 	q, _ := open(t)
 	asker, _, err := q.Create(DefaultTeam, KindTurn, "", Spec{Session: "p", Harness: "claude", Prompt: "go"}, Links{})
@@ -31,16 +31,9 @@ func TestWhoAskedStoredOnce(t *testing.T) {
 		t.Fatalf("the asking session, read back: %+v %v", got.Links.Chain, err)
 	}
 
-	// The per-tree cap counts an on through its maker's own job: the asker's
-	// (the person's turn, its tree is its session) and the child's (its chain's
-	// root) both count against tree p.
-	lim := Limits{MaxDepth: 2, MaxPerTurn: 10, MaxPerTree: 3}
-	if _, err := q.RegisterOnLinked(DefaultTeam, OnTurnCompleted, child.Turn, "p", "", Maker{Session: "p", Turn: asker.Turn},
-		&Chain{Root: "p", Depth: 1, By: asker.Turn}, lim); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := q.RegisterOnLinked(DefaultTeam, OnTurnCompleted, asker.Turn, string(child.Session), "", Maker{Session: child.Session, Turn: child.Turn},
-		&Chain{Root: "p", Depth: 2, By: child.Turn}, lim); err != nil {
+	// An on keeps its maker, never a copy of the maker's tree, and does not
+	// count as asked work (0.6.8).
+	if _, err := q.RegisterWatchOn(DefaultTeam, OnTurnCompleted, OnFilter{Session: string(child.Session)}, "p", "", Maker{Session: "p", Turn: asker.Turn}, &testLimits, 0); err != nil {
 		t.Fatal(err)
 	}
 	var chain sql.NullString
@@ -48,13 +41,7 @@ func TestWhoAskedStoredOnce(t *testing.T) {
 	if err := q.db.QueryRow(`SELECT chain, asked FROM ons WHERE json_extract(maker, '$.turn') = ?`, asker.Turn).Scan(&chain, &counts); err != nil {
 		t.Fatal(err)
 	}
-	if chain.Valid || counts.Int64 != 1 {
-		t.Errorf("an on kept a copy of its maker's tree: chain %v asked %v", chain, counts)
-	}
-	// One job and two ons in tree p: the cap of 3 is reached.
-	_, err = q.RegisterOnLinked(DefaultTeam, OnTurnCompleted, child.Turn, "p", "", Maker{Session: "p", Turn: asker.Turn},
-		&Chain{Root: "p", Depth: 1, By: asker.Turn}, lim)
-	if !isLimit(err, "in all") {
-		t.Fatalf("an on past the tree cap: %v", err)
+	if chain.Valid || counts.Valid {
+		t.Errorf("an on kept a copy of its maker's tree, or counts as asked work: chain %v asked %v", chain, counts)
 	}
 }

@@ -700,104 +700,14 @@ func TestDeliveryKeepsRecipientTree(t *testing.T) {
 	}
 }
 
-// An on a turn token registers counts as asked work (found 2026-11-25). Its
-// delivered turn is not asked work, so without the count a turn could watch an
-// ended turn it may read, get a new turn in its own session at once, and that
-// turn do the same again. The chain stops at the per-tree cap, counted with
-// the asked jobs; the per-turn cap holds for one turn's ons; a retry with a
-// key already used returns its on without counting again; a refused on stores
-// nothing.
-func TestOnChainStopsAtCaps(t *testing.T) {
-	q, _ := open(t)
-	r := runner(t, q, 5)
-	parent := job(t, q, "")
-	_, pa := take(t, q, r)
-	if _, _, err := q.Start(r.ID, pa.ID, pa.Number, lease); err != nil {
-		t.Fatal(err)
-	}
-	child, err := askTurn(q, asked(parent.Session, parent.Turn, parent.Session, 1), "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, ca := take(t, q, r)
-	if _, _, err := q.Start(r.ID, ca.ID, ca.Number, lease); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := q.End(r.ID, ca.ID, ca.Number, Finish{Status: Finished}); err != nil {
-		t.Fatal(err)
-	}
-	// The tree has asked for one job (child); the cap lets two ons more.
-	lim := Limits{MaxDepth: 2, MaxPerTurn: 10, MaxPerTree: 3}
-	register := func(by, key string) (On, error) {
-		return q.RegisterOnLinked(DefaultTeam, OnTurnCompleted, child.Turn, parent.Session, key, Maker{Session: parent.Session, Turn: by},
-			&Chain{Root: parent.Session, By: by, BySession: parent.Session}, lim)
-	}
-	by, chain := parent.Turn, 0
-	for {
-		if _, err := register(by, ""); err != nil {
-			if !isLimit(err, "in all") {
-				t.Fatalf("on %d: %v, want the per-tree cap", chain+1, err)
-			}
-			break
-		}
-		if n, err := q.FireOns(DefaultTeam, jobEnded(q), nil, nil, nil); err != nil || n != 1 {
-			t.Fatalf("fire on %d: %d %v", chain+1, n, err)
-		}
-		ds := deliveriesOf(t, q, parent.Session)
-		if len(ds) != chain+1 {
-			t.Fatalf("after on %d: %d deliveries", chain+1, len(ds))
-		}
-		chain++
-		if chain > 5 {
-			t.Fatal("the chain of ons ran past the per-tree cap")
-		}
-		by = ds[len(ds)-1].Turn
-		if by == "" {
-			t.Fatal("a delivered turn has no turn id")
-		}
-	}
-	if chain != 2 {
-		t.Fatalf("the chain delivered %d turns, want 2 (cap 3, one asked job)", chain)
-	}
-	// The refused on stored nothing: nothing is live, and nothing more fires.
-	if live, err := q.ListOns(DefaultTeam); err != nil || len(live) != 0 {
-		t.Fatalf("live ons after the refusal: %v %v", live, err)
-	}
-	// An asked job now meets the same cap: the ons counted with it.
-	if _, _, err := q.CreateTurnLinked(DefaultTeam, "", Spec{Harness: "claude", Folder: "/x", Isolate: true, Prompt: "hi"},
-		asked(parent.Session, by, parent.Session, 1), lim, nil); !isLimit(err, "in all") {
-		t.Fatalf("an ask after the chain: %v, want the per-tree cap", err)
-	}
-
-	// The per-turn cap: one turn's ons, in a tree of its own.
-	lim = Limits{MaxDepth: 2, MaxPerTurn: 1, MaxPerTree: 10}
-	other := func(key string) (On, error) {
-		return q.RegisterOnLinked(DefaultTeam, OnTurnCompleted, child.Turn, "s_two", key, Maker{Session: "s_two", Turn: "t_two"},
-			&Chain{Root: "s_two", By: "t_two", BySession: "s_two"}, lim)
-	}
-	first, err := other("k")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if again, err := other("k"); err != nil || again.ID != first.ID {
-		t.Fatalf("a retry with the same key: %+v %v, want the same on, not counted again", again, err)
-	}
-	if _, err := other(""); !isLimit(err, "one turn") {
-		t.Fatalf("a second on by one turn: %v, want the per-turn cap", err)
-	}
-	// An on with no chain (the main token's) is not asked work.
-	if _, err := q.RegisterOn(DefaultTeam, OnTurnCompleted, child.Turn, "s_two", "", Maker{}); err != nil {
-		t.Fatalf("a main-token on: %v", err)
-	}
-}
-
 // Work a request tree causes stays in that tree, whatever session it lands in
 // (review P1, 2026-11-25). An asked turn sends a reply into an empty session,
 // once through an on it registers and once through the delivery recorded with
 // its ask. An empty session has no tree, so a delivery that took the receiving
 // session's tree got a new root at depth zero with fresh caps, and repeating it
-// passed the depth, job and cost limits. Each delivery now carries the asking
-// turn's root and depth, and what it asks for counts against that tree.
+// passed the depth, job and cost limits. Each delivery is now a turn the
+// asking turn asked for (his rule, 2026-11-28): its tree, one level below it,
+// and what the delivery asks for counts against that tree.
 func TestDeliveryStaysInTheAskersTree(t *testing.T) {
 	q, _ := open(t)
 	r := runner(t, q, 5)
@@ -829,9 +739,9 @@ func TestDeliveryStaysInTheAskersTree(t *testing.T) {
 	if _, err := q.End(r.ID, ga.ID, ga.Number, Finish{Status: Finished, Result: json.RawMessage(`{"session":"` + grand.Session + `","state":"finished"}`)}); err != nil {
 		t.Fatal(err)
 	}
-	// And it watches itself, delivering into another empty session.
-	if _, err := q.RegisterOnLinked(DefaultTeam, OnTurnCompleted, child.Turn, "s_empty_b", "", mk,
-		&Chain{Root: parent.Session, By: child.Turn, BySession: string(child.Session)}, testLimits); err != nil {
+	// And it watches its own session, delivering into another empty session.
+	read, last := endedRecord(t, q)
+	if _, err := q.RegisterWatchOn(DefaultTeam, OnTurnCompleted, OnFilter{Session: string(child.Session)}, "s_empty_b", "", mk, &testLimits, last()); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := q.End(r.ID, ca.ID, ca.Number, Finish{Status: Finished, Result: json.RawMessage(`{"session":"` + child.Session + `","state":"finished"}`)}); err != nil {
@@ -843,6 +753,9 @@ func TestDeliveryStaysInTheAskersTree(t *testing.T) {
 		if _, err := q.FireOns(DefaultTeam, jobEnded(q), to, nil, nil); err != nil {
 			t.Fatal(err)
 		}
+		if _, err := q.FireWatchOns(DefaultTeam, read, to, nil, nil); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var delivered []Job
 	for _, s := range []string{"s_empty_a", "s_empty_b"} {
@@ -850,8 +763,8 @@ func TestDeliveryStaysInTheAskersTree(t *testing.T) {
 		if len(ds) != 1 {
 			t.Fatalf("delivered %d times to %s, want once", len(ds), s)
 		}
-		if c := ds[0].Links.Chain; c == nil || c.Root != parent.Session || c.Depth != 1 || c.By != "" {
-			t.Fatalf("delivery to %s has chain %+v, want root %s depth 1 (the asking turn's tree)", s, c, parent.Session)
+		if c := ds[0].Links.Chain; c == nil || c.Root != parent.Session || c.Depth != 2 || c.By != child.Turn {
+			t.Fatalf("delivery to %s has chain %+v, want root %s depth 2, asked by %s", s, c, parent.Session, child.Turn)
 		}
 		if ds[0].Tree != parent.Session {
 			t.Fatalf("delivery to %s is recorded in tree %q, want %s", s, ds[0].Tree, parent.Session)
@@ -864,17 +777,18 @@ func TestDeliveryStaysInTheAskersTree(t *testing.T) {
 		delivered = append(delivered, ds[0])
 	}
 	// What a delivered turn asks for counts against the asker's tree: two asked
-	// jobs and one on so far, so a cap of 4 lets one more on and refuses the
-	// next. Its root is the one its token gets (jobs/tokens.go): its chain's.
-	lim := Limits{MaxDepth: 2, MaxPerTurn: 10, MaxPerTree: 4}
+	// jobs and the two deliveries so far, so a cap of 5 lets one more ask and
+	// refuses the next. Its root and depth are the ones its token gets
+	// (jobs/tokens.go): its chain's.
+	lim := Limits{MaxDepth: 3, MaxPerTurn: 10, MaxPerTree: 5}
 	for i, d := range delivered {
-		_, err := q.RegisterOnLinked(DefaultTeam, OnTurnCompleted, child.Turn, string(d.Session), "",
-			Maker{Session: string(d.Session), Turn: d.Turn}, &Chain{Root: d.Links.Chain.Root, By: d.Turn, BySession: string(d.Session)}, lim)
+		_, _, err := q.CreateTurnLinked(DefaultTeam, "", Spec{Harness: "claude", Folder: "/x", Isolate: true, Prompt: "hi"},
+			asked(string(d.Session), d.Turn, d.Links.Chain.Root, d.Links.Chain.Depth+1), lim, nil)
 		switch {
 		case i == 0 && err != nil:
-			t.Fatalf("the first on by a delivered turn: %v", err)
+			t.Fatalf("the first ask by a delivered turn: %v", err)
 		case i == 1 && !isLimit(err, "in all"):
-			t.Fatalf("the second on by a delivered turn: %v, want the asker's per-tree cap", err)
+			t.Fatalf("the second ask by a delivered turn: %v, want the asker's per-tree cap", err)
 		}
 	}
 }

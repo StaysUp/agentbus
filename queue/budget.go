@@ -34,11 +34,11 @@ type Limits struct {
 	// MaxDepth: work may be asked for at most this many levels below the
 	// person's turn.
 	MaxDepth int `json:"max_depth"`
-	// MaxPerTurn: jobs one turn may ask for, with the ons it registers.
+	// MaxPerTurn: jobs one turn may ask for. The ons it registers are not
+	// counted: they deliver results, they are not work.
 	MaxPerTurn int `json:"max_per_turn"`
 	// MaxPerTree: jobs a whole request tree may ask for, over every level:
-	// everything that started from one person's session. The ons its turns
-	// register count too.
+	// everything that started from one person's session.
 	MaxPerTree int `json:"max_per_tree"`
 	// MaxCostUSD: what the turns of one request tree may cost in all before
 	// it gets no more turns. 0 is off.
@@ -139,29 +139,23 @@ func (q *Queue) checkCost(tx *sql.Tx, team, tree string, max float64) error {
 	return nil
 }
 
-// countAsked refuses one more piece of asked work by c.By (a job, or an on a
-// turn token registers through POST /api/v0/ons) when the per-turn or
-// per-tree cap is reached. Both caps count asked jobs and those ons together.
-// An on counts because its delivered turn is not asked work (deliverResult):
-// without it, a turn token could watch an ended turn it may read, get a new
-// turn in its own session at once, and that turn do the same again, a chain
-// no job cap would see (found 2026-11-25). The on that ask_agent records with
-// its job (Delivery) is not counted: its job already counts.
+// countAsked refuses one more asked job by c.By when the per-turn or per-tree
+// cap is reached. Asked jobs are the turns and commands a turn asks for, and
+// the turns its ons deliver, which deliverResult makes as asked by the on's
+// maker. Until 0.6.8 registering an on counted instead (found 2026-11-25).
 func countAsked(tx *sql.Tx, team string, c Chain, lim Limits) error {
-	// Who asked is stored once: a job's chain names the asking turn (by), and
-	// an on its maker. The tree is each job's own record (jobs.tree), and an
-	// on's is its maker's job's, never kept on the on.
+	// Who asked is stored once: a job's chain names the asking turn (by). The
+	// tree is each job's own record (jobs.tree). Registering an on is not
+	// counted (0.6.8, framework TODO 2026-11-27); each turn it delivers is,
+	// as a turn its maker asked for (deliverResult, his rule 2026-11-28).
 	var n int
-	if err := tx.QueryRow(`SELECT (SELECT COUNT(*) FROM jobs WHERE team = ?1 AND json_extract(links, '$.chain.by') = ?2)
-		+ (SELECT COUNT(*) FROM ons WHERE team = ?1 AND asked = 1 AND json_extract(maker, '$.turn') = ?2)`, team, c.By).Scan(&n); err != nil {
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ?1 AND json_extract(links, '$.chain.by') = ?2`, team, c.By).Scan(&n); err != nil {
 		return fmt.Errorf("queue: count asked: %w", err)
 	}
 	if n >= lim.MaxPerTurn {
 		return &LimitError{fmt.Sprintf("one turn may ask for at most %s, and this turn has asked for %d (Turns per request in Settings, Limits)", turnsOrReviews(lim.MaxPerTurn), n)}
 	}
-	if err := tx.QueryRow(`SELECT (SELECT COUNT(*) FROM jobs WHERE team = ?1 AND tree = ?2 AND json_extract(links, '$.chain.by') IS NOT NULL)
-		+ (SELECT COUNT(*) FROM ons o JOIN jobs m ON m.team = o.team AND m.turn = json_extract(o.maker, '$.turn')
-			WHERE o.team = ?1 AND o.asked = 1 AND m.tree = ?2)`, team, c.Root).Scan(&n); err != nil {
+	if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ?1 AND tree = ?2 AND json_extract(links, '$.chain.by') IS NOT NULL`, team, c.Root).Scan(&n); err != nil {
 		return fmt.Errorf("queue: count asked: %w", err)
 	}
 	if n >= lim.MaxPerTree {

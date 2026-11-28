@@ -467,7 +467,7 @@ func TestRunWithSessionRefusals(t *testing.T) {
 
 	// Body refusals, as runs.
 	const badPrompt = "prompt must be from 1 byte to 256 KiB, with no NUL byte"
-	const badBody = "the body must be one JSON object with session, agent and prompt, and optionally model, delivery and idempotency_key, at most 2 MiB"
+	const badBody = "the body must be one JSON object with session, agent and prompt, and optionally model and idempotency_key, at most 2 MiB"
 	for _, tc := range []struct {
 		name string
 		body string

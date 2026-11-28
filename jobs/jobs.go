@@ -233,6 +233,17 @@ func New(cfg Config) (*Server, error) {
 	s.mux.HandleFunc("POST /api/v0/runner/packs/fetch", s.runner(s.blobFetch))
 	s.mux.HandleFunc("PUT /api/v0/runner/blobs/{id}", s.runner(s.blobPut))
 	s.mux.HandleFunc("GET /api/v0/runner/blobs/{id}", s.runner(s.blobGet))
+	if rec := cfg.Record; rec != nil {
+		// A delivery an on refused, such as one past a cap, is the record's
+		// too, so the person sees why a result never came.
+		cfg.Queue.ReportRefusedWith(func(on, session string, work queue.Job, why string) {
+			e := event.Event{ID: "dr_" + on + "_" + work.Turn, Kind: event.DeliveryRefused, Time: time.Now().UTC(),
+				Session: session, Error: why, Origin: &event.Origin{Kind: event.OriginResult, Session: queue.ResultSession(work), Turn: work.Turn}}
+			if _, err := rec.AppendOnce(e); err != nil && s.Logf != nil {
+				s.Logf("store.error what=%s", event.DeliveryRefused)
+			}
+		})
+	}
 	return s, nil
 }
 

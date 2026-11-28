@@ -176,12 +176,10 @@ type limits interface {
 	// ask checks a POST /api/v0/turns body, and gives the links of the job
 	// it makes. ok false has answered.
 	ask(a *API, w http.ResponseWriter, rules settings.Policy, body *TurnRequest) (links queue.Links, ok bool)
-	// deliver is where a turn's reply goes when the body names to. ok false
-	// has answered.
-	deliver(w http.ResponseWriter, to string) (d *queue.Delivery, ok bool)
-	// watch checks a POST /api/v0/ons body for subject turn j, and gives
-	// where the reply goes, who made the on and the asked work it counts as.
-	watch(a *API, w http.ResponseWriter, j queue.Job, body *OnRequest) (session string, maker queue.Maker, asked *queue.Chain, ok bool)
+	// watch checks a POST /api/v0/ons body, and gives the session the
+	// replies go to, who made the on, and whether its deliveries are held to
+	// the caller's caps. ok false has answered.
+	watch(a *API, w http.ResponseWriter, body *OnRequest) (to string, maker queue.Maker, held bool, ok bool)
 	// removeOn checks the grant may remove on id. ok false has answered.
 	removeOn(a *API, w http.ResponseWriter, id string) bool
 	// machines is the machine reach of the grant, for what is a machine's
@@ -207,15 +205,12 @@ func (noLimits) appliesAnywhere(settings.Policy) bool      { return true }
 func (noLimits) ask(*API, http.ResponseWriter, settings.Policy, *TurnRequest) (queue.Links, bool) {
 	return queue.Links{}, true
 }
-func (noLimits) deliver(_ http.ResponseWriter, to string) (*queue.Delivery, bool) {
-	return &queue.Delivery{Session: to}, true
-}
-func (noLimits) watch(_ *API, w http.ResponseWriter, _ queue.Job, body *OnRequest) (string, queue.Maker, *queue.Chain, bool) {
+func (noLimits) watch(_ *API, w http.ResponseWriter, body *OnRequest) (string, queue.Maker, bool, bool) {
 	if body.Session == "" {
-		writeError(w, http.StatusBadRequest, "session is required: where to deliver the turn's reply")
-		return "", queue.Maker{}, nil, false
+		writeError(w, http.StatusBadRequest, "session is required: where to deliver the replies")
+		return "", queue.Maker{}, false, false
 	}
-	return body.Session, queue.Maker{}, nil, true
+	return body.Session, queue.Maker{}, false, true
 }
 func (noLimits) removeOn(*API, http.ResponseWriter, string) bool { return true }
 func (noLimits) machines(*API) (machineReach, error)             { return machineReach{every: true}, nil }
@@ -300,14 +295,6 @@ func (l agentLimits) ask(a *API, w http.ResponseWriter, rules settings.Policy, b
 	return a.askChecks(w, l.g, body)
 }
 
-// deliver: a reply goes to any session in the agent's reach (limit 1).
-func (l agentLimits) deliver(w http.ResponseWriter, to string) (*queue.Delivery, bool) {
-	if !l.inReach(w, to) {
-		return nil, false
-	}
-	return &queue.Delivery{Session: to, Maker: queue.Maker{Session: l.g.Session, Turn: l.g.Turn}}, true
-}
-
 // inReach says session s is in the agent's reach, and has answered when it is
 // not.
 func (l agentLimits) inReach(w http.ResponseWriter, s string) bool {
@@ -321,37 +308,19 @@ func (l agentLimits) inReach(w http.ResponseWriter, s string) bool {
 	return err == nil && ok
 }
 
-// watch: an agent may watch any turn it may read (mayReadTurn), its own
-// session's too, and have the reply delivered to any session in its reach,
-// its own when the body names none. The on counts as asked work by its turn
-// under the caps (queue.countAsked, limit 2): its delivered turn is not asked
-// work, so without this a chain of ons over ended turns, or a session that
-// watches itself, would pass the caps.
-func (l agentLimits) watch(a *API, w http.ResponseWriter, j queue.Job, body *OnRequest) (string, queue.Maker, *queue.Chain, bool) {
-	found, ok, err := a.mayReadTurn(l.g, body.Turn, "")
-	if j.Kind == queue.KindExec {
-		// A command is read as its asking session is (GET /api/v0/commands/{id}).
-		found = true
-		ok, err = a.inAuthority(l.g, string(j.Spec.Session))
+// watch: an agent may watch a session in its reach (limit 1), its own too,
+// and have the replies delivered to a session in its reach, its own when the
+// body names none. Registering it is free; each turn it delivers is held to
+// its caps as work its turn asked for (queue/asked.go, deliverResult).
+func (l agentLimits) watch(a *API, w http.ResponseWriter, body *OnRequest) (string, queue.Maker, bool, bool) {
+	to := body.Session
+	if to == "" {
+		to = l.g.Session
 	}
-	switch {
-	case err != nil:
-		a.internal(w)
-	case !found:
-		writeError(w, http.StatusNotFound, noTurn)
-	case !ok:
-		writeError(w, http.StatusForbidden, turnOnRefused)
-	default:
-		to := body.Session
-		if to == "" {
-			to = l.g.Session
-		}
-		if !l.inReach(w, to) {
-			return "", queue.Maker{}, nil, false
-		}
-		return to, queue.Maker{Session: l.g.Session, Turn: l.g.Turn}, askedLinks(l.g).Chain, true
+	if !l.inReach(w, body.Filter.Session) || !l.inReach(w, to) {
+		return "", queue.Maker{}, false, false
 	}
-	return "", queue.Maker{}, nil, false
+	return to, queue.Maker{Session: l.g.Session, Turn: l.g.Turn}, true, true
 }
 
 // removeOn: an agent removes an on its own turn made, or one that delivers to

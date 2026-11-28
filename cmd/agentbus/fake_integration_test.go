@@ -284,10 +284,10 @@ func fakeAgent() {
 	}
 	// With AGENTBUS_FAKE_ASK, a turn whose prompt is "ask someone" asks
 	// another agent through the API, with its own token, as the ask_agent app
-	// does (B15): create a session in this turn's own workspace (POST
-	// /api/v0/sessions; the turn token derives the workspace), start the asked
-	// turn in it (POST /api/v0/turns), then register the on that delivers its
-	// reply to this session (POST /api/v0/ons).
+	// does (0.6.8): create a session in this turn's own workspace (POST
+	// /api/v0/sessions; the turn token derives the workspace), register the on
+	// over it that delivers its turns' replies to this session (POST
+	// /api/v0/ons), then start the asked turn in it (POST /api/v0/turns).
 	if b := os.Getenv("AGENTBUS_FAKE_ASK"); b != "" && len(os.Args) > 1 && os.Args[len(os.Args)-1] == "ask someone" {
 		url, tok := os.Getenv("AGENTBUS_URL"), os.Getenv("AGENTBUS_TOKEN")
 		sreq, _ := http.NewRequest("POST", url+"/api/v0/sessions", strings.NewReader("{}"))
@@ -301,6 +301,12 @@ func fakeAgent() {
 			sresp.Body.Close()
 			json.Unmarshal(sout, &sess)
 		}
+		on, _ := http.NewRequest("POST", url+"/api/v0/ons", strings.NewReader(`{"event":"turn.completed","filter":{"session":"`+sess.Session+`"}}`))
+		on.Header.Set("Content-Type", "application/json")
+		on.Header.Set("Authorization", "Bearer "+tok)
+		if r2, err := http.DefaultClient.Do(on); err == nil {
+			r2.Body.Close()
+		}
 		var ask map[string]any
 		json.Unmarshal([]byte(b), &ask)
 		ask["session"] = sess.Session
@@ -313,17 +319,6 @@ func fakeAgent() {
 		if resp, err := http.DefaultClient.Do(req); err == nil {
 			out, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			var started struct {
-				Turn string `json:"turn"`
-			}
-			if json.Unmarshal(out, &started) == nil && started.Turn != "" {
-				on, _ := http.NewRequest("POST", os.Getenv("AGENTBUS_URL")+"/api/v0/ons", strings.NewReader(`{"turn":"`+started.Turn+`"}`))
-				on.Header.Set("Content-Type", "application/json")
-				on.Header.Set("Authorization", "Bearer "+os.Getenv("AGENTBUS_TOKEN"))
-				if r2, err := http.DefaultClient.Do(on); err == nil {
-					r2.Body.Close()
-				}
-			}
 			if p := os.Getenv("AGENTBUS_FAKE_ASKED"); p != "" {
 				os.WriteFile(p, []byte(fmt.Sprintf("%d %s", resp.StatusCode, out)), 0o600)
 			}

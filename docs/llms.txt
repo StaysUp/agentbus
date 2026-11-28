@@ -73,6 +73,7 @@ Your token may do what the person may, narrowed by three things only:
 | `GET /api/v0/turns` | Turns, newest first; queued ones first. Facts only — no prompt or reply text. `?session=` picks a session (yours by default). |
 | `GET /api/v0/turns/{id}` | One turn in any state, with its whole `prompt` and `reply` (read from the record): also `state`, `number`, `cost_usd`; for a review `verdict` and `findings`. |
 | `POST /api/v0/turns` | Start a turn: `{"session","agent","prompt"}`, in a new session you opened with `POST /api/v0/sessions` or one that already ran. |
+| `POST /api/v0/ons` | Have a session's results come to you: `{"event":"turn.completed","filter":{"session":"S"}}`. Every turn of S that ends from now on is delivered to your session as a later turn, until `DELETE /api/v0/ons/{id}`. `GET /api/v0/ons` lists them. |
 | `POST /api/v0/turns/{id}/review` | Ask another agent to review a turn: `{"agent"}`. It starts a review turn. Pick an agent other than the turn's own. |
 | `GET /api/v0/sessions`, `GET /api/v0/workspaces` | The sessions and workspaces you may work in. `GET /api/v0/workspaces/{id}` holds `last_action`, the newest outcome of an apply, discard, update or close. |
 | `POST /api/v0/workspaces/{id}/update` | Bring the person's folder as it is now into a copy, under its unapplied work (after an apply was refused because the folder changed). `/discard` drops the copy's unapplied changes; `/close` removes the copy. Each answers 202 with the outcome's `event` at once. |
@@ -96,6 +97,11 @@ Your token may do what the person may, narrowed by three things only:
 Do not wait for work you ask for. Start it, say so, and end your turn. **Each result comes back
 to your session as a later turn**, whose prompt starts `[AgentBus] This message is from AgentBus`.
 It names the agent, the turn, its state, the changed files, a review's verdict, and the reply.
+
+`ask_agent` and `review_turn` set this up for you. Without them it is three calls: open a session
+(`POST /api/v0/sessions`), register an on over it (`POST /api/v0/ons`), then start the turn there.
+Register the on first, so no result is missed. The on stays: a review that session asks for later
+comes back to you too.
 
 AgentBus agents are not your harness's own agents or subagents. To have another agent check your
 work, ask for a review of your turn, then end your turn.

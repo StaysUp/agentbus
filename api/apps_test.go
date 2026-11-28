@@ -37,11 +37,14 @@ func askApp() toolreg.Tool {
 		Where: toolreg.WhereControl,
 		Run: toolreg.Run{Kind: toolreg.RunApp, App: &toolreg.App{
 			Steps: []toolreg.Step{
-				{StepID: "start", OperationID: "startTurn",
-					RequestBody: map[string]any{"agent": "$inputs.agent", "prompt": "$inputs.prompt"},
-					Outputs:     map[string]string{"turn": "$response.body#/turn"}},
+				{StepID: "session", OperationID: "createSession",
+					RequestBody: map[string]any{},
+					Outputs:     map[string]string{"session": "$response.body#/session"}},
 				{StepID: "deliver", OperationID: "registerOn",
-					RequestBody: map[string]any{"turn": "$steps.start.outputs.turn", "session": "$caller.session"}},
+					RequestBody: map[string]any{"event": "turn.completed", "filter": map[string]any{"session": "$steps.session.outputs.session"}, "session": "$caller.session"}},
+				{StepID: "start", OperationID: "startTurn",
+					RequestBody: map[string]any{"session": "$steps.session.outputs.session", "agent": "$inputs.agent", "prompt": "$inputs.prompt"},
+					Outputs:     map[string]string{"turn": "$response.body#/turn"}},
 			},
 			Outputs: map[string]string{"turn": "$steps.start.outputs.turn"},
 		}},
@@ -270,5 +273,27 @@ func TestDeriveKey(t *testing.T) {
 	}
 	if !idempotencyKey.MatchString(k1) {
 		t.Fatalf("derived key %q does not fit the idempotency key pattern", k1)
+	}
+}
+
+// An object in a step's body holds values (0.6.8): ask_agent sends POST
+// /api/v0/ons a filter naming the session its first step made. Each field is
+// resolved, one that resolves to nothing is left out, and a bad reference
+// inside an object is refused at save as one outside it is.
+func TestStepObjectValuesResolve(t *testing.T) {
+	a := &API{byOp: opIndex()}
+	s := toolreg.Step{StepID: "on", OperationID: "registerOn", RequestBody: map[string]any{
+		"filter": map[string]any{"session": "$steps.session.outputs.session", "gone": "$inputs.none"}}}
+	body, _, why := a.resolveStep(s, map[string]any{}, "s_me", map[string]map[string]any{"session": {"session": "s_new"}})
+	if why != "" {
+		t.Fatal(why)
+	}
+	if f, ok := body["filter"].(map[string]any); !ok || len(f) != 1 || f["session"] != "s_new" {
+		t.Fatalf("the filter resolved to %#v, want session s_new only", body["filter"])
+	}
+	tool := askApp()
+	tool.Run.App.Steps[1].RequestBody["filter"] = map[string]any{"session": "$steps.later.outputs.session"}
+	if why := toolreg.Check(&tool); why == "" {
+		t.Fatal("a reference to a later step inside an object was accepted")
 	}
 }

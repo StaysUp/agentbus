@@ -11,9 +11,10 @@ package queue
 // Nothing waits and nothing is held in memory: the cursor and the fires are
 // rows, and the job says why it was queued (Links.Because).
 //
-// For now the one action is queuing a put-away (putaway.go), and the ons over
-// the record are control's own built-in ones (RegisterRecordOn); POST
-// /api/v0/ons still registers only a turn's on.
+// For now the one action here is queuing a put-away (putaway.go), and these
+// ons are control's own built-in ones (RegisterRecordOn). The ons POST
+// /api/v0/ons registers read the record the same way and deliver a result
+// (watchon.go).
 
 import (
 	"database/sql"
@@ -41,12 +42,13 @@ type Action struct {
 }
 
 // RecordEvent is one record event an on over the record reads: its id, its seq
-// in the record, when it was recorded and the workspace it names.
+// in the record, when it was recorded, and the workspace and turn it names.
 type RecordEvent struct {
 	ID        string
 	Seq       int64
 	Time      time.Time
 	Workspace string
+	Turn      string
 }
 
 // RecordReader reads the record's events of kind with seq after after, oldest

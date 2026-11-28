@@ -39,7 +39,7 @@ const DefaultTurnWait = 30 * time.Second
 
 var runModel = run.ModelShape
 
-const badRun = "the body must be one JSON object with session, agent and prompt, and optionally model, delivery and idempotency_key, at most 2 MiB"
+const badRun = "the body must be one JSON object with session, agent and prompt, and optionally model and idempotency_key, at most 2 MiB"
 
 // TurnRequest is the body of POST /api/v0/turns. A turn names the session it
 // runs in and its agent, and nothing about where it runs: the folder and the
@@ -53,9 +53,8 @@ type TurnRequest struct {
 	// IdempotencyKey makes a retry safe: a client whose request timed out
 	// sends it again with the same key and gets the same turn.
 	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"Optional, 1 to 128 characters of A-Z, a-z, 0-9 and . _ : -. A retry with the same key and the same fields answers 202 with the turn the key first started, existing true, and starts nothing. The same key with other fields gets 409. A request refused with 400 used no key."`
-	// Delivery records the on for the turn's reply in the SAME write as the turn
-	// (his call (a), 2026-11-19), so starting and delivering are one atomic step.
-	Delivery string `json:"delivery,omitempty" doc:"A session to deliver this turn's reply to when it completes, recorded as a turn.completed on in the same transaction that starts the turn (the same as POST /api/v0/ons, but atomic with the start, so no separate call can be lost). A turn token may name any session it may read; the main token may name any. Absent: no delivery is registered. The turn's idempotency_key covers the on too, so a retry adds no second."`
+	// delivery was a field here until 0.6.8; a body that sends it is 410
+	// (deliveryGone): an on over the session (POST /api/v0/ons) replaces it.
 }
 
 // Started is the answer to a turn's start, and to a review's.
@@ -97,6 +96,10 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 	data, err := io.ReadAll(r.Body)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, badRun)
+		return
+	}
+	if sentField(data, "delivery") {
+		writeError(w, http.StatusGone, deliveryGone)
 		return
 	}
 	r.Body = io.NopCloser(bytes.NewReader(data))
@@ -192,20 +195,9 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	// Atomic delivery (his call (a), 2026-11-19): if delivery is set, record the
-	// on in the SAME write as the turn, under the one authorization that starts
-	// it — the same rules POST /api/v0/ons applies, but no separate call that a
-	// stop or a lost token can drop. A turn token delivers to a session in its
-	// reach; the main token may name any session. The turn's key covers the on.
-	var deliver *queue.Delivery
-	if body.Delivery != "" {
-		if deliver, ok = who.limits.deliver(w, body.Delivery); !ok {
-			return
-		}
-	}
 	// Never refused for a busy session: the job waits behind the session's turns
 	// that have not ended, as a delivered result does.
-	job, created, err := a.cfg.Queue.CreateTurnLinked(queue.DefaultTeam, body.IdempotencyKey, spec, links, queueLimits(who.rules), deliver)
+	job, created, err := a.cfg.Queue.CreateTurnLinked(queue.DefaultTeam, body.IdempotencyKey, spec, links, queueLimits(who.rules), nil)
 	var limit *queue.LimitError
 	var removed *queue.RunnerRemovedError
 	switch {

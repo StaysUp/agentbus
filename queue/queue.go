@@ -259,9 +259,11 @@ CREATE TABLE IF NOT EXISTS deliveries (
 -- this" (on.go). B13 has one event (a turn completes) and one action (start a
 -- turn in session with the subject turn's reply). It is a row plus the
 -- control loop's check; nothing waits. off is set when it is removed or, for a
--- one-shot, once it has fired. asked is set on an on a turn token registered
--- through POST /api/v0/ons: it counts as asked work by its maker under the caps
--- (asked.go, countAsked), as a job that turn asked for does. limits are the
+-- one-shot, once it has fired. asked was set, before 0.6.8, on an on a turn
+-- token registered, which then counted as asked work; ons no longer count and
+-- it is no longer read. filter, on an on over a session (watchon.go), is the
+-- session whose turns it watches, with subject empty and cursor the record seq
+-- it has read to; it does not go off when it fires. limits are the
 -- caps of the turn that made the on, as its rules said when it registered it:
 -- the turn the on delivers is held to them (budget.go). chain held a copy of
 -- the maker's tree before 0.6.x; it is no longer written or read.
@@ -279,7 +281,8 @@ CREATE TABLE IF NOT EXISTS ons (
 	asked    INTEGER,
 	limits   TEXT,
 	action   TEXT,
-	cursor   INTEGER
+	cursor   INTEGER,
+	filter   TEXT
 );
 CREATE INDEX IF NOT EXISTS ons_live ON ons(team, event, off);
 -- B15 (his call, 2026-11-19): an on is deduped by its idempotency_key ONLY, the
@@ -291,6 +294,17 @@ CREATE INDEX IF NOT EXISTS ons_live ON ons(team, event, off);
 -- One row per time an on fired, keyed so a fire happens exactly once even
 -- across a control restart: the same role the deliveries table plays for the
 -- old delivery. For a one-shot turn.completed on, key is the subject turn.
+-- An idempotency key sent with an on that returned an on already live (an on
+-- over a session, watchon.go), bound to it so the key always names that on:
+-- a reuse with other fields is a conflict, and a retry after the on was
+-- removed returns it rather than make another. The on's own first key stays
+-- in ons.idem_key; onByKey reads both.
+CREATE TABLE IF NOT EXISTS on_keys (
+	team  TEXT NOT NULL,
+	key   TEXT NOT NULL,
+	on_id TEXT NOT NULL REFERENCES ons(id),
+	PRIMARY KEY (team, key)
+);
 CREATE TABLE IF NOT EXISTS on_fires (
 	on_id   TEXT NOT NULL REFERENCES ons(id),
 	key     TEXT NOT NULL,
@@ -744,6 +758,8 @@ type Queue struct {
 	putAwayOn PutAwaySetting
 	// delegatedAtOnce reads the delegated lane's limit now (lanes.go).
 	delegatedAtOnce DelegatedSetting
+	// refused records a delivery an on refused (ReportRefusedWith).
+	refused RefusedReporter
 	// cost reads what turns cost from the record (ReadCostWith), for the
 	// cost cap (budget.go).
 	cost CostReader

@@ -26,12 +26,13 @@ func (s *Store) WorkspaceUsedAfter(ws ids.WorkspaceID, after int64) (bool, error
 }
 
 // KindEvent is one event of a kind, as an on over the record reads it: its id,
-// seq, time and the workspace it names.
+// seq, time, and the workspace and turn it names.
 type KindEvent struct {
 	ID        string
 	Seq       int64
 	Time      time.Time
 	Workspace string
+	Turn      string
 }
 
 // EventsOfKind reads the events of kind with seq after after, oldest first, at
@@ -53,11 +54,12 @@ func (s *Store) EventsOfKind(kind string, after int64, limit int) ([]KindEvent, 
 		var head struct {
 			ID        string `json:"id"`
 			Workspace string `json:"workspace"`
+			Turn      string `json:"turn"`
 		}
 		if err := json.Unmarshal([]byte(data), &head); err != nil {
 			return nil, fmt.Errorf("store: read events: %w", err)
 		}
-		e.ID, e.Workspace, e.Time = head.ID, head.Workspace, time.Unix(0, when).UTC()
+		e.ID, e.Workspace, e.Turn, e.Time = head.ID, head.Workspace, head.Turn, time.Unix(0, when).UTC()
 		out = append(out, e)
 	}
 	return out, rows.Err()

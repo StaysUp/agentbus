@@ -288,8 +288,10 @@ func checkAppRun(t *Tool) string {
 // to "else" otherwise. It lets one app answer a call that gives an optional
 // input and one that omits it (review_turn: a named turn, or the workspace's
 // whole unapplied set). "then" and "else" are themselves values, so each may
-// embed its own {$...} references. A plain object with no "if_present" key is a
-// literal, as before.
+// embed its own {$...} references. A plain object with no "if_present" key
+// holds values: each of its fields is resolved as a value (0.6.8, so an app can
+// send POST /api/v0/ons a filter naming the session an earlier step made), and
+// a field that resolves to nothing is left out.
 var (
 	stepIDShape    = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 	operationShape = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*$`)
@@ -371,9 +373,17 @@ func checkValueExpr(v any, props map[string]any, seen map[string]bool, outs map[
 		}
 		return ""
 	}
+	if m, ok := v.(map[string]any); ok {
+		for _, part := range m {
+			if why := checkValueExpr(part, props, seen, outs, self); why != "" {
+				return why
+			}
+		}
+		return ""
+	}
 	s, ok := v.(string)
 	if !ok {
-		return "" // a literal number, bool, object or array
+		return "" // a literal number, bool or array
 	}
 	if IsFullExpr(s) {
 		return checkRef(s, props, seen, outs, self)
@@ -389,7 +399,7 @@ func checkValueExpr(v any, props map[string]any, seen map[string]bool, outs map[
 // AsConditional reports whether v is a conditional value: an object with an
 // "if_present" key (see the grammar above). It returns the object so the caller
 // reads its "if_present", "then" and "else" parts. A map without "if_present"
-// is a literal object, not a conditional.
+// is an object of values, not a conditional.
 func AsConditional(v any) (map[string]any, bool) {
 	m, ok := v.(map[string]any)
 	if !ok {
