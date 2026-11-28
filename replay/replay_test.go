@@ -31,7 +31,7 @@ type fakeSource struct {
 	order   []string            // newest first
 	calls   map[string]store.CallContext
 	replies map[string]body.Reply
-	notes   []event.Added // the notes the turns' calls carried
+	notes   []store.GivenNote // the notes the turns' calls carried
 }
 
 func newSource() *fakeSource {
@@ -47,7 +47,7 @@ func (f *fakeSource) TurnCalls(_, turn string) ([]store.Call, error) {
 	return f.turns[turn].exchanges, nil
 }
 func (f *fakeSource) TurnClosed(_, turn string) (bool, error) { return f.turns[turn].closed, nil }
-func (f *fakeSource) TurnNotes(string, string) ([]event.Added, error) {
+func (f *fakeSource) TurnNotes(string, string) ([]store.GivenNote, error) {
 	return f.notes, nil
 }
 func (f *fakeSource) TurnEnd(_, turn string) (store.TurnEnd, error) {

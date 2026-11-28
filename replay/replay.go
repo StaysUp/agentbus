@@ -56,7 +56,7 @@ type Source interface {
 	TurnCalls(session, turn string) ([]store.Call, error)
 	TurnIncomplete(session, turn string) (bool, error)
 	TurnClosed(session, turn string) (bool, error)
-	TurnNotes(session, turn string) ([]event.Added, error)
+	TurnNotes(session, turn string) ([]store.GivenNote, error)
 	TurnEnd(session, turn string) (store.TurnEnd, error)
 	CallContext(exchange string, full bool) (store.CallContext, bool, error)
 	Reply(exchange string) (body.Reply, bool, error)
@@ -677,6 +677,13 @@ func (r *Replayer) compactedHistory(session, turn string, ti turnInfo, mains []c
 	note += " Every call of the turn is in AgentBus's record: " + apiGet("/api/v0/turns/"+turn+"/record") +
 		". It may have changed files: check the folder before going on."
 	h.add("", "", -2, r.f.note(note))
+	// The notes given after base, which it does not carry, are said here,
+	// at the next turn's start (notes.go).
+	later, err := r.notesAfter(session, turn, mains, base)
+	if err != nil {
+		return nil, err
+	}
+	h.add("", "", -2, later...)
 	return h, nil
 }
 

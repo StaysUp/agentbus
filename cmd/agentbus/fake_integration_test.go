@@ -418,9 +418,10 @@ func fakeAgent() {
 	// AGENTBUS_FAKE_OPENCODE_AFTER are the same for codex and opencode.
 	// AGENTBUS_FAKE_AFTER_PROMPT, when set, makes them only in a turn whose
 	// prompt (the last argument) is that text. A value that starts with [ is
-	// a list of bodies, as an agent's tool loop goes on: the first is made
-	// again every 100 ms until AGENTBUS_FAKE_AFTER_UNTIL is there (at most
-	// 20 s), then each of the rest once.
+	// a list of bodies, as an agent's tool loop goes on, each made once. The
+	// first is made again every 100 ms until AGENTBUS_FAKE_AFTER_UNTIL is
+	// there, and the one at index i of AGENTBUS_FAKE_AFTER_HOLD
+	// ("i=file,...") until its file is, each at most 20 s.
 	afterCalls := func(v string, call func(string)) {
 		if p := os.Getenv("AGENTBUS_FAKE_AFTER_PROMPT"); p != "" && os.Args[len(os.Args)-1] != p {
 			return
@@ -430,15 +431,22 @@ func fakeAgent() {
 			call(v)
 			return
 		}
-		until := os.Getenv("AGENTBUS_FAKE_AFTER_UNTIL")
-		for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(100 * time.Millisecond) {
-			call(string(list[0]))
-			if _, err := os.Stat(until); until == "" || err == nil || time.Now().After(deadline) {
-				break
+		hold := map[int]string{0: os.Getenv("AGENTBUS_FAKE_AFTER_UNTIL")}
+		for _, h := range strings.Split(os.Getenv("AGENTBUS_FAKE_AFTER_HOLD"), ",") {
+			if i, f, ok := strings.Cut(h, "="); ok {
+				if n, err := strconv.Atoi(i); err == nil {
+					hold[n] = f
+				}
 			}
 		}
-		for _, b := range list[1:] {
-			call(string(b))
+		for i, b := range list {
+			until := hold[i]
+			for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+				call(string(b))
+				if _, err := os.Stat(until); until == "" || err == nil || time.Now().After(deadline) {
+					break
+				}
+			}
 		}
 	}
 	if b := os.Getenv("AGENTBUS_FAKE_CODEX_AFTER"); b != "" {

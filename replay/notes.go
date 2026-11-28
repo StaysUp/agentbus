@@ -10,14 +10,22 @@ package replay
 // A note waiting for the turn goes at the end of its next main-thread
 // request. It is given once the vendor accepts that call (a 2xx): then the
 // call's context.added records it, with the call's exchange and its place
-// (event.Added's At and Compacted), and control marks it delivered when that
-// event reaches its record. A call the vendor does not accept gives it back,
-// and the next call carries it.
+// (event.Added's At), and control marks it delivered when that event reaches
+// its record. A call the vendor does not accept gives it back, and the next
+// call carries it.
 //
-// Its place is how many of the agent's messages came before it. The agent's
-// conversation only grows between compactions, so a later request carries it
-// at that place. A request after a compaction the note's call did not see
-// carries it right after the summary, never inside a tool loop.
+// Its place is how many of the agent's messages came before it. Until the
+// agent compacts, its conversation only grows, so a later request carries it
+// at that place. Whether a request is compacted is the one test that decides
+// it everywhere (format.fresh, recorded as the call's history.compacted),
+// never a count of messages: a compacted request carries every note right
+// after its summary, however many compactions came before, so a note is
+// never put inside a tool loop.
+//
+// The next turn's history is rebuilt from one call of this turn: its newest
+// main call, or after a compaction its last one before it
+// (compactedHistory). A note that call did not carry, one given after it, is
+// carried at the next turn's start, from the record (notesAfter).
 //
 // The record is the truth. Between the vendor's 2xx and the store holding
 // its context.added, the Replayer keeps the note in memory (placed): its
@@ -50,11 +58,10 @@ func (r *Replayer) SetNotes(n Notes) { r.notes = n }
 // noteCall is what withNotes made of one request: the request with the turn's
 // notes at their places, the waiting notes it took, and their place.
 type noteCall struct {
-	data      []byte
-	changed   bool
-	taken     []event.Added
-	at        int
-	compacted bool
+	data    []byte
+	changed bool
+	taken   []event.Added
+	at      int
 }
 
 // withNotes lays out the turn's notes in data, the agent's request, when it is
@@ -86,10 +93,11 @@ func (r *Replayer) withNotes(session, turn string, data []byte) noteCall {
 	if len(given) == 0 && len(nc.taken) == 0 {
 		return nc
 	}
-	nc.at, nc.compacted = len(req.msgs), !fresh
-	summary := -1
+	// A compacted request: every note right after the summary. Any other:
+	// each given note at its place, then the waiting ones at the end.
+	nc.at = len(req.msgs)
 	if !fresh {
-		summary = r.f.afterSummary(req.msgs)
+		nc.at = r.f.afterSummary(req.msgs)
 	}
 	type placed struct {
 		at   int
@@ -97,16 +105,14 @@ func (r *Replayer) withNotes(session, turn string, data []byte) noteCall {
 	}
 	var out []placed
 	for _, n := range given {
-		at := n.At
-		// A note given before a compaction this request comes after, or
-		// before one later than its call's, goes after the summary.
-		if !fresh && (!n.Compacted || len(req.msgs) < n.At) {
-			at = summary
+		at := nc.at
+		if fresh {
+			at = min(max(n.At, 0), len(req.msgs))
 		}
-		out = append(out, placed{min(max(at, 0), len(req.msgs)), n.Text})
+		out = append(out, placed{at, n.Text})
 	}
 	for _, n := range nc.taken {
-		out = append(out, placed{len(req.msgs), n.Text})
+		out = append(out, placed{nc.at, n.Text})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].at < out[j].at })
 	msgs := make([]json.RawMessage, 0, len(req.msgs)+len(out))
@@ -132,15 +138,17 @@ func (r *Replayer) given(session, turn string) ([]event.Added, error) {
 	k := [2]string{session, turn}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	var out []event.Added
 	seen := map[int64]bool{}
 	for _, n := range stored {
 		seen[n.Note] = true
+		out = append(out, n.Added)
 	}
 	var left []event.Added
 	for _, n := range r.placed[k] {
 		if !seen[n.Note] {
 			left = append(left, n)
-			stored = append(stored, n)
+			out = append(out, n)
 		}
 	}
 	if len(left) == 0 {
@@ -148,7 +156,31 @@ func (r *Replayer) given(session, turn string) ([]event.Added, error) {
 	} else {
 		r.placed[k] = left
 	}
-	return stored, nil
+	return out, nil
+}
+
+// notesAfter are the notes of turn its call base did not carry, oldest
+// first: those first given at a call newer than base. mains are the turn's
+// main-thread calls, newest first, base among them.
+func (r *Replayer) notesAfter(session, turn string, mains []call, base *call) ([]json.RawMessage, error) {
+	given, err := r.src.TurnNotes(session, turn)
+	if err != nil {
+		return nil, err
+	}
+	newer := map[string]bool{}
+	for _, c := range mains {
+		if c.a.Exchange == base.a.Exchange {
+			break
+		}
+		newer[c.a.Exchange] = true
+	}
+	var out []json.RawMessage
+	for _, n := range given {
+		if newer[n.Exchange] {
+			out = append(out, r.f.userNote(n.Text))
+		}
+	}
+	return out, nil
 }
 
 // replied is the call's Replied: a 2xx gives the notes it took, recorded with
@@ -164,7 +196,7 @@ func (r *Replayer) replied(session, turn string, nc noteCall) func(int) []event.
 		}
 		given := make([]event.Added, len(nc.taken))
 		for i, n := range nc.taken {
-			n.At, n.Compacted = nc.at, nc.compacted
+			n.At = nc.at
 			given[i] = n
 		}
 		k := [2]string{session, turn}

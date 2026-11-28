@@ -34,6 +34,7 @@ import (
 const (
 	noteXFirst  = "your folder changed: a.go"
 	noteXSecond = "your folder changed again: b.go"
+	noteXMid    = "your folder changed while you worked: c.go"
 )
 
 // noteXCase is one API format: its harness, control's upstream variable, the
@@ -52,6 +53,13 @@ type noteXCase struct {
 	note                           func(text string) string
 	// afterSummary is where a note goes in compacted's conversation.
 	afterSummary int
+	// mark is in compacted's body only. again is a call after a second
+	// compaction, a tool loop as long as compacted's conversation, so that a
+	// note at compacted's end would fall between a tool call and its result
+	// there; againSummary is its summary's place.
+	mark         string
+	again        string
+	againSummary int
 	// agent makes the saved agent the turn runs on; nil runs on the harness.
 	agent func(x *xproc) string
 }
@@ -90,6 +98,10 @@ func noteXCases() []noteXCase {
 			compacted: `{"model":"claude-x","messages":[{"role":"user","content":[{"type":"text","text":"This session is being continued from a previous conversation. Summary: listed files."}]},` +
 				`{"role":"system","content":"# Environment\nenv"}` + claudeStep("t3") + claudeTail,
 			afterSummary: 1, reply: streamedReply, conversation: "messages",
+			mark: "Summary: listed files.",
+			again: `{"model":"claude-x","messages":[{"role":"user","content":[{"type":"text","text":"This session is being continued from a previous conversation. Summary: listed more files."}]}` +
+				claudeStep("t4") + claudeStep("t5") + claudeTail,
+			againSummary: 1,
 			note: func(s string) string {
 				return `{"role":"user","content":[{"type":"text","text":` + quoteJSON(event.NotePrefix+s) + `}]}`
 			}},
@@ -101,6 +113,10 @@ func noteXCases() []noteXCase {
 				`{"type":"message","role":"developer","content":[{"type":"input_text","text":"base"}],"internal_chat_message_metadata_passthrough":{"content_item_kinds":["model.base_instructions"]}},` +
 				`{"type":"compaction","encrypted_content":"U1VN"}` + codexStep("c3") + "]}",
 			afterSummary: 2, reply: codexStream, conversation: "input",
+			mark: `"U1VN"`,
+			again: `{"model":"gpt-x","stream":true,"store":false,"prompt_cache_key":"th-one","input":[{"type":"compaction","encrypted_content":"U1VNMg=="}` +
+				codexStep("c4") + codexStep("c5") + "]}",
+			againSummary: 1,
 			note: func(s string) string {
 				return `{"type":"message","role":"user","content":[{"type":"input_text","text":` + quoteJSON(event.NotePrefix+s) + `}]}`
 			}},
@@ -111,7 +127,11 @@ func noteXCases() []noteXCase {
 			compacted: `{"model":"z-ai/glm-5.3-flash","messages":[{"role":"system","content":"You are opencode."},{"role":"user","content":"Summary: listed files."}` +
 				chatStep("k3") + chatTail,
 			afterSummary: 2, reply: opencodeStreamedReply, conversation: "messages",
-			note: func(s string) string { return `{"role":"user","content":` + quoteJSON(event.NotePrefix+s) + `}` },
+			mark: "Summary: listed files.",
+			again: `{"model":"z-ai/glm-5.3-flash","messages":[{"role":"system","content":"You are opencode."},{"role":"user","content":"Summary: listed more files."},{"role":"assistant","content":"Going on."}` +
+				chatStep("k5") + chatTail,
+			againSummary: 2,
+			note:         func(s string) string { return `{"role":"user","content":` + quoteJSON(event.NotePrefix+s) + `}` },
 			agent: func(x *xproc) string {
 				code, b := x.post("/api/v0/agents", map[string]any{"name": "GLM", "harness": "opencode",
 					"access": "openrouter", "model": "z-ai/glm-5.3-flash", "key_env": "AB_TEST_OR_KEY"})
@@ -337,7 +357,7 @@ func TestXProcNoteLife(t *testing.T) {
 			if len(evs) != 1 || evs[0].Exchange == "" || evs[0].Turn != st.Turn {
 				t.Fatalf("%d note events, want one of a call of turn 1", len(evs))
 			}
-			if a := evs[0].Added; len(a) != 1 || a[0].Note != n1.ID || a[0].At != len(one) || a[0].Compacted || a[0].Text != event.NotePrefix+noteXFirst {
+			if a := evs[0].Added; len(a) != 1 || a[0].Note != n1.ID || a[0].At != len(one) || a[0].Text != event.NotePrefix+noteXFirst {
 				t.Fatalf("added %+v, want note %d at %d", a, n1.ID, len(one))
 			}
 			if s := x.callStatus(st.Turn, evs[0].Exchange); s != 200 {
@@ -380,6 +400,160 @@ func TestXProcNoteLife(t *testing.T) {
 				t.Fatalf("the second note event %+v, want one of turn 2's call", evs[1].Added)
 			}
 			waitForN(t, "the second note marked delivered", 10*time.Second, func() bool {
+				p, err := q.PendingNotes(queue.DefaultTeam, st.Session)
+				return err == nil && len(p) == 0
+			})
+		})
+	}
+}
+
+// A note first given after the agent compacted, across processes, for each
+// API format (review t_231bd9618295692d, 2026-11-28):
+//   - every compacted call carries each note right after its summary, also
+//     after a second compaction whose tool loop is as long as the first
+//     compacted call, where a place known by counting messages falls
+//     between a tool call and its result;
+//   - the next turn's history is rebuilt from turn 1's last call before the
+//     compaction, which did not carry the later note, so the next turn's
+//     start carries it, from the record, once, after turn 1's work.
+func TestXProcNoteAfterACompaction(t *testing.T) {
+	for _, c := range noteXCases() {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("AB_TEST_OR_KEY", "test-key-value-notes")
+			dir := t.TempDir()
+			gate, stop, mid := filepath.Join(dir, "go"), filepath.Join(dir, "stop"), filepath.Join(dir, "mid")
+			compacted := make(chan struct{})
+			var once sync.Once
+			var mu sync.Mutex
+			var calls []string
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				b, _ := io.ReadAll(r.Body)
+				if r.Method != http.MethodPost || len(b) == 0 {
+					return
+				}
+				mu.Lock()
+				calls = append(calls, string(b))
+				mu.Unlock()
+				switch {
+				case strings.Contains(string(b), noteXMid):
+					os.WriteFile(mid, []byte("seen"), 0o600)
+				case strings.Contains(string(b), c.mark):
+					once.Do(func() { close(compacted) })
+				case strings.Contains(string(b), noteXFirst):
+					os.WriteFile(stop, []byte("seen"), 0o600)
+				}
+				w.Header().Set("Content-Type", "text/event-stream")
+				io.WriteString(w, c.reply)
+			}))
+			t.Cleanup(upstream.Close)
+			seen := func() []string {
+				mu.Lock()
+				defer mu.Unlock()
+				return append([]string{}, calls...)
+			}
+
+			after := "[" + c.step1 + "," + c.compacted + "," + c.again + "]"
+			x := startServerEnv(t, []string{c.upstreamVar + "=" + upstream.URL}, c.harness)
+			x.setAgentEnv(c.firstVar+"="+c.first, "AGENTBUS_FAKE_WAIT="+gate, "AGENTBUS_FAKE_WAIT_S=30",
+				c.afterVar+"="+after, "AGENTBUS_FAKE_AFTER_UNTIL="+stop, "AGENTBUS_FAKE_AFTER_HOLD=1="+mid,
+				"AGENTBUS_FAKE_AFTER_PROMPT=one")
+			x.addRunner("far", t.TempDir())
+			fs := x.folders()
+			agent := c.harness
+			if c.agent != nil {
+				agent = c.agent(x)
+			}
+			code, st := x.startTurnX(map[string]any{"agent": agent, "folder_ref": fs[0].Ref,
+				"machine": fs[0].Machine, "prompt": "one", "isolate": false})
+			if code/100 != 2 || st.Turn == "" {
+				t.Fatalf("POST /api/v0/turns: %d %+v", code, st)
+			}
+			waitForN(t, "the turn's first call", 20*time.Second, func() bool { return len(seen()) >= 1 })
+			q, err := queue.Open(filepath.Join(x.serverHome, "jobs.db"), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer q.Close()
+			if _, err := q.AddNote(queue.DefaultTeam, st.Turn, noteXFirst); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(gate, []byte("go"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-compacted:
+			case <-time.After(30 * time.Second):
+				t.Fatal("the agent never compacted")
+			}
+			n2, err := q.AddNote(queue.DefaultTeam, st.Turn, noteXMid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			waitForN(t, "turn 1 ended", 40*time.Second, func() bool { return x.turnState(st.Turn) == "finished" })
+
+			// Every compacted call: the notes right after its summary.
+			first, later := c.note(noteXFirst), c.note(noteXMid)
+			comp := conversationX(t, c.compacted, c.conversation)
+			again := conversationX(t, c.again, c.conversation)
+			both := func(msgs []string, at int) []string {
+				return append(append(append([]string{}, msgs[:at]...), first, later), msgs[at:]...)
+			}
+			carried, agains := 0, 0
+			for i, b := range seen() {
+				got := strings.Join(conversationX(t, b, c.conversation), "\n")
+				switch {
+				case strings.Contains(b, c.mark) && strings.Contains(b, noteXMid):
+					carried++
+					if want := strings.Join(both(comp, c.afterSummary), "\n"); got != want {
+						t.Fatalf("call %d, compacted:\n%s\nwant:\n%s", i, got, want)
+					}
+				case strings.Contains(b, c.mark):
+					if want := strings.Join(withNoteAtX(comp, c.afterSummary, first), "\n"); got != want {
+						t.Fatalf("call %d, compacted:\n%s\nwant:\n%s", i, got, want)
+					}
+				case strings.Contains(b, "listed more files") || strings.Contains(b, "U1VNMg=="):
+					agains++
+					if want := strings.Join(both(again, c.againSummary), "\n"); got != want {
+						t.Fatalf("call %d, after a second compaction:\n%s\nwant:\n%s", i, got, want)
+					}
+				}
+			}
+			if carried < 1 || agains != 1 {
+				t.Fatalf("%d compacted calls carried the later note and %d came after a second compaction, want at least 1 and 1", carried, agains)
+			}
+			var evs []event.Event
+			waitForN(t, "both notes on control", 10*time.Second, func() bool {
+				evs = x.noteEvents(st.Session)
+				return len(evs) == 2
+			})
+			if a := evs[1].Added; a[0].Note != n2.ID || a[0].At != c.afterSummary {
+				t.Fatalf("the later note was recorded %+v, want at %d", a, c.afterSummary)
+			}
+
+			// Turn 2 hears both notes once, the later one after turn 1's work.
+			before := len(seen())
+			code, st2 := x.startTurnX(map[string]any{"session": st.Session, "agent": agent, "prompt": "two"})
+			if code/100 != 2 || st2.Turn == "" {
+				t.Fatalf("turn 2: %d %+v", code, st2)
+			}
+			waitForN(t, "turn 2 ended", 30*time.Second, func() bool { return x.turnState(st2.Turn) == "finished" })
+			two := seen()[before:]
+			if len(two) != 1 {
+				t.Fatalf("turn 2 made %d calls, want 1", len(two))
+			}
+			conv := conversationX(t, two[0], c.conversation)
+			hist := strings.Join(conv, "\n")
+			at := -1
+			for i, m := range conv {
+				if strings.Contains(m, noteXMid) {
+					at = i
+				}
+			}
+			if strings.Count(hist, noteXFirst) != 1 || strings.Count(hist, noteXMid) != 1 || at < 0 ||
+				!strings.Contains(strings.Join(conv[:at], "\n"), "a.go") || !strings.Contains(conv[len(conv)-1], "two") {
+				t.Fatalf("turn 2's call should hold both notes once, the later one after turn 1's work:\n%s", hist)
+			}
+			waitForN(t, "both notes delivered", 10*time.Second, func() bool {
 				p, err := q.PendingNotes(queue.DefaultTeam, st.Session)
 				return err == nil && len(p) == 0
 			})

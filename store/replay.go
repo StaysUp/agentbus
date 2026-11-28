@@ -289,17 +289,24 @@ func (s *Store) TurnCalls(session, turn string) ([]Call, error) {
 	return out, nil
 }
 
+// GivenNote is a note a turn's model call carried first: the call's exchange
+// and the note's piece.
+type GivenNote struct {
+	Exchange string
+	event.Added
+}
+
 // TurnNotes are the notes a turn's model calls carried, in the order they
 // were given: the note pieces of its context.added events that name a call
 // (replay/notes.go).
-func (s *Store) TurnNotes(session, turn string) ([]event.Added, error) {
+func (s *Store) TurnNotes(session, turn string) ([]GivenNote, error) {
 	rows, err := s.r.Query(`SELECT data FROM events WHERE session = ? AND turn = ? AND kind = 'context.added'
 		AND COALESCE(json_extract(data, '$.exchange'), '') <> '' ORDER BY seq`, session, turn)
 	if err != nil {
 		return nil, fmt.Errorf("store: read a turn's notes: %w", err)
 	}
 	defer rows.Close()
-	var out []event.Added
+	var out []GivenNote
 	for rows.Next() {
 		var data string
 		if err := rows.Scan(&data); err != nil {
@@ -311,7 +318,7 @@ func (s *Store) TurnNotes(session, turn string) ([]event.Added, error) {
 		}
 		for _, a := range e.Added {
 			if a.Kind == event.AddedNote && a.Note > 0 {
-				out = append(out, a)
+				out = append(out, GivenNote{Exchange: e.Exchange, Added: a})
 			}
 		}
 	}

@@ -33,11 +33,19 @@ func (f *fakeNotes) ReturnNotes(_, _ string, notes []event.Added) {
 // longer than the one before, a request after the agent compacted, and a
 // side call; how a call is stored with a finished reply; the next turn's
 // fresh request, whose prompt is "two"; and the note as a message.
+//
+// again is a request after a second compaction, a tool loop as long as
+// second's conversation or longer, so that second's place in it falls between
+// a tool call and its result: a compaction known by counting messages would
+// put the note there (review t_231bd9618295692d, 2026-11-28). afterSummary is
+// its summary's place.
 type noteCase struct {
 	name                  string
 	replayer              func(Source) *Replayer
 	first, second, third  string
 	compacted, side, next string
+	again                 string
+	afterSummary          int
 	store                 func(f *fakeSource, t *testing.T, turn, exchange, request string)
 	conversation          string
 	note                  string
@@ -92,8 +100,11 @@ func noteCases() []noteCase {
 			first: claudeHead("one") + claudeTail, second: claudeHead("one") + claudeStep("t1") + claudeTail,
 			third:     claudeHead("one") + claudeStep("t1") + claudeStep("t2") + claudeTail,
 			compacted: `{"model":"claude-x","messages":[` + claudeSummary + `,` + claudeSys + claudeStep("t3") + claudeTail,
-			side:      `{"model":"claude-haiku","system":"Write a title.","messages":[{"role":"user","content":"one"}]}`,
-			next:      claudeHead("two") + claudeTail,
+			again: `{"model":"claude-x","messages":[` + strings.Replace(claudeSummary, "listed files", "listed more files", 1) +
+				claudeStep("t4") + claudeStep("t5") + claudeTail,
+			afterSummary: 1,
+			side:         `{"model":"claude-haiku","system":"Write a title.","messages":[{"role":"user","content":"one"}]}`,
+			next:         claudeHead("two") + claudeTail,
 			store: func(f *fakeSource, t *testing.T, turn, x, req string) {
 				f.addCall(t, turn, x, req, `{"role":"assistant","content":[{"type":"text","text":"done"}]}`, "end_turn")
 			},
@@ -105,8 +116,11 @@ func noteCases() []noteCase {
 			first: codexHead("one") + `]}`, second: codexHead("one") + codexStep("c1") + `]}`,
 			third:     codexHead("one") + codexStep("c1") + codexStep("c2") + `]}`,
 			compacted: `{"model":"gpt-x","stream":true,"store":false,"prompt_cache_key":"th1","input":[` + codexBase + `,` + codexSummary + codexStep("c3") + `]}`,
-			side:      `{"model":"gpt-x","prompt_cache_key":"other","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"one"}]}]}`,
-			next:      strings.Replace(codexHead("two"), `"th1"`, `"th2"`, 1) + `]}`,
+			again: `{"model":"gpt-x","stream":true,"store":false,"prompt_cache_key":"th1","input":[{"type":"compaction","encrypted_content":"U1VNMg=="}` +
+				codexStep("c4") + codexStep("c5") + `]}`,
+			afterSummary: 1,
+			side:         `{"model":"gpt-x","prompt_cache_key":"other","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"one"}]}]}`,
+			next:         strings.Replace(codexHead("two"), `"th1"`, `"th2"`, 1) + `]}`,
 			store: func(f *fakeSource, t *testing.T, turn, x, req string) {
 				f.addCodexCall(t, turn, x, req, completedCall, items(answer2))
 			},
@@ -118,8 +132,11 @@ func noteCases() []noteCase {
 			first: chatHead("one") + chatTail, second: chatHead("one") + chatStep("k1") + chatTail,
 			third:     chatHead("one") + chatStep("k1") + chatStep("k2") + chatTail,
 			compacted: `{"model":"z-ai/glm-5.3-flash","messages":[` + chatSys + `,` + chatSummary + chatStep("k3") + chatTail,
-			side:      `{"model":"z-ai/glm-5.3-flash","messages":[{"role":"system","content":"Write a title."},{"role":"user","content":"one"}]}`,
-			next:      chatHead("two") + chatTail,
+			again: `{"model":"z-ai/glm-5.3-flash","messages":[` + chatSys + `,{"role":"user","content":"Summary: listed more files."},{"role":"assistant","content":"Going on."}` +
+				chatStep("k5") + chatTail,
+			afterSummary: 2,
+			side:         `{"model":"z-ai/glm-5.3-flash","messages":[{"role":"system","content":"Write a title."},{"role":"user","content":"one"}]}`,
+			next:         chatHead("two") + chatTail,
 			store: func(f *fakeSource, t *testing.T, turn, x, req string) {
 				f.addChatCall(t, turn, x, req, chatStop, `{"role":"assistant","content":"done"}`)
 			},
@@ -234,7 +251,7 @@ func TestNoteLifeInATurn(t *testing.T) {
 				t.Fatalf("a 200 recorded %+v", evs)
 			}
 			given := evs[0].Added[0]
-			if given.Note != 7 || given.At != len(two) || given.Compacted || given.Text != text {
+			if given.Note != 7 || given.At != len(two) || given.Text != text {
 				t.Fatalf("recorded %+v, want note 7 at %d", given, len(two))
 			}
 
@@ -246,7 +263,7 @@ func TestNoteLifeInATurn(t *testing.T) {
 			if replied != nil {
 				t.Fatal("a later call took a note again")
 			}
-			src.notes = append(src.notes, given)
+			src.notes = append(src.notes, store.GivenNote{Exchange: "x-second", Added: given})
 			got, _ = sent(c.third)
 			eqConversation(t, "a later call, from the record", got, wantThird)
 
@@ -258,6 +275,14 @@ func TestNoteLifeInATurn(t *testing.T) {
 			// After a compaction: right after the summary.
 			got, _ = sent(c.compacted)
 			eqConversation(t, "after a compaction", got, c.wantCompacted(c.note))
+
+			// After a second compaction, whose tool loop is as long as the
+			// note's place: still right after the summary.
+			if n := len(conv(c.again)); n < len(two)+1 {
+				t.Fatalf("the second compaction's request has %d messages, too few to test it", n)
+			}
+			got, _ = sent(c.again)
+			eqConversation(t, "after a second compaction", got, withNoteAt(conv(c.again), c.afterSummary, c.note))
 
 			src.setEnd("t1", store.TurnEnd{Closed: true, ExitCode: intp(0)})
 			src.addTurn("t2", "two", "t1")
@@ -273,6 +298,68 @@ func TestNoteLifeInATurn(t *testing.T) {
 			hist := strings.Join(conversationOf(t, next.Body, c.conversation), "\n")
 			if strings.Count(hist, folderNote) != 1 || !strings.Contains(hist, "a.go") {
 				t.Fatalf("turn 2's history should keep the note once and the tool loop:\n%s", hist)
+			}
+		})
+	}
+}
+
+// A note first given after the agent compacted is in no call the next turn's
+// history is rebuilt from (the turn's last call before the compaction), so
+// the next turn's start carries it, from the record, once; a second
+// compaction puts it right after its summary too (review t_231bd9618295692d,
+// 2026-11-28).
+func TestNoteGivenAfterACompaction(t *testing.T) {
+	for _, c := range noteCases() {
+		t.Run(c.name, func(t *testing.T) {
+			src := newSource()
+			src.addTurn("t1", "one", "")
+			r := c.replayer(src)
+			notes := &fakeNotes{}
+			r.SetNotes(notes)
+			if rw := r.Rewrite("s", "t1", []byte(c.second)); rw.Body != nil {
+				t.Fatal("changed with no note")
+			}
+			c.store(src, t, "t1", "x1", c.second)
+
+			text := event.NotePrefix + folderNote
+			notes.waiting = []event.Added{{Kind: event.AddedNote, Bytes: len(text), Text: text, Note: 9}}
+			rw := r.Rewrite("s", "t1", []byte(c.compacted))
+			if rw.Body == nil || rw.Replied == nil {
+				t.Fatal("the compacted call did not take the note")
+			}
+			eqConversation(t, "the compacted call", conversationOf(t, rw.Body, c.conversation), c.wantCompacted(c.note))
+			evs := rw.Replied(200)
+			if len(evs) != 1 || len(evs[0].Added) != 1 {
+				t.Fatalf("recorded %+v", evs)
+			}
+			src.notes = append(src.notes, store.GivenNote{Exchange: "x2", Added: evs[0].Added[0]})
+			c.store(src, t, "t1", "x2", string(rw.Body))
+
+			again := r.Rewrite("s", "t1", []byte(c.again))
+			conv := conversationOf(t, []byte(c.again), c.conversation)
+			eqConversation(t, "after a second compaction", conversationOf(t, again.Body, c.conversation), withNoteAt(conv, c.afterSummary, c.note))
+			c.store(src, t, "t1", "x3", string(again.Body))
+
+			src.setEnd("t1", store.TurnEnd{Closed: true, ExitCode: intp(0)})
+			src.addTurn("t2", "two", "t1")
+			next := c.replayer(src).Rewrite("s", "t2", []byte(c.next))
+			if next.Refuse != nil || next.Body == nil {
+				t.Fatalf("turn 2 not spliced: %+v %+v", next.Events, next.Refuse)
+			}
+			msgs := conversationOf(t, next.Body, c.conversation)
+			hist := strings.Join(msgs, "\n")
+			if strings.Count(hist, folderNote) != 1 {
+				t.Fatalf("turn 2's history should hold the note once:\n%s", hist)
+			}
+			// It is said after turn 1's history, before turn 2's prompt.
+			at := -1
+			for i, m := range msgs {
+				if strings.Contains(m, folderNote) {
+					at = i
+				}
+			}
+			if at < 0 || !strings.Contains(strings.Join(msgs[:at], "\n"), "a.go") || !strings.Contains(strings.Join(msgs[at+1:], "\n"), "two") {
+				t.Fatalf("turn 2's history should say the note after turn 1's work, before the prompt:\n%s", hist)
 			}
 		})
 	}
