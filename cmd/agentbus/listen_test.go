@@ -359,6 +359,17 @@ func TestBrowserCommand(t *testing.T) {
 	}
 	found := func(string) (string, error) { return "/usr/bin/xdg-open", nil }
 	missing := func(string) (string, error) { return "", os.ErrNotExist }
+	only := func(names ...string) func(string) (string, error) {
+		return func(name string) (string, error) {
+			for _, n := range names {
+				if n == name {
+					return "/usr/bin/" + name, nil
+				}
+			}
+			return "", os.ErrNotExist
+		}
+	}
+	wsl := "WSL_DISTRO_NAME"
 	for _, tc := range []struct {
 		name, goos string
 		getenv     func(string) string
@@ -372,6 +383,14 @@ func TestBrowserCommand(t *testing.T) {
 		{"linux no display", "linux", env(), found, ""},
 		{"linux no xdg-open", "linux", env("DISPLAY", ":0"), missing, ""},
 		{"linux over ssh", "linux", env("DISPLAY", ":10", "SSH_TTY", "/dev/pts/1"), found, ""},
+		// Under WSL the browser is Windows': wslview, else explorer.exe,
+		// with or without WSLg's display; xdg-open only when neither is there.
+		{"wsl wslview", "linux", env(wsl, "Ubuntu-24.04", "DISPLAY", ":0"), only("wslview", "explorer.exe", "xdg-open"), "/usr/bin/wslview"},
+		{"wsl explorer", "linux", env(wsl, "Ubuntu-24.04", "DISPLAY", ":0"), only("explorer.exe"), "/usr/bin/explorer.exe"},
+		{"wsl no display", "linux", env(wsl, "Ubuntu-24.04"), only("explorer.exe"), "/usr/bin/explorer.exe"},
+		{"wsl xdg-open only", "linux", env(wsl, "Ubuntu-24.04", "DISPLAY", ":0"), only("xdg-open"), "/usr/bin/xdg-open"},
+		{"wsl nothing", "linux", env(wsl, "Ubuntu-24.04", "DISPLAY", ":0"), missing, ""},
+		{"wsl over ssh", "linux", env(wsl, "Ubuntu-24.04", "SSH_TTY", "/dev/pts/1"), found, ""},
 		{"other", "windows", env(), found, ""},
 	} {
 		got := strings.Join(browserCommand(tc.goos, tc.getenv, tc.look), " ")

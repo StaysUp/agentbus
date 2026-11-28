@@ -217,8 +217,8 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		link := signInLink(svc.addr, svc.api.NewSignInCode())
 		fmt.Fprintf(stdout, "\nOpen the cockpit (the link works once, for %d minutes; start agentbus up again for a new one):\n  %s\n\n",
 			int(api.SignInTTL.Minutes()), link)
-		if c.mode == modeUp && !c.noOpen {
-			openBrowser(home, link, getenv)
+		if c.mode == modeUp && !c.noOpen && !openBrowser(home, link, getenv) {
+			fmt.Fprintf(stdout, "No browser could be opened from here: open the link above in your browser.\n\n")
 		}
 	}
 
