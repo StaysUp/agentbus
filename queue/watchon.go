@@ -17,8 +17,9 @@ package queue
 // It repeats, so it must not deliver in a circle: an on whose delivery would
 // reach its own watched session again through live ons over sessions is
 // refused (ErrCycle). Registering an on costs nothing; each turn it delivers
-// is a turn its maker asked for, one level below it, under the same caps as
-// an ask (deliverResult), so a chain of ons stops where a chain of asks does.
+// is a turn its maker asked for, at the maker's depth, under the same turn
+// caps as an ask (deliverResult), so a chain of ons stops where a chain of asks
+// does.
 //
 // Prior art (_references/). Temporal pushes: a signal names the workflow it
 // goes to, and a caller hears a run end through completion callbacks set when

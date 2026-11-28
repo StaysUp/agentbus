@@ -27,7 +27,7 @@ import (
 // Chain is where a job sits in a request tree. Root is the session the
 // person's own turn ran in. Depth is how many agents asked in a row: work the
 // person's turn asks for has depth 1, work that work asks for depth 2. A
-// delivered result has the depth of the work it carries. By and BySession are
+// delivered result has the depth of the turn whose on delivers it. By and BySession are
 // the turn and session that asked for the job: the provenance the per-turn cap
 // (countAsked) keys on and the record's "asked" origin (runner.go, turnview.go)
 // reads, both from the asking turn's token. They are empty on a delivered
@@ -251,8 +251,9 @@ func (q *Queue) deliverResult(team, onID, toSession, askingTurn string, j Job, t
 	// rule, 2026-11-28, replacing "a delivery is free"). A delivery an on of a
 	// turn makes is a turn of the tree of the turn that registered the on, as
 	// if that turn had asked for it: its chain is the maker's root, the
-	// maker's depth plus one, and the maker as By. So it counts against the
-	// maker's per-turn cap and the tree's cap, and is held to the depth cap,
+	// maker's depth (depth counts asking, not hearing back; at least 1), and
+	// the maker as By. So it counts against the maker's per-turn cap and the
+	// tree's cap, and is held to the depth cap,
 	// in create (checkBudget), and every reader of chain.by sees it as asked
 	// work of that tree (the lanes, the caps). A chain of ons, each delivered
 	// turn registering the next, then stops at the same limits as a chain of
@@ -271,7 +272,11 @@ func (q *Queue) deliverResult(team, onID, toSession, askingTurn string, j Job, t
 	// an unrelated session into the subject's tree.
 	if cause != nil {
 		if cause.Root != toSession || cause.Depth != 0 {
-			cause.Depth++
+			// Depth counts asking, not hearing back (his call, 2026-11-28): the
+			// delivery stays at the maker's level, so a builder that hears its
+			// review can ask for the next one. The person's own turn (depth 0)
+			// delivering elsewhere makes work of level 1, as its asks are.
+			cause.Depth = max(cause.Depth, 1)
 			links.Chain = cause
 		}
 	} else if root, depth, err := q.SessionChain(team, toSession); err != nil {

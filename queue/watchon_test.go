@@ -148,14 +148,14 @@ func TestWatchOnDeliversEveryTurnOfASession(t *testing.T) {
 	}
 	// Into the coordinator's own root session, from its own turn's on: free,
 	// the person's root-level turns. Into the builder, from the builder's on:
-	// a turn the builder asked for, one level below it.
+	// a turn the builder asked for, at the builder's own depth.
 	for _, d := range got {
 		if string(d.Spec.Session) != coord.Session || d.Links.ResultOf.Session != string(builder.Session) || d.Links.Chain != nil {
 			t.Fatalf("a delivery to the coordinator: %+v %+v %+v", d.Spec, d.Links.ResultOf, d.Links.Chain)
 		}
 	}
-	if c := intoBuilder[0].Links.Chain; c == nil || c.By != builder.Turn || c.Depth != 2 || c.Root != coord.Session {
-		t.Fatalf("the review's delivery into the builder has chain %+v, want asked by the builder at depth 2", c)
+	if c := intoBuilder[0].Links.Chain; c == nil || c.By != builder.Turn || c.Depth != 1 || c.Root != coord.Session {
+		t.Fatalf("the review's delivery into the builder has chain %+v, want asked by the builder at its depth 1", c)
 	}
 	live, err := isLive(q, on.ID)
 	if err != nil || !live {
@@ -264,6 +264,56 @@ func TestOnsDoNotCountAsAskedWork(t *testing.T) {
 	if _, _, err := q.CreateTurnLinked(DefaultTeam, "", Spec{Harness: "claude", Folder: "/x", Isolate: true, Prompt: "hi"},
 		asked(p.Session, p.Turn, p.Session, 1), lim, nil); err != nil {
 		t.Fatalf("an ask by a turn with ons and caps of 1: %v, want it to start", err)
+	}
+}
+
+// Depth counts asking, not hearing back (his call, 2026-11-28). A builder at
+// depth 1 asks for a review (depth 2) and hears its result through an on over
+// the reviewer's session, as review_turn registers it. The turn that carries
+// the result is at the builder's depth, so at the default limits (Depth 2) it
+// may ask for a second review. When a delivery went one level deeper, it
+// arrived at depth 2 and its second review was refused at depth 3.
+func TestBuilderAsksAgainAfterHearingBack(t *testing.T) {
+	q, _ := open(t)
+	r := runner(t, q, 5)
+	read, last := endedRecord(t, q)
+	q.ReadReplyWith(func(session, turn string) (string, error) { return "reply of " + turn, nil })
+	coord := job(t, q, "")
+	builder, err := askTurn(q, asked(coord.Session, coord.Turn, coord.Session, 1), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The builder's copy is kept, so its session takes the delivered turn.
+	if _, err := q.db.Exec(`INSERT INTO copies(id, team, runner, kind, folder, created) VALUES(?,?,?,?,?,0)`,
+		string(builder.Session), DefaultTeam, r.ID, "overlay", "/x"); err != nil {
+		t.Fatal(err)
+	}
+	// The builder's turn asks for the review and has its session watched, as
+	// review_turn does.
+	review, err := askTurn(q, asked(string(builder.Session), builder.Turn, coord.Session, 2), "")
+	if err != nil {
+		t.Fatalf("the first review: %v", err)
+	}
+	if _, err := q.RegisterWatchOn(DefaultTeam, OnTurnCompleted, OnFilter{Session: string(review.Session)}, string(builder.Session), "",
+		Maker{Session: string(builder.Session), Turn: builder.Turn}, &testLimits, last()); err != nil {
+		t.Fatal(err)
+	}
+	runEnd(t, q, r, review)
+	if _, err := q.FireWatchOns(DefaultTeam, read, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	heard := deliveriesOf(t, q, string(builder.Session))
+	if len(heard) != 1 {
+		t.Fatalf("the review's result reached the builder %d times, want 1", len(heard))
+	}
+	c := heard[0].Links.Chain
+	if c == nil || c.Depth != 1 || c.Root != coord.Session || c.By != builder.Turn {
+		t.Fatalf("the builder hears back with chain %+v, want root %s at the builder's depth 1, by %s", c, coord.Session, builder.Turn)
+	}
+	// The turn that heard back asks for the second review, one level below its
+	// own depth, as its token reads it (jobs/tokens.go).
+	if _, err := askTurn(q, asked(string(heard[0].Session), heard[0].Turn, c.Root, c.Depth+1), ""); err != nil {
+		t.Fatalf("the second review, at the default limits: %v", err)
 	}
 }
 

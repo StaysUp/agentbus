@@ -706,7 +706,7 @@ func TestDeliveryKeepsRecipientTree(t *testing.T) {
 // its ask. An empty session has no tree, so a delivery that took the receiving
 // session's tree got a new root at depth zero with fresh caps, and repeating it
 // passed the depth, job and cost limits. Each delivery is now a turn the
-// asking turn asked for (his rule, 2026-11-28): its tree, one level below it,
+// asking turn asked for (his rule, 2026-11-28): its tree, at its depth,
 // and what the delivery asks for counts against that tree.
 func TestDeliveryStaysInTheAskersTree(t *testing.T) {
 	q, _ := open(t)
@@ -763,8 +763,8 @@ func TestDeliveryStaysInTheAskersTree(t *testing.T) {
 		if len(ds) != 1 {
 			t.Fatalf("delivered %d times to %s, want once", len(ds), s)
 		}
-		if c := ds[0].Links.Chain; c == nil || c.Root != parent.Session || c.Depth != 2 || c.By != child.Turn {
-			t.Fatalf("delivery to %s has chain %+v, want root %s depth 2, asked by %s", s, c, parent.Session, child.Turn)
+		if c := ds[0].Links.Chain; c == nil || c.Root != parent.Session || c.Depth != 1 || c.By != child.Turn {
+			t.Fatalf("delivery to %s has chain %+v, want root %s depth 1 (the child's), asked by %s", s, c, parent.Session, child.Turn)
 		}
 		if ds[0].Tree != parent.Session {
 			t.Fatalf("delivery to %s is recorded in tree %q, want %s", s, ds[0].Tree, parent.Session)

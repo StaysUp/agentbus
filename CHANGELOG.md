@@ -16,8 +16,9 @@ All notable changes to AgentBus. Full notes for each release are on the
   over it for the asking session, then starts the turn. The result of any later turn of that session
   comes back too. You no longer need to register an on by hand for each review.
 - **Registering an on is free; what it delivers counts.** Each turn an on delivers is a turn the
-  on's maker asked for: one level below it, counted under Depth, Turns per request and Turns per
-  request tree. So a chain of ons stops where a chain of asks does. One delivery stays free: your
+  on's maker asked for, counted under Turns per request and Turns per request tree. It stays at the
+  maker's level under Depth, since depth counts asking, not hearing back: a builder at the default
+  Depth of 2 can ask for a review, hear back, and ask again. So a chain of ons stops where a chain of asks does. One delivery stays free: your
   own turn hearing back in the session you started, so a coordinator's ons and results no longer
   use up its tree. A delivery past a cap is not made; `delivery.refused` in its session says why.
 
