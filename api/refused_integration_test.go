@@ -129,23 +129,69 @@ func TestCostCapRefusalReachesTheWatchingSession(t *testing.T) {
 	heldOnce(t, e, p, into)
 }
 
-// The notice's write fails once. The next sweep writes it: the on does not
-// move past the turn until its refusal is in the record.
+// readFrom is recordReader that keeps where each check reads from: the on's
+// cursor, as FireWatchOns passes it.
+func readFrom(st *store.Store, from *[]int64) queue.RecordReader {
+	read := recordReader(st)
+	return func(kind string, after int64, limit int) ([]queue.RecordEvent, error) {
+		*from = append(*from, after)
+		return read(kind, after, limit)
+	}
+}
+
+// endedSeq is the record seq of turn's turn.ended.
+func endedSeq(t *testing.T, e *env, turn string) int64 {
+	t.Helper()
+	evs, err := recordReader(e.store)("turn.ended", 0, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range evs {
+		if ev.Turn == turn {
+			return ev.Seq
+		}
+	}
+	t.Fatalf("no turn.ended of %s", turn)
+	return 0
+}
+
+// The notice's write fails once. The on stays before the turn, and the next
+// sweep writes the notice: once, under its id, with no turn.
 func TestRefusedNoticeSurvivesAFailedWrite(t *testing.T) {
 	var rec *failRefused
 	e, p, into := capWatch(t, stack{record: func(st *store.Store) jobs.Recorder {
 		rec = &failRefused{Store: st}
 		return rec
 	}})
-	_, err := e.q.FireWatchOns(queue.DefaultTeam, recordReader(e.store), nil, nil, nil)
+	ended := endedSeq(t, e, p.Turn)
+	var from []int64
+	read := readFrom(e.store, &from)
+	_, err := e.q.FireWatchOns(queue.DefaultTeam, read, nil, nil, nil)
 	if rec.failed.Load() != 1 {
 		t.Fatal("the injected failure did not happen")
 	}
 	t.Logf("injected delivery.refused write failures: %d; first sweep answered: %v", rec.failed.Load(), err)
-	for range 2 {
-		if _, err := e.q.FireWatchOns(queue.DefaultTeam, recordReader(e.store), nil, nil, nil); err != nil {
-			t.Fatal(err)
-		}
+	if err == nil || !strings.Contains(err.Error(), "injected") {
+		t.Fatalf("the sweep whose notice failed answered %v, want the write's error", err)
+	}
+	if got, _ := refusedIn(t, e, into); len(got) != 0 {
+		t.Fatalf("a notice after its write failed: %+v", got)
+	}
+	if _, err := e.q.FireWatchOns(queue.DefaultTeam, read, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("cursor at the failed sweep %d, at the next %d; the turn's turn.ended is seq %d", from[0], from[1], ended)
+	if len(from) != 2 || from[1] >= ended {
+		t.Fatalf("the on read from %v; the turn's turn.ended is seq %d: the cursor moved past the refusal", from, ended)
+	}
+	heldOnce(t, e, p, into)
+	// Once the notice is in, the on reads past the turn, and nothing more is
+	// written.
+	if _, err := e.q.FireWatchOns(queue.DefaultTeam, read, nil, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(from) != 3 || from[2] < ended {
+		t.Fatalf("the on read from %v; the turn's turn.ended is seq %d: the cursor stayed before a written notice", from, ended)
 	}
 	heldOnce(t, e, p, into)
 }

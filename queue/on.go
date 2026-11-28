@@ -403,7 +403,9 @@ func (q *Queue) FireOns(team string, ended func(turn string) (bool, error), to f
 		if why == "" {
 			n++
 		}
-		q.reportRefused(p.id, p.session, j, why)
+		if err := q.reportRefused(p.id, p.session, j, why); err != nil {
+			return n, err // the on stays live: the next check reports it again
+		}
 		if _, err := q.db.Exec(`INSERT INTO on_fires(on_id, key, job, error, created) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING`,
 			p.id, p.subject, did, why, nanos(q.now())); err != nil {
 			return n, fmt.Errorf("queue: write on fire: %w", err)

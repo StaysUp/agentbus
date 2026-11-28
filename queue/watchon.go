@@ -141,18 +141,20 @@ func (q *Queue) RegisterWatchOn(team, event string, filter OnFilter, to, key str
 }
 
 // RefusedReporter records that on did not deliver work's result to session,
-// and why. Control writes it to the record (delivery.refused).
-type RefusedReporter func(on, session string, work Job, why string)
+// and why. Control writes it to the record (delivery.refused). An error
+// leaves the on where it was, so the next check refuses and reports again.
+type RefusedReporter func(on, session string, work Job, why string) error
 
 // ReportRefusedWith sets how the queue records a delivery it refused. Set it
 // before the queue is used; without it a refusal is kept in on_fires only.
 func (q *Queue) ReportRefusedWith(r RefusedReporter) { q.refused = r }
 
 // reportRefused records why on did not deliver work's result, when set.
-func (q *Queue) reportRefused(on, session string, work Job, why string) {
+func (q *Queue) reportRefused(on, session string, work Job, why string) error {
 	if why != "" && q.refused != nil {
-		q.refused(on, session, work, why)
+		return q.refused(on, session, work, why)
 	}
+	return nil
 }
 
 // errFound ends RegisterWatchOn's transaction when a live on already does
@@ -279,7 +281,9 @@ func (q *Queue) FireWatchOns(team string, read RecordReader, to func(session str
 				if why == "" {
 					n++
 				}
-				q.reportRefused(o.id, o.session, j, why)
+				if err := q.reportRefused(o.id, o.session, j, why); err != nil {
+					return n, err // the cursor stays: the next check reports it again
+				}
 			}
 			if err := q.tx(func(tx *sql.Tx) error {
 				if fired {

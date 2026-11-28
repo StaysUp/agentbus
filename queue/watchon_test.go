@@ -329,8 +329,9 @@ func TestWatchChainStopsAtTheLimits(t *testing.T) {
 	read, last := endedRecord(t, q)
 	type refusal struct{ on, session, turn, why string }
 	var refused []refusal
-	q.ReportRefusedWith(func(on, session string, work Job, why string) {
+	q.ReportRefusedWith(func(on, session string, work Job, why string) error {
 		refused = append(refused, refusal{on, session, work.Turn, why})
+		return nil
 	})
 	lim := Limits{MaxDepth: 10, MaxPerTurn: 1, MaxPerTree: 1}
 	root := job(t, q, "")
