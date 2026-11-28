@@ -379,6 +379,90 @@ func TestOpenCountsHoldsByID(t *testing.T) {
 	}
 }
 
+// A next turn reads its own session's holds (#128), and they are what
+// OpenHolds says of that session: one hold id in two sessions is two holds,
+// each closed by its own session's run.ended, at every seq cutoff.
+func TestSessionHoldsAreOpenHoldsOfTheSession(t *testing.T) {
+	s := newStore(t)
+	inTurn := func(kind event.Kind, session, id, turn string) event.Event {
+		e := hold(kind, session, id)
+		e.Turn = turn
+		return e
+	}
+	mustAppend(t, s, inTurn(event.RunStarted, "a", "h", "a1"))
+	mustAppend(t, s, inTurn(event.RunStarted, "b", "h", "b1"))
+	mustAppend(t, s, inTurn(event.RunEnded, "b", "h", "b1"))
+	mustAppend(t, s, ev(event.ModelRequested, "b"))
+	mustAppend(t, s, inTurn(event.RunStarted, "c", "h2", "c1"))
+	mustAppend(t, s, inTurn(event.RunStarted, "a", "h3", "a2"))
+	mustAppend(t, s, inTurn(event.RunEnded, "a", "h3", "a2"))
+	mustAppend(t, s, ev(event.RunStarted, "old")) // an older store's run without a hold
+	for _, id := range []string{"a", "b", "c", "old", "none"} {
+		for hi := int64(0); hi <= s.Last(); hi++ {
+			all, err := s.OpenHolds(hi)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var want []OpenHold
+			for _, h := range all {
+				if h.Session == id {
+					want = append(want, h)
+				}
+			}
+			got, err := s.openHoldsOfSession(id, hi)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("session %s up to %d: holds %+v, OpenHolds says %+v", id, hi, got, want)
+			}
+		}
+	}
+	open := func(id string) bool {
+		t.Helper()
+		c, err := s.Continuation(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c.Open
+	}
+	if !open("a") || open("b") || !open("c") || !open("old") || open("none") {
+		t.Fatalf("open a %v b %v c %v old %v none %v, want true false true true false",
+			open("a"), open("b"), open("c"), open("old"), open("none"))
+	}
+	mustAppend(t, s, inTurn(event.RunEnded, "a", "h", "a1"))
+	if open("a") || !open("c") {
+		t.Fatalf("after a's h closed: open a %v c %v, want false true", open("a"), open("c"))
+	}
+}
+
+// The session's holds are read through events_session_kind: its run events
+// only, however many model calls the session holds (#128). The store runs no
+// ANALYZE, so the plan does not depend on what the store holds.
+func TestSessionHoldsReadOnlyRunEvents(t *testing.T) {
+	s := newStore(t)
+	rows, err := s.r.Query(`EXPLAIN QUERY PLAN `+openHoldsWhere(`session = ? AND seq <= ?`), "s", 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &unused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		plan = append(plan, detail)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(plan, "; "); !strings.Contains(got, "USING INDEX events_session_kind (session=? AND kind=?") {
+		t.Fatalf("plan %q, want a search of events_session_kind by session and kind", got)
+	}
+}
+
 // Only a run's child makes a session open. The guess that a model call in the
 // last 30 minutes meant open is gone.
 func TestOpenOnlyWhileARunsChildRuns(t *testing.T) {
