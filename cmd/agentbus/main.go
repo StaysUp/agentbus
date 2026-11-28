@@ -3,6 +3,7 @@
 //	agentbus up [-listen 127.0.0.1:8787] [-origin http://localhost:5173]
 //	agentbus server [-listen 127.0.0.1:8787]
 //	agentbus runner -server URL
+//	agentbus doctor
 //	agentbus version
 //
 // modes.go says what each mode runs. up starts one service on one address, 127.0.0.1:8787 unless -listen says
@@ -129,6 +130,9 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	if err != nil {
 		own.Print(err)
 		return 1
+	}
+	if args[0] == "doctor" {
+		return runDoctor(args[1:], home, getenv, stdout, stderr)
 	}
 	if args[0] == "login" {
 		return runLogin(args[1:], home, stdout, stderr, systemLogin())
@@ -1957,8 +1961,12 @@ func freshFolder(home string) bool {
 // notPackedLine is what a source build prints instead of a sign-in link.
 // Release binaries pack the cockpit; go install and go build do not.
 func notPackedLine(listen string) string {
-	return "The cockpit is not packed in this build. Install a release to get it (brew install staysup/tap/agentbus, or the install script in the README), or from a clone run tools/pack-cockpit.sh. The API's docs: http://" + linkHost(listen) + "/docs"
+	return "The cockpit is not packed in this build: " + packCockpit + ". The API's docs: http://" + linkHost(listen) + "/docs"
 }
+
+// packCockpit is how a source build gets the cockpit, for up and doctor.
+const packCockpit = "install a release to get it (brew install staysup/tap/agentbus, or the install script in the README), " +
+	"or from a clone run tools/pack-cockpit.sh, then go build"
 
 // dataFolderLine is what agentbus up says about its data folder when it
 // starts: which one, and whether it is new or what an earlier run left in
