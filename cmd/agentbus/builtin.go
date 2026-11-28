@@ -95,10 +95,14 @@ func (c config) logName() string {
 // build, so the runner it finds retires for one of its own (review
 // t_f1724c4b98986fcb P2: up started again with -replay=false kept replay).
 func runnerOptions(c config) string {
+	var options string
 	if c.noReplay {
-		return "+replay=false"
+		options += "+replay=false"
 	}
-	return ""
+	if len(c.passEnv) > 0 {
+		options += "+pass-env=" + strings.Join(c.passEnv, ",")
+	}
+	return options
 }
 
 // buildOf names the program at path by its content, so a rebuild in place
@@ -220,6 +224,9 @@ func (s *service) spawnRunner(rc config) error {
 	args := []string{modeRunner, "-server", rc.server}
 	if rc.noReplay {
 		args = append(args, "-replay=false")
+	}
+	if len(rc.passEnv) > 0 {
+		args = append(args, "-pass-env", strings.Join(rc.passEnv, ","))
 	}
 	cmd := exec.Command(rc.self, args...)
 	cmd.Env = append(os.Environ(), "AGENTBUS_HOME="+rc.home, builtinEnv+"="+rc.builtin.enroll+" "+rc.builtin.build)
