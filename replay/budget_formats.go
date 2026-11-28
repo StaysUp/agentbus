@@ -5,6 +5,7 @@ package replay
 // message says for a summary, and where the summary goes.
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 
@@ -129,11 +130,94 @@ func (claude) said(m json.RawMessage) (texts, calls []string) {
 	return texts, calls
 }
 
-// summaryIn: the summary is the first text block of a user message.
+// reminderMark opens each of Claude Code's own context blocks. Claude Code
+// 2.1.3xx (seen 2026-11-26, the coordinator session 2bcc782f239aa890's first
+// request) puts its standing context into the session's first user message
+// as text blocks in front of the person's words: one with ~/.claude/CLAUDE.md,
+// the memory index and the repo's AGENTS.md and CLAUDE.local.md, one with
+// facts about the person's account, one with the commit attribution rule,
+// each "<system-reminder>\n...\n</system-reminder>". The environment goes in
+// the role-system message after it (build's envMark).
+const reminderMark = "<system-reminder>"
+
+// context: the leading text blocks of a user message that open with
+// reminderMark, never its last block (the person's words or the summary
+// always follow).
+func (claude) context(m json.RawMessage) ([]json.RawMessage, json.RawMessage) {
+	if role(m) != "user" {
+		return nil, m
+	}
+	blocks, ok := body.Elements(field(m, "content"))
+	if !ok {
+		return nil, m
+	}
+	n := 0
+	for n < len(blocks)-1 && body.Label(blocks[n], "type") == "text" &&
+		strings.HasPrefix(textOf(field(blocks[n], "text")), reminderMark) {
+		n++
+	}
+	if n == 0 {
+		return nil, m
+	}
+	rest, ok := setField(m, "content", joinArray(blocks[n:]))
+	if !ok {
+		return nil, m
+	}
+	return blocks[:n], rest
+}
+
+// withStanding: a history whose first message (the person's) has none of
+// Claude Code's context gets the fresh request's, as the environment does in
+// build; a first turn that never reached the model has none either. The
+// record keeps it there from then on.
+func (claude) withStanding(h *history, req request) *history {
+	if len(h.messages) == 0 || len(req.msgs) == 0 {
+		return h
+	}
+	fresh, _ := claude{}.context(req.msgs[0])
+	if len(fresh) == 0 {
+		return h
+	}
+	if have, _ := (claude{}).context(h.messages[0]); len(have) > 0 {
+		return h
+	}
+	m := withContext(h.messages[0], fresh)
+	if bytes.Equal(m, h.messages[0]) {
+		return h
+	}
+	out := *h
+	out.messages = append([]json.RawMessage{m}, h.messages[1:]...)
+	return &out
+}
+
+// withContext is m, a user message, with ctx in front of its content.
+func withContext(m json.RawMessage, ctx []json.RawMessage) json.RawMessage {
+	if len(ctx) == 0 || role(m) != "user" {
+		return m
+	}
+	c := field(m, "content")
+	var blocks []json.RawMessage
+	if body.IsString(c) {
+		blocks = []json.RawMessage{body.Object([]body.Field{{Key: "type", Value: json.RawMessage(`"text"`)}, {Key: "text", Value: c}})}
+	} else if els, ok := body.Elements(c); ok {
+		blocks = els
+	} else {
+		return m
+	}
+	out, ok := setField(m, "content", joinArray(append(append([]json.RawMessage{}, ctx...), blocks...)))
+	if !ok {
+		return m
+	}
+	return out
+}
+
+// summaryIn: the summary is the first text block of a user message after
+// Claude Code's context.
 func (claude) summaryIn(m json.RawMessage) (string, json.RawMessage, bool) {
 	if role(m) != "user" {
 		return "", nil, false
 	}
+	_, m = claude{}.context(m)
 	blocks, ok := body.Elements(field(m, "content"))
 	if !ok || len(blocks) == 0 || body.Label(blocks[0], "type") != "text" {
 		return "", nil, false
@@ -150,16 +234,18 @@ func (claude) summaryIn(m json.RawMessage) (string, json.RawMessage, bool) {
 }
 
 // withSummary: the summary goes in as the first text block of the person's
-// message, so the history still alternates and starts with the person, as
-// Claude Code's layout does; no message is made up for the model. A summary
-// that takes every turn (first nil) is a user message of that one block,
-// which build puts in front of the new prompt (mergeSummary).
-func (claude) withSummary(first json.RawMessage, text string) []json.RawMessage {
+// message after Claude Code's context, so the history still alternates and
+// starts with the person, as Claude Code's layout does; no message is made up
+// for the model. A summary that takes every turn (first nil) is a user
+// message of ctx and that one block, which build puts in front of the new
+// prompt (mergeSummary).
+func (claude) withSummary(ctx []json.RawMessage, first json.RawMessage, text string) []json.RawMessage {
 	block := body.Object([]body.Field{{Key: "type", Value: json.RawMessage(`"text"`)}, {Key: "text", Value: jsonString(text)}})
 	if first == nil {
 		return []json.RawMessage{body.Object([]body.Field{{Key: "role", Value: json.RawMessage(`"user"`)},
-			{Key: "content", Value: joinArray([]json.RawMessage{block})}})}
+			{Key: "content", Value: joinArray(append(append([]json.RawMessage{}, ctx...), block))}})}
 	}
+	_, first = claude{}.context(first)
 	c := field(first, "content")
 	var blocks []json.RawMessage
 	if body.IsString(c) {
@@ -168,11 +254,11 @@ func (claude) withSummary(first json.RawMessage, text string) []json.RawMessage 
 		blocks = append([]json.RawMessage{block}, els...)
 	}
 	if role(first) == "user" && blocks != nil {
-		if out, ok := setField(first, "content", joinArray(blocks)); ok {
+		if out, ok := setField(first, "content", joinArray(append(append([]json.RawMessage{}, ctx...), blocks...))); ok {
 			return []json.RawMessage{out}
 		}
 	}
-	return []json.RawMessage{claude{}.prompt(text), first}
+	return []json.RawMessage{withContext(claude{}.prompt(text), ctx), first}
 }
 
 // codex: OpenAI Responses input items.
@@ -255,8 +341,14 @@ func (codex) summaryIn(m json.RawMessage) (string, json.RawMessage, bool) {
 	return "", nil, false
 }
 
+// context: codex's context items are messages of their own, in the head.
+func (codex) context(m json.RawMessage) ([]json.RawMessage, json.RawMessage) { return nil, m }
+
+// withStanding: codex's context items come with each fresh request (build).
+func (codex) withStanding(h *history, _ request) *history { return h }
+
 // withSummary: a developer message before the person's, as the note is.
-func (codex) withSummary(first json.RawMessage, text string) []json.RawMessage {
+func (codex) withSummary(_ []json.RawMessage, first json.RawMessage, text string) []json.RawMessage {
 	if first == nil {
 		return []json.RawMessage{openai.DeveloperMessage(text)}
 	}
@@ -330,7 +422,13 @@ func (chatCompletions) summaryIn(m json.RawMessage) (string, json.RawMessage, bo
 	return "", nil, false
 }
 
-func (chatCompletions) withSummary(first json.RawMessage, text string) []json.RawMessage {
+// withStanding: OpenCode's system message comes with a fresh request (build).
+func (chatCompletions) withStanding(h *history, _ request) *history { return h }
+
+// context: OpenCode's system message is a message of its own, in the head.
+func (chatCompletions) context(m json.RawMessage) ([]json.RawMessage, json.RawMessage) { return nil, m }
+
+func (chatCompletions) withSummary(_ []json.RawMessage, first json.RawMessage, text string) []json.RawMessage {
 	if first == nil {
 		return []json.RawMessage{chatUserMessage(text)}
 	}

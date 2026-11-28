@@ -31,9 +31,17 @@ package replay
 //     half): its stubs, then into the summary, then logs left out down to
 //     none. history.shortened says so (newest_shortened).
 //
-// Only the head, the harness's own context before the first turn (codex's
-// context items, OpenCode's system message), is never shortened: every
-// fresh request carries it anyway.
+// Only the harness's standing context is never shortened or summarised: the
+// head before the first turn (codex's context items, OpenCode's system
+// message) and the context blocks in the first turn's person's message
+// (Claude Code's system-reminder blocks: CLAUDE.md, the memory index,
+// AGENTS.md). Every step keeps them byte for byte where they were, so the
+// cached prefix of system prompt, tools and that context stays. (2026-11-28:
+// the coordinator session ran a day without its rules after a step summarised
+// its first message, reminders and all.) The system prompt is not in the
+// history at all: every request carries its own. This is how opencode and
+// openclaw keep instruction files through compaction too: outside what is
+// compacted, never summarised.
 //
 // A compaction is not judged here: one test (the format's fresh) decides it,
 // applied by the gateway as it forwards a request, and read back by the
@@ -123,10 +131,10 @@ type segment struct {
 // The budget is a guarantee on what fit returns, counted by approxTokens on
 // the bytes it returns, and no turn is exempt from it: where keeping the
 // newest turn whole and the budget conflict, the budget wins. The only part
-// fit never shortens is the head, the harness's own context before the first
-// turn (codex's context items, OpenCode's system message), which every fresh
-// request carries anyway; a head alone over the budget is the one way out,
-// and step.AfterTokens then says so.
+// fit never shortens is the harness's standing context (the head before the
+// first turn, and the context blocks in the first turn's person's message);
+// that context alone over the budget is the one way out, and the step then
+// says so (HeadTokens over BudgetTokens).
 //
 // The ladder, each rung only while the history is still over its goal:
 //   - older turns (all but the newest recentTurns, then fewer), goal half the
@@ -158,6 +166,7 @@ func (r *Replayer) fit(session, from string, h *history, model string) (*history
 		// recorded, as everywhere else in fit.
 		return h, nil
 	}
+	step.HeadTokens = standingTokens(r.f, msgs, est, segs)
 	start := func(i int) int {
 		if i >= len(segs) {
 			return len(msgs)
@@ -316,6 +325,9 @@ func (r *Replayer) segments(session, from string, msgs []json.RawMessage) []segm
 type summary struct {
 	head    []json.RawMessage
 	headTok int
+	// ctx is the harness's context in segment 0's first message (Claude
+	// Code's), kept in front of the summary byte for byte.
+	ctx []json.RawMessage
 	// firstRest is segment 0's first message without the earlier summary,
 	// when the summary rode in it (Claude Code); nil otherwise.
 	firstRest json.RawMessage
@@ -387,9 +399,10 @@ func newSummary(f format, msgs []json.RawMessage, segs []segment) *summary {
 			break
 		}
 	}
+	s.ctx, _ = f.context(msgs[segs[0].start])
 	if !found {
 		// Claude Code's summary rides in the first message of the oldest
-		// turn kept, which is now segment 0.
+		// turn kept, which is now segment 0, after its context.
 		if text, rest, ok := f.summaryIn(msgs[segs[0].start]); ok {
 			old, s.firstRest = text, rest
 		}
@@ -468,7 +481,7 @@ func (s *summary) first(msgs []json.RawMessage, segs []segment, j int) json.RawM
 func (s *summary) total(f format, msgs []json.RawMessage, est []int, segs []segment, j int) int {
 	next := next(msgs, segs, j)
 	n := s.headTok
-	for _, m := range f.withSummary(s.first(msgs, segs, j), s.text(j)) {
+	for _, m := range f.withSummary(s.ctx, s.first(msgs, segs, j), s.text(j)) {
 		n += approxTokens(m)
 	}
 	if next < len(msgs) {
@@ -484,11 +497,31 @@ func (s *summary) total(f format, msgs []json.RawMessage, est []int, segs []segm
 func (s *summary) layout(f format, msgs []json.RawMessage, segs []segment, j int) []json.RawMessage {
 	next := next(msgs, segs, j)
 	out := append([]json.RawMessage{}, s.head...)
-	out = append(out, f.withSummary(s.first(msgs, segs, j), s.text(j))...)
+	out = append(out, f.withSummary(s.ctx, s.first(msgs, segs, j), s.text(j))...)
 	if next < len(msgs) {
 		out = append(out, msgs[next+1:]...)
 	}
 	return out
+}
+
+// standingTokens is the size of the harness's standing context in msgs,
+// whose turns are segs: the head before the first turn without an earlier
+// summary in it, and the context in the first turn's person's message.
+func standingTokens(f format, msgs []json.RawMessage, est []int, segs []segment) int {
+	n := 0
+	for i, m := range msgs[:segs[0].start] {
+		if _, rest, ok := f.summaryIn(m); ok {
+			if rest != nil {
+				n += approxTokens(rest)
+			}
+			continue
+		}
+		n += est[i]
+	}
+	if ctx, _ := f.context(msgs[segs[0].start]); len(ctx) > 0 {
+		n += approxTokens(joinArray(ctx))
+	}
+	return n
 }
 
 // turnLog is one turn in a summary.

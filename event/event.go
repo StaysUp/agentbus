@@ -835,6 +835,7 @@ type HistoryStep struct {
 	BudgetTokens     int    `json:"budget_tokens" doc:"The history budget in tokens: the budget share of window_tokens. Over it, the history is shortened to about half of it."`
 	BeforeTokens     int    `json:"before_tokens" doc:"The history's size before the step: a rough count (bytes / 2.66, an image counted as 1,600), not the vendor's."`
 	AfterTokens      int    `json:"after_tokens" doc:"The history's size after the step, counted the same way."`
+	HeadTokens       int    `json:"head_tokens,omitempty" doc:"The harness's standing context in the history, counted the same way: what the budget never shortens or summarises (Claude Code's context blocks in the first message, codex's context items, OpenCode's system message). Over budget_tokens, the history stays over the budget by it."`
 	ResultsShortened int    `json:"results_shortened,omitempty" doc:"Tool results over 2 KiB made a stub: what it was, how it began, and where the agent fetches it back."`
 	InputsShortened  int    `json:"inputs_shortened,omitempty" doc:"Tool-call inputs over 2 KiB made a stub the same way."`
 	TurnsSummarised  int    `json:"turns_summarised,omitempty" doc:"The oldest turns now in AgentBus's summary: the person's words and the model's last words verbatim, AgentBus's notes, a line per tool call. An earlier summary is kept word for word inside it."`

@@ -22,6 +22,16 @@ All notable changes to AgentBus. Full notes for each release are on the
   own turn hearing back in the session you started, so a coordinator's ons and results no longer
   use up its tree. A delivery past a cap is not made; `delivery.refused` in its session says why.
 
+### Fixed
+- **A shortened session keeps its standing rules.** When the history budget summarised a Claude
+  Code session's first turn, the summary also replaced the context Claude Code puts in that
+  message: `~/.claude/CLAUDE.md`, the memory index and the repo's `AGENTS.md`. The session then ran
+  without them. Every step now keeps that context byte for byte at the front of the first message,
+  as it already kept codex's context items and OpenCode's system message. A session that already
+  lost it gets the fresh process's copy back on its next turn. `history.shortened` carries
+  `head_tokens`, the size of what is never shortened. `tools/budgetcheck` shows per turn whether
+  the context is still there.
+
 ### Removed
 - **The on over one turn, and `delivery` on `POST /api/v0/turns`.** Both answer 410 with a message
   saying what to send instead: register an on over the session first, then start the turn. A

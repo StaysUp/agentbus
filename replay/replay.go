@@ -158,11 +158,23 @@ type format interface {
 	// notes, and its tool calls, one line each (callLine).
 	said(m json.RawMessage) (texts, calls []string)
 	// summaryIn finds AgentBus's summary of earlier turns in m: its text,
-	// and m without it (nil when m held only the summary).
+	// and m without it and without the harness's context (nil when m held
+	// only the summary and that context).
 	summaryIn(m json.RawMessage) (text string, rest json.RawMessage, ok bool)
+	// context is the harness's own standing context inside m, the person's
+	// message, and m without it: Claude Code's system-reminder blocks in a
+	// session's first message. Formats whose harness puts its context in
+	// messages of its own (the head) have none here.
+	context(m json.RawMessage) (ctx []json.RawMessage, rest json.RawMessage)
 	// withSummary lays the summary out in front of first, the person's
-	// message of the oldest turn kept.
-	withSummary(first json.RawMessage, text string) []json.RawMessage
+	// message of the oldest turn kept, with ctx (from context) kept in
+	// front of it, byte for byte.
+	withSummary(ctx []json.RawMessage, first json.RawMessage, text string) []json.RawMessage
+	// withStanding is h with the standing context of req, a fresh request,
+	// put in where h lacks it (Claude Code: a first message whose context a
+	// step before 0.6.8 summarised away), before the budget fits h. h itself
+	// is never changed.
+	withStanding(h *history, req request) *history
 	// passOn is a main request the harness compacted, as it goes on: its
 	// conversation untouched, under the identity the turn's other requests
 	// went out with, so the record keeps the turn one thread; h is the
@@ -1204,7 +1216,7 @@ func (r *Replayer) splice(session string, ti turnInfo, data []byte) (out []byte,
 		}
 		return nil, nil, 0, false, nil, errors.New("a request came before the turn's main thread's first one, in a layout the gateway does not know, so the replayed history cannot be placed")
 	}
-	h, evs, err := r.fitted(session, ti, requestModel(req.fields))
+	h, evs, err := r.fitted(session, ti, req)
 	if err != nil {
 		var miss *missing
 		if errors.As(err, &miss) {
@@ -1236,7 +1248,10 @@ func (r *Replayer) splice(session string, ti turnInfo, data []byte) (out []byte,
 // request, for model, and every later request of the turn carries the same
 // bytes, so the cache holds inside the turn; the memo drops only closed
 // turns. evs, on that first request only, record the step it took, if any.
-func (r *Replayer) fitted(session string, ti turnInfo, model string) (*history, []event.Event, error) {
+// The harness's standing context the history lacks is put in before the fit
+// (withStanding), so the budget counts it.
+func (r *Replayer) fitted(session string, ti turnInfo, req request) (*history, []event.Event, error) {
+	model := requestModel(req.fields)
 	k := [2]string{session, ti.turn}
 	r.mu.Lock()
 	h, ok := r.fits[k]
@@ -1248,6 +1263,7 @@ func (r *Replayer) fitted(session string, ti turnInfo, model string) (*history, 
 	if err != nil {
 		return nil, nil, err
 	}
+	full = r.f.withStanding(full, req)
 	h, step := r.fit(session, ti.from, full, model)
 	r.mu.Lock()
 	if len(r.fits) >= memoMax {
@@ -1491,17 +1507,23 @@ func (claude) build(req request, h *history, prompt string) ([]byte, func(http.H
 	if hist, err = unreferenced(hist, searchable(tools)); err != nil {
 		return nil, nil, err
 	}
+	// Claude Code's standing context (CLAUDE.md, memory, AGENTS.md: context)
+	// rides in the history's first message (withStanding put it there before
+	// the fit when it was missing), so the fresh process's own copy in
+	// msgs[0] does not go in again.
 	// A history the budget made AgentBus's summary alone ends with that
-	// summary, a user message: its block goes first in the new prompt's
-	// message, where a later step finds it (summaryIn), and the request
-	// alternates as Claude Code's does.
+	// summary, a user message after the context: the context and the
+	// summary's block go first in the new prompt's message, where a later
+	// step finds them (context, summaryIn), and the request alternates as
+	// Claude Code's does.
 	content := promptText
 	if n := len(hist); n > 0 {
 		if text, rest, ok := (claude{}).summaryIn(hist[n-1]); ok && rest == nil {
+			ctx, _ := claude{}.context(hist[n-1])
 			hist = hist[:n-1]
-			content = joinArray([]json.RawMessage{
+			content = joinArray(append(append([]json.RawMessage{}, ctx...),
 				body.Object([]body.Field{{Key: "type", Value: json.RawMessage(`"text"`)}, {Key: "text", Value: jsonString(text)}}),
-				body.Object([]body.Field{{Key: "type", Value: json.RawMessage(`"text"`)}, {Key: "text", Value: promptText}})})
+				body.Object([]body.Field{{Key: "type", Value: json.RawMessage(`"text"`)}, {Key: "text", Value: promptText}})))
 		}
 	}
 	// On the turn's first request only (the person's message and Claude
