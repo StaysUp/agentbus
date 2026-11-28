@@ -36,6 +36,12 @@ func askEnv(t *testing.T) (*env, string) {
 // askEnvWith is askEnv with permissions.toml at perm ("" for none).
 func askEnvWith(t *testing.T, perm string) (*env, string) {
 	t.Helper()
+	return askEnvOf(t, stack{permissions: perm})
+}
+
+// askEnvOf is askEnvWith on stack s, with the fake agent wired in.
+func askEnvOf(t *testing.T, s stack) (*env, string) {
+	t.Helper()
 	dir := t.TempDir()
 	script := `for a; do p="$a"; done; echo '{"type":"result","session_id":"sid-'$$'"}'; ` +
 		`case "$p" in "[AgentBus]"*) printf '%s' "$p" > "$D/delivered-$$"; exit 0;; quick|"Review a change"*|"Review the changes"*) exit 0;; esac; ` +
@@ -45,7 +51,8 @@ func askEnvWith(t *testing.T, perm string) (*env, string) {
 		return run.Launch{Path: "/bin/sh", Args: []string{"-c", script, "sh"},
 			Env: []string{"PATH=/usr/bin:/bin", "D=" + dir, "ANTHROPIC_BASE_URL=" + baseURL}}, nil
 	}
-	return stackEnv(t, stack{wire: wire, permissions: perm}), dir
+	s.wire = wire
+	return stackEnv(t, s), dir
 }
 
 // firstTurn runs the three calls a first turn now needs (POST /workspaces, POST

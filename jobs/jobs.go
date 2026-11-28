@@ -236,12 +236,14 @@ func New(cfg Config) (*Server, error) {
 	if rec := cfg.Record; rec != nil {
 		// A delivery an on refused, such as one past a cap, is the record's
 		// too, so the person sees why a result never came.
-		cfg.Queue.ReportRefusedWith(func(on, session string, work queue.Job, why string) {
+		cfg.Queue.ReportRefusedWith(func(on, session string, work queue.Job, why string) error {
 			e := event.Event{ID: "dr_" + on + "_" + work.Turn, Kind: event.DeliveryRefused, Time: time.Now().UTC(),
 				Session: session, Error: why, Origin: &event.Origin{Kind: event.OriginResult, Session: queue.ResultSession(work), Turn: work.Turn}}
-			if _, err := rec.AppendOnce(e); err != nil && s.Logf != nil {
+			_, err := rec.AppendOnce(e)
+			if err != nil && s.Logf != nil {
 				s.Logf("store.error what=%s", event.DeliveryRefused)
 			}
+			return err
 		})
 	}
 	return s, nil

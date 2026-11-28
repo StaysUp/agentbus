@@ -35,6 +35,9 @@ type stack struct {
 	// settings, when set, is the settings store, in place of permissions.
 	settings settings.Store
 	homes    string
+	// record, when set, is the record the jobs server writes to, in place of
+	// the store: a test wraps the store to make one of its writes fail.
+	record func(st *store.Store) jobs.Recorder
 }
 
 // stackEnv is an API on loopback with a whole stack behind it.
@@ -80,8 +83,12 @@ func stackEnv(t *testing.T, s stack) *env {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var rec jobs.Recorder = st
+	if s.record != nil {
+		rec = s.record(st)
+	}
 	js, err := jobs.New(jobs.Config{Queue: q, Token: token, EnrollToken: enrollTok, Heartbeat: 50 * time.Millisecond,
-		MaxWait: 500 * time.Millisecond, Folders: fr, Blobs: bs, Record: st, Settings: cfgStore})
+		MaxWait: 500 * time.Millisecond, Folders: fr, Blobs: bs, Record: rec, Settings: cfgStore})
 	if err != nil {
 		t.Fatal(err)
 	}
