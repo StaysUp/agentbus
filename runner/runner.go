@@ -1480,7 +1480,7 @@ func (r *Runner) prepare(ctx context.Context, at *attempt) *queue.Result {
 			// the setting: the setting picks a backend for the folder as it is.
 			if sp.Base != "" {
 				b, _ := isolation.Get(isolation.Git)
-				return r.isolate(at, b, isolation.Request{Folder: folder, Ref: at.ref, Base: sp.Base, Carry: p.CarryFiles})
+				return r.isolate(ctx, at, b, isolation.Request{Folder: folder, Ref: at.ref, Base: sp.Base, Carry: p.CarryFiles})
 			}
 			if b, ok := isolation.For(setting, folder); ok {
 				return r.isolate(ctx, at, b, isolation.Request{Folder: folder, Ref: at.ref})
