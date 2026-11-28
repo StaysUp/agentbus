@@ -1050,6 +1050,10 @@ func start(c config) (*service, error) {
 	}
 	go func() { s.done <- s.srv.Serve(ln) }()
 	if q != nil {
+		// The session list's first fold reads the whole record (0.3 s at
+		// 41,000 events); made now, the cockpit's first list after a start
+		// reads from it like every later one (store/snapshotfold.go).
+		go func() { _, _ = st.Snapshot() }()
 		// A delivered result names the saved agent that did the work.
 		name := func(id string) string {
 			if saved == nil {

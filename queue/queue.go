@@ -1562,6 +1562,23 @@ func (w *Workspace) setWhere(v string) {
 	}
 }
 
+// workspaceHeadSQL reads the checkpoint a workspace's copy is at (see
+// workspaceOf), from its jobs: each part one read of jobs_workspace. Its
+// arguments are the team and the workspace, three times.
+const workspaceHeadSQL = `SELECT checkpoint FROM (
+		SELECT ended, rowid, COALESCE(json_extract(result, '$.checkpoint'), json_extract(result, '$.changes.to'), '') AS checkpoint
+			FROM jobs WHERE team = ? AND kind = 'turn' AND ` + jobWorkspace + ` = ?
+			AND ended IS NOT NULL AND attempt IS NOT NULL AND COALESCE(json_extract(result, '$.changeset'), '') != ''
+		UNION ALL
+		SELECT ended, rowid, COALESCE(json_extract(spec, '$.restore'), '') AS checkpoint
+			FROM jobs WHERE team = ? AND kind = 'discard' AND ` + jobWorkspace + ` = ?
+			AND ended IS NOT NULL AND state = 'finished'
+		UNION ALL
+		SELECT ended, rowid, json_extract(result, '$.update.merged_checkpoint') AS checkpoint
+			FROM jobs WHERE team = ? AND kind = 'update' AND ` + jobWorkspace + ` = ?
+			AND ended IS NOT NULL AND state = 'finished' AND COALESCE(json_extract(result, '$.update.merged_checkpoint'), '') != '')
+		ORDER BY ended DESC, rowid DESC LIMIT 1`
+
 // workspaceOf is the workspace of the job's session: the one it continues,
 // the one its finish recorded, or for a review the reviewed job's. Nil when
 // the queue knows none.
@@ -1589,19 +1606,7 @@ func workspaceOf(db querier, j Job) (*Workspace, error) {
 	// not diffed from again; an update after the latest turn moves it forward to
 	// the merge, so the next turn's diff does not include the folder's own changes
 	// that the update merged in as if the turn had made them.
-	err = db.QueryRow(`SELECT checkpoint FROM (
-		SELECT ended, rowid, COALESCE(json_extract(result, '$.checkpoint'), json_extract(result, '$.changes.to'), '') AS checkpoint
-			FROM jobs WHERE team = ? AND kind = 'turn' AND COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), session) = ?
-			AND ended IS NOT NULL AND attempt IS NOT NULL AND COALESCE(json_extract(result, '$.changeset'), '') != ''
-		UNION ALL
-		SELECT ended, rowid, COALESCE(json_extract(spec, '$.restore'), '') AS checkpoint
-			FROM jobs WHERE team = ? AND kind = 'discard' AND COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), session) = ?
-			AND ended IS NOT NULL AND state = 'finished'
-		UNION ALL
-		SELECT ended, rowid, json_extract(result, '$.update.merged_checkpoint') AS checkpoint
-			FROM jobs WHERE team = ? AND kind = 'update' AND COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), session) = ?
-			AND ended IS NOT NULL AND state = 'finished' AND COALESCE(json_extract(result, '$.update.merged_checkpoint'), '') != '')
-		ORDER BY ended DESC, rowid DESC LIMIT 1`, j.Team, key, j.Team, key, j.Team, key).Scan(&w.DiffFrom)
+	err = db.QueryRow(workspaceHeadSQL, j.Team, key, j.Team, key, j.Team, key).Scan(&w.DiffFrom)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("queue: read workspace head: %w", err)
 	}
@@ -2637,7 +2642,7 @@ func (q *Queue) CloseSession(team string, id ids.WorkspaceID) (Workspace, error)
 		if !closed.Valid {
 			var open int
 			if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND state IN ('queued','taken','running')
-				AND COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), session) = ?`, team, key).Scan(&open); err != nil {
+				AND `+jobWorkspace+` = ?`, team, key).Scan(&open); err != nil {
 				return fmt.Errorf("queue: count jobs: %w", err)
 			}
 			if open > 0 {

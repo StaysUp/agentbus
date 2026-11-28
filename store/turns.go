@@ -112,6 +112,81 @@ func (s *Store) FirstStartSince(session string, from int64) (t time.Time, ok boo
 	return time.Unix(0, tm.Int64).UTC(), true, nil
 }
 
+// turnsSQL is the turn list's page of turns, newest first, for a where on
+// the turn.started rows (e). Each turn's call count, last call and number
+// are read through events_turn_kind and events_session_kind, never a row
+// per event: counting a turn's earlier turns row by row read every
+// turn.started for each turn listed (2026-11-28).
+func turnsSQL(where string) string {
+	return `WITH t AS (
+			SELECT e.seq, e.session, e.turn,
+				(SELECT COUNT(*) FROM events c WHERE c.session = e.session AND c.turn = e.turn
+					AND c.kind = 'model.requested' AND c.seq <= ?) AS calls,
+				(SELECT MAX(c.seq) FROM events c WHERE c.session = e.session AND c.turn = e.turn
+					AND c.kind = 'model.requested' AND c.seq <= ?) AS last_call
+			FROM events e WHERE ` + where + ` ORDER BY e.seq DESC LIMIT ?
+		), u AS (
+			SELECT t.seq, t.calls, t.last_call,
+				(SELECT p.seq FROM events p
+					WHERE p.session = t.session AND p.turn = t.turn AND p.kind = 'model.responded' AND p.seq <= ?
+					AND CASE WHEN COALESCE(json_extract(q.data, '$.exchange'), '') <> ''
+						THEN json_extract(p.data, '$.exchange') = json_extract(q.data, '$.exchange')
+						ELSE COALESCE(json_extract(p.data, '$.exchange'), '') = '' AND p.seq > q.seq END
+					ORDER BY p.seq LIMIT 1) AS reply
+			FROM t LEFT JOIN events q ON q.seq = t.last_call
+		)
+		SELECT s.seq, s.session, s.turn, s.time,
+			COALESCE(json_extract(s.data, '$.agent'), ''), COALESCE(json_extract(s.data, '$.agent_id'), ''),
+			COALESCE(json_extract(s.data, '$.folder'), ''), COALESCE(json_extract(s.data, '$.idempotency_key'), ''),
+			COALESCE(json_extract(s.data, '$.origin'), ''),
+			u.calls, COALESCE(json_extract(q.data, '$.model'), ''),
+			COALESCE(json_extract(r.data, '$.status'), 0), COALESCE(json_extract(r.data, '$.error'), ''),
+			(SELECT COUNT(*) FROM events n WHERE n.session = s.session AND n.kind = 'turn.started' AND n.turn <> '' AND n.seq <= s.seq)
+		FROM u JOIN events s ON s.seq = u.seq
+			LEFT JOIN events q ON q.seq = u.last_call
+			LEFT JOIN events r ON r.seq = u.reply
+		ORDER BY s.seq DESC`
+}
+
+// turnTotalsSQL adds up the events of n turns. Its arguments are the seq
+// bound twice, then each turn's session and id. It reads each turn's own
+// events only, of the four kinds it adds up, through events_session_kind:
+// never a turn's tool calls, the bulk of its events, nor the events of
+// another session's turn with the same id.
+func turnTotalsSQL(n int) string {
+	pairs := strings.TrimSuffix(strings.Repeat("(?,?),", n), ",")
+	return `SELECT session, turn,
+			SUM(kind = 'model.responded' AND COALESCE(json_type(data, '$.usage'), 'null') = 'object'),
+			SUM(kind = 'model.responded' AND COALESCE(json_type(data, '$.usage'), 'null') <> 'object'),
+			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.input_tokens') END), 0),
+			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.output_tokens') END), 0),
+			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_read_tokens') END), 0),
+			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_tokens') END), 0),
+			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_5m_tokens') END), 0),
+			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_1h_tokens') END), 0),
+			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_30m_tokens') END), 0),
+			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_12h_tokens') END), 0),
+			COALESCE(MAX(kind = 'model.responded' AND json_extract(data, '$.usage.output_incomplete') = 1), 0),
+			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.cost_usd') END), 0),
+			SUM(kind = 'model.responded' AND COALESCE(json_extract(data, '$.cost_complete'), 0) <> 1),
+			SUM(kind = 'run.started'),
+			SUM(kind = 'run.ended'),
+			MAX(CASE WHEN kind = 'run.ended' THEN time END),
+			MAX(CASE WHEN kind = 'run.ended' THEN json_extract(data, '$.exit_code') END),
+			MAX(CASE WHEN kind = 'run.ended' THEN COALESCE(json_extract(data, '$.error'), '') END),
+			MAX(CASE WHEN kind = 'run.ended' THEN COALESCE(json_extract(data, '$.error_tail'), '') END),
+			COALESCE(MAX(CASE WHEN kind = 'run.ended' THEN json_extract(data, '$.stopped') END), 0),
+			COALESCE(MAX(CASE WHEN kind = 'run.ended' THEN json_extract(data, '$.unsettled') END), 0),
+			MAX(CASE WHEN kind = 'turn.completed' THEN time END),
+			(SELECT json_extract(e2.data, '$.outcome') FROM events e2
+				WHERE e2.turn = events.turn AND e2.session = events.session AND e2.kind = 'turn.completed' AND e2.seq <= ?
+				ORDER BY e2.seq DESC LIMIT 1)
+		FROM events
+		WHERE seq <= ? AND (session, turn) IN (VALUES ` + pairs + `)
+			AND kind IN ('model.responded', 'run.started', 'run.ended', 'turn.completed')
+		GROUP BY session, turn`
+}
+
 // Turns lists the turns that have a turn.started, newest first. A turn is
 // named by the turn id on its events; every turn.started with one is a turn.
 // Events whose turn id has no turn.started, such as a codex conversation the
@@ -144,34 +219,7 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 	// there are several; a request with no exchange takes the first reply after
 	// it that has none either. That is how the cockpit pairs a turn's calls.
 	// t and u carry seqs and short fields only, never a whole event's data.
-	rows, err := s.r.Query(`WITH t AS (
-			SELECT e.seq, e.session, e.turn,
-				(SELECT COUNT(*) FROM events c WHERE c.session = e.session AND c.turn = e.turn
-					AND c.kind = 'model.requested' AND c.seq <= ?) AS calls,
-				(SELECT MAX(c.seq) FROM events c WHERE c.session = e.session AND c.turn = e.turn
-					AND c.kind = 'model.requested' AND c.seq <= ?) AS last_call
-			FROM events e WHERE `+where+` ORDER BY e.seq DESC LIMIT ?
-		), u AS (
-			SELECT t.seq, t.calls, t.last_call,
-				(SELECT p.seq FROM events p
-					WHERE p.session = t.session AND p.turn = t.turn AND p.kind = 'model.responded' AND p.seq <= ?
-					AND CASE WHEN COALESCE(json_extract(q.data, '$.exchange'), '') <> ''
-						THEN json_extract(p.data, '$.exchange') = json_extract(q.data, '$.exchange')
-						ELSE COALESCE(json_extract(p.data, '$.exchange'), '') = '' AND p.seq > q.seq END
-					ORDER BY p.seq LIMIT 1) AS reply
-			FROM t LEFT JOIN events q ON q.seq = t.last_call
-		)
-		SELECT s.seq, s.session, s.turn, s.time,
-			COALESCE(json_extract(s.data, '$.agent'), ''), COALESCE(json_extract(s.data, '$.agent_id'), ''),
-			COALESCE(json_extract(s.data, '$.folder'), ''), COALESCE(json_extract(s.data, '$.idempotency_key'), ''),
-			COALESCE(json_extract(s.data, '$.origin'), ''),
-			u.calls, COALESCE(json_extract(q.data, '$.model'), ''),
-			COALESCE(json_extract(r.data, '$.status'), 0), COALESCE(json_extract(r.data, '$.error'), ''),
-			(SELECT COUNT(*) FROM events n WHERE n.session = s.session AND n.kind = 'turn.started' AND n.turn <> '' AND n.seq <= s.seq)
-		FROM u JOIN events s ON s.seq = u.seq
-			LEFT JOIN events q ON q.seq = u.last_call
-			LEFT JOIN events r ON r.seq = u.reply
-		ORDER BY s.seq DESC`, args...)
+	rows, err := s.r.Query(turnsSQL(where), args...)
 	if err != nil {
 		return list, fmt.Errorf("store: read turns: %w", err)
 	}
@@ -238,41 +286,14 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 	if err != nil {
 		return list, err
 	}
-	ids := make([]any, 0, len(list.Turns)+2)
+	// The page's turns as (session, turn) pairs (turnTotalsSQL).
+	ids := make([]any, 0, 2*len(list.Turns)+2)
 	ids = append(ids, hi, hi)
 	for _, t := range list.Turns {
-		ids = append(ids, t.ID)
+		ids = append(ids, t.Session, t.ID)
 	}
 	marks := strings.TrimSuffix(strings.Repeat("?,", len(list.Turns)), ",")
-	rows, err = s.r.Query(`SELECT session, turn,
-			SUM(kind = 'model.responded' AND COALESCE(json_type(data, '$.usage'), 'null') = 'object'),
-			SUM(kind = 'model.responded' AND COALESCE(json_type(data, '$.usage'), 'null') <> 'object'),
-			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.input_tokens') END), 0),
-			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.output_tokens') END), 0),
-			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_read_tokens') END), 0),
-			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_tokens') END), 0),
-			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_5m_tokens') END), 0),
-			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_1h_tokens') END), 0),
-			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_30m_tokens') END), 0),
-			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.usage.cache_write_12h_tokens') END), 0),
-			COALESCE(MAX(kind = 'model.responded' AND json_extract(data, '$.usage.output_incomplete') = 1), 0),
-			COALESCE(SUM(CASE WHEN kind = 'model.responded' THEN json_extract(data, '$.cost_usd') END), 0),
-			SUM(kind = 'model.responded' AND COALESCE(json_extract(data, '$.cost_complete'), 0) <> 1),
-			SUM(kind = 'run.started'),
-			SUM(kind = 'run.ended'),
-			MAX(CASE WHEN kind = 'run.ended' THEN time END),
-			MAX(CASE WHEN kind = 'run.ended' THEN json_extract(data, '$.exit_code') END),
-			MAX(CASE WHEN kind = 'run.ended' THEN COALESCE(json_extract(data, '$.error'), '') END),
-			MAX(CASE WHEN kind = 'run.ended' THEN COALESCE(json_extract(data, '$.error_tail'), '') END),
-			COALESCE(MAX(CASE WHEN kind = 'run.ended' THEN json_extract(data, '$.stopped') END), 0),
-			COALESCE(MAX(CASE WHEN kind = 'run.ended' THEN json_extract(data, '$.unsettled') END), 0),
-			MAX(CASE WHEN kind = 'turn.completed' THEN time END),
-			(SELECT json_extract(e2.data, '$.outcome') FROM events e2
-				WHERE e2.turn = events.turn AND e2.session = events.session AND e2.kind = 'turn.completed' AND e2.seq <= ?
-				ORDER BY e2.seq DESC LIMIT 1)
-		FROM events
-		WHERE seq <= ? AND turn IN (`+marks+`)
-		GROUP BY session, turn`, ids...)
+	rows, err = s.r.Query(turnTotalsSQL(len(list.Turns)), ids...)
 	if err != nil {
 		return list, fmt.Errorf("store: read turns: %w", err)
 	}

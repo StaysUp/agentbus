@@ -12,12 +12,15 @@ import (
 	"github.com/staysup/agentbus/event"
 )
 
+// eventByIDSQL reads an event by its session, turn and id, through events_id.
+const eventByIDSQL = `SELECT data FROM events WHERE session = ? AND turn = ? AND json_extract(data, '$.id') = ?
+	ORDER BY seq LIMIT 1`
+
 // EventByID reads the event with id of session and turn (turn empty for an
 // event of no turn). found is false when the record holds none.
 func (s *Store) EventByID(session, turn, id string) (e event.Event, found bool, err error) {
 	var data string
-	err = s.r.QueryRow(`SELECT data FROM events WHERE session = ? AND turn = ? AND json_extract(data, '$.id') = ?
-		ORDER BY seq LIMIT 1`, session, turn, id).Scan(&data)
+	err = s.r.QueryRow(eventByIDSQL, session, turn, id).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
 		return e, false, nil
 	}
