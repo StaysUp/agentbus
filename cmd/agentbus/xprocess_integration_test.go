@@ -198,14 +198,7 @@ func (x *xproc) addRunnerVia(server, name string, folders ...string) {
 		"CODEX_HOME="+t.TempDir(),
 	)
 	env = append(env, x.agentEnv...)
-	// The runner runs each session in a home of its own, which keeps only the
-	// variables named in -pass-env: the fake agent's, and those set here.
-	pass := slices.Clone(fakeEnv)
-	for _, kv := range x.agentEnv {
-		k, _, _ := strings.Cut(kv, "=")
-		pass = append(pass, k)
-	}
-	args := []string{"runner", "-server", server, "-name", name, "-pass-env", strings.Join(pass, ",")}
+	args := []string{"runner", "-server", server, "-name", name, "-pass-env", x.fakePassEnv()}
 	for _, f := range folders {
 		args = append(args, "-folder", f)
 	}
@@ -213,6 +206,16 @@ func (x *xproc) addRunnerVia(server, name string, folders ...string) {
 	if len(folders) > 0 {
 		x.waitFolders(len(folders))
 	}
+}
+
+// fakePassEnv allows only fake-agent fixtures and explicitly configured test knobs.
+func (x *xproc) fakePassEnv() string {
+	pass := slices.Clone(fakeEnv)
+	for _, kv := range x.agentEnv {
+		k, _, _ := strings.Cut(kv, "=")
+		pass = append(pass, k)
+	}
+	return strings.Join(pass, ",")
 }
 
 // setAgentEnv adds AGENTBUS_FAKE_* knobs that each later runner passes to its

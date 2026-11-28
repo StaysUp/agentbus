@@ -37,7 +37,7 @@ func TestXProcCloseRebuildPreservesBase(t *testing.T) {
 				"PATH="+fakeDir+string(os.PathListSeparator)+os.Getenv("PATH"),
 				"AGENTBUS_FAKE_AGENT=1", "ANTHROPIC_BASE_URL=", "OPENAI_BASE_URL=", "CODEX_HOME="+t.TempDir())
 			runnerEnv = append(runnerEnv, x.agentEnv...)
-			x.spawn(t, "runner:far", []string{"runner", "-server", x.base, "-name", "far", "-folder", folder, "-replay=false"}, runnerEnv, reRunnerReady)
+			x.spawn(t, "runner:far", []string{"runner", "-server", x.base, "-name", "far", "-folder", folder, "-pass-env", x.fakePassEnv(), "-replay=false"}, runnerEnv, reRunnerReady)
 			x.waitFolders(1)
 			f := x.folders()[0]
 			code, raw := x.post("/api/v0/workspaces", map[string]any{"machine": f.Machine, "folder_ref": f.Ref})
