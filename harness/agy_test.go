@@ -104,14 +104,16 @@ func TestAgyRefuse(t *testing.T) {
 	if got := Unkept(h, Turn{}); len(got) != 0 {
 		t.Errorf("a plain turn unkept = %q", got)
 	}
+	// gemini cannot turn its own off either (TestGeminiRefuse).
 	for _, o := range All() {
-		if o.Info().Name != "agy" && len(Unkept(o, Turn{NoSubagents: true})) != 0 {
+		if n := o.Info().Name; n != "agy" && n != "gemini" && len(Unkept(o, Turn{NoSubagents: true})) != 0 {
 			t.Errorf("%s records subagents as unkept", o.Info().Name)
 		}
 	}
-	// opencode refuses forbid too, for the same reason (TestOpencodeRefuse).
+	// opencode and gemini refuse forbid too, for the same reason
+	// (TestOpencodeRefuse, TestGeminiRefuse).
 	for _, o := range All() {
-		if n := o.Info().Name; n != "agy" && n != "opencode" && o.Refuse(Turn{NoSubagents: true, Forbid: []string{"git push"}}) != "" {
+		if n := o.Info().Name; n != "agy" && n != "opencode" && n != "gemini" && o.Refuse(Turn{NoSubagents: true, Forbid: []string{"git push"}}) != "" {
 			t.Errorf("%s refused", o.Info().Name)
 		}
 	}

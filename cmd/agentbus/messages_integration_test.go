@@ -225,10 +225,10 @@ func TestHarnessesListsFoundVersionsAndSignIn(t *testing.T) {
 			} `json:"access"`
 		} `json:"harnesses"`
 	}
-	if err := json.Unmarshal([]byte(raw), &got); err != nil || len(got.Harnesses) != 4 {
+	if err := json.Unmarshal([]byte(raw), &got); err != nil || len(got.Harnesses) != 5 {
 		t.Fatalf("got %s (%v)", raw, err)
 	}
-	cl, cx, ag, oc := got.Harnesses[0], got.Harnesses[1], got.Harnesses[2], got.Harnesses[3]
+	cl, cx, ag, oc, gm := got.Harnesses[0], got.Harnesses[1], got.Harnesses[2], got.Harnesses[3], got.Harnesses[4]
 	// agy has no sign-in status command: signed_in is left out.
 	if ag.Name != "agy" || ag.Found || ag.SignedIn != nil || len(ag.Access) != 3 || ag.Access[0].Disabled || !ag.Access[1].Disabled || ag.Access[2].Disabled {
 		t.Errorf("agy: %+v", ag)
@@ -245,6 +245,12 @@ func TestHarnessesListsFoundVersionsAndSignIn(t *testing.T) {
 		oc.Access[0].Kind != "subscription" || !oc.Access[0].Disabled || oc.Access[1].Kind != "openrouter" || oc.Access[1].Disabled ||
 		oc.Access[2].Kind != "xai" || oc.Access[2].Disabled {
 		t.Errorf("opencode: %+v", oc)
+	}
+	// gemini runs on a Gemini API key only: its Google sign-in and
+	// OpenRouter are listed, disabled.
+	if gm.Name != "gemini" || gm.Disabled || gm.Found || gm.SignedIn != nil || len(gm.Access) != 3 ||
+		!gm.Access[0].Disabled || !gm.Access[1].Disabled || gm.Access[2].Kind != "api" || gm.Access[2].Disabled {
+		t.Errorf("gemini: %+v", gm)
 	}
 	if len(cl.Access) != 3 || cl.Access[0].Kind != "subscription" || cl.Access[1].Kind != "openrouter" ||
 		cl.Access[2].Kind != "api" || cl.Access[2].Disabled || cl.Access[0].Disabled || cl.Access[1].Disabled {

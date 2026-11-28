@@ -78,6 +78,9 @@ func runWire(getenv func(string) string, environ func() []string, lookPath func(
 				return engine.Launch{}, engine.Refused(http.StatusBadRequest, "an agent on an API key runs only where control adds its key; run it on agentbus up or a runner")
 			}
 			env, pre = h.WireAPI(harness.APIWire{Base: baseURL + apiKeyPrefix(agent), Placeholder: acc.Placeholder, Model: acc.Model})
+			if f, ok := h.(harness.KeyHome); ok {
+				files = f.APIHome()
+			}
 		case acc.Kind == "" || acc.Kind == harness.Subscription:
 			env, pre = h.Wire(baseURL)
 		case acc.Kind == harness.OpenRouter:

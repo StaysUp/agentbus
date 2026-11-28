@@ -21,7 +21,7 @@ func TestCompactionDefaultsAndSource(t *testing.T) {
 		source  string
 	}{
 		{"opencode", 0.85, SourceVendor},
-		{"gemini", 0.70, SourceVendor},
+		{"gemini", 0.50, SourceVendor},
 		{"claude", 0.80, SourceDefault},
 		{"codex", 0.80, SourceDefault},
 	} {

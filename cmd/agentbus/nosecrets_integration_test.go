@@ -109,7 +109,8 @@ func startNoSecrets(t *testing.T) *noSecretsSetup {
 	t.Setenv("OPENAI_BASE_URL", "")
 	t.Setenv("AB_TEST_OR_KEY", "") // in this process only the server's getenv has it
 	ns := &noSecretsSetup{anth: newFakeVendor(t), or: newFakeVendor(t), chat: newFakeVendor(t), cc: newFakeVendor(t), serverHome: t.TempDir(),
-		keyed: map[string]*fakeVendor{"claude": newFakeVendor(t), "codex": newFakeVendor(t), "agy": newFakeVendor(t)}}
+		keyed: map[string]*fakeVendor{"claude": newFakeVendor(t), "codex": newFakeVendor(t), "agy": newFakeVendor(t),
+			"gemini": newFakeVendor(t)}}
 	apiKeys := map[string]*url.URL{}
 	for h, v := range ns.keyed {
 		apiKeys[h] = mustURL(v.URL)

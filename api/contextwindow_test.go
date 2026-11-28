@@ -92,10 +92,14 @@ func TestContextWindow(t *testing.T) {
 		t.Errorf("haiku-4-5 window = %d, want 200000", w.WindowTokens)
 	}
 
-	// Gemini is 1M.
+	// Gemini is 1M. The Gemini CLI's point is read from its own source
+	// (settings/context.go), labelled vendor.
 	w = a.contextWindow("gemini-3-pro", "gemini", 100000)
 	if w.WindowTokens != 1000000 || w.PercentFull != 10 {
 		t.Errorf("gemini window/percent = %d/%d, want 1000000/10", w.WindowTokens, w.PercentFull)
+	}
+	if w.CompactionPoint != 0.5 || w.CompactionPct != 50 || w.CompactionSource != "vendor" || !w.CompactionIsDefault {
+		t.Errorf("gemini compaction = %v/%d/%s/default=%v, want 0.5/50/vendor/true", w.CompactionPoint, w.CompactionPct, w.CompactionSource, w.CompactionIsDefault)
 	}
 }
 

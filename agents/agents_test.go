@@ -120,7 +120,11 @@ func TestCheckRefuses(t *testing.T) {
 		// opencode runs on an OpenRouter key only.
 		{Fields{Name: "x", Harness: "opencode", Access: Subscription}, "cannot use access subscription"},
 		{Fields{Name: "x", Harness: "opencode", Access: API}, "cannot use access api"},
-		{Fields{Name: "x", Harness: "gemini", Access: Subscription}, "harness must be"},
+		// gemini runs on a Gemini API key only: its Google sign-in cannot
+		// be connected yet.
+		{Fields{Name: "x", Harness: "gemini", Access: Subscription}, "cannot use access subscription"},
+		{Fields{Name: "x", Harness: "gemini", Access: OpenRouter, Model: "m"}, "cannot use access openrouter"},
+		{Fields{Name: "x", Harness: "goose", Access: Subscription}, "harness must be"},
 		{Fields{Name: "x", Harness: "agy", Access: OpenRouter, Model: "m"}, "cannot use access openrouter"},
 		{Fields{Name: "x", Harness: Claude, Access: API, KeyEnv: "ANTHROPIC_API_KEY"}, "for openrouter agents only"},
 		{Fields{Name: "x", Harness: Claude, Access: "local"}, "access must be"},
@@ -144,7 +148,7 @@ func TestCheckRefuses(t *testing.T) {
 	}
 	// Every harness takes access api, with a model or without; the key is
 	// the one set in Settings, so no variable is filled in.
-	for _, h := range []string{Claude, Codex, "agy"} {
+	for _, h := range []string{Claude, Codex, "agy", "gemini"} {
 		for _, m := range []string{"", "some-model"} {
 			f := Fields{Name: "x", Harness: h, Access: API, Model: m}
 			if got := Check(&f); got != "" || f.KeyEnv != "" {
@@ -206,9 +210,12 @@ func TestStarters(t *testing.T) {
 			t.Fatalf("a turn naming %s: %+v %v", h, a, err)
 		}
 	}
-	// opencode offers no subscription, so it has no default to fall back on.
-	if a, err := s.Resolve("opencode"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("a turn naming opencode: %+v %v", a, err)
+	// opencode and gemini offer no subscription, so they have no default to
+	// fall back on.
+	for _, h := range []string{"opencode", "gemini"} {
+		if a, err := s.Resolve(h); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("a turn naming %s: %+v %v", h, a, err)
+		}
 	}
 }
 

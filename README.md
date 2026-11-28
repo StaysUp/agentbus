@@ -18,7 +18,8 @@
 [![AgentBus 0.6.7: Claude Code builds a change in a copy of your folder, Codex reviews it, and the fix waits in Changes until you Apply. Click to watch the 1-minute demo.](docs/assets/cockpit-067.png)](https://github.com/StaysUp/agentbus/releases/tag/v0.6.7)
 
 AgentBus sits between your coding agents and every model vendor. It runs the agents you already
-have (Claude Code, Codex, Antigravity, OpenCode or any OpenRouter model) and tracks every step.
+have (Claude Code, Codex, Antigravity, OpenCode, the Gemini CLI or any OpenRouter model) and tracks
+every step.
 
 - **Your agents work together.** Claude can ask Codex, or any agent from any vendor, to answer a
   question, take on a task or check its work. The answer comes back into the same session.
@@ -33,7 +34,8 @@ have (Claude Code, Codex, Antigravity, OpenCode or any OpenRouter model) and tra
 
 ## Install
 
-You need macOS or Linux, and `claude`, `codex`, `agy` or `opencode` installed. Use **one** of these:
+You need macOS or Linux, and `claude`, `codex`, `agy`, `opencode` or `gemini` installed. Use **one**
+of these:
 
 **Install script** (puts the binary in `~/.local/bin`):
 
@@ -116,18 +118,19 @@ vendor sign-in goes through Connect.
 
 An agent can also use an API key instead of a subscription. Paste the key once in Settings,
 Subscriptions: an OpenRouter key for any OpenRouter model, or the vendor's own key (Anthropic for
-Claude Code, OpenAI for Codex, Gemini for Antigravity). AgentBus keeps it, adds it only to that
-vendor's model calls, and never shows it again or gives it to an agent. **Replace** and **Remove**
-change it.
+Claude Code, OpenAI for Codex, Gemini for Antigravity and the Gemini CLI). AgentBus keeps it, adds it
+only to that vendor's model calls, and never shows it again or gives it to an agent. **Replace** and
+**Remove** change it.
 
 An agent reaches its model in one of three ways, its **access**:
 
 - `subscription`: the subscription connected in Settings. The model is optional.
 - `openrouter`: an OpenRouter key. The model is required and is written in OpenRouter's naming.
 - `api`: the vendor's own API key set in Settings (Anthropic for Claude Code, OpenAI for Codex, Gemini
-  for Antigravity). The model is optional.
+  for Antigravity and the Gemini CLI). The model is optional.
 
-OpenCode (`npm install -g opencode-ai`) runs on `openrouter` only.
+OpenCode (`npm install -g opencode-ai`) runs on `openrouter` only. The Gemini CLI
+(`npm install -g @google/gemini-cli`) runs on `api` only, with the same Gemini API key as Antigravity.
 
 ### Use any model
 
@@ -268,6 +271,13 @@ with `agentbus runner -capacity N`.
   its sessions continue by its own resume. A turn with forbidden or asked commands set is refused on
   it, and a command on none of the lists is refused rather than held for you. In a folder below the
   root of a git repository it runs without edits, since OpenCode would edit the whole repository.
+- The Gemini CLI runs on a Gemini API key only; its Google sign-in cannot be connected in Settings
+  yet. It gets no instructions and no AgentBus tools from AgentBus (it reaches the API through
+  `agentbus-api`), and its sessions continue by its own resume. A turn with forbidden or asked
+  commands set is refused on it, a command on none of the lists is refused rather than held for
+  you, and it cannot turn off its own subagents. AgentBus writes the session home's
+  `~/.gemini/settings.json` to select the API key, so leave that file out of Home files for it. In
+  a folder that holds AgentBus's data folder it runs without edits.
 
 ## Docs
 
