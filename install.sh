@@ -40,6 +40,20 @@ dir="${AGENTBUS_INSTALL_DIR:-$HOME/.local/bin}"
 say() { printf '%s\n' "$*"; }
 fail() { printf 'agentbus install: %s\n' "$*" >&2; exit 1; }
 
+# release_os prints the release's name for a system, from uname -s. A
+# Windows shell (Git Bash, MSYS2, Cygwin) is sent to WSL2, where agentbus
+# runs as on Linux.
+release_os() {
+  case "$1" in
+    Darwin) say darwin ;;
+    Linux) say linux ;;
+    MINGW* | MSYS* | CYGWIN*)
+      fail "Windows is not supported directly ($1). Install WSL2 with Ubuntu (in PowerShell: wsl --install -d Ubuntu-24.04), then run this install inside Ubuntu"
+      ;;
+    *) fail "unsupported system $1; macOS and Linux only" ;;
+  esac
+}
+
 # path_hint prints the line to add for this user's shell. It only prints:
 # install.sh never edits a profile file.
 path_hint() {
@@ -252,11 +266,7 @@ fi
 command -v curl >/dev/null 2>&1 || fail "curl is needed"
 command -v tar >/dev/null 2>&1 || fail "tar is needed"
 
-case "$(uname -s)" in
-  Darwin) os=darwin ;;
-  Linux) os=linux ;;
-  *) fail "unsupported system $(uname -s); macOS and Linux only" ;;
-esac
+os=$(release_os "$(uname -s)")
 
 # Where AppArmor restricts user namespaces, the wall needs a profile, and a
 # profile is given only to a binary only root can change: as root, the

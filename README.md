@@ -33,7 +33,7 @@ have (Claude Code, Codex, Antigravity, OpenCode or any OpenRouter model) and tra
 
 ## Install
 
-You need macOS or Linux, and `claude`, `codex`, `agy` or `opencode` installed. Use **one** of these:
+You need macOS or Linux (on Windows, WSL2: see [Windows](#windows-wsl2) below), and `claude`, `codex`, `agy` or `opencode` installed. Use **one** of these:
 
 **Install script** (puts the binary in `~/.local/bin`):
 
@@ -58,6 +58,20 @@ A source build has no cockpit. Use the install script or Homebrew to follow the 
 The install script takes `AGENTBUS_INSTALL_DIR` (another folder) and `AGENTBUS_VERSION` (another
 release). Check the install with `agentbus version`. If `~/.local/bin` is not on your PATH, the
 script prints the exact line to add for your shell (zsh, bash or fish); it never edits a profile.
+
+### Windows (WSL2)
+
+AgentBus runs on Windows inside WSL2, as on Linux. Run in Git Bash, MSYS2 or Cygwin, the install
+script stops and says to use WSL2.
+
+1. In PowerShell: `wsl --install -d Ubuntu-24.04`. If it stops with `HCS_E_HYPERV_NOT_INSTALLED`,
+   turn on virtualization (Intel VT-x or AMD-V) in the BIOS, run `wsl --install --no-distribution`
+   once, restart and try again.
+2. In Ubuntu, work from your Linux home folder (`cd ~`), not from `/mnt/c`: a shell started from
+   PowerShell begins in your Windows folder.
+3. Install with the install script above, and add `~/.local/bin` to your PATH as it says.
+4. Start `agentbus up` and paste the printed link into your Windows browser: `127.0.0.1` reaches WSL2
+   from Windows.
 
 ## Quickstart
 
