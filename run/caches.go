@@ -8,49 +8,72 @@ import (
 	"sync"
 )
 
-// copyCaches are the cache and temp folders a Copy turn's commands may write
-// besides the copy (harness.Copy.Write), from the host environment env: the
-// person's own cache folder, where Go's build cache, pip and Homebrew keep
-// theirs, and on macOS the per-user cache and temp folders under /var/folders.
-// The Keychain writes its Module Directory Service files in the cache one
-// (…/C/mds): with it read-only, "security list-keychains" fails with "A
-// Module Directory Service error has occurred" and gh reads no token. mktemp
-// writes in the temp one (…/T) when TMPDIR names it. Both seen in a Copy
-// session, 2026-11-27, Claude Code 2.1.332.
-func copyCaches(env []string) []string {
-	var dirs []string
-	add := func(d string) {
-		if d != "" && filepath.IsAbs(d) {
-			d = filepath.Clean(d)
-			for _, have := range dirs {
-				if have == d {
-					return
-				}
-			}
-			dirs = append(dirs, d)
+// The cache rule of a Copy turn, in one place (copyCache), so the one wall of
+// 0.6.9 can take it over whole.
+//
+// A Copy turn's commands write the copy and the session's own cache folder,
+// never the person's own cache folders. A write to ~/.cache, ~/Library/Caches
+// or XDG_CACHE_HOME lands outside the copy, where review and Discard never see
+// it, and those folders hold programs that run later with no sandbox (uv's
+// tool binaries, Go's build cache). So until 0.6.8 a Copy turn could plant
+// code that ran outside its sandbox (reported privately 2026-11-28; the grant
+// came with 0.6.7). The session's own cache is in its workspace's state
+// (isolation.CacheDir) and goes when the workspace closes.
+
+// cacheEnv are the variables that point a build or a package tool at its
+// cache, each set to a folder of the session's own cache. The XDG one covers
+// every tool that follows it (uv, pip, pre-commit, and Go's GOCACHE off
+// macOS); the rest name the tools whose macOS default is ~/Library/Caches,
+// or that read no XDG variable.
+var cacheEnv = [][2]string{
+	{"XDG_CACHE_HOME", ""},
+	{"GOCACHE", "go-build"},
+	{"UV_CACHE_DIR", "uv"},
+	{"PIP_CACHE_DIR", "pip"},
+	{"HOMEBREW_CACHE", "Homebrew"},
+	{"npm_config_cache", "npm"},
+}
+
+// copyCache is what a Copy turn may write besides its copy, and the
+// variables that send its tools' caches there: own, the session's own cache
+// folder ("" when the workspace has none, and then no cache is writable), and
+// the system folders a command cannot work without (system).
+func copyCache(own string, system []string) (write, env []string) {
+	if own != "" {
+		write = append(write, own)
+		for _, v := range cacheEnv {
+			env = append(env, v[0]+"="+filepath.Join(own, v[1]))
 		}
 	}
-	home := lastEnv(env, "HOME")
-	switch runtime.GOOS {
-	case "darwin":
-		if home != "" {
-			add(filepath.Join(home, "Library", "Caches"))
+	return append(write, system...), env
+}
+
+// systemDirs are the folders a Copy turn's commands must write and that no
+// variable can move: on macOS the
+// Keychain's Module Directory Service files under the per-user cache folder
+// (…/C/mds; with them read-only, "security list-keychains" fails with "A
+// Module Directory Service error has occurred" and gh reads no token) and the
+// per-user temp folder (…/T), which mktemp writes when TMPDIR names it. Both
+// seen in a Copy session, 2026-11-27, Claude Code 2.1.332. Elsewhere none.
+func systemDirs() []string {
+	if runtime.GOOS != "darwin" {
+		return nil
+	}
+	var dirs []string
+	for i, d := range userDirs() {
+		if d = filepath.Clean(d); !filepath.IsAbs(d) {
+			continue
 		}
-		for _, d := range userDirs() {
-			add(d)
+		if i == 0 {
+			d = filepath.Join(d, "mds")
 		}
-	default:
-		if x := lastEnv(env, "XDG_CACHE_HOME"); x != "" {
-			add(x)
-		} else if home != "" {
-			add(filepath.Join(home, ".cache"))
-		}
+		dirs = append(dirs, d)
 	}
 	return dirs
 }
 
-// userDirs are macOS's per-user cache and temp folders; a unit test swaps
-// it, since the real one starts getconf.
+// userDirs are macOS's per-user cache and temp folders, in that order; a
+// unit test swaps it, since the real one starts getconf.
 var userDirs = darwinUserDirs
 
 var (
@@ -60,27 +83,19 @@ var (
 
 // darwinUserDirs are macOS's per-user cache and temp folders (confstr
 // _CS_DARWIN_USER_CACHE_DIR and _CS_DARWIN_USER_TEMP_DIR), read once from
-// getconf: Go has no confstr.
+// getconf: Go has no confstr. Both or none, so the order holds.
 func darwinUserDirs() []string {
 	darwinDirsOnce.Do(func() {
+		var ds []string
 		for _, name := range []string{"DARWIN_USER_CACHE_DIR", "DARWIN_USER_TEMP_DIR"} {
-			if out, err := exec.Command("/usr/bin/getconf", name).Output(); err == nil {
-				if d := strings.TrimSpace(string(out)); d != "" {
-					darwinDirs = append(darwinDirs, d)
-				}
+			out, err := exec.Command("/usr/bin/getconf", name).Output()
+			d := strings.TrimSpace(string(out))
+			if err != nil || d == "" {
+				return
 			}
+			ds = append(ds, d)
 		}
+		darwinDirs = ds
 	})
 	return darwinDirs
-}
-
-// lastEnv is the value of key in env (the last one wins, as for exec), or "".
-func lastEnv(env []string, key string) string {
-	v := ""
-	for _, kv := range env {
-		if k, val, ok := strings.Cut(kv, "="); ok && k == key {
-			v = val
-		}
-	}
-	return v
 }

@@ -1301,6 +1301,11 @@ func (r *Runner) request(ctx context.Context, at *attempt) run.Request {
 	}
 	if w != nil && (w.Kind == queue.WorkspaceCopy || w.Kind == queue.WorkspaceWorktree) {
 		req.Copy = true
+		// Its commands keep their caches in the workspace's own state, which
+		// Close removes, never in the person's cache folders.
+		if at.space != nil {
+			req.Cache = isolation.CacheDir(at.space)
+		}
 	}
 	// The agent's token for the API is control's: a runner of a server's
 	// always, and in up too. Its model calls carry the stand-in, not the token.

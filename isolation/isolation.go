@@ -433,6 +433,15 @@ func stateDir(workdir, id string) string { return filepath.Join(workdir, stateFo
 
 func (s *Space) state() string { return stateDir(s.Workdir, s.ID) }
 
+// cacheFolder is the session's own cache folder in a space's state.
+const cacheFolder = "cache"
+
+// CacheDir is s's own cache folder, in its state: a Copy turn's commands keep
+// their build and package caches there instead of the person's (run's
+// copyCache). Close removes it with the rest of the state. The folder is made
+// by the turn that uses it.
+func CacheDir(s *Space) string { return filepath.Join(s.state(), cacheFolder) }
+
 // Load finds the space whose copy holds dir, a folder at or inside a copy
 // under workdir, as a session's workspace names it. A folder with no space
 // record, such as a worktree made before this package kept one, is

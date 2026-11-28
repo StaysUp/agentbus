@@ -202,10 +202,11 @@ type Config struct {
 	AgentName func(id string) string
 	// Now is the clock. Nil means time.Now.
 	Now func() time.Time
-	// Caches are the cache folders a Copy turn's commands may write, from the
-	// host environment. Nil means copyCaches, the person's own; a test sets a
-	// fixed list, since the real one differs per system.
-	Caches func(env []string) []string
+	// SystemDirs are the system folders a Copy turn's commands may write
+	// besides the copy and the session's own cache (systemDirs). Nil means
+	// systemDirs; a test sets a fixed list, since the real one differs per
+	// system.
+	SystemDirs func() []string
 	// Logf writes one line to the service log: a child starting and exiting.
 	// It is never given a token, a prompt or the child's output.
 	Logf func(format string, args ...any)
@@ -240,8 +241,8 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
-	if cfg.Caches == nil {
-		cfg.Caches = copyCaches
+	if cfg.SystemDirs == nil {
+		cfg.SystemDirs = systemDirs
 	}
 	// The engine counts no turns: control counts each lane's places
 	// (queue/lanes.go), and a runner starts every job it takes. A session
@@ -308,6 +309,11 @@ type Request struct {
 	// commands are walled to the copy. Stamped on the job from the workspace
 	// record (the runner reads the workspace kind); the engine never derives it.
 	Copy bool
+	// Cache is a Copy turn's own cache folder, in its workspace's state on
+	// the runner (isolation.CacheDir), made at the turn's start if it is not
+	// there. Its commands write their caches there and never the person's
+	// (copyCache). "" gives a Copy turn no writable cache.
+	Cache string
 	// AgentID, Access and KeyEnv: the saved agent and how it reaches its
 	// model (Access). Every turn needs Harness, a next one too (NoAgent):
 	// with Session, the turn runs on that agent in the session's folder.
@@ -461,7 +467,7 @@ func (e *Engine) Start(req Request) (*Turn, error) {
 	if model == "" {
 		model = req.AgentModel
 	}
-	return e.start(turn{harness: req.Harness, folder: req.Folder, folderRef: req.FolderRef, workspace: req.Workspace, copy: req.Copy, session: id, id: req.Turn,
+	return e.start(turn{harness: req.Harness, folder: req.Folder, folderRef: req.FolderRef, workspace: req.Workspace, copy: req.Copy, cache: req.Cache, session: id, id: req.Turn,
 		model: model, prompt: req.Prompt, key: req.IdempotencyKey,
 		agentID: req.AgentID, access: req.Access, keyEnv: req.KeyEnv, origin: req.Origin, root: req.Root, depth: req.Depth,
 		token: req.Token, apiURL: req.APIURL, standIn: req.StandIn, signin: req.Signin, allowOnce: req.AllowOnce, recorded: req.Recorded,
@@ -613,7 +619,7 @@ func (e *Engine) next(req Request) (*Turn, error) {
 		return fail(refuse(http.StatusBadRequest, "folder is not this session's folder "+strconv.Quote(c.Folder)+
 			"; leave folder out to use the session's"))
 	}
-	t := turn{harness: agent, folder: c.Folder, folderRef: c.FolderRef, workspace: req.Workspace, copy: req.Copy, session: session, id: req.Turn, resumeID: c.ResumeID, replayFrom: from,
+	t := turn{harness: agent, folder: c.Folder, folderRef: c.FolderRef, workspace: req.Workspace, copy: req.Copy, cache: req.Cache, session: session, id: req.Turn, resumeID: c.ResumeID, replayFrom: from,
 		recoveredFrom: recovered, recoveredWhy: recoveredWhy, continuity: continuity, model: model,
 		prompt: req.Prompt, context: context, key: req.IdempotencyKey,
 		agentID: agentID, access: access, keyEnv: keyEnv, origin: req.Origin, root: req.Root, depth: req.Depth,
@@ -681,6 +687,7 @@ type turn struct {
 	harness, folder, session string
 	workspace                string // the workspace the turn runs in; stored on turn.started
 	copy                     bool   // Copy mode: the folder is a sandbox copy, commands walled to it
+	cache                    string // Copy mode: the session's own cache folder (Request.Cache)
 	folderRef                string // the person's folder, by its reference
 	id                       string // the turn id
 	resumeID                 string // a next turn by resume: the conversation it continues; empty for a first
@@ -933,9 +940,19 @@ func (e *Engine) start(t turn) (*Turn, error) {
 				deny = append(deny, f)
 			}
 		}
-		// The person's cache folders are writable too, as the README promises
-		// (copyCaches): a build keeps its cache, and the Keychain its MDS files.
-		spec.Copy = harness.Copy{Dir: t.folder, Write: e.cfg.Caches(hostEnv), DenyRead: deny, Hosts: hosts}
+		// Besides the copy, its commands write the session's own cache, with
+		// every tool's cache variable pointed there, and the few system folders
+		// they cannot work without; never the person's own cache folders
+		// (copyCache).
+		if t.cache != "" {
+			if err := os.MkdirAll(t.cache, 0o700); err != nil {
+				e.cfg.Logf("run.refused agent=%s reason=cache_folder", t.harness)
+				return nil, refuse(http.StatusInternalServerError, "the session's own cache folder could not be made")
+			}
+		}
+		write, cacheVars := copyCache(t.cache, e.cfg.SystemDirs())
+		cmd.Env = setEnv(cmd.Env, cacheVars)
+		spec.Copy = harness.Copy{Dir: t.folder, Write: write, DenyRead: deny, Hosts: hosts}
 		// The whole-process wall was skipped, so the turn is not Walled: a
 		// harness must not also turn its own sandbox off (harness.Turn.Walled).
 		spec.Walled = false

@@ -153,7 +153,8 @@ and read what they reply.
 When you start a session you pick how it runs. The choice is remembered.
 
 - **Copy (default).** The session works in its own copy of your folder. The agent's commands write
-  only inside the copy, plus temporary files and package caches; reads across your disk stay open.
+  only inside the copy, plus temporary files and the session's own package and build caches, never
+  your own cache folders. Closing the session removes its caches. Reads across your disk stay open.
   The network works as normal. For Claude Code it is a list of hosts, and Docker and other local
   services need a Direct session; [Limits](#limits) says why. Several sessions can work on the
   same code without stepping on each other.
@@ -240,6 +241,10 @@ with `agentbus runner -capacity N`.
   mount would let a command write outside the copy, so the copy allows no local sockets: Docker's,
   Lima's and ssh-agent's are closed too. `limactl start` also writes under `~/.lima`, outside the
   copy.
+- **A Copy session's caches start empty.** Go, pip, uv, npm and Homebrew keep their caches in the
+  session's own folder, so its first build or install downloads and compiles again. Go's module
+  cache (`~/go/pkg/mod`) is read as it is and not written. On a Mac the Keychain's own files and
+  the per-user temporary folder under `/var/folders` stay writable: `gh` and `mktemp` need them.
 - Socket grants in your own managed or MDM settings, and socket paths in your user settings, still
   apply in a Copy session. This closes in 0.6.8.
 - Codex's Copy network is truly open. Antigravity and OpenCode have no command sandbox of their own

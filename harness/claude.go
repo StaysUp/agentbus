@@ -282,7 +282,7 @@ func (claude) Args(t Turn) []string {
 	a := []string{"-p", "--output-format", "json"}
 	// Copy mode: Claude Code's own per-command sandbox, as a second --settings
 	// the engine folds into the gateway one (CombineSettings). Writes fenced to
-	// the copy and the caches, the login file hidden, the network an allow-list,
+	// the copy and the session's own cache, the login file hidden, the network an allow-list,
 	// no Unix socket.
 	if t.Copy.Dir != "" {
 		sb, _ := json.Marshal(map[string]any{"sandbox": claudeSandboxBlock(t.Copy.Dir, t.Copy.Write, t.Copy.DenyRead, t.Copy.Hosts)})
@@ -423,8 +423,8 @@ var claudeCopyDomains = []string{
 }
 
 // claudeSandboxBlock is Claude Code's "sandbox" settings for a Copy turn: writes
-// fenced to the copy plus the extra writable paths (the per-run temp and tool
-// caches), reads open across the disk except denyRead (the CLI's own login
+// fenced to the copy plus the extra writable paths (the session's own cache and
+// the system folders a command needs), reads open across the disk except denyRead (the CLI's own login
 // file, so Connect's stand-in is used), the network as open as srt allows
 // (claudeCopyDomains plus hosts, e.g. the gateway, with localhost through
 // allowLocalBinding and Go's TLS through trustd), and no Unix socket: Docker's

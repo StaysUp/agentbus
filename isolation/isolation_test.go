@@ -479,3 +479,38 @@ func TestCheckpointRootIsTheSnapshotID(t *testing.T) {
 		t.Fatalf("read back: %+v %v", list, err)
 	}
 }
+
+// A Copy session's own cache (CacheDir) is in its space's state, outside the
+// copy: what a build keeps there is never a change of the session, and Close
+// removes it with the rest, read-only folders too (Go's module cache makes
+// them).
+func TestCacheDirGoesWithClose(t *testing.T) {
+	src := t.TempDir()
+	fixture(t, src, map[string]string{"a.txt": "a1"})
+	b, s := open(t, Copy, src)
+	c := CacheDir(s)
+	if rel, err := filepath.Rel(s.state(), c); err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		t.Fatalf("CacheDir %s is not inside the space's state %s", c, s.state())
+	}
+	if rel, err := filepath.Rel(s.Root, c); err == nil && !strings.HasPrefix(rel, "..") {
+		t.Fatalf("CacheDir %s is inside the copy %s", c, s.Root)
+	}
+	if err := os.MkdirAll(filepath.Join(c, "go-build", "ro"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	fixture(t, c, map[string]string{"go-build/ro/x": "x"})
+	os.Chmod(filepath.Join(c, "go-build", "ro"), 0o555)
+	cp, err := b.Checkpoint(s, "t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch, err := b.Diff(s, Base, cp.Name); err != nil || len(ch.Files) != 0 {
+		t.Fatalf("the cache showed up as changes: %+v %v", ch.Files, err)
+	}
+	if err := Close(s); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(c); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the cache %s is left after Close: %v", c, err)
+	}
+}
