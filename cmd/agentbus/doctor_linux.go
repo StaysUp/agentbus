@@ -24,6 +24,11 @@ func copyWay(home string) finding {
 	if why == "" {
 		return finding{statusOK, "Copy mounts an overlay for each session"}
 	}
+	// AppArmor's advice, when the namespace was refused for it, ends the
+	// reason; the AppArmor line gives it once.
+	if advice := netjail.AppArmorAdvice(); advice != "" {
+		why = strings.TrimSuffix(why, advice)
+	}
 	var st unix.Statfs_t
 	then := "a plain copy of each file"
 	if unix.Statfs(existingDir(home), &st) == nil {

@@ -15,8 +15,10 @@ import (
 
 // The command itself, as a person runs it: on Linux it starts itself again
 // in a user namespace, as up does, and says nothing of that on stderr. It
-// answers within a second, fails on the variable that would make claude's
+// fails on the variable that would make claude's
 // turns refuse, and leaves nothing beside the data folder it did not make.
+// The bound on its time is loose, for -race on a busy machine: it catches
+// a doctor that waits on something, not a slow one.
 func TestDoctorProcess(t *testing.T) {
 	bin := agentbusBinary(t)
 	path := t.TempDir()
@@ -48,7 +50,7 @@ func TestDoctorProcess(t *testing.T) {
 			t.Errorf("no %q in:\n%s", want, out.String())
 		}
 	}
-	if took > time.Second {
+	if took > 10*time.Second {
 		t.Errorf("doctor took %v", took)
 	}
 	if entries, _ := os.ReadDir(parent); len(entries) != 0 {

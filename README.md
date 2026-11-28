@@ -62,7 +62,8 @@ script prints the exact line to add for your shell (zsh, bash or fish); it never
 Before the first run, `agentbus doctor` checks the machine: the agents on your PATH, your
 subscriptions and keys, how Copy copies a folder here, free disk, a variable such as
 `ANTHROPIC_BASE_URL` that would get in the way, and the cockpit. Each failed check says how to fix
-it. It needs no service running.
+it. It needs no service running. On a runner's machine (after `agentbus login`) it leaves the
+subscriptions and keys to control, where they are kept.
 
 ## Quickstart
 

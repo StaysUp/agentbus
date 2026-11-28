@@ -108,7 +108,12 @@ func (d doctor) findings() []finding {
 		out = append(out, finding{statusFail, "no agent is installed: install " + harness.NameList() +
 			", then start agentbus from a shell where it runs"})
 	}
-	out = append(out, d.signins(installed)...)
+	if d.runnerFolder() {
+		out = append(out, finding{statusNote, "this is a runner's data folder (agentbus login), so its subscriptions and keys " +
+			"are control's: check them " + connectWhere + " on control"})
+	} else {
+		out = append(out, d.signins(installed)...)
+	}
 	out = append(out, d.endpoints(installed)...)
 	out = append(out, d.copyWay(d.home))
 	if d.appArmor != nil {
@@ -120,10 +125,19 @@ func (d doctor) findings() []finding {
 	if d.packed {
 		out = append(out, finding{statusOK, "the cockpit is packed in"})
 	} else {
-		out = append(out, finding{statusFail, "the cockpit is not packed in this build: install a release " +
-			"(brew install staysup/tap/agentbus, or the install script in the README), or from a clone run tools/pack-cockpit.sh, then go build"})
+		out = append(out, finding{statusFail, "the cockpit is not packed in this build: " + packCockpit})
 	}
 	return out
+}
+
+// runnerFolder says the data folder is a runner's, as agentbus login made
+// it: it holds the runner's identity and no jobs.db. Its turns sign in with
+// what is connected on control, not here.
+func (d doctor) runnerFolder() bool {
+	if _, err := os.Stat(filepath.Join(d.home, "jobs.db")); err == nil {
+		return false
+	}
+	return signedIn(d.home)
 }
 
 // connectWhere is where the person connects a subscription or sets a key.
@@ -132,7 +146,8 @@ const connectWhere = "in the cockpit's Settings, Subscriptions"
 // signins are the subscriptions connected on this machine's control and the
 // keys set there: one line for each harness that has a subscription and is
 // installed or connected, one for the keys, and a fail when a turn would
-// have nothing to sign in with.
+// have nothing to sign in with. A subscription counts only for a harness
+// installed here.
 func (d doctor) signins(installed map[string]bool) []finding {
 	subs := subscriptionStore(d.home)
 	subs.Now = d.now
@@ -149,7 +164,11 @@ func (d doctor) signins(installed map[string]bool) []finding {
 			out = append(out, finding{statusFail, "the " + i.Name + " subscription cannot be read (" +
 				strings.TrimPrefix(err.Error(), "credentials: ") + "): connect it again " + connectWhere})
 		case st.Expired:
-			out = append(out, finding{statusFail, "the " + i.Name + " subscription cannot be used: " + st.Error + " " + connectWhere})
+			why := strings.TrimSuffix(st.Error, ": connect again")
+			out = append(out, finding{statusFail, "the " + i.Name + " subscription cannot be used (" + why + "): connect it again " + connectWhere})
+		case st.Connected && !installed[i.Name]:
+			out = append(out, finding{statusNote, "the " + i.Name + " subscription is connected, but " + i.Name +
+				" is not on PATH, so no turn uses it here"})
 		case st.Connected:
 			usable++
 			when := "control renews it"

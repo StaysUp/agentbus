@@ -1900,8 +1900,12 @@ func freshFolder(home string) bool {
 // notPackedLine is what a source build prints instead of a sign-in link.
 // Release binaries pack the cockpit; go install and go build do not.
 func notPackedLine(listen string) string {
-	return "The cockpit is not packed in this build. Install a release to get it (brew install staysup/tap/agentbus, or the install script in the README), or from a clone run tools/pack-cockpit.sh. The API's docs: http://" + linkHost(listen) + "/docs"
+	return "The cockpit is not packed in this build: " + packCockpit + ". The API's docs: http://" + linkHost(listen) + "/docs"
 }
+
+// packCockpit is how a source build gets the cockpit, for up and doctor.
+const packCockpit = "install a release to get it (brew install staysup/tap/agentbus, or the install script in the README), " +
+	"or from a clone run tools/pack-cockpit.sh, then go build"
 
 // dataFolderLine is what agentbus up says about its data folder when it
 // starts: which one, and whether it is new or what an earlier run left in

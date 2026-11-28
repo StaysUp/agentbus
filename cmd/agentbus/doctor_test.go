@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/staysup/agentbus/credentials"
+	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/runner"
 )
 
 // fakeDoctor is a doctor over home where only the programs in onPath are
@@ -103,7 +105,7 @@ func TestDoctorFailsNameTheFix(t *testing.T) {
 		t.Fatalf("exit %d:\n%s", code, out)
 	}
 	for _, want := range []string{
-		"fail  the claude subscription cannot be used: the token's time is up: connect again in the cockpit's Settings, Subscriptions",
+		"fail  the claude subscription cannot be used (the token's time is up): connect it again in the cockpit's Settings, Subscriptions",
 		"fail  the codex subscription cannot be read (the subscription's file cannot be used; connect again): connect it again in the cockpit's Settings, Subscriptions",
 		"ok    keys set: openrouter",
 		"fail  ANTHROPIC_BASE_URL is set, so every claude turn is refused: unset it in the shell that starts agentbus",
@@ -140,6 +142,46 @@ func TestDoctorNothingToSignInWith(t *testing.T) {
 	}
 }
 
+// A subscription counts only for an agent installed here: codex's alone,
+// with only claude installed, leaves claude's turns nothing to sign in with.
+func TestDoctorSubscriptionOfAnAgentNotInstalled(t *testing.T) {
+	home := t.TempDir()
+	connectFake(t, home, "codex")
+	out, code := doctorReport(t, fakeDoctor(home, []string{"claude"}, nil, 50<<30))
+	if code != 1 {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+	for _, want := range []string{
+		"note  the codex subscription is connected, but codex is not on PATH, so no turn uses it here",
+		"fail  no subscription is connected and no key is set, so every turn is refused",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("no %q in:\n%s", want, out)
+		}
+	}
+}
+
+// A runner's data folder, as agentbus login made it, holds no subscription:
+// its turns sign in with control's. One note, and no fail for it.
+func TestDoctorRunnerFolder(t *testing.T) {
+	home := t.TempDir()
+	if err := runner.SaveIdentity(filepath.Join(home, runnerState), queue.Runner{ID: "r1"}, "runner-token", 1000, 1000); err != nil {
+		t.Fatal(err)
+	}
+	out, code := doctorReport(t, fakeDoctor(home, []string{"claude"}, nil, 50<<30))
+	if code != 0 || !strings.Contains(out, "note  this is a runner's data folder (agentbus login), so its subscriptions and keys are control's") ||
+		strings.Contains(out, "subscription is") || strings.Contains(out, "runner-token") {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+	// With jobs.db beside it, it is control's folder: its sign-ins are checked.
+	if err := os.WriteFile(filepath.Join(home, "jobs.db"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if out, code := doctorReport(t, fakeDoctor(home, []string{"claude"}, nil, 50<<30)); code != 1 || strings.Contains(out, "runner's data folder") {
+		t.Fatalf("exit %d:\n%s", code, out)
+	}
+}
+
 // No agent installed: that one fail, not a second about sign-ins.
 func TestDoctorNoAgent(t *testing.T) {
 	out, code := doctorReport(t, fakeDoctor(t.TempDir(), nil, map[string]string{"ANTHROPIC_BASE_URL": "x"}, 50<<30))
@@ -154,8 +196,7 @@ func TestDoctorNoAgent(t *testing.T) {
 }
 
 // doctor needs no service and makes no data folder: one that does not
-// exist yet is reported as new, and still is after. It answers well
-// within a second.
+// exist yet is reported as new, and still is after.
 func TestDoctorCommand(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "agentbus")
 	env := func(k string) string {
@@ -165,9 +206,7 @@ func TestDoctorCommand(t *testing.T) {
 		return os.Getenv(k)
 	}
 	var b bytes.Buffer
-	start := time.Now()
 	code := run([]string{"doctor"}, env, &b, &b)
-	took := time.Since(start)
 	if code != 0 && code != 1 {
 		t.Fatalf("exit %d:\n%s", code, b.String())
 	}
@@ -179,9 +218,6 @@ func TestDoctorCommand(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(filepath.Dir(home)); len(entries) != 0 {
 		t.Fatalf("doctor left %v beside the data folder", entries)
-	}
-	if took > time.Second {
-		t.Fatalf("doctor took %v", took)
 	}
 	b.Reset()
 	if run([]string{"doctor", "-x"}, env, &b, &b) != 2 || !strings.Contains(b.String(), doctorUsage) {

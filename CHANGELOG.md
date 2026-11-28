@@ -16,7 +16,8 @@ All notable changes to AgentBus. Full notes for each release are on the
   failed with that reason.
 - **`agentbus doctor` checks a machine before the first run.** It prints one line per check, each
   failed one with its fix: which of `claude`, `codex`, `agy` and `opencode` are on PATH, which
-  subscriptions are connected and which keys are set, a variable such as `ANTHROPIC_BASE_URL` that
+  subscriptions are connected for an installed agent and which keys are set (on control's data
+  folder, not a runner's), a variable such as `ANTHROPIC_BASE_URL` that
   would make an agent's turns refuse, how Copy copies a folder here (APFS clone, overlay, or file
   by file), AppArmor on Ubuntu, the data folder and its disk's free space, and whether the cockpit
   is packed in. It needs no service running, leaves nothing behind, and exits 1 when a check
