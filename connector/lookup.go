@@ -66,8 +66,10 @@ func (l *lookup) at(st workspace.Step) (there bool, respelt, why string) {
 			l.dirs[p] = true
 		case st.To == nil:
 			return false, "", "" // a file or a link, and no file under it
-		case fi.Mode()&fs.ModeSymlink != 0 && l.removed(p, fi) != "":
-			return false, "", "" // a link, which makes way
+		case l.removed(p, fi) != "":
+			// A file or a link the changes remove, which makes way: a file
+			// becomes a folder. Its own step checks it is as they start from.
+			return false, "", ""
 		default:
 			return false, "", WhyNoFolder
 		}
@@ -80,6 +82,10 @@ func (l *lookup) at(st workspace.Step) (there bool, respelt, why string) {
 		return false, "", WhyNotFile
 	case fi.IsDir() && st.To == nil:
 		return false, "", "" // no file to remove
+	case fi.IsDir() && st.From == nil && l.emptied(st.Path):
+		// A folder that holds only files the changes remove: a folder
+		// becomes a file. Each of those steps checks its own file.
+		return false, "", ""
 	case fi.IsDir():
 		return false, "", WhyNotFile
 	case st.To == nil && l.other(st.Path, fi) != "":
@@ -90,6 +96,50 @@ func (l *lookup) at(st workspace.Step) (there bool, respelt, why string) {
 		}
 	}
 	return true, "", ""
+}
+
+// anew is l for the look just before a file's own write or removal: the
+// folders above each path are looked at again, since one seen to be a
+// folder may be a link by now, and nothing makes way any more. The removals
+// come first, so by a write they are done: what stands at a removed path
+// then was put there since, and is in the way. The names the folders list
+// and the files found at the steps' paths stay as l found them.
+func (l *lookup) anew() *lookup {
+	n := *l
+	n.dirs = map[string]bool{}
+	n.removes = map[string]bool{}
+	return &n
+}
+
+// emptied says the folder at p holds no file but those the changes remove,
+// in any spelling the disk takes for theirs: once they are removed it holds
+// none, and a file can take its name. A name that differs from a removed
+// one only in case or Unicode form is that file only when the disk finds
+// the one at the other's name: on a disk that keeps them apart it is
+// another file, the person's.
+func (l *lookup) emptied(p string) bool {
+	err := fs.WalkDir(l.rt.FS(), p, func(q string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || l.removes[q] {
+			return nil
+		}
+		fi, err := d.Info()
+		if err != nil {
+			return err
+		}
+		for r := range l.removes {
+			if !workspace.SameName(r, q) {
+				continue
+			}
+			if ri, err := l.rt.Lstat(filepath.FromSlash(r)); err == nil && os.SameFile(ri, fi) {
+				return nil
+			}
+		}
+		return errHolds
+	})
+	return err == nil
 }
 
 // removed is the path under which the changes remove fi, the file found at

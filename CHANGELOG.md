@@ -65,6 +65,12 @@ All notable changes to AgentBus. Full notes for each release are on the
     names the earlier ones.
 
 ### Fixed
+- **Apply no longer writes over a file you edit while it runs.** It checked every file before it
+  fetched and staged what it writes, then wrote without looking again, so an edit you saved in
+  between was replaced. It now looks again at every file just before the first write, and refuses
+  as the check would have, naming each file; nothing is written. A stop during that look writes
+  nothing either. (#102; the fix is Kunal Roy Choudhury's, from #107.)
+- **Apply leaves alone a file already as it would write it**, and does not list it as written.
 - **When a turn ended, and how, is decided once, by control.** A turn's end is its job's end on
   control: a finish control took, or an attempt it found lost. `GET /api/v0/turns` reads the turn's
   state from there once its job has ended, and a run's `run.ended` says only how its agent ended.

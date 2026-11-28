@@ -521,7 +521,10 @@ var routes = slices.Concat([]route{
 			"The apply writes each file the unapplied turns added or changed, and removes each one they deleted. " +
 			"Before it writes anything it checks every file in the folder: one that is neither as it was at the changes' start nor already as they leave it refuses the whole apply, " +
 			"with result refused and each file in conflicts with why. Nothing is written then, so the agent can read why and make another turn. " +
-			"A file is never looked up through a link in the folder. A turn may put a folder where a link was, or change only the case of a name. " +
+			"Each file is looked at again just before the first write, and once more just before its own: one changed meanwhile refuses the apply in the same way, nothing written; " +
+			"one found changed after others were written ends it failed, files listing those written. A file already as the changes leave it is not written again, nor listed. " +
+			"A file is never looked up through a link in the folder, nor written through one. A turn may put a folder where a file or a link was, a file or a link where a folder was, or change only the case of a name. " +
+			"A folder makes way only when every file in it is one the changes remove. " +
 			"After an update's merge left conflict markers in the copy, and until an apply or discard finishes, a file that still holds them (<<<<<<< this session ... >>>>>>> your folder) is refused the same way, until the agent combines it; a workspace with no such merge never checks. " +
 			"Applying again when nothing is unapplied is a no-op: 200 with already true. " +
 			"An apply that was refused may be asked for again. " +

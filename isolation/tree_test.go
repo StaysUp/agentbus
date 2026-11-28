@@ -2,9 +2,7 @@ package isolation
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
-	"github.com/staysup/agentbus/connector"
 	"io/fs"
 	"math/rand"
 	"os"
@@ -367,9 +365,9 @@ func TestTreeFromSnapshot(t *testing.T) {
 }
 
 // A file replaced by a folder of the same name, and the reverse, show in
-// the diff. Apply refuses them and writes nothing (it checks each path on
-// its own, and a folder where a file goes is not a file): a limit kept in
-// the framework TODO.
+// the diff, and Apply writes them (once a limit: it refused them, since a
+// folder where a file goes is not a file, until the mid-turn update needed
+// them, 2026-11-27).
 func TestFileBecomesFolder(t *testing.T) {
 	for _, name := range fast(t) {
 		t.Run(name, func(t *testing.T) {
@@ -396,12 +394,11 @@ func TestFileBecomesFolder(t *testing.T) {
 			if !reflect.DeepEqual(got, want) {
 				t.Fatalf("diff %v, want %v", got, want)
 			}
-			var cf *connector.Conflict
-			if _, err := applyIn(t, s, src, Base, "t1"); !errors.As(err, &cf) {
+			if _, err := applyIn(t, s, src, Base, "t1"); err != nil {
 				t.Fatalf("apply: %v", err)
 			}
-			if read(t, filepath.Join(src, "item")) != "a file" || read(t, filepath.Join(src, "dir", "x.txt")) != "x" {
-				t.Fatal("a refused apply wrote")
+			if read(t, filepath.Join(src, "item", "child.txt")) != "c" || read(t, filepath.Join(src, "dir")) != "now a file" {
+				t.Fatal("the apply did not write the folder and the file")
 			}
 		})
 	}
