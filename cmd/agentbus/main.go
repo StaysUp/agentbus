@@ -70,6 +70,7 @@ import (
 	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
 	"github.com/staysup/agentbus/toolreg"
+	"github.com/staysup/agentbus/wall"
 )
 
 const (
@@ -1296,6 +1297,7 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 		Version: build(debug.ReadBuildInfo()).Version,
 		Engine:  s.eng, Store: s.store, Logf: svcLog.Printf, Labels: c.labels,
 		LookPath: c.lookPath, Environ: c.environ,
+		Wall:    func(ctx context.Context) wall.Result { return wall.Probe(ctx, exec.LookPath, c.environ()) },
 		Workdir: filepath.Join(c.home, copiesDir), OldWorkdir: filepath.Join(c.home, oldCopiesDir), StateFile: filepath.Join(c.home, runnerState), Settings: s.settings,
 		Forward: true, NoSecrets: c.noSecrets(), StartDelay: c.startDelay,
 		Finishes: filepath.Join(c.home, finishesDir)}

@@ -35,6 +35,7 @@ import (
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/settings"
 	"github.com/staysup/agentbus/store"
+	"github.com/staysup/agentbus/wall"
 	"github.com/staysup/agentbus/workspace"
 )
 
@@ -97,6 +98,10 @@ type Config struct {
 	// report (caps.go). Nil LookPath probes nothing.
 	LookPath func(string) (string, error)
 	Environ  func() []string
+	// Wall probes the wall this runner can put around a turn (package wall),
+	// after each harness probe; its report goes with the capabilities. Nil
+	// reports no wall, so control sends this runner no walled job.
+	Wall func(context.Context) wall.Result
 
 	// Forward sends each turn's record to the control plane while the turn
 	// runs (POST /api/v0/runner/attempts/{id}/record and /calls): a runner of a
@@ -161,6 +166,8 @@ type Runner struct {
 	// sends it (caps.go).
 	probeMu sync.Mutex
 	probed  []harness.Report
+	// walled is the last wall probe, under probeMu: nil before the first.
+	walled *wall.Result
 	// busy counts the jobs this runner runs now (Busy), and agents the
 	// agents it runs now (Agents): a job's agent ends before its end is sent.
 	busy, agents atomic.Int32
@@ -224,7 +231,7 @@ func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 	if st, ok := loadState(cfg.StateFile); ok {
 		var rn jobs.RunnerBeatReply
 		status, err := call(ctx, r.short, cfg.Queue+"/api/v0/runner/heartbeat", st.Token,
-			jobs.RunnerBeat{Capacity: cfg.Capacity, Labels: cfg.Labels, Capabilities: r.caps(nil)}, &rn)
+			jobs.RunnerBeat{Capacity: cfg.Capacity, Labels: cfg.Labels, Capabilities: r.caps(nil, nil)}, &rn)
 		if err != nil {
 			return nil, err
 		}
@@ -250,7 +257,7 @@ func Enroll(ctx context.Context, cfg Config) (*Runner, error) {
 	var e jobs.Enrolled
 	status, err := call(ctx, cfg.HTTP, cfg.Queue+"/api/v0/runner/register", cfg.EnrollToken,
 		jobs.EnrollRequest{Name: cfg.Name, Labels: cfg.Labels, Capacity: cfg.Capacity, Protocol: jobs.ProtocolVersion,
-			Capabilities: r.caps(nil)}, &e)
+			Capabilities: r.caps(nil, nil)}, &e)
 	if err != nil {
 		return nil, err
 	}
@@ -1195,6 +1202,15 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 		at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup,
 			Result: mustJSON(queue.Result{Refused: fmt.Sprintf("this runner does not run jobs of kind %q", job.Kind), Status: http.StatusBadRequest})})
 		return
+	}
+	// A turn that must run in a wall this runner cannot build is refused
+	// before its copy is made: it never runs without the wall.
+	if job.Spec.Wall != "" {
+		if msg := r.wallRefusal(job.Spec.Wall); msg != "" {
+			at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup,
+				Result: mustJSON(queue.Result{Refused: msg, Status: http.StatusServiceUnavailable})})
+			return
+		}
 	}
 	// The copy is made under the attempt's own context: a cancel, a stale
 	// attempt or the runner stopping ends it there, as it ends a running

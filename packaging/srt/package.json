@@ -1,0 +1,12 @@
+{
+  "name": "agentbus-wall",
+  "private": true,
+  "description": "The srt (sandbox-runtime) version agentbus's wall is built and tested with. install.sh installs it with npm ci, so every package is the one in package-lock.json.",
+  "license": "FSL-1.1-ALv2",
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sandbox-runtime": "0.0.83"
+  }
+}

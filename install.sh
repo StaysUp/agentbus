@@ -24,6 +24,14 @@
 #
 # To take it away: sudo apparmor_parser -R /etc/apparmor.d/agentbus && sudo rm /etc/apparmor.d/agentbus
 #
+# The wall around a turn's processes is srt (sandbox-runtime), at the version
+# in packaging/srt. It needs Node.js 22.12 or later, and on Linux bwrap, socat
+# and ripgrep. install.sh installs srt with npm ci from that lockfile into
+# <install dir>/../lib/agentbus-srt and links srt next to agentbus. As root on
+# Linux it installs bwrap, socat and ripgrep too; otherwise it prints the
+# command. A missing piece never stops the install: the runner probes the wall
+# and reports what is missing. AGENTBUS_WALL=no skips this step.
+#
 set -eu
 
 repo="staysup/agentbus"
@@ -108,6 +116,86 @@ $home/.local/bin/agentbus"
     say "Another agentbus, at '$o', has no profile, so the wall stays off when it comes first on PATH."
     say "Remove the agentbus at '$o', or run $1 directly."
   done
+}
+
+# srt_version is the srt that packaging/srt pins; wall.Version in the code.
+srt_version=0.0.83
+
+# node_ok says the Node.js version $1 (as node --version prints it) is
+# 22.12 or later, which srt needs.
+node_ok() {
+  v=${1#v}
+  major=${v%%.*}
+  rest=${v#*.}
+  minor=${rest%%.*}
+  case "$major$minor" in '' | *[!0-9]*) return 1 ;; esac
+  [ "$major" -gt 22 ] || { [ "$major" -eq 22 ] && [ "$minor" -ge 12 ]; }
+}
+
+# linux_wall_tools installs bwrap, socat and ripgrep as root with the
+# system's package manager, or prints the command.
+linux_wall_tools() {
+  missing=
+  for t in bwrap socat rg; do command -v "$t" >/dev/null 2>&1 || missing="$missing $t"; done
+  [ -n "$missing" ] || return 0
+  if command -v apt-get >/dev/null 2>&1; then cmd="apt-get install -y bubblewrap socat ripgrep"
+  elif command -v dnf >/dev/null 2>&1; then cmd="dnf install -y bubblewrap socat ripgrep"
+  elif command -v pacman >/dev/null 2>&1; then cmd="pacman -S --noconfirm bubblewrap socat ripgrep"
+  else
+    say "The wall needs bwrap, socat and ripgrep, missing here:$missing. Install them with your package manager."
+    return 0
+  fi
+  if [ "$(id -u)" = 0 ]; then
+    say "Installing bwrap, socat and ripgrep for the wall"
+    $cmd >/dev/null || say "Could not install them; run: $cmd"
+  else
+    say "The wall needs bwrap, socat and ripgrep, missing here:$missing. Install them once:"
+    say "  sudo $cmd"
+  fi
+}
+
+# install_srt installs the pinned srt next to the binary in $1: npm ci from
+# packaging/srt at the release's tag, into $1/../lib/agentbus-srt,
+# and srt linked into $1. It says what is missing and returns, never fails.
+install_srt() {
+  # Absolute, so the link's target holds from inside $1 (AGENTBUS_INSTALL_DIR
+  # may be relative).
+  bindir=$(cd "$1" && pwd -P) || { say "Cannot read $1; srt is not installed."; return 0; }
+  if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+    say "The wall needs srt, which runs on Node.js 22.12 or later; node and npm are not on PATH."
+    say "Install Node.js (macOS: brew install node; or https://nodejs.org), then run this script again."
+    return 0
+  fi
+  if ! node_ok "$(node --version 2>/dev/null)"; then
+    say "The wall needs srt, which runs on Node.js 22.12 or later; this node is $(node --version 2>/dev/null)."
+    say "Install a newer Node.js (macOS: brew install node; or https://nodejs.org), then run this script again."
+    return 0
+  fi
+  lib="$(dirname "$bindir")/lib/agentbus-srt"
+  src="https://raw.githubusercontent.com/$repo/$srt_ref/packaging/srt"
+  if ! mkdir -p "$tmp/srt" ||
+    ! curl -fsSL -o "$tmp/srt/package.json" "$src/package.json" ||
+    ! curl -fsSL -o "$tmp/srt/package-lock.json" "$src/package-lock.json"; then
+    say "Could not download $src; srt is not installed."
+    return 0
+  fi
+  say "Installing srt $srt_version (sandbox-runtime) for the wall"
+  if ! mkdir -p "$lib" 2>/dev/null || [ ! -w "$lib" ]; then
+    say "Cannot write to $lib; srt is not installed."
+    return 0
+  fi
+  cp "$tmp/srt/package.json" "$tmp/srt/package-lock.json" "$lib/"
+  if ! npm ci --prefix "$lib" --omit=dev --no-fund --no-audit >/dev/null 2>&1; then
+    say "npm ci in $lib failed; srt is not installed. Run it there to see why."
+    return 0
+  fi
+  ln -sf "$lib/node_modules/.bin/srt" "$bindir/srt"
+  got=$("$bindir/srt" --version 2>/dev/null) || got=
+  if [ "$got" = "$srt_version" ]; then
+    say "Installed $bindir/srt $srt_version"
+  else
+    say "srt in $lib did not report $srt_version; the runner will say what is wrong."
+  fi
 }
 
 # apparmor_profile prints the profile for the binary at $1: the profile in
@@ -256,6 +344,14 @@ if [ "$os" = linux ] && needs_apparmor; then
     say "  curl -fsSL https://raw.githubusercontent.com/$repo/main/install.sh | sudo AGENTBUS_INSTALL_DIR=/usr/local/bin sh"
   fi
   [ -z "$profiled" ] || other_binaries "$profiled"
+fi
+if [ "${AGENTBUS_WALL:-yes}" != no ]; then
+  say ""
+  # packaging/srt is read at the release's tag, so srt is the version that
+  # release's runner probes for.
+  srt_ref="v$version"
+  install_srt "$dir"
+  [ "$os" != linux ] || linux_wall_tools
 fi
 case ":$PATH:" in
   *":$dir:"*) ;;

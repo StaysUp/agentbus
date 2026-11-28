@@ -17,10 +17,12 @@ import (
 	"github.com/staysup/agentbus/isolation"
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/wall"
 )
 
-// caps is what the runner can report now. harnesses is nil before a probe.
-func (r *Runner) caps(harnesses []harness.Report) *queue.Capabilities {
+// caps is what the runner can report now. harnesses is nil before a probe,
+// and walled before a wall probe.
+func (r *Runner) caps(harnesses []harness.Report, walled *wall.Result) *queue.Capabilities {
 	// What each harness's own models cache held after the latest turn.
 	if seen := r.cfg.Engine.Models(); len(seen) > 0 {
 		harnesses = slices.Clone(harnesses)
@@ -32,6 +34,9 @@ func (r *Runner) caps(harnesses []harness.Report) *queue.Capabilities {
 		}
 	}
 	c := &queue.Capabilities{OS: runtime.GOOS, Arch: runtime.GOARCH, Isolation: isolation.Available(), Harnesses: harnesses}
+	if walled != nil {
+		c.Wall = &queue.WallReport{Engine: wall.Engine, Version: walled.Version, Levels: walled.Levels, Problem: walled.Problem}
+	}
 	if f := r.cfg.Folders; f != nil {
 		// This machine, and the folders the runner holds on it.
 		// compat 0.6: drop connector. The caps go to control, whose decode is
@@ -62,6 +67,18 @@ func (r *Runner) report(ctx context.Context, wg *sync.WaitGroup) {
 		r.probed = hs
 		r.probeMu.Unlock()
 		r.beat(ctx)
+		// The wall after the harnesses, so a slow srt never holds back their
+		// report, and sent at once.
+		if r.cfg.Wall != nil {
+			w := r.cfg.Wall(ctx)
+			if ctx.Err() != nil {
+				return
+			}
+			r.probeMu.Lock()
+			r.walled = &w
+			r.probeMu.Unlock()
+			r.beat(ctx)
+		}
 		select {
 		case <-ctx.Done():
 			return
@@ -79,13 +96,30 @@ func (r *Runner) beat(ctx context.Context) {
 	r.beatMu.Lock()
 	defer r.beatMu.Unlock()
 	r.probeMu.Lock()
-	hs := r.probed
+	hs, walled := r.probed, r.walled
 	r.probeMu.Unlock()
 	status, err := call(ctx, r.short, r.cfg.Queue+"/api/v0/runner/heartbeat", r.token,
-		jobs.RunnerBeat{Capacity: r.cfg.Capacity, Labels: r.cfg.Labels, Capabilities: r.caps(hs)}, nil)
+		jobs.RunnerBeat{Capacity: r.cfg.Capacity, Labels: r.cfg.Labels, Capabilities: r.caps(hs, walled)}, nil)
 	if err != nil || status != http.StatusOK {
 		r.cfg.Logf("runner.report_failed status=%d", status)
 	}
+}
+
+// wallRefusal says why this runner cannot run a turn in a wall of the
+// level, or "" when its last wall probe lists the level.
+func (r *Runner) wallRefusal(level string) string {
+	r.probeMu.Lock()
+	w := r.walled
+	r.probeMu.Unlock()
+	switch {
+	case w == nil:
+		return "this turn must run in a " + level + " wall, and this runner has not probed for one yet; it probes when it starts"
+	case w.Problem != "":
+		return "this turn must run in a " + level + " wall, and this runner cannot build one: " + w.Problem
+	case !slices.Contains(w.Levels, level):
+		return "this turn must run in a " + level + " wall, and this runner's build cannot put one around a turn: upgrade agentbus on this machine"
+	}
+	return ""
 }
 
 // folderPath is the path of the folder a job names: by reference, from this

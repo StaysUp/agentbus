@@ -33,6 +33,15 @@ type RunnerInfo struct {
 	Arch      string          `json:"arch,omitempty" doc:"Its processor, as Go names it, such as amd64 or arm64. Absent before its first report."`
 	// Harnesses: the runner's last probe of each harness.
 	Harnesses []RunnerProbe `json:"harnesses" doc:"Its last probe of each harness, in the order it reported them. Empty for a connector, and before its first probe ends."`
+	Wall      *RunnerWall   `json:"wall,omitempty" doc:"Its last probe of the wall it can put around a turn's processes. Absent before its first wall probe ends, and from a runner of a build before 0.6.9: such a runner takes no turn that must run in a wall."`
+}
+
+// RunnerWall is a runner's last probe of its wall.
+type RunnerWall struct {
+	Engine  string   `json:"engine" doc:"What builds the wall: srt (sandbox-runtime)."`
+	Version string   `json:"version,omitempty" doc:"The engine's version found there. Absent when it is not installed or did not say."`
+	Levels  []string `json:"levels" doc:"The walls it can put around a turn now. A turn that must run in a level goes to a runner that lists it, and any other runner refuses it with problem, or with why its build cannot. Empty in 0.6.9 step 1: the probe is reported, and no turn runs in the wall yet."`
+	Problem string   `json:"problem,omitempty" doc:"Why it can build no wall, such as srt not installed, or a write outside the probe's wall not refused. Absent when the probe passed."`
 }
 
 // PendingMachine is a machine waiting for the person's approval.
@@ -149,6 +158,9 @@ func runnerInfo(rn queue.Runner, now time.Time) RunnerInfo {
 	v.OS, v.Arch, v.Machine = c.OS, c.Arch, c.MachineID()
 	for _, rep := range c.Harnesses {
 		v.Harnesses = append(v.Harnesses, RunnerProbe{Name: rep.Name, Found: rep.Found, Version: rep.Version, SignedIn: rep.SignedIn})
+	}
+	if w := c.Wall; w != nil {
+		v.Wall = &RunnerWall{Engine: w.Engine, Version: w.Version, Levels: append([]string{}, w.Levels...), Problem: w.Problem}
 	}
 	return v
 }

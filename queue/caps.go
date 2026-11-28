@@ -44,9 +44,25 @@ type Capabilities struct {
 	// runner-wire decode is strict, so control accepts the key and keeps
 	// nothing of it (Retired).
 	Sandbox Retired `json:"sandbox,omitzero" doc:"Retired in 0.6.5. A runner of an older build sends its report of the whole-agent wall here; control ignores it."`
+	// Wall is the runner's last probe of the wall it can put around a turn's
+	// processes (package wall, plans/DESIGN_one_wall.md). Nil until its
+	// first wall probe ends, and from a runner of a build before 0.6.9, which
+	// never takes a walled job (wallTake).
+	Wall *WallReport `json:"wall,omitempty"`
 	// Role was RoleConnector for a connector of a build before 0.5. A
 	// runner stored with it is listed as such; none may report it now.
 	Role string `json:"role,omitempty"`
+}
+
+// WallReport is what a runner's probe of its wall found. Levels are the
+// walls it can build now: the levels its build knows, when the probe held a
+// write outside the wall. Problem says why it can build none, in fixed
+// wording; empty when the probe passed.
+type WallReport struct {
+	Engine  string   `json:"engine"`
+	Version string   `json:"version,omitempty"`
+	Levels  []string `json:"levels,omitempty"`
+	Problem string   `json:"problem,omitempty"`
 }
 
 // MachineID is the machine's id, read from the current key or, for a runner
@@ -124,6 +140,16 @@ func (c Capabilities) Check() string {
 			return "an isolation backend's name is at most 32 bytes"
 		}
 	}
+	if w := c.Wall; w != nil {
+		if len(w.Engine) > 32 || len(w.Version) > 64 || len(w.Problem) > 512 || len(w.Levels) > 16 {
+			return "capabilities.wall lists too much"
+		}
+		for _, l := range w.Levels {
+			if len(l) > 32 {
+				return "a wall level's name is at most 32 bytes"
+			}
+		}
+	}
 	return ""
 }
 
@@ -172,6 +198,22 @@ const FolderCapacity = 4
 
 // SpaceShape is a copy's id on its runner (isolation): a job id.
 var SpaceShape = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
+
+// wallTake: a job whose spec names a wall (spec.wall, the level its turn
+// runs under) goes to a runner whose last wall probe lists that level. When
+// no runner that could take the job (seen within RunnerFresh, on the job's
+// machine, with every label it asks for) lists it, a runner that reported a
+// wall probe at all may take it, and refuses it with the probe's reason, so
+// the turn ends failed with it. A runner that reported no probe (one of a
+// build before 0.6.9, which does not know the field, or one whose first
+// probe has not ended) never takes a walled job: it would run the turn
+// without the wall. Its parameter is the freshness cut, as harnessTake's.
+const wallTake = `COALESCE(json_extract(j.spec, '$.wall'), '') = ''
+	OR EXISTS (SELECT 1 FROM json_each(r.caps, '$.wall.levels') l WHERE l.value = json_extract(j.spec, '$.wall'))
+	OR (json_extract(r.caps, '$.wall') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM runners o, json_each(o.caps, '$.wall.levels') l
+		WHERE o.team = j.team AND o.seen >= ? AND o.removed IS NULL AND l.value = json_extract(j.spec, '$.wall')
+		AND (COALESCE(json_extract(j.spec, '$.machine'), json_extract(j.spec, '$.connector'), '') = '' OR COALESCE(json_extract(j.spec, '$.machine'), json_extract(j.spec, '$.connector')) = COALESCE(json_extract(o.caps, '$.machine'), json_extract(o.caps, '$.connector')))
+		AND NOT EXISTS (SELECT 1 FROM json_each(j.spec, '$.labels') x WHERE x.value NOT IN (SELECT value FROM json_each(o.labels)))))`
 
 // labelsTake: a job with labels goes only to a runner with every one.
 const labelsTake = `NOT EXISTS (SELECT 1 FROM json_each(j.spec, '$.labels') l

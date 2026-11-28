@@ -442,6 +442,13 @@ type Spec struct {
 	// lets exactly these run, this turn only, and nothing is written to the
 	// settings. Carried on the job so control's record is the only source.
 	AllowOnce []string `json:"allow_once,omitempty"`
+	// Wall is the level of the wall the turn's processes run under (package
+	// wall on the runner), filled by control from the record, never by a
+	// caller. A job with one goes only to a runner that reports it can build
+	// that level (wallTake), and any other runner refuses it. Empty runs the
+	// turn as before. No route sets it yet: step 1 of
+	// plans/DESIGN_one_wall.md only reports the wall.
+	Wall string `json:"wall,omitempty"`
 }
 
 // Places are the workspace's folders as the job names them: each of Folders,
@@ -1688,8 +1695,8 @@ func (q *Queue) Take(runnerID string, lease time.Duration, lane Lane) (job Job, 
 			AND (j.kind IN `+folderKinds+` OR `+jobCopyKey("j")+` IS NULL OR NOT EXISTS (SELECT 1 FROM copies s WHERE s.id = `+jobCopyKey("j")+` AND s.team = j.team)
 				OR EXISTS (SELECT 1 FROM copies s WHERE s.id = `+jobCopyKey("j")+` AND s.team = j.team AND s.runner = r.id AND s.closed IS NULL))
 			AND ((j.kind NOT IN `+laneKinds+` AND j.kind != '`+KindExec+`') OR NOT EXISTS (SELECT 1 FROM jobs o WHERE o.team = j.team AND o.id != j.id AND (`+laneTake(nanos(now))+`)))
-			AND (`+machineTake+`) AND (`+labelsTake+`) AND (`+harnessTake+`)
-			ORDER BY j.created, j.id LIMIT 1`, runnerID, team, nanos(now.Add(-RunnerFresh))).Scan(&id)
+			AND (`+machineTake+`) AND (`+labelsTake+`) AND (`+harnessTake+`) AND (`+wallTake+`)
+			ORDER BY j.created, j.id LIMIT 1`, runnerID, team, nanos(now.Add(-RunnerFresh)), nanos(now.Add(-RunnerFresh))).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}

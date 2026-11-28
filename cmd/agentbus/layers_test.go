@@ -97,6 +97,13 @@ func TestPackageLayers(t *testing.T) {
 			"cost", "replay", "store", "body", "logfile", "settings", "cmd", "folders", "connector", "blobs", "credentials", "netjail"}, jobSide...)},
 		{[]string{"blobs"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
 			"cost", "replay", "store", "body", "logfile", "settings", "cmd", "folders", "connector"}, jobSide...)},
+		// wall, the wall around a turn's processes, uses nothing of the
+		// module, and only the runner side uses it: control knows a wall by
+		// its level and the runner's report, never builds one.
+		{[]string{"wall"}, append([]string{"harness", "run", "agents", "workspace", "isolation", "api", "gateway", "adapter", "event",
+			"cost", "replay", "store", "body", "logfile", "settings", "cmd", "folders", "connector", "blobs", "credentials", "netjail",
+			"homefiles", "applied", "models", "ids"}, jobSide...)},
+		{controlSide, []string{"wall"}},
 	} {
 		for _, top := range c.pkgs {
 			pkgs := packagesUnder(t, top)

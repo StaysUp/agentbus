@@ -5,6 +5,16 @@ All notable changes to AgentBus. Full notes for each release are on the
 
 ## Unreleased
 
+### Added
+- **Each runner checks for the wall and says what it found.** The wall is srt (sandbox-runtime)
+  0.0.83. A runner tests it for real: it lets a shell inside the wall write one folder, then
+  checks that a write next to it was refused. `GET /api/v0/runners` shows each runner's `wall`:
+  the srt version, or why it cannot build a wall. `install.sh` installs srt next to agentbus,
+  locked by `packaging/srt/package-lock.json`. srt needs Node.js 22.12 or later, and on Linux
+  bwrap, socat and ripgrep. Nothing runs inside the wall yet. A turn that must run in a wall goes
+  only to a runner that can build it. Any other runner refuses it and says why, and the turn ends
+  failed with that reason.
+
 ### Changed
 - **An on watches a session, not one turn.** `POST /api/v0/ons` takes
   `{"event":"turn.completed","filter":{"session":"S"}}`. Every turn of S that ends from then on has
