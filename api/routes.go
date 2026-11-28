@@ -779,14 +779,14 @@ var routes = slices.Concat([]route{
 			"A session's copy is never listed, though a turn may run in one. No body is read.",
 		replies: []reply{ok(200, FolderList{}, "The folders."), badRequest},
 		serve:   plain((*API).listFolders)},
-	{method: "POST", path: "/api/v0/folders/branches", op: "listBranches", action: run.ActWorkspaceCreate,
+	{method: "POST", path: "/api/v0/folders/branches", op: "listBranches", action: run.ActAdmin,
 		tag:     "Workspaces",
 		summary: "List a folder's branches",
 		doc: "The git branches a workspace may start from (base on POST /api/v0/workspaces): the folder's repo's own, most recently changed first, " +
 			"with the one checked out as current; or, with remote, the branches that remote has now, by name. Both answers list the repo's remotes. " +
 			"The folder's machine lists them, not the server, and changes nothing of the repo: a remote is asked with git ls-remote, nothing is fetched. " +
 			"A remote that cannot be reached answers the branches the repo last fetched from it, marked stale. A typed folder is checked and registered, as POST /api/v0/workspaces does. " +
-			"The reply waits up to 15 seconds for the folder's machine, and 60 more to reach a remote.",
+			"The reply waits up to 15 seconds for the folder's machine, and 60 more to reach a remote. Takes the main token only.",
 		body: BranchesRequest{},
 		replies: []reply{ok(200, queue.BranchList{}, "The branches."), badRequest,
 			fail(404, "This service keeps no queue."), tooMany,

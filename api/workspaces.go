@@ -328,7 +328,7 @@ const (
 	agentFolderRefused  = "an agent working in a copy may make a workspace only of folders its own workspace holds"
 	// turnWorkspaceRefused: a session opened in a workspace outside the reach.
 	turnWorkspaceRefused = "a turn token opens sessions only in the workspaces in its authority: its machine's when its own workspace works in the folder as it is, else its own workspace and the workspaces its session made"
-	agentBaseRefused    = "an agent working in a copy cannot start a workspace from a git base: resolving it reads, and may fetch into, the person's own repo"
+	agentBaseRefused     = "an agent working in a copy cannot start a workspace from a git base: resolving it reads, and may fetch into, the person's own repo"
 )
 
 // workspaceAuthority checks that the workspace body asks for is within g's
