@@ -189,7 +189,7 @@ var routes = slices.Concat([]route{
 			"The turn is queued before the reply; its turn.started, with the prompt, is stored once a runner starts it.\n\n" +
 			"A session runs on its workspace's machine for its whole life, and only that machine's runner takes its work: " +
 			"the machine is picked, and the folder typed or named, when the workspace is made.\n\n" +
-			"The reply comes at once, once the turn is recorded; it never waits for a runner. It answers 202 with state queued: " +
+			"The reply comes at once, once the turn is recorded; it never waits for a runner. It answers 202 with state queued, even when a runner takes the turn at once: " +
 			"the turn runs once no turn runs in its workspace (one copy runs one turn at a time) and its session's earlier turns have ended, and GET /api/v0/turns/{id} follows it. A retry of a turn already running answers running; one of a turn that has ended answers how it ended.\n\n" +
 			"A turn the main token sends is the person's: it is not counted against any limit, and it goes ahead of delegated turns of its workspace that have not started, since those hold no copy yet. No job passes a discard, update or close of the workspace. A turn a turn token sends is delegated work: " +
 			"one runner runs at most [limits] max_delegated_at_once of those at once (8 by default; GET /api/v0/runners says how many are busy and waiting), and the rest wait, oldest first.\n\n" +

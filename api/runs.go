@@ -223,7 +223,29 @@ func (a *API) run(w http.ResponseWriter, r *http.Request) {
 		a.internal(w)
 		return
 	}
-	a.answerStarted(w, job.ID, !created)
+	if created {
+		a.answerCreated(w, job)
+		return
+	}
+	a.answerStarted(w, job.ID, true)
+}
+
+// answerCreated answers the call that made the turn's job: queued, as it was
+// recorded, as a new Apply, Discard and Close answer. The job is never read
+// back for it: the queue wakes the runners when it records the job, so by the
+// time it is read back one may have started it, or even ended it, and the
+// answer would say running for a turn the call had only queued. A turn queued
+// behind its session's earlier turns says how many are ahead.
+func (a *API) answerCreated(w http.ResponseWriter, j queue.Job) {
+	st := Started{Session: j.Session, Turn: j.Turn, State: queue.TurnQueued}
+	if j.Session != "" {
+		var err error
+		if st.Ahead, err = a.turnsAhead(j.ID); err != nil {
+			a.internal(w)
+			return
+		}
+	}
+	writeJSON(w, http.StatusAccepted, st)
 }
 
 // turnAgent is the saved agent a turn names, or false once it has answered

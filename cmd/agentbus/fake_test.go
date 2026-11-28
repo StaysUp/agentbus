@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -44,14 +45,31 @@ func storedEvents(t *testing.T, st *store.Store) []storedEvent {
 	return out
 }
 
+// waitFor polls cond every 10 ms until it holds, and fails the test once
+// waitDeadline(5 s) has passed without it.
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	for deadline := time.Now().Add(5 * time.Second); !cond(); {
+	for deadline := time.Now().Add(waitDeadline(5 * time.Second)); !cond(); {
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %s", what)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// ciWaitScale is how many times longer a test waits for something to happen
+// on CI. CI machines are shared and slower than a laptop: a delivered turn
+// that takes a second here took over 5 s on macOS CI (2026-11-27). It scales
+// how long a test waits before it gives up, never a bound a test checks.
+const ciWaitScale = 4
+
+// waitDeadline is d, or d times ciWaitScale on CI (CI is set, as GitHub
+// Actions sets it).
+func waitDeadline(d time.Duration) time.Duration {
+	if os.Getenv("CI") != "" {
+		return d * ciWaitScale
+	}
+	return d
 }
 
 func mustURL(s string) *url.URL {

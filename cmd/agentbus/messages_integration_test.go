@@ -165,12 +165,20 @@ func waitClosedN(t *testing.T, svc *service, session string, n int) []runEvent {
 }
 
 // startRun runs agent with the fake printing stdout, waits for it to close,
-// and returns the session id and base URL.
+// and returns the session id and base URL. The fake waits for a release until
+// the reply says running: one that exits at once can end its turn between
+// two of postTurn's polls, and the reply then says finished.
 func startRun(t *testing.T, svc *service, tok, agent, stdout string) (string, string) {
 	t.Helper()
 	t.Setenv("AGENTBUS_FAKE_STDOUT", stdout)
 	t.Setenv("AGENTBUS_FAKE_EXIT", "0")
+	release := filepath.Join(t.TempDir(), "release")
+	t.Setenv("AGENTBUS_FAKE_WAIT", release)
 	out, _ := postRunRunning(t, svc, tok, map[string]any{"agent": agent, "folder": t.TempDir(), "prompt": "one"})
+	if err := os.WriteFile(release, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("AGENTBUS_FAKE_WAIT", "")
 	id := out["session"].(string)
 	waitClosed(t, svc.store, id)
 	return id, out["base_url"].(string)
@@ -322,6 +330,11 @@ func TestRunWithSessionRunsNextTurnInSameSession(t *testing.T) {
 			t.Setenv("AGENTBUS_FAKE_STDOUT", `{"type":"thread.started","thread_id":"`+idB+`"}`+"\n")
 		}
 		t.Setenv("AGENTBUS_FAKE_EXIT", "4")
+		// The agent waits for release, so the turn still runs when the reply is
+		// read: a fake that exits at once can end its turn between two of
+		// postTurn's polls, and the reply then says failed (CI, 2026-11-27).
+		release := filepath.Join(t.TempDir(), "release")
+		t.Setenv("AGENTBUS_FAKE_WAIT", release)
 		body := map[string]any{"prompt": "--next"}
 		// read_only was retired (B12): the turn body no longer carries it, so tc.readOnly
 		// only labels the case; every case gets the same normal args.
@@ -342,6 +355,9 @@ func TestRunWithSessionRunsNextTurnInSameSession(t *testing.T) {
 			t.Fatalf("%s: %s, want 202 with the same id, a new turn, and the session's base URL with it", name, raw)
 		}
 		base = out["base_url"].(string) // this turn's own
+		if err := os.WriteFile(release, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
 		closed := waitClosedN(t, svc, id, 2)
 		if c := closed[1]; c.ExitCode == nil || *c.ExitCode != 4 || c.ResumeID != idB || c.Hold == "" || c.Hold == closed[0].Hold {
 			t.Fatalf("%s: second run.ended %+v, want exit 4, resume_id %s, a new hold", name, c, idB)
@@ -372,6 +388,7 @@ func TestRunWithSessionRunsNextTurnInSameSession(t *testing.T) {
 			t.Fatalf("%s: events %s", name, got)
 		}
 		t.Setenv("AGENTBUS_FAKE_OUT", "")
+		t.Setenv("AGENTBUS_FAKE_WAIT", "")
 	}
 }
 

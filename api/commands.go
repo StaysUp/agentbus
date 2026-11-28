@@ -222,7 +222,14 @@ func (a *API) runCommand(w http.ResponseWriter, r *http.Request) {
 		a.internal(w)
 		return
 	}
-	writeJSON(w, http.StatusAccepted, CommandStarted{Command: job.Turn, State: commandState(job), Existing: !created})
+	// A call that made the job answers queued, as it was recorded: the queue
+	// wakes the runners when it records the job, so the job it hands back may
+	// already be taken. A repeat of the same request reports the job's state.
+	state := queue.TurnQueued
+	if !created {
+		state = commandState(job)
+	}
+	writeJSON(w, http.StatusAccepted, CommandStarted{Command: job.Turn, State: state, Existing: !created})
 }
 
 // refuseLimit refuses a command that would get more than its turn may do.
