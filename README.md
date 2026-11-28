@@ -153,8 +153,9 @@ and read what they reply.
 When you start a session you pick how it runs. The choice is remembered.
 
 - **Copy (default).** The session works in its own copy of your folder. The agent's commands write
-  only inside the copy, plus temporary files and the session's own package and build caches, never
-  your own cache folders. Closing the session removes its caches. Reads across your disk stay open.
+  only inside the copy, plus temporary files. For Claude Code they also write the session's own
+  package and build caches, never your own cache folders, and closing the session removes them.
+  Reads across your disk stay open.
   The network works as normal. For Claude Code it is a list of hosts, and Docker and other local
   services need a Direct session; [Limits](#limits) says why. Several sessions can work on the
   same code without stepping on each other.
@@ -241,7 +242,7 @@ with `agentbus runner -capacity N`.
   mount would let a command write outside the copy, so the copy allows no local sockets: Docker's,
   Lima's and ssh-agent's are closed too. `limactl start` also writes under `~/.lima`, outside the
   copy.
-- **A Copy session's caches start empty.** Go, pip, uv, npm and Homebrew keep their caches in the
+- **A Claude Code Copy session's caches start empty.** Go, pip, uv, npm and Homebrew keep their caches in the
   session's own folder, so its first build or install downloads and compiles again. Go's module
   cache (`~/go/pkg/mod`) is read as it is and not written. On a Mac the Keychain's own files and
   the per-user temporary folder under `/var/folders` stay writable: `gh` and `mktemp` need them.
