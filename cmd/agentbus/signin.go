@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 )
 
@@ -49,6 +50,15 @@ func browserCommand(goos string, getenv func(string) string, lookPath func(strin
 	case "darwin":
 		return []string{"open"}
 	case "linux":
+		// Under WSL the person's browser is Windows', whether or not WSLg
+		// gives Linux a display, and a fresh Ubuntu there has no xdg-open.
+		if getenv("WSL_DISTRO_NAME") != "" {
+			for _, name := range []string{"wslview", "explorer.exe"} {
+				if p, err := lookPath(name); err == nil {
+					return []string{p}
+				}
+			}
+		}
 		if getenv("DISPLAY") == "" && getenv("WAYLAND_DISPLAY") == "" {
 			return nil
 		}
@@ -80,7 +90,18 @@ func openBrowser(home, link string, getenv func(string) string) bool {
 	if err != nil {
 		return false
 	}
-	cmd := exec.Command(argv[0], append(argv[1:], page)...)
+	target := page
+	if filepath.Base(argv[0]) == "explorer.exe" {
+		// explorer.exe is a Windows program: it takes the page's Windows
+		// path, which wslpath gives.
+		out, err := exec.Command("wslpath", "-w", page).Output()
+		if err != nil {
+			_ = os.Remove(page)
+			return false
+		}
+		target = strings.TrimSpace(string(out))
+	}
+	cmd := exec.Command(argv[0], append(argv[1:], target)...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
 	if err := cmd.Start(); err != nil {
 		_ = os.Remove(page)
