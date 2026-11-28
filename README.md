@@ -248,9 +248,11 @@ with `agentbus runner -capacity N`.
   the per-user temporary folder under `/var/folders` stay writable: `gh` and `mktemp` need them.
 - Socket grants in your own managed or MDM settings, and socket paths in your user settings, still
   apply in a Copy session. This closes in 0.6.8.
-- Codex's Copy network is truly open. Antigravity and OpenCode have no command sandbox of their own
-  yet, and the gateway's check on file edits outside the copy reads Claude Code's calls only. So in
-  a Copy session their commands and file edits can write outside the copy.
+- Codex's Copy network is truly open. Antigravity's commands run in its own sandbox: they write only
+  in the copy and temp folders and get no network at all, so a package install or `agentbus-api`
+  fails there. Its model calls are not commands and still reach AgentBus. OpenCode has no command
+  sandbox of its own yet, and the gateway's check on file edits outside the copy reads Claude Code's
+  calls only. So in a Copy session its commands and file edits can write outside the copy.
 - On ext4 a copy is a full copy. A clone (APFS) or a reflink (xfs, btrfs) is used where the disk can
   make one.
 - AgentBus has no file tools of its own: an agent reaches files through its CLI's built-in tools,

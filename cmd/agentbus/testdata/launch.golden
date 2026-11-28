@@ -2238,6 +2238,30 @@ cwd <folder>
 turn.started agent="claude" continuity="" replay_from="" model="" context=""
 context.added instructions=1073 mcp_instructions=390
 run.ended resume_id="sid-0"
+=== agy copy
+--- turn t_1 harness="agy" access="" model=""
+arg "--output-format"
+arg "json"
+arg "--settings"
+arg "{\"allowNonWorkspaceAccess\":false,\"enableTerminalSandbox\":true,\"permissions\":{\"allow\":[\"mcp(*)\",\"write_file(<folder>)\",\"edit_file(<folder>)\",\"command(*)\",\"command(agentbus-api)\"],\"deny\":[\"write_file(<data>/permissions.toml)\",\"edit_file(<data>/permissions.toml)\",\"write_file(<data>/instructions.md)\",\"edit_file(<data>/instructions.md)\",\"write_file(<data>/agents.json)\",\"edit_file(<data>/agents.json)\"]}}"
+arg "--print=one"
+env "AGENTBUS_LAUNCH_DIR=<launch>"
+env "AGENTBUS_TOKEN=<token>
+env "AGENTBUS_URL=http://127.0.0.1:8787"
+env "CLOUD_CODE_URL=http://127.0.0.1:8787/s/s1/t/t_1"
+env "GOCACHE=<data>/.isolation/ws_1/cache/go-build"
+env "HOME=<home>"
+env "HOMEBREW_CACHE=<data>/.isolation/ws_1/cache/Homebrew"
+env "PATH=<data>/bin:/usr/bin:/bin"
+env "PIP_CACHE_DIR=<data>/.isolation/ws_1/cache/pip"
+env "PWD=<folder>"
+env "UV_CACHE_DIR=<data>/.isolation/ws_1/cache/uv"
+env "XDG_CACHE_HOME=<data>/.isolation/ws_1/cache"
+env "npm_config_cache=<data>/.isolation/ws_1/cache/npm"
+cwd <folder>
+turn.started agent="agy" continuity="" replay_from="" model="" context=""
+run.ended resume_id="cid-0"
+log run.hint session=s1 turn=t_1 left_out=agy_no_instruction_flag
 === agy subscription, then resume
 --- turn t_1 harness="agy" access="" model=""
 arg "--output-format"

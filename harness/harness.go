@@ -59,9 +59,9 @@ type Info struct {
 	// folder read only in its place.
 	OwnSandbox bool
 	// CopySandbox: in Copy mode the harness walls each command itself (its own
-	// per-command sandbox, configured through Turn.Copy), so the runner does not
-	// wrap the whole process. A harness without it falls back to the runner's
-	// whole-process wall for a Copy turn.
+	// per-command sandbox, configured through Turn.Copy). There is no
+	// whole-process wall behind it: a Copy turn of a harness without it runs
+	// unwalled (run/run.go).
 	CopySandbox bool
 	// StatusArgs is its own offline sign-in status command: exit 0 signed
 	// in, 1 not. Its output is never read, since it can name the account.
