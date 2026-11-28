@@ -291,6 +291,12 @@ func (r *failingRecord) set(fail, after int) {
 	r.mu.Unlock()
 }
 
+func (r *failingRecord) remainingFailures() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.fail
+}
+
 var errFailingRecord = errors.New("the record is not written")
 
 type testClock struct {
@@ -443,8 +449,9 @@ func TestOutcomeBeforeFinish(t *testing.T) {
 					}
 					// A finish of a job already finished writes nothing.
 					rec.set(1, 0)
-					if code := e.finish(t, base, queue.Finished, "", res); code != 200 || rec.fail != 1 {
-						t.Fatalf("a finish already accepted: %d, writes %d", code, 1-rec.fail)
+					code := e.finish(t, base, queue.Finished, "", res)
+					if left := rec.remainingFailures(); code != 200 || left != 1 {
+						t.Fatalf("a finish already accepted: %d, writes %d", code, 1-left)
 					}
 				})
 			}
