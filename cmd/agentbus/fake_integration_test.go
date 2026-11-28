@@ -127,8 +127,10 @@ func fakeAgent() {
 	n, _ := strconv.Atoi(os.Getenv("AGENTBUS_FAKE_CALL"))
 	calls = calls[:min(n, len(calls))]
 	// With AGENTBUS_FAKE_BODY, that one model call instead.
+	// @PROMPT@ in it, and in AGENTBUS_FAKE_CODEX_BODY and
+	// AGENTBUS_FAKE_OPENCODE_BODY, is the turn's prompt (fakePrompted).
 	if b := os.Getenv("AGENTBUS_FAKE_BODY"); b != "" {
-		calls = []string{b}
+		calls = []string{fakePrompted(b)}
 	}
 	// With AGENTBUS_FAKE_BODIES, a JSON object from a turn's prompt (the
 	// last argument) to the model calls it makes, "*" for any other prompt;
@@ -173,57 +175,14 @@ func fakeAgent() {
 	// its -c arguments set, with the key its env_key names as the bearer, and
 	// AGENTBUS_FAKE_THREAD as its Thread-Id header.
 	if b := os.Getenv("AGENTBUS_FAKE_CODEX_BODY"); b != "" {
-		var base, key string
-		for _, a := range os.Args[1:] {
-			if v, ok := strings.CutPrefix(a, `openai_base_url="`); ok {
-				base = strings.TrimSuffix(v, `"`)
-			}
-			if _, v, ok := strings.Cut(a, `.base_url="`); ok && strings.HasPrefix(a, "model_providers.") {
-				base = strings.TrimSuffix(v, `"`)
-			}
-			if _, v, ok := strings.Cut(a, `.env_key="`); ok && strings.HasPrefix(a, "model_providers.") {
-				key = os.Getenv(strings.TrimSuffix(v, `"`))
-			}
-		}
-		if base != "" {
-			req, _ := http.NewRequest("POST", base+"/responses", strings.NewReader(b))
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("Thread-Id", os.Getenv("AGENTBUS_FAKE_THREAD"))
-			if key != "" {
-				req.Header.Set("Authorization", "Bearer "+key)
-			}
-			if resp, err := http.DefaultClient.Do(req); err == nil {
-				io.Copy(io.Discard, resp.Body)
-				resp.Body.Close()
-			}
-		}
+		fakeCodexCall(fakePrompted(b))
 	}
 	// With AGENTBUS_FAKE_OPENCODE_BODY, one model call as opencode makes it
 	// through an @ai-sdk/openai-compatible provider: to <baseURL>/chat/completions
 	// of the one provider OPENCODE_CONFIG_CONTENT sets, with the key its
 	// "{env:NAME}" names as the bearer, as opencode reads it.
 	if b := os.Getenv("AGENTBUS_FAKE_OPENCODE_BODY"); b != "" {
-		var cfg struct {
-			Provider map[string]struct {
-				Options struct {
-					BaseURL string `json:"baseURL"`
-					APIKey  string `json:"apiKey"`
-				} `json:"options"`
-			} `json:"provider"`
-		}
-		json.Unmarshal([]byte(os.Getenv("OPENCODE_CONFIG_CONTENT")), &cfg)
-		for _, p := range cfg.Provider {
-			req, _ := http.NewRequest("POST", p.Options.BaseURL+"/chat/completions", strings.NewReader(b))
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("User-Agent", "opencode/1.19.6 ai-sdk/provider-utils/4.0.23 runtime/bun/1.4.4")
-			if name, ok := strings.CutPrefix(p.Options.APIKey, "{env:"); ok {
-				req.Header.Set("Authorization", "Bearer "+os.Getenv(strings.TrimSuffix(name, "}")))
-			}
-			if resp, err := http.DefaultClient.Do(req); err == nil {
-				io.Copy(io.Discard, resp.Body)
-				resp.Body.Close()
-			}
-		}
+		fakeOpencodeCall(fakePrompted(b))
 	}
 	// With AGENTBUS_FAKE_AGY_BODY, one model call as agy makes it: to
 	// CLOUD_CODE_URL, with the access token of the sign-in file in its HOME
@@ -455,28 +414,132 @@ func fakeAgent() {
 	}
 	// With AGENTBUS_FAKE_CALL_AFTER, that one model call, as Claude Code
 	// makes it, after the wait: it writes the reply's status to
-	// AGENTBUS_FAKE_CALL_OUT, when set.
+	// AGENTBUS_FAKE_CALL_OUT, when set. AGENTBUS_FAKE_CODEX_AFTER and
+	// AGENTBUS_FAKE_OPENCODE_AFTER are the same for codex and opencode.
+	// AGENTBUS_FAKE_AFTER_PROMPT, when set, makes them only in a turn whose
+	// prompt (the last argument) is that text. A value that starts with [ is
+	// a list of bodies, as an agent's tool loop goes on: the first is made
+	// again every 100 ms until AGENTBUS_FAKE_AFTER_UNTIL is there (at most
+	// 20 s), then each of the rest once.
+	afterCalls := func(v string, call func(string)) {
+		if p := os.Getenv("AGENTBUS_FAKE_AFTER_PROMPT"); p != "" && os.Args[len(os.Args)-1] != p {
+			return
+		}
+		var list []json.RawMessage
+		if !strings.HasPrefix(v, "[") || json.Unmarshal([]byte(v), &list) != nil || len(list) == 0 {
+			call(v)
+			return
+		}
+		until := os.Getenv("AGENTBUS_FAKE_AFTER_UNTIL")
+		for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(100 * time.Millisecond) {
+			call(string(list[0]))
+			if _, err := os.Stat(until); until == "" || err == nil || time.Now().After(deadline) {
+				break
+			}
+		}
+		for _, b := range list[1:] {
+			call(string(b))
+		}
+	}
+	if b := os.Getenv("AGENTBUS_FAKE_CODEX_AFTER"); b != "" {
+		afterCalls(b, fakeCodexCall)
+	}
+	if b := os.Getenv("AGENTBUS_FAKE_OPENCODE_AFTER"); b != "" {
+		afterCalls(b, fakeOpencodeCall)
+	}
 	if b := os.Getenv("AGENTBUS_FAKE_CALL_AFTER"); b != "" {
-		req, _ := http.NewRequest("POST", claudeGatewayEnv("ANTHROPIC_BASE_URL")+"/v1/messages", strings.NewReader(b))
-		req.Header.Set("Content-Type", "application/json")
-		if tok := claudeGatewayEnv("ANTHROPIC_AUTH_TOKEN"); tok != "" {
-			req.Header.Set("Authorization", "Bearer "+tok)
-		} else if tok := claudeGatewayEnv("CLAUDE_CODE_OAUTH_TOKEN"); tok != "" {
-			req.Header.Set("Authorization", "Bearer "+tok)
-			req.Header.Set("anthropic-beta", "oauth-2025-04-20")
-		}
-		status := 0
-		if resp, err := http.DefaultClient.Do(req); err == nil {
-			io.Copy(io.Discard, resp.Body)
-			resp.Body.Close()
-			status = resp.StatusCode
-		}
-		if out := os.Getenv("AGENTBUS_FAKE_CALL_OUT"); out != "" {
-			os.WriteFile(out, []byte(strconv.Itoa(status)), 0o600)
-		}
+		afterCalls(b, fakeClaudeCallAfter)
 	}
 	code, _ := strconv.Atoi(os.Getenv("AGENTBUS_FAKE_EXIT"))
 	os.Exit(code)
+}
+
+// fakePrompted is b with @PROMPT@ made the turn's prompt, the last
+// argument, as a JSON string's inside.
+func fakePrompted(b string) string {
+	q, _ := json.Marshal(os.Args[len(os.Args)-1])
+	return strings.ReplaceAll(b, "@PROMPT@", string(q[1:len(q)-1]))
+}
+
+// fakeClaudeCallAfter is AGENTBUS_FAKE_CALL_AFTER's call.
+func fakeClaudeCallAfter(b string) {
+	req, _ := http.NewRequest("POST", claudeGatewayEnv("ANTHROPIC_BASE_URL")+"/v1/messages", strings.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	if tok := claudeGatewayEnv("ANTHROPIC_AUTH_TOKEN"); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+	} else if tok := claudeGatewayEnv("CLAUDE_CODE_OAUTH_TOKEN"); tok != "" {
+		req.Header.Set("Authorization", "Bearer "+tok)
+		req.Header.Set("anthropic-beta", "oauth-2025-04-20")
+	}
+	status := 0
+	if resp, err := http.DefaultClient.Do(req); err == nil {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		status = resp.StatusCode
+	}
+	if out := os.Getenv("AGENTBUS_FAKE_CALL_OUT"); out != "" {
+		os.WriteFile(out, []byte(strconv.Itoa(status)), 0o600)
+	}
+}
+
+// fakeCodexCall is one model call as codex makes it: to the
+// openai_base_url its -c argument names, or the base_url of the provider
+// its -c arguments set, with the key its env_key names as the bearer, and
+// AGENTBUS_FAKE_THREAD as its Thread-Id header.
+func fakeCodexCall(b string) {
+	var base, key string
+	for _, a := range os.Args[1:] {
+		if v, ok := strings.CutPrefix(a, `openai_base_url="`); ok {
+			base = strings.TrimSuffix(v, `"`)
+		}
+		if _, v, ok := strings.Cut(a, `.base_url="`); ok && strings.HasPrefix(a, "model_providers.") {
+			base = strings.TrimSuffix(v, `"`)
+		}
+		if _, v, ok := strings.Cut(a, `.env_key="`); ok && strings.HasPrefix(a, "model_providers.") {
+			key = os.Getenv(strings.TrimSuffix(v, `"`))
+		}
+	}
+	if base == "" {
+		return
+	}
+	req, _ := http.NewRequest("POST", base+"/responses", strings.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Thread-Id", os.Getenv("AGENTBUS_FAKE_THREAD"))
+	if key != "" {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	if resp, err := http.DefaultClient.Do(req); err == nil {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+}
+
+// fakeOpencodeCall is one model call as opencode makes it through an
+// @ai-sdk/openai-compatible provider: to <baseURL>/chat/completions of the
+// one provider OPENCODE_CONFIG_CONTENT sets, with the key its "{env:NAME}"
+// names as the bearer.
+func fakeOpencodeCall(b string) {
+	var cfg struct {
+		Provider map[string]struct {
+			Options struct {
+				BaseURL string `json:"baseURL"`
+				APIKey  string `json:"apiKey"`
+			} `json:"options"`
+		} `json:"provider"`
+	}
+	json.Unmarshal([]byte(os.Getenv("OPENCODE_CONFIG_CONTENT")), &cfg)
+	for _, p := range cfg.Provider {
+		req, _ := http.NewRequest("POST", p.Options.BaseURL+"/chat/completions", strings.NewReader(b))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("User-Agent", "opencode/1.19.6 ai-sdk/provider-utils/4.0.23 runtime/bun/1.4.4")
+		if name, ok := strings.CutPrefix(p.Options.APIKey, "{env:"); ok {
+			req.Header.Set("Authorization", "Bearer "+os.Getenv(strings.TrimSuffix(name, "}")))
+		}
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+		}
+	}
 }
 
 type fakeReport struct {

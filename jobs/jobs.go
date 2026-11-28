@@ -701,6 +701,11 @@ type AttemptStarted struct {
 	// earlier turns' agents by them (run.Config.AgentName). The saved agents
 	// live on control; a runner keeps none.
 	AgentNames map[string]string `json:"agent_names,omitempty"`
+	// Notes, on a turn's attempt, are the notes of its session no turn has
+	// been given yet (queue/notes.go): an earlier turn's that it never
+	// passed on, or this turn's own while it waited. The runner gives them as
+	// AttemptBeat's.
+	Notes []queue.Note `json:"notes,omitempty"`
 }
 
 // RulesRefusal is a setting control cannot use, so a turn cannot start: where
@@ -747,6 +752,10 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request, rn queue.Runner) 
 			default:
 				st.Settings = rules
 			}
+			if st.Notes, err = s.cfg.Queue.AttemptNotes(rn.ID, a.ID, a.Number); err != nil {
+				s.queueError(w, err)
+				return
+			}
 			if s.cfg.Agents != nil {
 				st.AgentNames = map[string]string{}
 				for _, ag := range s.cfg.Agents.List() {
@@ -784,6 +793,10 @@ func (s *Server) signin(j queue.Job) string {
 type AttemptBeat struct {
 	LeaseUntil time.Time `json:"lease_until"`
 	Cancel     bool      `json:"cancel"`
+	// Notes are the notes of the turn's session it has not been given yet
+	// (queue/notes.go). The runner gives each one once, at the turn's next
+	// main-thread model call.
+	Notes []queue.Note `json:"notes,omitempty"`
 }
 
 func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request, rn queue.Runner) {
@@ -797,7 +810,12 @@ func (s *Server) heartbeat(w http.ResponseWriter, r *http.Request, rn queue.Runn
 		s.queueError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, AttemptBeat{until, c})
+	notes, err := s.cfg.Queue.AttemptNotes(rn.ID, r.PathValue("id"), b.Number)
+	if err != nil {
+		s.queueError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, AttemptBeat{until, c, notes})
 }
 
 // Events is the body of an events batch: the attempt's number, the sequence

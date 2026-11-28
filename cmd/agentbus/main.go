@@ -167,6 +167,16 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		}
 		c.chatgpt = tu
 	}
+	// The same for OpenRouter, so a two-process test can run an OpenRouter
+	// agent (opencode's Chat Completions) against a fake.
+	if u := getenv("AGENTBUS_TEST_OPENROUTER_UPSTREAM"); u != "" {
+		tu, err := url.Parse(u)
+		if err != nil || (tu.Scheme != "http" && tu.Scheme != "https") || tu.Host == "" || !loopbackHost(tu.Hostname()) {
+			own.Printf("AGENTBUS_TEST_OPENROUTER_UPSTREAM must be a loopback http address")
+			return 1
+		}
+		c.openrouter = tu
+	}
 	// Env only, like the test upstreams: a two-process test shortens the Ask
 	// hold so its timeout path does not take a real minute.
 	// Env only, like the hold: a cross-process test holds a runner's taken job
@@ -345,6 +355,39 @@ func (l *lazyDecider) Decided(ctx context.Context, turn, approval string) (bool,
 	return d.Decided(ctx, turn, approval)
 }
 
+// lazyNotes gives own replay a running turn's notes (replay.Notes) from the
+// runner that runs it, once that runner is enrolled (startRunner). Before
+// that no turn runs here, so there are none.
+type lazyNotes struct {
+	mu sync.RWMutex
+	n  replay.Notes
+}
+
+func (l *lazyNotes) set(n replay.Notes) {
+	l.mu.Lock()
+	l.n = n
+	l.mu.Unlock()
+}
+
+func (l *lazyNotes) TakeNotes(session, turn string) []event.Added {
+	l.mu.RLock()
+	n := l.n
+	l.mu.RUnlock()
+	if n == nil {
+		return nil
+	}
+	return n.TakeNotes(session, turn)
+}
+
+func (l *lazyNotes) ReturnNotes(session, turn string, notes []event.Added) {
+	l.mu.RLock()
+	n := l.n
+	l.mu.RUnlock()
+	if n != nil {
+		n.ReturnNotes(session, turn, notes)
+	}
+}
+
 type service struct {
 	addr     string // the address listened on
 	shown    string // -listen with its port filled in: Go reports 0.0.0.0 as [::]
@@ -373,8 +416,10 @@ type service struct {
 	// (gateway/hold.go, runner/decide.go). guardedGws are those gateways, so
 	// startRunner can also give them the runner's approval-id scope.
 	holdDecider *lazyDecider
-	gate        *turnGate // the runner's gateways' turn check, set once it enrolled
-	guardedGws  []*gateway.Gateway
+	// notes backs own replay's notes (lazyNotes); nil without own replay.
+	notes      *lazyNotes
+	gate       *turnGate // the runner's gateways' turn check, set once it enrolled
+	guardedGws []*gateway.Gateway
 
 	// The built-in runner, and the lease sweep: stopped before the API.
 	stopRunner func()
@@ -750,6 +795,7 @@ func start(c config) (*service, error) {
 	// each vendor's gateway puts the earlier turn's history in front of their
 	// requests.
 	var claudeReplay, codexReplay, chatReplay *replay.Replayer
+	var notes *lazyNotes
 	var replayBase func(string, string) (engine.ReplayPlan, error)
 	if !c.noReplay {
 		claudeReplay, codexReplay, chatReplay = replay.New(st), replay.NewCodex(st), replay.NewChatCompletions(st)
@@ -758,8 +804,13 @@ func start(c config) (*service, error) {
 		// control's database, or on a runner from the server (settings.Remote),
 		// so every runner keeps the same budget.
 		budget := settings.BudgetOf(cfgStore)
+		// A running turn's notes come from the runner that runs it
+		// (runner/notes.go), and own replay adds them to its next
+		// main-thread call (replay/notes.go).
+		notes = &lazyNotes{}
 		for _, r := range []*replay.Replayer{claudeReplay, codexReplay, chatReplay} {
 			r.SetBudget(budget)
+			r.SetNotes(notes)
 		}
 		replayBase = func(agent, session string) (engine.ReplayPlan, error) {
 			// Each harness names the history format own replay uses for it.
@@ -1019,7 +1070,7 @@ func start(c config) (*service, error) {
 	}
 	host, _, _ := net.SplitHostPort(c.listen)
 	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: append(gws, relayGws...), api: a, eng: eng, store: st, blobs: bs, blobSwp: blobSweep, jobsSrv: runnerJobs,
-		queue: q, saved: saved, remote: remote, settings: cfgStore, sdb: sdb, folders: fr, log: svcLog, logins: logins, holdDecider: holdDecider, gate: gate, guardedGws: guardedGws, done: make(chan error, 1)}
+		queue: q, saved: saved, remote: remote, settings: cfgStore, sdb: sdb, folders: fr, log: svcLog, logins: logins, holdDecider: holdDecider, notes: notes, gate: gate, guardedGws: guardedGws, done: make(chan error, 1)}
 	sdbHanded = true
 	if q != nil {
 		s.subs = subs
@@ -1332,6 +1383,9 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 	}
 	if s.gate != nil {
 		s.gate.set(rn)
+	}
+	if s.notes != nil {
+		s.notes.set(rn)
 	}
 	for _, g := range s.guardedGws {
 		g.SetApprovalScope(rn.ScopeApproval)

@@ -685,6 +685,10 @@ type attempt struct {
 	settings              *settings.RunnerSettings
 	rulesErr              *settings.Error
 	cancelOnce, staleOnce sync.Once
+	// notes are the notes of the turn's session control has sent and the
+	// turn has not been given yet; given, those it was given (notes.go).
+	notes []queue.Note
+	given map[int64]bool
 
 	// The workspace, once known: its folder, and for a session's first job
 	// the workspace to record. In an isolated session, space is its copy and
@@ -1104,6 +1108,7 @@ func (at *attempt) heartbeats(ctx context.Context, done <-chan struct{}) {
 			if b.Cancel {
 				at.cancelOnce.Do(func() { close(at.cancel) })
 			}
+			at.heardNotes(b.Notes)
 		case err == nil && (e.Stale || status == http.StatusNotFound):
 			at.staleOnce.Do(func() { close(at.stale) })
 			return
@@ -1150,6 +1155,7 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 		at.rulesErr = st.RulesRefused.Err()
 	}
 	at.mu.Unlock()
+	at.heardNotes(st.Notes)
 	done := make(chan struct{})
 	defer close(done)
 	go at.heartbeats(ctx, done)

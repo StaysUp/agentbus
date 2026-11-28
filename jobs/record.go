@@ -179,6 +179,15 @@ func (s *Server) record(w http.ResponseWriter, r *http.Request, rn queue.Runner)
 		if stored {
 			n++
 		}
+		// A note the turn was given is delivered once its context.added is
+		// in the record (queue/notes.go), whether this batch or an earlier
+		// one stored it, so a batch sent again marks nothing new.
+		if ids := event.NotesGiven(e); len(ids) > 0 {
+			if err := s.cfg.Queue.NotesDelivered(j.Team, e.Session, e.Turn, ids); err != nil {
+				s.internal(w)
+				return
+			}
+		}
 	}
 	writeJSON(w, http.StatusOK, RecordAck{Stored: n})
 }

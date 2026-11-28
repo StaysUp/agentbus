@@ -28,12 +28,16 @@ import (
 
 // relayOnly are the kinds of a call's events (those with an exchange) that
 // the runner's gateway makes and control's relay cannot: own replay's refusal
-// and its history steps (history.shortened, history.compacted), the guard's, and a call the runner's gateway refused on its own, before it
+// and its history steps (history.shortened, history.compacted), the notes it
+// added (context.added), the guard's, and a call the runner's gateway refused on its own, before it
 // reached control's relay (refuseCall, for an unrecorded path or a bad header:
 // no credential is added and the call is sent nowhere, so the relay never sees
 // it). Every other event of a relayed call control records itself.
 var relayOnly = map[event.Kind]bool{event.ReplayFailed: true, event.HistoryShortened: true, event.HistoryCompacted: true, event.ToolRefused: true,
-	event.ApprovalRequested: true, event.ApprovalDecided: true, event.CallRefused: true}
+	event.ApprovalRequested: true, event.ApprovalDecided: true, event.CallRefused: true,
+	// A note own replay added to the call (replay/notes.go): control's
+	// relay sees the call with it, but only this gateway knows it was a note.
+	event.ContextAdded: true}
 
 // relayedCall is true for a call's event that control's relay records itself, so
 // a runner that holds no secret leaves it out of what it writes to control's

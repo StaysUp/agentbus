@@ -5,10 +5,13 @@ package store
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
 	"unicode/utf8"
+
+	"github.com/staysup/agentbus/event"
 )
 
 // TurnStart reads the turn.started of (session, turn): the prompt its agent
@@ -284,6 +287,35 @@ func (s *Store) TurnCalls(session, turn string) ([]Call, error) {
 		return nil, fmt.Errorf("store: read a turn's calls: %w", err)
 	}
 	return out, nil
+}
+
+// TurnNotes are the notes a turn's model calls carried, in the order they
+// were given: the note pieces of its context.added events that name a call
+// (replay/notes.go).
+func (s *Store) TurnNotes(session, turn string) ([]event.Added, error) {
+	rows, err := s.r.Query(`SELECT data FROM events WHERE session = ? AND turn = ? AND kind = 'context.added'
+		AND COALESCE(json_extract(data, '$.exchange'), '') <> '' ORDER BY seq`, session, turn)
+	if err != nil {
+		return nil, fmt.Errorf("store: read a turn's notes: %w", err)
+	}
+	defer rows.Close()
+	var out []event.Added
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, fmt.Errorf("store: read a turn's notes: %w", err)
+		}
+		var e event.Event
+		if json.Unmarshal([]byte(data), &e) != nil {
+			continue
+		}
+		for _, a := range e.Added {
+			if a.Kind == event.AddedNote && a.Note > 0 {
+				out = append(out, a)
+			}
+		}
+	}
+	return out, rows.Err()
 }
 
 // TurnIncomplete reports whether the turn may be missing events: an

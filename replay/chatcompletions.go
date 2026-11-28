@@ -17,8 +17,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/staysup/agentbus/body"
+	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/gateway"
 	"github.com/staysup/agentbus/store"
 )
@@ -252,11 +254,24 @@ func (c chatCompletions) fresh(req request, prompt string) bool {
 	for _, m := range req.msgs[p+1:] {
 		switch role(m) {
 		case "assistant", "tool", "function":
+		case "user":
+			// A note the gateway added to an earlier call of the turn
+			// (notes.go), as the call is kept: part of its tool loop.
+			if !isNote(m) {
+				return false
+			}
 		default:
 			return false
 		}
 	}
 	return true
+}
+
+// isNote says m is a user message the gateway added for a note: its content
+// is a string that starts with event.NotePrefix.
+func isNote(m json.RawMessage) bool {
+	var s string
+	return json.Unmarshal(field(m, "content"), &s) == nil && strings.HasPrefix(s, event.NotePrefix)
 }
 
 func (chatCompletions) freshRule() string {

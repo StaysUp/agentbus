@@ -895,7 +895,7 @@ func Open(path string, now func() time.Time) (*Queue, error) {
 			return nil, fmt.Errorf("queue: migrate sessions to copies: %w", err)
 		}
 	}
-	if _, err := db.Exec(schema + loginsSchema); err != nil {
+	if _, err := db.Exec(schema + loginsSchema + notesSchema); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("queue: create tables: %w", err)
 	}

@@ -75,13 +75,15 @@ func agentbusBinary(t *testing.T) string {
 }
 
 // fakeAgentDir returns a directory holding an executable named for each harness
-// (claude, codex) that is the test binary: run as the agent, it is the fake
-// agent (AGENTBUS_FAKE_AGENT). It goes on the runner's PATH, so the runner's
-// own exec.LookPath finds it, as it would find a real install.
+// (claude, codex, opencode) that is the test binary: run as the agent, it is the
+// fake agent (AGENTBUS_FAKE_AGENT). It goes on the runner's PATH, so the runner's
+// own exec.LookPath finds it, as it would find a real install. A harness left
+// out runs whatever install the machine's PATH has (a real opencode, seen
+// 2026-11-28).
 func fakeAgentDir(t *testing.T, harnesses ...string) string {
 	t.Helper()
 	if len(harnesses) == 0 {
-		harnesses = []string{"claude", "codex"}
+		harnesses = []string{"claude", "codex", "opencode"}
 	}
 	self, err := os.Executable()
 	if err != nil {

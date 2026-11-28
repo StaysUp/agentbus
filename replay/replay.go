@@ -56,6 +56,7 @@ type Source interface {
 	TurnCalls(session, turn string) ([]store.Call, error)
 	TurnIncomplete(session, turn string) (bool, error)
 	TurnClosed(session, turn string) (bool, error)
+	TurnNotes(session, turn string) ([]event.Added, error)
 	TurnEnd(session, turn string) (store.TurnEnd, error)
 	CallContext(exchange string, full bool) (store.CallContext, bool, error)
 	Reply(exchange string) (body.Reply, bool, error)
@@ -79,6 +80,11 @@ type Replayer struct {
 	carried map[[2]string]bool
 	// budget gives the history budget, a share of the model's window.
 	budget func() float64
+	// notes gives a running turn its waiting notes (notes.go); nil gives none.
+	// placed: (session, turn): notes a 2xx gave whose context.added the
+	// store may not hold yet.
+	notes  Notes
+	placed map[[2]string][]event.Added
 }
 
 // New returns a Replayer for Claude Code's requests, reading src.
@@ -93,7 +99,8 @@ func NewChatCompletions(src Source) *Replayer { return newReplayer(src, chatComp
 
 func newReplayer(src Source, f format) *Replayer {
 	return &Replayer{src: src, f: f, turns: map[[2]string]turnInfo{}, hists: map[[2]string]*history{},
-		mains: map[[2]string]string{}, fits: map[[2]string]*history{}, carried: map[[2]string]bool{}}
+		mains: map[[2]string]string{}, fits: map[[2]string]*history{}, carried: map[[2]string]bool{},
+		placed: map[[2]string][]event.Added{}}
 }
 
 // format is what own replay knows of one vendor's request layout. Every
@@ -130,6 +137,12 @@ type format interface {
 	note(text string) json.RawMessage
 	// refusal answers the agent in its vendor's error format.
 	refusal(msg string) *gateway.Refusal
+	// conversation is the request's field that holds its conversation;
+	// userNote is AgentBus's note as a user message, and afterSummary the
+	// place right after a compacted conversation's summary (notes.go).
+	conversation() string
+	userNote(text string) json.RawMessage
+	afterSummary(msgs []json.RawMessage) int
 	// parse reads a request; ok is false for a body that is not this
 	// format's, which passes unchanged.
 	parse(data []byte) (request, bool)
@@ -963,13 +976,19 @@ func (r *Replayer) storedIdentity(calls []store.Call, prompt string) (id string,
 	return "", false, unread, nil
 }
 
-// evictClosed drops the identities of turns whose child has exited. An open
+// evictClosed drops the identities, and the notes placed, of turns whose
+// child has exited. An open
 // turn's identity is never dropped: the memo then grows past memoMax, bounded
 // by the turns running at once. Called with r.mu held.
 func (r *Replayer) evictClosed() {
 	for k := range r.mains {
 		if closed, err := r.src.TurnClosed(k[0], k[1]); err == nil && closed {
 			delete(r.mains, k)
+		}
+	}
+	for k := range r.placed {
+		if closed, err := r.src.TurnClosed(k[0], k[1]); err == nil && closed {
+			delete(r.placed, k)
 		}
 	}
 }
@@ -991,7 +1010,26 @@ func quote(s string) string { b, _ := json.Marshal(s); return string(b) }
 // is refused with replay.failed: sending it on without the history would give
 // the model a turn with no past, which it would answer as if that were the
 // whole conversation.
+//
+// Either way, a main-thread request carries the turn's notes first
+// (withNotes), as if the agent had sent them.
 func (r *Replayer) Rewrite(session, turn string, data []byte) gateway.Rewrite {
+	nc := r.withNotes(session, turn, data)
+	rw := r.rewrite(session, turn, nc.data)
+	if rw.Refuse != nil {
+		if len(nc.taken) > 0 {
+			r.notes.ReturnNotes(session, turn, nc.taken)
+		}
+		return rw
+	}
+	if rw.Body == nil && nc.changed {
+		rw.Body = nc.data
+	}
+	rw.Replied = r.replied(session, turn, nc)
+	return rw
+}
+
+func (r *Replayer) rewrite(session, turn string, data []byte) gateway.Rewrite {
 	ti, err := r.turn(session, turn)
 	if err != nil {
 		return r.refuse("the store could not be read")

@@ -363,3 +363,65 @@ func TestBarrierWaitsForTheDropReport(t *testing.T) {
 	}
 	q.close()
 }
+
+// A rewrite's Replied hears once how the call went: the vendor's status, or
+// 0 when no vendor answered, and its events are the exchange's.
+func TestRewriteRepliedHearsTheStatus(t *testing.T) {
+	for _, c := range []struct {
+		name   string
+		status int // the vendor's; 0: no vendor
+	}{{"accepted", 200}, {"refused", 429}, {"unreachable", 0}} {
+		t.Run(c.name, func(t *testing.T) {
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.ReadAll(r.Body)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(c.status)
+				io.WriteString(w, okReply)
+			}))
+			u, _ := url.Parse(upstream.URL)
+			if c.status == 0 {
+				upstream.Close()
+			} else {
+				t.Cleanup(upstream.Close)
+			}
+			mem := &event.Memory{}
+			g := New(u, anthropic.Adapter{}, mem)
+			var mu sync.Mutex
+			var heard []int
+			g.SetRewriter(rewriteFunc(func(_, _ string, _ []byte) Rewrite {
+				return Rewrite{Replied: func(status int) []event.Event {
+					mu.Lock()
+					heard = append(heard, status)
+					mu.Unlock()
+					return []event.Event{{Kind: event.ContextAdded}}
+				}}
+			}))
+			srv := httptest.NewServer(g)
+			t.Cleanup(func() { srv.Close(); g.Close() })
+			resp, err := rawClient().Post(srv.URL+"/s/s1/t/t_1/v1/messages", "application/json", strings.NewReader(runBody))
+			if err != nil {
+				t.Fatal(err)
+			}
+			io.ReadAll(resp.Body)
+			resp.Body.Close()
+			g.Close()
+			mu.Lock()
+			defer mu.Unlock()
+			if len(heard) != 1 || heard[0] != c.status {
+				t.Fatalf("Replied heard %v, want [%d]", heard, c.status)
+			}
+			n := 0
+			for _, e := range mem.Events() {
+				if e.Kind == event.ContextAdded {
+					n++
+					if e.Exchange == "" || e.Turn != "t_1" {
+						t.Fatalf("Replied's event is not the exchange's: %+v", e)
+					}
+				}
+			}
+			if n != 1 {
+				t.Fatalf("%d of Replied's events emitted, want 1", n)
+			}
+		})
+	}
+}

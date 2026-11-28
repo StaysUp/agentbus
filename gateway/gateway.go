@@ -220,6 +220,12 @@ type Rewrite struct {
 	Refuse *Refusal
 	// Events are emitted for the exchange, before model.requested.
 	Events []event.Event
+	// Replied, when set, is called once the call's fate is known: with the
+	// vendor's status when its reply begins, or 0 when no vendor answered
+	// (the vendor could not be reached, the agent closed the call, the reply
+	// could not be read). The events it returns are emitted for the
+	// exchange.
+	Replied func(status int) []event.Event
 }
 
 // Refusal is an answer the gateway gives in the vendor's place.
@@ -295,6 +301,10 @@ type exchange struct {
 	// runs once, however many paths reach it.
 	releaseOnce sync.Once
 	release     func(confirmed bool)
+
+	// replied is the rewrite's Replied, called once (answered).
+	repliedOnce sync.Once
+	replied     func(status int) []event.Event
 }
 
 // done marks the exchange as finished, once. confirmed false means the
@@ -303,6 +313,14 @@ func (ex *exchange) done(confirmed bool) {
 	if ex.release != nil {
 		ex.releaseOnce.Do(func() { ex.release(confirmed) })
 	}
+}
+
+// answered tells the exchange's rewrite how the call went, once (Rewrite.Replied).
+func (g *Gateway) answered(ex *exchange, status int) {
+	if ex.replied == nil {
+		return
+	}
+	ex.repliedOnce.Do(func() { g.emit(ex, ex.replied(status)) })
 }
 
 type exchangeKey struct{}
@@ -624,6 +642,7 @@ func (g *Gateway) serve(w http.ResponseWriter, r *http.Request, session, runTurn
 				_, _ = w.Write(rw.Refuse.Body)
 				return
 			}
+			ex.replied = rw.Replied
 			if rw.Body != nil {
 				// What the vendor gets, sent plain: a compressed request is
 				// decoded once and not compressed again.
@@ -690,6 +709,7 @@ func (g *Gateway) modifyResponse(resp *http.Response) error {
 	if ex.checked && !readable(ex.call, resp.Header) {
 		return errUnreadable
 	}
+	g.answered(ex, resp.StatusCode)
 	if ex.call.Service {
 		if ex.call.Path == "/v1internal:retrieveUserQuotaSummary" && resp.StatusCode == http.StatusOK {
 			if err := g.readAgyQuota(ex, resp); err != nil {
@@ -791,6 +811,9 @@ func upstreamFailure(err error) (msg string, status int) {
 func (g *Gateway) errorHandler(w http.ResponseWriter, r *http.Request, err error) {
 	ex, ok := r.Context().Value(exchangeKey{}).(*exchange)
 	rl := relayedOf(r.Context())
+	if ok {
+		g.answered(ex, 0)
+	}
 	if ok && errors.Is(err, errUnreadable) {
 		g.unreadableReply(w, ex)
 		return

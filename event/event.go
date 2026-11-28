@@ -291,7 +291,7 @@ var Kinds = []KindInfo{
 	{ApprovalRequested, "The gateway refused a tool call because its command matched an ask entry of permissions.toml, and recorded it for a person: approval (its id), tool_id, tool_name, rule (the first ask entry), commands (every ask command in the reply) and rules (the ask entries they matched); text lists the commands one per line. The turn ends with the call refused; nothing is held. Control derives the pending list from the record, a requested with no approval.decided for the same approval id, so it works when the gateway that refused runs on a separate runner. GET /api/v0/approvals lists it and POST /api/v0/approvals/{id} answers it: allow moves the entries from ask to allow and continues the session so the agent can run them; refuse records the decision. The call's tool.requested is still stored, and its tool.completed carries the refusal. Show it as a prompt to allow or refuse.", []string{"approval", "tool_id", "commands", "rules"}},
 	{ApprovalDecided, "A recorded ask command was answered, written by control when a person answers: approval ties it to its approval.requested, rule is the first ask entry, and text says how it ended (allowed or refused) and who answered. Show it beside the request.", []string{"approval"}},
 	{ToolsListed, "Control served the turn's tool list: its agent's tool server (POST /api/v0/mcp, [agent_api] tools in permissions.toml) answered tools/list for the turn's token. Stored once per turn, at the first tools/list, however often the agent asks. server is the tool server's name, as tool names carry it (claude calls a tool mcp__agentbus__<name>); tools are the names it served, which the turn's token may call; tools_hidden are the harness's own tools the turn does not get, each with why. A turn with no tools.listed got no tool server, or its agent never asked for the list. Names only: never an input, a value or a token.", []string{"server"}},
-	{ContextAdded, "What AgentBus gave the turn besides the person's words, the same for every harness: added, each piece with its kind, bytes and text. Kinds: agents_md (the folder's AGENTS.md, when the harness does not read it by itself), instructions (instructions.md, filled in), asked_by (who asked an asked agent for the work), mcp_instructions (the tool server's own instructions, when the turn has it) and, in records from before 0.5, commands (the shell commands the person ran in the session since its previous turn, with their output). Stored once per turn, after its turn.started, just before its agent starts. Absent when nothing was added. Each text is as the agent got it: AGENTS.md is bounded at 32 KiB and instructions.md at 64 KiB.", []string{"added"}},
+	{ContextAdded, "What AgentBus gave the turn besides the person's words, the same for every harness: added, each piece with its kind, bytes and text. Kinds: agents_md (the folder's AGENTS.md, when the harness does not read it by itself), instructions (instructions.md, filled in), asked_by (who asked an asked agent for the work), mcp_instructions (the tool server's own instructions, when the turn has it), and, in records from before 0.5, commands (the shell commands the person ran in the session since its previous turn, with their output). Stored once per turn, after its turn.started, just before its agent starts. Absent when nothing was added. One more kind, note (a short note AgentBus attached to the session's running turn, with its id as note), has a context.added of its own, stored once the vendor accepted (2xx) the first model call that carried it, with that call's exchange and the note's place in the conversation (at, compacted). Every later model call of the turn carries it again at that place, so each call's kept request holds it. Each text is as the agent got it: AGENTS.md is bounded at 32 KiB and instructions.md at 64 KiB.", []string{"added"}},
 	{NetworkRefused, "A turn's agent runs closed off from the network ([network] of permissions.toml), and asked its runner's proxy for a host the policy does not allow: host (host:port as asked) and error (why). The connection was refused. Each refusal is its own event. Show it as a warning.", []string{"host"}},
 	{CallRefused, "A turn's agent sent its vendor a call that control adds no credential to, because it is not a call the vendor's adapter records: call (method and vendor path), status and error (why). " +
 		"Refused before sending (a path, method or query the adapter does not read): status 403, the vendor got nothing and the credential went nowhere. " +
@@ -857,9 +857,14 @@ type HistoryStep struct {
 // Added is one piece of what AgentBus gave a turn besides the person's
 // words (context.added).
 type Added struct {
-	Kind  string `json:"kind" doc:"agents_md, instructions, asked_by, mcp_instructions, or commands in records from before 0.5."`
+	Kind  string `json:"kind" doc:"agents_md, instructions, asked_by, mcp_instructions, note, or commands in records from before 0.5."`
 	Bytes int    `json:"bytes" doc:"The size of text, in bytes."`
 	Text  string `json:"text" doc:"The text as the agent got it."`
+	Note  int64  `json:"note,omitempty" doc:"For note: the note's id. Each note is given to one turn, once."`
+	// At and Compacted are a note's place in its turn's conversation: own
+	// replay puts it back there in each later model call (replay/notes.go).
+	At        int  `json:"at,omitempty" doc:"For note: how many messages of the agent's conversation came before it in the model call that first carried it."`
+	Compacted bool `json:"compacted,omitempty" doc:"For note: that call came after the agent compacted its conversation."`
 }
 
 // The kinds of an Added.
@@ -868,11 +873,36 @@ const (
 	AddedInstructions    = "instructions"
 	AddedAskedBy         = "asked_by"
 	AddedMCPInstructions = "mcp_instructions"
+	// AddedNote: a short note AgentBus attached to a running turn, such as
+	// that its folder changed. The gateway adds it to the turn's next
+	// main-thread model call, and once the vendor accepts that call (a 2xx)
+	// records it in a context.added with the call's exchange and its place.
+	AddedNote = "note"
 	// AddedCommands: the shell commands the person ran in the session since
 	// its previous turn (command.ran), with their output. Retired in 0.5:
 	// only in older records.
 	AddedCommands = "commands"
 )
+
+// NotePrefix starts every note as the agent gets it, so the agent never
+// takes it for the person's words, and own replay knows the message the
+// gateway added (replay/notes.go).
+const NotePrefix = "[AgentBus] A note from AgentBus, not from the person: "
+
+// NotesGiven are the ids of the notes e gave its turn: e's note pieces, when
+// e is a context.added.
+func NotesGiven(e Event) []int64 {
+	if e.Kind != ContextAdded {
+		return nil
+	}
+	var ids []int64
+	for _, a := range e.Added {
+		if a.Kind == AddedNote && a.Note > 0 {
+			ids = append(ids, a.Note)
+		}
+	}
+	return ids
+}
 
 // Origin says who started a turn when the person did not.
 type Origin struct {
