@@ -84,6 +84,10 @@ type Recorder interface {
 	// OpenHoldsOfTurn are the runs of a turn the record saw start and not end
 	// (closeOpenRuns).
 	OpenHoldsOfTurn(turn string) ([]store.OpenHold, error)
+	// TurnClosed says the turn's run has a run.ended: its child has exited, so
+	// its token and stand-in no longer work (tokens.go), even while the runner
+	// is still finishing the attempt.
+	TurnClosed(session, turn string) (bool, error)
 	Finder
 }
 

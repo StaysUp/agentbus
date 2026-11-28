@@ -40,6 +40,7 @@ func (c calls) TurnText(string, string) (string, string, bool, error) {
 func (c calls) EventByID(string, string, string) (event.Event, bool, error) {
 	return event.Event{}, false, nil
 }
+func (c calls) TurnClosed(string, string) (bool, error) { return false, nil }
 func (c calls) OtherTurns(x, session, turn string) (bool, error) {
 	v, ok := c[x]
 	return ok && v[0] == session && v[1] != turn, nil

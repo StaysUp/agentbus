@@ -25,7 +25,8 @@ package jobs
 // A stand-in is the same runner, attempt and number, sealed with another key
 // derived from the main token, behind a random nonce: it reads as random
 // bytes, names nothing to whoever gets it, and lives exactly as long as the
-// turn token: while the attempt is current, across a restart of control.
+// turn token: while the attempt is current and the turn's child runs, across a
+// restart of control.
 
 import (
 	"crypto/aes"
@@ -89,6 +90,19 @@ func (s *Server) attemptJob(msg string) (queue.Job, run.Grant, bool) {
 	session := assignedSession(j)
 	if session == "" {
 		return queue.Job{}, run.Grant{}, false
+	}
+	// The attempt stays current from the child's exit until the runner reports
+	// it finished, which it does only after uploading the turn's changes (a
+	// large changeset takes seconds). The token and the stand-in must not
+	// outlive the child: the engine stores the turn's run.ended once the child
+	// has exited and its output is in, before the runner finishes the attempt,
+	// so from then on a process the child left behind holds neither. A record
+	// read error keeps the turn working, so a transient error never kills a
+	// live one.
+	if s.cfg.Record != nil {
+		if closed, err := s.cfg.Record.TurnClosed(session, j.Turn); err == nil && closed {
+			return queue.Job{}, run.Grant{}, false
+		}
 	}
 	// Everything the grant says of the turn is read from its job and attempt,
 	// the one copy: its place in the request tree, and the rules it took when
