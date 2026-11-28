@@ -277,6 +277,7 @@ func addColumns(db *sql.DB) error {
 		{"jobs", "not_before", "INTEGER"},
 		{"ons", "action", "TEXT"},
 		{"ons", "cursor", "INTEGER"},
+		{"ons", "filter", "TEXT"},
 	} {
 		var n int
 		if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name = ?`, c.table, c.column).Scan(&n); err != nil {
@@ -320,6 +321,14 @@ func addColumns(db *sql.DB) error {
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS jobs_tree ON jobs(team, tree) WHERE tree IS NOT NULL`); err != nil {
 		return fmt.Errorf("queue: index jobs.tree: %w", err)
+	}
+	// A workspace's jobs, by the workspace they run in (jobWorkspace): every
+	// Get reads the workspace's head through it (workspaceOf), and without it
+	// each read was a scan of every job's JSON (4 ms at 1,000 jobs, 870 of
+	// them at a start). The queries name jobWorkspace itself, so SQLite
+	// matches them to this index.
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS jobs_workspace ON jobs(team, (` + jobWorkspace + `), kind)`); err != nil {
+		return fmt.Errorf("queue: index jobs by workspace: %w", err)
 	}
 	// One on per idempotency key (B15): added after the column exists, since a
 	// fresh queue has it from the schema and an older one gets it from the ALTER

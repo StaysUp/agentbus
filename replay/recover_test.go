@@ -326,7 +326,10 @@ func TestRecoverTurnWithNoCall(t *testing.T) {
 	if plan.Turn != "t1" {
 		t.Fatalf("plan %+v", plan)
 	}
-	want := `{"role":"user","content":"remember the word kiwi"},` +
+	// No earlier turn reached the model, so the history holds none of
+	// Claude Code's context either: the fresh process's goes into its first
+	// message, in front of the person's words.
+	want := `{"role":"user","content":[` + reminder + `,{"type":"text","text":"remember the word kiwi"}]},` +
 		`{"role":"assistant","content":[{"type":"text","text":"[Note from AgentBus, not written by the model] The message above was not acted on: it ended before the model was called (the agent could not be started)."}]}`
 	if got := stripped(t, m2[0]) + "," + stripped(t, m2[1]); got != want {
 		t.Errorf("history\n got %s\nwant %s", got, want)

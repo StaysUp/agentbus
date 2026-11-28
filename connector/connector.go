@@ -316,9 +316,10 @@ func (c *Connector) keepSnapshot(ref string, s *workspace.Snapshot) {
 	}
 }
 
-// Lend opens the file rel of the folder ref while it is a regular file with
-// f's size, modification time and mode (isolation.Lender).
-func (c *Connector) Lend(ref, rel string, f workspace.File) (io.ReadCloser, func() bool, bool) {
+// Lend opens the file rel of the folder ref while it is a regular file that
+// asBase says is the Base's f, for a Base that began reading the folder at
+// taken (isolation.Lender).
+func (c *Connector) Lend(ref, rel string, f workspace.File, taken int64) (io.ReadCloser, func() bool, bool) {
 	dir, err := c.path(ref)
 	if err != nil || !f.Mode.IsRegular() {
 		return nil, nil, false
@@ -336,7 +337,7 @@ func (c *Connector) Lend(ref, rel string, f workspace.File) (io.ReadCloser, func
 			return false
 		}
 		defer r2.Close()
-		return sameStat(r2, name, f)
+		return asBase(r2, name, f, taken)
 	}
 	if !same() {
 		rt.Close()
@@ -365,6 +366,9 @@ func (l *lent) Close() error {
 type Applied struct {
 	// Files were written or removed, sorted.
 	Files []string `json:"files"`
+	// Refused, with ErrPartial: the file that stopped the apply part way,
+	// found changed just before its own write (Files were written before it).
+	Refused *ConflictFile `json:"refused,omitempty"`
 }
 
 // Conflict refuses an apply: these files of the folder are neither as the
@@ -426,8 +430,11 @@ var applyMu sync.Mutex
 // *Conflict, and nothing is written. What the folder holds at a path is what
 // a checkpoint would list there (lookup). Then every new file is written out
 // of sight (staged) before any is put in place, so a file that cannot be read
-// from the store writes nothing either. Only a failure while files are put
-// in place leaves some written; ErrPartial says so, and Applied lists them.
+// from the store writes nothing either. After staging, each file to write or
+// remove is looked at again before the first is put in place: one changed
+// meanwhile refuses the apply as the check would have. Only a failure, or a
+// stop, while files are put in place leaves some written; ErrPartial says
+// so, and Applied lists them.
 func (c *Connector) Apply(ctx context.Context, ref, from, to string) (Applied, error) {
 	return c.ApplyPlaces(ctx, []workspace.Place{{Ref: ref}}, from, to, false)
 }
@@ -478,6 +485,9 @@ func (c *Connector) ApplyPlaces(ctx context.Context, places []workspace.Place, f
 		done, _, err := c.apply(ctx, p.Ref, csFrom.Under(p), csTo.Under(p), writeFiles, checkMarkers)
 		for _, f := range done.Files {
 			out.Files = append(out.Files, p.Prefix()+f)
+		}
+		if done.Refused != nil {
+			out.Refused = &ConflictFile{p.Prefix() + done.Refused.Path, done.Refused.Why}
 		}
 		if err != nil {
 			sort.Strings(out.Files)
@@ -620,13 +630,36 @@ const (
 // copy), a file to write that still holds them (workspace.HasMergeMarkers) is a
 // conflict (WhyMarkers), never written: the agent has not combined it.
 func (c *Connector) apply(ctx context.Context, ref string, csFrom, csTo *workspace.Changeset, mode applyMode, checkMarkers bool) (Applied, queue.PreviewResult, error) {
-	var none queue.PreviewResult
-	dry := mode != writeFiles
 	defer lockRef(ref)()
 	dir, err := c.path(ref)
 	if err != nil {
-		return Applied{}, none, err
+		return Applied{}, queue.PreviewResult{}, err
 	}
+	return c.applyDir(ctx, dir, csFrom, csTo, mode, checkMarkers)
+}
+
+// ApplyChangesIn is Apply's writer for any folder dir: it makes dir as csTo
+// holds it, from as csFrom holds it (nil: the base), with every guarantee
+// Apply gives (each file checked against from, or already as at to, before
+// any is written, and a refusal is a *Conflict naming each file and why;
+// every write through dir as a root; names that differ only in case or
+// Unicode form taken as the disk takes them; every file staged whole before
+// any is put in place). The file blobs come from c.Store, and c.Remote when
+// set. Nothing in it needs dir to be one of c.Folders: package isolation
+// writes a merge into a session's copy with it, while the session's turn
+// runs. It runs under the same lock as every apply in this process.
+func (c *Connector) ApplyChangesIn(ctx context.Context, dir string, csFrom, csTo *workspace.Changeset) (Applied, error) {
+	applyMu.Lock()
+	defer applyMu.Unlock()
+	defer lockRef("dir:" + dir)()
+	done, _, err := c.applyDir(ctx, dir, csFrom, csTo, writeFiles, false)
+	return done, err
+}
+
+// applyDir is apply into the folder dir, found and locked by the caller.
+func (c *Connector) applyDir(ctx context.Context, dir string, csFrom, csTo *workspace.Changeset, mode applyMode, checkMarkers bool) (Applied, queue.PreviewResult, error) {
+	var none queue.PreviewResult
+	dry := mode != writeFiles
 	if csTo.Truncated || (csFrom != nil && csFrom.Truncated) {
 		return Applied{}, none, ErrTruncated
 	}
@@ -648,9 +681,19 @@ func (c *Connector) apply(ctx context.Context, ref string, csFrom, csTo *workspa
 		staged     string
 		removeOnly bool
 		respelt    string // the path removed that rel spells in another way
+		// What the conflict check found, for the look again before any
+		// write: the step, whether a file stood there, its stat and, when
+		// the check read it, its hash.
+		step  workspace.Step
+		there bool
+		seen  fs.FileInfo
+		hash  string
 	}
 	var ops []*op
 	var conflict Conflict
+	// The look again measures from here, before the first file is read: what
+	// is written in the folder after this has a change time of this or later.
+	began := time.Now().UnixNano()
 	look := newLookup(rt, steps)
 	// shown, for a dry run: each file an op or a conflict names, and the
 	// folder's file at that path as the check found it.
@@ -660,11 +703,25 @@ func (c *Connector) apply(ctx context.Context, ref string, csFrom, csTo *workspa
 		name := filepath.FromSlash(st.Path)
 		fa, fb := st.From, st.To
 		there, respelt, why := look.at(st)
-		// A file the base recorded without a hash is as the base saw it,
-		// by size, modification time and mode: one still so in the folder
-		// is as at from, without reading it.
-		if there && fa != nil && fa.Hash == "" && sameStat(rt, name, *fa) {
-			ops = append(ops, &op{rel: st.Path, to: fb, removeOnly: fb == nil})
+		var seen fs.FileInfo
+		if there {
+			seen, _ = rt.Lstat(name)
+		}
+		// A file the base recorded without a hash is as the base saw it
+		// when nothing about it changed since the base began reading the
+		// folder (asBase): it is as at from, without reading it. Any other
+		// is read, and one the base left unhashed then cannot be shown to
+		// be as at from, so it refuses the apply as changed.
+		if there && fa != nil && fa.Hash == "" && asBase(rt, name, *fa, csTo.BaseTaken) {
+			o := &op{rel: st.Path, to: fb, removeOnly: fb == nil, step: st, there: there, seen: seen}
+			// One touched since the check began may be written again with its
+			// stat as it is, so it is read now: the look again has no other
+			// record of what it held. A dry run or a check stops before the
+			// look again, so it reads nothing.
+			if !dry && (seen == nil || !workspace.Keeps(*fa, seen, began)) {
+				o.hash, _, _, _ = hashIn(rt, name)
+			}
+			ops = append(ops, o)
 			shown = append(shown, shownFile{rel: st.Path, to: fb, exists: true, mode: fa.Mode})
 			continue
 		}
@@ -709,6 +766,10 @@ func (c *Connector) apply(ctx context.Context, ref string, csFrom, csTo *workspa
 			conflict.Files = append(conflict.Files, ConflictFile{st.Path, WhyRemoved})
 		default:
 			conflict.Files = append(conflict.Files, ConflictFile{st.Path, WhyChanged})
+		}
+		if len(ops) > nops {
+			o := ops[len(ops)-1]
+			o.step, o.there, o.seen, o.hash = st, there, seen, cur
 		}
 		if len(ops) > nops || len(conflict.Files) > nconf {
 			shown = append(shown, shownFile{rel: st.Path, to: fb, exists: exists || why == WhyNotFile, mode: mode, unread: why == WhyNotFile})
@@ -796,14 +857,80 @@ func (c *Connector) apply(ctx context.Context, ref string, csFrom, csTo *workspa
 	if err := ctx.Err(); err != nil {
 		return Applied{}, none, err // stopped before any file is put in place
 	}
+	// The folder may be written while the files are fetched and staged. Each
+	// file to write or remove is looked at again, before the first is: one no
+	// longer as the check found it, nor as the apply leaves it, refuses the
+	// apply as the check would have, and nothing is written (#102).
+	again := newLookup(rt, steps)
+	for _, o := range ops {
+		if err := ctx.Err(); err != nil {
+			return Applied{}, none, err // stopped during the look again
+		}
+		if lookAgain != nil {
+			lookAgain(o.rel)
+		}
+		if why, _ := changedSince(rt, again, o.step, o.there, o.seen, o.hash, began); why != "" {
+			conflict.Files = append(conflict.Files, ConflictFile{o.rel, why})
+		}
+	}
+	if len(conflict.Files) > 0 {
+		sort.Slice(conflict.Files, func(i, j int) bool { return conflict.Files[i].Path < conflict.Files[j].Path })
+		return Applied{}, none, &conflict
+	}
+	// The look again can read large files: a stop meanwhile still writes
+	// nothing.
+	if err := ctx.Err(); err != nil {
+		return Applied{}, none, err
+	}
+	// The look just before each write takes the folders above the file anew,
+	// and the names listed and the files found as they were before anything
+	// is written.
+	again.files()
 	out := Applied{Files: []string{}}
+	// A stop once files are in place ends the apply part way: ErrPartial,
+	// with the files written, as any other failure then.
 	fail := func() (Applied, queue.PreviewResult, error) {
 		sort.Strings(out.Files)
 		return out, none, ErrPartial
 	}
+	// The rule of this last look: once the removals are done, nothing at a
+	// path makes way, so whatever stands there was put there since and is in
+	// the way (lookup.anew).
+	//
+	// Each file is also looked at once more just before its own write or
+	// removal, so an edit saved while the look again read the files after
+	// it is not written over either (review of the take-over of #107). A
+	// change found before anything is written refuses the apply, nothing
+	// written; one found after ends it part way, ErrPartial, the file named
+	// in Refused. It looks the path up as the look again does, the folders
+	// above it included, so a folder made a link meanwhile is refused, not
+	// written through. A file it finds already as the apply leaves it is
+	// left as it is, and not listed. One system call per file remains
+	// between this look and the write, as with git checkout: no portable
+	// compare-and-rename.
+	refuse := func(o *op, why string) (Applied, queue.PreviewResult, error) {
+		if len(out.Files) == 0 {
+			return Applied{}, none, &Conflict{Files: []ConflictFile{{o.rel, why}}}
+		}
+		out.Refused = &ConflictFile{o.rel, why}
+		return fail()
+	}
 	for i := len(ops) - 1; i >= 0; i-- {
 		o := ops[i]
 		if o.to != nil {
+			continue
+		}
+		if ctx.Err() != nil {
+			return fail()
+		}
+		if beforeWrite != nil {
+			beforeWrite(o.rel)
+		}
+		why, done := changedSince(rt, again.anew(), o.step, o.there, o.seen, o.hash, began)
+		if why != "" {
+			return refuse(o, why)
+		}
+		if done {
 			continue
 		}
 		name := filepath.FromSlash(o.rel)
@@ -825,6 +952,19 @@ func (c *Connector) apply(ctx context.Context, ref string, csFrom, csTo *workspa
 		if o.to == nil {
 			continue
 		}
+		if ctx.Err() != nil {
+			return fail()
+		}
+		if beforeWrite != nil {
+			beforeWrite(o.rel)
+		}
+		why, done := changedSince(rt, again.anew(), o.step, o.there, o.seen, o.hash, began)
+		if why != "" {
+			return refuse(o, why)
+		}
+		if done {
+			continue
+		}
 		name := filepath.FromSlash(o.rel)
 		var err error
 		if o.chmod {
@@ -841,6 +981,9 @@ func (c *Connector) apply(ctx context.Context, ref string, csFrom, csTo *workspa
 			return fail()
 		}
 		out.Files = append(out.Files, o.rel)
+		if placed != nil {
+			placed(o.rel)
+		}
 	}
 	sort.Strings(out.Files)
 	return out, none, nil
@@ -1033,12 +1176,68 @@ func (c *Connector) stageFile(ctx context.Context, rt *os.Root, src blobs.Local,
 	return nil
 }
 
+// lookAgain, when set (by a test only), runs as the look again reaches each
+// file, before it is looked at: a write in the folder, or a stop, then.
+var lookAgain func(rel string)
+
+// beforeWrite, when set (by a test only), runs just before each file's own
+// look and its write or removal: a write in the folder then.
+var beforeWrite func(rel string)
+
+// placed, when set (by a test only), runs after each file is put in place:
+// a stop then.
+var placed func(rel string)
+
+// changedSince says why the file of st, about to be written or removed, is no
+// longer as the conflict check found it (there; seen, and hash when it read
+// it) nor as st leaves it, or "" when it is one of the two; done says it is
+// already as st leaves it. look is the lookup of the look again, or one
+// taken anew from it (lookup.anew); began is when the check began (Unix
+// nanoseconds). A file that workspace.Keeps says is still the one seen is
+// unchanged; any other is read again, so one touched and not changed is
+// still as it was. (From #107, by Kunal Roy Choudhury.)
+func changedSince(rt *os.Root, look *lookup, st workspace.Step, there bool, seen fs.FileInfo, hash string, began int64) (why string, done bool) {
+	now, _, why := look.at(st)
+	if why != "" {
+		return why, false
+	}
+	gone := WhyRemoved
+	if !there || st.To == nil {
+		gone = ""
+	}
+	if !now {
+		return gone, st.To == nil
+	}
+	name := filepath.FromSlash(st.Path)
+	if there && seen != nil {
+		was := workspace.File{Size: seen.Size(), Mode: seen.Mode(), ModTime: seen.ModTime().UnixNano()}
+		if fi, err := rt.Lstat(name); err == nil && workspace.Keeps(was, fi, began) {
+			return "", false
+		}
+	}
+	cur, mode, exists, err := hashIn(rt, name)
+	switch {
+	case err != nil:
+		return WhyNotFile, false
+	case !exists:
+		return gone, st.To == nil
+	case st.To != nil && cur == st.To.Hash && mode&fs.ModeSymlink == st.To.Mode&fs.ModeSymlink && (!mode.IsRegular() || mode == st.To.Mode):
+		return "", true
+	case there && seen != nil && hash != "" && cur == hash && mode == seen.Mode():
+		return "", false
+	case !there:
+		return WhyAdded, false
+	}
+	return WhyChanged, false
+}
+
 // placeStaged puts the staged file at name, by rename, so a reader never
-// sees half a file. An empty folder in the way goes first: the changes
-// emptied it.
+// sees half a file. A folder in the way that holds no file goes first,
+// with the empty folders in it: the changes emptied it (a folder becomes a
+// file). One that holds a file, such as one made since the check, stops it.
 func placeStaged(rt *os.Root, staged, name string) error {
 	if fi, err := rt.Lstat(name); err == nil && fi.IsDir() {
-		if err := rt.Remove(name); err != nil {
+		if err := removeEmptied(rt, name); err != nil {
 			return err
 		}
 	}
@@ -1068,11 +1267,16 @@ func copyInto(rt *os.Root, tmp, src string, perm fs.FileMode) error {
 	return err
 }
 
-// sameStat says whether the file name of rt has f's size, modification time
-// and mode.
-func sameStat(rt *os.Root, name string, f workspace.File) bool {
+// asBase says whether the file name of rt is, without reading it, the file f
+// that a Base which began reading the folder at taken recorded: the one rule
+// a checkpoint keeps a hash by (workspace.Keeps). Size, time and mode alone
+// are no proof: a file moved over another keeps its own time, and touch -r,
+// cp -p and rsync -t set any time; its change time, which no one can set
+// back, must be older than taken too. A taken of 0 (a changeset made before
+// 0.6.7) proves nothing.
+func asBase(rt *os.Root, name string, f workspace.File, taken int64) bool {
 	fi, err := rt.Lstat(name)
-	return err == nil && fi.Mode() == f.Mode && fi.Size() == f.Size && fi.ModTime().UnixNano() == f.ModTime
+	return err == nil && taken != 0 && workspace.Keeps(f, fi, taken)
 }
 
 // hashIn hashes the file name of rt as workspace.Walk does. A missing file

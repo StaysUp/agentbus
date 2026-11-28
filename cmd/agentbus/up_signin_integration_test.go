@@ -365,7 +365,7 @@ func TestUpTokenGetsNoCredentialOnAnotherTurnsPath(t *testing.T) {
 	waitFor(t, "the running turn's report", func() bool { _, err := os.Stat(report); return err == nil })
 	placeholder := settingsEnvOf(t, report)["CLAUDE_CODE_OAUTH_TOKEN"]
 	for _, path := range []string{"/s/othersession/t/t_other/v1/messages", "/s/" + session + "/t/t_other/v1/messages", "/v1/messages"} {
-		req, _ := http.NewRequest("POST", "http://"+svc.addr+path, strings.NewReader(`{"model":"claude-x","messages":[{"role":"user","content":"x"}]}`))
+		req, _ := http.NewRequest("POST", "http://"+svc.inRunner.addr+path, strings.NewReader(`{"model":"claude-x","messages":[{"role":"user","content":"x"}]}`))
 		req.Header.Set("Authorization", "Bearer "+placeholder)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {
@@ -385,7 +385,7 @@ func TestUpTokenGetsNoCredentialOnAnotherTurnsPath(t *testing.T) {
 		}
 	}
 	// Its own turn's path still gets the sign-in.
-	req, _ := http.NewRequest("POST", "http://"+svc.addr+"/s/"+session+"/t/"+turn+"/v1/messages",
+	req, _ := http.NewRequest("POST", turnBase(t, svc, session, turn)+"/v1/messages",
 		strings.NewReader(`{"model":"claude-x","messages":[{"role":"user","content":"own"}]}`))
 	req.Header.Set("Authorization", "Bearer "+placeholder)
 	resp, err := http.DefaultClient.Do(req)
@@ -424,7 +424,12 @@ func TestUpSignInOnlyOnRecordedCalls(t *testing.T) {
 	placeholder := settingsEnvOf(t, report)["CLAUDE_CODE_OAUTH_TOKEN"]
 	own := "/s/" + session + "/t/" + turn
 	send := func(method, path string) (int, string) {
-		req, _ := http.NewRequest(method, "http://"+svc.addr+path, strings.NewReader(`{"model":"claude-x","messages":[{"role":"user","content":"x"}]}`))
+		// up's gateway is its built-in runner's; the relay is control's.
+		addr := svc.inRunner.addr
+		if strings.HasPrefix(path, jobs.RelayPrefix) {
+			addr = svc.addr
+		}
+		req, _ := http.NewRequest(method, "http://"+addr+path, strings.NewReader(`{"model":"claude-x","messages":[{"role":"user","content":"x"}]}`))
 		req.Header.Set("Authorization", "Bearer "+placeholder)
 		resp, err := http.DefaultClient.Do(req)
 		if err != nil {

@@ -5,15 +5,21 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/staysup/agentbus/blobs"
 	"github.com/staysup/agentbus/connector"
 	"github.com/staysup/agentbus/ids"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -34,6 +40,9 @@ import (
 //	write <path> <text>   writes text to path, in its folder
 //	hold                  waits until the file $RUNNER_FAKE_LOG.go exists
 //	exit <n>              exits with n
+//	slowterm              ignores SIGTERM: only the stop's SIGKILL ends it
+//	alone                 holds $RUNNER_FAKE_LOG.copy locked until it exits;
+//	                      when another agent holds it, writes $RUNNER_FAKE_LOG.overlap
 //
 // While the file $RUNNER_FAKE_LOG.hold exists, every turn holds first, as
 // hold does: for a turn whose prompt the test does not write, a review's.
@@ -75,6 +84,13 @@ func fakeAgent() {
 			}
 		case "exit":
 			fmt.Sscan(f[1], &code)
+		case "slowterm":
+			signal.Ignore(syscall.SIGTERM)
+		case "alone":
+			lk, _ := os.OpenFile(log+".copy", os.O_RDWR|os.O_CREATE, 0o600)
+			if lk != nil && syscall.Flock(int(lk.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) != nil {
+				os.WriteFile(log+".overlap", []byte("two agents at once"), 0o600)
+			}
 		}
 	}
 	os.Exit(code)
@@ -107,6 +123,10 @@ type world struct {
 	// SetPolicy to pin a backend (e.g. copy) before it queues turns.
 	settings *settings.Files
 }
+
+// worldSink is the control plane's blob store as newWorld's runner sees it.
+// A test may set it for its own world, and puts it back.
+var worldSink = func(s *blobs.Store) blobs.Sink { return s }
 
 func newWorld(t *testing.T, capacity int, record ...bool) *world {
 	t.Helper()
@@ -170,7 +190,7 @@ func newWorld(t *testing.T, capacity int, record ...bool) *world {
 	set := settings.NewFiles(setDir)
 	r, err := Enroll(ctx, Config{Queue: plane.URL, EnrollToken: enrollTok, Name: "test", Capacity: capacity,
 		Engine: eng, Store: st, StopWait: 5 * time.Second, Logf: t.Logf, Workdir: filepath.Join(dir, "worktrees"), Folders: fr,
-		FolderSide: connector.Jobs{Connector: conn}, Lender: conn, Blobs: bs, BlobSink: bs, Settings: set})
+		FolderSide: connector.Jobs{Connector: conn}, Lender: conn, Blobs: bs, BlobSink: worldSink(bs), Settings: set})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -844,5 +864,222 @@ func TestCloseRemovesTheCopyAndRebuilds(t *testing.T) {
 	}
 	if _, err := os.Stat(copyDir); err != nil {
 		t.Fatalf("the next turn did not rebuild the copy: %v", err)
+	}
+}
+
+// awaySink is control's blob store while control is away for its first
+// fails calls: it answers none of them.
+type awaySink struct {
+	blobs.Sink
+	mu    sync.Mutex
+	fails int
+}
+
+func (a *awaySink) away() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.fails > 0 {
+		a.fails--
+		return true
+	}
+	return false
+}
+
+func (a *awaySink) Missing(ctx context.Context, hs []string) ([]string, error) {
+	if a.away() {
+		return nil, blobs.ErrUnreachable
+	}
+	return a.Sink.Missing(ctx, hs)
+}
+
+// A turn's changes that could not go to control's blob store because control
+// was away go once it answers again: the finish names its changeset, so an
+// apply can read them (review t_2a49c2f954efcbb4 P2: the upload was not tried
+// again, and the turn ended with no changeset).
+func TestTurnChangesWaitForControlsBlobStore(t *testing.T) {
+	sink := &awaySink{fails: 2}
+	defer func(old func(*blobs.Store) blobs.Sink) { worldSink = old }(worldSink)
+	worldSink = func(s *blobs.Store) blobs.Sink { sink.Sink = s; return sink }
+	w := newWorld(t, 1)
+	p := settings.DefaultPolicy()
+	p.Isolation = settings.IsolationCopy
+	if _, _, err := w.settings.SetPolicy(p, settings.Any); err != nil {
+		t.Fatal(err)
+	}
+	src := t.TempDir()
+	write(t, filepath.Join(src, "a.txt"), "v1\n")
+	j := w.create(t, queue.Spec{Harness: "claude", Folder: src, Isolate: true, Prompt: "write b.txt two"})
+	w.release()
+	waitFor(t, "the turn finished", func() bool { return w.job(t, j.ID).Ended != nil })
+	n := w.job(t, j.ID)
+	var res struct {
+		Changeset string `json:"changeset"`
+	}
+	_ = json.Unmarshal(n.Result, &res)
+	if n.State != queue.Finished || res.Changeset == "" {
+		t.Fatalf("the turn %s with changeset %q, want finished with one: %s", n.State, res.Changeset, n.Result)
+	}
+	if sink.away() {
+		t.Fatal("the blob store was asked fewer times than it was away")
+	}
+}
+
+// cutSink is control's blob store behind a link that cuts the first replies
+// to Missing after their headers, through the real client (blobs.Client), or
+// refuses every call with an answer (refuse).
+type cutSink struct {
+	blobs.Sink
+	mu     sync.Mutex
+	cuts   int
+	refuse bool
+}
+
+type cutTransport struct{}
+
+func (cutTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Body != nil {
+		r.Body.Close()
+	}
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"application/json"}},
+		Body: io.NopCloser(io.MultiReader(strings.NewReader(`{"missing":["`), cutReader{})), Request: r}, nil
+}
+
+type cutReader struct{}
+
+func (cutReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
+
+func (c *cutSink) Missing(ctx context.Context, hs []string) ([]string, error) {
+	c.mu.Lock()
+	cut, refuse := c.cuts > 0, c.refuse
+	if cut {
+		c.cuts--
+	}
+	c.mu.Unlock()
+	switch {
+	case refuse:
+		return nil, errors.New("blobs: missing answered 413")
+	case cut:
+		return blobs.Client{URL: "http://control", Token: "t", HTTP: &http.Client{Transport: cutTransport{}}}.Missing(ctx, hs)
+	}
+	return c.Sink.Missing(ctx, hs)
+}
+
+// A turn never ends finished unless control holds its changeset (review
+// t_f1724c4b98986fcb P1: a reply cut after its headers was not tried again,
+// and the turn ended finished with no changeset, its edits never appliable).
+// A cut reply is tried again and the turn finishes with its changeset; a
+// store that keeps refusing ends the turn failed, saying why.
+func TestTurnNeverFinishesWithoutItsChangeset(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sink *cutSink
+		want string
+	}{
+		{"reply cut after its headers", &cutSink{cuts: 2}, queue.Finished},
+		{"store refuses", &cutSink{refuse: true}, queue.Failed},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			defer func(old func(*blobs.Store) blobs.Sink) { worldSink = old }(worldSink)
+			worldSink = func(s *blobs.Store) blobs.Sink { tc.sink.Sink = s; return tc.sink }
+			w := newWorld(t, 1)
+			p := settings.DefaultPolicy()
+			p.Isolation = settings.IsolationCopy
+			if _, _, err := w.settings.SetPolicy(p, settings.Any); err != nil {
+				t.Fatal(err)
+			}
+			src := t.TempDir()
+			write(t, filepath.Join(src, "a.txt"), "v1\n")
+			j := w.create(t, queue.Spec{Harness: "claude", Folder: src, Isolate: true, Prompt: "write b.txt two"})
+			w.release()
+			// A store that keeps refusing is asked maxRefusedSends times, a
+			// backoff apart: longer than waitFor waits.
+			for end := time.Now().Add(time.Minute); w.job(t, j.ID).Ended == nil; time.Sleep(20 * time.Millisecond) {
+				if time.Now().After(end) {
+					t.Fatal("the turn did not end")
+				}
+			}
+			n := w.job(t, j.ID)
+			var res struct {
+				Changeset string `json:"changeset"`
+				Error     string `json:"error"`
+			}
+			_ = json.Unmarshal(n.Result, &res)
+			if n.State != tc.want {
+				t.Fatalf("the turn %s (%s), want %s: %s", n.State, n.Attempts[len(n.Attempts)-1].Reason, tc.want, n.Result)
+			}
+			if n.State == queue.Finished && res.Changeset == "" {
+				t.Fatalf("the turn finished with no changeset: %s", n.Result)
+			}
+			if n.State == queue.Failed && (n.Attempts[len(n.Attempts)-1].Reason != ReasonChangesNotKept || !strings.Contains(res.Error, "cannot be applied")) {
+				t.Fatalf("the failed turn does not say why: %+v %s", n.Attempts, n.Result)
+			}
+		})
+	}
+}
+
+// Control decides that an attempt is lost on its own clock (runner/lease.go),
+// and the runner hears of it at its next call: until its agent has stopped,
+// the next turn of the same copy waits, so two agents never work in one copy
+// at once. (Review evt_69f6f1c76f03b195 P1: control freed the session while
+// the runner still ran the agent, and a second turn could enter the copy.)
+func TestNextTurnWaitsForALostAttemptsAgent(t *testing.T) {
+	w := newWorld(t, 2)
+	opened := w.create(t, queue.Spec{Harness: "claude", Prompt: "write a.txt one"})
+	waitFor(t, "the session's first turn", func() bool { return w.job(t, opened.ID).Ended != nil })
+	session := ids.SessionID(w.job(t, opened.ID).Session)
+	first := w.create(t, queue.Spec{Session: session, Harness: "claude", Prompt: "alone\nslowterm\nhold"})
+	waitFor(t, "the lost turn's agent", func() bool { return len(w.runs()) == 2 })
+	next := w.create(t, queue.Spec{Session: session, Harness: "claude", Prompt: "alone"})
+	w.skew.Store(int64(time.Minute)) // control's clock passes the first attempt's lease
+	waitFor(t, "the next turn ended", func() bool { return w.job(t, next.ID).Ended != nil })
+	if got := w.job(t, first.ID); got.State != queue.Failed || got.Reason != queue.ReasonRunnerLost {
+		t.Fatalf("the first turn: %s %s, want failed runner_lost", got.State, got.Reason)
+	}
+	if _, err := os.Stat(w.log + ".overlap"); err == nil {
+		t.Fatal("the next turn's agent started in the copy while the lost attempt's agent still ran")
+	}
+	if got := w.job(t, next.ID); got.State != queue.Finished {
+		t.Fatalf("the next turn: %s %s %s", got.State, got.Reason, got.Result)
+	}
+}
+
+// A command (run_command) waits for every earlier attempt in its copy, a
+// turn control declared lost whose agent has not stopped yet among them
+// (holdCopy). (Review t_ac742ab9ec348359 P1: commands skipped the copy's
+// line, and a queued command started while the lost turn's agent still ran.)
+// The command runs this binary as the fake agent, which notes an overlap if
+// the lost turn's agent still holds the copy's lock.
+func TestCommandWaitsForALostAttemptsAgent(t *testing.T) {
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := newWorld(t, 2)
+	opened := w.create(t, queue.Spec{Harness: "claude", Prompt: "write a.txt one"})
+	waitFor(t, "the session's first turn", func() bool { return w.job(t, opened.ID).Ended != nil })
+	o := w.job(t, opened.ID)
+	session := ids.SessionID(o.Session)
+	// The workspace the session's turns use their copy in: a session with no
+	// workspace id is its own (queue.CopyKey).
+	ws := queue.CopyKey(o.Spec.Workspace, o.Session)
+	first := w.create(t, queue.Spec{Session: session, Harness: "claude", Prompt: "alone\nslowterm\nhold"})
+	waitFor(t, "the lost turn's agent", func() bool { return len(w.runs()) == 2 })
+	line := "RUNNER_FAKE_AGENT=1 RUNNER_FAKE_LOG='" + w.log + "' '" + self + "' alone"
+	cmd, _, err := w.q.CreateCommand(queue.DefaultTeam, "", queue.Spec{Workspace: ws, Command: line},
+		queue.Links{Chain: &queue.Chain{By: o.Turn, BySession: o.Session, Root: o.Session, Depth: 1}},
+		queue.Limits{MaxDepth: 5, MaxPerTurn: 10, MaxPerTree: 10}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.skew.Store(int64(time.Minute)) // control's clock passes the first attempt's lease
+	waitFor(t, "the command ended", func() bool { return w.job(t, cmd.ID).Ended != nil })
+	if got := w.job(t, first.ID); got.State != queue.Failed || got.Reason != queue.ReasonRunnerLost {
+		t.Fatalf("the first turn: %s %s, want failed runner_lost", got.State, got.Reason)
+	}
+	if _, err := os.Stat(w.log + ".overlap"); err == nil {
+		t.Fatal("the command ran in the copy while the lost turn's agent still ran")
+	}
+	if got := w.job(t, cmd.ID); got.State != queue.Finished {
+		t.Fatalf("the command: %s %s %s", got.State, got.Reason, got.Result)
 	}
 }

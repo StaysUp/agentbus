@@ -158,7 +158,7 @@ func (r *Runner) publish(ctx context.Context, s *isolation.Space, name string) (
 	}
 	cs, err := isolation.ChangesetOf(s, name)
 	if err != nil {
-		return "", err
+		return "", localErr(err)
 	}
 	// The file as the turn left it, and as the Base had it: an apply from a
 	// later turn may put it back.
@@ -203,6 +203,9 @@ func (r *Runner) publish(ctx context.Context, s *isolation.Space, name string) (
 	for _, h := range missing {
 		if p, ok := isolation.BlobPath(s, h); ok && local != nil {
 			if _, err := local.PutFile(p, h, isolation.Clone); err != nil {
+				if own != nil {
+					err = localErr(err) // the runner's own store
+				}
 				return "", err
 			}
 			staged = append(staged, h)
@@ -221,11 +224,14 @@ func (r *Runner) publish(ctx context.Context, s *isolation.Space, name string) (
 				// is refused then, and writes nothing.
 				continue
 			}
-			return "", fmt.Errorf("the copy keeps no file %s", h)
+			return "", localErr(fmt.Errorf("the copy keeps no file %s", h))
 		}
 		if local != nil {
 			err = local.Put(ctx, h, rc)
 			staged = append(staged, h)
+			if err != nil && own != nil {
+				err = localErr(err) // the runner's own store
+			}
 		} else {
 			err = r.cfg.BlobSink.Put(ctx, h, rc)
 		}

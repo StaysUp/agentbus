@@ -226,6 +226,13 @@ type Space struct {
 	// name of the folder under the copy's top that holds it, and its
 	// reference. Empty for a copy of one folder, which is the copy's top.
 	Folders []SpaceFolder `json:"folders,omitempty"`
+	// BaseTaken, for a copy made from the person's folder itself (a clone, a
+	// copy or an overlay's lower layer): when it began reading the folder, in
+	// Unix nanoseconds. Its Base records files by size, time and mode only,
+	// so the folder side trusts those only for a file whose change time is
+	// older than this (workspace.Keeps). 0 for a copy made before 0.6.7, or
+	// one whose Base hashed every file.
+	BaseTaken int64 `json:"base_taken,omitempty"`
 	// Fallback: why the backend asked for could not be used, and which one
 	// was, as For's choice fell back. Empty when it was used.
 	Fallback string `json:"fallback,omitempty"`
@@ -259,6 +266,14 @@ func (s *Space) stopCtx() context.Context {
 type SpaceFolder struct {
 	Name string `json:"name"`
 	Ref  string `json:"ref"`
+}
+
+// readNow records now as when s began reading the person's folder, and
+// answers it.
+func (s *Space) readNow() time.Time {
+	now := time.Now()
+	s.BaseTaken = now.UnixNano()
+	return now
 }
 
 // Place is one folder of a copy of several: the person's folder (on this

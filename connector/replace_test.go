@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/staysup/agentbus/blobs"
 	"github.com/staysup/agentbus/workspace"
 )
 
@@ -156,6 +157,28 @@ func TestApplyReplaces(t *testing.T) {
 		{name: "a name's accent, written in another way",
 			base: map[string]string{"caf\u00e9": "x"},
 			now:  map[string]string{"cafe\u0301": "x"}},
+		// A file that becomes a folder, and the other way round (once a limit:
+		// a folder where a file goes, or a file where a folder goes, was a
+		// conflict though nobody had touched it; the mid-turn update needs
+		// them, review P2, 2026-11-27).
+		{name: "a file by a folder",
+			base: map[string]string{"conf": "x"},
+			now:  map[string]string{"conf/a/main": "n"}},
+		{name: "a file by a folder, in another case", caseBlind: true,
+			base: map[string]string{"conf": "x"},
+			now:  map[string]string{"Conf/main": "n"}},
+		{name: "a folder by a file",
+			base: map[string]string{"conf/a": "x", "conf/b/c": "y"},
+			now:  map[string]string{"conf": "n"}},
+		{name: "a folder by a file, in another case", caseBlind: true,
+			base: map[string]string{"conf/a": "x"},
+			now:  map[string]string{"Conf": "n"}},
+		{name: "a folder by a link",
+			base: map[string]string{"conf/a": "x", "other/a": "x"},
+			now:  map[string]string{"conf": "-> other", "other/a": "x"}},
+		{name: "a link and its folder swapped",
+			base: map[string]string{"v1/a": "a", "cur": "-> v1"},
+			now:  map[string]string{"cur/a": "a", "v1": "-> cur"}},
 		{name: "a link by a folder, in another case", caseBlind: true,
 			base: map[string]string{"v1/a": "a", "cur": "-> v1"},
 			now:  map[string]string{"v1/a": "a", "Cur/a": "a"}},
@@ -212,9 +235,9 @@ func TestApplyReplaces(t *testing.T) {
 	}
 }
 
-// What the person put in the way is kept: the apply is refused, whole. So is
-// one that puts a folder where a file was, or the other way round, though
-// nobody touched the folder: a limit (isolation, TestFileBecomesFolder).
+// What the person put in the way is kept: the apply is refused, whole. A file
+// that becomes a folder, or a folder a file, is refused only when the person
+// changed what is in the way (TestApplyReplaces has the ones nobody touched).
 func TestApplyReplacesNothingElse(t *testing.T) {
 	for _, tc := range []struct {
 		name            string
@@ -223,30 +246,6 @@ func TestApplyReplacesNothingElse(t *testing.T) {
 		caseBlind       bool
 		want            map[string]string // the conflicts
 	}{
-		{name: "a file by a folder",
-			base: map[string]string{"conf": "x"},
-			now:  map[string]string{"conf/a/main": "n"},
-			want: map[string]string{"conf/a/main": WhyNoFolder}},
-		{name: "a file by a folder, in another case", caseBlind: true,
-			base: map[string]string{"conf": "x"},
-			now:  map[string]string{"Conf/main": "n"},
-			want: map[string]string{"Conf/main": WhyNoFolder}},
-		{name: "a folder by a file",
-			base: map[string]string{"conf/a": "x"},
-			now:  map[string]string{"conf": "n"},
-			want: map[string]string{"conf": WhyNotFile}},
-		{name: "a folder by a file, in another case", caseBlind: true,
-			base: map[string]string{"conf/a": "x"},
-			now:  map[string]string{"Conf": "n"},
-			want: map[string]string{"Conf": WhyNotFile}},
-		{name: "a folder by a link",
-			base: map[string]string{"conf/a": "x", "other/a": "x"},
-			now:  map[string]string{"conf": "-> other", "other/a": "x"},
-			want: map[string]string{"conf": WhyNotFile}},
-		{name: "a link and its folder swapped",
-			base: map[string]string{"v1/a": "a", "cur": "-> v1"},
-			now:  map[string]string{"cur/a": "a", "v1": "-> cur"},
-			want: map[string]string{"v1": WhyNotFile}},
 		{name: "a file added to the folder a file replaces",
 			base: map[string]string{"conf/a": "x"},
 			now:  map[string]string{"conf": "n"},
@@ -256,12 +255,12 @@ func TestApplyReplacesNothingElse(t *testing.T) {
 			base: map[string]string{"conf/a": "x"},
 			now:  map[string]string{"conf": "n"},
 			mine: map[string]string{"conf/a": "m"},
-			want: map[string]string{"conf": WhyNotFile, "conf/a": WhyChanged}},
+			want: map[string]string{"conf/a": WhyChanged}},
 		{name: "the file a folder replaces, changed",
 			base: map[string]string{"conf": "x"},
 			now:  map[string]string{"conf/main": "n"},
 			mine: map[string]string{"conf": "m"},
-			want: map[string]string{"conf": WhyChanged, "conf/main": WhyNoFolder}},
+			want: map[string]string{"conf": WhyChanged}},
 		{name: "the link a folder replaces, pointed elsewhere",
 			base: map[string]string{"v1/a": "a", "v2/a": "a", "cur": "-> v1"},
 			now:  map[string]string{"v1/a": "a", "v2/a": "a", "cur/a": "a"},
@@ -493,5 +492,64 @@ func TestApplyUnhashedThroughALink(t *testing.T) {
 	}
 	if got := text(t, filepath.Join(folder, "e", "x")); got != "x" {
 		t.Fatalf("e/x: %q", got)
+	}
+}
+
+// A hard link of the person's under another name is the same file, never
+// another spelling of the name: a turn that respells button.tsx to Button.tsx
+// and edits Archive.tsx, the person's hard link to it, finds each by its own
+// name (Codex review t_631a1bb6f9d48cda).
+func TestApplyRespellingIsNotAHardLink(t *testing.T) {
+	folder := t.TempDir()
+	if !caseBlind(t, folder) {
+		t.Skip("this disk tells names that differ only in case apart")
+	}
+	base := map[string]string{"button.tsx": "x", "Archive.tsx": "x"}
+	tree(t, folder, map[string]string{"button.tsx": "x"})
+	if err := os.Link(filepath.Join(folder, "button.tsx"), filepath.Join(folder, "Archive.tsx")); err != nil {
+		t.Skip("no hard links here")
+	}
+	c, ref := newConnector(t, folder)
+	h := turnChanges(t, c, base, map[string]string{"Button.tsx": "x", "Archive.tsx": "y"})
+	got, err := c.Apply(context.Background(), ref, "", h)
+	if err != nil {
+		t.Fatalf("apply: %+v %v", got, err)
+	}
+	want := map[string]string{"Button.tsx": "x", "Archive.tsx": "y"}
+	if now := held(t, folder); !reflect.DeepEqual(now, want) {
+		t.Fatalf("the folder holds %v, want %v", now, want)
+	}
+}
+
+// On a disk that keeps case apart, a file whose name differs only in case
+// from one the changes remove is another file, the person's: the folder
+// that holds it does not make way for a file, and the apply is refused with
+// nothing written (review of the take-over of #107).
+func TestApplyFolderByAFileKeepsAnotherCase(t *testing.T) {
+	folder := t.TempDir()
+	if caseBlind(t, folder) {
+		t.Skip("the disk takes names that differ only in case for one")
+	}
+	write(t, folder, map[string]string{"d/a": "a\n", "d/A": "mine\n"})
+	st, err := blobs.Open(filepath.Join(t.TempDir(), "store"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PutBytes([]byte("n\n")); err != nil {
+		t.Fatal(err)
+	}
+	cs := &workspace.Changeset{Space: "s", Checkpoint: "t1", Files: []workspace.FileChange{
+		{Path: "d", Now: fileOf("n\n", 0o644)},
+		{Path: "d/a", Base: fileOf("a\n", 0o644)},
+	}}
+	done, err := (&Connector{Store: st}).ApplyChangesIn(context.Background(), folder, nil, cs)
+	var cf *Conflict
+	if !errors.As(err, &cf) || len(done.Files) != 0 {
+		t.Fatalf("apply: %+v, %v; want a conflict, nothing written", done, err)
+	}
+	for p, want := range map[string]string{"d/a": "a\n", "d/A": "mine\n"} {
+		if got := text(t, filepath.Join(folder, p)); got != want {
+			t.Errorf("%s holds %q", p, got)
+		}
 	}
 }

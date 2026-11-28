@@ -54,6 +54,30 @@ CREATE UNIQUE INDEX IF NOT EXISTS events_turn_started ON events(session, turn)
 -- POST /api/v0/turns finds the turn an idempotency key started (TurnByKey).
 CREATE INDEX IF NOT EXISTS events_idempotency ON events(json_extract(data, '$.idempotency_key'))
 	WHERE kind = 'turn.started';
+-- Indexes on fields inside data. A filter on json_extract(data, ...) reads
+-- each candidate row's whole JSON, and some events are large (a
+-- changes.previewed can pass 500 KiB), so without these a lookup read every
+-- event of its session, or of no session (2026-11-28: 74 ms per lookup at
+-- 41,000 events, and a start of 20 s). A query matches an index only when it
+-- spells the same expression, as the queries in this package do.
+-- An event by its id, within its session and turn (AppendOnce, EventByID).
+CREATE INDEX IF NOT EXISTS events_id ON events(session, turn, json_extract(data, '$.id'));
+-- A workspace's events by the workspace they name (Applied, lastAction,
+-- WorkspaceOutcome, LatestPreview).
+CREATE INDEX IF NOT EXISTS events_workspace ON events(json_extract(data, '$.workspace'), kind);
+-- A turn's workspace: the one its turn.started names, else its session
+-- (resolvedWorkspace).
+CREATE INDEX IF NOT EXISTS events_turn_workspace ON events((COALESCE(NULLIF(json_extract(data, '$.workspace'), ''), session)), session, turn)
+	WHERE kind = 'turn.started';
+-- A session's events of one kind, and a turn's: the turn list counts a turn's
+-- calls and numbers its turns through them without reading an event's row.
+-- Each ends in its equality columns, so the seq (the rowid) that follows
+-- serves a seq bound too.
+CREATE INDEX IF NOT EXISTS events_session_kind ON events(session, kind);
+CREATE INDEX IF NOT EXISTS events_turn_kind ON events(session, turn, kind);
+-- Every column the session list's activity reads (foldRange), so a fold from
+-- the start reads this index, not every event's row.
+CREATE INDEX IF NOT EXISTS events_activity ON events(session, kind, time, client);
 -- folder_grants was retired with the file routes (his call, 2026-11-25). A
 -- record made before keeps its table; nothing reads or writes it.
 -- The owner of this record: one row, made once. Every event names it (owner).
@@ -76,6 +100,9 @@ type Store struct {
 	subs   map[chan struct{}]struct{}
 	closed bool
 
+	// folds are the session list's kept folds of the record (snapshotfold.go).
+	folds folds
+
 	// OnError, if set, hears about an event Emit could not write. Emit has no
 	// way to return the error. Set it before the first Emit.
 	OnError func(error)
@@ -93,12 +120,22 @@ func Open(path string) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("store: open the lock file: %w", err)
 	}
-	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		lock.Close()
-		if errors.Is(err, syscall.EWOULDBLOCK) {
+	// agentbus up looks at its built-in runner's lock for a moment (held,
+	// cmd/agentbus/builtin.go), so a busy lock is tried for a second before
+	// the store reads in use.
+	for start := time.Now(); ; time.Sleep(20 * time.Millisecond) {
+		err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			lock.Close()
+			return nil, fmt.Errorf("store: lock: %w", err)
+		}
+		if time.Since(start) > time.Second {
+			lock.Close()
 			return nil, ErrInUse
 		}
-		return nil, fmt.Errorf("store: lock: %w", err)
 	}
 	s, err := openLocked(path)
 	if err != nil {
@@ -254,6 +291,16 @@ func (s *Store) Append(e event.Event) (out event.Event, stored bool, err error) 
 	return s.appendLocked(e)
 }
 
+// runEndedOfHoldSQL counts a hold's run.ended: a search of
+// events_session_kind under the write lock, not a read of every event of the
+// session (2 ms at 41,000 events, 2026-11-28).
+const runEndedOfHoldSQL = `SELECT COUNT(*) FROM events WHERE session = ? AND kind = 'run.ended'
+	AND json_extract(data, '$.hold') = ?`
+
+// countByIDSQL counts the events of a session and turn with an id: one
+// read of events_id, which AppendOnce makes under the write lock.
+const countByIDSQL = `SELECT COUNT(*) FROM events WHERE session = ? AND turn = ? AND json_extract(data, '$.id') = ?`
+
 // AppendOnce is Append of an event another service already stored under
 // its own seq, such as a runner's turn sent to the control plane: one whose
 // id this store holds for the same session and turn is not stored again, so
@@ -265,8 +312,7 @@ func (s *Store) AppendOnce(e event.Event) (stored bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var n int
-	if err := s.w.QueryRow(`SELECT COUNT(*) FROM events WHERE session = ? AND turn = ? AND json_extract(data, '$.id') = ?`,
-		e.Session, e.Turn, e.ID).Scan(&n); err != nil {
+	if err := s.w.QueryRow(countByIDSQL, e.Session, e.Turn, e.ID).Scan(&n); err != nil {
 		return false, fmt.Errorf("store: read %s: %w", e.Kind, err)
 	}
 	if n > 0 {
@@ -331,6 +377,21 @@ func (s *Store) AppendForKey(e event.Event, idPath string) (existingID, existing
 func (s *Store) appendLocked(e event.Event) (out event.Event, stored bool, err error) {
 	if s.closed {
 		return e, false, ErrClosed
+	}
+	// One run.ended per hold: a hold is a run, and it ends once. Whoever
+	// writes it first (the engine, a runner's forwarded record, control's
+	// sweep for a turn whose job ended without it) closes the hold; a later
+	// one is not stored, so a turn never has two competing ends. The check
+	// and the write are one step under the store's lock.
+	if e.Kind == event.RunEnded && e.Hold != "" {
+		var n int
+		if err := s.w.QueryRow(runEndedOfHoldSQL, e.Session, e.Hold).Scan(&n); err != nil {
+			return e, false, fmt.Errorf("store: read %s: %w", e.Kind, err)
+		}
+		if n > 0 {
+			e.Seq = 0
+			return e, false, nil
+		}
 	}
 	e.Seq = s.last + 1
 	// The record names its owner on every event, beside the actor. An event
@@ -780,4 +841,16 @@ func (s *Store) CloseStaleHolds(now time.Time, newID func() string) (int, error)
 		}
 	}
 	return len(holds), nil
+}
+
+// CopyTo writes a copy of the whole record to a new file at path, consistent
+// as of one moment, while the store stays open. agentbus up gives its built-in
+// runner, a process of its own since 0.6.7, its first record this way.
+func (s *Store) CopyTo(path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.w.Exec(`VACUUM INTO ?`, path); err != nil {
+		return fmt.Errorf("store: copy: %w", err)
+	}
+	return nil
 }

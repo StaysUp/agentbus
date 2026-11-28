@@ -33,6 +33,10 @@ paid), **budget off** and **budget on**.
 - `on step`, `recorded step`: the step fit made in the on arm, and the `history.shortened` the
   gateway recorded, as `before>after` and what fired: `R` results made stubs, `I` inputs made
   stubs, `S` turns summarised, `L` turns left out of the summary, `N` the newest turn shortened.
+- `context`: whether the real history and the on arm's carry the standing context of the turn
+  that started the chain (the harness's head, Claude Code's system-reminder blocks with
+  CLAUDE.md, memory and AGENTS.md) byte for byte, as `real/on`: `no/yes` is a turn whose
+  recorded history lost it. Totalled under the table.
 - `real $`, `off $`, `on $`: per turn.
 
 Under the totals, the self-check: how many turns each arm rebuilt within 1% of what the record

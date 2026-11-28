@@ -19,6 +19,9 @@ func (r recStub) CostOfTurns([]string) (float64, error)                   { retu
 func (r recStub) WorkspaceUsedAfter(ids.WorkspaceID, int64) (bool, error) { return false, nil }
 func (r recStub) OpenHoldsOfTurn(string) ([]store.OpenHold, error)        { return nil, nil }
 func (r recStub) AppendOnce(event.Event) (bool, error)                    { return true, nil }
+func (r recStub) Workspace(ids.WorkspaceID) (store.Workspace, bool, error) {
+	return store.Workspace{}, false, nil
+}
 func (r recStub) CallSession(string) (string, bool, error) {
 	return "", false, nil
 }

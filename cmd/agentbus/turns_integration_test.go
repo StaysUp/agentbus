@@ -129,8 +129,9 @@ func TestRunTurnIDOnEveryEvent(t *testing.T) {
 		t.Errorf("%d turn.started over two runs, want 2", n)
 	}
 
-	// Traffic by hand, with no turn's token, is refused in agentbus up and
-	// recorded nowhere, so it never shows among the turns below.
+	// Traffic by hand, with no turn's token, is refused in agentbus up (its
+	// control serves no model path) and recorded nowhere, so it never shows
+	// among the turns below.
 	resp, err := http.Post("http://"+svc.addr+"/s/byhand/v1/messages", "application/json",
 		strings.NewReader(`{"model":"claude-x","messages":[{"role":"user","content":"by hand"}]}`))
 	if err != nil {
@@ -138,7 +139,7 @@ func TestRunTurnIDOnEveryEvent(t *testing.T) {
 	}
 	io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized || len(turnEvents(t, svc.store, "byhand")) != 0 {
+	if resp.StatusCode != http.StatusNotFound || len(turnEvents(t, svc.store, "byhand")) != 0 {
 		t.Fatalf("a hand-pointed call: %d, %d events", resp.StatusCode, len(turnEvents(t, svc.store, "byhand")))
 	}
 

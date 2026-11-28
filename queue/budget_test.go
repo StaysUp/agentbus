@@ -79,8 +79,10 @@ func TestCostCountsTheTreesTurnsOnly(t *testing.T) {
 // Review P1, 2026-11-25: a turn watching itself scheduled a continuation that
 // was held to the job caps but never to the cost cap, so a tree over
 // max_cost_usd_per_tree kept going. The on keeps its maker's caps, and the
-// turn it delivers is made under them, in create, as every job is.
-func TestSelfWatchHeldToTheCostCap(t *testing.T) {
+// turn it delivers is made under them, in create, as every job is. Since 0.6.8
+// the on watches a session (an on into the watched session is refused as a
+// circle), so here it delivers the session's replies to another session.
+func TestWatchHeldToTheCostCap(t *testing.T) {
 	q, _ := open(t)
 	r := runner(t, q, 5)
 	parent := job(t, q, "")
@@ -100,8 +102,8 @@ func TestSelfWatchHeldToTheCostCap(t *testing.T) {
 	lim.MaxCostUSD = 0.25
 	q.ReadCostWith(costs(map[string]float64{child.Turn: 0.30}))
 	mk := Maker{Session: string(child.Session), Turn: child.Turn}
-	on, err := q.RegisterOnLinked(DefaultTeam, OnTurnCompleted, child.Turn, string(child.Session), "", mk,
-		&Chain{Root: parent.Session, By: child.Turn, BySession: string(child.Session)}, lim)
+	read, last := endedRecord(t, q)
+	on, err := q.RegisterWatchOn(DefaultTeam, OnTurnCompleted, OnFilter{Session: string(child.Session)}, "s_cost", "", mk, &lim, last())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,10 +117,10 @@ func TestSelfWatchHeldToTheCostCap(t *testing.T) {
 	}
 	q.ReadReplyWith(func(session, turn string) (string, error) { return "again", nil })
 	to := func(session string) (DeliverTo, bool, error) { return DeliverTo{Workspace: "ws_" + session}, true, nil }
-	if _, err := q.FireOns(DefaultTeam, jobEnded(q), to, nil, nil); err != nil {
+	if _, err := q.FireWatchOns(DefaultTeam, read, to, nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	for _, d := range deliveriesOf(t, q, string(child.Session)) {
+	for _, d := range deliveriesOf(t, q, "s_cost") {
 		t.Fatalf("a tree past its cost cap got a continuation: %s", d.Turn)
 	}
 	var why string

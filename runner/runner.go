@@ -21,12 +21,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/staysup/agentbus/blobs"
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/folders"
 	"github.com/staysup/agentbus/harness"
+	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/isolation"
 	"github.com/staysup/agentbus/jobs"
 	"github.com/staysup/agentbus/queue"
@@ -112,6 +114,20 @@ type Config struct {
 	// (jobs.AttemptStarted.Signin).
 	NoSecrets bool
 
+	// Retire, when it closes, makes the runner take no more jobs: Run returns
+	// once the jobs it runs have ended on their own and been finished. The
+	// built-in runner of agentbus up retires when up is started from another
+	// build, so the next runner is the new one (cmd/agentbus/builtin.go).
+	Retire <-chan struct{}
+
+	// Finishes is the folder where a turn's end waits until control has it
+	// (pending.go). Empty keeps none.
+	Finishes string
+
+	// StartDelay, for tests only, holds a taken job this long before its
+	// start (AGENTBUS_TEST_START_DELAY_MS).
+	StartDelay time.Duration
+
 	// StopWait bounds how long a runner waits for a stopped turn to end
 	// before it lets go of the job. Zero means one minute.
 	StopWait time.Duration
@@ -136,11 +152,22 @@ type Runner struct {
 	// workspace (two sessions a caller started at once) do not open the same
 	// copy on disk concurrently: the first makes it, the rest load it.
 	openMu sync.Map
-	down   retry // the take loops' wait while control does not answer
+	// copies holds, by workspace, the attempts in each copy's line, oldest
+	// first (holdCopy), under copiesMu.
+	copiesMu sync.Mutex
+	copies   map[ids.WorkspaceID][]*copyHolder
+	down     retry // the take loops' wait while control does not answer
 	// probed is the last probe's harnesses, under probeMu: every report
 	// sends it (caps.go).
 	probeMu sync.Mutex
 	probed  []harness.Report
+	// busy counts the jobs this runner runs now (Busy), and agents the
+	// agents it runs now (Agents): a job's agent ends before its end is sent.
+	busy, agents atomic.Int32
+	// names are the saved agents' names control gave with the latest turn's
+	// start (jobs.AttemptStarted.AgentNames), under namesMu (AgentName).
+	namesMu sync.Mutex
+	names   map[string]string
 	// beatMu keeps one report in flight at a time (beat).
 	beatMu sync.Mutex
 	// attempts are the running attempts by their turn, under attemptsMu, so the
@@ -395,7 +422,8 @@ func (r *Runner) Token() string { return r.token }
 // not counted); and, with its folders, as many as queue.FolderCapacity folder
 // jobs besides, so an apply never waits behind running turns. A job still
 // running then has its turn stopped and is finished as failed with reason
-// runner_stopped.
+// runner_stopped. A runner that retires (Config.Retire) takes no more jobs and
+// returns once its running jobs end on their own.
 func (r *Runner) Run(ctx context.Context) {
 	// What a runner here left mounted, if it did not stop cleanly, is
 	// unmounted first; each session mounts its copy again when it next
@@ -409,17 +437,27 @@ func (r *Runner) Run(ctx context.Context) {
 			r.cfg.Logf("isolation.sweep_failed workdir=%q", wd)
 		}
 	}
+	// The reports go on while any job runs, and stop with the take loops:
+	// when ctx ends, or once a retiring runner's last job ended.
+	reportCtx, stopReports := context.WithCancel(ctx)
+	var reports sync.WaitGroup
+	reports.Add(1)
+	go r.report(reportCtx, &reports)
+	defer reports.Wait()
+	defer stopReports()
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go r.report(ctx, &wg)
+	// The ends a runner before this one could not send (pending.go).
+	r.sendKept(ctx, &wg)
 	for _, lane := range []queue.Lane{queue.LaneInteractive, queue.LaneDelegated} {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			r.loop(ctx, lane, func(j queue.Job, a queue.Attempt) {
 				wg.Add(1)
+				r.busy.Add(1)
 				go func() {
 					defer wg.Done()
+					defer r.busy.Add(-1)
 					r.work(ctx, j, a)
 				}()
 			})
@@ -430,7 +468,11 @@ func (r *Runner) Run(ctx context.Context) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				r.loop(ctx, queue.LaneFolders, func(j queue.Job, a queue.Attempt) { r.work(ctx, j, a) })
+				r.loop(ctx, queue.LaneFolders, func(j queue.Job, a queue.Attempt) {
+					r.busy.Add(1)
+					defer r.busy.Add(-1)
+					r.work(ctx, j, a)
+				})
 			}()
 		}
 	}
@@ -476,23 +518,65 @@ func (r *Runner) loadIn(load func(workdir string) (*isolation.Space, error)) (*i
 	return nil, err
 }
 
-// loop takes the jobs of lane, one take at a time, until ctx ends, and hands
-// each to do: a folder loop runs it before its next take, a turn lane's runs
-// it beside the others.
+// AgentName is a saved agent's name by its id, as control named it with the
+// latest turn's start; "" when it named none.
+func (r *Runner) AgentName(id string) string {
+	r.namesMu.Lock()
+	defer r.namesMu.Unlock()
+	return r.names[id]
+}
+
+// leaving says the runner retires (Config.Retire).
+func (r *Runner) leaving() bool {
+	select {
+	case <-r.cfg.Retire:
+		return true
+	default:
+		return false
+	}
+}
+
+// Agents is how many agents the runner runs now.
+func (r *Runner) Agents() int { return int(r.agents.Load()) }
+
+// Busy is how many jobs the runner runs now.
+func (r *Runner) Busy() int { return int(r.busy.Load()) }
+
+// Away is how long control has not answered the runner: zero while its takes,
+// heartbeats or finishes are answered.
+func (r *Runner) Away() time.Duration { return r.down.away(time.Now()) }
+
+// loop takes the jobs of lane, one take at a time, until ctx ends or the
+// runner retires (Config.Retire), and hands each to do: a folder loop runs it
+// before its next take, a turn lane's runs it beside the others.
+// A job taken runs to its end either way; only ctx stops it.
 func (r *Runner) loop(ctx context.Context, lane queue.Lane, do func(queue.Job, queue.Attempt)) {
-	for ctx.Err() == nil {
+	takeCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	if r.cfg.Retire != nil {
+		go func() {
+			select {
+			case <-r.cfg.Retire:
+				cancel()
+			case <-takeCtx.Done():
+			}
+		}()
+	}
+	for takeCtx.Err() == nil {
 		var t jobs.TakenWork
-		status, err := call(ctx, r.cfg.HTTP, r.cfg.Queue+"/api/v0/runner/take", r.token,
+		status, err := call(takeCtx, r.cfg.HTTP, r.cfg.Queue+"/api/v0/runner/take", r.token,
 			jobs.TakeRequest{WaitMS: jobs.MaxWait.Milliseconds(), Protocol: jobs.ProtocolVersion, Lane: lane}, &t)
 		switch {
-		case ctx.Err() != nil:
+		case takeCtx.Err() != nil:
+			// A job control handed out as the take was given up is taken
+			// with no runner: its lease runs out and it is queued again.
 			return
 		case err != nil || (status != http.StatusOK && status != http.StatusNoContent):
 			wait, grew := r.down.failed(time.Now())
 			if grew {
 				r.cfg.Logf("%s", retryLine(r.cfg.Queue, status, wait))
 			}
-			sleep(ctx, wait)
+			sleep(takeCtx, wait)
 			continue
 		case r.down.answered():
 			r.cfg.Logf("control at %s answers again", r.cfg.Queue)
@@ -580,7 +664,6 @@ type attempt struct {
 	mu      sync.Mutex
 	next    int64 // the next event's sequence number
 	pending []queue.AttemptEvent
-	until   time.Time // the lease, on this machine's clock
 
 	cancel, stale chan struct{} // closed when a heartbeat hears it
 	// signin is control's word that the turn's agent can get no
@@ -605,6 +688,16 @@ type attempt struct {
 	start   string
 	session string
 
+	// endChanges is what the job changed in its copy, worked out once at its
+	// end (localChanges); endOK says the copy could be read.
+	endChanges *workspace.Changes
+	endOK      bool
+
+	agentOn bool // counted in Agents (agentStarted), under mu
+
+	refusedSends int  // control refused the turn's changes (addChanges)
+	spaceLost    bool // a kept end's copy is gone (sendOne)
+
 	// token is the attempt's turn token, minted by control (jobs.AttemptStarted),
 	// and standIn its agent's model credential, minted with it.
 	token, standIn string
@@ -617,6 +710,163 @@ func (at *attempt) path(op string) string {
 	return at.r.cfg.Queue + "/api/v0/runner/attempts/" + at.a.ID + "/" + op
 }
 
+// maxRefusedSends is how many times control may refuse a turn's changes
+// before the turn ends failed without them. A send control did not answer is
+// tried for as long as the finish is.
+const maxRefusedSends = 5
+
+// ReasonChangesNotKept: the turn's changes could not be put in control's
+// store, so nothing could apply them, and the turn ended failed.
+const ReasonChangesNotKept = "changes_not_kept"
+
+// notKept makes a finish that would say finished say failed, with why its
+// changes are not in control's store: a turn never ends finished unless
+// control holds its changeset.
+func notKept(f *queue.Finish, why string) {
+	if f.Status != queue.Finished {
+		return
+	}
+	res, _ := queue.ReadResult(f.Result)
+	res.State = "failed"
+	res.Error = "The turn's changes could not be sent to control (" + why + "), so they cannot be applied; send the turn again."
+	f.Status, f.Reason, f.Result = queue.Failed, ReasonChangesNotKept, mustJSON(res)
+}
+
+// localError is a failure of the runner's own disk, not of control: sending
+// again does not help.
+type localError struct{ err error }
+
+func (e *localError) Error() string { return e.err.Error() }
+func (e *localError) Unwrap() error { return e.err }
+
+func localErr(err error) error { return &localError{err} }
+
+// copyHolder is one attempt in a copy's line (holdCopy): its job's kind, and
+// a channel closed when it lets go.
+type copyHolder struct {
+	kind string
+	done chan struct{}
+}
+
+// waitsFor is the one rule of who goes ahead of whom in a copy. Every attempt
+// waits for every earlier attempt in its copy, a turn or command control
+// declared lost whose process has not stopped yet among them. There is one
+// exception, and only one: a turn (the person's or delegated) passes an
+// earlier command (run_command), as control lets a turn run beside one
+// (queue: a command stands in the workspace's lane as delegated work). A
+// command, a discard, an update, a close, a put-away, and any kind added
+// later wait for everything earlier.
+func (h *copyHolder) waitsFor(earlier *copyHolder) bool {
+	if h.kind == queue.KindTurn && earlier.kind == queue.KindExec {
+		return false
+	}
+	return true
+}
+
+// holdCopy puts at in its copy's line, waits for every earlier attempt there
+// that it waits for (copyHolder.waitsFor), and holds its place until release.
+// It says false, holding nothing, when control answered that at is no longer
+// current, or ctx ended, while it waited: an attempt control decided lost may
+// still run here until this runner hears of it (lease.go). A job with no copy
+// of its own (a folder's, a home's) holds nothing.
+func (r *Runner) holdCopy(ctx context.Context, at *attempt) (release func(), ok bool) {
+	switch at.job.Kind {
+	case queue.KindApply, queue.KindPreview, queue.KindFolder, queue.KindHome:
+		return func() {}, true
+	}
+	key := queue.CopyKey(at.job.Spec.Workspace, at.job.Session)
+	if key == "" {
+		return func() {}, true
+	}
+	me := &copyHolder{kind: at.job.Kind, done: make(chan struct{})}
+	r.copiesMu.Lock()
+	if r.copies == nil {
+		r.copies = map[ids.WorkspaceID][]*copyHolder{}
+	}
+	var ahead []*copyHolder
+	for _, h := range r.copies[key] {
+		if me.waitsFor(h) {
+			ahead = append(ahead, h)
+		}
+	}
+	r.copies[key] = append(r.copies[key], me)
+	r.copiesMu.Unlock()
+	release = func() {
+		r.copiesMu.Lock()
+		line := r.copies[key]
+		for i, h := range line {
+			if h == me {
+				line = append(line[:i:i], line[i+1:]...)
+				break
+			}
+		}
+		if len(line) == 0 {
+			delete(r.copies, key)
+		} else {
+			r.copies[key] = line
+		}
+		r.copiesMu.Unlock()
+		close(me.done)
+	}
+	if len(ahead) > 0 {
+		r.cfg.Logf("job %s attempt %d: waits for %d attempt(s) before it in its copy", at.job.ID, at.a.Number, len(ahead))
+	}
+	for _, h := range ahead {
+		select {
+		case <-h.done:
+		case <-at.stale:
+			release()
+			return nil, false
+		case <-ctx.Done():
+			release()
+			return nil, false
+		}
+	}
+	return release, true
+}
+
+// agentStarted counts the attempt as an agent of its runner (Agents), until
+// agentEnded.
+func (at *attempt) agentStarted() {
+	at.mu.Lock()
+	defer at.mu.Unlock()
+	if !at.agentOn {
+		at.agentOn = true
+		at.r.agents.Add(1)
+	}
+}
+
+// agentEnded stops counting the attempt as an agent of its runner, if it
+// was.
+func (at *attempt) agentEnded() {
+	at.mu.Lock()
+	defer at.mu.Unlock()
+	if at.agentOn {
+		at.agentOn = false
+		at.r.agents.Add(-1)
+	}
+}
+
+// post calls the attempt's op on control.
+func (at *attempt) post(ctx context.Context, op string, body, out, errOut any) (int, error) {
+	status, err := callErr(context.WithoutCancel(ctx), at.r.short, at.path(op), at.r.token, body, out, errOut)
+	if err == nil && status == http.StatusOK && (op == "heartbeat" || op == "start") {
+		at.r.down.heard()
+	}
+	return status, err
+}
+
+// gone says control answered that the attempt is no longer current: control
+// decided its end (lease.go), so nothing of it is this runner's to send.
+func (at *attempt) gone() bool {
+	select {
+	case <-at.stale:
+		return true
+	default:
+		return false
+	}
+}
+
 func (at *attempt) event(kind string, data any) {
 	b, _ := json.Marshal(data)
 	at.mu.Lock()
@@ -627,21 +877,25 @@ func (at *attempt) event(kind string, data any) {
 
 // flush sends the pending events, at most jobs.MaxBatch at a time. A batch
 // the control plane already holds, in part or whole, is stored once. A batch
-// that fails stays pending for the next flush.
-func (at *attempt) flush(ctx context.Context) {
+// that fails stays pending for the next flush. It says whether control
+// answered: false only while it is out of reach or answers 5xx.
+func (at *attempt) flush(ctx context.Context) bool {
 	for {
 		at.mu.Lock()
 		n := min(len(at.pending), jobs.MaxBatch)
 		batch := append([]queue.AttemptEvent(nil), at.pending[:n]...)
 		at.mu.Unlock()
 		if n == 0 {
-			return
+			return true
 		}
 		var ack jobs.EventBatchAck
-		status, err := call(ctx, at.r.short, at.path("events"), at.r.token,
-			jobs.EventBatch{Number: at.a.Number, Offset: batch[0].Seq, Events: batch}, &ack)
-		if err != nil || status != http.StatusOK {
-			return
+		status, err := at.post(ctx, "events",
+			jobs.EventBatch{Number: at.a.Number, Offset: batch[0].Seq, Events: batch}, &ack, nil)
+		if err != nil || status >= 500 {
+			return false
+		}
+		if status != http.StatusOK {
+			return true // refused: the finish says why
 		}
 		at.mu.Lock()
 		at.pending = at.pending[n:]
@@ -655,27 +909,67 @@ func (at *attempt) lastSeq() int64 {
 	return at.next - 1
 }
 
-// finish ends the attempt, retrying a lost reply: the same finish is safe to
-// send again.
+// finish ends the attempt. The turn's end is kept on disk first (pending.go),
+// and taken off once control has it, so a runner that leaves before control
+// is back leaves it to the next runner of this machine. Each step waits for
+// control while the attempt is live (untilAnswered, lease.go): a heartbeat
+// that control answers, so the changes go to its blob store, then the
+// attempt's events, the turn's record and the finish itself, each safe to send
+// again. Once the attempt is gone (control said it is not current, or its
+// lease ran out) control ends it, and nothing is kept.
 func (at *attempt) finish(ctx context.Context, f queue.Finish) {
-	ctx = context.WithoutCancel(ctx)
-	at.addChanges(ctx, &f)
-	at.flush(ctx)
-	at.forward(ctx, at.sessionOf(f), true)
-	f.LastSeq = at.lastSeq()
-	for i := range 5 {
-		var j queue.Job
-		status, err := call(ctx, at.r.short, at.path("finish"), at.r.token, jobs.Finishing(at.a.Number, f), &j)
-		if err == nil && status == http.StatusOK {
-			at.r.cfg.Logf("job %s attempt %d %s %s", at.job.ID, at.a.Number, f.Status, f.Reason)
-			return
-		}
-		if err == nil && status < 500 {
-			at.r.cfg.Logf("job %s finish refused: %d", at.job.ID, status)
-			return
-		}
-		sleep(ctx, time.Duration(i+1)*time.Second)
+	// Its agent, if any, has ended: a runner may leave while the end is
+	// sent, which waits for control and is kept on disk meanwhile.
+	at.agentEnded()
+	at.localChanges()
+	at.r.keep(at, f)
+	if at.deliver(ctx, f) || at.gone() {
+		at.r.unkeep(at)
 	}
+}
+
+// deliver sends the attempt's end to control, and says whether control has it.
+func (at *attempt) deliver(run context.Context, f queue.Finish) bool {
+	ctx := context.WithoutCancel(run)
+	wait := func(try func() bool) bool { return untilAnswered(run, at.r.cfg.Retire, at.gone, try) }
+	if !wait(func() bool {
+		status, err := at.post(ctx, "heartbeat", jobs.AttemptCall{Number: at.a.Number}, &jobs.AttemptBeat{}, nil)
+		return err == nil && status < 500
+	}) {
+		return false
+	}
+	// The changes go to control's blob store, again while control is away:
+	// a turn's end never reaches control without them.
+	base := f
+	if !wait(func() bool { f = base; return at.addChanges(ctx, &f) }) {
+		return false
+	}
+	if !wait(func() bool { return at.flush(ctx) }) {
+		return false
+	}
+	// The turn's record goes before its finish, and a finish never goes
+	// without control's answer to it: with none, the end stays kept on disk
+	// for the next runner (pending.go), which sends the record again from the
+	// turn's start. A batch control refused is its answer: the finish goes,
+	// and control closes the run it did not get (jobs.closeOpenRuns).
+	if _, answered := at.forward(run, at.sessionOf(f), true); !answered {
+		return false
+	}
+	f.LastSeq = at.lastSeq()
+	return wait(func() bool {
+		var j queue.Job
+		status, err := at.post(ctx, "finish", jobs.Finishing(at.a.Number, f), &j, nil)
+		switch {
+		case err == nil && status == http.StatusOK:
+			at.r.down.heard()
+			at.r.cfg.Logf("job %s attempt %d %s %s", at.job.ID, at.a.Number, f.Status, f.Reason)
+		case err == nil && status < 500:
+			at.r.cfg.Logf("job %s finish refused: %d", at.job.ID, status)
+		default:
+			return false
+		}
+		return true
+	})
 }
 
 // MaxRecordBatch bounds the event bytes of one record batch, under the
@@ -686,23 +980,44 @@ const MaxRecordBatch = jobs.MaxBody * 3 / 4
 // a session's first job the session and its workspace, so the session's
 // later jobs come to this runner. A turn in a folder used as it is (Direct)
 // records no changes: they went straight into the folder.
-func (at *attempt) addChanges(ctx context.Context, f *queue.Finish) {
+func (at *attempt) addChanges(ctx context.Context, f *queue.Finish) (answered bool) {
 	defer at.claim(f)
 	if at.space == nil {
-		return
+		if at.spaceLost {
+			notKept(f, "its copy is gone")
+		}
+		return true
 	}
 	res, _ := queue.ReadResult(f.Result)
-	c, ok := at.changes()
-	if !ok {
-		c = workspace.Changes{Kind: workspace.KindSnapshot, Files: []workspace.Change{}, Error: "the workspace could not be read at the end"}
-	}
+	at.localChanges()
+	c, ok := *at.endChanges, at.endOK
 	// What the copy holds now goes to the control plane's store, so an
-	// apply reads it there, not from this runner.
-	if ok && at.space != nil && at.job.Kind == queue.KindTurn {
-		if h, err := at.r.publish(ctx, at.space, c.To); err != nil {
-			at.r.cfg.Logf("job %s: the turn's changes could not be put in the store: %s", at.job.ID, err)
-		} else {
+	// apply reads it there, not from this runner. A turn never ends finished
+	// unless control holds its changeset: a send that fails is tried again,
+	// as the finish is, and a turn whose changes cannot be sent ends failed.
+	if at.job.Kind == queue.KindTurn && at.r.cfg.BlobSink != nil {
+		h, err := "", errors.New("the copy could not be read")
+		if ok {
+			h, err = at.r.publish(ctx, at.space, c.To)
+		}
+		var local *localError
+		switch {
+		case err == nil:
 			res.Changeset = h
+		case errors.Is(err, blobs.ErrUnreachable):
+			return false // control did not answer, or not whole (deliver)
+		case !errors.As(err, &local) && ok:
+			// Control answered, and refused: tried again a few times, then
+			// the turn ends failed.
+			if at.refusedSends++; at.refusedSends < maxRefusedSends {
+				at.r.cfg.Logf("job %s: control refused the turn's changes (%s); trying again", at.job.ID, err)
+				return false
+			}
+			fallthrough
+		default:
+			at.r.cfg.Logf("job %s: the turn's changes could not be put in control's store: %s", at.job.ID, err)
+			notKept(f, err.Error())
+			res, _ = queue.ReadResult(f.Result)
 		}
 	}
 	res.Folder, res.Changes = "", nil
@@ -713,6 +1028,20 @@ func (at *attempt) addChanges(ctx context.Context, f *queue.Finish) {
 	res.Changes = &c
 	f.Result = mustJSON(res)
 	at.event("workspace.changes", map[string]any{"count": c.Count, "kind": c.Kind})
+	return true
+}
+
+// localChanges works out, once, what the job changed in its copy: on this
+// machine only, so before anything waits for control.
+func (at *attempt) localChanges() {
+	if at.space == nil || at.endChanges != nil {
+		return
+	}
+	c, ok := at.changes()
+	if !ok {
+		c = workspace.Changes{Kind: workspace.KindSnapshot, Files: []workspace.Change{}, Error: "the workspace could not be read at the end"}
+	}
+	at.endChanges, at.endOK = &c, ok
 }
 
 // claim names, for a turn that started, its session and the workspace it ran
@@ -740,11 +1069,11 @@ func (at *attempt) changes() (workspace.Changes, bool) {
 	return c, err == nil
 }
 
-// heartbeats renews the lease every heartbeat interval until done closes, on
-// its own goroutine, so a slow framework call never holds one up. It closes
-// cancel when the control plane asks the job to stop, and stale when the
-// attempt is no longer current or the control plane has been out of reach
-// for a whole lease.
+// heartbeats tells control the attempt runs, every heartbeat interval until
+// done closes, on its own goroutine, so a slow framework call never holds one
+// up. It closes cancel when the control plane asks the job to stop, and stale
+// when control answers that the attempt is no longer current: control's
+// decision, the only one that ends an attempt here (lease.go).
 func (at *attempt) heartbeats(ctx context.Context, done <-chan struct{}) {
 	t := time.NewTicker(at.r.heartbeat)
 	defer t.Stop()
@@ -752,57 +1081,60 @@ func (at *attempt) heartbeats(ctx context.Context, done <-chan struct{}) {
 		select {
 		case <-done:
 			return
+		case <-at.stale:
+			return
 		case <-t.C:
 		}
 		var b jobs.AttemptBeat
 		var e jobs.JobError
-		status, err := callErr(context.WithoutCancel(ctx), at.r.short, at.path("heartbeat"), at.r.token,
-			jobs.AttemptCall{Number: at.a.Number}, &b, &e)
+		status, err := at.post(ctx, "heartbeat", jobs.AttemptCall{Number: at.a.Number}, &b, &e)
 		switch {
 		case err == nil && status == http.StatusOK:
-			at.mu.Lock()
-			at.until = time.Now().Add(at.r.lease)
-			at.mu.Unlock()
 			if b.Cancel {
 				at.cancelOnce.Do(func() { close(at.cancel) })
 			}
 		case err == nil && (e.Stale || status == http.StatusNotFound):
 			at.staleOnce.Do(func() { close(at.stale) })
 			return
-		default:
-			at.mu.Lock()
-			gone := time.Now().After(at.until)
-			at.mu.Unlock()
-			if gone {
-				at.staleOnce.Do(func() { close(at.stale) })
-				return
-			}
 		}
 	}
 }
 
 func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
-	at := &attempt{r: r, job: job, a: a, next: 1, until: time.Now().Add(r.lease),
+	at := &attempt{r: r, job: job, a: a, next: 1,
 		cancel: make(chan struct{}), stale: make(chan struct{})}
-	// start is safe to send again: a lost reply is retried until the lease
-	// must have run out. A stale answer means the job is no longer ours.
+	if r.cfg.StartDelay > 0 {
+		// Test only (AGENTBUS_TEST_START_DELAY_MS): the moment between a take
+		// and its start, held open so a test can stop control in it.
+		r.cfg.Logf("test.start_delay job=%s", job.ID)
+		time.Sleep(r.cfg.StartDelay)
+	}
+	// start is safe to send again: a lost reply is retried until control
+	// answers (lease.go). A stale answer means the job is no longer ours.
 	var st jobs.AttemptStarted
 	for {
 		var e jobs.JobError
-		status, err := callErr(context.WithoutCancel(ctx), r.short, at.path("start"), r.token, jobs.AttemptCall{Number: a.Number}, &st, &e)
+		status, err := at.post(ctx, "start", jobs.AttemptCall{Number: a.Number}, &st, &e)
 		if err == nil && status == http.StatusOK {
 			break
 		}
-		if (err == nil && status < 500) || time.Now().After(at.until) {
+		// A runner that stops or leaves drops a start it could not send:
+		// nothing was spent, and control queues the job again when it starts
+		// (queue.RenewLeases). A cancelled sleep returns at once, so the
+		// loop ends with it, never spins (review t_fe36d3855a58fd0f P1).
+		if (err == nil && status < 500) || r.leaving() || !sleep(ctx, time.Second) {
 			r.cfg.Logf("job %s start failed: %d", job.ID, status)
 			return
 		}
-		sleep(ctx, time.Second)
 	}
 	at.mu.Lock()
-	at.until = time.Now().Add(r.lease)
 	at.token, at.standIn, at.signin = st.Token, st.StandIn, st.Signin
 	at.settings = st.Settings
+	if st.AgentNames != nil {
+		r.namesMu.Lock()
+		r.names = st.AgentNames
+		r.namesMu.Unlock()
+	}
 	if st.RulesRefused != nil {
 		at.rulesErr = st.RulesRefused.Err()
 	}
@@ -810,6 +1142,12 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	done := make(chan struct{})
 	defer close(done)
 	go at.heartbeats(ctx, done)
+	// From its start on control the attempt counts as an agent of this
+	// runner (Agents) until its agent ended, or never started: its setup and
+	// the turn's start sent to control's record (Request.Recorded) come
+	// before the agent, and a runner that left then would drop the turn.
+	at.agentStarted()
+	defer at.agentEnded()
 
 	// The attempt is current on control now: the gateway's hold can find it by
 	// turn and poll its decision while it holds an Ask (decide.go).
@@ -817,6 +1155,14 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 	defer r.unregisterAttempt(at)
 
 	at.event("attempt.started", map[string]any{"runner": r.id})
+	// Its place in its copy's line (holdCopy): an attempt control decided
+	// lost may still run here until this runner hears of it (lease.go), and
+	// what must not overlap it waits.
+	release, ok := r.holdCopy(ctx, at)
+	if !ok {
+		return // control ended it while it waited, or the runner stops
+	}
+	defer release()
 	if st.Cancel {
 		at.finish(ctx, queue.Finish{Status: queue.Cancelled})
 		return
@@ -869,8 +1215,16 @@ func (r *Runner) work(ctx context.Context, job queue.Job, a queue.Attempt) {
 		at.finish(ctx, queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup, Result: mustJSON(refused)})
 		return
 	}
-	turn, err := r.cfg.Engine.Start(r.request(ctx, at))
+	req := r.request(ctx, at)
+	turn, err := r.cfg.Engine.Start(req)
 	if err != nil {
+		// What the engine recorded of the refused start (its run.ended and
+		// the reason) goes to control's record, as a started turn's does.
+		session := req.Session
+		if session == "" {
+			session = req.NewSession
+		}
+		at.forward(ctx, session, true)
 		res := queue.Result{Refused: "the turn could not be started", Status: http.StatusInternalServerError}
 		var rf *run.Refusal
 		if errors.As(err, &rf) {
@@ -972,7 +1326,7 @@ func (r *Runner) request(ctx context.Context, at *attempt) run.Request {
 			// its next turn got 409). Engine.Start calls this on the attempt's
 			// own goroutine, before it returns.
 			at.session = session
-			if !at.forward(ctx, session, true) {
+			if took, _ := at.forward(ctx, session, true); !took {
 				return errStartNotSent
 			}
 			return nil
@@ -1603,6 +1957,9 @@ func (r *Runner) useFolder(at *attempt) *queue.Result {
 // ended. A cancel or a shutdown stops the turn. A stale attempt stops the
 // turn and finishes nothing: the queue has already settled it.
 func (r *Runner) follow(ctx context.Context, at *attempt, turn *run.Turn) {
+	// The agent is counted until its turn has ended, or the runner let go of
+	// it (Agents), not while its end is sent.
+	agentEnded := at.agentEnded
 	quit, cancelCh := ctx.Done(), (<-chan struct{})(at.cancel)
 	cancelled, shutdown := false, false
 	var stopWait <-chan time.Time // set once a stop is sent
@@ -1641,6 +1998,7 @@ wait:
 			// The stop's SIGKILL came and went and the turn has not ended:
 			// its run.ended waits on something. The job ends now and
 			// says so; the turn ends on its own.
+			agentEnded()
 			at.event("turn.unended", map[string]any{"turn": turn.ID})
 			res := queue.Result{Session: turn.Session, Error: "the turn was stopped and had not ended in time"}
 			f := queue.Finish{Status: queue.Failed, Reason: ReasonRunnerStopped, Result: mustJSON(res)}
@@ -1651,6 +2009,7 @@ wait:
 			return
 		}
 	}
+	agentEnded()
 	// A harness that keeps its own list of models in the session's home
 	// may have just written it: control hears of it now, not at the next
 	// probe (run.Engine.Models).
@@ -1699,12 +2058,15 @@ func mustJSON(v any) json.RawMessage {
 	return b
 }
 
-func sleep(ctx context.Context, d time.Duration) {
+// sleep waits d, or until ctx ends, and says whether it waited all of d.
+func sleep(ctx context.Context, d time.Duration) bool {
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
 	case <-ctx.Done():
+		return false
 	case <-t.C:
+		return true
 	}
 }
 

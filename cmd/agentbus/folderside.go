@@ -55,10 +55,9 @@ func sweepCache(ctx context.Context, st *blobs.Store, logf func(string, ...any))
 }
 
 // folderSide is this machine's folder side, for its runner to do its folder
-// jobs and lend from (runner.Config.FolderSide, Lender). store, in agentbus
-// up, is the control plane's own: nothing is sent over HTTP. Otherwise it
-// is the runner's own store, and the control plane's is set as its Remote
-// once the runner has its token.
+// jobs and lend from (runner.Config.FolderSide, Lender). store is the
+// runner's own, up's built-in one's too, and the control plane's is set as
+// its Remote once the runner has its token.
 func folderSide(home string, fr *folders.Registry, store *blobs.Store) *connector.Connector {
 	c := &connector.Connector{Folders: fr, Store: store, State: filepath.Join(home, "connector"), Link: isolation.Clone}
 	// A folder inside a session's overlay copy on this machine (a session

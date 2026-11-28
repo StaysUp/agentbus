@@ -55,8 +55,9 @@ may hold other projects' Go code. Go's own tools skip folders that start with `_
   other part reads that memory. Teams depend on one control while their runners are many machines.
   (2026-11-16: approvals listed from one gateway's memory never showed a remote runner's request.)
 - **One gateway path everywhere.** A runner on control's machine and a runner on another machine take
-  the same path, so what works locally works across machines. (Target: `agentbus up` runs its
-  built-in runner with its own local gateway, as a remote runner does.)
+  the same path, so what works locally works across machines. `agentbus up` runs its built-in
+  runner as a process of its own, with its own gateway and record, as a remote runner does
+  (`cmd/agentbus/builtin.go`), so a restart of `up` leaves its turns running.
 - **Test across processes.** A feature that touches the gateway or the runner gets a test with
   control and a separate runner process, not only the built-in runner of `agentbus up`. Before a
   release, a live check with a real runner on another machine.
@@ -122,6 +123,23 @@ may hold other projects' Go code. Go's own tools skip folders that start with `_
 - **Fix the root cause.** No defensive backstops on top of a fix.
 - **A live run beats a fixture.** Vendors change their wire formats. Check a change against a real
   agent when it touches an adapter or the gateway.
+- **Async by default.** AgentBus runs across machines. A call returns as soon as its work is
+  recorded and never waits for that work to happen. Results arrive later, as an event (an on) or by
+  reading the record. A wait inside a call is a window for things to break. (His call, 2026-11-19.)
+- **Parts talk only through the event log or the public API.** Control is a few parts: the API, the
+  event log, the scheduler, the runners and the reactors. None reaches into another. A design that
+  makes one part wait on, or read, another's internals is missing a boundary. (His call, 2026-11-19.)
+- **No custom rulings in core.** Every special case in the code (a rule for one kind of thing, one
+  vendor, one route, one flow) drifts and breeds bugs. Keep the core's rules few and the same for
+  everything they touch. A special case that is really wanted goes outside the core, as a program or
+  app that is visible and replaceable. (His call, 2026-11-19.)
+- **Deployed is not committed.** After changing anything that is deployed or installed, check that
+  the running artefact matches the repo: read the version off the running binary, not the file date.
+- **Live systems.** "Remove", "stop" or "stop watching" X means the in-session view, not the running
+  service. Stopping a service, changing a live setting, or stopping or deleting a VM needs an
+  explicit ask, because other sessions share them.
+- **Experiments.** Compare a baseline with a variant that changes one thing, in the same window.
+  Read the numbers before choosing the next one.
 
 ## Adding a harness
 

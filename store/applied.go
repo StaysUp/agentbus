@@ -10,6 +10,30 @@ import (
 	"github.com/staysup/agentbus/ids"
 )
 
+// appliedSQL reads a workspace's events for Applied, oldest first: one read
+// per kind, each through its index. A turn.changed belongs to the workspace
+// its turn's turn.started names (resolvedWorkspace). Applied needs only that
+// a turn.started is there, and four short fields of a turn.changed, so the
+// first is read without its data and the second reduced to those fields in
+// SQLite. A turn.changed carries the turn's whole file list with diffs (up
+// to 830 KiB each, 2026-11-28), and decoding it for every workspace on every
+// list was most of GET /api/v0/workspaces.
+const appliedSQL = `SELECT kind, time, data FROM (
+	SELECT e.seq, e.kind, e.time, '{}' AS data FROM events e
+		WHERE e.kind = 'turn.started' AND COALESCE(NULLIF(json_extract(e.data, '$.workspace'), ''), e.session) = ?1
+	UNION ALL
+	SELECT c.seq, c.kind, c.time, json_object('turn', c.turn, 'changeset', json_extract(c.data, '$.changeset'),
+			'checkpoint', json_extract(c.data, '$.checkpoint'), 'changes', json_object('to', json_extract(c.data, '$.changes.to')))
+		FROM (SELECT DISTINCT ts.session, ts.turn FROM events ts
+			WHERE ts.kind = 'turn.started' AND ` + resolvedWorkspace + ` = ?1) t
+		JOIN events c ON c.kind = 'turn.changed' AND c.session = t.session AND c.turn = t.turn
+	UNION ALL
+	SELECT e.seq, e.kind, e.time, e.data FROM events e WHERE json_extract(e.data, '$.workspace') = ?1
+		AND e.kind IN ('workspace.applied', 'workspace.discarded', 'workspace.updated', 'workspace.snapshot', 'workspace.closed')
+	UNION ALL
+	SELECT e.seq, e.kind, e.time, e.data FROM events e WHERE e.kind = 'turn.applied' AND e.session = ?1)
+	ORDER BY seq`
+
 // Applied is the workspace's applied state, folded from its events in the
 // record's order (applied.Fold): its turns' turn.changed, its
 // workspace.applied, workspace.discarded and workspace.updated, and, for a
@@ -20,13 +44,7 @@ import (
 // update.
 func (s *Store) Applied(ws ids.WorkspaceID) (applied.State, error) {
 	var f applied.Fold
-	rows, err := s.r.Query(`SELECT e.kind, e.time, e.data FROM events e
-		WHERE (e.kind = 'turn.started' AND COALESCE(NULLIF(json_extract(e.data, '$.workspace'), ''), e.session) = ?1)
-			OR (e.kind = 'turn.changed' AND EXISTS (SELECT 1 FROM events ts
-				WHERE ts.kind = 'turn.started' AND ts.session = e.session AND ts.turn = e.turn AND `+resolvedWorkspace+` = ?1))
-			OR (e.kind IN ('workspace.applied', 'workspace.discarded', 'workspace.updated', 'workspace.snapshot', 'workspace.closed') AND json_extract(e.data, '$.workspace') = ?1)
-			OR (e.kind = 'turn.applied' AND e.session = ?1)
-		ORDER BY e.seq`, string(ws))
+	rows, err := s.r.Query(appliedSQL, string(ws))
 	if err != nil {
 		return applied.State{}, fmt.Errorf("store: read applied: %w", err)
 	}

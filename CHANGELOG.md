@@ -3,6 +3,161 @@
 All notable changes to AgentBus. Full notes for each release are on the
 [releases page](https://github.com/staysup/agentbus/releases).
 
+## Unreleased
+
+### Changed
+- **An on watches a session, not one turn.** `POST /api/v0/ons` takes
+  `{"event":"turn.completed","filter":{"session":"S"}}`. Every turn of S that ends from then on has
+  its reply delivered to a session, your own by default. It stays until you remove it. So a
+  coordinator that watches a builder's session hears each of its turns, including the later turn
+  that carries a review the builder asked for. A turn token may watch and deliver only within its
+  reach. An on may not deliver in a circle (409). A second on for the same pair returns the first.
+- **ask_agent and review_turn register that on themselves.** Each opens a session, registers an on
+  over it for the asking session, then starts the turn. The result of any later turn of that session
+  comes back too. You no longer need to register an on by hand for each review.
+- **Registering an on is free; what it delivers counts.** Each turn an on delivers is a turn the
+  on's maker asked for, counted under Turns per request and Turns per request tree. It stays at the
+  maker's level under Depth, since depth counts asking, not hearing back: a builder at the default
+  Depth of 2 can ask for a review, hear back, and ask again. So a chain of ons stops where a chain of asks does. One delivery stays free: your
+  own turn hearing back in the session you started, so a coordinator's ons and results no longer
+  use up its tree. A delivery past a cap is not made; `delivery.refused` in its session says why.
+
+### Fixed
+- **A shortened session keeps its standing rules.** When the history budget summarised a Claude
+  Code session's first turn, the summary also replaced the context Claude Code puts in that
+  message: `~/.claude/CLAUDE.md`, the memory index and the repo's `AGENTS.md`. The session then ran
+  without them. Every step now keeps that context byte for byte at the front of the first message,
+  as it already kept codex's context items and OpenCode's system message. A session that already
+  lost it gets the fresh process's copy back on its next turn. `history.shortened` carries
+  `head_tokens`, the size of what is never shortened. `tools/budgetcheck` shows per turn whether
+  the context is still there.
+
+### Removed
+- **The on over one turn, and `delivery` on `POST /api/v0/turns`.** Both answer 410 with a message
+  saying what to send instead: register an on over the session first, then start the turn. A
+  command's result (`POST /api/v0/commands`) is still delivered by an on over that command, which
+  control registers; `GET /api/v0/ons` lists it with `turn`, as before. An on over a session is
+  listed with `filter` in place of `turn`.
+
+### Changed
+- **Restarting `agentbus up` no longer stops running turns.** `up`'s built-in runner is now a
+  process of its own, started by `up`, as a runner on another machine is. Stopping `up` (Ctrl-C, or
+  a restart to upgrade it) leaves the runner and its turns running. They finish and reach the
+  record once `up` is back, after a few seconds or after minutes. A model call made while `up` is
+  away waits for it, up to two minutes. Before, every running turn ended with exit 143,
+  `runner_stopped`.
+  - When `up` comes back from another build, or with another option for its runner
+    (`-replay=false`), the runner of the earlier build finishes its running
+    turns, takes no new ones, and then leaves. `up` then starts a runner of its own build. Turns
+    asked for in between wait in the queue until then.
+  - The runner leaves on its own when no agent of its runs and `up` is gone, so a stopped `up`
+    leaves no process behind. A turn's end it could not send is kept in `finishes/`, and the next
+    runner sends it when `up` is started again.
+  - The runner keeps its own record in `runner/events.db`, a copy of `up`'s the first time, and its
+    log in `logs/runner.log` (its own output in `logs/runner.out`). It shares the rest of `up`'s
+    data folder: the folders, the session copies and its identity.
+  - Its agents call the runner's own gateway, which relays to `up`. `up`'s own address no longer
+    serves model paths (404), and `POST /api/v0/turns` no longer returns `base_url` on `up`, as on
+    `server`. A turn's stand-in sent on another turn's path is refused by the runner's gateway
+    (403) and recorded nowhere, on every runner now, not only `up`'s.
+  - Control names a runner's turn's folder in its record from the turn's workspace, and gives a
+    runner the saved agents' names with each turn's start, so a session that changes agent still
+    names the earlier ones.
+
+### Fixed
+- **Apply no longer writes over a file you edit while it runs.** It checked every file before it
+  fetched and staged what it writes, then wrote without looking again, so an edit you saved in
+  between was replaced. It now looks again at every file just before the first write, and refuses
+  as the check would have, naming each file; nothing is written. A stop during that look writes
+  nothing either. (#102; the fix is Kunal Roy Choudhury's, from #107.)
+- **Apply leaves alone a file already as it would write it**, and does not list it as written.
+- **When a turn ended, and how, is decided once, by control.** A turn's end is its job's end on
+  control: a finish control took, or an attempt it found lost. `GET /api/v0/turns` reads the turn's
+  state from there once its job has ended, and a run's `run.ended` says only how its agent ended.
+  Before, a turn whose agent finished but whose changes control never got read `finished`, with
+  no changes to apply. This follows Buildkite and Temporal: the server records a job's end once
+  and refuses a second; the agent learns it from the server's answer.
+- **A turn that ended while control was away stayed "running"**, and a control restart longer
+  than the 30-second lease ended every running turn with `runner_lost`. Control renews every
+  running lease when it starts. A runner keeps no clock of its own over a turn: it stops one only
+  when control answers that the turn is no longer its own. So a turn goes on through a restart of
+  `up` or `server` of any length, and through a dropped link shorter than the lease.
+- **A turn control found lost while its runner could not reach it no longer shares its copy.**
+  The next turn of that workspace waits until the runner has heard and stopped the lost one's
+  agent. In a copy everything waits for everything earlier, a lost turn or command still
+  stopping among them, with one exception: a turn runs beside a command (`run_command`).
+  A command, a discard, an update, a close or a put-away waits for all of it.
+- **A turn's end is never dropped before control answered it.** A runner keeps it in
+  `finishes/` until control took it or answered that the turn is no longer current. The turn's
+  record goes before its finish: a runner that leaves while control does not answer the record
+  keeps the end for the next runner, which sends both. A record control answers with a server
+  error three times is given up, as Buildkite gives up a job's failed log chunks: the finish goes,
+  and control closes the run whose end it did not get.
+- **A turn never ends finished unless control holds its changes.** A reply cut after its
+  headers, or no answer, is tried again as the finish is. If control keeps refusing the changes,
+  or the copy cannot be read, the turn ends failed (`changes_not_kept`) and says so.
+- **A turn taken just before a restart ran 30 seconds late.** Control now queues such a turn
+  again as soon as it starts, since nothing was spent on it, and a runner takes it at once.
+- **A finished turn whose last record never reached control blocked its session**
+  ([#98](https://github.com/staysup/agentbus/issues/98)). Control now closes the turn's open run
+  with the attempt, and the turn reads as its job ended. A run ends once: the record keeps the
+  first `run.ended` of a run. Thanks to ayush585 for the report and the two tests.
+- **A turn whose agent could not start left its reason only in the runner's own record.** Its
+  `run.ended` now reaches control's record, as a started turn's does.
+- **A runner stopped while control did not answer a turn's start never stopped.** It tried the
+  start again without pause. It now drops the start, which control queues again when it is back.
+- **A turn could edit up's built-in runner's record.** `runner/events.db` and `runner/build` are
+  now among the data folder's files no turn may edit.
+- **A file moved over another of the same size and time is no longer lost**
+  ([#89](https://github.com/staysup/agentbus/issues/89), [#97](https://github.com/staysup/agentbus/pull/97)).
+  A checkpoint trusts a file's size, time and mode only when its ctime is also older than the last
+  look. The system sets ctime on every write, rename, link and chmod, and nothing can set it back.
+  Before, `mv new.go old.go` in an overlay copy kept `old.go`'s old content in the record, and Apply
+  removed `new.go` and said applied. An edit that put the time back (`touch -r`, `cp -p`,
+  `rsync -t`) was missed the same way. A Copy workspace records its checkpoints through git, whose
+  stat cache compares ctime to the second, so such an edit made in the same second as the copy
+  was missed there too. It now holds git's cache to the same rule, and hashes again any file whose
+  ctime or time is within 2 seconds of the copy's last record. Thanks to `kunalgoesbyken` (#97).
+- **Apply no longer writes over a file the person moved in**. The same rule now holds in your
+  folder. Where a copy's Base recorded a file by size, time and mode only (an overlay copy), Apply
+  took a file still showing them as untouched and wrote over it. So when you moved another file of
+  the same size and time over it during the session, its content was lost. Apply now trusts that
+  only when the file's ctime is older than when the copy began reading your folder. Otherwise it
+  reads the file, and refuses the apply as changed when it cannot show the file is the Base's. The
+  same holds when a copy reads a file's Base content from your folder. A changeset now records that
+  time (`base_taken`); one made before 0.6.8 has none, so such a file refuses rather than being
+  trusted.
+- **Edits to committed build output reach Review and Apply**
+  ([#87](https://github.com/staysup/agentbus/issues/87)). Before, an edit to a committed file
+  under `dist/`, `build/`, `target/` or another built-in folder, or to a file added with
+  `git add -f` past your `.gitignore`, never reached Review or Apply, and Apply said applied. A
+  Copy workspace now asks git at every checkpoint, and on your side of every Update, which files
+  are the work, of the repo each file is in: your folder's own, each nested repo and each
+  submodule, each found the way git finds it. A file that repo tracks is always recorded, so one
+  removed in a turn and made again in a later one is recorded again rather than applied as removed.
+  What else is left out is that repo's own rules only: its `.gitignore` files, its
+  `.git/info/exclude` and its `core.excludesFile` (a relative one read from its work tree, as git
+  does), else yours. The built-in list (`node_modules/`, `dist/`, `build/`, `target/` and the rest)
+  still applies at your folder's top, but git applies it, less any built-in folder git finds a
+  tracked file in. So a new file beside a committed one reaches Apply in `dist/` and in `Dist/`
+  alike, a `node_modules/` your repo does not ignore stays out, and a parent repo's rules no longer
+  reach into a nested repo, as `git status` there does not read them. A folder that holds its own `.git` is that repo's
+  to decide, even where a rule of the repo above leaves the folder out; a repo the agent makes in
+  the copy is asked as it is now. Submodules opened as the
+  folder, worktrees, split indexes and SHA-256 repos are read too; an index git cannot read fails
+  the checkpoint instead of dropping its files. A tracked file is found under the name your folder
+  lists it by, so a case rename of a force-added `config.local` to `Config.local` is a rename, and a
+  name your disk keeps in another Unicode form than git's index is found too. Only another spelling
+  of the same name stands in for it, never a hard link under another name. This holds for
+  copies made from 0.6.8 on; start a new session for an older one.
+- **A case-only rename reaches the folder on a disk that ignores case**
+  ([#76](https://github.com/staysup/agentbus/issues/76)). On such a disk (macOS by default, ext4
+  with casefold) a look-up of `button.tsx` finds `Button.tsx`, so a checkpoint took the old name
+  as still there. Renaming `button.tsx` to `Button.tsx`, or `comp/` to `Comp/`, left Review empty,
+  and Apply said applied with the folder unchanged. A name now counts only as its folder lists
+  it. The rename shows in Review, applies, is put back by a Discard, and comes in with an Update
+  when the person makes it. This holds for Copy workspaces made since 0.6.6.
+
 ## 0.6.7 (2026-11-27)
 
 ### Added

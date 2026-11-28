@@ -807,3 +807,51 @@ func TestSessionsPaging(t *testing.T) {
 		t.Fatalf("page two pinned: %q next %v err %v", ids(p2.Sessions), p2.NextBefore, err)
 	}
 }
+
+// CopyTo copies the record whole into a new file the copy opens as a store,
+// numbering on from the copied events.
+func TestCopyTo(t *testing.T) {
+	dir := t.TempDir()
+	s := open(t, filepath.Join(dir, "events.db"))
+	if _, _, err := s.Append(event.Event{ID: "evt_1", Kind: event.TurnStarted, Session: "s1", Turn: "t1", Time: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "runner", "events.db")
+	if err := os.MkdirAll(filepath.Dir(p), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CopyTo(p); err != nil {
+		t.Fatal(err)
+	}
+	c := open(t, p)
+	recs, _, err := c.Page(0, Filter{}, 10, 1<<20)
+	if err != nil || len(recs) != 1 {
+		t.Fatalf("copy holds %d events, %v", len(recs), err)
+	}
+	e, _, err := c.Append(event.Event{ID: "evt_2", Kind: event.TurnStarted, Session: "s1", Turn: "t2", Time: time.Now()})
+	if err != nil || e.Seq != 2 {
+		t.Fatalf("the copy numbers on: %d %v", e.Seq, err)
+	}
+}
+
+// A hold ends once: a second run.ended for it, from whoever, is not stored.
+func TestOneRunEndedPerHold(t *testing.T) {
+	s := newStore(t)
+	now, exit := time.Now(), 0
+	for _, e := range []event.Event{
+		{ID: "evt_s", Kind: event.RunStarted, Session: "s1", Turn: "t1", Hold: "hold_1", Time: now},
+		{ID: "evt_e1", Kind: event.RunEnded, Session: "s1", Turn: "t1", Hold: "hold_1", Time: now, ExitCode: &exit},
+	} {
+		if _, stored, err := s.Append(e); err != nil || !stored {
+			t.Fatalf("%s: %v %v", e.ID, stored, err)
+		}
+	}
+	if _, stored, err := s.Append(event.Event{ID: "evt_e2", Kind: event.RunEnded, Session: "s1", Turn: "t1", Hold: "hold_1",
+		Time: now, Unsettled: true}); err != nil || stored {
+		t.Fatalf("a second run.ended of the hold: stored %v, %v", stored, err)
+	}
+	if _, stored, err := s.Append(event.Event{ID: "evt_e3", Kind: event.RunEnded, Session: "s2", Turn: "t1", Hold: "hold_1",
+		Time: now}); err != nil || !stored {
+		t.Fatalf("another session's hold of the same name: stored %v, %v", stored, err)
+	}
+}

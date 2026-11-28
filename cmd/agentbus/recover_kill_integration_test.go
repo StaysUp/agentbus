@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,7 +17,9 @@ import (
 // closed or a power cut take it: the real binary, a stand-in claude that calls a
 // fake vendor, and a second start on the same data folder. SIGTERM is the way
 // the service is asked to stop; its turn is closed with its calls confirmed, and
-// the session goes on. SIGKILL gives it no say.
+// the session goes on. SIGKILL gives it no say: it takes up and up's built-in
+// runner, a process of its own that outlives up (builtin.go), as a power cut
+// does; with up alone gone, its runner would finish the turn whole.
 func TestRecoverAfterServiceEndsMidTurn(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -96,6 +99,9 @@ func TestRecoverAfterServiceEndsMidTurn(t *testing.T) {
 
 			tc.kill(p.cmd.Process.Pid)
 			<-p.done
+			if tc.name == "SIGKILL" {
+				killBuiltinRunner(t, home)
+			}
 			if err := os.WriteFile(wait, nil, 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -121,4 +127,24 @@ func TestRecoverAfterServiceEndsMidTurn(t *testing.T) {
 			}
 		})
 	}
+}
+
+// killBuiltinRunner kills up's built-in runner and its agents (its own process
+// group, builtin.go), named by up's service log, and waits until it is gone.
+func killBuiltinRunner(t *testing.T, home string) {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(home, "logs", "service.log"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := strings.LastIndex(string(b), "runner.spawned pid=")
+	if i < 0 {
+		t.Fatal("up's log names no runner it started")
+	}
+	var pid int
+	if _, err := fmt.Sscanf(string(b)[i+len("runner.spawned pid="):], "%d", &pid); err != nil || pid <= 0 {
+		t.Fatalf("up's log names its runner's pid badly: %v", err)
+	}
+	syscall.Kill(-pid, syscall.SIGKILL)
+	waitFor(t, "up's runner is gone", func() bool { return !held(runnerLock(home)) })
 }

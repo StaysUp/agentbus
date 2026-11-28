@@ -205,9 +205,13 @@ const (
 )
 
 // dataFiles are the data folder's own files, which no turn may edit: a turn
-// that could would raise its own limits, or read a token.
+// that could would raise its own limits, or read a token. up's built-in
+// runner keeps its record and the build it runs as under runner/
+// (cmd/agentbus/builtin.go): a turn that edited them could rewrite a turn's
+// record or retire the runner.
 var dataFiles = []string{PolicyFile, InstructionsFile, AgentsFile, ToolsFile, "token", "turns_token",
-	"enroll_token", "events.db", "jobs.db", DBFile, KeptRulesFile, "runner.json", "folders.json", filepath.Join("bin", APIClient)}
+	"enroll_token", "events.db", "jobs.db", DBFile, KeptRulesFile, "runner.json", "folders.json", filepath.Join("bin", APIClient),
+	filepath.Join("runner", "events.db"), filepath.Join("runner", "build")}
 
 // protected is dataFiles under dir.
 func protected(dir string) []string {

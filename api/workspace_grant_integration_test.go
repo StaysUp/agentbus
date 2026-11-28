@@ -97,9 +97,9 @@ func TestAgentMakesWorkspaceWithinAuthority(t *testing.T) {
 	if pwd := pwdOf(t, dir, "builder"); pwd == f2 {
 		t.Fatalf("the builder runs in the folder itself, not a copy: %s", pwd)
 	}
-	// It hears back only if it chooses: an on for the turn it started.
-	if code, out := as(t, e, dtok, "POST", "/api/v0/ons", `{"turn":"`+builder.Turn+`"}`); code != 201 {
-		t.Fatalf("on for the builder's turn: %d %s", code, out)
+	// It hears back only if it chooses: an on over the session it started.
+	if code, out := as(t, e, dtok, "POST", "/api/v0/ons", `{"event":"turn.completed","filter":{"session":"`+builder.Session+`"}}`); code != 201 {
+		t.Fatalf("on over the builder's session: %d %s", code, out)
 	}
 	if code, out := as(t, e, dtok, "GET", "/api/v0/workspaces/"+w.ID, ""); code != 200 {
 		t.Fatalf("read the made workspace: %d %s", code, out)

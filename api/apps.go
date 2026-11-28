@@ -90,7 +90,7 @@ func reviewTurnApp() toolreg.Tool {
 			"With no turn it reviews your workspace's whole unapplied set (every change applying would write to the person's folder, across turns) — this is what you want for \"review my changes\". " +
 			"With a turn (its id) it reviews that one turn's diff instead. " +
 			"The reviewer reads the changes through agentbus-api and replies with its findings. " +
-			"The reply comes back to your session as a later turn: do not wait or poll for it. " +
+			"The reply comes back to your session as a later turn, and so reaches whoever watches your session too: do not wait or poll for it. " +
 			"Review with a different vendor than wrote the work, so a reviewer does not share the author's blind spots.",
 		Inputs: map[string]any{
 			"type": "object",
@@ -104,20 +104,24 @@ func reviewTurnApp() toolreg.Tool {
 		Where: toolreg.WhereControl,
 		Run: toolreg.Run{Kind: toolreg.RunApp, App: &toolreg.App{
 			Steps: []toolreg.Step{
-				// Two calls in sequence (his API rules, 2026-11-21): a session in
-				// the reviewer's workspace (the asker's, by the grant), then a turn
-				// in it. The reviewer reads the changes through agentbus-api, not a
-				// copy. The session step hands on its workspace (the asker's own, by
-				// the grant) so the no-turn prompt can name it. startTurn records the
-				// delivery on in the same write, and answers at once.
+				// Three calls in sequence over the public API (his rules,
+				// 2026-11-21 and 2026-11-27, no shortcuts): a session in the
+				// reviewer's workspace (the asker's, by the grant), an on over it
+				// that delivers each of its turns' replies to the asker, then a
+				// turn in it. The on comes before the turn, so no reply can be
+				// missed, and it stays: whoever watches the asker's session hears
+				// the result in turn. The reviewer reads the changes through
+				// agentbus-api, not a copy. The session step hands on its
+				// workspace (the asker's own, by the grant) so the no-turn prompt
+				// can name it.
 				{StepID: "session", OperationID: "createSession",
 					RequestBody: map[string]any{},
 					Outputs:     map[string]string{"session": "$response.body#/session", "workspace": "$response.body#/workspace"}},
+				onStep(),
 				{StepID: "start", OperationID: "startTurn",
 					RequestBody: map[string]any{
-						"session":  "$steps.session.outputs.session",
-						"agent":    "$inputs.agent",
-						"delivery": "$caller.session",
+						"session": "$steps.session.outputs.session",
+						"agent":   "$inputs.agent",
 						// A named turn reviews that turn's diff; no turn reviews the
 						// workspace's whole unapplied set (the same GET the Apply panel
 						// shows). The reviewer's token may read its own workspace's
@@ -151,15 +155,23 @@ func reviewTurnApp() toolreg.Tool {
 const reviewDirect = "AgentBus keeps no record of its changes and gives you no diff. " +
 	"The changes are already in the folder you run in, so find them there yourself. "
 
-// askAgentApp is ask_agent: start a turn on another agent, then register the on
-// that delivers its reply to the asking session. Two steps over the public API,
-// what the old route-plus-auto-on did, now as data.
+// onStep is the step ask_agent and review_turn share: an on over the session
+// the session step made, delivering each of its turns' replies to the caller's
+// session (POST /api/v0/ons with no session delivers to the caller's own).
+func onStep() toolreg.Step {
+	return toolreg.Step{StepID: "on", OperationID: "registerOn",
+		RequestBody: map[string]any{"event": "turn.completed", "filter": map[string]any{"session": "$steps.session.outputs.session"}}}
+}
+
+// askAgentApp is ask_agent: open a session, register the on over it that
+// delivers its turns' replies to the asking session, then start a turn on
+// another agent in it. Three steps over the public API, as data.
 func askAgentApp() toolreg.Tool {
 	return toolreg.Tool{
 		Name: "ask_agent",
 		Description: "Ask a saved AgentBus agent (from GET /api/v0/agents, any vendor) to do work. " +
 			"It starts a new session on that agent, in your workspace's copy of your folder (the same copy your turn runs in). " +
-			"The reply names the new turn and session at once; its result comes back to your session as a later turn: do not wait or poll for it. " +
+			"The reply names the new turn and session at once; its result, and the result of every later turn of that session (a review it asks for, say), comes back to your session as a later turn: do not wait or poll for it. " +
 			"This is not your harness's own subagent: it is recorded, and can be another vendor. " +
 			"Each ask is a new session: to follow up, ask again with what the result said.",
 		Inputs: map[string]any{
@@ -174,18 +186,21 @@ func askAgentApp() toolreg.Tool {
 		Where: toolreg.WhereControl,
 		Run: toolreg.Run{Kind: toolreg.RunApp, App: &toolreg.App{
 			Steps: []toolreg.Step{
-				// Two calls in sequence (his API rules, 2026-11-21): create a
-				// session in the asker's workspace, then run a turn in it. A turn
+				// Three calls in sequence over the public API (his rules,
+				// 2026-11-21 and 2026-11-27, no shortcuts): create a session in
+				// the asker's workspace, register an on over it that delivers each
+				// of its turns' replies to the asker, then run a turn in it. A turn
 				// token's createSession takes the workspace from the grant, so the
-				// asked session shares the asker's copy. startTurn records the
-				// delivery on in the same write (delivery=$caller.session), so
-				// start and deliver stay atomic.
+				// asked session shares the asker's copy. The on comes before the
+				// turn, so no reply can be missed; a failed step stops the app
+				// before the turn starts.
 				{StepID: "session", OperationID: "createSession",
 					RequestBody: map[string]any{},
 					Outputs:     map[string]string{"session": "$response.body#/session"}},
+				onStep(),
 				{StepID: "start", OperationID: "startTurn",
 					RequestBody: map[string]any{"session": "$steps.session.outputs.session",
-						"agent": "$inputs.agent", "prompt": "$inputs.prompt", "delivery": "$caller.session"},
+						"agent": "$inputs.agent", "prompt": "$inputs.prompt"},
 					Outputs: map[string]string{"turn": "$response.body#/turn", "session": "$response.body#/session"}},
 			},
 			Outputs: map[string]string{"turn": "$steps.start.outputs.turn", "session": "$steps.start.outputs.session"},
@@ -458,6 +473,21 @@ func resolveValue(v any, args map[string]any, caller string, stepOut map[string]
 			return resolveValue(c["then"], args, caller, stepOut)
 		}
 		return resolveValue(c["else"], args, caller, stepOut)
+	}
+	// An object holds values: each field is resolved, and one that resolves
+	// to nothing is left out, as a body field is (resolveStep).
+	if m, ok := v.(map[string]any); ok {
+		out := make(map[string]any, len(m))
+		for k, part := range m {
+			rv, why := resolveValue(part, args, caller, stepOut)
+			if why != "" {
+				return nil, k + ": " + why
+			}
+			if rv != nil {
+				out[k] = rv
+			}
+		}
+		return out, ""
 	}
 	s, ok := v.(string)
 	if !ok {

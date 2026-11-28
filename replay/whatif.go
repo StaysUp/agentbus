@@ -57,6 +57,11 @@ type WhatIfTurn struct {
 	// Problem says why the arms could not be rebuilt for this turn. They
 	// then carry what the record carried, and the next turns go on from it.
 	Problem string
+	// ContextTokens is the size of the standing context of the turn that
+	// started the chain (its harness's head, Claude Code's context blocks in
+	// its first message), which each history's ContextKept is checked for;
+	// 0 when that turn had none.
+	ContextTokens int
 }
 
 // WhatIfHistory is the history one turn carried in one arm.
@@ -68,6 +73,9 @@ type WhatIfHistory struct {
 	Prefix int
 	// Step is the shortening fit made at this turn, nil when none.
 	Step *event.HistoryStep
+	// ContextKept says every piece of the chain's standing context
+	// (WhatIfTurn.ContextTokens) is in this history byte for byte.
+	ContextKept bool
 }
 
 // WhatIfCall is one model call of a turn.
@@ -107,6 +115,8 @@ func (r *Replayer) WhatIf(session string, share float64) ([]WhatIfTurn, error) {
 	// whole is the newest first system message of a turn the record holds
 	// whole (relayer).
 	var whole json.RawMessage
+	// standing is the standing context of the turn that started the chain.
+	var standing []json.RawMessage
 
 	var out []WhatIfTurn
 	for i := len(newest) - 1; i >= 0; i-- {
@@ -130,7 +140,7 @@ func (r *Replayer) WhatIf(session string, share float64) ([]WhatIfTurn, error) {
 			return nil, err
 		}
 		at := map[string]int{} // exchange: index of the person's message
-		var last []json.RawMessage
+		var last, realHist []json.RawMessage
 		lastAt := -1
 		for j := len(calls) - 1; j >= 0; j-- {
 			c, ok, err := r.src.CallContext(calls[j].Exchange, true)
@@ -177,6 +187,9 @@ func (r *Replayer) WhatIf(session string, share float64) ([]WhatIfTurn, error) {
 		}
 		if last != nil {
 			realReq[t] = last
+			// With the person's message: a summary that took every turn
+			// rides in it, after the context (build).
+			realHist = last[:lastAt+1]
 		}
 
 		// The turn's own part, from the record.
@@ -197,6 +210,15 @@ func (r *Replayer) WhatIf(session string, share float64) ([]WhatIfTurn, error) {
 			}
 		} else {
 			w.Problem = "its history cannot be rebuilt: " + err.Error()
+		}
+		if fresh && own != nil {
+			standing = standingParts(r.f, own, ti.prompt)
+		}
+		if !fresh {
+			for _, p := range standing {
+				w.ContextTokens += approxTokens(p)
+			}
+			w.Real.ContextKept = holds(realHist, standing)
 		}
 		// How many of own were the last main request's own messages, so the
 		// rest (the reply, AgentBus's note) is not in the cache's prefix.
@@ -238,6 +260,7 @@ func (r *Replayer) WhatIf(session string, share float64) ([]WhatIfTurn, error) {
 			}
 			if !fresh {
 				a.got.Prefix = prefixTokens(carried.messages, prev.req)
+				a.got.ContextKept = holds(carried.messages, standing)
 			}
 			if own == nil {
 				a.after[t] = arm{}
@@ -261,6 +284,32 @@ func (r *Replayer) WhatIf(session string, share float64) ([]WhatIfTurn, error) {
 		out = append(out, w)
 	}
 	return out, nil
+}
+
+// standingParts is the standing context of a turn that carries no history,
+// own being its messages: each message in front of its person's message, and
+// the harness's context blocks inside that message.
+func standingParts(f format, own []json.RawMessage, prompt string) []json.RawMessage {
+	var out []json.RawMessage
+	for _, m := range own {
+		if f.isPrompt(m, prompt) {
+			ctx, _ := f.context(m)
+			return append(out, ctx...)
+		}
+		out = append(out, m)
+	}
+	return nil
+}
+
+// holds says each of parts is in msgs byte for byte.
+func holds(msgs, parts []json.RawMessage) bool {
+	all := joinArray(msgs)
+	for _, p := range parts {
+		if !bytes.Contains(all, p) {
+			return false
+		}
+	}
+	return true
 }
 
 // personAt is the index of the person's message of the turn whose prompt is
@@ -375,8 +424,9 @@ func (claude) relay(carried, own []json.RawMessage, whole json.RawMessage) ([]js
 	}
 	if n := len(carried); n > 0 && len(mine) > 0 {
 		if text, rest, ok := (claude{}).summaryIn(carried[n-1]); ok && rest == nil {
+			ctx, _ := claude{}.context(carried[n-1])
 			sent = carried[:n-1]
-			mine[0] = claude{}.withSummary(mine[0], text)[0]
+			mine[0] = claude{}.withSummary(ctx, mine[0], text)[0]
 		}
 	}
 	return sent, mine

@@ -2,24 +2,26 @@ package api
 
 // POST /api/v0/ons, GET /api/v0/ons and DELETE /api/v0/ons/{id}: register,
 // list and remove an on, the standing instruction "when this event happens, do
-// this" (queue/on.go). B13
-// has one event, a turn completing, and one action, deliver that turn's reply
-// to a session as its next turn. It is the public form of what ask_agent
-// registers for itself (runs.go): the primitive every later reaction is built
-// on (schedule, gate), one row on control, nothing waiting.
+// this" (queue/watchon.go). The public on watches an event kind on the record
+// with a filter: for now turn.completed, filtered by session, so every turn of
+// that session that ends from now on has its reply delivered to a session as
+// that session's next turn. ask_agent and review_turn compose it themselves
+// (apps.go). The on over one turn, and POST /api/v0/turns' delivery, were
+// removed in 0.6.8 (ARCHITECTURE, "no shortcuts in the API"): both answer 410.
 //
 // The caller's token decides what it may do. A turn token may register an on
-// for any turn it may read (mayReadTurn, the check GET /api/v0/turns/{id}
-// uses), its own session's too, and its result is delivered to a session it
-// may read (its own when it names none); it may remove an on its own turn made
-// or one that delivers to a session it may read, and it lists those same ons
-// (agentOn). Such an on counts as work its turn asked for, under the per-turn
-// and per-tree caps ([limits] max_jobs_per_turn, max_jobs_per_tree). The main
-// token may register an on for any turn, naming the session to deliver to, and
-// list and remove any on.
+// whose watched session and target session are both in its reach
+// (inAuthority), its own session as the target when it names none; it may
+// remove an on its own turn made or one that delivers to a session it may
+// read, and it lists those same ons (agentOn). Registering an on is free;
+// each turn it delivers counts as work its maker asked for (queue/asked.go). The main token may register an on
+// over any session, naming the session to deliver to, and list and remove any.
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 
 	"github.com/staysup/agentbus/queue"
@@ -28,18 +30,26 @@ import (
 
 // OnRequest is the body of POST /api/v0/ons.
 type OnRequest struct {
-	Turn    string `json:"turn" doc:"The turn to watch: when it completes, its reply is delivered. A turn token may name any turn it may read with GET /api/v0/turns/{id}, its own session's too."`
-	Session string `json:"session,omitempty" doc:"The session the reply is delivered to as its next turn. The main token must set it. A turn token may name any session it may read, and its own is used when it leaves this out."`
+	Event   string    `json:"event" doc:"The event to react to. turn.completed: a turn ended, however it ended. Required."`
+	Filter  *OnFilter `json:"filter" doc:"Which events it reacts to. Required: filter.session."`
+	Session string    `json:"session,omitempty" doc:"The session each reply is delivered to as its next turn. The main token must set it. A turn token may name any session it may read, and its own is used when it leaves this out. It may not be the watched session, nor one whose replies already reach the watched session through other ons (409): that would deliver in a circle."`
 	// IdempotencyKey is the same mechanism POST /api/v0/turns takes: a key
 	// already used returns the on it made, so a retry does not add a second.
-	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"An optional idempotency key, as POST /api/v0/turns takes: the same key returns the same on, so a retry registers no second delivery."`
+	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"An optional idempotency key, as POST /api/v0/turns takes: the same key with the same fields returns the same on; with other fields it is 409."`
+}
+
+// OnFilter narrows an on's event.
+type OnFilter struct {
+	Session string `json:"session" doc:"The session whose turns it watches. A turn token may name any session it may read, its own too."`
 }
 
 // OnView is a registered on, as the API shows it. The queue's job id stays out.
 type OnView struct {
-	ID      string `json:"id" doc:"The on's id (on_...), to remove it with DELETE /api/v0/ons/{id}."`
-	Event   string `json:"event" doc:"The event it reacts to: turn.completed, or command.ended for a command an agent handed to AgentBus (POST /api/v0/commands)."`
-	Turn    string `json:"turn" doc:"The turn it watches, or for command.ended the command (c_...; GET /api/v0/commands/{id})."`
+	ID     string    `json:"id" doc:"The on's id (on_...), to remove it with DELETE /api/v0/ons/{id}."`
+	Event  string    `json:"event" doc:"The event it reacts to: turn.completed, or command.ended for a command an agent handed to AgentBus (POST /api/v0/commands)."`
+	Filter *OnFilter `json:"filter,omitempty" doc:"For an on over a session: the session whose turns it watches. It stays until it is removed."`
+	Turn   string    `json:"turn,omitempty" doc:"For an on over one turn or command, which control registers itself (a command's delivery, or an on made before 0.6.8): the turn it watches, or for command.ended the command (c_...; GET /api/v0/commands/{id}). It goes once it fires."`
+	// Session is where the on delivers, for both shapes.
 	Session string `json:"session" doc:"The session its action delivers to."`
 	// By is who registered it, as the queue's Maker names it.
 	By *OnMaker `json:"by,omitempty" doc:"The turn whose token registered the on, and that turn's session. Absent for an on the main token registered."`
@@ -59,6 +69,9 @@ type OnList struct {
 // onView is on as the API shows it.
 func onView(on queue.On) OnView {
 	v := OnView{ID: on.ID, Event: on.Event, Turn: on.Subject, Session: on.Session}
+	if on.Filter.Session != "" {
+		v.Filter = &OnFilter{Session: on.Filter.Session}
+	}
 	if on.Maker.Turn != "" {
 		v.By = &OnMaker{Session: on.Maker.Session, Turn: on.Maker.Turn}
 	}
@@ -66,23 +79,54 @@ func onView(on queue.On) OnView {
 }
 
 const (
-	turnOnRefused       = "a turn token may watch only a turn it may read"
 	turnOnRemoveRefused = "a turn token may remove only an on its own turn registered or one that delivers to a session it may read"
+	// onTurnGone and deliveryGone answer the forms removed in 0.6.8.
+	onTurnGone   = "an on over one turn was removed in 0.6.8: register an on over the turn's session instead, {\"event\":\"turn.completed\",\"filter\":{\"session\":\"<session>\"}}, which delivers the reply of each of its turns that ends from now on"
+	deliveryGone = "delivery was removed in 0.6.8: first register an on over the session (POST /api/v0/ons {\"event\":\"turn.completed\",\"filter\":{\"session\":\"<session>\"}}), then start the turn without delivery"
+	onCircle     = "this on would deliver in a circle: replies to the session it delivers to already reach the session it watches, through other ons (GET /api/v0/ons); remove one of them first"
 )
+
+// sentField says the JSON object data has a top-level field name.
+func sentField(data []byte, name string) bool {
+	var m map[string]json.RawMessage
+	if json.Unmarshal(data, &m) != nil {
+		return false
+	}
+	_, ok := m[name]
+	return ok
+}
 
 // POST /api/v0/ons
 func (a *API) registerOn(w http.ResponseWriter, r *http.Request) {
-	if a.cfg.Queue == nil {
+	if a.cfg.Queue == nil || a.cfg.Store == nil {
 		writeError(w, http.StatusNotFound, noTurns)
 		return
 	}
-	var body OnRequest
-	if !decodeObject(r, &body) {
-		writeError(w, http.StatusBadRequest, "the body must be a JSON object with a turn to watch")
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "the body must be a JSON object with an event and a filter")
 		return
 	}
-	if body.Turn == "" {
-		writeError(w, http.StatusBadRequest, "turn is required: the turn to watch")
+	if sentField(data, "turn") {
+		writeError(w, http.StatusGone, onTurnGone)
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(data))
+	var body OnRequest
+	if !decodeObject(r, &body) {
+		writeError(w, http.StatusBadRequest, "the body must be a JSON object with an event and a filter")
+		return
+	}
+	if body.Event != queue.OnTurnCompleted {
+		writeError(w, http.StatusBadRequest, "event is required: turn.completed is the event an on may watch")
+		return
+	}
+	if body.Filter == nil || !sessionID.MatchString(body.Filter.Session) {
+		writeError(w, http.StatusBadRequest, "filter.session is required: the session whose turns it watches")
+		return
+	}
+	if body.Session != "" && !sessionID.MatchString(body.Session) {
+		writeError(w, http.StatusBadRequest, "session must match "+sessionID.String())
 		return
 	}
 	// The same key validator as POST /turns (his call, 2026-11-19): a key with a
@@ -92,60 +136,37 @@ func (a *API) registerOn(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, msg)
 		return
 	}
-	// The subject turn must exist, whoever the caller is: a nonexistent one is
-	// 404, never a reaction that can never fire.
-	// It may also be a command an agent handed to AgentBus (c_...): its on
-	// watches command.ended, so a handover can move a command's delivery as it
-	// moves a turn's.
-	event := queue.OnTurnCompleted
-	j, err := a.cfg.Queue.JobByTurn(queue.DefaultTeam, body.Turn)
-	if errors.Is(err, queue.ErrNotFound) {
-		event = queue.OnCommandEnded
-		j, err = a.cfg.Queue.JobByCommand(queue.DefaultTeam, body.Turn)
-	}
-	switch {
-	case errors.Is(err, queue.ErrNotFound):
-		a.noJobOn(w, callerOf(r), &body)
-		return
-	case err != nil:
-		a.internal(w)
-		return
-	}
-	// B15 (his call, 2026-11-19): an on may watch ANY turn the caller's token
-	// may reach — core does not single out asked work as a kind. What stays is
-	// credential scoping, not a kind check:
-	//   - a turn token may watch any turn it may read (C2, 2026-11-25: a
-	//     coordinator was refused the review its builder asked for). The check
-	//     is the read's own (mayReadTurn), so a wider read widens this too.
-	//     Delivery goes to a session it may read, its own by default (O2.3).
-	//     The on counts as asked work under the per-turn and per-tree caps
-	//     (2026-11-25): a delivered turn skips them (deliverResult), so a chain
-	//     of ons over ended turns, each fired at once into a new turn that
-	//     registers the next, or a session watching itself, stops at the caps
-	//     here instead.
-	//   - the main token may watch any turn and deliver to any session it names;
-	//     it can already start a turn in any session. A main-token on over a
-	//     person's turn is made safe by the self-retire checks (B13b), not by a
-	//     refusal here.
 	c := callerOf(r)
-	session, maker, asked, ok := c.limits.watch(a, w, j, &body)
+	to, maker, held, ok := c.limits.watch(a, w, &body)
 	if !ok {
 		return
 	}
-	on, err := a.cfg.Queue.RegisterOnLinked(queue.DefaultTeam, event, body.Turn, session, body.IdempotencyKey, maker, asked, queueLimits(c.rules))
-	var limit *queue.LimitError
+	// Both sessions must exist, whoever asks: a session the record does not
+	// hold would make an on that can never fire, or never deliver.
+	for _, s := range []string{body.Filter.Session, to} {
+		switch _, found, err := a.workspaceOf(s); {
+		case err != nil:
+			a.internal(w)
+			return
+		case !found:
+			writeError(w, http.StatusNotFound, "no such session: "+s)
+			return
+		}
+	}
+	// The delivered turns are held to the caps of the turn that made the on,
+	// its cost cap among them; the main token's are held to none.
+	var budget *queue.Limits
+	if held {
+		lim := queueLimits(c.rules)
+		budget = &lim
+	}
+	on, err := a.cfg.Queue.RegisterWatchOn(queue.DefaultTeam, body.Event, queue.OnFilter{Session: body.Filter.Session}, to, body.IdempotencyKey, maker, budget, a.cfg.Store.Last())
 	switch {
-	case errors.As(err, &limit):
-		writeError(w, http.StatusForbidden, limit.Msg)
-		return
-	case errors.Is(err, queue.ErrUnknownEvent):
-		writeError(w, http.StatusBadRequest, "that event is not known")
-		return
-	case errors.Is(err, queue.ErrBadState):
-		writeError(w, http.StatusBadRequest, "turn and session are required")
+	case errors.Is(err, queue.ErrCycle):
+		writeError(w, http.StatusConflict, onCircle)
 		return
 	case errors.Is(err, queue.ErrKeyConflict):
-		writeError(w, http.StatusConflict, "idempotency_key was already used to register an on for a different turn or session; send a new key")
+		writeError(w, http.StatusConflict, "idempotency_key was already used to register an on with other fields; send a new key")
 		return
 	case err != nil:
 		a.internal(w)
@@ -154,32 +175,10 @@ func (a *API) registerOn(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, onView(on))
 }
 
-const onNoJob = "this turn was not run as a job of this service (an older turn, or one recorded at the gateway), so nothing reports its end and no on can react to it"
-
-// noJobOn answers an on over a turn with no job. The caller's own check comes
-// first (limits.watch), so a turn token that may not read such a turn gets
-// what it gets for any turn it cannot read. A turn that passes it, and that
-// the record holds, is 409: it is there, but an on over it could never fire
-// (FireOns reads the turn.ended its job's end writes, and the job's reply).
-// Review of dd2dcb1: every such turn got 404, a readable one too.
-func (a *API) noJobOn(w http.ResponseWriter, c *caller, body *OnRequest) {
-	if _, _, _, ok := c.limits.watch(a, w, queue.Job{}, body); !ok {
-		return
-	}
-	switch session, err := a.sessionOfTurn(body.Turn, ""); {
-	case err != nil:
-		a.internal(w)
-	case session == "":
-		writeError(w, http.StatusNotFound, noTurn)
-	default:
-		writeError(w, http.StatusConflict, onNoJob)
-	}
-}
-
-// GET /api/v0/ons: the turns' ons still waiting to react, oldest first, the
-// ones the caller may remove: every one for the main token; for a turn token,
-// agentOn's, the rule of DELETE /api/v0/ons/{id}. Control's own ons over the
-// record (the put-away) are not listed: no caller registers or removes them.
+// GET /api/v0/ons: the ons still waiting to react, oldest first, the ones the
+// caller may remove: every one for the main token; for a turn token, agentOn's,
+// the rule of DELETE /api/v0/ons/{id}. Control's own ons over the record (the
+// put-away) are not listed: no caller registers or removes them.
 func (a *API) listOns(w http.ResponseWriter, r *http.Request) {
 	if !noBody(w, r) {
 		return

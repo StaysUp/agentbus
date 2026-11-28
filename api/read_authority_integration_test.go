@@ -59,9 +59,9 @@ func TestTurnTokenReadsItsAuthority(t *testing.T) {
 		reads("direct coordinator", coord, "GET", "/api/v0/turns?session="+s.Session)
 		reads("direct coordinator", coord, "GET", "/api/v0/turns/"+s.Turn)
 	}
-	// Watching follows reading (mayReadTurn).
-	if code, out := as(t, e, coord, "POST", "/api/v0/ons", `{"turn":"`+elsewhere.Turn+`"}`); code != 201 {
-		t.Errorf("direct coordinator watches another tree's turn: %d %s", code, out)
+	// Watching follows reading (inAuthority): a session it may read.
+	if code, out := as(t, e, coord, "POST", "/api/v0/ons", `{"event":"turn.completed","filter":{"session":"`+elsewhere.Session+`"}}`); code != 201 {
+		t.Errorf("direct coordinator watches another tree's session: %d %s", code, out)
 	}
 	// It stops any turn it may read, as its owner may (O2.3): a turn the
 	// person started too.
@@ -106,7 +106,9 @@ func TestTurnTokenReadsItsAuthority(t *testing.T) {
 		refused("builder in a copy", btok, "GET", "/api/v0/sessions/"+s.Session+"/events", "", turnSessionRefused)
 		refused("builder in a copy", btok, "GET", "/api/v0/turns/"+s.Turn, "", turnSessionRefused)
 		refused("builder in a copy", btok, "PATCH", "/api/v0/sessions/"+s.Session, `{"title":"x"}`, turnSessionRefused)
-		refused("builder in a copy", btok, "POST", "/api/v0/ons", `{"turn":"`+s.Turn+`"}`, turnOnRefused)
+		// An on whose watched session, or whose target, is outside its reach.
+		refused("builder in a copy", btok, "POST", "/api/v0/ons", `{"event":"turn.completed","filter":{"session":"`+s.Session+`"}}`, turnSessionRefused)
+		refused("builder in a copy", btok, "POST", "/api/v0/ons", `{"event":"turn.completed","filter":{"session":"`+builder.Session+`"},"session":"`+s.Session+`"}`, turnSessionRefused)
 	}
 	refused("builder in a copy", btok, "GET", "/api/v0/turns?session="+elsewhere.Session, "", turnSessionRefused)
 	refused("builder in a copy", btok, "POST", "/api/v0/turns/"+walled.Turn+"/stop", "", turnStopRefused)

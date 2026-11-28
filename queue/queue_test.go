@@ -249,6 +249,58 @@ func TestLeaseLostWhileRunning(t *testing.T) {
 	}
 }
 
+// Control away longer than a lease: when it starts again it renews every
+// running lease (RenewLeases), so a runner still working keeps its attempt and
+// its next heartbeat and finish are taken; one that never answers loses the
+// attempt a lease later.
+func TestRenewLeasesAfterControlAway(t *testing.T) {
+	q, c := open(t)
+	r := runner(t, q, 2)
+	j := job(t, q, "a")
+	_, a := take(t, q, r)
+	if _, _, err := q.Start(r.ID, a.ID, 1, lease); err != nil {
+		t.Fatal(err)
+	}
+	gone := job(t, q, "b")
+	_, b := take(t, q, r)
+	if _, _, err := q.Start(r.ID, b.ID, 1, lease); err != nil {
+		t.Fatal(err)
+	}
+	taken := job(t, q, "c")
+	_, tk := take(t, q, r) // taken, its start not sent before control went
+	c.add(time.Minute)     // control was away a minute: every lease ran out
+	if n, err := q.RenewLeases(lease); err != nil || n != 2 {
+		t.Fatalf("renew: %d %v", n, err)
+	}
+	if n, err := q.Sweep(); err != nil || n != 0 {
+		t.Fatalf("sweep right after the renewal: %d %v", n, err)
+	}
+	// The taken one is queued again at once, and its start is refused.
+	if got := state(t, q, taken.ID); got.State != Queued {
+		t.Fatalf("the taken attempt's job after the renewal: %+v", got)
+	}
+	if _, _, err := q.Start(r.ID, tk.ID, 1, lease); err == nil {
+		t.Fatal("the start of an attempt queued again was taken")
+	}
+	c.add(lease / 2)
+	if _, _, err := q.Heartbeat(r.ID, a.ID, 1, lease); err != nil {
+		t.Fatalf("heartbeat after the renewal: %v", err)
+	}
+	c.add(lease * 3 / 4)
+	if n, err := q.Sweep(); err != nil || n != 1 {
+		t.Fatalf("sweep a lease after: %d %v", n, err)
+	}
+	if got := state(t, q, gone.ID); got.State != Failed || got.Reason != ReasonRunnerLost {
+		t.Fatalf("the attempt no runner answered for: %+v", got)
+	}
+	if _, err := q.End(r.ID, a.ID, 1, Finish{Status: Finished}); err != nil {
+		t.Fatalf("finish of the attempt that kept working: %v", err)
+	}
+	if got := state(t, q, j.ID); got.Attempts[0].Reason == "lease_expired" {
+		t.Fatalf("the working attempt expired: %+v", got)
+	}
+}
+
 // A lease that runs out while taken is settled by the call that finds it, not
 // only by Sweep: the expiry is the control plane's clock.
 func TestLeaseLostWhileTakenSettledOnCall(t *testing.T) {

@@ -15,6 +15,7 @@ import (
 	"strconv"
 
 	"github.com/staysup/agentbus/jobs"
+	"github.com/staysup/agentbus/queue"
 )
 
 // Decider returns the runner's gateway decider. It satisfies gateway.Decider
@@ -102,4 +103,28 @@ func (r *Runner) ScopeApproval(turn, localID string) string {
 	// separator, and the composite stays within the id charset the client
 	// approvals route accepts ([A-Za-z0-9_-]).
 	return at.a.ID + "-" + localID
+}
+
+// CallOwner says whether a model call on the path of session's turn, carrying
+// token as its credential, is that turn's own: a turn this runner runs now,
+// in that session, whose stand-in the call carries. A runner's gateway asks it
+// before it holds or records a call, so a stand-in sent on another turn's path
+// is refused there and recorded nowhere (cmd/agentbus turnGate). known is
+// false when the token is no running turn's stand-in at all.
+func (r *Runner) CallOwner(session, turn, token string) (own, known bool) {
+	if token == "" {
+		return false, false
+	}
+	r.attemptsMu.Lock()
+	defer r.attemptsMu.Unlock()
+	for _, at := range r.attempts {
+		at.mu.Lock()
+		standIn := at.standIn
+		at.mu.Unlock()
+		if standIn != token {
+			continue
+		}
+		return at.job.Kind == queue.KindTurn && at.job.Turn == turn && at.job.Session == session && turn != "", true
+	}
+	return false, false
 }

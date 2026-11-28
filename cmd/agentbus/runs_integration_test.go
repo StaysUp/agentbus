@@ -187,7 +187,7 @@ func TestRunSetsBaseURLInChildOnlyAndClosesWithExitCode(t *testing.T) {
 	id, _ := out["session"].(string)
 	turn, _ := out["turn"].(string)
 	base, _ := out["base_url"].(string)
-	if id == "" || turn == "" || base != "http://"+svc.addr+"/s/"+id+"/t/"+turn {
+	if id == "" || turn == "" || base != turnBase(t, svc, id, turn) {
 		t.Fatalf("reply %s", raw)
 	}
 
@@ -442,7 +442,7 @@ func TestRunRefusals(t *testing.T) {
 		noAgent   = "agent is required: name the saved agent this turn runs on (GET /api/v0/agents lists them)"
 		badPrompt = "prompt must be from 1 byte to 256 KiB, with no NUL byte"
 		badModel  = "model must match ^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$"
-		badBody   = "the body must be one JSON object with session, agent and prompt, and optionally model, delivery and idempotency_key, at most 2 MiB"
+		badBody   = "the body must be one JSON object with session, agent and prompt, and optionally model and idempotency_key, at most 2 MiB"
 	)
 	for _, tc := range []struct {
 		name string
@@ -668,9 +668,9 @@ func TestRunTurnCarriesAgentAndFolder(t *testing.T) {
 		t.Fatalf("session %v, want claude, the folder, and not open", s)
 	}
 
-	// The same call pointed at the gateway by hand, with no turn's token:
-	// in agentbus up a call's turn comes from its token, so it is refused
-	// and recorded nowhere.
+	// The same call pointed at control by hand, with no turn's token: up's
+	// control serves no model path (its runner's gateway does), so it is
+	// refused and recorded nowhere.
 	resp, err := http.Post("http://"+svc.addr+"/s/byhand/v1/messages", "application/json",
 		strings.NewReader(`{"model":"claude-x","messages":[{"role":"user","content":"by hand"}]}`))
 	if err != nil {
@@ -678,8 +678,8 @@ func TestRunTurnCarriesAgentAndFolder(t *testing.T) {
 	}
 	io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("a hand-pointed call: %d, want 401", resp.StatusCode)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("a hand-pointed call: %d, want 404", resp.StatusCode)
 	}
 	for _, e := range storedEvents(t, svc.store) {
 		if e.Session == "byhand" {

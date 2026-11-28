@@ -4,8 +4,8 @@ How runners talk to control: one runner on each machine, which holds that machin
 described at `/api/v0/openapi.json` and `/docs` on the running service.
 
 
-`agentbus runner -server <url>` is a runner; so is the one built into `agentbus up`. Both speak this
-protocol over HTTP. A runner pulls work and is never called, so it works behind NAT. These calls take the runner's own token,
+`agentbus runner -server <url>` is a runner; so is the one built into `agentbus up`, which up starts
+as a process of its own (below). Both speak this protocol over HTTP. A runner pulls work and is never called, so it works behind NAT. These calls take the runner's own token,
 from `agentbus login` once the person approved the machine; never the main token. `agentbus login`
 is the only way a machine joins: register takes an enrollment token that `agentbus up` makes at
 each start for its built-in runner, keeps in memory and never writes. A removed runner's token
@@ -134,7 +134,10 @@ took within 15 seconds ends. Control (the server) never reads or writes a folder
 its reference. File data goes through the server's blob store, by the hash of its content:
 
 - At the end of each turn the runner puts the copy's changeset (what it holds that differs from
-  its base) and the files it names in the store; the job's `result.changeset` names it.
+  its base) and the files it names in the store; the job's `result.changeset` names it. A turn of
+  a copy never finishes without it: a send control did not answer, or answered only in part, is
+  tried again for as long as the finish is; one control refuses, 5 times; then the turn is
+  finished as failed with reason `changes_not_kept`.
 - An apply job goes to the runner of the folder's machine, which reads both changesets and the
   files from the store (on that machine they are already in its own store), checks the folder and
   writes it.
@@ -167,6 +170,41 @@ its reference. File data goes through the server's blob store, by the hash of it
   its folder is refused (503, `the folder's machine is offline, so nothing was written: start
   agentbus runner there, then ask again`), and so is a typed folder for it. A session's turns wait
   in the queue until its machine is back.
+- **Control alone decides when a turn ended, and how.** One place (`runner/lease.go`): the end of
+  the turn's job on control, a finish it took or an attempt its sweep found lost, recorded once
+  as the job's state and as the record's `turn.ended`. `GET /api/v0/turns`, the record's turns
+  and the runs control closes all read that decision; a run's own `run.ended` says only how the
+  agent ended. A second finish of an attempt is refused, as Buildkite refuses a job finished
+  twice and Temporal a completed activity's token.
+  - Control counts the 30 s lease from each heartbeat or start it takes, and gives every running
+    attempt a fresh one when it starts, once it holds its address and before it serves anything;
+    a taken attempt no runner started is queued again then instead, since nothing was spent,
+    and its runner's `start` is answered stale. When it stops, its sweep stops before its address
+    closes.
+  - **The runner keeps no clock over an attempt.** It runs the turn until control answers that
+    the attempt is no longer current (a heartbeat or any call answered stale or 404), and only
+    then stops its agent. While control does not answer, from a restart of any length or a link
+    that is down, the turn goes on, and its start, changes, events, record and finish are tried
+    again, a second at first and up to 5 s apart, until control answers.
+  - **Control running but not hearing the runner** (a link down longer than the lease): control
+    ends the turn with `runner_lost`, and that is how it ended everywhere. The runner stops the
+    agent when it next reaches control, and sends nothing more for it. Within a copy,
+    every attempt waits for every earlier one, with one exception: a turn passes an earlier
+    command (`run_command`), so it runs beside it. A command, discard, update, close or
+    put-away waits for everything earlier. So what comes next in that workspace waits on the
+    runner until the lost turn's agent, or a lost command's process, has stopped.
+  - **A turn's end kept on disk.** A runner keeps each turn's end in `finishes/` until control has
+    answered it: taken, or refused as no longer current. Its record goes before its finish, and
+    while control does not answer the record at all the finish waits for it. A record batch
+    answered 5xx three times is given up: the finish goes, and control closes the run whose end
+    it did not get (a run control saw start always ends there). A runner that leaves while control is away (up's built-in runner, once no agent of its
+    runs) leaves it there, and the next runner of the machine sends it when it starts.
+  A model call
+  whose connection to control's relay is refused (nothing was sent) waits up to two minutes on
+  the runner's gateway for control, then fails as before.
+- A turn whose job has ended, by a finish or otherwise, has its run closed by control if the
+  runner's `run.ended` never arrived: control writes it, unsettled, from the job's result, within
+  a second. The record keeps one `run.ended` per run, so the runner's own, sent first, wins.
 - A turn whose runner stops answering ends with `runner_lost` once its lease runs out. Control
   closes the turn in its record (unsettled), so the cockpit shows it ended and the session takes
   its next turn when the runner is back. A later turn's diff starts at the end of the session's
@@ -179,7 +217,7 @@ its reference. File data goes through the server's blob store, by the hash of it
 The modes:
 
 ```sh
-agentbus up                                   # control and the machine's runner, one process
+agentbus up                                   # control, and the machine's runner as its own process
 agentbus server                               # control alone
 agentbus runner -server URL [-folder DIR]...  # the one program of any other machine
 ```
@@ -189,8 +227,26 @@ its own flags, changes nothing and exits 2. A runner started on the connector's 
 the machine's id and its folders' references, so the sessions and applies that name them reach it.
 The old connector stays listed in `GET /api/v0/runners` only while no runner reports its machine.
 
-In `agentbus up` control and the runner share the server's blob store on disk: nothing is sent
-over HTTP. A runner of a server keeps its own store in its data folder (`blob-cache/`, apart from a server's `blobs/`) and sends
+**up's built-in runner** is `agentbus runner` started by up from its own program, in a session of
+its own, so stopping up (Ctrl-C, a restart to upgrade it) leaves it and its turns running. It works
+in up's data folder: the folders (`folders.json`, which both read and write), the session copies,
+the homes, the run logs and its identity (`runner.json`). It keeps apart only its own record
+(`runner/events.db`, a copy of control's the first time, since its sessions' history is there) and
+its log (`logs/runner.log`, its own lines in `logs/runner.out`). up starts one whenever none runs (one
+runs while it holds `runner/events.db.lock`). It leaves on its own: when no agent of its runs and
+control does not answer, so a stopped up leaves nothing behind (a turn's end it could not send
+waits in `finishes/` for the next runner); and when up is started from
+another program (another build, by the program's content, `runner/build`), once its running jobs
+have ended, so the next runner is the new build. It takes no new job meanwhile: turns asked for
+then wait in the queue until the new runner starts.
+
+A turn's `start` answer carries `agent_names` (additive; protocol stays 5): the saved agents' names
+by id, which a runner uses where a turn names the earlier turns' agents. A runner's gateway takes a
+call only on the path of a turn it runs now, carrying that turn's stand-in; any other is refused
+(401, or 403 for another turn's) before it is recorded or sent on.
+
+Every runner, up's built-in one too, keeps its own blob store in its data folder (`blob-cache/`,
+apart from a server's `blobs/`) and sends
 only what the server lacks: blobs under
 1 MiB go a pack at a time, four packs at once, and a bigger one alone by `PUT`. A runner fetches a
 snapshot's trees a level at a time and its files a pack at a time.

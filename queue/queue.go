@@ -259,9 +259,11 @@ CREATE TABLE IF NOT EXISTS deliveries (
 -- this" (on.go). B13 has one event (a turn completes) and one action (start a
 -- turn in session with the subject turn's reply). It is a row plus the
 -- control loop's check; nothing waits. off is set when it is removed or, for a
--- one-shot, once it has fired. asked is set on an on a turn token registered
--- through POST /api/v0/ons: it counts as asked work by its maker under the caps
--- (asked.go, countAsked), as a job that turn asked for does. limits are the
+-- one-shot, once it has fired. asked was set, before 0.6.8, on an on a turn
+-- token registered, which then counted as asked work; ons no longer count and
+-- it is no longer read. filter, on an on over a session (watchon.go), is the
+-- session whose turns it watches, with subject empty and cursor the record seq
+-- it has read to; it does not go off when it fires. limits are the
 -- caps of the turn that made the on, as its rules said when it registered it:
 -- the turn the on delivers is held to them (budget.go). chain held a copy of
 -- the maker's tree before 0.6.x; it is no longer written or read.
@@ -279,7 +281,8 @@ CREATE TABLE IF NOT EXISTS ons (
 	asked    INTEGER,
 	limits   TEXT,
 	action   TEXT,
-	cursor   INTEGER
+	cursor   INTEGER,
+	filter   TEXT
 );
 CREATE INDEX IF NOT EXISTS ons_live ON ons(team, event, off);
 -- B15 (his call, 2026-11-19): an on is deduped by its idempotency_key ONLY, the
@@ -291,6 +294,17 @@ CREATE INDEX IF NOT EXISTS ons_live ON ons(team, event, off);
 -- One row per time an on fired, keyed so a fire happens exactly once even
 -- across a control restart: the same role the deliveries table plays for the
 -- old delivery. For a one-shot turn.completed on, key is the subject turn.
+-- An idempotency key sent with an on that returned an on already live (an on
+-- over a session, watchon.go), bound to it so the key always names that on:
+-- a reuse with other fields is a conflict, and a retry after the on was
+-- removed returns it rather than make another. The on's own first key stays
+-- in ons.idem_key; onByKey reads both.
+CREATE TABLE IF NOT EXISTS on_keys (
+	team  TEXT NOT NULL,
+	key   TEXT NOT NULL,
+	on_id TEXT NOT NULL REFERENCES ons(id),
+	PRIMARY KEY (team, key)
+);
 CREATE TABLE IF NOT EXISTS on_fires (
 	on_id   TEXT NOT NULL REFERENCES ons(id),
 	key     TEXT NOT NULL,
@@ -744,6 +758,8 @@ type Queue struct {
 	putAwayOn PutAwaySetting
 	// delegatedAtOnce reads the delegated lane's limit now (lanes.go).
 	delegatedAtOnce DelegatedSetting
+	// refused records a delivery an on refused (ReportRefusedWith).
+	refused RefusedReporter
 	// cost reads what turns cost from the record (ReadCostWith), for the
 	// cost cap (budget.go).
 	cost CostReader
@@ -1546,6 +1562,23 @@ func (w *Workspace) setWhere(v string) {
 	}
 }
 
+// workspaceHeadSQL reads the checkpoint a workspace's copy is at (see
+// workspaceOf), from its jobs: each part one read of jobs_workspace. Its
+// arguments are the team and the workspace, three times.
+const workspaceHeadSQL = `SELECT checkpoint FROM (
+		SELECT ended, rowid, COALESCE(json_extract(result, '$.checkpoint'), json_extract(result, '$.changes.to'), '') AS checkpoint
+			FROM jobs WHERE team = ? AND kind = 'turn' AND ` + jobWorkspace + ` = ?
+			AND ended IS NOT NULL AND attempt IS NOT NULL AND COALESCE(json_extract(result, '$.changeset'), '') != ''
+		UNION ALL
+		SELECT ended, rowid, COALESCE(json_extract(spec, '$.restore'), '') AS checkpoint
+			FROM jobs WHERE team = ? AND kind = 'discard' AND ` + jobWorkspace + ` = ?
+			AND ended IS NOT NULL AND state = 'finished'
+		UNION ALL
+		SELECT ended, rowid, json_extract(result, '$.update.merged_checkpoint') AS checkpoint
+			FROM jobs WHERE team = ? AND kind = 'update' AND ` + jobWorkspace + ` = ?
+			AND ended IS NOT NULL AND state = 'finished' AND COALESCE(json_extract(result, '$.update.merged_checkpoint'), '') != '')
+		ORDER BY ended DESC, rowid DESC LIMIT 1`
+
 // workspaceOf is the workspace of the job's session: the one it continues,
 // the one its finish recorded, or for a review the reviewed job's. Nil when
 // the queue knows none.
@@ -1573,19 +1606,7 @@ func workspaceOf(db querier, j Job) (*Workspace, error) {
 	// not diffed from again; an update after the latest turn moves it forward to
 	// the merge, so the next turn's diff does not include the folder's own changes
 	// that the update merged in as if the turn had made them.
-	err = db.QueryRow(`SELECT checkpoint FROM (
-		SELECT ended, rowid, COALESCE(json_extract(result, '$.checkpoint'), json_extract(result, '$.changes.to'), '') AS checkpoint
-			FROM jobs WHERE team = ? AND kind = 'turn' AND COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), session) = ?
-			AND ended IS NOT NULL AND attempt IS NOT NULL AND COALESCE(json_extract(result, '$.changeset'), '') != ''
-		UNION ALL
-		SELECT ended, rowid, COALESCE(json_extract(spec, '$.restore'), '') AS checkpoint
-			FROM jobs WHERE team = ? AND kind = 'discard' AND COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), session) = ?
-			AND ended IS NOT NULL AND state = 'finished'
-		UNION ALL
-		SELECT ended, rowid, json_extract(result, '$.update.merged_checkpoint') AS checkpoint
-			FROM jobs WHERE team = ? AND kind = 'update' AND COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), session) = ?
-			AND ended IS NOT NULL AND state = 'finished' AND COALESCE(json_extract(result, '$.update.merged_checkpoint'), '') != '')
-		ORDER BY ended DESC, rowid DESC LIMIT 1`, j.Team, key, j.Team, key, j.Team, key).Scan(&w.DiffFrom)
+	err = db.QueryRow(workspaceHeadSQL, j.Team, key, j.Team, key, j.Team, key).Scan(&w.DiffFrom)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("queue: read workspace head: %w", err)
 	}
@@ -1903,6 +1924,41 @@ func (q *Queue) Sweep() (int, error) {
 		q.wake()
 	}
 	return n, err
+}
+
+// RenewLeases gives every running attempt a lease of its own from now, and
+// says how many. Control calls it once when it starts, before it serves or
+// sweeps: while control was away no runner could heartbeat, so the time it
+// was away is no runner's fault. A runner still working answers within the
+// new lease; one that is gone loses it then. A lease already longer is kept.
+// A taken attempt no runner started is queued again at once, as its lease
+// running out would: nothing was spent, and its runner, retrying its start,
+// is told it is no longer current, so the next take runs the job now, not a
+// lease later, and a runner that left with it holds nothing (runner/lease.go).
+func (q *Queue) RenewLeases(lease time.Duration) (int, error) {
+	var n int64
+	err := q.tx(func(tx *sql.Tx) error {
+		now := q.now()
+		until := nanos(now.Add(lease))
+		res, err := tx.Exec(`UPDATE attempts SET lease_until = ? WHERE state = 'running' AND finish_hash IS NULL
+			AND lease_until < ?`, until, until)
+		if err != nil {
+			return fmt.Errorf("queue: write attempt: %w", err)
+		}
+		if n, err = res.RowsAffected(); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE attempts SET lease_until = ? WHERE state = 'taken' AND finish_hash IS NULL`,
+			nanos(now)-1); err != nil {
+			return fmt.Errorf("queue: write attempt: %w", err)
+		}
+		_, err = sweepTx(tx, now)
+		return err
+	})
+	if err == nil {
+		q.wake()
+	}
+	return int(n), err
 }
 
 // Start moves a taken attempt to running and renews its lease. Starting a
@@ -2586,7 +2642,7 @@ func (q *Queue) CloseSession(team string, id ids.WorkspaceID) (Workspace, error)
 		if !closed.Valid {
 			var open int
 			if err := tx.QueryRow(`SELECT COUNT(*) FROM jobs WHERE team = ? AND state IN ('queued','taken','running')
-				AND COALESCE(NULLIF(json_extract(spec, '$.workspace'), ''), session) = ?`, team, key).Scan(&open); err != nil {
+				AND `+jobWorkspace+` = ?`, team, key).Scan(&open); err != nil {
 				return fmt.Errorf("queue: count jobs: %w", err)
 			}
 			if open > 0 {

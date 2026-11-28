@@ -159,7 +159,8 @@ var pidOf = regexp.MustCompile(`message\.start session=\S+ agent=claude turn=(\S
 
 func childPID(t *testing.T, home, turn string) int {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join(home, "logs", "service.log"))
+	// up's built-in runner, which starts the agents, writes runner.log.
+	b, err := os.ReadFile(filepath.Join(home, "logs", "runner.log"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,8 +314,12 @@ func TestRecoverAfterFirstTurnWithNoCall(t *testing.T) {
 	if ts.ReplayFrom != t1 || ts.RecoveredFrom != t1 || ts.RecoveredReason != want {
 		t.Errorf("turn 2's turn.started %+v", ts)
 	}
+	// No call of turn 1 reached the model, so no history holds Claude Code's
+	// standing context: turn 2's fresh copy goes into the session's first
+	// message, in front of its words, where Claude Code puts it (before
+	// 0.6.8 it was dropped, and the turn ran without CLAUDE.md or AGENTS.md).
 	m2 := v.last(t)
-	if len(m2) < 3 || m2[0] != `{"role":"user","content":"fix the parser"}` ||
+	if len(m2) < 3 || m2[0] != `{"role":"user","content":[{"type":"text","text":"<system-reminder>r</system-reminder>"},{"type":"text","text":"fix the parser"}]}` ||
 		!strings.Contains(m2[1], "The message above was not acted on: it ended before the model was called (its agent process exited with code 1).") {
 		t.Errorf("turn 2 sent\n%s", strings.Join(m2, "\n"))
 	}

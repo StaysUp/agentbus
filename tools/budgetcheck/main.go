@@ -445,7 +445,7 @@ func render(w io.Writer, rep *Report) {
 	}
 	fmt.Fprintf(w, "History in budget tokens (bytes / 2.66). Real tokens per budget token: %s. Cache lifetime: %s.\n\n", scale, rep.TTL)
 	tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', tabwriter.AlignRight)
-	fmt.Fprintln(tw, "#\tturn\tstart\tcalls\treal hist\toff hist\ton hist\ton cached\ton step\trecorded step\treal $\toff $\ton $\t")
+	fmt.Fprintln(tw, "#\tturn\tstart\tcalls\treal hist\toff hist\ton hist\ton cached\ton step\trecorded step\tcontext\treal $\toff $\ton $\t")
 	for i, t := range rep.Turns {
 		start := ""
 		if !t.Start.IsZero() {
@@ -462,9 +462,9 @@ func render(w io.Writer, rep *Report) {
 		if t.Problem != "" {
 			real = "! " + real
 		}
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%d/%d\t%s\t%s\t%s\t%s\t%s\t%s\t%.2f\t%.2f\t%.2f\t\n", i+1, t.Turn, start, t.CarryingCalls, t.All,
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%d/%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%.2f\t%.2f\t%.2f\t\n", i+1, t.Turn, start, t.CarryingCalls, t.All,
 			real, k(t.WhatIfTurn.Off.Tokens), k(t.WhatIfTurn.On.Tokens), cached, stepText(t.WhatIfTurn.On.Step), stepText(t.Recorded),
-			t.Real.USD, t.Off.USD, t.On.USD)
+			contextText(t.WhatIfTurn), t.Real.USD, t.Off.USD, t.On.USD)
 	}
 	tw.Flush()
 	fmt.Fprintln(w)
@@ -478,7 +478,21 @@ func render(w io.Writer, rep *Report) {
 			k(int(a.t.Input)), k(int(a.t.Output)), 100*a.t.CacheShare, a.t.Steps, a.t.USD)
 	}
 	tw.Flush()
-	fmt.Fprintf(w, "\nRebuilt within 1%% of what the record carried: off arm %d of %d turns, on arm %d of %d.\n",
+	ctxTurns, ctxReal, ctxOn := 0, 0, 0
+	for _, t := range rep.Turns {
+		if t.From != "" && t.ContextTokens > 0 {
+			ctxTurns++
+			if t.WhatIfTurn.Real.ContextKept {
+				ctxReal++
+			}
+			if t.WhatIfTurn.On.ContextKept {
+				ctxOn++
+			}
+		}
+	}
+	fmt.Fprintf(w, "\nThe first turn's standing context, byte for byte in the history: real %d of %d turns, budget on %d of %d.\n",
+		ctxReal, ctxTurns, ctxOn, ctxTurns)
+	fmt.Fprintf(w, "Rebuilt within 1%% of what the record carried: off arm %d of %d turns, on arm %d of %d.\n",
 		rep.OffMatches, rep.Replayed, rep.OnMatches, rep.Replayed)
 	fmt.Fprintln(w, "A session that ran without the budget must match the off arm at every turn, one that ran with it the on arm (at the same budget).")
 	if rep.WriteAsInput > 0 {
@@ -496,6 +510,17 @@ func render(w io.Writer, rep *Report) {
 	if len(probs) > 0 {
 		fmt.Fprintf(w, "Turns rebuilt from the record instead (marked !):\n  %s\n", strings.Join(probs, "\n  "))
 	}
+}
+
+// contextText says whether the real history and the on arm's carry the
+// chain's standing context byte for byte: "yes/yes", "no/yes"; "" when the
+// turn carries no history or its chain had none.
+func contextText(t replay.WhatIfTurn) string {
+	if t.From == "" || t.ContextTokens == 0 {
+		return ""
+	}
+	yes := map[bool]string{true: "yes", false: "no"}
+	return yes[t.Real.ContextKept] + "/" + yes[t.On.ContextKept]
 }
 
 // k is n tokens, short: 438k, 1.2M.

@@ -38,26 +38,10 @@ var relayOnly = map[event.Kind]bool{event.ReplayFailed: true, event.HistoryShort
 // relayedCall is true for a call's event that control's relay records itself, so
 // a runner that holds no secret leaves it out of what it writes to control's
 // record: it carries an exchange and is not one of the few only a gateway makes
-// (relayOnly). The forwarding (forward, below) and agentbus up's built-in-runner
-// sink (SuppressRelayed) share this one rule, so it cannot drift between them.
+// (relayOnly). Every runner forwards by it (forward, below), agentbus up's
+// built-in one too, a process of its own since 0.6.7.
 func relayedCall(kind event.Kind, hasExchange bool) bool {
 	return hasExchange && !relayOnly[kind]
-}
-
-// SuppressRelayed wraps next so it drops the call events control's relay records
-// (relayedCall), keeping only the few a gateway alone makes. agentbus up's
-// built-in runner shares control's record with the relay; without this, both
-// would record each call. A runner on another machine does the same by not
-// forwarding those events.
-func SuppressRelayed(next event.Sink) event.Sink { return relaySuppress{next} }
-
-type relaySuppress struct{ next event.Sink }
-
-func (r relaySuppress) Emit(e event.Event) {
-	if relayedCall(e.Kind, e.Exchange != "") {
-		return
-	}
-	r.next.Emit(e)
 }
 
 // LiveEvery is how often a running turn's new record goes to control, at
@@ -96,29 +80,27 @@ func (at *attempt) live(ctx context.Context, done <-chan struct{}) {
 
 // forward sends what control lacks of the turn's events in session, and says
 // whether control holds them all now (true when nothing is forwarded: the
-// runner writes control's own record). It sends a batch at
+// runner writes control's own record), and whether control answered every
+// batch it was sent: taken, or refused, which control decided. It sends a batch at
 // a time, from the runner's own record. A batch that cannot be sent waits for
-// the next time; at the end (final) each is tried a few times, then given up:
-// the job still finishes, and the turn stays in the runner's record. A runner
+// the next time; at the end (final) each is tried while the attempt is live,
+// as the finish is (untilAnswered), so a turn that ended while control was
+// away is whole in its record once it is back. A runner
 // holds no secret, so each of its model calls went through control's relay,
 // which recorded the call from its own copy; the runner sends only the events
 // the relay cannot (relayedCall), never the calls themselves.
-func (at *attempt) forward(ctx context.Context, session string, final bool) bool {
+func (at *attempt) forward(ctx context.Context, session string, final bool) (took, answered bool) {
 	if !at.r.cfg.Forward || at.r.cfg.Store == nil || session == "" {
-		return true
+		return true, true
 	}
 	at.fwdMu.Lock()
 	defer at.fwdMu.Unlock()
 	s := &at.sent
-	tries := 1
-	if final {
-		tries = 3
-	}
 	filter := store.Filter{Turn: at.job.Turn, TurnSession: session}
 	for range 10000 {
 		recs, more, err := at.r.cfg.Store.Page(s.after, filter, jobs.MaxBatch, MaxRecordBatch)
 		if err != nil {
-			return false
+			return false, true // the runner's own record: nothing to ask control
 		}
 		if len(recs) == 0 {
 			break
@@ -145,16 +127,18 @@ func (at *attempt) forward(ctx context.Context, session string, final bool) bool
 			size += len(rec.Data)
 			last, taken = rec.Seq, taken+1
 		}
-		if len(b.Events) > 0 && !at.send(ctx, "record", b, &jobs.RecordAck{}, tries) {
-			at.r.cfg.Logf("job %s: the turn's record could not be sent", at.job.ID)
-			return false
+		if len(b.Events) > 0 {
+			if took, answered := at.send(ctx, "record", b, &jobs.RecordAck{}, final); !took {
+				at.r.cfg.Logf("job %s: the turn's record could not be sent", at.job.ID)
+				return false, answered
+			}
 		}
 		s.after = last
 		if !more && taken == len(recs) {
 			break
 		}
 	}
-	return true
+	return true, true
 }
 
 // hasExchange says whether an event's data names a model call's exchange.
@@ -165,22 +149,40 @@ func hasExchange(data []byte) bool {
 	return json.Unmarshal(data, &e) == nil && e.Exchange != ""
 }
 
-// send posts body to the attempt's op, tries times at most while control
-// answers 5xx or is out of reach.
-func (at *attempt) send(ctx context.Context, op string, body, out any, tries int) bool {
-	for i := range tries {
-		status, err := call(ctx, at.r.short, at.path(op), at.r.token, body, out)
-		if err == nil && status == http.StatusOK {
-			return true
+// send posts body to the attempt's op: once, or when final until control
+// answers while the attempt is control's (untilAnswered). It says whether
+// control took it, and whether control answered at all: a refusal is an
+// answer (control decided), no answer is not.
+//
+// A 5xx answer is tried recordTries times, then counted as an answer: the
+// record is given up, the finish goes, and control closes the run whose end
+// it did not get (jobs.closeOpenRuns). That is Buildkite's rule for a job's
+// log chunks (agent/run_job.go: failed chunks are counted, the finish is not
+// held for them). Only no answer at all (control away, as in a restart) is
+// waited out like the finish.
+// recordTries is how many 5xx answers a final record batch takes before it
+// is given up (send).
+const recordTries = 3
+
+func (at *attempt) send(ctx context.Context, op string, body, out any, final bool) (took, answered bool) {
+	fives := 0
+	try := func() bool {
+		status, err := at.post(ctx, op, body, out, nil)
+		took = err == nil && status == http.StatusOK
+		answered = err == nil && status < 500
+		if err == nil && status >= 500 {
+			if fives++; fives >= recordTries {
+				answered = true
+			}
 		}
-		if err == nil && status < 500 {
-			return false
-		}
-		if i < tries-1 {
-			sleep(ctx, time.Duration(i+1)*time.Second)
-		}
+		return answered
 	}
-	return false
+	if final {
+		untilAnswered(ctx, at.r.cfg.Retire, at.gone, try)
+	} else {
+		try()
+	}
+	return took, answered
 }
 
 // sessionOf is the turn's session at its end: the result's, or the one it

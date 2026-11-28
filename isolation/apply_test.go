@@ -14,6 +14,8 @@ import (
 	"github.com/staysup/agentbus/blobs"
 	"github.com/staysup/agentbus/connector"
 	"github.com/staysup/agentbus/folders"
+	"github.com/staysup/agentbus/ids"
+	"github.com/staysup/agentbus/workspace"
 )
 
 // applyIn applies s's changes from the checkpoint from to to into folder,
@@ -21,6 +23,46 @@ import (
 // name in a store, and the connector applies from there. from Base is the
 // copy's base.
 func applyIn(t testing.TB, s *Space, folder, from, to string) (connector.Applied, error) {
+	t.Helper()
+	dir, st, fromSet, toSet := storeChangesets(t, s, from, to)
+	reg, err := folders.Open(filepath.Join(dir, "folders.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref, err := reg.Register(folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := &connector.Connector{Folders: reg, Store: st, State: filepath.Join(dir, "connector")}
+	return c.Apply(context.Background(), ref, fromSet, toSet)
+}
+
+// applyPlacesIn applies a copy of several folders into dirs, one per folder
+// of s in order, as applyIn does one.
+func applyPlacesIn(t testing.TB, s *Space, dirs []string, from, to string) {
+	t.Helper()
+	dir, st, fromSet, toSet := storeChangesets(t, s, from, to)
+	reg, err := folders.Open(filepath.Join(dir, "folders.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var places []workspace.Place
+	for i, d := range dirs {
+		ref, err := reg.Register(d)
+		if err != nil {
+			t.Fatal(err)
+		}
+		places = append(places, workspace.Place{Name: ids.FolderName(s.Folders[i].Name), Ref: ref})
+	}
+	c := &connector.Connector{Folders: reg, Store: st, State: filepath.Join(dir, "connector")}
+	if _, err := c.ApplyPlaces(context.Background(), places, fromSet, toSet, false); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// storeChangesets puts s's changesets from and to, and the files they name,
+// in a new store, as the runner publishes them.
+func storeChangesets(t testing.TB, s *Space, from, to string) (string, *blobs.Store, string, string) {
 	t.Helper()
 	dir := t.TempDir()
 	st, err := blobs.Open(filepath.Join(dir, "blobs"))
@@ -66,17 +108,7 @@ func applyIn(t testing.TB, s *Space, folder, from, to string) (connector.Applied
 	if from != Base {
 		fromSet = put(from)
 	}
-	toSet := put(to)
-	reg, err := folders.Open(filepath.Join(dir, "folders.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	ref, err := reg.Register(folder)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c := &connector.Connector{Folders: reg, Store: st, State: filepath.Join(dir, "connector")}
-	return c.Apply(context.Background(), ref, fromSet, toSet)
+	return dir, st, fromSet, put(to)
 }
 
 // lenderFor is the folder side of folder, as a runner on the connector's

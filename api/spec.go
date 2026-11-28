@@ -78,7 +78,7 @@ var (
 	docSessionQuery = "A turn token may call this for a session it may read: without session, its own is used. " + turnReads
 	docTurn         = "A turn token may call this for a turn of a session it may read, by the turn id alone. " + turnReads
 	docAsk          = "A turn token may call this to start a turn in any session it may read: a new one it opened (POST /api/v0/sessions), one that already ran, its own too. " +
-		"The result comes back only when asked for: delivery set to a session it may read, or an on (POST /api/v0/ons). " + turnReads + " Caps: " + askCaps
+		"The result comes back only when asked for: an on over the session (POST /api/v0/ons), registered before the turn. " + turnReads + " Caps: " + askCaps
 	docStop    = "A turn token may stop any turn in a session it may read. " + turnReads
 	docAnyRead = "A turn token may call this too."
 	docChanges = "A turn token may preview the changes of a workspace in its authority. " + turnWorkspaces

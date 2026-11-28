@@ -137,6 +137,10 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 		return 2
 	}
 	c.home, c.logf, c.self = home, own.Printf, self()
+	c.spawn = c.mode == modeUp
+	if c.mode == modeRunner {
+		c.builtin = readBuiltinEnv(getenv)
+	}
 	c.upstream, _ = url.Parse(upstream)
 	c.chatgpt, _ = url.Parse(chatgpt)
 	// A test points control's model upstream at a fake vendor on loopback, so a
@@ -164,6 +168,16 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 	}
 	// Env only, like the test upstreams: a two-process test shortens the Ask
 	// hold so its timeout path does not take a real minute.
+	// Env only, like the hold: a cross-process test holds a runner's taken job
+	// before its start, so it can stop control in between.
+	if ms := getenv("AGENTBUS_TEST_START_DELAY_MS"); ms != "" {
+		n, err := strconv.Atoi(ms)
+		if err != nil || n <= 0 {
+			own.Printf("AGENTBUS_TEST_START_DELAY_MS must be a positive number of milliseconds")
+			return 1
+		}
+		c.startDelay = time.Duration(n) * time.Millisecond
+	}
 	if ms := getenv("AGENTBUS_TEST_HOLD_MS"); ms != "" {
 		n, err := strconv.Atoi(ms)
 		if err != nil || n <= 0 {
@@ -209,8 +223,15 @@ func run(args []string, getenv func(string) string, stdout, stderr io.Writer) in
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	// up's built-in runner leaves on its own once it retired (builtin.go).
+	var retired <-chan struct{}
+	if svc.retire != nil {
+		retired = svc.runnerDone
+	}
 	select {
 	case <-sig:
+	case <-retired:
+		own.Printf("the built-in runner retired")
 	case err := <-svc.done:
 		own.Printf("stopped: %v", err)
 		svc.stop()
@@ -232,6 +253,9 @@ type config struct {
 	// hold's timeout without a real minute. Env only (AGENTBUS_TEST_HOLD_MS),
 	// never a flag or in any help or doc, like the test upstreams above.
 	holdMS int
+	// startDelay, test only (AGENTBUS_TEST_START_DELAY_MS): a runner holds
+	// each taken job this long before its start.
+	startDelay time.Duration
 	// cloudCode is agy's Code Assist host; nil means cloudCode above.
 	cloudCode *url.URL
 	// openrouter is OpenRouter's API; nil means openrouter above.
@@ -270,12 +294,22 @@ type config struct {
 
 	// mode is up (the zero value), server or runner (modes.go).
 	mode string
+	// spawn: up runs its built-in runner as a process of its own (the
+	// command does; a test of up in this process does not). builtin marks a
+	// runner as up's built-in one (builtin.go).
+	spawn   bool
+	builtin *builtinRunner
 	// A runner's: the server's URL, the runner's name, and where its agents
 	// send model calls.
 	server, runnerName string
 	// A runner's folders it owns (-folder), and its labels (-labels).
 	folders, labels []string
 }
+
+// controlWait is how long a runner's gateway holds a model call while control's
+// relay refuses the connection (gateway.SetUpstreamWait): long enough for a
+// restart of control, short of the agents' own request timeouts.
+const controlWait = 2 * time.Minute
 
 // lazyDecider is the gateways' Ask-hold Decider, set on each guarded gateway
 // before serving (as SetGuard is) and filled in once the runner that backs it
@@ -331,14 +365,22 @@ type service struct {
 	// (gateway/hold.go, runner/decide.go). guardedGws are those gateways, so
 	// startRunner can also give them the runner's approval-id scope.
 	holdDecider *lazyDecider
+	gate        *turnGate // the runner's gateways' turn check, set once it enrolled
 	guardedGws  []*gateway.Gateway
 
 	// The built-in runner, and the lease sweep: stopped before the API.
 	stopRunner func()
 	runnerDone chan struct{}
-	stopSweep  func()
-	subs       *credentials.Subscriptions // control's connected subscriptions; nil without a queue
-	sweepDone  chan struct{}
+	// up's built-in runner (builtin.go): in this process for a test
+	// (inRunner), else watched as a process of its own until up stops
+	// (stopSupervise). retire is the built-in runner's own Config.Retire,
+	// when it runs as that process.
+	inRunner      *service
+	stopSupervise func()
+	retire        chan struct{}
+	stopSweep     func()
+	subs          *credentials.Subscriptions // control's connected subscriptions; nil without a queue
+	sweepDone     chan struct{}
 }
 
 // start opens the store, makes the token if needed, and serves.
@@ -407,7 +449,8 @@ func start(c config) (*service, error) {
 	// Control keeps the person's connected subscriptions there: no turn
 	// edits them either.
 	subs := subscriptionStore(c.home)
-	if c.hasQueue() {
+	// up's built-in runner too, which runs in up's data folder.
+	if c.hasQueue() || c.builtin != nil {
 		protect = append(protect, subscriptionsProtected(subs)...)
 	}
 	// The enrollment token adds the built-in runner of agentbus up, and no
@@ -420,11 +463,15 @@ func start(c config) (*service, error) {
 		if enrollToken, err = newToken(enrollTokenPrefix); err != nil {
 			return nil, err
 		}
+	case c.builtin != nil:
+		// up's built-in runner: up's token, handed over at its start
+		// (builtin.go). A runner that enrolled keeps its identity.
+		enrollToken = c.builtin.enroll
 	case c.mode == modeRunner && !signedIn(c.home):
 		// Nothing is opened for a machine that never signed in.
 		return nil, runner.ErrNotSignedIn
 	}
-	st, err := store.Open(filepath.Join(c.home, "events.db"))
+	st, err := store.Open(c.storePath())
 	if err != nil {
 		return nil, err
 	}
@@ -462,7 +509,8 @@ func start(c config) (*service, error) {
 	})}
 	// The relay's gateways, which record the runners' calls it carries.
 	var relayGws []*gateway.Gateway
-	if c.hasEngine() {
+	if c.hasEngine() || c.mode == modeUp {
+		// up and its built-in runner, two processes, share the file (folders/).
 		if fr, err = folders.Open(filepath.Join(c.home, "folders.json")); err != nil {
 			st.Close()
 			return nil, err
@@ -631,7 +679,7 @@ func start(c config) (*service, error) {
 		closeQ()
 		return nil, fmt.Errorf("log folder %s could not be made: %w", runLogs, err)
 	}
-	svcLog, err := logfile.Open(filepath.Join(logs, "service.log"), c.logMax, nil)
+	svcLog, err := logfile.Open(filepath.Join(logs, c.logName()), c.logMax, nil)
 	if err != nil {
 		st.Close()
 		closeQ()
@@ -724,11 +772,24 @@ func start(c config) (*service, error) {
 	// calls it, for the jobs it takes from the queue: the built-in one of up,
 	// or this process's own in runner mode. A server runs no turns.
 	var eng *engine.Engine
+	// The runner's gateways' turn check, and the agents' names it was given:
+	// set once the runner enrolled (startRunner).
+	gate := &turnGate{}
 	if c.hasEngine() {
 		// A turn on another harness than its session's latest names the
 		// earlier turns' agents by their saved names, where this process
 		// keeps them.
-		var agentName func(string) string
+		// A runner keeps no saved agents: it names them as control did with
+		// the turn's start (runner.AgentName), once it enrolled.
+		agentName := func(id string) string {
+			gate.mu.RLock()
+			rn := gate.rn
+			gate.mu.RUnlock()
+			if rn == nil {
+				return ""
+			}
+			return rn.AgentName(id)
+		}
 		if saved != nil {
 			agentName = func(id string) string {
 				a, err := saved.Get(id)
@@ -748,7 +809,7 @@ func start(c config) (*service, error) {
 		// continuation of a session that already has a clean home — still uses
 		// it (run/run.go decides per turn).
 		homes := filepath.Join(c.home, homesDir)
-		eng, err = engine.New(engine.Config{Store: st, BaseURL: baseURL, ReplayBase: replayBase, AgentName: agentName, Homes: homes, Personal: c.mode == modeUp,
+		eng, err = engine.New(engine.Config{Store: st, BaseURL: baseURL, ReplayBase: replayBase, AgentName: agentName, Homes: homes, Personal: c.builtin != nil,
 			Settings: cfgStore, Protect: protect, APIDir: apiLink(c.home, c.self, svcLog), Wire: runWire(c.getenv, c.environ, c.lookPath), RunGrace: c.runGrace, Logf: svcLog.Printf,
 			RunLog: func(session string, data []byte) {
 				// The session id is the service's own hex, so it is a plain
@@ -808,34 +869,21 @@ func start(c config) (*service, error) {
 	// each call to the relay, which adds the credential and records the call
 	// in control's record (jobs/relay.go), and names each call's exchange to
 	// the relay. The relay is control's: the server for a runner on another
-	// machine, and this process itself, on loopback, for up. One gateway path,
-	// so what works in up works across machines.
+	// machine, and up for its built-in runner, a process of its own on this
+	// machine (builtin.go). One gateway path, so what works in up works across
+	// machines.
 	relayBase := ""
 	if c.noSecrets() {
-		switch c.mode {
-		case modeRunner:
-			relayBase = strings.TrimSuffix(c.server, "/")
-		case modeUp:
-			if runnerJobs != nil {
-				relayBase = baseURL
-			}
-		}
+		relayBase = strings.TrimSuffix(c.server, "/")
 	}
 	if relayBase != "" {
 		srv := relayBase + jobs.RelayPrefix
 		anthURL, orURL = mustParse(srv+relayAnthropic), mustParse(srv+relayOpenRouter)
 		chatURL, ccURL = mustParse(srv+relayChatGPT), mustParse(srv+relayCloudCode)
 	}
-	// up's built-in runner shares control's record with the relay. The relay
-	// records every call it carries, so up's own gateways must not record it a
-	// second time: they write through a sink that drops the call events the
-	// relay records, keeping only the few a gateway alone makes (the guard's
-	// and refusals). A runner on another machine, with a record of its own,
-	// keeps the full call and suppresses those events when it forwards.
+	// A runner, with a record of its own, keeps each full call and leaves out
+	// what the relay records when it forwards (runner/record.go).
 	var gwSink event.Sink = sink
-	if c.mode == modeUp && relayBase != "" {
-		gwSink = runner.SuppressRelayed(sink)
-	}
 	anth := gateway.New(anthURL, anthropic.Adapter{}, gwSink)
 	oai := gateway.New(chatURL, openai.Adapter{}, gwSink)
 	// agy's Code Assist calls, on its own Google sign-in: on this machine's
@@ -906,16 +954,6 @@ func start(c config) (*service, error) {
 					settled = false
 				}
 			}
-			// up's built-in runner records its calls through the relay, which
-			// writes them off the reply's path too (gwSink drops them here): so
-			// its turn's end waits on the relay, as control's record handler
-			// waits for a runner on another machine (jobs/record.go).
-			if relayBase != "" && runnerJobs != nil {
-				if !runnerJobs.Settle(session, turn) {
-					svcLog.Printf("settle.relay_unconfirmed session=%s turn=%s", session, turn)
-					settled = false
-				}
-			}
 			return settled
 		})
 	}
@@ -935,14 +973,15 @@ func start(c config) (*service, error) {
 		g.SetLog(svcLog.Printf)
 		if relayBase != "" {
 			g.SendExchange()
+			// Control restarting (an upgrade of agentbus up) refuses the
+			// connection for a few seconds: the call waits for it.
+			g.SetUpstreamWait(controlWait)
 		}
-		// up's built-in runner checks each call's turn at the gateway entrance,
-		// before it is processed or recorded: a token used on another turn's
-		// path is refused here (TurnGate). The relay adds the credential for the
-		// calls that pass; a runner on another machine sends the call to
-		// control's relay, which binds it to the token's turn and credentials it.
-		if c.mode == modeUp && relayBase != "" {
-			g.SetCredential(runnerJobs.TurnGate())
+		// A runner checks each call's turn at its gateway's entrance, before it
+		// is processed or recorded (turnGate), and sends it to control's relay,
+		// which credentials it.
+		if relayBase != "" {
+			g.SetCredential(gate.credential())
 		}
 		// The command rules of permissions.toml (allow, ask, forbid), applied
 		// to each run turn's replies: refuse, hold for a person, or run. A
@@ -972,12 +1011,20 @@ func start(c config) (*service, error) {
 	}
 	host, _, _ := net.SplitHostPort(c.listen)
 	s := &service{addr: addr, shown: net.JoinHostPort(host, port), loopback: loopback, gws: append(gws, relayGws...), api: a, eng: eng, store: st, blobs: bs, blobSwp: blobSweep, jobsSrv: runnerJobs,
-		queue: q, saved: saved, remote: remote, settings: cfgStore, sdb: sdb, folders: fr, log: svcLog, logins: logins, holdDecider: holdDecider, guardedGws: guardedGws, done: make(chan error, 1)}
+		queue: q, saved: saved, remote: remote, settings: cfgStore, sdb: sdb, folders: fr, log: svcLog, logins: logins, holdDecider: holdDecider, gate: gate, guardedGws: guardedGws, done: make(chan error, 1)}
 	sdbHanded = true
 	if q != nil {
 		s.subs = subs
 	}
 	routed := vendors{anthropic: anth, openai: oai, openrouterAnth: orAnth, openrouterResps: orOAI, openrouterChat: orChat, gemini: handler(gem), keyed: keyed, relay: relayHandler}
+	if c.mode == modeUp {
+		// up's agents call the gateway of its built-in runner, a process of
+		// its own (builtin.go), which relays to control. Control's own
+		// address serves no model path: a call pointed at it by hand, which
+		// carries no turn's stand-in, is refused and recorded nowhere, as up
+		// refused it before.
+		routed = vendors{relay: relayHandler}
+	}
 	if q != nil {
 		// up and server: the cockpit at /. A runner's own service is for
 		// its agents only.
@@ -989,8 +1036,24 @@ func start(c config) (*service, error) {
 		ErrorLog:          log.New(io.Discard, "", 0),
 	}
 	svcLog.Printf("service.start mode=%s listen=%s pid=%d", c.modeName(), addr, os.Getpid())
+	// While control was not running no runner could heartbeat: every attempt
+	// gets a lease from now (control alone decides an attempt's end,
+	// runner/lease.go). Here, once the address is held and before anything is
+	// served or swept, so no call can find a lease run out before it is
+	// renewed.
+	if q != nil {
+		if _, err := q.RenewLeases(jobs.Lease); err != nil {
+			ln.Close()
+			s.stop()
+			return nil, err
+		}
+	}
 	go func() { s.done <- s.srv.Serve(ln) }()
 	if q != nil {
+		// The session list's first fold reads the whole record (0.3 s at
+		// 41,000 events); made now, the cockpit's first list after a start
+		// reads from it like every later one (store/snapshotfold.go).
+		go func() { _, _ = st.Snapshot() }()
 		// A delivered result names the saved agent that did the work.
 		name := func(id string) string {
 			if saved == nil {
@@ -1005,13 +1068,13 @@ func start(c config) (*service, error) {
 		s.sweep(svcLog, name)
 	}
 	// The runner takes jobs through the runner protocol over HTTP: the
-	// built-in one from this service on loopback, as a runner on another
-	// machine does from its server.
+	// built-in one of up, a process of its own, from this service on
+	// loopback, as a runner on another machine does from its server.
 	switch {
 	case c.mode == modeRunner:
 		err = s.startRunner(c, strings.TrimSuffix(c.server, "/"), enrollToken, svcLog)
-	case eng != nil:
-		err = s.startRunner(c, baseURL, enrollToken, svcLog)
+	case c.mode == modeUp:
+		err = s.startBuiltin(c, baseURL, enrollToken)
 	}
 	if err != nil {
 		s.stop()
@@ -1187,6 +1250,13 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 				} else if n > 0 {
 					svcLog.Printf("queue.results_delivered n=%d", n)
 				}
+				// An on over a session: each of its turns that ended since
+				// the on's cursor delivers its reply (queue/watchon.go).
+				if n, err := s.queue.FireWatchOns(queue.DefaultTeam, s.recordEvents, deliverTo, name, s.deliveredAgent); err != nil {
+					svcLog.Printf("queue.fire_watch_ons_failed")
+				} else if n > 0 {
+					svcLog.Printf("queue.results_delivered n=%d", n)
+				}
 				// An on over the record: an event of its kind recorded since
 				// its cursor queues its job (queue/recordon.go), such as the
 				// put-away of a workspace whose work is settled.
@@ -1203,9 +1273,9 @@ func (s *service) sweep(svcLog *logfile.Log, name func(string) string) {
 // startRunner enrolls the built-in runner and starts it, holding this
 // machine's folders: it makes each session's copy from its folder and does
 // the folders' jobs (applies, typed folders) itself, so one program runs on
-// the machine. In up it shares the control plane's blob store on disk, so
-// a copy is made by clone or overlay and no file is sent over HTTP. A runner
-// of a server keeps its own store, with the server's behind it.
+// the machine. Every runner, up's built-in one too (a process of its own,
+// builtin.go), keeps its own blob store (blob-cache/), with control's behind
+// it, and sends control only what it lacks, over HTTP.
 func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfile.Log) error {
 	capacity := runnerCapacity(c.capacity)
 	name := c.runnerName
@@ -1227,18 +1297,17 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 		Engine:  s.eng, Store: s.store, Logf: svcLog.Printf, Labels: c.labels,
 		LookPath: c.lookPath, Environ: c.environ,
 		Workdir: filepath.Join(c.home, copiesDir), OldWorkdir: filepath.Join(c.home, oldCopiesDir), StateFile: filepath.Join(c.home, runnerState), Settings: s.settings,
-		Forward: c.mode == modeRunner, NoSecrets: c.noSecrets()}
-	// A runner of a server keeps its own store, which its folder side
-	// shares: one handle, so its sweep and the folder side's touches share
-	// one lock.
-	store := s.blobs
-	if store != nil {
-		cfg.Blobs, cfg.BlobSink = s.blobs, s.blobs
-	} else {
-		var err error
-		if store, err = blobs.Open(filepath.Join(c.home, cacheDir)); err != nil {
-			return fail(err)
-		}
+		Forward: true, NoSecrets: c.noSecrets(), StartDelay: c.startDelay,
+		Finishes: filepath.Join(c.home, finishesDir)}
+	if c.builtin != nil && c.builtin.process {
+		retire := make(chan struct{})
+		cfg.Retire, s.retire = retire, retire
+	}
+	// The runner's own store, which its folder side shares: one handle, so
+	// its sweep and the folder side's touches share one lock.
+	store, err := blobs.Open(filepath.Join(c.home, cacheDir))
+	if err != nil {
+		return fail(err)
 	}
 	fs := folderSide(c.home, s.folders, store)
 	cfg.Folders, cfg.FolderSide, cfg.Lender = s.folders, connector.Jobs{Connector: fs}, fs
@@ -1252,19 +1321,23 @@ func (s *service) startRunner(c config, self, enrollToken string, svcLog *logfil
 	if s.holdDecider != nil {
 		s.holdDecider.set(rn.Decider())
 	}
+	if s.gate != nil {
+		s.gate.set(rn)
+	}
 	for _, g := range s.guardedGws {
 		g.SetApprovalScope(rn.ScopeApproval)
 	}
-	if s.blobs == nil {
-		client := blobClient(self, rn.Token())
-		fs.Remote = client
-		rn.UseBlobs(blobs.Local{Store: store, From: client}, client)
-		go sweepCache(ctx, store, svcLog.Printf)
-	}
+	client := blobClient(self, rn.Token())
+	fs.Remote = client
+	rn.UseBlobs(blobs.Local{Store: store, From: client}, client)
+	go sweepCache(ctx, store, svcLog.Printf)
 	if s.remote != nil {
 		s.remote.Enrolled(rn.ID(), rn.Token())
 	}
 	svcLog.Printf("runner.start id=%s capacity=%d machine=%s folders=%d", rn.ID(), capacity, s.folders.Machine(), len(s.folders.List(queue.MaxFolders)))
+	if s.retire != nil {
+		go s.watchRetire(c, rn.Agents, rn.Busy, rn.Away, s.retire)
+	}
 	s.stopRunner = cancel
 	s.runnerDone = make(chan struct{})
 	wg.Add(1)
@@ -1288,7 +1361,7 @@ func (s *service) recordEvents(kind string, after int64, limit int) ([]queue.Rec
 	}
 	out := make([]queue.RecordEvent, len(evs))
 	for i, e := range evs {
-		out[i] = queue.RecordEvent{ID: e.ID, Seq: e.Seq, Time: e.Time, Workspace: e.Workspace}
+		out[i] = queue.RecordEvent{ID: e.ID, Seq: e.Seq, Time: e.Time, Workspace: e.Workspace, Turn: e.Turn}
 	}
 	return out, nil
 }
@@ -1681,6 +1754,10 @@ func route(a *api.API, v vendors, open bool) http.Handler {
 			localError(w, "agentbus: no vendor is routed for this path", http.StatusNotFound)
 			return
 		}
+		if gw == nil {
+			localError(w, "agentbus: no vendor is routed for this path", http.StatusNotFound)
+			return
+		}
 		if open && !thisMachine(r) {
 			localError(w, "agentbus: the model gateway answers callers on this machine only", http.StatusForbidden)
 			return
@@ -1761,6 +1838,15 @@ func (s *service) stop() { s.once.Do(s.shutdown) }
 
 func (s *service) shutdown() {
 	s.log.Printf("service.stopping")
+	// up stops watching its built-in runner, which keeps running: its turns
+	// go on and reach control when up is back (builtin.go). One in this
+	// process (a test) stops first, while the API still serves it.
+	if s.stopSupervise != nil {
+		s.stopSupervise()
+	}
+	if s.inRunner != nil {
+		s.inRunner.stop()
+	}
 	// The runner first: it stops its jobs' turns and finishes them through
 	// the API, which is still serving.
 	if s.stopRunner != nil {
@@ -1771,16 +1857,18 @@ func (s *service) shutdown() {
 	if s.eng != nil {
 		s.eng.StopAll()
 	}
+	// The sweep before the address: once control stops answering, no runner
+	// can heartbeat, so no lease may run out from then (runner/lease.go).
+	if s.stopSweep != nil {
+		s.stopSweep()
+		<-s.sweepDone
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	_ = s.srv.Shutdown(ctx) // streams never go idle, so this usually times out
 	_ = s.srv.Close()
 	for _, gw := range s.gws {
 		gw.Close()
-	}
-	if s.stopSweep != nil {
-		s.stopSweep()
-		<-s.sweepDone
 	}
 	if s.logins != nil {
 		s.logins.Stop()

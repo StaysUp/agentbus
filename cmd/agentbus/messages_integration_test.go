@@ -74,20 +74,35 @@ func messageBody(t *testing.T, svc *service, session string, body map[string]any
 }
 
 // postRunning posts the turn body (postTurn) and returns the reply of a turn
-// that runs: 202 running, with session, turn and base_url. Any other reply
-// fails the test with the reply as sent, never a panic on a missing field.
+// that runs: 202 running, with session and turn, and as base_url the turn's
+// gateway, on the built-in runner (turnBase). Any other reply fails the test
+// with the reply as sent, never a panic on a missing field.
 func postRunning(t *testing.T, svc *service, tok string, body map[string]any) (map[string]any, string) {
 	t.Helper()
 	code, out, raw := postTurn(t, svc, tok, body)
 	if code != http.StatusAccepted || out["state"] != "running" {
 		t.Fatalf("turn: %d %s, want 202 running", code, raw)
 	}
-	for _, f := range []string{"session", "turn", "base_url"} {
+	for _, f := range []string{"session", "turn"} {
 		if s, _ := out[f].(string); s == "" {
 			t.Fatalf("turn reply without %s: %s", f, raw)
 		}
 	}
+	if out["base_url"] != nil {
+		t.Fatalf("control's reply names a gateway, which runs on the runner: %s", raw)
+	}
+	out["base_url"] = turnBase(t, svc, out["session"].(string), out["turn"].(string))
 	return out, raw
+}
+
+// turnBase is a turn's gateway address, as its agent is given it: on up's
+// built-in runner, which serves its agents' gateway (builtin.go).
+func turnBase(t *testing.T, svc *service, session, turn string) string {
+	t.Helper()
+	if svc.inRunner == nil {
+		t.Fatal("no built-in runner in this process")
+	}
+	return "http://" + svc.inRunner.addr + "/s/" + session + "/t/" + turn
 }
 
 // postRunRunning is postRun, returning once the turn runs (postRunning).
@@ -322,7 +337,8 @@ func TestRunWithSessionRunsNextTurnInSameSession(t *testing.T) {
 			again = `,"existing":true`
 		}
 		if strings.HasSuffix(base, "/t/"+next) ||
-			strings.TrimSpace(raw) != `{"session":"`+id+`","turn":"`+next+`","state":"running","base_url":"`+session+`/t/`+next+`"`+again+`}` {
+			strings.TrimSpace(raw) != `{"session":"`+id+`","turn":"`+next+`","state":"running"`+again+`}` ||
+			out["base_url"] != session+"/t/"+next {
 			t.Fatalf("%s: %s, want 202 with the same id, a new turn, and the session's base URL with it", name, raw)
 		}
 		base = out["base_url"].(string) // this turn's own
@@ -371,21 +387,27 @@ func TestRunWithSessionRefusals(t *testing.T) {
 		t.Errorf("unknown session: %d %s, want 404", code, raw)
 	}
 	// A session seen only through the gateway (pointed at it by hand) has no
-	// agent and no resume_id.
+	// agent and no resume_id. The runner judges a continuation from its own
+	// record (builtin.go), so the session is in both, as one the gateway saw
+	// before 0.6.7 is in the runner's copy of control's.
 	const byHand = "byhand"
 	byHandFolder := t.TempDir()
 	sb := false
-	if _, _, err := svc.store.Append(event.Event{ID: "wc_byhand", Kind: event.WorkspaceCreated, Time: time.Now(),
-		Workspace: byHand, Folder: byHandFolder, Sandbox: &sb}); err != nil {
-		t.Fatal(err)
+	for _, st := range []*store.Store{svc.store, svc.inRunner.store} {
+		if _, _, err := st.Append(event.Event{ID: "wc_byhand", Kind: event.WorkspaceCreated, Time: time.Now(),
+			Workspace: byHand, Folder: byHandFolder, Sandbox: &sb}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	// A prior gateway turn with no agent and no resume_id: the session RAN (its
 	// turn.started is the continuation signal), so a next turn continues it and
 	// is refused because it cannot be resumed -- not misread as a new session for
 	// having no agent.
-	if _, _, err := svc.store.Append(event.Event{ID: "evt_byhand", Kind: event.TurnStarted, Time: time.Now(),
-		Session: byHand, Turn: "turn_1", Text: "hi", Folder: byHandFolder}); err != nil {
-		t.Fatal(err)
+	for _, st := range []*store.Store{svc.store, svc.inRunner.store} {
+		if _, _, err := st.Append(event.Event{ID: "evt_byhand", Kind: event.TurnStarted, Time: time.Now(),
+			Session: byHand, Turn: "turn_1", Text: "hi", Folder: byHandFolder}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	before := svc.store.Last()
 	if code, out, raw := postMessage(t, svc, tok, byHand, map[string]any{"agent": "claude", "prompt": "hi"}); code != http.StatusConflict ||
@@ -467,7 +489,7 @@ func TestRunWithSessionRefusals(t *testing.T) {
 
 	// Body refusals, as runs.
 	const badPrompt = "prompt must be from 1 byte to 256 KiB, with no NUL byte"
-	const badBody = "the body must be one JSON object with session, agent and prompt, and optionally model, delivery and idempotency_key, at most 2 MiB"
+	const badBody = "the body must be one JSON object with session, agent and prompt, and optionally model and idempotency_key, at most 2 MiB"
 	for _, tc := range []struct {
 		name string
 		body string

@@ -16,11 +16,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/staysup/agentbus/adapter"
 	"github.com/staysup/agentbus/event"
@@ -246,4 +249,55 @@ type credCall struct {
 func credOf(ctx context.Context) *credCall {
 	c, _ := ctx.Value(credKey{}).(*credCall)
 	return c
+}
+
+// SetUpstreamWait holds a call whose next hop cannot be reached at all (the
+// connection is refused, so nothing was sent) for up to d, trying again each
+// second, before the error goes on. A runner's gateway sets it on the paths
+// to control's relay: control restarting (an upgrade of agentbus up) is back
+// in seconds, and the agent then sees a slow reply instead of a failed call.
+// Call it before serving.
+func (g *Gateway) SetUpstreamWait(d time.Duration) { g.upWait = d }
+
+// waitUp is the transport under refuser that holds a call while its next hop
+// refuses the connection (SetUpstreamWait). Only a failed dial is tried again:
+// a call that reached the hop, whatever its answer, is never sent twice.
+type waitUp struct {
+	g    *Gateway
+	next http.RoundTripper
+}
+
+func (t waitUp) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.g.upWait <= 0 {
+		return t.next.RoundTrip(req)
+	}
+	// The gateway holds the whole body in memory already (ServeHTTP): each try
+	// sends it from the start.
+	var body []byte
+	if req.Body != nil {
+		var err error
+		body, err = io.ReadAll(req.Body)
+		_ = req.Body.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	until := time.Now().Add(t.g.upWait)
+	for {
+		try := req
+		if req.Body != nil {
+			try = req.Clone(req.Context())
+			try.Body = io.NopCloser(bytes.NewReader(body))
+		}
+		resp, err := t.next.RoundTrip(try)
+		var op *net.OpError
+		if err == nil || !errors.As(err, &op) || op.Op != "dial" || !time.Now().Before(until) {
+			return resp, err
+		}
+		select {
+		case <-req.Context().Done():
+			return nil, err
+		case <-time.After(time.Second):
+		}
+	}
 }

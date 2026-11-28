@@ -209,8 +209,9 @@ var gitBuiltinIgnore = []string{
 
 // initShadow makes the copy's private repo and takes its first commit (Base):
 // the copy as opened, the folder's uncommitted edits included. It writes the
-// repo's info/exclude (the built-in ignores; the folder's own .gitignore git
-// respects on its own) and info/attributes (every content transformation off),
+// repo's info/exclude (the built-in ignores; a copy made since 0.6.6 asks each
+// repo of its tree instead, gitwork.go) and info/attributes (every content
+// transformation off),
 // then commits Base. A repo already there, from a retried Open, is used as it
 // is. The caller sets s.Shadow and writes space.json only after this returns.
 func (s *Space) initShadow(ctx context.Context) error {
@@ -226,8 +227,7 @@ func (s *Space) initShadow(ctx context.Context) error {
 	if _, err := s.shadowGit(ctx, "init", "-q", "-b", "main"); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(dir, "info", "exclude"),
-		[]byte(strings.Join(folderIgnores(s.Folders), "\n")+"\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "info", "exclude"), []byte(strings.Join(folderIgnores(s.Folders), "\n")+"\n"), 0o600); err != nil {
 		return err
 	}
 	// info/attributes overrides any .gitattributes in the copy, so no path is
@@ -253,8 +253,14 @@ func (s *Space) initShadow(ctx context.Context) error {
 // (clean -ffd, below).
 func (s *Space) shadowAdd(ctx context.Context) error {
 	if s.Nested {
-		// One rule for every file, a nested repo's included (nested.go).
-		return s.stageTree(ctx, s.Dir, "", s.ignorer(s.Dir), s.headFiles(ctx))
+		// One rule for every file, a nested repo's included (nested.go), by
+		// git's answer asked now (gitwork.go).
+		w, err := s.copyWork(ctx)
+		if err != nil {
+			return err
+		}
+		defer w.close()
+		return s.stageTree(ctx, s.Dir, "", w, s.headFiles(ctx))
 	}
 	_, _, code, err := s.runGit(ctx, "add", "-A", "--ignore-errors")
 	if err != nil && code != 1 {
@@ -850,7 +856,7 @@ func (s *Space) gitChangeset(ctx context.Context, name string) (workspace.Change
 		return workspace.Changeset{}, err
 	}
 	changes = append(changes, extra...)
-	cs := workspace.Changeset{Space: s.ID, Checkpoint: name, Files: []workspace.FileChange{}}
+	cs := workspace.Changeset{Space: s.ID, Checkpoint: name, BaseTaken: s.BaseTaken, Files: []workspace.FileChange{}}
 	for _, ch := range changes {
 		fc := workspace.FileChange{Path: ch.path}
 		if !zeroOID(ch.srcSha) {

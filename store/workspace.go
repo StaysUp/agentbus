@@ -129,6 +129,17 @@ func (s *Store) workspaceState(w *Workspace) error {
 	return nil
 }
 
+// An outcome of a workspace's action, by its id, and its latest: each one
+// read of events_workspace.
+const (
+	workspaceOutcomeSQL = `SELECT data FROM events WHERE kind IN ('workspace.applied', 'workspace.discarded',
+		'workspace.updated', 'workspace.closed', 'workspace.failed')
+		AND json_extract(data, '$.workspace') = ? AND json_extract(data, '$.id') = ? ORDER BY seq LIMIT 1`
+	lastActionSQL = `SELECT data FROM events WHERE kind IN ('workspace.applied', 'workspace.discarded',
+		'workspace.updated', 'workspace.closed', 'workspace.failed')
+		AND json_extract(data, '$.workspace') = ? ORDER BY seq DESC LIMIT 1`
+)
+
 // WorkspaceOutcome reads the outcome of one apply, discard, update or close
 // of the workspace by its event id, the id the route's 202 named. found is
 // false while the action has not run (or the id names none of ws's outcomes).
@@ -136,9 +147,7 @@ func (s *Store) workspaceState(w *Workspace) error {
 // another reads its own here.
 func (s *Store) WorkspaceOutcome(ws, id string) (e event.Event, found bool, err error) {
 	var data string
-	err = s.r.QueryRow(`SELECT data FROM events WHERE kind IN ('workspace.applied', 'workspace.discarded',
-			'workspace.updated', 'workspace.closed', 'workspace.failed')
-		AND json_extract(data, '$.workspace') = ? AND json_extract(data, '$.id') = ? ORDER BY seq LIMIT 1`, ws, id).Scan(&data)
+	err = s.r.QueryRow(workspaceOutcomeSQL, ws, id).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
 		return e, false, nil
 	}
@@ -156,9 +165,7 @@ func (s *Store) WorkspaceOutcome(ws, id string) (e event.Event, found bool, err 
 // session, and its workspace's routes never queued it.
 func (s *Store) lastAction(ws string) (e event.Event, found bool, err error) {
 	var data string
-	err = s.r.QueryRow(`SELECT data FROM events WHERE kind IN ('workspace.applied', 'workspace.discarded',
-			'workspace.updated', 'workspace.closed', 'workspace.failed')
-		AND json_extract(data, '$.workspace') = ? ORDER BY seq DESC LIMIT 1`, ws).Scan(&data)
+	err = s.r.QueryRow(lastActionSQL, ws).Scan(&data)
 	if errors.Is(err, sql.ErrNoRows) {
 		return e, false, nil
 	}

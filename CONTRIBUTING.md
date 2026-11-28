@@ -49,7 +49,8 @@ test with `-race`, and the build. Tests that start a child process or wait on re
 - One change per pull request. Keep it small.
 - A fix comes with a test that fails before the fix and passes after it.
 - `make gate` passes, which includes gofmt and `go vet`. Format with `gofmt -w` before you commit.
-- The pull request says what you changed, why, and what you ran to check it.
+- The pull request says what you changed, why, what you ran to check it, and which coding agents
+  you used and what you checked yourself. The pull request template asks for each.
 - A new dependency needs a reason in the commit message. Code shipped in the binary is listed in
   [THIRD_PARTY.md](THIRD_PARTY.md).
 - Read the code rules in [AGENTS.md](AGENTS.md) before a change that touches the gateway, a runner,

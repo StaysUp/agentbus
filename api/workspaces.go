@@ -644,7 +644,15 @@ func (a *API) applyWorkspace(w http.ResponseWriter, r *http.Request, id string) 
 	// same turn still waiting or running (its idempotency key, ApplyKey, makes
 	// requests at once one job), is 202 with the record's event that will be
 	// its outcome. Only an apply that already covers the turn and has ended is
-	// read whole: it is the record's already.
+	// read whole: it is the record's already. A call that made the job says
+	// what it did, queued, as Discard and Close do: the job is read back after
+	// it is recorded, and by then a runner may have taken it, or even ended it.
+	if created {
+		st := applyHead(j)
+		st.State = "queued"
+		writeJSON(w, http.StatusAccepted, st)
+		return
+	}
 	st, err := a.applyStateOf(j)
 	if err != nil {
 		a.internal(w)
@@ -654,7 +662,7 @@ func (a *API) applyWorkspace(w http.ResponseWriter, r *http.Request, id string) 
 		writeJSON(w, http.StatusAccepted, st)
 		return
 	}
-	st.Already = !created
+	st.Already = true
 	writeJSON(w, http.StatusOK, st)
 }
 

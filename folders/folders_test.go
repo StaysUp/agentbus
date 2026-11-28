@@ -210,3 +210,44 @@ func TestExpand(t *testing.T) {
 		}
 	}
 }
+
+// agentbus up and its runner, two processes, open one folders.json: each sees
+// what the other registered, and neither write drops the other's folders.
+func TestRegistrySharedByTwo(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "folders.json")
+	a, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.Machine() != b.Machine() {
+		t.Fatalf("two machine ids: %s %s", a.Machine(), b.Machine())
+	}
+	one, err := a.Register("/work/one")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := b.Path(one); !ok || got != "/work/one" {
+		t.Fatalf("the other process sees %q %v", got, ok)
+	}
+	two, err := b.Register("/work/two")
+	if err != nil {
+		t.Fatal(err)
+	}
+	three, err := a.Register("/work/three")
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, err := Open(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range []string{one, two, three} {
+		if _, ok := c.Path(ref); !ok {
+			t.Fatalf("%s lost from the file", ref)
+		}
+	}
+}

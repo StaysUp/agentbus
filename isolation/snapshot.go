@@ -56,10 +56,12 @@ type Snapshot struct {
 // made by clone records most files by size, time and mode only, and keeps
 // none of their content.
 type Lender interface {
-	// Lend opens the file rel of the folder ref while it is a regular file
-	// with f's size, modification time and mode. same says, once it was
-	// read, whether it still has them; the bytes read count only then.
-	Lend(ref, rel string, f workspace.File) (r io.ReadCloser, same func() bool, ok bool)
+	// Lend opens the file rel of the folder ref while it is, by
+	// workspace.Keeps, the file f a Base that began reading the folder at
+	// taken recorded: same size, times and mode, and changed in no way
+	// since. same says, once it was read, whether it still is; the bytes
+	// read count only then. A taken of 0 proves nothing: nothing is lent.
+	Lend(ref, rel string, f workspace.File, taken int64) (r io.ReadCloser, same func() bool, ok bool)
 }
 
 // ErrSnapshot: the snapshot could not be read, or the copy built from it
@@ -349,7 +351,7 @@ func ChangesetOf(s *Space, name string) (workspace.Changeset, error) {
 	if err != nil {
 		return workspace.Changeset{}, err
 	}
-	cs := workspace.Changeset{Space: s.ID, Checkpoint: hb.Checkpoint.Name, Snapshot: ha.Checkpoint.Root, Files: []workspace.FileChange{},
+	cs := workspace.Changeset{Space: s.ID, Checkpoint: hb.Checkpoint.Name, Snapshot: ha.Checkpoint.Root, BaseTaken: s.BaseTaken, Files: []workspace.FileChange{},
 		Truncated: a.Truncated() || b.Truncated()}
 	for _, rel := range b.Changed(a) {
 		fc := workspace.FileChange{Path: rel}
@@ -408,7 +410,7 @@ func lend(s *Space, rel string, f workspace.File, keep bool) (hash string, saved
 	if s.Lender == nil || s.Ref == "" || !f.Mode.IsRegular() {
 		return "", false, false
 	}
-	r, same, ok := s.Lender.Lend(s.Ref, rel, f)
+	r, same, ok := s.Lender.Lend(s.Ref, rel, f, s.BaseTaken)
 	if !ok {
 		return "", false, false
 	}
