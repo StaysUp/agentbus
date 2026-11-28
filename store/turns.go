@@ -66,6 +66,7 @@ type Turn struct {
 	// IdempotencyKey is the key the turn was started with, so a client that
 	// lost the reply to POST /api/v0/turns can still find its turn.
 	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"The idempotency_key POST /api/v0/turns was sent with, from the turn's turn.started."`
+	RulesVersion   string `json:"rules_version,omitempty" doc:"The version of the permissions this turn took at its turn.started. Absent if the start event did not record a version."`
 	// Usage, CostUSD and CostComplete follow Session's rules, over the
 	// turn's own model.responded events.
 	Usage        *event.Usage `json:"usage" doc:"Sums the turn's replies that carried usage. Null when none did: unknown, never zero."`
@@ -138,7 +139,7 @@ func turnsSQL(where string) string {
 		SELECT s.seq, s.session, s.turn, s.time,
 			COALESCE(json_extract(s.data, '$.agent'), ''), COALESCE(json_extract(s.data, '$.agent_id'), ''),
 			COALESCE(json_extract(s.data, '$.folder'), ''), COALESCE(json_extract(s.data, '$.idempotency_key'), ''),
-			COALESCE(json_extract(s.data, '$.origin'), ''),
+			COALESCE(json_extract(s.data, '$.origin'), ''), COALESCE(json_extract(s.data, '$.rules_version'), ''),
 			u.calls, COALESCE(json_extract(q.data, '$.model'), ''),
 			COALESCE(json_extract(r.data, '$.status'), 0), COALESCE(json_extract(r.data, '$.error'), ''),
 			(SELECT COUNT(*) FROM events n WHERE n.session = s.session AND n.kind = 'turn.started' AND n.turn <> '' AND n.seq <= s.seq)
@@ -243,7 +244,7 @@ func (s *Store) Turns(q TurnQuery) (TurnList, error) {
 		var origin string
 		var replyStatus int64
 		var replyErr string
-		if err := rows.Scan(&t.StartedSeq, &t.Session, &t.ID, &tm, &t.Harness, &t.AgentID, &t.Folder, &t.IdempotencyKey, &origin,
+		if err := rows.Scan(&t.StartedSeq, &t.Session, &t.ID, &tm, &t.Harness, &t.AgentID, &t.Folder, &t.IdempotencyKey, &origin, &t.RulesVersion,
 			&t.ModelCalls, &t.Model, &replyStatus, &replyErr, &t.Number); err != nil {
 			rows.Close()
 			return list, fmt.Errorf("store: read turns: %w", err)
