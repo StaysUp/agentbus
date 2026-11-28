@@ -129,8 +129,25 @@ turns. A `folder` job names a path a person typed for that machine (`spec.folder
 checks that it is a directory it can read, registers it, and answers its reference in
 `result.folder_ref`, or a one-sentence `refused`. It reports its folders again at once. Typing the
 folder is the grant for that session. The server never stores the path: it hands it out with the
-job from memory, so a job taken after the server restarted has none and is refused. One no runner
-took within 15 seconds ends. Control (the server) never reads or writes a folder; it knows one by
+job from memory, so a job taken after the server restarted has none and is refused. A `folder` job
+may instead name a folder the runner already registered (`spec.folder_ref`), which it answers in
+`result.folder_ref` again. Either kind may also carry:
+
+- `spec.base`, a branch, tag or commit of the git repo that holds the folder, and optionally
+  `spec.remote`, a remote of that repo. The runner fetches the branch from the remote first, when
+  one is named, with the machine's own git credentials, then resolves the base to a commit that
+  holds the folder and answers it in `result.base_commit`. The fetch moves that branch's
+  remote-tracking ref and rewrites `.git/FETCH_HEAD`, and the repo's own hooks run as for any
+  fetch and worktree add. A workspace made this way keeps the commit, and each of its turns carries
+  it as `spec.base`: the runner makes the session's copy as a git worktree at that commit.
+- `spec.branches: true`, to list the repo's branches, or with `spec.remote` the remote's, in
+  `result.branches` (`remotes`, `branches` with `name` and `commit`, `current`, `stale` when the
+  remote could not be reached and the list is what the repo last fetched, `truncated`). Listing
+  changes nothing of the repo.
+
+Control never runs git: only the folder's machine does. One no runner took within 15 seconds ends.
+The API waits 15 seconds for a folder job's answer, and 75 when it names a remote, for the fetch
+or the listing. Control (the server) never reads or writes a folder; it knows one by
 its reference. File data goes through the server's blob store, by the hash of its content:
 
 - At the end of each turn the runner puts the copy's changeset (what it holds that differs from

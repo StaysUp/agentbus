@@ -161,10 +161,55 @@ func TestCreateWorkspaceValidation(t *testing.T) {
 		{`{"folder":"/tmp","folder_ref":"fld_0123456789abcdef"}`, http.StatusBadRequest},
 		{`{"folder_ref":"not-a-ref"}`, http.StatusBadRequest},
 		{`{"folder_ref":"fld_0123456789abcdef","machine":"not-a-con"}`, http.StatusBadRequest},
+		// A base: a branch, tag or commit shape, with a sandbox; a remote
+		// only with a base.
+		{`{"folder_ref":"fld_0123456789abcdef","remote":"origin"}`, http.StatusBadRequest},
+		{`{"folder_ref":"fld_0123456789abcdef","base":"main","sandbox":false}`, http.StatusBadRequest},
+		{`{"folder_ref":"fld_0123456789abcdef","base":"main","remote":"-x"}`, http.StatusBadRequest},
+		{`{"folder_ref":"fld_0123456789abcdef","base":"main","remote":"a/b"}`, http.StatusBadRequest},
+		// A base names one folder's repo: a workspace with several takes none.
+		{`{"folders":[{"folder_ref":"fld_0123456789abcdef"},{"folder_ref":"fld_fedcba9876543210"}],"base":"main"}`, http.StatusBadRequest},
 	} {
 		resp, raw := do(t, e.req(t, "POST", "/api/v0/workspaces", strings.NewReader(tc.body)))
 		if resp.StatusCode != tc.want {
 			t.Errorf("POST /workspaces %s: %d %s, want %d", tc.body, resp.StatusCode, raw, tc.want)
+		}
+	}
+}
+
+// A base is refused when its shape could read as an option, a revision
+// expression or a refspec, each with the one fixed sentence.
+func TestCreateWorkspaceBaseShape(t *testing.T) {
+	e := newEnv(t)
+	for _, base := range []string{"-x", "--upload-pack=x", ".hidden", "/abs", "a..b", "a//b", "a/", "a.", "a.lock", "a/.b",
+		"HEAD~1", "main^", "a:b", "a b", "@{1}", "a*", strings.Repeat("a", 256)} {
+		body, _ := json.Marshal(map[string]string{"folder_ref": "fld_0123456789abcdef", "base": base})
+		resp, raw := do(t, e.req(t, "POST", "/api/v0/workspaces", strings.NewReader(string(body))))
+		if resp.StatusCode != http.StatusBadRequest || !strings.Contains(raw, badBase) {
+			t.Errorf("base %q: %d %s, want 400 with the base sentence", base, resp.StatusCode, raw)
+		}
+	}
+	for _, good := range []string{"main", "feature/login", "v1.2.3", "release-2026_11", "0123abc"} {
+		if msg := checkBase(good, "", true); msg != "" {
+			t.Errorf("base %q refused: %s", good, msg)
+		}
+	}
+	if msg := checkBase("main", "origin", true); msg != "" {
+		t.Errorf("remote origin refused: %s", msg)
+	}
+}
+
+// POST /api/v0/folders/branches checks its body before any job: one of
+// folder or folder_ref, their shapes, the machine's and the remote's.
+func TestListBranchesValidation(t *testing.T) {
+	e := newEnv(t)
+	for _, body := range []string{`{}`, `[]`, `{"folder":"/tmp","folder_ref":"fld_0123456789abcdef"}`, `{"folder":"rel"}`,
+		`{"folder_ref":"nope"}`, `{"folder_ref":"fld_0123456789abcdef","machine":"x"}`,
+		`{"folder_ref":"fld_0123456789abcdef","remote":"-x"}`, `{"folder_ref":"fld_0123456789abcdef","remote":"a/b"}`,
+		`{"folder_ref":"fld_0123456789abcdef","extra":1}`} {
+		resp, raw := do(t, e.req(t, "POST", "/api/v0/folders/branches", strings.NewReader(body)))
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("POST /folders/branches %s: %d %s, want 400", body, resp.StatusCode, raw)
 		}
 	}
 }

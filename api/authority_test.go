@@ -387,6 +387,7 @@ var agentRefusals = map[string]string{
 	`API.createSession: turnWorkspaceRefused`:                                  limWhere,
 	`agentLimits.home: "a turn token has no workspace to create a session in"`: limWhere,
 	`API.workspaceAuthority: msg`:                                              limPass,
+	`API.workspaceAuthority: agentBaseRefused`:                                 limWhere,
 	`API.workspaceAuthority: agentDirectRefused`:                               limWhere,
 	`API.workspaceAuthority: agentFolderRefused`:                               limWhere,
 	`API.workspaceAuthority: agentMachineRefused`:                              limWhere,

@@ -61,6 +61,12 @@ type Result struct {
 	// FolderRef, for a folder job: the reference the connector registered
 	// the typed folder under.
 	FolderRef string `json:"folder_ref,omitempty"`
+	// BaseCommit, for a folder job that named a base: the commit it
+	// resolved to in the folder's repo.
+	BaseCommit string `json:"base_commit,omitempty"`
+	// Branches, for a folder job that asked for them: the branches of the
+	// folder's repo, or of one of its remotes.
+	Branches *BranchList `json:"branches,omitempty"`
 	// Home, for a home job: the usual config files its machine's home
 	// holds. Names, kinds and sizes only.
 	Home []HomeFile `json:"home,omitempty"`
@@ -286,4 +292,23 @@ type HomeFile struct {
 	Files int    `json:"files,omitempty" doc:"For a folder: how many files it holds, at any depth."`
 	Part  string `json:"part,omitempty" doc:"Set when only a part of the file is copied: mcpServers for ~/.claude.json."`
 	Over  bool   `json:"over,omitempty" doc:"A folder with more files or bytes than home_files copies (10000 files, 64 MiB): listing it would refuse each turn."`
+}
+
+// BranchList is what a folder job that lists branches found: the repo's
+// remotes, and the branches of the repo itself or of the remote named.
+type BranchList struct {
+	Remotes  []string `json:"remotes" doc:"The remotes of the folder's repo, such as origin, sorted."`
+	Remote   string   `json:"remote,omitempty" doc:"The remote whose branches these are. Absent for the repo's own branches."`
+	Current  string   `json:"current,omitempty" doc:"For the repo's own branches: the branch the folder has checked out. Absent on a detached HEAD."`
+	Branches []Branch `json:"branches" doc:"The branches, most recently changed first for the repo's own, by name for a remote's. At most 1000."`
+	// Stale: the remote could not be reached, so these are the branches the
+	// repo last fetched from it.
+	Stale     bool `json:"stale,omitempty" doc:"True when the remote could not be reached: the branches are the ones the repo last fetched from it, which may be behind."`
+	Truncated bool `json:"truncated,omitempty" doc:"True when there were more than 1000."`
+}
+
+// Branch is one branch: its name and the commit it points at.
+type Branch struct {
+	Name   string `json:"name" doc:"The branch's name, such as feature/login: what base takes."`
+	Commit string `json:"commit" doc:"The commit it points at."`
 }

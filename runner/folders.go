@@ -44,6 +44,14 @@ type FolderSide interface {
 	// registers it: it answers the folder's reference, or why it cannot
 	// be used, in one sentence.
 	FolderJob(ctx context.Context, path string) (ref string, err error)
+	// BaseJob resolves base, a branch, tag or commit of the git repo that
+	// holds the folder ref, to its commit id, after fetching the branch
+	// base from remote when remote is set. Its errors are one sentence each.
+	BaseJob(ctx context.Context, ref, base, remote string) (commit string, err error)
+	// BranchesJob lists the branches of the git repo that holds the folder
+	// ref, or of its remote when remote is set. Its errors are one sentence
+	// each.
+	BranchesJob(ctx context.Context, ref, remote string) (queue.BranchList, error)
 }
 
 // errPartial is a partial apply's refusal.
@@ -82,19 +90,44 @@ func (r *Runner) folderWork(ctx context.Context, at *attempt) queue.Finish {
 		return refuse("this runner is not on the machine of the job's folder", nil)
 	}
 	if at.job.Kind == queue.KindFolder {
-		if sp.Folder == "" {
+		bad := func(msg string) queue.Finish {
+			return queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup,
+				Result: mustJSON(queue.Result{Refused: msg, Status: http.StatusBadRequest})}
+		}
+		ref := sp.FolderRef
+		switch {
+		case sp.Folder != "":
+			var err error
+			if ref, err = r.cfg.FolderSide.FolderJob(ctx, sp.Folder); err != nil {
+				return bad(err.Error())
+			}
+			// Reported before the job ends, so GET /api/v0/folders lists it
+			// by the time the turn that typed it is answered.
+			r.beat(ctx)
+		case ref != "":
+			// A registered folder, checked for its base only.
+			if _, ok := r.cfg.Folders.Path(ref); !ok {
+				return bad(folderUnknown)
+			}
+		default:
 			// Control keeps a typed path in memory only: it restarted since.
 			return refuse("the folder's path is no longer known; send the turn again", nil)
 		}
-		ref, err := r.cfg.FolderSide.FolderJob(ctx, sp.Folder)
-		if err != nil {
-			return queue.Finish{Status: queue.Failed, Reason: queue.ReasonSetup,
-				Result: mustJSON(queue.Result{Refused: err.Error(), Status: http.StatusBadRequest})}
+		res := queue.Result{FolderRef: ref}
+		if sp.Branches {
+			list, err := r.cfg.FolderSide.BranchesJob(ctx, ref, sp.Remote)
+			if err != nil {
+				return bad(err.Error())
+			}
+			res.Branches = &list
+		} else if sp.Base != "" {
+			commit, err := r.cfg.FolderSide.BaseJob(ctx, ref, sp.Base, sp.Remote)
+			if err != nil {
+				return bad(err.Error())
+			}
+			res.BaseCommit = commit
 		}
-		// Reported before the job ends, so GET /api/v0/folders lists it
-		// by the time the turn that typed it is answered.
-		r.beat(ctx)
-		return queue.Finish{Status: queue.Finished, Result: mustJSON(queue.Result{FolderRef: ref})}
+		return queue.Finish{Status: queue.Finished, Result: mustJSON(res)}
 	}
 	places := sp.Places()
 	if len(places) == 0 {

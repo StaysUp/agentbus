@@ -386,7 +386,15 @@ type Spec struct {
 	// old key is read and written only inside MarshalJSON/UnmarshalJSON, never
 	// as a struct field, so a caller cannot set the wrong one.
 	Machine string `json:"machine,omitempty"`
-	Base    string `json:"base,omitempty"`
+	// Base, on a turn: the commit a workspace started from a base begins at
+	// (a git worktree of the folder's repo there). On a folder job: the
+	// branch, tag or commit to resolve, as the person typed it, and Remote
+	// the remote to fetch it from first.
+	Base   string `json:"base,omitempty"`
+	Remote string `json:"remote,omitempty"`
+	// Branches, on a folder job: list the branches of the folder's repo, or
+	// of Remote, instead of resolving a base.
+	Branches bool `json:"branches,omitempty"`
 	// Labels: a runner takes the job only if it has every one.
 	Labels  []string      `json:"labels,omitempty"`
 	Session ids.SessionID `json:"session,omitempty"`

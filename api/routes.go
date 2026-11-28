@@ -14,6 +14,7 @@ import (
 
 	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/harness"
+	"github.com/staysup/agentbus/queue"
 	"github.com/staysup/agentbus/run"
 	"github.com/staysup/agentbus/store"
 	"github.com/staysup/agentbus/toolreg"
@@ -412,6 +413,7 @@ var routes = slices.Concat([]route{
 		tag:     "Workspaces",
 		summary: "Create a workspace",
 		doc: "Create a workspace: where turns run. Send folder (an absolute path, or ~/... on the folder's machine) or folder_ref, optionally machine, and sandbox (true by default: turns run in a copy of the folder behind a wall; false: in the folder as it is). The reply names the workspace; create a session in it (POST /api/v0/sessions), then run the session's turns.\n\n" +
+			"A sandbox workspace with one folder may start from a git base instead of the folder as it is: base names a branch, tag or commit of the folder's repo (POST /api/v0/folders/branches lists them), and remote a remote to fetch the branch from first. The folder's machine resolves it now, so a name the repo does not have, or a commit that does not hold the folder (a folder below the repo's top, at a commit from before it was added), is refused here; the workspace keeps the commit as base_commit. Discard and update are not available for it yet.\n\n" +
 			"A typed folder's machine checks and registers it, and the workspace keeps only its reference. With idempotency_key a retry returns the same workspace and makes nothing new.",
 		body:    WorkspaceRequest{},
 		replies: createReplies(ok(201, store.Workspace{}, "The workspace."), fail(404, "This service keeps no queue, or no such machine."), tooMany, stopping),
@@ -448,7 +450,8 @@ var routes = slices.Concat([]route{
 		idDoc:   "A workspace id (ws_ and 16 hex digits). Another shape gets 404.",
 		doc: "Drop a sandbox workspace's unapplied changes: reset its copy to the last applied state, or to the folder as it was first copied when nothing was applied. The person's folder is never touched, and the conversation stays so the agent can try another way. No body is read.\n\n" +
 			"One apply or discard runs per workspace, so a discard while an apply or discard of the workspace is still running or waiting is refused with 409. A running TURN does not refuse it: the discard waits behind the turn in the lane, and what it drops is worked out when it runs, so a turn that ran while it waited is dropped and marked too. Nothing unapplied answers 200 with already true.\n\n" +
-			"Otherwise the reply comes at once: 202 with state queued and event, the id the record gives the discard's outcome. Nothing waits for it to run. When it has, the record holds that event: workspace.discarded, with the turns it dropped (dropped_turns), or workspace.failed, with why nothing was dropped. GET /api/v0/workspaces/{id}/outcome?event= reads it.",
+			"Otherwise the reply comes at once: 202 with state queued and event, the id the record gives the discard's outcome. Nothing waits for it to run. When it has, the record holds that event: workspace.discarded, with the turns it dropped (dropped_turns), or workspace.failed, with why nothing was dropped. GET /api/v0/workspaces/{id}/outcome?event= reads it.\n\n" +
+			"A workspace started from a git base (base on POST /api/v0/workspaces) cannot discard yet: it answers 400, and nothing is dropped.",
 		replies: []reply{ok(200, DiscardState{}, "Nothing to do: already true, nothing was unapplied."),
 			ok(202, DiscardState{}, "Queued: event names the outcome the record will hold once the discard has run."),
 			badRequest,
@@ -481,7 +484,7 @@ var routes = slices.Concat([]route{
 			"The reply comes at once: 202 with state queued and event, the id the record gives the update's outcome. Nothing waits for the update to run. When it has, the record holds that event, and GET /api/v0/workspaces/{id}/outcome?event= reads it: workspace.updated with its result, or workspace.failed with why nothing was merged.\n\n" +
 			"A clean merge is result updated: the copy now holds both the folder's changes and the session's, and the next apply writes just the session's work. A real conflict (the same lines changed on both sides) is result conflict with the files in conflicts; nothing changed. Ignored files (node_modules and the like) are not merged.\n\n" +
 			"With mode merge, a conflict does not stop it: the copy gets each conflicting file with both sides between conflict markers, the folder baseline moves to the folder now, and the result is merged with the files in unresolved. The markers are labelled this session and your folder. The agent's next turn combines them; until an apply or discard finishes, an apply refuses, as a conflict, any file that still holds them, whatever its path (a rename or a later update does not carry one past it). A conflict markers cannot show (a file that is not text, a link, or one removed on one side) makes the merge change nothing: result conflict, with those files in unmergeable, so no side's change is lost. A merge with no conflict is an update. A merge is refused with 409 while a turn of the workspace runs or waits, so the markers land between turns.\n\n" +
-			"One apply, discard or update runs per workspace, so an update while one of them is still running or waiting is refused with 409. A running TURN does not refuse it: the update waits behind the turn in the lane, and what it folds is worked out when it runs. A workspace that works in the folder as it is answers 400.",
+			"One apply, discard or update runs per workspace, so an update while one of them is still running or waiting is refused with 409. A running TURN does not refuse it: the update waits behind the turn in the lane, and what it folds is worked out when it runs. A workspace that works in the folder as it is answers 400. A workspace started from a git base also answers 400: its copy is a worktree at that commit.",
 		body:    UpdateRequest{},
 		bodyOpt: true,
 		replies: []reply{ok(202, UpdateState{}, "Queued: event names the outcome the record will hold once the update has run."),
@@ -776,6 +779,19 @@ var routes = slices.Concat([]route{
 			"A session's copy is never listed, though a turn may run in one. No body is read.",
 		replies: []reply{ok(200, FolderList{}, "The folders."), badRequest},
 		serve:   plain((*API).listFolders)},
+	{method: "POST", path: "/api/v0/folders/branches", op: "listBranches", action: run.ActAdmin,
+		tag:     "Workspaces",
+		summary: "List a folder's branches",
+		doc: "The git branches a workspace may start from (base on POST /api/v0/workspaces): the folder's repo's own, most recently changed first, " +
+			"with the one checked out as current; or, with remote, the branches that remote has now, by name. Both answers list the repo's remotes. " +
+			"The folder's machine lists them, not the server, and changes nothing of the repo: a remote is asked with git ls-remote, nothing is fetched. " +
+			"A remote that cannot be reached answers the branches the repo last fetched from it, marked stale. A typed folder is checked and registered, as POST /api/v0/workspaces does. " +
+			"The reply waits up to 15 seconds for the folder's machine, and 60 more to reach a remote. Takes the main token only.",
+		body: BranchesRequest{},
+		replies: []reply{ok(200, queue.BranchList{}, "The branches."), badRequest,
+			fail(404, "This service keeps no queue."), tooMany,
+			fail(503, "The folder's machine is offline or did not answer in time."), storeFailed},
+		serve: plain((*API).listBranches)},
 	{method: "GET", path: "/api/v0/folders/{id}/home-files", op: "folderHomeFiles", action: run.ActRead,
 		at:      atBody,
 		idDoc:   "A folder's reference (fld_ and 16 hex digits), from GET /api/v0/folders. Another shape gets 404.",

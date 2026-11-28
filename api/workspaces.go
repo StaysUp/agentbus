@@ -15,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -88,7 +89,7 @@ const (
 )
 
 const (
-	badWorkspace = "the body must be one JSON object with folder (an absolute path or ~/...) or folder_ref, and optionally machine, sandbox and idempotency_key"
+	badWorkspace = "the body must be one JSON object with folder (an absolute path or ~/...) or folder_ref, and optionally machine, sandbox, base, remote and idempotency_key"
 	badFolder    = "folder must be an absolute path or start with ~/, at most 4096 bytes"
 	badSession   = "the body must be one JSON object with workspace, and optionally title and idempotency_key"
 )
@@ -103,6 +104,8 @@ type WorkspaceRequest struct {
 	// under one top, named by the folder's last path part.
 	Folders []WorkspaceFolderRequest `json:"folders,omitempty" doc:"In place of folder and folder_ref: the folders of a workspace with several, 1 to 8, all on the machine named by machine. The workspace keeps each folder in order with a name: the last part of its path, in letters, digits, . _ and - (any other character becomes -), at most 64 bytes, and -2, -3 for a second of the same name. Its turns run at the top of one copy that holds each folder side by side under its name, and their changes name each file by its folder's name and its path inside the folder. Needs sandbox true."`
 	Sandbox *bool                    `json:"sandbox,omitempty" doc:"True (the default): turns run in a copy of the folder behind a wall, and their changes are applied on request. False: turns run in the folder as it is."`
+	Base    string                   `json:"base,omitempty" doc:"Optional: a branch, tag or commit id of the git repo that holds the folder. The workspace starts from that commit instead of the folder as it is: its turns run in a git worktree of the repo at that commit, at the folder's place in it. The folder's uncommitted edits are not in it, and nothing of the folder changes; files git ignores, such as .env, are copied in only when the carry_files setting names them. The folder's machine resolves it when the workspace is made, and the workspace keeps the commit (base_commit), so a later change to the branch does not move it. 1 to 255 characters of A-Z, a-z, 0-9 and . _ / -, not starting with . / or -, without .. or //, not ending with / . or .lock. Needs sandbox true and one folder, not folders."`
+	Remote  string                   `json:"remote,omitempty" doc:"Optional, with base: a remote of the folder's repo, such as origin. The branch base is fetched from it first, on the folder's machine with that machine's git credentials, and the workspace starts from the fetched commit. The fetch updates only that branch's remote-tracking ref, as git fetch does. 1 to 64 characters of A-Z, a-z, 0-9 and . _ -, not starting with . or -."`
 	// IdempotencyKey makes a retry safe: the same key returns the same workspace.
 	IdempotencyKey string `json:"idempotency_key,omitempty" doc:"Optional, 1 to 128 characters of A-Z, a-z, 0-9 and . _ : -. A retry with the same key returns the workspace the key first created and makes nothing new."`
 }
@@ -128,6 +131,42 @@ type SessionCreated struct {
 	Session   string `json:"session" doc:"The new session's id. Name it as session on POST /api/v0/turns to run its turns."`
 	Workspace string `json:"workspace" doc:"The workspace the session's turns run in."`
 	Title     string `json:"title,omitempty" doc:"The session's name, when one was given."`
+}
+
+// Shapes of a workspace's base and remote. A base is a git branch, tag or
+// commit id: a subset of git check-ref-format's rules, so it can never read
+// as an option, a revision expression or a refspec.
+var (
+	baseShape   = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._/-]{0,254}$`)
+	remoteShape = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$`)
+	commitShape = regexp.MustCompile(`^([0-9a-f]{40}|[0-9a-f]{64})$`)
+)
+
+const (
+	badBase         = "base must be a branch, tag or commit id: 1 to 255 characters of A-Z, a-z, 0-9 and . _ / -, not starting with . / or -, without .. or //, not ending with / . or .lock"
+	badRemote       = "remote must be a remote's name, such as origin: 1 to 64 characters of A-Z, a-z, 0-9 and . _ -, not starting with . or -"
+	remoteNoBase    = "remote needs base: the branch to fetch from it"
+	baseNoSandbox   = "base needs sandbox true: a direct session works in the folder as it is"
+	baseManyFolders = "base needs one folder: a workspace with several folders starts from each folder as it is"
+)
+
+// checkBase says what is wrong with a workspace's base and remote, or "".
+func checkBase(base, remote string, sandbox bool) string {
+	switch {
+	case base == "" && remote != "":
+		return remoteNoBase
+	case base == "":
+		return ""
+	case !baseShape.MatchString(base) || strings.Contains(base, "..") || strings.Contains(base, "//") ||
+		strings.HasSuffix(base, "/") || strings.HasSuffix(base, ".") || strings.HasSuffix(base, ".lock") ||
+		strings.Contains(base, "/.") || strings.Contains(base, ".lock/"):
+		return badBase
+	case remote != "" && !remoteShape.MatchString(remote):
+		return badRemote
+	case !sandbox:
+		return baseNoSandbox
+	}
+	return ""
 }
 
 // createWorkspace serves POST /api/v0/workspaces.
@@ -162,6 +201,10 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 	maker := c.origin()
 	if len(body.Folders) > 0 {
+		if body.Base != "" || body.Remote != "" {
+			writeError(w, http.StatusBadRequest, baseManyFolders)
+			return
+		}
 		a.createMultiWorkspace(w, r, body, maker)
 		return
 	}
@@ -178,11 +221,20 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sandbox := body.Sandbox == nil || *body.Sandbox
-	hash := requestHash(withMaker([]string{body.Folder, body.FolderRef, body.Machine, strconv.FormatBool(sandbox)}, maker)...)
+	if msg := checkBase(body.Base, body.Remote, sandbox); msg != "" {
+		writeError(w, http.StatusBadRequest, msg)
+		return
+	}
+	parts := []string{body.Folder, body.FolderRef, body.Machine, strconv.FormatBool(sandbox)}
+	if body.Base != "" {
+		// Only then: a request without a base keeps the hash it always had.
+		parts = append(parts, body.Base, body.Remote)
+	}
+	hash := requestHash(withMaker(parts, maker)...)
 	id := queue.NewID("ws_")
 	a.idempotentCreate(w, event.WorkspaceCreated, "$.workspace", body.IdempotencyKey, hash, workspaceConflict, id,
 		func() (event.Event, bool) {
-			ref, conn := body.FolderRef, body.Machine
+			ref, conn, commit := body.FolderRef, body.Machine, ""
 			if body.Folder != "" {
 				if a.cfg.Queue == nil {
 					writeError(w, http.StatusNotFound, noTurns)
@@ -194,7 +246,8 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
 				}
 				var status int
 				var msg string
-				ref, conn, status, msg = a.typedFolder(r.Context(), body.Folder, body.Machine)
+				ref, conn, commit, status, msg = a.checkFolder(r.Context(), body.Machine,
+					queue.FolderCheck{Path: body.Folder, Base: body.Base, Remote: body.Remote})
 				switch {
 				case status == 0 && msg != "":
 					return event.Event{}, false // the caller went away
@@ -220,12 +273,41 @@ func (a *API) createWorkspace(w http.ResponseWriter, r *http.Request) {
 					return event.Event{}, false
 				}
 			}
+			// A registered folder with a base: its machine resolves the base.
+			if body.Base != "" && body.FolderRef != "" {
+				if a.cfg.Queue == nil {
+					writeError(w, http.StatusNotFound, noTurns)
+					return event.Event{}, false
+				}
+				var status int
+				var msg string
+				_, conn, commit, status, msg = a.checkFolder(r.Context(), conn,
+					queue.FolderCheck{Ref: ref, Base: body.Base, Remote: body.Remote})
+				switch {
+				case status == 0 && msg != "":
+					return event.Event{}, false // the caller went away
+				case status == http.StatusInternalServerError:
+					a.internal(w)
+					return event.Event{}, false
+				case msg != "":
+					writeError(w, status, msg)
+					return event.Event{}, false
+				}
+			}
+			var start *event.Start
+			if body.Base != "" {
+				if !commitShape.MatchString(commit) {
+					writeError(w, http.StatusServiceUnavailable, "the machine's runner did not resolve the base; it may run an older build: update it, and try again")
+					return event.Event{}, false
+				}
+				start = &event.Start{Base: body.Base, Remote: body.Remote, Commit: commit}
+			}
 			sb := sandbox
 			// The folder path is kept only when this machine owns the folder
 			// (DisplayFolder); on a server the reference is the only pointer.
 			return event.Event{ID: "wc_" + id, Kind: event.WorkspaceCreated, Time: a.cfg.Now().UTC(),
 				Workspace: id, Folder: queue.DisplayFolder(a.cfg.Folders, ref, conn),
-				FolderRef: ref, Machine: conn, Sandbox: &sb, Origin: maker}, true
+				FolderRef: ref, Machine: conn, Sandbox: &sb, Start: start, Origin: maker}, true
 		},
 		func(wsID string) {
 			out, ok, err := a.cfg.Store.Workspace(ids.WorkspaceID(wsID))
@@ -246,6 +328,7 @@ const (
 	agentFolderRefused  = "an agent working in a copy may make a workspace only of folders its own workspace holds"
 	// turnWorkspaceRefused: a session opened in a workspace outside the reach.
 	turnWorkspaceRefused = "a turn token opens sessions only in the workspaces in its authority: its machine's when its own workspace works in the folder as it is, else its own workspace and the workspaces its session made"
+	agentBaseRefused     = "an agent working in a copy cannot start a workspace from a git base: resolving it reads, and may fetch into, the person's own repo"
 )
 
 // workspaceAuthority checks that the workspace body asks for is within g's
@@ -293,6 +376,9 @@ func (a *API) workspaceAuthority(w http.ResponseWriter, g run.Grant, body *Works
 	}
 	if body.Sandbox != nil && !*body.Sandbox {
 		return refuse(agentDirectRefused)
+	}
+	if body.Base != "" || body.Remote != "" {
+		return refuse(agentBaseRefused)
 	}
 	holds := map[string]bool{}
 	for _, f := range own.Folders {
