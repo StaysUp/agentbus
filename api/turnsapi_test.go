@@ -76,14 +76,16 @@ func TestTurnsTokenCreatesSessionNotWorkspace(t *testing.T) {
 }
 
 // GET /api/v0/turns/{id} answers one turn with its end: exit code, stopped,
-// unsettled, error and timings. 404 for a turn id with no turn.started.
+// unsettled, error and timings, and what its turn.started recorded: the
+// idempotency key and the rules version (#121), each left out when the start
+// did not record it. 404 for a turn id with no turn.started.
 func TestGetTurn(t *testing.T) {
 	e := turnsEnv(t, nil)
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	code := 0
 	appendAll(t, e.store,
 		event.Event{ID: "e1", Kind: event.RunStarted, Time: now, Session: "s1", Turn: "t_a", Hold: "h1", Harness: "claude", Folder: "/x"},
-		event.Event{ID: "e2", Kind: event.TurnStarted, Time: now, Session: "s1", Turn: "t_a", Text: "hi", Harness: "claude", Folder: "/x", IdempotencyKey: "job-1"},
+		event.Event{ID: "e2", Kind: event.TurnStarted, Time: now, Session: "s1", Turn: "t_a", Text: "hi", Harness: "claude", Folder: "/x", IdempotencyKey: "job-1", RulesVersion: "v-at-start"},
 		event.Event{ID: "e3", Kind: event.RunEnded, Time: now.Add(time.Second), Session: "s1", Turn: "t_a", Hold: "h1", ExitCode: &code, Unsettled: true},
 		event.Event{ID: "e4", Kind: event.RunStarted, Time: now, Session: "s2", Turn: "t_b", Hold: "h2", Harness: "claude", Folder: "/x"},
 		event.Event{ID: "e5", Kind: event.TurnStarted, Time: now, Session: "s2", Turn: "t_b", Text: "go", Harness: "claude", Folder: "/x"},
@@ -108,8 +110,13 @@ func TestGetTurn(t *testing.T) {
 	}
 	tr := one.Turn
 	if tr.ID != "t_a" || tr.Session != "s1" || tr.State != store.TurnFinished || tr.ExitCode == nil || *tr.ExitCode != 0 ||
-		!tr.Unsettled || tr.Stopped || tr.Ended == nil || !tr.Ended.Equal(now.Add(time.Second)) || tr.IdempotencyKey != "job-1" {
+		!tr.Unsettled || tr.Stopped || tr.Ended == nil || !tr.Ended.Equal(now.Add(time.Second)) || tr.IdempotencyKey != "job-1" ||
+		tr.RulesVersion != "v-at-start" {
 		t.Errorf("t_a: %+v", tr)
+	}
+	// A turn.started with no rules version: the field is left out, not empty.
+	if resp, out := do(t, e.req(t, "GET", "/api/v0/turns/t_b", nil)); resp.StatusCode != 200 || strings.Contains(out, `"rules_version"`) {
+		t.Errorf("t_b: %d %s, want no rules_version", resp.StatusCode, out)
 	}
 	if _, one = get("/api/v0/turns/t_b"); one.Turn.State != store.TurnRunning || one.Turn.Ended != nil || one.Turn.Unsettled {
 		t.Errorf("t_b: %+v", one.Turn)
