@@ -56,7 +56,7 @@ func TestFinisherPassReadsPastFailedFinishes(t *testing.T) {
 		if _, _, err := q.Create(queue.DefaultTeam, queue.KindTurn, "", queue.Spec{Harness: "claude", Prompt: "x"}, queue.Links{}); err != nil {
 			t.Fatal(err)
 		}
-		j, a, ok, _, err := q.Take(r.ID, time.Minute, false)
+		j, a, ok, _, err := q.Take(r.ID, time.Minute, queue.LaneInteractive)
 		if err != nil || !ok {
 			t.Fatalf("take %d: %v %v", i, ok, err)
 		}

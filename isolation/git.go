@@ -2,6 +2,7 @@ package isolation
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"io/fs"
@@ -45,7 +46,7 @@ func (gitBackend) Open(r Request) (*Space, error) {
 	if r.Snapshot != nil {
 		return nil, &Unavailable{Git, "a worktree needs the folder's repo on this machine"}
 	}
-	s := &Space{ID: r.ID, Backend: Git, Root: root, Dir: root, Workdir: r.Workdir}
+	s := &Space{ID: r.ID, Backend: Git, Root: root, Dir: root, Workdir: r.Workdir, stop: ctxOf(r)}
 	rel, source := ".", ""
 	if r.Folder != "" {
 		repo, in, head, ok := repoOf(r.Folder)
@@ -64,7 +65,14 @@ func (gitBackend) Open(r Request) (*Space, error) {
 	if err := removeState(s); err != nil {
 		return nil, err
 	}
-	if err := makeWorktree(s.Repo, s.Base, root); err != nil {
+	// A worktree here with no record is one a failed attempt or a failed
+	// close left, perhaps part removed: it is removed, never used (remove.go).
+	if err := retireWorktree(s); err != nil {
+		return nil, err
+	}
+	if err := makeWorktree(s.stopCtx(), s.Repo, s.Base, root); err != nil {
+		// A stop can end git part way: what it made goes, as on any failure.
+		gitBackend{}.Close(s)
 		return nil, err
 	}
 	undo := func(err error) (*Space, error) {
@@ -78,14 +86,15 @@ func (gitBackend) Open(r Request) (*Space, error) {
 		return undo(&Refusal{refusedNotInCommit})
 	}
 	if source != "" {
-		if err := carry(s.Repo, source, root); err != nil {
+		if err := carry(s.stopCtx(), s.Repo, source, root); err != nil {
 			return undo(err)
 		}
 	}
-	if err := s.save(); err != nil {
+	if _, err := checkpoint(s, Base, gitBackend{}); err != nil {
 		return undo(err)
 	}
-	if _, err := checkpoint(s, Base, gitBackend{}); err != nil {
+	// The record last, once the worktree and its Base are made (remove.go).
+	if err := s.record(); err != nil {
 		return undo(err)
 	}
 	return s, nil
@@ -105,7 +114,7 @@ func (gitBackend) take(s *Space, t *trees, prev *treeState, save workspace.Hashe
 			if info.Mode()&fs.ModeSymlink != 0 || info.Mode().IsRegular() && info.Size() <= MaxFileDiff {
 				return save(rel, p, info)
 			}
-			return workspace.Hash(rel, p, info)
+			return workspace.HashContext(s.stopCtx(), rel, p, info)
 		}
 		snap, err := workspace.Walk(s.Dir, nil, keep)
 		if err != nil {
@@ -137,10 +146,23 @@ func (gitBackend) Close(s *Space) error {
 	if s.Root != filepath.Join(s.Workdir, s.ID) {
 		return ErrOutside
 	}
-	if err := RemoveWorktree(s.Workdir, s.Repo, s.Root); err != nil {
+	return retireWorktree(s)
+}
+
+// retireWorktree removes s's worktree as retire removes a copy: the record
+// and the worktree move aside, the record first, and a worktree that cannot
+// be moved keeps its record, whole (remove.go). Git's own entry for it goes
+// after, by prune, once the folder is gone. A worktree git locked (a stopped
+// `git worktree add` leaves "initializing") is unlocked first: prune and add
+// both refuse a locked one, even with its folder gone. Unlock finds it by
+// its path either way (measured on git 2.37.1).
+func retireWorktree(s *Space) error {
+	_, _ = git(s.Repo, "worktree", "unlock", s.Root)
+	if err := retire(s); err != nil {
 		return err
 	}
-	return removeState(s)
+	_, err := git(s.Repo, "worktree", "prune")
+	return err
 }
 
 // carry copies into the worktree at root what git status lists in the
@@ -148,7 +170,7 @@ func (gitBackend) Close(s *Space) error {
 // file, not the ignored ones. Paths are from the repo's top, as git status
 // gives them. Every write goes through root as a root, so no symbolic link
 // in the worktree can take one outside it.
-func carry(repo, folder, root string) error {
+func carry(ctx context.Context, repo, folder, root string) error {
 	out, err := gitOut(folder, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames",
 		"--ignore-submodules=all", "--", ".")
 	if err != nil {
@@ -160,6 +182,9 @@ func carry(repo, folder, root string) error {
 	}
 	defer rt.Close()
 	for _, e := range strings.Split(string(out), "\x00") {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if len(e) < 4 {
 			continue
 		}
@@ -252,11 +277,19 @@ func gitOut(dir string, args ...string) ([]byte, error) {
 // git runs git in dir with args, and answers its stdout, or an error with
 // the start of git's own words.
 func git(dir string, args ...string) ([]byte, error) {
-	cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+	return gitContext(context.Background(), dir, args...)
+}
+
+// gitContext is git that ends git when ctx ends, with ctx's error.
+func gitContext(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
 	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0")
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	if err := cmd.Run(); err != nil {
+		if cerr := ctx.Err(); cerr != nil {
+			return out.Bytes(), cerr
+		}
 		msg := strings.TrimSpace(errb.String())
 		if len(msg) > 500 {
 			msg = msg[:500]
@@ -309,7 +342,7 @@ func repoOf(folder string) (repo, rel, head string, ok bool) {
 // makeWorktree adds a detached git worktree of repo at base, in dir. A dir
 // that is already a worktree, from an earlier attempt of the same job, is
 // used as it is.
-func makeWorktree(repo, base, dir string) error {
+func makeWorktree(ctx context.Context, repo, base, dir string) error {
 	if gitTop(dir) {
 		return nil
 	}
@@ -318,7 +351,7 @@ func makeWorktree(repo, base, dir string) error {
 	}
 	// base never starts with a dash (the control plane checks it), and dir
 	// is the runner's own absolute path.
-	_, err := git(repo, "worktree", "add", "--detach", dir, base)
+	_, err := gitContext(ctx, repo, "worktree", "add", "--detach", dir, base)
 	return err
 }
 
@@ -334,6 +367,8 @@ func RemoveWorktree(workdir, repo, dir string) error {
 	}
 	top, _, _ := strings.Cut(rel, string(filepath.Separator))
 	dir = filepath.Join(workdir, top)
+	// A worktree git locked is unlocked first: remove and prune refuse it.
+	_, _ = git(repo, "worktree", "unlock", dir)
 	if _, err := os.Stat(dir); errors.Is(err, fs.ErrNotExist) {
 		_, _ = git(repo, "worktree", "prune")
 		return nil

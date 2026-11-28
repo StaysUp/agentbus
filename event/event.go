@@ -46,6 +46,15 @@ const (
 	// without that history. Error says why.
 	ReplayFailed Kind = "replay.failed"
 
+	// HistoryShortened: own replay shortened the history it puts in front of
+	// a turn, to keep it within the history budget. History says the step.
+	// HistoryCompacted: the gateway's verdict on one main-thread call, that
+	// its harness had compacted it; it went on as sent. Own replay reads it
+	// in a turn that carries a history; in a turn with none it applies the
+	// same test to the stored request (replay's compacted).
+	HistoryShortened Kind = "history.shortened"
+	HistoryCompacted Kind = "history.compacted"
+
 	// ToolRefused: the gateway refused a tool call of a run's turn, because
 	// its command matched a forbid entry of permissions.toml. The agent did
 	// not run it. Rule names the entry.
@@ -179,6 +188,17 @@ const (
 	// WorkspaceClosed records removal of a sandbox copy. The next turn rebuilds
 	// from the folder; the record and conversation stay.
 	WorkspaceClosed Kind = "workspace.closed"
+	// WorkspaceFailed records a discard, update or close of a sandbox
+	// workspace that ended without doing its work: the runner refused it, or
+	// was lost while it ran, or was removed before it took it. failed says
+	// which action and why. It takes the id the action's success would have
+	// taken (workspace.discarded, workspace.updated or workspace.closed), so
+	// one request has one outcome event in the record, whichever it is. An
+	// apply records its own refusals in workspace.applied.
+	WorkspaceFailed Kind = "workspace.failed"
+	// WorkspaceKept records a put-away that kept the copy: when it came due,
+	// the workspace was not quiet or not settled. put_away says why.
+	WorkspaceKept Kind = "workspace.kept"
 	// WorkspaceSnapshot is the applied state of a workspace whose record was
 	// written before 0.6.6, when its outcome events did not yet carry it all
 	// (a turn's changeset, an apply's to, an update's head and checkpoints):
@@ -207,6 +227,15 @@ const (
 	// The changes and the reply are elsewhere (turn.changed, the job result).
 	TurnEnded Kind = "turn.ended"
 
+	// CommandEnded: control's record that a command an agent handed to
+	// AgentBus (POST /api/v0/commands, the run_command tool) ended, whatever
+	// its outcome, once per command. Command holds its id, line, exit code,
+	// the end of its output and how long it ran; State is how it ended and
+	// Error why. Turn is the command's id (c_...), the key its delivery on
+	// watches, and Origin the turn that asked for it. Like turn.ended it is a
+	// reactor trigger and carries no session.
+	CommandEnded Kind = "command.ended"
+
 	// ChangesPreviewed: what applying a workspace's changes to the person's
 	// folder would do now, the dry run's result, stored so GET
 	// /workspaces/{id}/changes serves it from the record (one source) and pages
@@ -233,7 +262,9 @@ type KindInfo struct {
 // Kinds lists every framework kind. A program's own kind, x.<program>.<name>,
 // is not one of them. A test checks that every Kind constant is listed.
 var Kinds = []KindInfo{
-	{WorkspaceClosed, "A sandbox workspace's copy was removed (POST /api/v0/workspaces/{id}/close). The record and turns stay. The next turn rebuilds from the folder. Resets all apply and update baselines of the removed copy. Stored once per close.", []string{"workspace"}},
+	{WorkspaceClosed, "A sandbox workspace's copy was removed, by POST /api/v0/workspaces/{id}/close or by AgentBus putting it away. The record and turns stay. The next turn rebuilds from the folder. Resets all apply and update baselines of the removed copy. Stored once per close. put_away is present when AgentBus put the copy away by itself: the on and the event that queued it, when it was queued and when it came due.", []string{"workspace"}},
+	{WorkspaceFailed, "A discard, update or close of a sandbox workspace ended without doing its work (POST /api/v0/workspaces/{id}/discard, /update or /close): workspace names it, and failed holds the action (discard, update or close), why it failed (error), and who asked. The action may be sent again. It has the id the action's success event would have had, the event the route's 202 named, so one request has one outcome. A refused apply is not one: workspace.applied records it, with result refused and the files. Stored once per action. Show it as an error.", []string{"workspace", "failed"}},
+	{WorkspaceKept, "AgentBus came to put a sandbox workspace's copy away and kept it: workspace names it, and put_away holds the on and the event that queued the put-away, when it was queued, when it came due, and why it kept the copy (putting copies away was turned off, a put-away for a later event decides instead, other work waiting or running, the workspace used since, work not applied or discarded, no copy, or the record could not be read). Nothing was removed. Stored once per put-away.", []string{"workspace", "put_away"}},
 	{TurnStarted, "A person's message started a turn. Stored once per turn id; text holds their words; agent and folder name the run's agent and folder, empty when no run started the session. A turn started by POST /api/v0/turns has its turn.started stored by the API, with the prompt as sent, before its agent starts.", nil},
 	{ModelRequested, "The harness sent a request to the model: model and tools_offered.", nil},
 	{ModelResponded, "The model replied: status, text, stop_reason, usage, latency_ms, cost_usd, or error.", nil},
@@ -248,6 +279,8 @@ var Kinds = []KindInfo{
 	{RunEnded, "A run's turn ended: its child exited, or could not start. hold, exit_code, resume_id, turn, state (finished, failed or stopped), error when it failed (the agent's own error line from its stderr, or plain words in its place for a failure its harness knows, else its exit code, or why it could not start), stopped when the person stopped the turn, error_tail (the last lines the agent wrote to stderr, when it exited with an error), and unsettled when the gateway could not confirm all of the turn's calls were stored. Also stored at start, with unsettled and state failed, for a child the previous service left running, and by control for a turn whose runner stopped answering.", []string{"session"}},
 	{SchemaUnexpected, "The vendor sent a shape the adapter does not know: unexpected, as names only. Show it as a quiet warning.", []string{"unexpected"}},
 	{ReplayFailed, "A model request of a replayed turn (a turn.started with replay_from) could not be given the earlier turn's history: error says why, such as the harness's request layout not being one the gateway knows. The gateway refused that request with 400 and did not send it to the vendor, so the turn fails rather than continue without its history. Show it as an error.", []string{"error"}},
+	{HistoryShortened, "Own replay shortened the history it put in front of the turn, to keep it within the history budget (budget of GET /api/v0/settings/compaction, a share of the model's window, 0.4 by default). history holds the step: from (the earlier turn whose history it is), model, window_tokens, budget_tokens, before_tokens and after_tokens (rough counts, AgentBus's own, not the vendor's), results_shortened and inputs_shortened (long tool results and tool-call inputs made a stub that says where the full text is), turns_summarised (the oldest turns folded into AgentBus's summary), turns_left_out (the oldest logs left out of the summary for one line, so it stays bounded), newest_shortened (the newest earlier turn was shortened too: the budget wins over keeping it whole) and turns_whole (the newer turns left whole). Stored on the turn's first main request, once per step (again if the service restarted inside the turn). Each step is frozen: later turns carry the shortened history byte for byte, so the prompt cache keeps working. The record keeps every byte of every call; the turn's stored requests are what the model saw. Show it as a quiet line.", []string{"history"}},
+	{HistoryCompacted, "The gateway's verdict on one model call of a turn's main thread: its harness had compacted its context, so the request was not in the layout a fresh process sends (the turn's prompt where a fresh process puts it). It went on as the harness sent it (codex's under the session's thread id). Stored on each such call, with its exchange, in any turn, replayed or not. Own replay builds the next turn from the record, from the turn's last call before it, never from the harness's summary. In a replayed turn this event is what says a call was compacted; in a turn with no earlier history, whose stored requests are the agent's own, own replay applies the same layout test to the stored request, so a record from before 0.6.7 reads the same.", []string{"exchange"}},
 	{ToolRefused, "The gateway refused a tool call before the agent could run it, because its command matched a forbid entry of permissions.toml: tool_id, tool_name, tool_input, rule (the entry), and text (what the model is told in place of the output). The call's tool.requested is still stored, and its tool.completed carries that text. Show it as a warning.", []string{"tool_id", "rule"}},
 	{ApprovalRequested, "The gateway refused a tool call because its command matched an ask entry of permissions.toml, and recorded it for a person: approval (its id), tool_id, tool_name, rule (the first ask entry), commands (every ask command in the reply) and rules (the ask entries they matched); text lists the commands one per line. The turn ends with the call refused; nothing is held. Control derives the pending list from the record, a requested with no approval.decided for the same approval id, so it works when the gateway that refused runs on a separate runner. GET /api/v0/approvals lists it and POST /api/v0/approvals/{id} answers it: allow moves the entries from ask to allow and continues the session so the agent can run them; refuse records the decision. The call's tool.requested is still stored, and its tool.completed carries the refusal. Show it as a prompt to allow or refuse.", []string{"approval", "tool_id", "commands", "rules"}},
 	{ApprovalDecided, "A recorded ask command was answered, written by control when a person answers: approval ties it to its approval.requested, rule is the first ask entry, and text says how it ended (allowed or refused) and who answered. Show it beside the request.", []string{"approval"}},
@@ -277,6 +310,7 @@ var Kinds = []KindInfo{
 	{WorkspaceUpdated, "The person's folder as it is now was merged into a sandbox workspace's copy (POST /api/v0/workspaces/{id}/update), so the session's work sits on top of it and the next Apply writes only that work: workspace and session name it, and updated holds the result (updated, merged or conflict), on a clean update or a merge the new baseline changeset (from, the folder now) and the merged changeset (to) with the folded turns, on a merge the files left with conflict markers (unresolved), on a conflict the files that conflicted, and who asked. Nothing is written to the folder; the copy's private git does the three-way merge. Stored once per update.", []string{"workspace", "updated"}},
 	{WorkspaceSnapshot, "The applied state of a workspace whose record was written before 0.6.6, when its outcome events did not yet carry all of it: workspace names it, and snapshot holds its appliable turns with their changesets and checkpoints, how far a successful apply went and what it wrote, the update in force and whether a merge left conflict markers. Written once, when control starts, from what control held then. It stands for every turn.changed, apply, discard and update of the workspace before it; later ones add to it.", []string{"workspace", "snapshot"}},
 	{TurnEnded, "A turn job ended, whatever its outcome: control writes it once per turn job for every ended turn (finished, failed, stopped, cancelled or its runner lost), so a reactor (a delivery) learns a turn ended from the record, not from the scheduler's job table. It is keyed on the turn and carries no session -- a reactor trigger, not part of a session's event stream. state is how it ended and error says why. The changes and the reply are not here: those are turn.changed and the job's result.", []string{"turn", "state"}},
+	{CommandEnded, "A command an agent handed to AgentBus ended (POST /api/v0/commands, the run_command tool), whatever its outcome: finished, failed (a non-zero exit, its time limit, or its runner lost) or stopped. Control writes it once per command, after the command's job has ended. turn is the command's id (c_...), the key its delivery on watches, and origin the turn that asked for it. command holds the line, exit_code, output (the end of stdout and stderr together, at most 16 KiB), output_bytes (all it wrote), timed_out and duration_ms; state is how it ended and error says why. No session: the asking session gets the result as a later turn.", []string{"turn", "state", "command"}},
 	{ChangesPreviewed, "What applying a workspace's changes to the person's folder would do now, the dry run of POST /api/v0/workspaces/{id}/apply computed on the folder's machine, nothing written: previewed holds the files it would write or remove (with diffs), the conflicts it would refuse, the turn it would apply up to and the turns it would carry. workspace names the workspace it is of (its session field is empty, so it never enters the session namespace). Stored so GET /api/v0/workspaces/{id}/changes serves and pages it from the record, as of this event's time; a new one is stored when a preview runs again (the workspace changed, or a fresh one was asked for). The file list can be cut (truncated) when too many to send; count still counts them all.", []string{"workspace", "previewed"}},
 	{PlanUsage, "How much of a subscription's plan is used in one of its windows, as the vendor said in the headers of a model reply that carried control's credential for that subscription: plan holds the subscription (the harness, such as claude), the connect its credential came from, the window, its length in minutes, the percent used, when it resets and the vendor's status word. " +
 		"exchange names the call it was read from. Stored when the reading changes, and again every 10 minutes at most while calls keep it the same. " +
@@ -343,6 +377,10 @@ type Usage struct {
 	// CostUSD is what the vendor says it charged for the call, in US
 	// dollars: OpenRouter's usage.cost. Nil when it said nothing.
 	CostUSD *float64 `json:"cost_usd,omitempty" doc:"What the vendor says it charged for the call, in US dollars, such as OpenRouter's usage.cost. Absent when it said nothing; then the cost comes from the price table."`
+	// CostPartial means CostUSD leaves out part of the charge: an OpenRouter
+	// call on the person's own provider key (BYOK) whose reply gave
+	// OpenRouter's fee but not the provider's charge.
+	CostPartial bool `json:"cost_partial,omitempty" doc:"cost_usd leaves out part of the charge, such as the provider's charge on an OpenRouter call with your own key (BYOK) that OpenRouter did not report. The call's cost is then incomplete."`
 }
 
 // WorkspaceFolderEntry is one folder of a workspace with several, on its
@@ -417,6 +455,8 @@ type Event struct {
 	Server      string       `json:"server,omitempty" doc:"On tools.listed: the tool server's name, as the harness puts it in tool names: agentbus."`
 	Tools       []string     `json:"tools,omitempty" doc:"On tools.listed: the names of the tools the server served the turn, in its order. Absent when it served none."`
 	ToolsHidden []HiddenTool `json:"tools_hidden,omitempty" doc:"On tools.listed: the harness's own tools the turn does not get, each with why. Absent when none are hidden."`
+	// History, only on history.shortened: the step own replay took.
+	History *HistoryStep `json:"history,omitempty" doc:"On history.shortened: how own replay shortened the history it put in front of the turn."`
 	// Added, only on context.added: each piece AgentBus gave the turn.
 	Added []Added `json:"added,omitempty" doc:"On context.added: each piece AgentBus gave the turn besides the person's words, in the order the agent got them."`
 	// Call, only on call.refused and vendor.called: method and vendor path.
@@ -473,7 +513,7 @@ type Event struct {
 	// is the workspace's mode, only on workspace.created: a pointer so its
 	// false (the person's real folder) is always present, told apart from a
 	// kind that carries no mode at all.
-	Workspace string `json:"workspace,omitempty" doc:"On workspace.created, workspace.applied, workspace.discarded and turn.started: the workspace the turn ran in (ws_ and 16 hex digits)."`
+	Workspace string `json:"workspace,omitempty" doc:"On workspace.created, workspace.applied, workspace.discarded, workspace.updated, workspace.closed, workspace.failed and turn.started: the workspace the turn ran in (ws_ and 16 hex digits)."`
 	Machine   string `json:"machine,omitempty" doc:"On workspace.created and folder.registered: the connector that owns the folder (con_ and 16 hex digits). Absent when no connector owns the folder, as for hook or gateway traffic."`
 	Sandbox   *bool  `json:"sandbox,omitempty" doc:"On workspace.created: the workspace's mode, true for a copy behind a wall and false for the person's real folder. Always present on workspace.created; absent on every other kind."`
 	// Folders, only on workspace.created of a workspace with several folders:
@@ -520,8 +560,12 @@ type Event struct {
 	Changes *TurnChanges `json:"changes,omitempty" doc:"On turn.changed: every file the turn added, modified or deleted, with diffs."`
 	// Applied, on turn.applied and workspace.applied: what the apply did.
 	Applied *Applied `json:"applied,omitempty" doc:"On turn.applied and workspace.applied: the turns applied, the from/to changesets, who asked, the result and the files."`
+	// PutAway, on workspace.closed and workspace.kept: a put-away's why.
+	PutAway *PutAway `json:"put_away,omitempty" doc:"On a workspace.closed AgentBus asked for itself, and on workspace.kept: the on and the record event that queued the put-away, when it was queued and came due, and on workspace.kept why the copy was kept."`
 	// Discarded, only on workspace.discarded: what the discard dropped.
 	Discarded *Discarded `json:"discarded,omitempty" doc:"On workspace.discarded: the changeset the workspace was reset to, the turns dropped, and who asked."`
+	// Failed, only on workspace.failed: the action that did nothing, and why.
+	Failed *Failed `json:"failed,omitempty" doc:"On workspace.failed: the action (discard, update or close), why it failed, and who asked."`
 	// Updated, only on workspace.updated: what the update from the folder did.
 	Updated *Updated `json:"updated,omitempty" doc:"On workspace.updated: the result, the new baseline (from) and merged (to) changesets on a clean update, the folded turns, the conflicting files on a conflict, and who asked."`
 	// Previewed, only on changes.previewed: the apply dry run's result.
@@ -537,13 +581,13 @@ type Event struct {
 	// Unsettled, only on a run's run.ended: the gateway could not
 	// confirm that all of the turn's model calls were stored (it gave up
 	// waiting, or a queue was full), so the turn may be missing calls.
-	Unsettled bool `json:"unsettled,omitempty" doc:"On a run's run.ended: the gateway could not confirm that every model call of the turn was stored, so the turn may be missing calls. Own replay does not continue from such a turn."`
+	Unsettled bool `json:"unsettled,omitempty" doc:"On a run's run.ended: the gateway could not confirm that every model call of the turn was stored, so the turn may be missing calls. Own replay does not continue from such a turn: the next turn gets the earlier turns as plain text (continuity transcript)."`
 	// Stopped, only on a run's run.ended: the person stopped the turn
 	// (POST /api/v0/turns/{id}/stop) while its child ran.
 	Stopped bool `json:"stopped,omitempty" doc:"On a run's run.ended: the person stopped the turn with POST /api/v0/turns/{id}/stop while its child ran. The session's next turn continues after it, told that the person stopped it."`
 	// Continuity, only on a next turn's turn.started: how it reaches the
 	// session's earlier turns, "replay", "resume" or "transcript".
-	Continuity string `json:"continuity,omitempty" doc:"On the turn.started of a session's next turn started by POST /api/v0/turns: replay (own replay, see replay_from), resume (the vendor's resume_id) or transcript (the turn's harness differs from the previous turn's, so it got the earlier turns as plain text, see context). Absent on a first turn."`
+	Continuity string `json:"continuity,omitempty" doc:"On the turn.started of a session's next turn started by POST /api/v0/turns: replay (own replay, see replay_from), resume (the vendor's resume_id) or transcript (the turn's harness differs from the previous turn's, or the previous turn's history cannot be rebuilt, so it got the earlier turns as plain text, see context). Absent on a first turn."`
 	// Context, only on the turn.started of a next turn: the earlier turns as
 	// plain text when its continuity is transcript (before 0.5, then the
 	// person's shell commands since the previous turn). The agent's prompt
@@ -558,6 +602,13 @@ type Event struct {
 	// Unkept, only on a run's turn.started: settings its agent has no way to
 	// keep, which the turn runs without, each one plain sentence.
 	Unkept []string `json:"unkept,omitempty" doc:"On a run's turn.started: the settings this turn's agent has no way to keep, so it ran without them, each in one plain sentence, such as agy's subagents. Show it as a quiet warning. Absent when it kept them all."`
+	// CommandsRun and CommandLimit, only on a run's turn.started: whether a
+	// command AgentBus runs for this turn (POST /api/v0/commands) may run, and
+	// why not (harness.CommandLimit), decided at launch from the turn's
+	// effective limits. A turn.started without CommandsRun (an older runner's)
+	// takes no command.
+	CommandsRun  bool   `json:"commands_run,omitempty" doc:"On a run's turn.started: a command this turn hands to AgentBus (POST /api/v0/commands) may run, since it would get no more than the turn itself may do. Absent: it is refused, with command_limit saying why."`
+	CommandLimit string `json:"command_limit,omitempty" doc:"On a run's turn.started without commands_run: why a command this turn hands to AgentBus would get more than the turn itself may do, such as edits forbidden or the harness's own sandbox."`
 	// IdempotencyKey and RequestHash, only on the turn.started of a turn
 	// started by POST /api/v0/turns with idempotency_key: the client's key,
 	// and the SHA-256 of the request's fields, so a retry with the same key
@@ -583,16 +634,17 @@ type Event struct {
 // Command is one shell command the person ran in a session's copy
 // (command.ran, retired in 0.5: only in older records).
 type Command struct {
-	ID   string `json:"id" doc:"The command's id, as the 0.4 route answered it: cmd_ and 16 hex digits."`
+	ID   string `json:"id" doc:"The command's id: on command.ended c_ and 16 hex digits, as POST /api/v0/commands answered it; on the retired events cmd_ and 16 hex digits."`
 	Line string `json:"line" doc:"The command line as sent, run by /bin/sh -c."`
 	// The rest only on command.ran.
-	ExitCode    int    `json:"exit_code,omitempty" doc:"On command.ran: its exit code, or 128 plus the signal that ended it. Absent means 0."`
-	TimedOut    bool   `json:"timed_out,omitempty" doc:"On command.ran: it ran past its time limit and was ended."`
+	ExitCode    int    `json:"exit_code,omitempty" doc:"On command.ran and command.ended: its exit code, or 128 plus the signal that ended it. Absent means 0 (on command.ended, or that it never ran: see state)."`
+	TimedOut    bool   `json:"timed_out,omitempty" doc:"On command.ran and command.ended: it ran past its time limit and was ended."`
+	Output      string `json:"output,omitempty" doc:"On command.ended: the end of what it wrote to stdout and stderr together, at most 16 KiB."`
 	Stdout      string `json:"stdout,omitempty" doc:"On command.ran: what it wrote to stdout, at most 64 KiB, the start kept."`
 	Stderr      string `json:"stderr,omitempty" doc:"On command.ran: what it wrote to stderr, at most 64 KiB, the start kept."`
-	OutputBytes int64  `json:"output_bytes,omitempty" doc:"On command.ran: all the bytes it wrote to stdout and stderr, kept or not."`
+	OutputBytes int64  `json:"output_bytes,omitempty" doc:"On command.ran and command.ended: all the bytes it wrote to stdout and stderr, kept or not."`
 	Truncated   bool   `json:"truncated,omitempty" doc:"On command.ran: some output was cut, as stdout or stderr went past 64 KiB."`
-	DurationMS  int64  `json:"duration_ms,omitempty" doc:"On command.ran: how long it ran."`
+	DurationMS  int64  `json:"duration_ms,omitempty" doc:"On command.ran and command.ended: how long it ran."`
 }
 
 // TurnChanges is what one turn changed (turn.changed).
@@ -663,6 +715,24 @@ type RefusedFile struct {
 	Path    string `json:"path"`
 	Why     string `json:"why"`
 	Markers bool   `json:"markers,omitempty" doc:"The file still holds the conflict markers an update's merge left (<<<<<<< this session ... >>>>>>> your folder), rather than having changed in the folder: the agent combining it in a turn clears it, an update does not."`
+}
+
+// PutAway is why AgentBus put a workspace's copy away, or kept it
+// (workspace.closed, workspace.kept).
+type PutAway struct {
+	On     string    `json:"on" doc:"The on that queued the put-away: the built-in one over workspace.applied or workspace.discarded."`
+	Event  string    `json:"event" doc:"The record event the on fired on: the apply or discard that settled the workspace."`
+	Queued time.Time `json:"queued" doc:"When the put-away was queued."`
+	Due    time.Time `json:"due,omitempty" doc:"When it came due: the event's time plus the quiet time of the settings ([workspaces] put_away_after_minutes)."`
+	Kept   string    `json:"kept,omitempty" doc:"On workspace.kept: why the copy was kept."`
+}
+
+// Failed is a workspace action that ended without doing its work
+// (workspace.failed).
+type Failed struct {
+	Action string `json:"action" doc:"discard, update or close: the route the request came to."`
+	Error  string `json:"error" doc:"Why it did nothing, in plain words."`
+	By     *By    `json:"by,omitempty" doc:"Who asked, by the kind of token it came with. Never the token itself. Absent on a close AgentBus asked for itself."`
 }
 
 // Discarded is what one discard dropped (workspace.discarded).
@@ -748,6 +818,22 @@ const (
 type HiddenTool struct {
 	Name string `json:"name" doc:"The tool's name, as the harness names it, such as Task."`
 	Why  string `json:"why" doc:"Why the turn does not get it, such as replaced by AgentBus tools."`
+}
+
+// HistoryStep is one step of own replay's history budget (history.shortened).
+type HistoryStep struct {
+	From             string `json:"from" doc:"The earlier turn whose history this turn carries."`
+	Model            string `json:"model,omitempty" doc:"The model the window is for, from the turn's request."`
+	WindowTokens     int    `json:"window_tokens" doc:"The model's assumed context window in tokens (the context view's window_tokens)."`
+	BudgetTokens     int    `json:"budget_tokens" doc:"The history budget in tokens: the budget share of window_tokens. Over it, the history is shortened to about half of it."`
+	BeforeTokens     int    `json:"before_tokens" doc:"The history's size before the step: a rough count (bytes / 2.66, an image counted as 1,600), not the vendor's."`
+	AfterTokens      int    `json:"after_tokens" doc:"The history's size after the step, counted the same way."`
+	ResultsShortened int    `json:"results_shortened,omitempty" doc:"Tool results over 2 KiB made a stub: what it was, how it began, and where the agent fetches it back."`
+	InputsShortened  int    `json:"inputs_shortened,omitempty" doc:"Tool-call inputs over 2 KiB made a stub the same way."`
+	TurnsSummarised  int    `json:"turns_summarised,omitempty" doc:"The oldest turns now in AgentBus's summary: the person's words and the model's last words verbatim, AgentBus's notes, a line per tool call. An earlier summary is kept word for word inside it."`
+	TurnsLeftOut     int    `json:"turns_left_out,omitempty" doc:"The oldest turns' logs this step left out of the summary, for one line naming how many turns and their range: the summary stays bounded however long the session runs. Their records stay in full."`
+	NewestShortened  bool   `json:"newest_shortened,omitempty" doc:"The newest earlier turn was shortened too, because the history did not fit the budget otherwise: the budget wins over keeping it whole."`
+	TurnsWhole       int    `json:"turns_whole,omitempty" doc:"The newer turns besides the newest that are not in the summary (their long tool output may be stubs)."`
 }
 
 // Added is one piece of what AgentBus gave a turn besides the person's

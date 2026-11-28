@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/workspace"
@@ -73,28 +74,46 @@ func (q *Queue) CreateTurnLinked(team, key string, spec Spec, links Links, lim L
 	return q.create(team, KindTurn, key, spec, links, budget, string(spec.Session), deliver)
 }
 
+// CreateCommand makes an exec job: a command an agent's turn handed to
+// AgentBus (POST /api/v0/commands), in the asking turn's workspace (spec),
+// asked by the turn links names, held to lim as work that turn asked for, with
+// deliver's on (command.ended) recorded in the same write. Its session column
+// stays empty: it belongs to the workspace's lane, not to a session's turns.
+func (q *Queue) CreateCommand(team, key string, spec Spec, links Links, lim Limits, deliver *Delivery) (Job, bool, error) {
+	if spec.Command == "" || spec.Workspace == "" || links.Chain == nil || links.Chain.By == "" {
+		return Job{}, false, ErrBadState
+	}
+	return q.create(team, KindExec, key, spec, links, &lim, "", deliver)
+}
+
 // SessionRoot is the root of the request tree a session was started in: the
-// Chain.Root of its first turn job that has one, or of the asked review that
-// runs in it: a review runs in a session of its own, which control names when
-// it makes the job (Links.ReviewSession).
-// "" for a session the person started, or one the queue does not know.
+// Chain.Root of its first turn job. "" for a session the person started, or
+// one the queue does not know.
 func (q *Queue) SessionRoot(team, session string) (string, error) {
 	root, _, err := q.SessionChain(team, session)
 	return root, err
 }
 
-// SessionChain is the request tree a session's own turns belong to: the root and
-// depth of its first rooted turn job, or ("", 0) for a session the person
-// started (which has no tree). A delivered result the main token asked for
-// joins the RECEIVING session's tree with these; one a turn asked for joins the
-// asking turn's tree instead (deliverResult). B15 dropped the review kind, so
-// only turn jobs carry a chain here.
+// SessionChain is the request tree a session's own turns belong to: the root
+// and depth of its FIRST turn job, or ("", 0) when that job has no chain (a
+// session the person started, which has no tree) or the session has no job. A
+// delivered result the main token asked for joins the RECEIVING session's tree
+// with these; one a turn asked for joins the asking turn's tree instead
+// (deliverResult).
+//
+// Only the first job decides. A later turn in the session may carry another
+// tree's chain, such as a delivery another tree's turn sent into it; that tree
+// continued the session, it did not start it. Reading the first job with a
+// chain took that tree for a session the person started, so an owner's
+// delivery into it joined a tree it was never in (O2.3 review P2). Ties of
+// created, at the clock's resolution, go to the job stored first (rowid), as
+// firstSpec reads a workspace's first turn.
 func (q *Queue) SessionChain(team, session string) (root string, depth int, err error) {
 	var r sql.NullString
 	var d sql.NullInt64
 	e := q.db.QueryRow(`SELECT json_extract(links, '$.chain.root'), json_extract(links, '$.chain.depth')
 		FROM jobs WHERE team = ? AND kind = 'turn' AND session = ?
-		AND json_extract(links, '$.chain.root') IS NOT NULL ORDER BY created, id LIMIT 1`, team, session).Scan(&r, &d)
+		ORDER BY created, rowid LIMIT 1`, team, session).Scan(&r, &d)
 	if errors.Is(e, sql.ErrNoRows) {
 		return "", 0, nil
 	}
@@ -203,6 +222,19 @@ func (q *Queue) deliverResult(team, onID, toSession, askingTurn string, j Job, t
 		if c := asking.Links.Chain; c != nil {
 			cause = &Chain{Root: c.Root, Depth: c.Depth}
 		}
+	} else if c := j.Links.Chain; j.Kind == KindExec && c != nil && c.By != "" {
+		// A command runs no agent of its own, so an on the main token made over
+		// it delivers on the agent of the turn that asked for the command
+		// (review P2, 2026-11-27). Only the agent: its tree stays the receiving
+		// session's, as for any main-token on.
+		asking, err := q.JobByTurn(team, c.By)
+		switch {
+		case errors.Is(err, ErrNotFound):
+			return "", "the turn that asked for the command is not in the queue, so its agent is not known", nil
+		case err != nil:
+			return "", "", err
+		}
+		from = asking.Spec
 	}
 	if agent != nil {
 		as, why := agent(from)
@@ -357,6 +389,9 @@ const MaxResultPrompt = 32 << 10
 // or a review's verdict and findings. It says that AgentBus wrote it, not the
 // person. name gives a saved agent's name; nil names it by id.
 func ResultPrompt(j Job, c *workspace.Changes, reply string, name func(id string) string) string {
+	if j.Kind == KindExec {
+		return CommandPrompt(j)
+	}
 	r, _ := ReadResult(j.Result)
 	var b strings.Builder
 	// B15: a review is a normal turn (the review_turn app), so a delivered
@@ -455,4 +490,43 @@ func firstRunes(s string, n int) string {
 
 func oneLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
+}
+
+// CommandPrompt is the prompt of the turn that delivers exec job j's result:
+// the command, how it ended, its exit code and the end of its output. It says
+// that AgentBus wrote it, not the person.
+func CommandPrompt(j Job) string {
+	r, _ := ReadResult(j.Result)
+	var b strings.Builder
+	b.WriteString("[AgentBus] This message is from AgentBus, not from the person: the command you asked AgentBus to run has ended, and this is its result.\n\n")
+	fmt.Fprintf(&b, "Command: %s\n", short(j.Spec.Command))
+	fmt.Fprintf(&b, "Id: %s (GET /api/v0/commands/%s)\n", j.Turn, j.Turn)
+	state := TurnState(j.State)
+	switch {
+	case r.TimedOut:
+		state += " (it ran past its time limit and was stopped)"
+	case j.Reason != "":
+		state += " (" + j.Reason + ")"
+	}
+	fmt.Fprintf(&b, "State: %s\n", state)
+	if r.ExitCode != nil {
+		fmt.Fprintf(&b, "Exit code: %d\n", *r.ExitCode)
+	}
+	if r.DurationMS > 0 {
+		fmt.Fprintf(&b, "Ran for: %s\n", (time.Duration(r.DurationMS) * time.Millisecond).Round(time.Second))
+	}
+	if msg := firstOf(r.Refused, r.Error); msg != "" {
+		fmt.Fprintf(&b, "Error: %s\n", short(msg))
+	}
+	if r.Output != "" {
+		if r.OutputBytes > int64(len(r.Output)) {
+			fmt.Fprintf(&b, "\nThe end of its output (the last %d of %d bytes):\n\n", len(r.Output), r.OutputBytes)
+		} else {
+			b.WriteString("\nIts output:\n\n")
+		}
+		b.WriteString(quoteBlock(strings.ToValidUTF8(r.Output, "")))
+	} else if r.ExitCode != nil {
+		b.WriteString("\nIt wrote no output.\n")
+	}
+	return strings.ReplaceAll(b.String(), "\x00", "")
 }

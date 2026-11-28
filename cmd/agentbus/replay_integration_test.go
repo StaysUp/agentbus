@@ -235,8 +235,9 @@ func TestReplayedOpencodeTurn(t *testing.T) {
 
 // A claude session from before replies were stored (no stored reply, a
 // resume_id, never replayed) still continues, by --resume, and its
-// turn.started says so. A session that did use replay is refused: its
-// resume_id names only its last turn.
+// turn.started says so. A session that did use replay never goes back to its
+// resume_id, which names only its last turn: with nothing to replay, it gets
+// the earlier turns as text.
 func TestReplayFallsBackToResumeForOldSessions(t *testing.T) {
 	home := t.TempDir()
 	oldToolDefaults(t, home)
@@ -257,15 +258,20 @@ func TestReplayFallsBackToResumeForOldSessions(t *testing.T) {
 		t.Errorf("continuity %q replay_from %q, want resume and none", c, from)
 	}
 
-	// A session that used replay, now with nothing to replay: 409.
+	// A session that used replay, now with nothing to replay: the earlier
+	// turns as text.
 	id2, _ := startRun(t, svc, tok, "claude", claudeResultA)
 	if _, _, err := svc.store.Append(event.Event{ID: "evt_r", Kind: event.TurnStarted, Time: time.Now(), Session: id2,
 		Turn: "t_replayed", Text: "x", ReplayFrom: "t_old", Continuity: "replay"}); err != nil {
 		t.Fatal(err)
 	}
-	code, _, raw = postMessage(t, svc, tok, id2, map[string]any{"prompt": "next"})
-	if code != http.StatusConflict || !strings.Contains(raw, "this session cannot be continued from here: turn t_replayed made no model call and has not ended") {
-		t.Errorf("%d %s, want 409", code, raw)
+	code, out, raw = postMessage(t, svc, tok, id2, map[string]any{"prompt": "next"})
+	if code != http.StatusAccepted {
+		t.Fatalf("%d %s, want 202 by transcript", code, raw)
+	}
+	waitClosedN(t, svc, id2, 2)
+	if c, from := continuityOf(t, svc, id2, out["turn"].(string)); c != "transcript" || from != "" {
+		t.Errorf("continuity %q replay_from %q, want transcript and none", c, from)
 	}
 }
 

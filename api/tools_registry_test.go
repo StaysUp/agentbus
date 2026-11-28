@@ -115,16 +115,17 @@ func TestPersistedFolderToolNotServed(t *testing.T) {
 	if _, ok := e.api.servedByName("read_file"); ok {
 		t.Error("a persisted read_file tool is still served after rebuild")
 	}
-	if got := len(listToolSummaries(t, e)); got != 2 {
-		t.Errorf("%d served tools, want 2 (the persisted folder tool must not show)", got)
+	if got := len(listToolSummaries(t, e)); got != 3 {
+		t.Errorf("%d served tools, want 3 (the persisted folder tool must not show)", got)
 	}
 }
 
 func TestDefaultRemovedAndReaddedBehavesTheSame(t *testing.T) {
 	e := mcpEnv(t)
-	// The built-in tools are the two apps, ask_agent and review_turn.
-	if got := len(listToolSummaries(t, e)); got != 2 {
-		t.Fatalf("%d built-in tools, want 2", got)
+	// The built-in tools are the three apps, ask_agent, review_turn and
+	// run_command.
+	if got := len(listToolSummaries(t, e)); got != 3 {
+		t.Fatalf("%d built-in tools, want 3", got)
 	}
 	before := toolEntry(t, e, mcpWriteTok, "ask_agent")
 	if before == nil {

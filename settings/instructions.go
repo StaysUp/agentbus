@@ -28,7 +28,8 @@ Your folder is usually your session's own copy of the person's folder. Your edit
 
 // ToolsText is what {tools} becomes for a turn with the agentbus MCP tools.
 // B15: review is the review_turn app, not a route — the tools cover asking
-// another agent (ask_agent) and asking one to review a turn (review_turn);
+// another agent (ask_agent), asking one to review a turn (review_turn) and
+// handing AgentBus a long command (run_command, H1);
 // reading turns and diffs, searching, apply and stop go through agentbus-api.
 // apply is [agent_api] apply: whether the turn may apply turns.
 func ToolsText(apply bool) string {
@@ -38,6 +39,7 @@ The person applies your changes to their folder; you cannot.`
 		write = `To read turns and their diffs, search this session, stop a turn, or apply your workspace's changes to the person's folder, use agentbus-api (GET /api/v0/turns, GET /api/v0/turns/T/diff, POST /api/v0/turns/T/stop, POST /api/v0/workspaces/{workspace}/apply). A short guide to every route is at agentbus-api GET /docs/llms.txt.`
 	}
 	return `Use the agentbus MCP tools to ask other saved agents (any vendor) for work (ask_agent) or to have one review a turn (review_turn). AgentBus agents are saved setups across vendors, not your harness's own agents or subagents.
+To run a long command, such as a gate of several minutes, hand it to AgentBus with run_command and end your turn: its exit code and output come back as a later turn. Do not run it in the background: that keeps your turn running.
 ` + write + `
 Work you ask for comes back to you as a later turn: do not wait for it.`
 }
@@ -53,6 +55,7 @@ func APIText(apply bool) string {
 	return `Call AgentBus with agentbus-api METHOD PATH [JSON]. Replace T with a turn id.
 - List this session's turns, with each id, number, state and cost: agentbus-api GET /api/v0/turns
 ` + line + `- Ask another agent to do work and get its reply back here: agentbus-api POST /api/v0/turns '{"agent":"<agent id>","prompt":"<what to do>","delivery":"{session}"}' — delivery is this session, so the new turn's reply comes back here as a later turn when it ends, recorded with the turn in the one call. The reply names the new turn T2. To have one review a turn, ask it to read that turn and its diff (GET /api/v0/turns/T, GET /api/v0/turns/T/diff). Pick an agent other than the one that did the turn. List the agents: agentbus-api GET /api/v0/agents. These are AgentBus agents, not your harness's own agents or subagents.
+- Run a long command (such as a gate of several minutes) as AgentBus work and end your turn: agentbus-api POST /api/v0/commands '{"command":"<command line>"}'. Its exit code and the end of its output come back here as a later turn. Do not run it in the background: that keeps your turn running.
 - Read a turn, its state and cost: agentbus-api GET /api/v0/turns/T
 - Stop a turn: agentbus-api POST /api/v0/turns/T/stop
 - Search this session's history: agentbus-api GET "/api/v0/sessions/{session}/search?q=<text>", with <text> URL-encoded.
@@ -69,7 +72,7 @@ func ToolServerInstructions(apply bool) string {
 	if apply {
 		write = "To read turns, search history, stop a turn, or apply your workspace's changes, use agentbus-api."
 	}
-	return "AgentBus tools: ask other saved agents (any vendor) for work (ask_agent) or have one review a turn (review_turn). " +
+	return "AgentBus tools: ask other saved agents (any vendor) for work (ask_agent), have one review a turn (review_turn), or hand AgentBus a long command and end your turn (run_command). " +
 		"Your folder is your session's own copy. " + write + " Work you ask for comes back to your session as a later turn."
 }
 

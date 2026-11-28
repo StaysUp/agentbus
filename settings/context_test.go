@@ -1,6 +1,9 @@
 package settings
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -119,5 +122,38 @@ func TestCompactionIfMatch(t *testing.T) {
 	}
 	if _, _, err := d.SetCompaction(Compaction{Codex: fptr(0.7)}, v0); err != nil {
 		t.Errorf("fresh match refused: %v", err)
+	}
+}
+
+// A runner's own replay reads the history budget from its server (Remote),
+// as control's reads its database: every runner keeps the person's budget.
+// A server that sends none gives the default; so does one that cannot be read.
+func TestBudgetOnEveryStore(t *testing.T) {
+	d := openTestDB(t, t.TempDir())
+	if got := BudgetOf(d)(); got != 0.4 {
+		t.Fatalf("a fresh database's budget = %v, want 0.4", got)
+	}
+	if _, _, err := d.SetCompaction(Compaction{Budget: fptr(0.3)}, Any); err != nil {
+		t.Fatal(err)
+	}
+	if got := BudgetOf(d)(); got != 0.3 {
+		t.Fatalf("the database's budget = %v, want 0.3", got)
+	}
+	send := 0.25
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(RunnerSettings{Permissions: DefaultPolicy(), Budget: send})
+	}))
+	defer srv.Close()
+	r := &Remote{Server: srv.URL, Local: "/data"}
+	if got := BudgetOf(r)(); got != 0.4 {
+		t.Fatalf("a runner not enrolled yet: %v, want the default", got)
+	}
+	r.Enrolled("rn_1", "rt_x")
+	if got := BudgetOf(r)(); got != 0.25 {
+		t.Fatalf("the runner's budget = %v, want the server's 0.25", got)
+	}
+	send = 0
+	if got := BudgetOf(r)(); got != 0.4 {
+		t.Fatalf("a server that sends no budget: %v, want the default", got)
 	}
 }

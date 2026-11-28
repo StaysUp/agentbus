@@ -218,6 +218,12 @@ func (r orderedRules) MarshalJSON() ([]byte, error) {
 // forbid and ask could only be OpenCode's own rules, which a command in
 // another shape passes, and opencode run has no person to ask. Tool and API
 // rules are checked elsewhere (control and tool gate).
+// ShellWall: OpenCode has no per-command sandbox of its own (Info.CopySandbox is
+// false), and the runner's whole-process wall is retired (0.6.4), so its
+// shell runs unwalled in a copy and in a direct folder alike, held by the
+// gateway's command rules only.
+func (opencode) ShellWall(Turn) string { return "" }
+
 func (opencode) Refuse(t Turn) string {
 	hasShellRules := func(list []string) bool {
 		for _, r := range list {

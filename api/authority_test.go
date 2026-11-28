@@ -395,6 +395,15 @@ var agentRefusals = map[string]string{
 	`API.workspaceAuthority: agentNoWorkspace`:                                 limWhere,
 	`API.workspaceAuthority: agentPathRefused`:                                 limWhere,
 	`API.homeFiles: homeRefused`:                                               limWhere,
+	// Commands an agent hands to AgentBus (H1).
+	`API.within: commandStopRefused`:                         limWhere,
+	`API.runCommand: commandOnlyTurns`:                       limNoAgent, // the main token and the turns token: no turn to run it for
+	`refuseLimit: commandBeyondTurn + limit`:                 limWhere,   // the turn's shell wall the command would leave
+	`API.runCommand: commandLimitUnknown`:                    limWhere,   // the runner records no command limit
+	`API.runCommand: commandNoStart`:                         limWhere,   // no start of the turn in the record
+	`API.runCommand: commandRefusedPrefix + quoteRule(rule)`: limBrake,   // the owner's command rules
+	`API.runCommand: commandNeedsPerson`:                     limBrake,
+	`API.runCommand: limit.Msg`:                              limBrake,
 }
 
 // O2.3: every refusal an agent's turn can get is one of the three limits. A

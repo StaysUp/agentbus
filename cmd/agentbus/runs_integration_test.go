@@ -527,7 +527,10 @@ func TestRunRefusesWhenServiceSendsAgentElsewhere(t *testing.T) {
 	}
 }
 
-func TestRunConcurrencyBound(t *testing.T) {
+// The person's turns are not bounded (queue/lanes.go): nine turns sent to nine
+// sessions, past the delegated limit of 8 and the 4 a runner ran before 0.6.7,
+// all run at once on agentbus up's built-in runner.
+func TestPersonsTurnsAreNotBounded(t *testing.T) {
 	home := t.TempDir()
 	svc := runService(t, home, nil, 0)
 	tok := readToken(t, home)
@@ -535,44 +538,28 @@ func TestRunConcurrencyBound(t *testing.T) {
 	t.Setenv("AGENTBUS_FAKE_WAIT", release)
 	t.Setenv("AGENTBUS_FAKE_EXIT", "0")
 	body := map[string]any{"agent": "claude", "folder": t.TempDir(), "prompt": "hi"}
-	var ids []string
-	for i := 0; i < 4; i++ {
+	var sessions, turns []string
+	for i := 0; i < 9; i++ {
 		code, out, raw := postRun(t, svc, tok, body)
 		if code != http.StatusAccepted {
 			t.Fatalf("run %d: %d %s", i+1, code, raw)
 		}
-		ids = append(ids, out["session"].(string))
+		sessions = append(sessions, out["session"].(string))
+		turns = append(turns, out["turn"].(string))
 	}
-	// A fifth waits in the queue: 202 queued, with its session and its
-	// turn's id, and nothing stored for it yet. The turn reads queued. Its
-	// workspace and session are made first, so only the turn is measured.
-	fifth := newWorkspaceSession(t, svc, tok, t.TempDir(), true)
-	before := svc.store.Last()
-	// Posted as is (not postRun): the runner-wait answer is what is measured.
-	fifthBody, _ := json.Marshal(map[string]any{"session": fifth, "agent": "claude", "prompt": "hi"})
-	code, out, raw := postAPI(t, svc, tok, "/api/v0/turns", fifthBody)
-	if code != http.StatusAccepted || out["state"] != "queued" || out["turn"] == "" || out["session"] == "" {
-		t.Fatalf("fifth run: %d %s, want 202 queued", code, raw)
-	}
-	if code, one := sendAPI(t, svc, tok, "GET", "/api/v0/turns/"+out["turn"].(string), nil); code != 200 ||
-		one["turn"].(map[string]any)["state"] != "queued" {
-		t.Fatalf("the queued turn: %d %v", code, one)
-	}
-	if evs, err := svc.store.After(before, store.Filter{}, 10); err != nil {
-		t.Fatal(err)
-	} else {
-		for _, e := range evs {
-			if e.Kind != "turn.ended" { // control's session-less reactor trigger
-				t.Fatal("the queued fifth run stored events")
+	waitFor(t, "nine turns running at once", func() bool {
+		for _, id := range turns {
+			code, one := sendAPI(t, svc, tok, "GET", "/api/v0/turns/"+id, nil)
+			if code != 200 || one["turn"].(map[string]any)["state"] != "running" {
+				return false
 			}
 		}
-	}
+		return true
+	})
 	os.WriteFile(release, nil, 0o600)
-	for _, id := range ids {
+	for _, id := range sessions {
 		waitClosed(t, svc.store, id)
 	}
-	// It runs once a slot is free, in the session its answer named.
-	waitClosed(t, svc.store, out["session"].(string))
 }
 
 func TestServiceStopEndsRuns(t *testing.T) {

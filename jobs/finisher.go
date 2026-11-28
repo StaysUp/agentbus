@@ -15,8 +15,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/ids"
 	"github.com/staysup/agentbus/queue"
+	"github.com/staysup/agentbus/store"
 )
 
 // FinishWait is how long the finish route waits for the finisher to end
@@ -196,6 +198,12 @@ func endAccepted(rec Recorder, q *queue.Queue, a queue.AcceptedFinish) (queue.Jo
 				}
 			}
 		}
+		// Every run of the turn that control's record saw start ends there
+		// with the attempt, before the job ends, whatever its runner managed
+		// to send (closeOpenRuns).
+		if cerr := closeOpenRuns(rec, a); cerr != nil {
+			return errOutcome
+		}
 		kept, kerr := keepOutcomes(rec, a.Job, a.Finish)
 		if kerr != nil {
 			return errOutcome
@@ -217,8 +225,46 @@ func endAccepted(rec Recorder, q *queue.Queue, a queue.AcceptedFinish) (queue.Jo
 	// turn.ended the finisher missed, idempotent by job id (his must #1).
 	// turn.changed above is the job's outcome and still blocks End; turn.ended
 	// is only the reactor trigger.
-	_, _ = recordTurnEnded(rec, a.Job, queue.TurnState(a.Finish.Status), a.Finish.Reason, time.Now().UTC())
+	_, _ = recordTurnEnded(rec, a.Job, a.Finish.Result, queue.TurnState(a.Finish.Status), a.Finish.Reason, time.Now().UTC())
 	return j, nil
+}
+
+// RunNotEndedText is the run.ended control writes for a run of a turn whose
+// attempt ended without the runner sending that run's end.
+const RunNotEndedText = "the runner ended the turn without sending how its agent ended"
+
+// closeOpenRuns ends, in control's record, each run of attempt a's turn that
+// the record saw start (run.started) and not end. A runner sends a turn's start
+// to control before its agent starts (run.Request.Recorded), so from that
+// moment control holds a run open, and every way the turn can end after it --
+// the agent failing to start, a stop, the runner's own crash before its
+// final send, control refusing a later batch -- reaches control here, as the
+// attempt's finish, or as a lost attempt (CloseLost). One rule on control's
+// side, so no early exit on the runner can leave a session open on control
+// and refuse its next turn (review P1, 2026-11-27: an agent program without
+// execute permission left one open run, and the next turn got 409). A run
+// the runner did end is closed already, and is left as it is. The run.ended
+// is unsettled (its calls may be missing) and keyed by the attempt and hold,
+// so a finish sent again writes it once.
+func closeOpenRuns(rec Recorder, a queue.AcceptedFinish) error {
+	if a.Job.Turn == "" {
+		return nil
+	}
+	holds, err := rec.OpenHoldsOfTurn(a.Job.Turn)
+	if err != nil {
+		return err
+	}
+	state := queue.TurnState(a.Finish.Status)
+	if state == store.TurnFinished {
+		state = store.TurnFailed // it ended with no end of its agent's run
+	}
+	for _, h := range holds {
+		if _, err := rec.AppendOnce(event.Event{ID: "evt_runend_" + a.Attempt + "_" + h.Hold, Kind: event.RunEnded, Time: time.Now().UTC(),
+			Session: h.Session, Turn: h.Turn, Hold: h.Hold, Unsettled: true, State: state, Error: RunNotEndedText}); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // EndAs ends attempt number of job j (as it was taken) with finish f the way

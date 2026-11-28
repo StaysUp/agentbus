@@ -94,8 +94,8 @@ type Config struct {
 	// and a stop cancels the job. Nil turns starting turns off: POST
 	// /api/v0/turns answers 404.
 	Queue *queue.Queue
-	// TurnWait bounds how long a changes preview or a turn's diff waits on a
-	// turn's job. Zero means DefaultTurnWait.
+	// TurnWait bounds how long a changes preview waits on its preview job,
+	// the one route that still waits for work (X3). Zero means DefaultTurnWait.
 	TurnWait time.Duration
 	// Engine is this process's own turn engine, when it runs turns: its live
 	// turns' own tokens are accepted here. Nil accepts none.
@@ -355,6 +355,23 @@ const MaxFolder = run.MaxFolder
 const MaxStreams = 32
 
 var sessionID = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+
+// sessionQuery is the session query of a route that filters by it
+// (atSessionQuery): the session, and whether one was sent. A value sent twice,
+// empty or not shaped as a session id is 400. The door checks it for every
+// grant (allow), before it asks whether the grant reaches everywhere, so a
+// handler reads the query as checked. ok false has answered.
+func sessionQuery(w http.ResponseWriter, r *http.Request) (session string, sent, ok bool) {
+	vs, sent := r.URL.Query()["session"]
+	if !sent {
+		return "", false, true
+	}
+	if len(vs) != 1 || !sessionID.MatchString(vs[0]) {
+		writeError(w, http.StatusBadRequest, "session must be sent once and match "+sessionID.String())
+		return "", true, false
+	}
+	return vs[0], true, true
+}
 
 func (a *API) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// A body must arrive whole, soon, and small: a client that sends part of

@@ -72,8 +72,13 @@ const (
 // the runner sends no model calls of its own (the relay records every call),
 // and POST /api/v0/runner/attempts/{id}/calls is gone. A runner of protocol 4
 // (which an old -gateway local binary speaks) is refused at register and take,
-// before any turn, not with a 404 when it tries to send calls mid-turn.
-const ProtocolVersion = 5
+// before any turn, not with a 404 when it tries to send calls mid-turn. 6:
+// a take names its lane (folders, delegated or interactive) in place of
+// folders, and the runner runs every job it takes; control counts each lane's
+// places (queue/lanes.go), so the person's own turns never wait for delegated
+// work. A runner of protocol 5 runs a fixed number of takes at once, which
+// would put back the limit it no longer knows, so it is refused.
+const ProtocolVersion = 6
 
 // Config is what the server needs.
 type Config struct {
@@ -170,7 +175,41 @@ func New(cfg Config) (*Server, error) {
 		// What a request tree has cost is the record's, by its turns: the
 		// queue's cost cap reads it there when it makes a job.
 		cfg.Queue.ReadCostWith(rec.CostOfTurns)
+		// Whether a workspace was used since the event that queued its
+		// put-away is the record's too (queue/putaway.go).
+		cfg.Queue.ReadActivityWith(rec.WorkspaceUsedAfter)
 	}
+	// Whether putting copies away is on is read when a put-away comes due,
+	// so turning it off holds for one already queued. Installed here, before
+	// anything serves, so a runner reconnecting at control's start never meets
+	// a due put-away without it. No settings, or a policy that cannot be
+	// read, is off: nothing is put away on a guess.
+	putAwaySettings := cfg.Settings
+	cfg.Queue.ReadPutAwayWith(func() bool {
+		if putAwaySettings == nil {
+			return false
+		}
+		p, _, err := putAwaySettings.Policy()
+		if err != nil {
+			return false
+		}
+		_, on := p.PutAwayAfter()
+		return on
+	})
+	// The delegated limit is read at every take, so a change of the settings
+	// holds for the next turn a runner takes, with no restart. A policy that
+	// cannot be read keeps the default: the person's own turns are not
+	// counted, so nothing they send waits on it.
+	cfg.Queue.ReadDelegatedWith(func() int {
+		if putAwaySettings == nil {
+			return settings.DefaultMaxDelegatedAtOnce
+		}
+		p, _, err := putAwaySettings.Policy()
+		if err != nil {
+			return settings.DefaultMaxDelegatedAtOnce
+		}
+		return p.DelegatedAtOnce()
+	})
 	s := &Server{cfg: cfg, token: sha256.Sum256([]byte(cfg.Token)), enrol: sha256.Sum256([]byte(cfg.EnrollToken)), mux: http.NewServeMux(),
 		tokenKey: sha256.Sum256([]byte("agentbus runner turn tokens\x00" + cfg.Token)), sealer: standInSealer(cfg.Token)}
 	if cfg.Record != nil {
@@ -387,7 +426,8 @@ func (s *Server) settingsNow() (settings.RunnerSettings, error) {
 		return snap, err
 	}
 	return settings.RunnerSettings{Permissions: got.Policy, PermissionsVersion: got.PolicyVersion,
-		Instructions: got.Instructions, InstructionsVersion: got.InstructionsVersion, SettingsVersion: got.Revision}, nil
+		Instructions: got.Instructions, InstructionsVersion: got.InstructionsVersion, SettingsVersion: got.Revision,
+		Budget: settings.BudgetOf(st)()}, nil
 }
 
 // turnRules are the settings attempt a of runnerID's turn runs under, taken
@@ -538,11 +578,13 @@ type TakeRequest struct {
 	WaitMS int64 `json:"wait_ms"`
 	// Protocol is the runner protocol the runner speaks: ProtocolVersion.
 	Protocol int `json:"protocol"`
-	// Folders asks for a folder job of the runner's own machine (an apply,
-	// a typed folder's check), in one of its queue.FolderCapacity folder
-	// places; without it, a turn or a review, in one of its
-	// capacity's places.
-	Folders bool `json:"folders,omitempty"`
+	// Lane is which of the runner's places the take is for (queue.Lane):
+	// folders, a folder job of the runner's own machine (an apply, a typed
+	// folder's check), in one of its queue.FolderCapacity folder places;
+	// delegated, a turn an agent started, in one of its delegated places
+	// (the settings' limit, at most its capacity); interactive, the person's
+	// own turns and the workspace jobs, which are not counted.
+	Lane queue.Lane `json:"lane"`
 }
 
 // protocolWhy refuses a runner of another protocol version.
@@ -568,6 +610,10 @@ func (s *Server) take(w http.ResponseWriter, r *http.Request, rn queue.Runner) {
 		fail(w, http.StatusBadRequest, protocolWhy)
 		return
 	}
+	if !b.Lane.Known() {
+		fail(w, http.StatusBadRequest, "lane must be folders, delegated or interactive")
+		return
+	}
 	wait := min(time.Duration(b.WaitMS)*time.Millisecond, s.cfg.MaxWait)
 	notify, cancel := s.cfg.Queue.Notify()
 	defer cancel()
@@ -581,7 +627,7 @@ func (s *Server) take(w http.ResponseWriter, r *http.Request, rn queue.Runner) {
 		if r.Context().Err() != nil {
 			return
 		}
-		j, a, ok, cleanup, err := s.cfg.Queue.Take(rn.ID, s.cfg.Lease, b.Folders)
+		j, a, ok, cleanup, err := s.cfg.Queue.Take(rn.ID, s.cfg.Lease, b.Lane)
 		if err != nil {
 			s.internal(w)
 			return

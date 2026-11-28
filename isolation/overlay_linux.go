@@ -85,19 +85,17 @@ func (overlayBackend) Open(r Request) (*Space, error) {
 		return nil, &Unavailable{Overlay, why}
 	}
 	s := &Space{ID: r.ID, Backend: Overlay, Ref: r.Ref, Root: filepath.Join(r.Workdir, r.ID),
-		Workdir: r.Workdir, Method: MethodOverlay}
+		Workdir: r.Workdir, Method: MethodOverlay, stop: ctxOf(r)}
 	s.Dir = s.Root
 	if r.Snapshot != nil {
 		s.Snapshot = r.Snapshot.ID
 	}
-	// What a failed attempt left, with no record, is this job's own.
+	// What a failed attempt or a failed close left, with no record, is this
+	// job's own: it is moved aside, never used (remove.go).
 	if err := unmountAll(s.Root); err != nil {
 		return nil, err
 	}
-	if err := removeAll(s.Root); err != nil {
-		return nil, err
-	}
-	if err := removeState(s); err != nil {
+	if err := retire(s); err != nil {
 		return nil, err
 	}
 	rootMode := fs.FileMode(0o755)
@@ -119,7 +117,7 @@ func (overlayBackend) Open(r Request) (*Space, error) {
 		if err := lowerFromSnapshot(ctxOf(r), s, r.Snapshot); err != nil {
 			return fail(err)
 		}
-	} else if err := snapshot(s, filepath.Clean(r.Folder), time.Now()); err != nil {
+	} else if err := snapshot(ctxOf(r), s, filepath.Clean(r.Folder), time.Now()); err != nil {
 		return fail(err)
 	}
 	// The upper layer's own folder is the copy's top folder: it has the
@@ -134,13 +132,14 @@ func (overlayBackend) Open(r Request) (*Space, error) {
 	if err := os.Mkdir(filepath.Join(s.state(), "w"), 0o700); err != nil {
 		return fail(err)
 	}
-	if err := s.save(); err != nil {
-		return fail(err)
-	}
 	if err := mountSpace(s); err != nil {
 		return fail(err)
 	}
 	if _, err := checkpoint(s, Base, overlayBackend{}); err != nil {
+		return fail(err)
+	}
+	// The record last, once the copy is mounted and its Base taken (remove.go).
+	if err := s.record(); err != nil {
 		return fail(err)
 	}
 	return s, nil
@@ -151,9 +150,9 @@ func (overlayBackend) Open(r Request) (*Space, error) {
 // copy, so it says what the layer holds, whatever changed in the folder
 // meanwhile. A .git file at the top is left out, as the copy backend leaves
 // it out.
-func snapshot(s *Space, source string, start time.Time) error {
+func snapshot(ctx context.Context, s *Space, source string, start time.Time) error {
 	dir := s.lowerDir()
-	if _, err := copyTree(source, dir); err != nil {
+	if _, err := copyTree(ctx, source, dir); err != nil {
 		return err
 	}
 	if fi, err := os.Lstat(filepath.Join(dir, ".git")); err == nil && !fi.IsDir() {
@@ -161,7 +160,7 @@ func snapshot(s *Space, source string, start time.Time) error {
 			return err
 		}
 	}
-	files, err := scan(dir, baseHasher(start, s.objectDir()))
+	files, err := scan(dir, baseHasher(ctx, start, s.objectDir()))
 	if err != nil {
 		return err
 	}
@@ -245,10 +244,8 @@ func (overlayBackend) Close(s *Space) error {
 	if err := unmountAll(s.Root); err != nil {
 		return err
 	}
-	if err := removeAll(s.Root); err != nil {
-		return err
-	}
-	if err := removeState(s); err != nil {
+	// The record before any file (remove.go).
+	if err := retire(s); err != nil {
 		return err
 	}
 	return removeOldLayers(s.Workdir)
@@ -332,10 +329,13 @@ func (overlayBackend) take(s *Space, t *trees, prev *treeState, save workspace.H
 			return ed.removeFile(rel)
 		case mode.IsRegular() || mode&fs.ModeSymlink != 0:
 			f := workspace.File{Size: info.Size(), Mode: mode, ModTime: info.ModTime().UnixNano()}
-			if old, ok := t.lookup(prev.Root, rel); ok && old.Size == f.Size && old.ModTime == f.ModTime && old.Mode == f.Mode && !racy(prev.Taken, old.ModTime) {
+			if old, ok := t.lookup(prev.Root, rel); ok && workspace.Keeps(old, info, prev.Taken) {
 				f.Hash = old.Hash
 			} else {
 				h, err := save(rel, p, info)
+				if workspace.Stopped(err) {
+					return err
+				}
 				if err != nil {
 					return ed.remove(rel)
 				}
@@ -646,6 +646,9 @@ func scan(root string, hash workspace.Hasher) (*workspace.Snapshot, error) {
 			continue
 		}
 		h, err := hash(it.Rel, it.Path, info)
+		if workspace.Stopped(err) {
+			return nil, err // a stop fails the scan: no file is left out for it
+		}
 		if err != nil {
 			continue
 		}
@@ -653,3 +656,7 @@ func scan(root string, hash workspace.Hasher) (*workspace.Snapshot, error) {
 	}
 	return files, nil
 }
+
+// unmountLeft unmounts an overlay left at p, so a copy with no record can be
+// moved aside.
+func unmountLeft(p string) error { return unmountAll(p) }

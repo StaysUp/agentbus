@@ -339,15 +339,15 @@ type OpenRouterWire struct {
 type Copy struct {
 	// Dir is the session's copy, the writable root; "" means not Copy mode.
 	Dir string
-	// Write are extra writable paths beyond Dir: the per-run temp and the tool
-	// caches, so a build does not break on a cold cache.
+	// Write are extra writable paths beyond Dir: the person's cache folders,
+	// so a build keeps its cache. The engine adds its own temp folder.
 	Write []string
 	// DenyRead are the CLI's own login files, hidden so the agent uses Connect's
 	// stand-in rather than the real token. Reads are otherwise open.
 	DenyRead []string
 	// Hosts are extra allowed network hosts (the gateway) on top of the
 	// harness's default allow-list. srt cannot open the network fully, so Copy's
-	// network is a broad allow-list (DESIGN_contain_mode, measured 2026-11-23).
+	// network is an allow-list (claudeCopyDomains, read 2026-11-27).
 	Hosts []string
 }
 
@@ -463,6 +463,46 @@ type Harness interface {
 	// in words fit for the person, or "": a setting of permissions.toml it
 	// has no way to keep. Nothing is started or stored for a refused turn.
 	Refuse(t Turn) string
+	// ShellWall says why the shell commands of turn t, as the launch builds
+	// it, run behind a wall of this harness's own (a per-command sandbox), in
+	// words fit for the agent, or "" when they run without one. Read through
+	// CommandLimit only.
+	ShellWall(t Turn) string
+}
+
+// CommandLimit is the one rule for a command AgentBus runs for turn t (POST
+// /api/v0/commands, H1): why it would get more than t itself may do, in words
+// fit for the agent, or "" when it would not. t is the turn as the launch
+// builds it (run/), the same one its harness is started with, so the rule reads
+// the turn's effective limits, never a guess from the workspace's kind. The
+// runner records the answer on the turn's turn.started, and control decides the
+// command by that record. A command has no wall of its own yet, so it runs only
+// for a turn its own shell runs unwalled for:
+//
+//   - the turn may edit its folder (Writes.Edit): a turn kept from writing,
+//     read-only or with edits forbidden, never writes through a command;
+//   - the harness walls none of its shell commands (ShellWall): Claude Code's
+//     per-command sandbox in a copy, codex's own sandbox everywhere;
+//   - no whole-process wall holds it (Walled).
+//
+// The turn's command rules (allow, ask, forbid) are not a reason here: control
+// decides the command line by the very rules the turn took (its token's rules
+// version), as the gateway decides each of its shell commands.
+//
+// A method on every harness, so a new harness cannot leave its wall out
+// (review P1s, 2026-11-27: codex's sandbox was missed in a copy, then
+// read-only in a direct folder).
+func CommandLimit(h Harness, t Turn) string {
+	switch {
+	case len(t.Writes.Edit) == 0:
+		return "your turn may not edit its folder (edits are forbidden, or it runs read-only), and a command could write"
+	case t.Walled:
+		return "your turn runs inside the runner's wall"
+	}
+	if wall := h.ShellWall(t); wall != "" {
+		return wall
+	}
+	return ""
 }
 
 // Unkeeper is a harness that runs some turns without keeping a setting it

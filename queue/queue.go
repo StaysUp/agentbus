@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -102,6 +103,16 @@ const (
 	// discards on the session to keep them). Its workspace.closed resets the
 	// record's applied state. It starts no turn.
 	KindClose = "close"
+	// KindPutAway is a close that AgentBus asks for itself (putaway.go): the
+	// built-in on queues one when a sandbox workspace's work is applied or
+	// discarded, to run once the workspace has been quiet for the setting's
+	// time (not_before). When it is due, control reads the record and the lane
+	// before any runner gets it: if anything happened in the workspace since
+	// the event that queued it, or work is still unapplied, it ends kept and
+	// the record says why. Otherwise the runner holding the copy removes it as a
+	// close does, and control records workspace.closed with the put-away's why.
+	// It is a lane job, but one not yet due holds no place in the lane.
+	KindPutAway = "put_away"
 	// KindUpdate brings the person's folder as it is now into a sandbox
 	// workspace's copy by a three-way merge, so the session's work sits on top
 	// of the folder and the next apply writes only that work (update.go). The
@@ -127,6 +138,19 @@ const (
 	// A "command" job (the person's "!" in 0.4) is retired: a "!" is now a
 	// message to the session's agent. One stored before is read as it is,
 	// and a runner refuses to run it.
+	// KindExec runs one shell command an agent's turn handed to AgentBus
+	// (POST /api/v0/commands, the run_command tool), in that turn's workspace,
+	// on the runner that holds it, so the turn can end while the command runs
+	// (H1). The job's turn column holds the command's id (c_ and 16 hex
+	// digits), the key its delivery on watches; JobByTurn never returns it.
+	// It waits in the workspace's lane behind the work made before it, so it
+	// starts once the asking turn has ended; while it runs, a turn the person
+	// sends does not wait for it, but a discard, update, close or put-away
+	// does, since those change or remove the copy under it (laneTake). It
+	// records no changes of its own: what it writes in a copy shows in the
+	// next turn's diff. Its end is command.ended in the record, and its on
+	// delivers its exit code and the end of its output to the asking session.
+	KindExec = "exec"
 )
 
 // Failure reasons.
@@ -136,6 +160,7 @@ const (
 	ReasonRunnerLost = "runner_lost" // the runner's lease expired while running
 	ReasonTimeout    = "timeout"
 	ReasonConflict   = "conflict" // an apply refused: files changed in the person's folder
+	ReasonExit       = "exit"     // a command (an exec job) exited with a code other than 0
 )
 
 // DefaultTeam is the one team every job and runner belongs to for now. The id
@@ -178,7 +203,8 @@ CREATE TABLE IF NOT EXISTS jobs (
 	created      INTEGER NOT NULL,
 	updated      INTEGER NOT NULL,
 	ended        INTEGER,
-	tree         TEXT
+	tree         TEXT,
+	not_before   INTEGER
 );
 CREATE UNIQUE INDEX IF NOT EXISTS jobs_key ON jobs(team, idem_key) WHERE idem_key IS NOT NULL;
 CREATE INDEX IF NOT EXISTS jobs_queue ON jobs(team, state, created);
@@ -251,7 +277,9 @@ CREATE TABLE IF NOT EXISTS ons (
 	created  INTEGER NOT NULL,
 	chain    TEXT,
 	asked    INTEGER,
-	limits   TEXT
+	limits   TEXT,
+	action   TEXT,
+	cursor   INTEGER
 );
 CREATE INDEX IF NOT EXISTS ons_live ON ons(team, event, off);
 -- B15 (his call, 2026-11-19): an on is deduped by its idempotency_key ONLY, the
@@ -390,6 +418,11 @@ type Spec struct {
 	// its turn without its folder being checked again.
 	Typed        string `json:"-"`
 	TypedMachine string `json:"-"`
+	// Command and CommandTimeout, for an exec job: the shell command line
+	// (run by /bin/sh -c in the workspace's folder) and the most seconds it
+	// may run before the runner stops it.
+	Command        string `json:"command,omitempty"`
+	CommandTimeout int64  `json:"command_timeout,omitempty"`
 	// AllowOnce are command lines a person allowed once on an earlier card
 	// (api/approvals.go, decision "once"): the continuation turn's gateway
 	// lets exactly these run, this turn only, and nothing is written to the
@@ -506,6 +539,17 @@ type Links struct {
 	// AppliesTurn. ApplyBy: who asked for it.
 	AppliesTurns []string `json:"applies_turns,omitempty"`
 	ApplyBy      *By      `json:"apply_by,omitempty"`
+	// Because: for a job an on queued (a put-away), the on and the record
+	// event that fired it. The record's outcome of the job repeats it.
+	Because *Because `json:"because,omitempty"`
+}
+
+// Because is why an on queued a job: the on, and the record event it fired on,
+// by its id and its seq in the record.
+type Because struct {
+	On    string `json:"on"`
+	Event string `json:"event"`
+	Seq   int64  `json:"seq"`
 }
 
 // Job is one requested turn.
@@ -530,11 +574,13 @@ type Job struct {
 	// Tree, for a turn job: the request tree the turn belongs to, recorded
 	// once when the job is made (treeOf) and never changed. The caps count by
 	// it (budget.go).
-	Tree     string     `json:"tree,omitempty"`
-	Created  time.Time  `json:"created"`
-	Updated  time.Time  `json:"updated"`
-	Ended    *time.Time `json:"ended,omitempty"`
-	Attempts []Attempt  `json:"attempts,omitempty"`
+	Tree    string     `json:"tree,omitempty"`
+	Created time.Time  `json:"created"`
+	Updated time.Time  `json:"updated"`
+	Ended   *time.Time `json:"ended,omitempty"`
+	// NotBefore: no runner takes the job before this time (nil: at once).
+	NotBefore *time.Time `json:"not_before,omitempty"`
+	Attempts  []Attempt  `json:"attempts,omitempty"`
 	// Workspace, for a job of a known session: where its runner keeps it.
 	Workspace *Workspace `json:"workspace,omitempty"`
 }
@@ -691,6 +737,13 @@ type Queue struct {
 	// applied reads a workspace's applied state from the record, its one
 	// owner (ReadAppliedWith). The queue keeps no copy of it.
 	applied AppliedReader
+	// activity reads whether a workspace was used after a record seq, for a
+	// put-away (putaway.go).
+	activity ActivityReader
+	// putAwayOn reads whether putting copies away is on now (putaway.go).
+	putAwayOn PutAwaySetting
+	// delegatedAtOnce reads the delegated lane's limit now (lanes.go).
+	delegatedAtOnce DelegatedSetting
 	// cost reads what turns cost from the record (ReadCostWith), for the
 	// cost cap (budget.go).
 	cost CostReader
@@ -1007,7 +1060,7 @@ func (q *Queue) HasKey(team, key string) (bool, error) {
 // person's folder, never the live copy, so they leave the lane and never wait
 // on a running turn (his call, 2026-11-22). folder and home touch no workspace
 // copy. (B15: a review is a turn in its own session, so no review clause.)
-const laneKinds = `('turn','discard','update','close')`
+const laneKinds = `('turn','discard','update','close','put_away')`
 
 // jobCopyKey is a job's workspace copy key in SQL, qualified by alias a (e.g.
 // "j"): its workspace, or its session when it names none, exactly as CopyKey
@@ -1020,18 +1073,75 @@ func jobCopyKey(a string) string {
 }
 
 // laneTake is Take's one rule of a WORKSPACE's lane, for a job j and another job
-// o: j waits for o. A workspace's copy-changing jobs (laneKinds) are one line,
-// first in, first out -- an asked session's turns share the asker's line, since
-// both name the one workspace -- so each waits for one that runs, and for one
-// made before it that is still queued. "Made before" is the row's order in the
-// jobs table (rowid), the order the jobs were made in, not their created time
-// or id: two jobs made in the same clock tick, or across a clock step back, still
-// run in the order they were made, so a close made after a queued turn always
-// runs after it. The lane key is the workspace, or the session for
-// a job with no workspace (its own workspace), as CopyKey keys the copy row.
-const laneTake = `j.kind IN ` + laneKinds + ` AND o.kind IN ` + laneKinds + `
-	AND COALESCE(NULLIF(json_extract(o.spec, '$.workspace'), ''), o.session) = COALESCE(NULLIF(json_extract(j.spec, '$.workspace'), ''), j.session)
-	AND (o.state IN ('taken','running') OR (o.state = 'queued' AND o.rowid < j.rowid))`
+// o: j waits for o. A workspace's copy-changing jobs (laneKinds) share its one
+// copy, so they run one at a time -- an asked session's turns share the
+// asker's line, since both name the one workspace. j waits for any job of the
+// lane that a runner holds (taken or running), and for each queued one that
+// comes before it in the lane's order (laneOrder). The lane key is the
+// workspace, or the session for a job with no workspace (its own workspace), as
+// CopyKey keys the copy row. A queued job that is not due yet (not_before after
+// now, in nanoseconds) holds no place: a put-away waiting out its quiet time
+// never holds up the turn the person sends meanwhile.
+//
+// A command (KindExec, H1) stands in the same order as delegated work: an
+// agent asked for it, so it is never ahead of the person's work (laneOrder
+// class 1, as a delegated turn). A command waits for every lane job and
+// command a runner holds, and for each queued one ahead of it, so it starts
+// once the turn that asked for it has ended, never beside another command and
+// never beside a turn of the person's. A barrier (discard, update, close,
+// put-away) waits for a command as for a turn, since it would change or remove
+// the copy under it. A turn does NOT wait for a command: the person can talk to
+// the session while its long command runs.
+func laneTake(now int64) string {
+	return jobCopyKey("o") + ` = ` + jobCopyKey("j") + `
+	AND (o.state IN ('taken','running') OR (o.state = 'queued' AND ` + due("o", now) + `
+		AND ` + laneOrder("o", now) + ` < ` + laneOrder("j", now) + `))
+	AND ((j.kind IN ` + laneKinds + ` AND o.kind IN ` + laneKinds + `)
+		OR (j.kind = '` + KindExec + `' AND (o.kind IN ` + laneKinds + ` OR o.kind = '` + KindExec + `'))
+		OR (j.kind IN ` + barrierKinds + ` AND o.kind = '` + KindExec + `'))`
+}
+
+// due says the job of alias a may be taken now: it has no not_before, or it
+// has passed.
+func due(a string, now int64) string {
+	return `(` + a + `.not_before IS NULL OR ` + a + `.not_before <= ` + strconv.FormatInt(now, 10) + `)`
+}
+
+// barrierKinds are the lane jobs that are not turns: a discard, update, close
+// or put-away. They keep the order they were made in against every job of the
+// lane, so a close made after a queued turn always runs after it, and a turn
+// made after a discard always runs after it.
+const barrierKinds = `('discard','update','close','put_away')`
+
+// laneOrder is where the queued lane job of alias a stands in its workspace's
+// order, as a row value compared with <: (segment, class, rowid).
+//
+//   - segment: how many due barriers (barrierKinds) of the workspace were made
+//     before it. No job passes a barrier either way.
+//   - class, within a segment: 0 for the person's work, 1 for delegated work
+//     (a delegated turn, or a command: KindExec), 2 for the barrier that closes
+//     the segment. The person's work is a turn
+//     that is not delegated (Job.Delegated), and a delegated turn of a session
+//     the person has a later turn queued in, so a session's turns keep their
+//     order and the person's message never waits for its own session's
+//     earlier turn to be passed over. A queued delegated turn holds no copy, so
+//     the person's turn goes ahead of it (his call, 2026-11-26: his messages
+//     to his coordinator waited behind builders the coordinator had asked for
+//     in the same workspace). A turn a runner holds still blocks everything.
+//   - rowid: the order the jobs were made in, not their created time or id,
+//     so two jobs made in the same clock tick still run in that order.
+//
+// It is a total order, so two jobs of one workspace never both see the lane
+// free: of any two queued, exactly one comes first.
+func laneOrder(a string, now int64) string {
+	return `((SELECT COUNT(*) FROM jobs lb WHERE lb.team = ` + a + `.team AND lb.kind IN ` + barrierKinds + `
+		AND lb.state = 'queued' AND ` + due("lb", now) + ` AND ` + jobCopyKey("lb") + ` = ` + jobCopyKey(a) + ` AND lb.rowid < ` + a + `.rowid),
+	CASE WHEN ` + a + `.kind = '` + KindExec + `' THEN 1 WHEN ` + a + `.kind != 'turn' THEN 2 WHEN NOT ` + delegatedJob(a) + ` THEN 0
+		WHEN EXISTS (SELECT 1 FROM jobs lp WHERE lp.team = ` + a + `.team AND lp.kind = 'turn' AND lp.state = 'queued'
+			AND lp.session = ` + a + `.session AND lp.rowid > ` + a + `.rowid AND NOT ` + delegatedJob("lp") + `) THEN 0
+		ELSE 1 END,
+	` + a + `.rowid)`
+}
 
 // SessionHasWork says the SESSION has a turn job that has not ended. It is kept
 // session-scoped (not the workspace lane): its callers ask about this one
@@ -1056,7 +1166,7 @@ func (q *Queue) SessionHasWork(team, session string) (bool, error) {
 // workspace. None for a job of no lane (laneKinds).
 func (q *Queue) TurnsAhead(team, id string) ([]Job, error) {
 	rows, err := q.db.Query(`SELECT o.id FROM jobs o JOIN jobs j ON j.id = ? AND j.team = ?
-		WHERE o.team = j.team AND o.id != j.id AND (`+laneTake+`)
+		WHERE o.team = j.team AND o.id != j.id AND (`+laneTake(nanos(q.now()))+`)
 		ORDER BY o.rowid`, id, team)
 	if err != nil {
 		return nil, fmt.Errorf("queue: list turns ahead: %w", err)
@@ -1095,6 +1205,11 @@ func (q *Queue) TurnsAhead(team, id string) ([]Job, error) {
 // queue's own jobs), and a job of a request tree that a cap binds is checked
 // in this transaction, whichever path asked for it.
 func (q *Queue) create(team, kind, key string, spec Spec, links Links, budget *Limits, session string, deliver *Delivery) (job Job, created bool, err error) {
+	return q.createAt(team, kind, key, spec, links, budget, session, deliver, nil)
+}
+
+// createAt is create for a job no runner takes before notBefore (nil: at once).
+func (q *Queue) createAt(team, kind, key string, spec Spec, links Links, budget *Limits, session string, deliver *Delivery, notBefore *time.Time) (job Job, created bool, err error) {
 	specBytes, err := spec.asked().hashBytes()
 	if err != nil {
 		return job, false, err
@@ -1175,8 +1290,11 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, budget *L
 		now := nanos(q.now())
 		job.ID = NewID("job_")
 		var turn any
-		if kind == KindTurn {
+		switch kind {
+		case KindTurn:
 			turn = NewID("t_")
+		case KindExec:
+			turn = NewID("c_") // the command's id, which its on watches
 		}
 		sb, _ := json.Marshal(spec)
 		lb, _ := json.Marshal(stored(links))
@@ -1190,8 +1308,12 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, budget *L
 		if tree != "" {
 			tr = tree
 		}
-		if _, err := tx.Exec(`INSERT INTO jobs(id, team, kind, state, idem_key, request_hash, spec, links, turn, session, created, updated, tree)
-			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, job.ID, team, kind, Queued, k, hash, string(sb), string(lb), turn, sess, now, now, tr); err != nil {
+		var nb any
+		if notBefore != nil {
+			nb = nanos(*notBefore)
+		}
+		if _, err := tx.Exec(`INSERT INTO jobs(id, team, kind, state, idem_key, request_hash, spec, links, turn, session, created, updated, tree, not_before)
+			VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, job.ID, team, kind, Queued, k, hash, string(sb), string(lb), turn, sess, now, now, tr, nb); err != nil {
 			return fmt.Errorf("queue: write job: %w", err)
 		}
 		// Atomic delivery (his call (a), 2026-11-19): record the on in the SAME
@@ -1200,7 +1322,11 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, budget *L
 		// drop. The on's key is the turn's key, namespaced (deliveryKey) so a retry
 		// dedups both yet it cannot collide with a standalone POST /ons; a keyless
 		// turn gives a keyless (always new) on.
-		if deliver != nil && kind == KindTurn && turn != nil {
+		if deliver != nil && (kind == KindTurn || kind == KindExec) && turn != nil {
+			event := OnTurnCompleted
+			if kind == KindExec {
+				event = OnCommandEnded
+			}
 			mk, err := json.Marshal(deliver.Maker)
 			if err != nil {
 				return fmt.Errorf("queue: delivery maker: %w", err)
@@ -1209,7 +1335,7 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, budget *L
 			// (budget): its turn is made in the asker's tree when the on fires.
 			if _, err := tx.Exec(`INSERT INTO ons(id, team, event, subject, session, maker, idem_key, created, limits) VALUES(?,?,?,?,?,?,?,?,?)
 				ON CONFLICT(team, idem_key) WHERE idem_key != '' DO NOTHING`,
-				NewID("on_"), team, OnTurnCompleted, turn, deliver.Session, string(mk), deliveryKey(key), now, limitsColumn(budget)); err != nil {
+				NewID("on_"), team, event, turn, deliver.Session, string(mk), deliveryKey(key), now, limitsColumn(budget)); err != nil {
 				return fmt.Errorf("queue: write delivery on: %w", err)
 			}
 		}
@@ -1229,7 +1355,7 @@ func (q *Queue) create(team, kind, key string, spec Spec, links Links, budget *L
 // B15: the verdict and findings columns are no longer read (review is a normal
 // turn, with no verdict in core). They stay in an older DB, unreferenced.
 const jobCols = `id, team, kind, state, COALESCE(idem_key, ''), spec, links, COALESCE(attempt, ''), COALESCE(turn, ''), cancel, reason, result, COALESCE(session, ''), created, updated, ended, COALESCE(tree, ''),
-	COALESCE((SELECT b.session FROM jobs b WHERE b.team = jobs.team AND b.turn = json_extract(jobs.links, '$.chain.by') LIMIT 1), '')`
+	COALESCE((SELECT b.session FROM jobs b WHERE b.team = jobs.team AND b.turn = json_extract(jobs.links, '$.chain.by') LIMIT 1), ''), not_before`
 
 // stored is l as a job keeps it. Who asked is kept once, as the asking turn
 // (Chain.By); the session that turn ran in is its own job's, read back with
@@ -1250,10 +1376,10 @@ func scanJob(s scanner) (Job, error) {
 	var spec, links string
 	var result sql.NullString
 	var created, updated int64
-	var ended sql.NullInt64
+	var ended, notBefore sql.NullInt64
 	var bySession string
 	if err := s.Scan(&j.ID, &j.Team, &j.Kind, &j.State, &j.IdempotencyKey, &spec, &links, &j.Attempt, &j.Turn, &j.CancelRequested,
-		&j.Reason, &result, &j.Session, &created, &updated, &ended, &j.Tree, &bySession); err != nil {
+		&j.Reason, &result, &j.Session, &created, &updated, &ended, &j.Tree, &bySession, &notBefore); err != nil {
 		return j, err
 	}
 	_ = json.Unmarshal([]byte(spec), &j.Spec)
@@ -1264,7 +1390,7 @@ func scanJob(s scanner) (Job, error) {
 	if result.Valid {
 		j.Result = json.RawMessage(result.String)
 	}
-	j.Created, j.Updated, j.Ended = fromNanos(created), fromNanos(updated), optTime(ended)
+	j.Created, j.Updated, j.Ended, j.NotBefore = fromNanos(created), fromNanos(updated), optTime(ended), optTime(notBefore)
 	return j, nil
 }
 
@@ -1473,15 +1599,19 @@ func workspaceOf(db querier, j Job) (*Workspace, error) {
 // knows goes only to that session's runner, and a session's turn
 // jobs run one at a time, so a next turn waits for the one before it. Reviews
 // never wait:
-// each runs in a session of its own. The capacity check and the claim
-// are one transaction. ok is false when there is no job; cleanup may still be
-// set.
+// each runs in a session of its own. The count of the lane's places and the
+// claim are one transaction. ok is false when there is no job; cleanup may
+// still be set.
 //
-// folders asks for a folder job (folderKinds: an apply, a typed folder's
-// check) of the runner's own machine, in one of its FolderCapacity folder
-// places; without it the take is for a turn or a review, in one
-// of its capacity's places. So an apply never waits behind running turns.
-func (q *Queue) Take(runnerID string, lease time.Duration, folders bool) (job Job, att Attempt, ok bool, cleanup *Workspace, err error) {
+// lane says which of the runner's places the take is for (lanes.go): a folder
+// job of its own machine, in one of its FolderCapacity folder places, so an
+// apply never waits behind running turns; a delegated turn, in one of its
+// delegated places; or interactive work, which is not counted.
+func (q *Queue) Take(runnerID string, lease time.Duration, lane Lane) (job Job, att Attempt, ok bool, cleanup *Workspace, err error) {
+	if !lane.Known() {
+		return job, att, false, nil, ErrBadState
+	}
+	folders := lane == LaneFolders
 	err = q.tx(func(tx *sql.Tx) error {
 		now := q.now()
 		if _, err := sweepTx(tx, now); err != nil {
@@ -1505,18 +1635,26 @@ func (q *Queue) Take(runnerID string, lease time.Duration, folders bool) (job Jo
 		// cleanup return and the runner's clean/remove path stay for release,
 		// which will mark a copy for removal under its own guard. Until then a
 		// copy is removed by nothing.
-		// Folder jobs and the rest count against their own places.
-		kinds, places := `j.kind NOT IN `+folderKinds, capacity
-		if folders {
-			kinds, places = `j.kind IN `+folderKinds, FolderCapacity
+		// Each lane counts against its own places; interactive work is not
+		// counted (lanes.go).
+		kinds, places := q.laneOf(lane, capacity)
+		if places >= 0 {
+			var busy int
+			if err := tx.QueryRow(`SELECT COUNT(*) FROM attempts a JOIN jobs j ON j.id = a.job WHERE a.runner = ? AND a.state IN ('taken','running') AND `+kinds,
+				runnerID).Scan(&busy); err != nil {
+				return fmt.Errorf("queue: count attempts: %w", err)
+			}
+			if busy >= places {
+				return nil
+			}
 		}
-		var busy int
-		if err := tx.QueryRow(`SELECT COUNT(*) FROM attempts a JOIN jobs j ON j.id = a.job WHERE a.runner = ? AND a.state IN ('taken','running') AND `+kinds,
-			runnerID).Scan(&busy); err != nil {
-			return fmt.Errorf("queue: count attempts: %w", err)
-		}
-		if busy >= places {
-			return nil
+		// A put-away now due on this runner is decided before any job is
+		// chosen, in this transaction (putaway.go): kept, it ends here; one
+		// that may go stays queued and is chosen below like a close.
+		if !folders {
+			if err := q.decidePutAways(tx, runnerID, team, now); err != nil {
+				return err
+			}
 		}
 		// A job goes only to a runner that can run it (caps.go): the job's
 		// machine, the session's runner, every label it asks for, and its
@@ -1524,10 +1662,11 @@ func (q *Queue) Take(runnerID string, lease time.Duration, folders bool) (job Jo
 		// takes nothing.
 		var id string
 		err = tx.QueryRow(`SELECT j.id FROM jobs j, runners r WHERE r.id = ? AND j.team = ? AND j.state = 'queued'
+			AND (j.not_before IS NULL OR j.not_before <= `+strconv.FormatInt(nanos(now), 10)+`)
 			AND `+kinds+` AND COALESCE(json_extract(r.caps, '$.role'), '') = ''
 			AND (j.kind IN `+folderKinds+` OR `+jobCopyKey("j")+` IS NULL OR NOT EXISTS (SELECT 1 FROM copies s WHERE s.id = `+jobCopyKey("j")+` AND s.team = j.team)
 				OR EXISTS (SELECT 1 FROM copies s WHERE s.id = `+jobCopyKey("j")+` AND s.team = j.team AND s.runner = r.id AND s.closed IS NULL))
-			AND (j.kind NOT IN `+laneKinds+` OR NOT EXISTS (SELECT 1 FROM jobs o WHERE o.team = j.team AND o.id != j.id AND (`+laneTake+`)))
+			AND ((j.kind NOT IN `+laneKinds+` AND j.kind != '`+KindExec+`') OR NOT EXISTS (SELECT 1 FROM jobs o WHERE o.team = j.team AND o.id != j.id AND (`+laneTake(nanos(now))+`)))
 			AND (`+machineTake+`) AND (`+labelsTake+`) AND (`+harnessTake+`)
 			ORDER BY j.created, j.id LIMIT 1`, runnerID, team, nanos(now.Add(-RunnerFresh))).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1628,9 +1767,9 @@ func expire(tx *sql.Tx, now time.Time, a Attempt, j Job) error {
 	if err != nil {
 		return fmt.Errorf("queue: write job: %w", err)
 	}
-	// An apply that ended here has no finish, so nothing wrote its
-	// turn.applied: mark it due (lost.go).
-	if j.Kind == KindApply && (j.CancelRequested || a.State != Taken) {
+	// An apply, discard, update or close that ended here has no finish, so
+	// nothing wrote its outcome: mark it due (lost.go).
+	if lostOutcome(j.Kind) && (j.CancelRequested || a.State != Taken) {
 		if err := markOutcomeDue(tx, j.ID); err != nil {
 			return err
 		}
@@ -2328,8 +2467,20 @@ func (q *Queue) SessionWorkspace(team string, session ids.SessionID) (ids.Worksp
 
 // JobByTurn reads the job of team that runs the turn with this id.
 func (q *Queue) JobByTurn(team, turn string) (Job, error) {
+	return q.jobBySubject(team, turn, `kind != '`+KindExec+`'`)
+}
+
+// JobByCommand reads the exec job of team that runs the command with this id
+// (c_...), as POST /api/v0/commands named it.
+func (q *Queue) JobByCommand(team, id string) (Job, error) {
+	return q.jobBySubject(team, id, `kind = '`+KindExec+`'`)
+}
+
+// jobBySubject reads the job whose turn column is id and whose kind passes
+// kinds (an SQL condition): a turn's, or a command's.
+func (q *Queue) jobBySubject(team, turn, kinds string) (Job, error) {
 	var id string
-	err := q.db.QueryRow(`SELECT id FROM jobs WHERE turn = ? AND team = ?`, turn, team).Scan(&id)
+	err := q.db.QueryRow(`SELECT id FROM jobs WHERE turn = ? AND team = ? AND `+kinds, turn, team).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Job{}, ErrNotFound
 	}

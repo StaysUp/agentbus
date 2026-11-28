@@ -35,6 +35,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/staysup/agentbus/credentials"
 	"github.com/staysup/agentbus/queue"
 )
 
@@ -276,6 +277,14 @@ func startService(bin, dir string, port int) (*service, error) {
 	}
 	s := &service{base: "http://" + addr, home: filepath.Join(dir, "home"), bin: filepath.Join(dir, "bin"),
 		done: make(chan struct{}), client: &http.Client{Timeout: 2 * time.Minute}}
+	// Every turn takes its sign-in from control since 0.5.1, so the scratch
+	// data folder holds a made-up claude subscription, as a person's
+	// Connect would store one. The stand-in makes no model call, so it is
+	// never sent anywhere.
+	subs := &credentials.Subscriptions{Dir: filepath.Join(s.home, "subscriptions")}
+	if err := subs.Put("claude", "bench-stand-in-subscription", 24*time.Hour); err != nil {
+		return nil, err
+	}
 	logf, err := os.Create(filepath.Join(dir, "up.log"))
 	if err != nil {
 		return nil, err
@@ -423,13 +432,18 @@ func (s *service) session(folder, tag string) (runResult, error) {
 	}
 	d0, f0 := s.disk(), free(s.home)
 	stopSampling := s.sample(&r.RSSPeakKB)
-	first, session, err := s.turn(map[string]any{"agent": "claude", "folder": folder, "prompt": tag + " turn 1"}, &r.Method)
+	session, err := s.newSession(folder)
+	if err != nil {
+		stopSampling()
+		return r, err
+	}
+	first, _, err := s.turn(map[string]any{"session": session, "agent": "claude", "prompt": tag + " turn 1"}, &r.Method)
 	if err != nil {
 		stopSampling()
 		return r, fmt.Errorf("first turn: %w", err)
 	}
 	d1 := s.disk()
-	later, _, err := s.turn(map[string]any{"session": session, "prompt": tag + " turn 2"}, nil)
+	later, _, err := s.turn(map[string]any{"session": session, "agent": "claude", "prompt": tag + " turn 2"}, nil)
 	stopSampling()
 	if err != nil {
 		return r, fmt.Errorf("later turn: %w", err)
@@ -465,14 +479,11 @@ func (s *service) session(folder, tag string) (runResult, error) {
 		turn string
 		appl *time.Duration
 	}{{first.ws, first.id, &r.ApplyFirst}, {later.ws, later.id, &r.ApplyLater}} {
-		var ap struct {
-			State string `json:"state"`
-		}
 		t0 := time.Now()
-		code, err := s.call("POST", "/api/v0/workspaces/"+t.ws+"/apply", map[string]any{"turn": t.turn}, &ap)
+		result, err := s.apply(t.ws, t.turn)
 		*t.appl = time.Since(t0)
-		if err != nil || code != 200 || ap.State != "applied" {
-			return r, fmt.Errorf("apply of %s (workspace %s): %d %v, state %q", t.turn, t.ws, code, err, ap.State)
+		if err != nil || result != "applied" {
+			return r, fmt.Errorf("apply of %s (workspace %s): %v, result %q", t.turn, t.ws, err, result)
 		}
 	}
 	// The stand-in added bench-new.txt in the first turn and removed it in
@@ -483,10 +494,64 @@ func (s *service) session(folder, tag string) (runResult, error) {
 	return r, nil
 }
 
+// apply asks for an apply of ws up to turn and waits for it to run. The route
+// answers 202 at once with the event its outcome will be; GET
+// /api/v0/workspaces/{id}/outcome?event= reads it once it has run. It answers
+// the apply's result: applied, refused or failed.
+func (s *service) apply(ws, turn string) (string, error) {
+	var q struct {
+		State string `json:"state"`
+		Event string `json:"event"`
+	}
+	code, err := s.call("POST", "/api/v0/workspaces/"+ws+"/apply", map[string]any{"turn": turn}, &q)
+	if err != nil || code != http.StatusAccepted || q.Event == "" {
+		return "", fmt.Errorf("apply: %d %v, state %q", code, err, q.State)
+	}
+	for deadline := time.Now().Add(5 * time.Minute); time.Now().Before(deadline); time.Sleep(2 * time.Millisecond) {
+		var e struct {
+			Applied *struct {
+				Result string `json:"result"`
+			} `json:"applied"`
+		}
+		code, err := s.call("GET", "/api/v0/workspaces/"+ws+"/outcome?event="+q.Event, nil, &e)
+		if err != nil || (code != 200 && code != 404) {
+			return "", fmt.Errorf("outcome: %d %v", code, err)
+		}
+		if code == 200 && e.Applied != nil {
+			return e.Applied.Result, nil
+		}
+	}
+	return "", errors.New("the apply did not run within 5 minutes")
+}
+
 type turnDone struct {
 	id    string
 	ws    string // the workspace the turn ran in, for the apply
 	times turnTimes
+}
+
+// newSession makes a Copy workspace on folder and a session in it, the first
+// two of a first turn's three calls (POST /api/v0/workspaces, POST
+// /api/v0/sessions, then POST /api/v0/turns). A turn names its session; the
+// folder and the mode are its workspace's.
+func (s *service) newSession(folder string) (string, error) {
+	var ws struct {
+		Workspace string `json:"workspace"`
+		Error     string `json:"error"`
+	}
+	code, err := s.call("POST", "/api/v0/workspaces", map[string]any{"folder": folder, "sandbox": true}, &ws)
+	if err != nil || code != http.StatusCreated || ws.Workspace == "" {
+		return "", fmt.Errorf("POST /workspaces: %d %v %s", code, err, ws.Error)
+	}
+	var sess struct {
+		Session string `json:"session"`
+		Error   string `json:"error"`
+	}
+	code, err = s.call("POST", "/api/v0/sessions", map[string]any{"workspace": ws.Workspace}, &sess)
+	if err != nil || code != http.StatusCreated || sess.Session == "" {
+		return "", fmt.Errorf("POST /sessions: %d %v %s", code, err, sess.Error)
+	}
+	return sess.Session, nil
 }
 
 // turn starts a turn and waits for its job to end.

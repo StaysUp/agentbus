@@ -118,11 +118,11 @@ func TestTokenScopes(t *testing.T) {
 		want              int
 	}{
 		{mainTok, "GET", "/api/v0/runner/settings", nil, 401},
-		{enrollTok, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, 401},
-		{mainTok, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, 401},
+		{enrollTok, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion, Lane: queue.LaneInteractive}, 401},
+		{mainTok, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion, Lane: queue.LaneInteractive}, 401},
 		{mainTok, "POST", "/api/v0/runner/register", EnrollRequest{Name: "x", Capacity: 1, Protocol: ProtocolVersion}, 401},
 		{a.Token, "POST", "/api/v0/runner/register", EnrollRequest{Name: "x", Capacity: 1, Protocol: ProtocolVersion}, 401},
-		{"abr_wrong", "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, 401},
+		{"abr_wrong", "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion, Lane: queue.LaneInteractive}, 401},
 		{enrollTok, "POST", "/api/v0/runner/register", EnrollRequest{Name: "x", Capacity: 1, Protocol: 99}, 400},
 		// A runner of protocol 4 is a pre-0.5.10 binary, the version an old
 		// -gateway local runner speaks. It is refused at register and at its
@@ -137,7 +137,7 @@ func TestTokenScopes(t *testing.T) {
 		}
 	}
 	var taken TakenWork
-	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, &taken); code != 200 || taken.Job.ID != j.ID {
+	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion, Lane: queue.LaneInteractive}, &taken); code != 200 || taken.Job.ID != j.ID {
 		t.Fatalf("take: %d %+v", code, taken)
 	}
 	att := "/api/v0/runner/attempts/" + taken.Attempt.ID
@@ -183,7 +183,7 @@ func TestTakeLongPoll(t *testing.T) {
 	a := enroll(t, srv, 1)
 	path := "/api/v0/runner/take"
 	start := time.Now()
-	if got := send(t, srv, a.Token, "POST", path, TakeRequest{WaitMS: 100, Protocol: ProtocolVersion}, nil); got != 204 || time.Since(start) < 90*time.Millisecond {
+	if got := send(t, srv, a.Token, "POST", path, TakeRequest{WaitMS: 100, Protocol: ProtocolVersion, Lane: queue.LaneInteractive}, nil); got != 204 || time.Since(start) < 90*time.Millisecond {
 		t.Fatalf("empty take: %d after %s", got, time.Since(start))
 	}
 	// The job is made from another goroutine that never touches t, and the
@@ -195,7 +195,7 @@ func TestTakeLongPoll(t *testing.T) {
 		made <- err
 	}()
 	var taken TakenWork
-	got := send(t, srv, a.Token, "POST", path, TakeRequest{WaitMS: 5000, Protocol: ProtocolVersion}, &taken)
+	got := send(t, srv, a.Token, "POST", path, TakeRequest{WaitMS: 5000, Protocol: ProtocolVersion, Lane: queue.LaneInteractive}, &taken)
 	if err := <-made; err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +293,8 @@ func TestRunnerSettings(t *testing.T) {
 }
 
 // A runner gets the settings version with the settings, from one read, so a
-// turn on it records the version it ran under.
+// turn on it records the version it ran under; and the history budget, so its
+// own replay keeps the person's.
 func TestRunnerSettingsVersion(t *testing.T) {
 	q, err := queue.Open(filepath.Join(t.TempDir(), "jobs.db"), nil)
 	if err != nil {
@@ -306,6 +307,10 @@ func TestRunnerSettingsVersion(t *testing.T) {
 	if _, err := db.SetInstructions("mine", settings.Any); err != nil {
 		t.Fatal(err)
 	}
+	b := 0.25
+	if _, _, err := db.SetCompaction(settings.Compaction{Budget: &b}, settings.Any); err != nil {
+		t.Fatal(err)
+	}
 	s, err := New(Config{Queue: q, Token: mainTok, EnrollToken: enrollTok, Settings: db})
 	if err != nil {
 		t.Fatal(err)
@@ -314,7 +319,7 @@ func TestRunnerSettingsVersion(t *testing.T) {
 	t.Cleanup(func() { srv.Close(); q.Close(); db.Close() })
 	a := enroll(t, srv, 1)
 	var got settings.RunnerSettings
-	if code := send(t, srv, a.Token, "GET", "/api/v0/runner/settings", nil, &got); code != 200 || got.SettingsVersion != 1 || got.Instructions != "mine" {
+	if code := send(t, srv, a.Token, "GET", "/api/v0/runner/settings", nil, &got); code != 200 || got.SettingsVersion != 2 || got.Instructions != "mine" || got.Budget != 0.25 {
 		t.Fatalf("%d %+v", code, got)
 	}
 }

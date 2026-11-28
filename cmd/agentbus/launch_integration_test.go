@@ -417,6 +417,16 @@ func runLaunchCase(t *testing.T, self string, c launchCase) string {
 	cfg := engine.Config{Store: st, BaseURL: "http://127.0.0.1:8787", Wire: runWire(getenv, func() []string { return environ }, lookPath),
 		Settings: settings.NewFiles(data), APIDir: filepath.Join(data, "bin"),
 		Protect: []string{permPath, instrPath, filepath.Join(data, "agents.json")},
+		// The real cache folders differ per system (run/caches.go); a fixed one
+		// under the host home keeps the golden the same on Linux and macOS.
+		Caches: func(env []string) []string {
+			for i := len(env) - 1; i >= 0; i-- {
+				if h, ok := strings.CutPrefix(env[i], "HOME="); ok {
+					return []string{filepath.Join(h, "caches")}
+				}
+			}
+			return nil
+		},
 		Logf: func(f string, a ...any) {
 			l := fmt.Sprintf(f, a...)
 			if strings.HasPrefix(l, "run.edit") || strings.HasPrefix(l, "run.hint") || strings.HasPrefix(l, "run.refused") || strings.HasPrefix(l, "run.doc") {

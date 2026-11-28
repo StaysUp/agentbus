@@ -43,7 +43,7 @@ func findingsEnv(t *testing.T, perm string) (*env, string) {
 	t.Helper()
 	dir := t.TempDir()
 	script := `for a; do p="$a"; done; echo '{"type":"result","session_id":"sid-'$$'"}'; ` +
-		`pwd > "$D/pwd-$p"; printf '%s\n' "$p" >> trace.txt; env > "$D/env-$p.tmp"; mv "$D/env-$p.tmp" "$D/env-$p"; ` +
+		`pwd > "$D/pwd-$p.tmp"; mv "$D/pwd-$p.tmp" "$D/pwd-$p"; printf '%s\n' "$p" >> trace.txt; env > "$D/env-$p.tmp"; mv "$D/env-$p.tmp" "$D/env-$p"; ` +
 		`case "$p" in hold*) i=0; while [ ! -e "$D/release-$p" ] && [ $i -lt 1500 ]; do sleep 0.02; i=$((i+1)); done;; esac`
 	wire := func(agent, baseURL string, _ run.Access) (run.Launch, error) {
 		return run.Launch{Path: "/bin/sh", Args: []string{"-c", script, "sh"},

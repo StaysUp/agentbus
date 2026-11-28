@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -35,23 +36,17 @@ func askEnv(t *testing.T) (*env, string) {
 
 // askEnvWith is askEnv with permissions.toml at perm ("" for none).
 func askEnvWith(t *testing.T, perm string) (*env, string) {
-	return askEnvCap(t, perm, 16)
-}
-
-// askEnvCap is askEnvWith with a chosen runner capacity, so a test can hold the
-// one slot and keep an asked turn queued.
-func askEnvCap(t *testing.T, perm string, maxRuns int) (*env, string) {
 	t.Helper()
 	dir := t.TempDir()
 	script := `for a; do p="$a"; done; echo '{"type":"result","session_id":"sid-'$$'"}'; ` +
 		`case "$p" in "[AgentBus]"*) printf '%s' "$p" > "$D/delivered-$$"; exit 0;; quick|"Review a change"*|"Review the changes"*) exit 0;; esac; ` +
-		`printf '%s\n' "$@" > "$D/args-$p"; env > "$D/env-$p.tmp"; pwd > "$D/pwd-$p"; mv "$D/env-$p.tmp" "$D/env-$p"; ` +
+		`printf '%s\n' "$@" > "$D/args-$p"; env > "$D/env-$p.tmp"; pwd > "$D/pwd-$p.tmp"; mv "$D/pwd-$p.tmp" "$D/pwd-$p"; mv "$D/env-$p.tmp" "$D/env-$p"; ` +
 		`i=0; while [ ! -e "$D/release-$p" ] && [ $i -lt 1500 ]; do sleep 0.02; i=$((i+1)); done`
 	wire := func(agent, baseURL string, _ run.Access) (run.Launch, error) {
 		return run.Launch{Path: "/bin/sh", Args: []string{"-c", script, "sh"},
 			Env: []string{"PATH=/usr/bin:/bin", "D=" + dir, "ANTHROPIC_BASE_URL=" + baseURL}}, nil
 	}
-	return stackEnv(t, stack{wire: wire, maxRuns: maxRuns, permissions: perm}), dir
+	return stackEnv(t, stack{wire: wire, permissions: perm}), dir
 }
 
 // firstTurn runs the three calls a first turn now needs (POST /workspaces, POST
@@ -89,6 +84,10 @@ func tokenOf(t *testing.T, dir, prompt string) string {
 
 func release(dir, prompt string) { os.WriteFile(filepath.Join(dir, "release-"+prompt), nil, 0o600) }
 
+// pwdOf waits for the working folder the turn of prompt wrote. A fake agent
+// writes it to a .tmp file and renames it, so the file appears whole: written
+// in place, it exists empty until the shell writes the folder, and a read in
+// between returns "" (seen on Ubuntu CI, 2026-11-26).
 func pwdOf(t *testing.T, dir, prompt string) string {
 	t.Helper()
 	p := filepath.Join(dir, "pwd-"+prompt)
@@ -139,9 +138,18 @@ func waitAskedTurn(t *testing.T, e *env, session string) store.Turn {
 	return store.Turn{}
 }
 
+// deliverWait is how long deliverUntil waits for a reply. A delivery follows a
+// chain of turns (the asker ends, the asked turn runs and ends, the on fires,
+// the reply turn starts), and under -race every queue call waits in line for
+// the queue's one database connection behind each runner slot's take. A poll
+// that takes 0.1ms idle took up to 1.9s there, and a loaded macOS CI runner
+// went past 15s (PR #109, 2026-11-27). A reply that never comes still fails.
+const deliverWait = 2 * time.Minute
+
+// deliverUntil waits until session holds want delivered results.
 func deliverUntil(t *testing.T, e *env, session string, want int) []store.Turn {
 	t.Helper()
-	for deadline := time.Now().Add(15 * time.Second); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
+	for deadline := time.Now().Add(deliverWait); time.Now().Before(deadline); time.Sleep(50 * time.Millisecond) {
 		// Mirror the sweep: record each ended turn's end, then fire the ons
 		// that read it from the record (C0).
 		if _, _, err := jobs.RecordTurnEnds(e.q, e.store, nil, time.Now().Add(time.Hour), 200); err != nil {
@@ -296,6 +304,14 @@ func TestAskAgentAppDelivers(t *testing.T) {
 	if turn3 == turn {
 		t.Fatalf("a fresh ask with the same args reused the completed turn: %s", turn3)
 	}
+	// GET /api/v0/ons lists the ons the asks recorded with their turns (the
+	// delivery of POST /api/v0/turns, not POST /api/v0/ons), for the main
+	// token and for the asking turn's own, by the session they deliver to.
+	for _, tk := range []string{token, tok} {
+		if got := onTurns(t, e, tk, root.Session); !slices.Equal(got, []string{turn, turn3}) {
+			t.Errorf("GET /api/v0/ons?session=root before delivery: %v, want [%s %s]", got, turn, turn3)
+		}
+	}
 	// The asked turns run in the asker's workspace lane, after the asker's turn
 	// ends, so release root; then the runner starts the first asked turn (check
 	// its origin) and BOTH replies come back to the asking session as later turns.
@@ -314,6 +330,30 @@ func TestAskAgentAppDelivers(t *testing.T) {
 	if !delivered[turn] || !delivered[turn3] {
 		t.Fatalf("the asked replies were not both delivered to root (want %s and %s): %+v", turn, turn3, got)
 	}
+	// An on that fired is no longer listed. The fire turns it off just after
+	// the delivery is queued, so allow the sweep a moment.
+	deadline := time.Now().Add(10 * time.Second)
+	for len(onTurns(t, e, token, root.Session)) > 0 {
+		if time.Now().After(deadline) {
+			t.Fatalf("fired ons still listed: %v", onTurns(t, e, token, root.Session))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// onTurns is the turns the ons delivering to session watch, as tok lists them.
+func onTurns(t *testing.T, e *env, tok, session string) []string {
+	t.Helper()
+	code, out := as(t, e, tok, "GET", "/api/v0/ons?session="+session, "")
+	var l OnList
+	if code != 200 || json.Unmarshal([]byte(out), &l) != nil {
+		t.Fatalf("GET /api/v0/ons: %d %s", code, out)
+	}
+	turns := []string{}
+	for _, on := range l.Ons {
+		turns = append(turns, on.Turn)
+	}
+	return turns
 }
 
 // The review_turn app end to end: it starts a review turn (ask_agent with a
@@ -417,26 +457,27 @@ func TestReviewTurnAppNoTurnDelivers(t *testing.T) {
 
 // ask_agent's startTurn step does not wait for a runner (POST /turns never
 // waits, C1 2026-11-25): it returns once the turn is recorded, so registerOn runs in
-// the same tool call even while the turn is only queued. Here the root turn
-// holds the one runner slot, so the asked turn cannot start during the call —
-// yet the app returns its id and its on is registered. When root ends and the
-// asked turn finally runs, its reply still delivers.
+// the same tool call even while the turn is only queued. Here the asked session
+// is in root's workspace (ask_agent opens it there), so the asked turn waits in
+// the workspace's lane while root runs, and cannot start during the call — yet
+// the app returns its id and its on is registered. When root ends and the asked
+// turn finally runs, its reply still delivers.
 func TestAskAgentAppQueuedStillGetsOn(t *testing.T) {
 	perm := filepath.Join(t.TempDir(), settings.PolicyFile)
 	if err := os.WriteFile(perm, []byte("allow = [\"ask_agent\"]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	e, dir := askEnvCap(t, perm, 1) // one runner slot: root occupies it
+	e, dir := askEnvWith(t, perm)
 	repo := gitRepo(t)
 	root := e.firstTurn(t, repo, "claude", "root", true)
-	tok := tokenOf(t, dir, "root") // root is running now, holding the slot
+	tok := tokenOf(t, dir, "root") // root is running now, in the workspace's lane
 
 	turn, _ := callAskAgent(t, e, tok,
 		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"ask_agent","arguments":{"agent":"claude","prompt":"quick"}}}`)
 	if turn == "" {
 		t.Fatal("ask_agent returned no turn")
 	}
-	// The asked turn is only queued: no runner is free to start it.
+	// The asked turn is only queued: root holds the workspace's lane.
 	j, err := e.q.JobByTurn(queue.DefaultTeam, turn)
 	if err != nil || j.State != queue.Queued {
 		t.Fatalf("asked turn state %q (err %v), want queued", j.State, err)
@@ -455,12 +496,76 @@ func TestAskAgentAppQueuedStillGetsOn(t *testing.T) {
 	if !found {
 		t.Fatalf("no on watching the queued turn %s for %s: %+v", turn, root.Session, ons)
 	}
-	// Release root; the slot frees, the asked turn runs and ends, and its reply
+	// Release root; the lane frees, the asked turn runs and ends, and its reply
 	// delivers back to root through the on registered while it was queued.
 	release(dir, "root")
 	got := deliverUntil(t, e, root.Session, 1)
 	if got[0].Origin == nil || got[0].Origin.Turn != turn {
 		t.Fatalf("the queued turn's reply did not deliver: %+v", got)
+	}
+}
+
+// The 2026-11-26 case through the API and a runner over HTTP (Grok review
+// evt_e3e61c1e333c80c6, P1): the person's coordinator asks for three builders
+// while its turn runs; ask_agent opens their sessions in its workspace, so
+// they queue in its lane. The person then sends the coordinator a message.
+// When the coordinator's turn ends, the message runs before any builder: a
+// queued delegated turn holds no copy. Before the fix it ran after all three.
+func TestPersonsMessageGoesAheadOfAskedBuilders(t *testing.T) {
+	perm := filepath.Join(t.TempDir(), settings.PolicyFile)
+	if err := os.WriteFile(perm, []byte("allow = [\"ask_agent\"]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e, dir := askEnvWith(t, perm)
+	root := e.firstTurn(t, gitRepo(t), "claude", "root", true)
+	tok := tokenOf(t, dir, "root")
+	for i, b := range []string{"b1", "b2", "b3"} {
+		turn, _ := callAskAgent(t, e, tok, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"ask_agent","arguments":{"agent":"claude","prompt":%q}}}`, i+1, b))
+		if j, err := e.q.JobByTurn(queue.DefaultTeam, turn); err != nil || j.State != queue.Queued {
+			t.Fatalf("builder %s: %q %v, want queued behind the coordinator", b, j.State, err)
+		}
+	}
+	msg := startTurn(t, e, fmt.Sprintf(`{"session":%q,"agent":"claude","prompt":"next"}`, root.Session))
+	if msg.State != "queued" || msg.Ahead != 1 {
+		t.Fatalf("the person's message: %+v, want queued behind the coordinator's running turn only", msg)
+	}
+	release(dir, "root")
+	tokenOf(t, dir, "next")
+	for _, b := range []string{"b1", "b2", "b3"} {
+		if _, err := os.Stat(filepath.Join(dir, "args-"+b)); err == nil {
+			t.Fatalf("builder %s ran before the person's message", b)
+		}
+	}
+	for _, p := range []string{"next", "b1", "b2", "b3"} {
+		release(dir, p)
+	}
+}
+
+// Through the API (Codex review evt_ffeb7b5ccdb2ee05): a turn token that
+// starts a turn in its own root session, the person's session, starts
+// delegated work, counted against the limit. The person's own next message in
+// that session is not.
+func TestAgentTurnInTheRootSessionIsDelegated(t *testing.T) {
+	e, dir := askEnvWith(t, "")
+	root := e.firstTurn(t, gitRepo(t), "claude", "root", true)
+	tok := tokenOf(t, dir, "root")
+	code, out := as(t, e, tok, "POST", "/api/v0/turns", fmt.Sprintf(`{"session":%q,"agent":"claude","prompt":"again"}`, root.Session))
+	var st Started
+	if code != 202 || json.Unmarshal([]byte(out), &st) != nil {
+		t.Fatalf("the agent's turn: %d %s", code, out)
+	}
+	j, err := e.q.JobByTurn(queue.DefaultTeam, st.Turn)
+	d, derr := e.q.JobDelegated(queue.DefaultTeam, j.ID)
+	if err != nil || derr != nil || !d || j.Tree != j.Session {
+		t.Fatalf("the agent's turn in its root session: %+v %v, want delegated", j, err)
+	}
+	mine := startTurn(t, e, fmt.Sprintf(`{"session":%q,"agent":"claude","prompt":"mine"}`, root.Session))
+	m, err := e.q.JobByTurn(queue.DefaultTeam, mine.Turn)
+	if d, derr := e.q.JobDelegated(queue.DefaultTeam, m.ID); err != nil || derr != nil || d {
+		t.Fatalf("the person's message: %+v %v, want not delegated", m, err)
+	}
+	for _, p := range []string{"root", "again", "mine"} {
+		release(dir, p)
 	}
 }
 
@@ -633,6 +738,14 @@ func TestOnAPIAuth(t *testing.T) {
 	}
 	if code, out := as(t, e, ptok, "DELETE", "/api/v0/ons/"+ov.ID, ""); code != 204 {
 		t.Fatalf("maker remove: %d %s, want 204", code, out)
+	}
+	// Control's built-in on (the put-away) is no agent's to turn off.
+	builtin, err := e.q.RegisterRecordOn(queue.DefaultTeam, "workspace.applied", queue.Action{Queue: queue.KindPutAway}, "builtin/put_away/workspace.applied", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code, out := as(t, e, ptok, "DELETE", "/api/v0/ons/"+builtin.ID, ""); code != 403 {
+		t.Fatalf("a turn token removes the built-in on: %d %s, want 403", code, out)
 	}
 }
 

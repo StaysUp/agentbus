@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"time"
 	"unicode/utf8"
 )
 
@@ -27,6 +28,24 @@ func (s *Store) TurnStart(session, turn string) (prompt, replayFrom string, tran
 		return "", "", false, false, fmt.Errorf("store: read a turn: %w", err)
 	}
 	return c.String + p.String, r.String, k.String == "transcript", true, nil
+}
+
+// TurnCommands reads what the turn.started of (session, turn) says of a command
+// the turn hands to AgentBus (harness.CommandLimit): run says it may run, why
+// says why not. found is false when the record holds no turn.started of it.
+// The first turn.started is the runner's, as TurnStart reads it.
+func (s *Store) TurnCommands(session, turn string) (run bool, why string, found bool, err error) {
+	var c sql.NullBool
+	var w sql.NullString
+	err = s.r.QueryRow(`SELECT json_extract(data, '$.commands_run'), json_extract(data, '$.command_limit')
+		FROM events WHERE session = ? AND turn = ? AND kind = 'turn.started' ORDER BY seq LIMIT 1`, session, turn).Scan(&c, &w)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, "", false, nil
+	}
+	if err != nil {
+		return false, "", false, fmt.Errorf("store: read a turn: %w", err)
+	}
+	return c.Valid && c.Bool, w.String, true, nil
 }
 
 // TurnText reads the whole prompt and whole reply of (session, turn) from the
@@ -64,6 +83,46 @@ func (s *Store) TurnText(session, turn string) (prompt, reply string, found bool
 		return "", "", false, fmt.Errorf("store: read a turn's text: %w", err)
 	}
 	return p.String, r.String, true, nil
+}
+
+// Answer is one answer of a turn: the text of a reply that ended it, and when.
+type Answer struct {
+	Text string    `json:"text" doc:"The reply's whole text."`
+	Time time.Time `json:"time" doc:"When the turn.completed that ended on this reply was recorded."`
+}
+
+// TurnAnswers reads every answer of (session, turn), oldest first: for each
+// turn.completed, the text of the model.responded of its exchange. A turn can
+// answer more than once: Claude Code resumes after its own background command
+// ends, and the record then holds a turn.completed per answer (seen
+// 2026-11-26, t_5794feb266e80f67: two, four minutes apart). A turn.completed
+// whose reply carried no text, or with no exchange to pair it by, gives no
+// answer.
+func (s *Store) TurnAnswers(session, turn string) ([]Answer, error) {
+	rows, err := s.r.Query(`SELECT c.time, json_extract(r.data, '$.text')
+		FROM events c JOIN events r ON r.seq = (
+			SELECT p.seq FROM events p WHERE p.session = c.session AND p.turn = c.turn AND p.kind = 'model.responded'
+				AND json_extract(p.data, '$.exchange') = json_extract(c.data, '$.exchange') AND p.seq < c.seq
+			ORDER BY p.seq DESC LIMIT 1)
+		WHERE c.session = ? AND c.turn = ? AND c.kind = 'turn.completed'
+			AND COALESCE(json_extract(c.data, '$.exchange'), '') <> ''
+			AND COALESCE(json_extract(r.data, '$.text'), '') <> ''
+		ORDER BY c.seq`, session, turn)
+	if err != nil {
+		return nil, fmt.Errorf("store: read a turn's answers: %w", err)
+	}
+	defer rows.Close()
+	out := []Answer{}
+	for rows.Next() {
+		var ns int64
+		var a Answer
+		if err := rows.Scan(&ns, &a.Text); err != nil {
+			return nil, fmt.Errorf("store: read a turn's answers: %w", err)
+		}
+		a.Time = time.Unix(0, ns).UTC()
+		out = append(out, a)
+	}
+	return out, rows.Err()
 }
 
 // TranscriptTurn is one turn as plain text: who ran it, the person's words
@@ -180,6 +239,9 @@ type Call struct {
 	// Such a reply's stop reason cannot be trusted, and its reply is never
 	// kept.
 	Error string
+	// Compacted: the gateway judged this call a main-thread request its
+	// harness had compacted (a history.compacted with its exchange).
+	Compacted bool
 }
 
 // TurnCalls lists the turn's model calls, newest request first, leaving out
@@ -193,7 +255,9 @@ func (s *Store) TurnCalls(session, turn string) ([]Call, error) {
 	rows, err := s.r.Query(`SELECT json_extract(q.data, '$.exchange'),
 			COUNT(r.seq), COALESCE(MAX(json_extract(r.data, '$.status')), 0),
 			COALESCE(MAX(json_extract(r.data, '$.stop_reason')), ''),
-			COALESCE(MAX(json_extract(r.data, '$.error')), '')
+			COALESCE(MAX(json_extract(r.data, '$.error')), ''),
+			EXISTS(SELECT 1 FROM events c WHERE c.session = q.session AND c.turn = q.turn
+				AND c.kind = 'history.compacted' AND json_extract(c.data, '$.exchange') = json_extract(q.data, '$.exchange'))
 		FROM events q
 		LEFT JOIN events r ON r.session = q.session AND r.turn = q.turn AND r.kind = 'model.responded'
 			AND json_extract(r.data, '$.exchange') = json_extract(q.data, '$.exchange')
@@ -210,7 +274,7 @@ func (s *Store) TurnCalls(session, turn string) ([]Call, error) {
 	for rows.Next() {
 		var c Call
 		var n int
-		if err := rows.Scan(&c.Exchange, &n, &c.Status, &c.Stop, &c.Error); err != nil {
+		if err := rows.Scan(&c.Exchange, &n, &c.Status, &c.Stop, &c.Error, &c.Compacted); err != nil {
 			return nil, fmt.Errorf("store: read a turn's calls: %w", err)
 		}
 		c.Responded = n > 0

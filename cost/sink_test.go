@@ -212,4 +212,8 @@ func TestSinkVendorCost(t *testing.T) {
 	wantCost(t, e, 0.0012, true)
 	e = priced(t, responded("openai", "openai/gpt-x", &event.Usage{OutputTokens: 1, OutputIncomplete: true, CostUSD: &usd}))
 	wantCost(t, e, 0.0012, false)
+	// A partial cost, such as OpenRouter's fee on a BYOK call without the
+	// provider's charge (issue #94), is a lower bound.
+	e = priced(t, responded("openai", "openai/gpt-x", &event.Usage{OutputTokens: 1, CostUSD: &usd, CostPartial: true}))
+	wantCost(t, e, 0.0012, false)
 }

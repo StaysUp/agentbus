@@ -18,6 +18,7 @@ package isolation
 // <seq>-<name>.snap.json, is turned into a tree when first read (migrate).
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -78,9 +79,6 @@ func (st treeState) snapshot() *workspace.Snapshot {
 	}
 	return snap
 }
-
-// racy is workspace.Snapshot.Racy for a checkpoint taken at taken.
-func racy(taken, mtime int64) bool { return taken != 0 && mtime >= taken-int64(workspace.Racy) }
 
 // locks keeps one change of a space at a time, in this process.
 var locks sync.Map // state folder -> *sync.Mutex
@@ -244,10 +242,10 @@ func checkpoints(s *Space) ([]Checkpoint, error) {
 type keeper interface {
 	// take records the space's files now as a tree in t, and answers it and
 	// the count of its files: prev is the latest checkpoint, or nil for the
-	// Base. A file whose size, modification time and mode match prev's
-	// keeps prev's hash; any other is passed to save, which saves it and
-	// answers its hash. The Base may leave hashes empty (not hashed), and
-	// saves only what it passes to save.
+	// Base. A file prev's hash is kept for (workspace.Keeps) keeps it; any
+	// other is passed to save, which saves it and answers its hash. The Base
+	// may leave hashes empty (not hashed), and saves only what it passes to
+	// save.
 	take(s *Space, t *trees, prev *treeState, save workspace.Hasher) (treeState, int, error)
 	// learn hashes rel as the Base holds it, f, when that content can still
 	// be read as it was; save it too when it is small. ok is false when it
@@ -261,9 +259,12 @@ type keeper interface {
 // changing); any other file is recorded by size, modification time and mode
 // only. Each link is saved too, under objects, as a link costs nothing to
 // keep: an apply that puts a link back as the Base had it reads it there.
-func baseHasher(start time.Time, objects string) workspace.Hasher {
+func baseHasher(ctx context.Context, start time.Time, objects string) workspace.Hasher {
 	since := start.Add(-workspace.Racy).UnixNano()
 	return func(rel, p string, info fs.FileInfo) (string, error) {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
 		if info.Mode()&fs.ModeSymlink != 0 {
 			if err := os.MkdirAll(objects, 0o700); err != nil {
 				return "", err
@@ -273,7 +274,7 @@ func baseHasher(start time.Time, objects string) workspace.Hasher {
 		if info.ModTime().UnixNano() < since {
 			return "", nil
 		}
-		return workspace.Hash(rel, p, info)
+		return workspace.HashContext(ctx, rel, p, info)
 	}
 }
 
@@ -311,6 +312,9 @@ func checkpoint(s *Space, name string, k keeper) (Checkpoint, error) {
 	}
 	var saved []string
 	save := func(_, p string, _ fs.FileInfo) (string, error) {
+		if err := s.stopCtx().Err(); err != nil {
+			return "", err
+		}
 		h, err := saveObject(p, s.objectDir())
 		if err == nil {
 			saved = append(saved, h)
@@ -666,13 +670,21 @@ func readRegular(rt *os.Root, name string, max int) ([]byte, bool) {
 func removeState(s *Space) error { return removeAll(s.state()) }
 
 // removeAll is os.RemoveAll that also removes what a read-only folder holds,
-// as a copied module cache has.
+// as a copied module cache has, and a file or folder locked on macOS (Finder's
+// Locked, which a clone keeps): p is always the runner's own, a copy or a
+// space's record, never the person's folder.
 func removeAll(p string) error {
 	if err := os.RemoveAll(p); err == nil {
 		return nil
 	}
 	_ = filepath.WalkDir(p, func(q string, d fs.DirEntry, err error) error {
-		if err == nil && d.IsDir() {
+		if err != nil {
+			return nil
+		}
+		// A link is unlocked itself (a clone keeps Finder's Locked on a link
+		// too), never chmodded: chmod follows it.
+		unlock(q)
+		if d.IsDir() {
 			_ = os.Chmod(q, 0o700)
 		}
 		return nil

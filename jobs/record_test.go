@@ -35,7 +35,7 @@ func TestRecordRoute(t *testing.T) {
 	a, b := enroll(t, srv, 1), enroll(t, srv, 1)
 	makeJob(t, q, queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"})
 	var taken TakenWork
-	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, &taken); code != 200 {
+	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion, Lane: queue.LaneInteractive}, &taken); code != 200 {
 		t.Fatalf("take: %d", code)
 	}
 	turn, session := taken.Job.Turn, taken.Job.Session
@@ -118,7 +118,7 @@ func TestRunnerApprovalDecisionOwnership(t *testing.T) {
 	a := enroll(t, srv, 1)
 	makeJob(t, q, queue.Spec{Harness: "claude", Folder: "/x", Prompt: "hi"})
 	var taken TakenWork
-	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, &taken); code != 200 {
+	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion, Lane: queue.LaneInteractive}, &taken); code != 200 {
 		t.Fatalf("take: %d", code)
 	}
 	session, turn := taken.Job.Session, taken.Job.Turn
@@ -223,7 +223,7 @@ func TestCloseLost(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		_, a, ok, _, err := q.Take(rn.ID, 30*time.Second, false)
+		_, a, ok, _, err := q.Take(rn.ID, 30*time.Second, queue.LaneInteractive)
 		if err != nil || !ok {
 			t.Fatalf("take: %v %v", ok, err)
 		}

@@ -3,6 +3,212 @@
 All notable changes to AgentBus. Full notes for each release are on the
 [releases page](https://github.com/staysup/agentbus/releases).
 
+## 0.6.7 (2026-11-27)
+
+### Added
+- **An agent hands a long command to AgentBus, and its turn ends.** On Claude Code 2.1.332 a
+  background command keeps `claude -p` running until the command ends, so a 10 to 15 minute gate
+  held the turn, and the person's messages waited behind it. Coordinators ran gates with `nohup`
+  instead, which nothing recorded and nothing reported. Now an agent calls the `run_command` tool
+  (or `POST /api/v0/commands`) and ends its turn. The command is a job: it runs in the turn's
+  direct workspace (the folder itself), on the runner that holds it, under
+  the turn's command rules, once the turn has ended. While it runs, a turn the person sends does
+  not wait for it. When it ends, a new turn in the session carries the command, how it ended, its
+  exit code and the end of its output (16 KiB). `command.ended` records it, its delivery is an on
+  (`GET /api/v0/ons`, event `command.ended`), and `GET /api/v0/commands/{id}` and
+  `POST /api/v0/commands/{id}/stop` read and stop it. A command the rules would hold for a person
+  is refused, since no one is there to answer. It counts as work the turn asked for, under the
+  limits. A command never gets more than the turn that asked for it may do: AgentBus has no wall
+  of its own for a command yet, so it is refused, saying why, when the turn is limited in a way the
+  command would escape (edits forbidden or read-only, or its harness's own sandbox: Claude Code in
+  a sandbox copy, Codex always). The runner decides it once, at the turn's launch, from the limits
+  the harness starts with (`harness.CommandLimit`), and records it on the turn's `turn.started`
+  (`commands_run`, `command_limit`), which a runner sends to control before the turn's agent
+  starts, so control never reads ahead of it; control refuses by that record, and a turn whose
+  runner records no limit (an agentbus from before this) takes no command. A run control saw
+  start always ends there: when a turn's attempt ends, control closes any run of it whose end the
+  runner did not send (its agent failed to start, or the link lost the end), so the session's
+  next turn starts.
+- **AgentBus keeps each turn's history within a budget, by itself.** Own replay used to put the
+  whole session in front of every turn, so a long session grew until its harness compacted. Now,
+  at each turn's start, the history it builds fits a budget: 40% of the model's window by default,
+  well below any harness's compaction point. Under the budget nothing changes. Over it, older turns
+  are shortened in one step down to half the budget, oldest first: long tool results (over 2 KiB)
+  become a stub that says what it was, how it began and the API call that fetches it back; then
+  long tool-call inputs the same way; then the oldest turns become AgentBus's own summary (the
+  person's words and the model's last words, each cut past 2,000 bytes, AgentBus's notes, a line
+  per tool call). When the summary itself grows too big, a step leaves the oldest turns out of it
+  for one line naming how many and their range, so a session of any length stays within the
+  budget. The three newest turns go in whole while that is enough. When even that does not fit,
+  the newest turn is shortened too: the budget wins, and every turn starts within it. Images are
+  counted by their block (about 1,600 tokens each), never guessed from long text. Each step is frozen: the next turns carry its bytes unchanged, so the prompt cache
+  keeps working, and a turn's log, once written, stays word for word until it is left out. No model
+  is called for it. The record keeps every byte, and the turn's stored requests are what the model saw.
+  `history.shortened` records each step. The budget is `budget` in
+  `GET/PUT /api/v0/settings/compaction`; control sends it to every runner with its settings, so a
+  runner on another machine keeps the same budget. Claude Code, Codex and OpenCode alike.
+- **A workspace's last action.** `GET /api/v0/workspaces/{id}` (and the list) adds `last_action`:
+  the newest outcome of an apply, discard, update or close, as the record holds it: a
+  quick look at what happened last. `GET /api/v0/workspaces/{id}/outcome?event=` reads one
+  action's outcome by the event its reply named (404 until it has run): the read a caller polls,
+  since a later action replaces `last_action`.
+- **`workspace.failed`.** A discard, update or close that ended without doing its work records it:
+  the action, why, and who asked. The runner refused it, its runner stopped answering while it
+  ran, or its runner was removed before it took it. Before, such a job recorded nothing, and only
+  a caller still waiting on the route heard why. It takes the id the action's success event would
+  have had, so one request has one outcome. A refused apply is still `workspace.applied` with
+  result `refused`.
+
+### Changed
+- **Turns you send start at once.** A runner used to run 4 turns at once, whoever started them, so
+  builders a coordinator started could fill every place and hold your own messages in the queue
+  (10+ minutes on 2026-11-26). Now your turns have a lane of their own and are not counted. They
+  wait only for a turn already running in their workspace (one copy runs one turn) and their
+  session's earlier turns. Within a workspace your turn goes ahead of the turns agents asked for
+  that have not started yet, such as `ask_agent` builders queued in the coordinator's workspace; no
+  job passes a discard, update or close. The limit holds only for delegated work, the turns
+  agents start (in any session, the person's own included: who asked decides it) and the replies
+  delivered into sessions agents started. It is 8 by default, set by
+  `[limits] max_delegated_at_once` in the settings (1 to 64), and a change holds for the next turn
+  a runner takes, with no restart. `GET /api/v0/runners` says how it stands: `delegated` with
+  `at_once`, `busy` and `waiting`, and each runner's own (its `waiting` counts the turns bound to
+  it by its copy or its machine). Control counts the places; a runner runs
+  every job it takes, and the engine no longer refuses a fifth turn with 429.
+- **`agentbus up -max-runs` is retired.** It is ignored, with a note saying where the limit is now.
+  `agentbus runner -capacity N` stays, as a machine's own ceiling on delegated turns; without it
+  the settings decide.
+- **Runner protocol 6.** A take names its lane (`folders`, `delegated` or `interactive`) in place
+  of `folders`. A runner and control of different releases refuse each other with a plain message:
+  upgrade both.
+- **A harness that compacts inside a turn is let through.** Own replay used to refuse a main
+  request the harness had compacted, which stopped the turn. Now, once a request of the turn has
+  carried the history, a compacted one goes on as the harness sent it (Codex's under the session's
+  thread id, as the turn's other requests). The gateway judges every main request once, by the
+  layout test it forwards by, in every turn, and records the verdict on the call as
+  `history.compacted`. That one test is the only place a compaction is decided: in a turn that
+  carries a history the recorded verdict says, and in a turn with none own replay applies the same
+  test to the stored request, which is the agent's own. Nothing depends on the harness's summary: the next turn is built from the
+  record, from the turn's last request before the compaction, then a note that the turn went on,
+  how many calls followed and the model's last words. A request not in the fresh layout before any
+  request carried the history is still refused.
+- **A Copy workspace puts itself away.** Once its work is all applied or discarded and the
+  workspace has been quiet for 30 minutes, AgentBus removes the copy itself, as Close does.
+  Sessions and the record stay, and the next turn makes a fresh copy. A copy with unapplied work
+  is never touched. If anything happened in the workspace since (a turn, an apply, a discard, an
+  update, a preview, a close), or work is waiting in it, the put-away does nothing. The record says
+  which: `workspace.closed` with `put_away` (the on and event that queued it, when it was queued
+  and when it came due), or `workspace.kept` with why. The quiet time is a setting,
+  `[workspaces] put_away_after_minutes` (30 by default, 0 is off). Turning it off also stops a
+  put-away already waiting. When several wait at once, the one for the latest event decides.
+- **A job may wait until a time.** A job can carry a time before which no runner takes it
+  (`not_before`). Until then it holds no place in its workspace's lane, so a turn sent meanwhile
+  runs at once. The put-away is the first job that uses it.
+- **An on may watch the record and queue a job.** Besides "a turn completed, deliver its reply",
+  an on can now watch a kind of event on the record and queue a job in that event's workspace. It
+  keeps a cursor in the record and fires once per event. The put-away is control's first built-in
+  on, over `workspace.applied` and `workspace.discarded`. `POST /api/v0/ons` still registers only
+  a turn's on.
+- **List the ons.** `GET /api/v0/ons` lists the ons still waiting to react, oldest first: each
+  one's id, the turn it watches, the session it delivers to and the turn that registered it.
+  `session` keeps the ons that deliver to that session. The main token sees every on; a turn
+  token sees the ons it may remove: those its own turn registered and those that deliver to a
+  session it may read. Finding them used to take a read of `jobs.db`.
+  The ons a turn's ask records with it (`delivery` on `POST /api/v0/turns`, as ask_agent does)
+  are listed too. One that fired or was removed drops out.
+- **Every answer of a turn.** `GET /api/v0/turns/{id}` adds `replies`: each answer the turn gave,
+  oldest first, with its text and time. A turn can answer more than once, as when Claude Code
+  resumes after its own background command ends; `reply` still holds the last. Before, the
+  earlier answers showed only in the turn's events.
+- **Apply, discard, update and close answer at once.** Each queues its job and answers 202 with
+  state `queued` and `event`: the id the record gives its outcome. None waits up to 30 seconds for
+  the job to run any more. Poll
+  `GET /api/v0/workspaces/{id}/outcome?event=` with it until it answers 200: `workspace.applied` (result
+  applied, refused with each file in `conflicts` and why, or failed), `workspace.discarded` (with
+  `dropped_turns`), `workspace.updated` (updated, merged or conflict, with the files),
+  `workspace.closed`, or `workspace.failed`. Asking for the same apply while it waits or runs
+  makes no second one: it answers 202 with the same event. Nothing to do still answers 200 with
+  `already` true, and a refusal before anything is queued (another action waiting, a closed
+  copy, an offline machine) keeps its status. **Breaking:** a refused apply is no longer a 409
+  with its files; the files are on the outcome. Discard's reply has no `dropped_turns` and
+  Update's has no `updated`, `conflicts`, `unresolved` or `unmergeable`: those are on the outcome
+  too. `GET /api/v0/turns/{id}/diff`'s `apply` names its outcome's `event`.
+- **A Claude Code Copy session reaches GitHub and the package hosts, and writes your caches.**
+  Copy limits where an agent writes, not what it reads. `gh` and GitHub, the npm, PyPI, Go, Yarn
+  and crates.io hosts are on the sandbox's list, Go can check TLS, and your cache folders are
+  writable as the README promised. The copy allows no local sockets (`allowAllUnixSockets` is
+  false), so Docker, whose bind mounts would write outside the copy, does not work there: use a
+  Direct session. Socket grants in your own managed, MDM or user Claude Code settings still apply
+  in a Copy session; 0.6.8 closes that.
+- **A malformed `session` query is 400 for every caller.** On `GET /api/v0/events` and
+  `GET /api/v0/turns`, a `session` sent twice, empty or not shaped as a session id is refused
+  with 400, the owner's token included. A turn token sending it twice got 403 before.
+
+### Fixed
+- **A file changed since the last checkpoint is read again, even with its old size and time**
+  ([#89](https://github.com/staysup/agentbus/issues/89)). A rename over a file of the same size
+  and time, or `touch -r`, made a checkpoint think it unchanged, and Apply said applied without it.
+  A file now also needs a ctime older than the last look. Thanks to Kunal Roy Choudhury
+  (`kunalgoesbyken`, #97).
+- **A session whose newest turn's history cannot be rebuilt goes on by transcript**
+  ([#100](https://github.com/staysup/agentbus/issues/100)). If `up` and its runner both died
+  mid-turn, every later turn of the session was refused with 409. Thanks to Kunal Roy Choudhury
+  (`kunalgoesbyken`, #101).
+- A test now proves Apply refuses a truncated changeset and writes nothing. Thanks to Rodrigo
+  Boratto (`rwrz`, #109).
+- **The owner's `GET /api/v0/events?session=` opened a stream of no session** instead of
+  refusing. The door checked the query only for a token that does not reach everywhere.
+- **A reply the main token delivered into a session another tree had continued joined that
+  tree.** A session's tree is now its first turn's: a session the person started has none, even
+  after another tree's turn delivered into it.
+- **A compaction from before 0.6.7 no longer leaks the harness's summary into the next turn.** In a
+  turn with no earlier history, whose stored requests are the agent's own, own replay now applies
+  the gateway's own layout test to the stored request. So a record written before
+  `history.compacted` existed, or a call the gateway could not judge after a restart, is rebuilt
+  from before the compaction. Before, such a session failed to continue (before 0.6.7) or carried
+  the summary (0.6.7).
+- A history step that changed nothing is no longer recorded as `history.shortened`; the
+  compaction note says "1 more model call".
+- **A retry of a turn that had ended answered `running`.** `POST /api/v0/turns` sent again with the
+  key of a turn that already ended now answers how it ended (`finished`, `failed` or `stopped`), as
+  `GET /api/v0/turns/{id}` does, with no `base_url`.
+- **An on over a turn with no job answered "no such turn".** `POST /api/v0/ons` for a turn you may
+  read but that no job of this service ran (an older turn, or one recorded at the gateway) now
+  answers 409 and says why: nothing reports that turn's end, so no on could react to it. A turn you
+  may not read still gets what any such turn gets.
+- **An OpenRouter call on your own provider key (BYOK) was recorded as $0 and complete**
+  ([#94](https://github.com/staysup/agentbus/issues/94)). On a BYOK call OpenRouter's `usage.cost`
+  holds only its own fee, often 0, and the provider's charge is in
+  `cost_details.upstream_inference_cost`. The call's cost is now both, in all three formats (Chat
+  Completions, Responses and Anthropic Messages). A BYOK reply without the provider's charge
+  records the fee as an incomplete cost, with `usage.cost_partial`, so a tree's cost limit no longer
+  reads the call as free and complete. `is_byok` is no longer reported as an unexpected field.
+- **A close that failed part way could make an Apply delete your files**
+  ([#96](https://github.com/staysup/agentbus/issues/96)). When Close could not remove one file of a
+  Copy workspace's copy (a file you locked in Finder was enough, since the copy keeps the lock), it
+  had already removed the others. The workspace stayed open, the next turn ran in what was left, its
+  changes listed your files as deleted, and Apply deleted them. Since a settled copy now puts
+  itself away, this could happen with no one pressing Close. Now a copy exists only while its
+  record does: the record is written last when a copy is made and taken away first when one is
+  removed, so a turn never runs in a half-made or half-removed copy, and nothing is applied from
+  one. Close clears locks and closed modes on the copy's own files and links (never on yours), so a
+  command in the copy cannot make it unremovable. A close that cannot move the copy out of its place puts the
+  record back: the copy stays whole, the workspace stays open (no `workspace.closed`), and a close
+  sent again tries again. What a close moved aside but could not remove is removed when the runner
+  starts again, and a copy a stopped Open left with no record is removed by the next close. This
+  holds for the copy, overlay and git backends: a git worktree is moved aside the same way, then git
+  forgets it, and one a stopped `git worktree add` left locked is unlocked and removed by the next
+  turn or close.
+- **A stop now stops a copy that is being made** ([#95](https://github.com/staysup/agentbus/issues/95)).
+  While a Copy workspace's first turn made its copy, a stop of the turn answered 202 but the turn
+  kept running, and Ctrl-C to `agentbus up` (or a stopping `agentbus runner`) did not exit until the
+  copy was done. Now every step of making a copy stops: the copy within one file or one 32 MiB
+  piece of a big file, the hashes of its first checkpoint within one 32 MiB piece, a git worktree's
+  `git worktree add` and its carried edits, and an overlay's snapshot. A copy whose stop came at any
+  step, its last included, never writes its record, so its turn never starts. A stop fails a
+  checkpoint; it never leaves a file out as if it could not be read. A stopped turn reads
+  stopped; a runner that stops fails the turn with `runner_stopped`. A copy made in one clonefile
+  call on macOS is still quick and is not stopped part way.
+
 ## 0.6.6 (2026-11-26)
 
 ### Added

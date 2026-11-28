@@ -40,6 +40,7 @@ var RunnerKinds = map[event.Kind]bool{
 	event.ToolRequested: true, event.ToolCompleted: true, event.TurnCompleted: true,
 	event.RunStarted: true, event.RunEnded: true, event.ContextAdded: true,
 	event.NetworkRefused: true, event.SchemaUnexpected: true, event.ReplayFailed: true,
+	event.HistoryShortened: true, event.HistoryCompacted: true,
 	event.ToolRefused: true, event.CallRefused: true, event.VendorCalled: true,
 	// A runner's gateway raises approval.requested when it holds an Ask, and
 	// records approval.decided itself when the hold times out or the agent
@@ -71,6 +72,12 @@ type Recorder interface {
 	// CostOfTurns is what the turns named have cost, for the queue's cost
 	// cap (queue.CostReader).
 	CostOfTurns(turns []string) (float64, error)
+	// WorkspaceUsedAfter says whether the workspace was used after a record
+	// seq, for a put-away (queue.ActivityReader).
+	WorkspaceUsedAfter(ws ids.WorkspaceID, after int64) (bool, error)
+	// OpenHoldsOfTurn are the runs of a turn the record saw start and not end
+	// (closeOpenRuns).
+	OpenHoldsOfTurn(turn string) ([]store.OpenHold, error)
 	Finder
 }
 

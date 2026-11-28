@@ -192,6 +192,12 @@ func (agy) ResumeID(line []byte, current string) string {
 // Refuse: the gateway's guard does not read the Gemini format, so forbid
 // could only be agy's own prefix rule, which a command in another shape
 // passes. Tool and API rules are checked elsewhere (control and tool gate).
+// ShellWall: agy has no per-command sandbox of its own (Info.CopySandbox is
+// false), and the runner's whole-process wall is retired (0.6.4), so its
+// shell runs unwalled in a copy and in a direct folder alike, held by the
+// gateway's command rules only.
+func (agy) ShellWall(Turn) string { return "" }
+
 func (agy) Refuse(t Turn) string {
 	hasShellRules := func(list []string) bool {
 		for _, r := range list {

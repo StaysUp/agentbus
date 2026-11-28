@@ -36,6 +36,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/staysup/agentbus/event"
 	"github.com/staysup/agentbus/jobs"
 )
 
@@ -259,6 +260,14 @@ func (x *xproc) get(path string) (int, []byte) {
 	return x.do("GET", path, nil)
 }
 
+// act sends a workspace action (apply, discard, update or close) to ws, which
+// answers 202 at once, and waits for its outcome on the record.
+func (x *xproc) act(ws, action string, body any) event.Event {
+	x.t.Helper()
+	code, raw := x.post("/api/v0/workspaces/"+ws+"/"+action, body)
+	return awaitAction(x.t, x.get, ws, code, raw)
+}
+
 // post sends POST path with a JSON body (a map or nil) and the main token.
 func (x *xproc) post(path string, body any) (int, []byte) {
 	x.t.Helper()
@@ -276,6 +285,9 @@ func (x *xproc) do(method, path string, body any) (int, []byte) {
 	req.Header.Set("Authorization", "Bearer "+x.tok)
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	if method == "PUT" {
+		req.Header.Set("If-Match", "*") // a settings PUT replaces whatever is there
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

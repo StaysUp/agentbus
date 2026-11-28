@@ -46,9 +46,6 @@ import (
 	"github.com/staysup/agentbus/store"
 )
 
-// DefaultMaxRuns bounds the runs at once, when Config.MaxRuns is zero.
-const DefaultMaxRuns = 4
-
 // MaxPrompt bounds a turn's prompt, in bytes.
 const MaxPrompt = 256 << 10
 
@@ -138,6 +135,10 @@ type ReplayPlan struct {
 	// Refused, without Turn, says why the session cannot be continued by
 	// replay, naming the turn.
 	Refused string
+	// Unusable, with Refused, says the newest turn's history can never be
+	// rebuilt (replay.ErrUnusable), as after the service stopped during that
+	// turn. Without it, the history may still be stored later.
+	Unusable bool
 }
 
 // Config is what the engine needs.
@@ -162,9 +163,6 @@ type Config struct {
 	// replay will not continue from that turn. Nil stores run.ended at
 	// once.
 	Settle func(session, turn string) bool
-	// MaxRuns bounds the turns running at once. Past it Start refuses with
-	// 429. Zero means DefaultMaxRuns.
-	MaxRuns int
 	// RunGrace is how long a stop waits after SIGTERM before SIGKILL. Zero
 	// means 5 seconds.
 	RunGrace time.Duration
@@ -205,6 +203,10 @@ type Config struct {
 	AgentName func(id string) string
 	// Now is the clock. Nil means time.Now.
 	Now func() time.Time
+	// Caches are the cache folders a Copy turn's commands may write, from the
+	// host environment. Nil means copyCaches, the person's own; a test sets a
+	// fixed list, since the real one differs per system.
+	Caches func(env []string) []string
 	// Logf writes one line to the service log: a child starting and exiting.
 	// It is never given a token, a prompt or the child's output.
 	Logf func(format string, args ...any)
@@ -239,14 +241,13 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.Logf == nil {
 		cfg.Logf = func(string, ...any) {}
 	}
-	if cfg.MaxRuns == 0 {
-		cfg.MaxRuns = DefaultMaxRuns
+	if cfg.Caches == nil {
+		cfg.Caches = copyCaches
 	}
-	if cfg.MaxRuns < 0 {
-		return nil, errors.New("run: MaxRuns below zero")
-	}
+	// The engine counts no turns: control counts each lane's places
+	// (queue/lanes.go), and a runner starts every job it takes. A session
+	// still runs one turn at a time (runs.take).
 	e := &Engine{cfg: cfg}
-	e.runs.max = cfg.MaxRuns
 	if _, err := cfg.Store.CloseStaleHolds(cfg.Now().UTC(), newEventID); err != nil {
 		return nil, err
 	}
@@ -257,13 +258,9 @@ func New(cfg Config) (*Engine, error) {
 // the engine's TurnSink). Call it before the first turn.
 func (e *Engine) SetSettle(f func(session, turn string) bool) { e.cfg.Settle = f }
 
-// MaxRuns is how many turns may run at once.
-func (e *Engine) MaxRuns() int { return e.cfg.MaxRuns }
-
 // Refusal is why a turn did not start. Status says what kind, in HTTP's
 // words: 400 for the request or the service's own setup, 404 for a session no
-// event names, 409 for a session that cannot take this turn now, 429 at the
-// run limit, 500 for a store that cannot be written, 503 while stopping.
+// event names, 409 for a session that cannot take this turn now, 500 for a store that cannot be written, 503 while stopping.
 // Nothing ran.
 type Refusal struct {
 	Status int
@@ -354,7 +351,17 @@ type Request struct {
 	// for this continuation turn only (api/approvals.go, decision "once").
 	// The gateway lets exactly these run; nothing is written to the settings.
 	AllowOnce []string
+	// Recorded, when set, is called once the turn's start is in this engine's
+	// record (turn.started, context.added) and before its child starts. A
+	// runner of a server sends that record to control in it and returns only
+	// once control holds it: what control decides by the turn's start, such as
+	// whether a command of it may run (turn.started's commands_run), it reads
+	// from its own record before the child can ask. An error refuses the turn.
+	Recorded func(session string) error
 }
+
+// startNotRecorded refuses a turn whose start control's record could not take.
+const startNotRecorded = "the turn's start could not be sent to control's record, so the turn did not start"
 
 // Turn is a turn that started.
 type Turn struct {
@@ -458,7 +465,7 @@ func (e *Engine) Start(req Request) (*Turn, error) {
 	return e.start(turn{harness: req.Harness, folder: req.Folder, folderRef: req.FolderRef, workspace: req.Workspace, copy: req.Copy, session: id, id: req.Turn,
 		model: model, prompt: req.Prompt, key: req.IdempotencyKey,
 		agentID: req.AgentID, access: req.Access, keyEnv: req.KeyEnv, origin: req.Origin, root: req.Root, depth: req.Depth,
-		token: req.Token, apiURL: req.APIURL, standIn: req.StandIn, signin: req.Signin, allowOnce: req.AllowOnce,
+		token: req.Token, apiURL: req.APIURL, standIn: req.StandIn, signin: req.Signin, allowOnce: req.AllowOnce, recorded: req.Recorded,
 		settings: req.Settings, rulesErr: req.RulesError})
 }
 
@@ -520,10 +527,13 @@ func (e *Engine) next(req Request) (*Turn, error) {
 	// format, nor can a turn of codex on OpenRouter give or take one
 	// (replayLayout): it starts fresh with the earlier turns as plain text.
 	var from, recovered, recoveredWhy, context string
+	// lost says the newest turn's history can never be rebuilt, so a
+	// transcript says that instead of naming a switch of agent.
+	lost := false
 	continuity := e.Continuity(agent)
 	if agent != c.Harness || (continuity == ByReplay && !(replayLayout(agent, access) && replayLayout(c.Harness, c.Access))) {
 		continuity = ByTranscript
-		if context, err = e.transcript(session, len(req.Prompt)); err != nil {
+		if context, err = e.transcript(session, len(req.Prompt), transcriptHead); err != nil {
 			return fail(storeFailed)
 		}
 	}
@@ -545,14 +555,27 @@ func (e *Engine) next(req Request) (*Turn, error) {
 			// stored, still continues by the vendor's resume: its resume_id
 			// names the whole conversation. A session that did use replay
 			// does not: its resume_id names only its last turn's own process.
+			// It gets the earlier turns as text instead when that turn's
+			// history can never be rebuilt.
+			lost = plan.Unusable
 			used, err := e.cfg.Store.UsedReplay(session)
 			if err != nil {
 				return fail(storeFailed)
 			}
-			if used || c.ResumeID == "" {
+			switch {
+			case !used && c.ResumeID != "":
+				continuity = ByResume
+			case plan.Unusable:
+				// No history will ever be rebuilt for that turn, so waiting
+				// cannot help: the turn gets the earlier turns as text, as on
+				// a switch of agent, and the session goes on.
+				continuity = ByTranscript
+				if context, err = e.transcript(session, len(req.Prompt), transcriptLostHead); err != nil {
+					return fail(storeFailed)
+				}
+			default:
 				return fail(refuse(http.StatusConflict, "this session cannot be continued from here: "+plan.Refused))
 			}
-			continuity = ByResume
 		}
 	}
 	// A vendor's resume_id names the conversation of the turn that gave it.
@@ -561,7 +584,11 @@ func (e *Engine) next(req Request) (*Turn, error) {
 	// gets the earlier turns as text instead.
 	if continuity == ByResume && c.ResumeID != "" && c.ResumeStale {
 		continuity = ByTranscript
-		if context, err = e.transcript(session, len(req.Prompt)); err != nil {
+		head := transcriptHead
+		if lost {
+			head = transcriptLostHead
+		}
+		if context, err = e.transcript(session, len(req.Prompt), head); err != nil {
 			return fail(storeFailed)
 		}
 	}
@@ -591,7 +618,7 @@ func (e *Engine) next(req Request) (*Turn, error) {
 		recoveredFrom: recovered, recoveredWhy: recoveredWhy, continuity: continuity, model: model,
 		prompt: req.Prompt, context: context, key: req.IdempotencyKey,
 		agentID: agentID, access: access, keyEnv: keyEnv, origin: req.Origin, root: req.Root, depth: req.Depth,
-		token: req.Token, apiURL: req.APIURL, standIn: req.StandIn, signin: req.Signin, allowOnce: req.AllowOnce,
+		token: req.Token, apiURL: req.APIURL, standIn: req.StandIn, signin: req.Signin, allowOnce: req.AllowOnce, recorded: req.Recorded,
 		settings: req.Settings, rulesErr: req.RulesError}
 	if from != "" || continuity == ByTranscript {
 		// A fresh child: the history comes from the gateway, or from the
@@ -611,9 +638,10 @@ const (
 	// ByResume: the vendor's own resume, from the session's resume_id.
 	ByResume = "resume"
 	// ByTranscript: the turn runs on another harness than the session's
-	// latest turn. The child starts fresh, and its prompt is the earlier
-	// turns as plain text (transcript.go), then the person's words. The
-	// turn's turn.started keeps that text in context.
+	// latest turn, or that turn's history can never be rebuilt for replay.
+	// The child starts fresh, and its prompt is the earlier turns as plain
+	// text (transcript.go), then the person's words. The turn's turn.started
+	// keeps that text in context.
 	ByTranscript = "transcript"
 )
 
@@ -670,10 +698,11 @@ type turn struct {
 	origin                   *event.Origin
 	root                     string // the request tree's root session; "" for this one
 	depth                    int
-	token, apiURL            string   // control's token for the turn and its API (Request.Token)
-	standIn                  string   // the child's model credential (Request.StandIn); "" for its own
-	signin                   string   // why control has no credential for the agent now
-	allowOnce                []string // command lines allowed once for this turn, from an earlier card
+	token, apiURL            string                     // control's token for the turn and its API (Request.Token)
+	standIn                  string                     // the child's model credential (Request.StandIn); "" for its own
+	signin                   string                     // why control has no credential for the agent now
+	allowOnce                []string                   // command lines allowed once for this turn, from an earlier card
+	recorded                 func(session string) error // Request.Recorded
 }
 
 // start stores run.started and turn.started, starts t's child in a slot
@@ -905,7 +934,9 @@ func (e *Engine) start(t turn) (*Turn, error) {
 				deny = append(deny, f)
 			}
 		}
-		spec.Copy = harness.Copy{Dir: t.folder, DenyRead: deny, Hosts: hosts}
+		// The person's cache folders are writable too, as the README promises
+		// (copyCaches): a build keeps its cache, and the Keychain its MDS files.
+		spec.Copy = harness.Copy{Dir: t.folder, Write: e.cfg.Caches(hostEnv), DenyRead: deny, Hosts: hosts}
 		// The whole-process wall was skipped, so the turn is not Walled: a
 		// harness must not also turn its own sandbox off (harness.Turn.Walled).
 		spec.Walled = false
@@ -942,6 +973,10 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		return nil, refuse(http.StatusBadRequest, why)
 	}
 	unkept := harness.Unkept(h, spec)
+	// What a command this turn hands to AgentBus may do, from the very spec
+	// the harness starts with (harness.CommandLimit), kept on turn.started
+	// for control to decide the command by.
+	commandLimit := harness.CommandLimit(h, spec)
 	args := h.Args(spec)
 	// The settings the harness takes in its environment rather than its
 	// command line (harness.TurnEnver).
@@ -998,7 +1033,8 @@ func (e *Engine) start(t turn) (*Turn, error) {
 		Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Text: t.prompt, Harness: t.harness, Folder: t.folder, FolderRef: t.folderRef, Workspace: t.workspace,
 		ReplayFrom: t.replayFrom, Continuity: t.continuity, RecoveredFrom: t.recoveredFrom,
 		RecoveredReason: t.recoveredWhy, IdempotencyKey: t.key, AgentID: t.agentID, Access: t.access, KeyEnv: t.keyEnv,
-		Context: t.context, Model: t.model, Origin: t.origin, SettingsVersion: snap.Revision, RulesVersion: string(snap.PolicyVersion), Unkept: unkept}); err != nil {
+		Context: t.context, Model: t.model, Origin: t.origin, SettingsVersion: snap.Revision, RulesVersion: string(snap.PolicyVersion), Unkept: unkept,
+		CommandsRun: commandLimit == "", CommandLimit: commandLimit}); err != nil {
 		closeHold()
 		return nil, storeFailed
 	}
@@ -1009,6 +1045,14 @@ func (e *Engine) start(t turn) (*Turn, error) {
 			Time: e.cfg.Now().UTC(), Session: t.session, Turn: t.id, Added: added}); err != nil {
 			closeHold()
 			return nil, storeFailed
+		}
+	}
+	// The turn's start reaches control's record before the child can call
+	// control (Request.Recorded).
+	if t.recorded != nil {
+		if err := t.recorded(t.session); err != nil {
+			closeHoldWhy(startNotRecorded)
+			return nil, refuse(http.StatusServiceUnavailable, startNotRecorded)
 		}
 	}
 	// The output goes through pipes of our own, read by our own goroutines,

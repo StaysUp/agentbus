@@ -37,7 +37,66 @@ func changedID(j queue.Job) string { return "evt_tc_" + j.ID }
 func appliedID(j queue.Job) string { return "evt_ta_" + j.ID }
 func discardID(j queue.Job) string { return "evt_wd_" + j.ID }
 func closedID(j queue.Job) string  { return "evt_wx_" + j.ID }
+func keptID(j queue.Job) string    { return "evt_wk_" + j.ID }
 func updateID(j queue.Job) string  { return "evt_wu_" + j.ID }
+
+// OutcomeID is the id the record gives the outcome of workspace job j (an
+// apply, discard, update, close or put-away), fixed by the job when it is
+// queued: the route that queued it names it in its 202, and the record holds
+// the event once the job has run. A discard, update or close that did nothing
+// records workspace.failed under the same id, so one request has one outcome.
+// Empty for any other kind.
+func OutcomeID(j queue.Job) string {
+	switch j.Kind {
+	case queue.KindApply:
+		return appliedID(j)
+	case queue.KindDiscard:
+		return discardID(j)
+	case queue.KindUpdate:
+		return updateID(j)
+	case queue.KindClose, queue.KindPutAway:
+		return closedID(j)
+	}
+	return ""
+}
+
+// failedActions names the action of each workspace job kind that records
+// workspace.failed when it ends without doing its work.
+var failedActions = map[string]string{
+	queue.KindDiscard: "discard", queue.KindUpdate: "update",
+	queue.KindClose: "close", queue.KindPutAway: "close",
+}
+
+// failedWhy is a failed action's error when its job carried no refusal of its
+// own: the runner was lost, or the job was stopped. Fixed wording.
+func failedWhy(j queue.Job, refused string) string {
+	switch {
+	case refused != "":
+		return refused
+	case j.Reason == queue.ReasonRunnerLost:
+		return "the runner holding the copy stopped answering while it ran, so it did not finish; send it again"
+	case j.State == queue.Cancelled:
+		return "it was stopped before it finished; send it again"
+	}
+	return "it did not finish; send it again"
+}
+
+// FailedOf is the workspace.failed of workspace job j, which ended without
+// doing its work: why is its refusal, or fixed words for one with none. ok is
+// false for a kind that records none (an apply records workspace.applied).
+func FailedOf(j queue.Job, refused string) (e event.Event, ok bool) {
+	action, ok := failedActions[j.Kind]
+	if !ok {
+		return event.Event{}, false
+	}
+	f := &event.Failed{Action: action, Error: failedWhy(j, refused)}
+	if b := j.Links.ApplyBy; b != nil {
+		f.By = &event.By{Kind: b.Kind, Session: b.Session, Turn: b.Turn}
+	}
+	ws := queue.CopyKey(j.Spec.Workspace, j.Session)
+	return event.Event{ID: OutcomeID(j), Kind: event.WorkspaceFailed, Time: endedAt(j), Workspace: string(ws),
+		Session: j.Session, Failed: f, PutAway: PutAwayOf(j, "")}, true
+}
 
 // registeredID is the id of a folder's folder.registered, by its reference and
 // machine rather than by the job, so the many folder jobs of one folder (one
@@ -160,7 +219,14 @@ func keepOutcomes(rec Recorder, j queue.Job, f queue.Finish) (kept json.RawMessa
 		}
 		res.Apply, res.Refused, res.AppliedEvent, moved = nil, "", e.ID, true
 	case queue.KindDiscard:
-		if res.DiscardedEvent != "" || j.State != queue.Finished {
+		if res.DiscardedEvent != "" || res.FailedEvent != "" {
+			break
+		}
+		if j.State != queue.Finished {
+			moved, err = keepFailed(rec, j, &res)
+			if err != nil {
+				return nil, err
+			}
 			break
 		}
 		// workspace.discarded names the workspace whose copy was reset, keyed by
@@ -173,12 +239,19 @@ func keepOutcomes(rec Recorder, j queue.Job, f queue.Finish) (kept json.RawMessa
 			return nil, err
 		}
 		res.Refused, res.DiscardedEvent, moved = "", e.ID, true
-	case queue.KindClose:
-		if res.ClosedEvent != "" || j.State != queue.Finished {
+	case queue.KindClose, queue.KindPutAway:
+		if res.ClosedEvent != "" || res.FailedEvent != "" {
+			break
+		}
+		if j.State != queue.Finished {
+			moved, err = keepFailed(rec, j, &res)
+			if err != nil {
+				return nil, err
+			}
 			break
 		}
 		ws := queue.CopyKey(j.Spec.Workspace, j.Session)
-		e := event.Event{ID: closedID(j), Kind: event.WorkspaceClosed, Time: now, Workspace: string(ws)}
+		e := event.Event{ID: closedID(j), Kind: event.WorkspaceClosed, Time: now, Workspace: string(ws), PutAway: PutAwayOf(j, "")}
 		if _, err := rec.AppendOnce(e); err != nil {
 			return nil, err
 		}
@@ -200,7 +273,14 @@ func keepOutcomes(rec Recorder, j queue.Job, f queue.Finish) (kept json.RawMessa
 			return nil, err
 		}
 	case queue.KindUpdate:
-		if res.UpdatedEvent != "" || j.State != queue.Finished {
+		if res.UpdatedEvent != "" || res.FailedEvent != "" {
+			break
+		}
+		if j.State != queue.Finished {
+			moved, err = keepFailed(rec, j, &res)
+			if err != nil {
+				return nil, err
+			}
 			break
 		}
 		// workspace.updated names the workspace whose copy was merged, keyed by the
@@ -218,6 +298,38 @@ func keepOutcomes(rec Recorder, j queue.Job, f queue.Finish) (kept json.RawMessa
 		return nil, nil
 	}
 	return json.Marshal(res)
+}
+
+// keepFailed writes the workspace.failed of discard, update or close job j,
+// which ended without doing its work, and moves its refusal into it: res
+// then names the event in its place. The routes answer before the job runs,
+// so the record is the only place its refusal can reach the caller.
+func keepFailed(rec Recorder, j queue.Job, res *queue.Result) (bool, error) {
+	e, ok := FailedOf(j, res.Refused)
+	if !ok {
+		return false, nil
+	}
+	if _, err := rec.AppendOnce(e); err != nil {
+		return false, err
+	}
+	res.Refused, res.Status, res.FailedEvent = "", 0, e.ID
+	return true, nil
+}
+
+// PutAwayOf is a put-away job's why, for its workspace.closed or, with kept,
+// its workspace.kept. nil for any other job.
+func PutAwayOf(j queue.Job, kept string) *event.PutAway {
+	if j.Kind != queue.KindPutAway {
+		return nil
+	}
+	p := &event.PutAway{Queued: j.Created.UTC(), Kept: kept}
+	if b := j.Links.Because; b != nil {
+		p.On, p.Event = b.On, b.Event
+	}
+	if j.NotBefore != nil {
+		p.Due = j.NotBefore.UTC()
+	}
+	return p
 }
 
 func endedAt(j queue.Job) time.Time {

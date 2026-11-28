@@ -32,9 +32,9 @@ const MaxRunBody = 2 << 20
 // MaxPrompt bounds a turn's prompt, in bytes.
 const MaxPrompt = run.MaxPrompt
 
-// DefaultTurnWait bounds how long a request waits on a turn's job, when
-// Config.TurnWait is zero: a workspace's changes preview (changes.go) and a
-// turn's diff while it ends (turndiff.go). POST /api/v0/turns never waits.
+// DefaultTurnWait bounds how long a workspace's changes preview (changes.go)
+// waits on its preview job, when Config.TurnWait is zero. POST /api/v0/turns
+// and the workspace actions (apply, discard, update, close) never wait.
 const DefaultTurnWait = 30 * time.Second
 
 var runModel = run.ModelShape
@@ -62,7 +62,7 @@ type TurnRequest struct {
 type Started struct {
 	Session string `json:"session" doc:"The turn's session: a new one, or the session sent. A review's is a session of its own."`
 	Turn    string `json:"turn" doc:"The turn's id. Every event of the turn carries it in turn; GET /api/v0/turns/{id} follows it from now on."`
-	State   string `json:"state" doc:"running: a runner started it. queued: it waits behind the session's earlier turns (ahead says how many), or for a runner. It runs next, in order."`
+	State   string `json:"state" doc:"running: a runner started it. queued: it waits behind the session's earlier turns (ahead says how many), or for a runner. It runs next, in order. A retry of a turn that has ended says how it ended: finished, failed or stopped."`
 	BaseURL string `json:"base_url,omitempty" doc:"The address the agent uses, <service>/s/<session>/t/<turn>. Present only when this service runs the turn itself (agentbus up). Absent while queued, and on a server, where the turn runs on another machine's runner and that runner serves its gateway."`
 	// Existing marks the answer to a retry: the idempotency key had already
 	// made this turn.
@@ -308,6 +308,12 @@ func (a *API) answerStarted(w http.ResponseWriter, id string, existing bool) {
 		return
 	}
 	if turn := startedTurn(j); turn != "" {
+		if j.Ended != nil {
+			// A retry of a turn that ran and ended says how it ended, as GET
+			// /api/v0/turns/{id} does, never running (review of dd2dcb1).
+			writeJSON(w, http.StatusAccepted, Started{Session: j.Session, Turn: turn, State: a.endedState(j, turn), Existing: existing})
+			return
+		}
 		writeJSON(w, http.StatusAccepted, a.startedRunning(j, turn, existing))
 		return
 	}
@@ -323,6 +329,17 @@ func (a *API) answerStarted(w http.ResponseWriter, id string, existing bool) {
 		}
 	}
 	writeJSON(w, http.StatusAccepted, st)
+}
+
+// endedState is how a started turn whose job has ended ended: the record's
+// state, as GET /api/v0/turns/{id} reads it, or the job's when the record
+// holds no end (a server whose runner keeps its own record).
+func (a *API) endedState(j queue.Job, turn string) string {
+	list, err := a.cfg.Store.Turns(store.TurnQuery{Turn: turn, Limit: 1})
+	if err == nil && len(list.Turns) == 1 && list.Turns[0].State != store.TurnRunning {
+		return list.Turns[0].State
+	}
+	return queue.TurnState(j.State)
 }
 
 // turnsAhead counts the turns the job waits behind: its session's earlier

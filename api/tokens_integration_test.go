@@ -164,7 +164,9 @@ func TestTurnToken(t *testing.T) {
 		{"GET", "/api/v0/turns", "", 200},
 		{"GET", "/api/v0/turns?session=" + own, "", 200},
 		{"GET", "/api/v0/turns?session=" + other, "", 403},
-		{"GET", "/api/v0/turns?session=" + own + "&session=" + other, "", 403},
+		// The query's shape is 400 for every token (O2.3 review P2), before
+		// any reach is asked.
+		{"GET", "/api/v0/turns?session=" + own + "&session=" + other, "", 400},
 		{"GET", "/api/v0/turns/" + s.Turn, "", 200},
 		{"GET", "/api/v0/turns/t_other", "", 403},
 		{"GET", "/api/v0/turns/t_other?session=" + other, "", 403},

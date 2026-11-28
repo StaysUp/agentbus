@@ -322,9 +322,13 @@ func TestOneEndpointStartsEveryTurn(t *testing.T) {
 	// no turn.
 	// 81 with POST /api/v0/workspaces/{id}/close, which removes the copy. 78
 	// without the three file routes (his call, 2026-11-25): agents use their
-	// CLI's own file tools.
-	if len(ops) != 78 {
-		t.Errorf("%d endpoints, want 78: %v", len(ops), ops)
+	// CLI's own file tools. 79 with GET /api/v0/ons, which lists the ons. 82
+	// with POST /api/v0/commands, GET /api/v0/commands/{id} and POST
+	// /api/v0/commands/{id}/stop (H1): a command an agent hands to AgentBus is
+	// an exec job, not a turn; its result is delivered as a turn by its on. 83
+	// with GET /api/v0/workspaces/{id}/outcome, which reads one action's outcome.
+	if len(ops) != 83 {
+		t.Errorf("%d endpoints, want 83: %v", len(ops), ops)
 	}
 	for _, want := range []string{"POST /api/v0/turns", "GET /api/v0/turns", "GET /api/v0/turns/{id}", "POST /api/v0/turns/{id}/stop",
 		"GET /api/v0/turns/{id}/diff", "GET /api/v0/workspaces/{id}/changes", "POST /api/v0/workspaces/{id}/apply",

@@ -8,7 +8,12 @@ package settings
 // window; Gemini CLI half the window); Claude Code and Codex publish none, so
 // their point here is a stated default the person can change, never a hidden
 // invented number. A person reads it at GET /api/v0/settings/compaction and
-// changes it at PUT. Nothing here decides or runs compaction: that is 0.7.
+// changes it at PUT. Nothing here runs a harness's compaction.
+//
+// The same setting holds AgentBus's own history budget (Budget): the share of
+// the model's window that own replay keeps each turn's carried history
+// within, well below every harness's point (replay/budget.go), and the
+// window table both read (ModelWindow).
 
 import (
 	"errors"
@@ -23,6 +28,7 @@ type Compaction struct {
 	Codex    *float64 `toml:"codex" json:"codex,omitempty" doc:"The share (0 to 1) of the model's window at which Codex CLI compacts. Codex publishes no fixed number, so this is a stated default you can change. Absent in a PUT: 0.8."`
 	Opencode *float64 `toml:"opencode" json:"opencode,omitempty" doc:"The share (0 to 1) of the model's window at which opencode compacts. opencode's own open source compacts when a turn's tokens reach the window less a reserve of up to 32k tokens for its reply: 0.84 of a 200k window, more of a larger one. Absent in a PUT: 0.85."`
 	Gemini   *float64 `toml:"gemini" json:"gemini,omitempty" doc:"The share (0 to 1) of the model's window at which Gemini CLI compacts. Gemini CLI's own open source compresses its history once a turn's tokens reach half the model's window, its compressionThreshold default. Absent in a PUT: 0.5."`
+	Budget   *float64 `toml:"budget" json:"budget,omitempty" doc:"AgentBus's own history budget: the share (0 to 1) of the model's window that the history own replay builds for a turn is kept within, by shortening older turns in frozen steps (long tool results and tool inputs to stubs the agent can fetch back, then the oldest turns to AgentBus's summary). Kept well below every harness's point, so a harness rarely compacts. 1 turns the budget off in practice. Absent in a PUT: 0.4."`
 }
 
 // The built-in defaults. opencode and Gemini are read from their own open
@@ -46,6 +52,11 @@ const (
 	// DEFAULT_COMPRESSION_TOKEN_THRESHOLD; packages/cli/src/config/
 	// settingsSchema.ts, model.compressionThreshold).
 	defaultGeminiPoint = 0.50
+	// defaultBudget is AgentBus's own history budget: half of the lowest
+	// default point (Gemini's 0.7) would be 0.35, Claude Code's 0.8 halved
+	// 0.4. 0.4 leaves a turn the other half of the window before any
+	// harness compacts (his call, 2026-11-26: start at 40%).
+	defaultBudget = 0.40
 )
 
 // Where a compaction point's number comes from, so the view never shows a
@@ -74,8 +85,8 @@ func CompactionSource(harness string) string {
 // DefaultCompaction is the compaction points of a store that holds none: every
 // field set to its built-in default.
 func DefaultCompaction() Compaction {
-	cl, co, op, ge := defaultClaudePoint, defaultCodexPoint, defaultOpencodePoint, defaultGeminiPoint
-	return Compaction{Claude: &cl, Codex: &co, Opencode: &op, Gemini: &ge}
+	cl, co, op, ge, b := defaultClaudePoint, defaultCodexPoint, defaultOpencodePoint, defaultGeminiPoint, defaultBudget
+	return Compaction{Claude: &cl, Codex: &co, Opencode: &op, Gemini: &ge, Budget: &b}
 }
 
 // fill sets every field left out to its default.
@@ -93,6 +104,42 @@ func (c *Compaction) fill() {
 	if c.Gemini == nil {
 		c.Gemini = d.Gemini
 	}
+	if c.Budget == nil {
+		c.Budget = d.Budget
+	}
+}
+
+// Budgeter is a store that holds the history budget: control's database, or
+// a runner's view of its server's (Remote). Own replay reads it at each
+// turn's start, the same way on every runner.
+type Budgeter interface {
+	Budget() (float64, error)
+}
+
+// BudgetOf is a reader of st's history budget, read each time it is called.
+// A store that holds none gives the default; so does a read that fails, since
+// the budget only sizes a history and no rule hangs on it.
+func BudgetOf(st Store) func() float64 {
+	b, ok := st.(Budgeter)
+	return func() float64 {
+		if !ok {
+			return defaultBudget
+		}
+		v, err := b.Budget()
+		if err != nil || v <= 0 || v > 1 {
+			return defaultBudget
+		}
+		return v
+	}
+}
+
+// BudgetShare is the history budget of a filled Compaction, or the built-in
+// default when it holds none.
+func (c Compaction) BudgetShare() float64 {
+	if c.Budget == nil {
+		return defaultBudget
+	}
+	return *c.Budget
 }
 
 // Point is harness's compaction point and whether one is known. It reads a
@@ -133,7 +180,7 @@ func (c Compaction) Check() error {
 	for _, f := range []struct {
 		name string
 		v    *float64
-	}{{"claude", c.Claude}, {"codex", c.Codex}, {"opencode", c.Opencode}, {"gemini", c.Gemini}} {
+	}{{"claude", c.Claude}, {"codex", c.Codex}, {"opencode", c.Opencode}, {"gemini", c.Gemini}, {"budget", c.Budget}} {
 		if f.v == nil {
 			continue
 		}
@@ -163,6 +210,9 @@ func (c Compaction) overCompaction(base Compaction) Compaction {
 	if c.Gemini != nil {
 		out.Gemini = c.Gemini
 	}
+	if c.Budget != nil {
+		out.Budget = c.Budget
+	}
 	out.fill()
 	return out
 }
@@ -184,6 +234,9 @@ func (c Compaction) onlyChanged() Compaction {
 	if c.Gemini != nil && *c.Gemini != *d.Gemini {
 		out.Gemini = c.Gemini
 	}
+	if c.Budget != nil && *c.Budget != *d.Budget {
+		out.Budget = c.Budget
+	}
 	return out
 }
 
@@ -194,7 +247,7 @@ func changedCompaction(a, b Compaction) []string {
 	for _, f := range []struct {
 		name string
 		x, y *float64
-	}{{"claude", a.Claude, b.Claude}, {"codex", a.Codex, b.Codex}, {"opencode", a.Opencode, b.Opencode}, {"gemini", a.Gemini, b.Gemini}} {
+	}{{"claude", a.Claude, b.Claude}, {"codex", a.Codex, b.Codex}, {"opencode", a.Opencode, b.Opencode}, {"gemini", a.Gemini, b.Gemini}, {"budget", a.Budget, b.Budget}} {
 		if f.x == nil || f.y == nil || *f.x != *f.y {
 			keys = append(keys, f.name)
 		}

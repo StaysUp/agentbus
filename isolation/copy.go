@@ -51,28 +51,26 @@ func (copyBackend) Open(r Request) (*Space, error) {
 	if err != nil {
 		return nil, &Refusal{"the folder is not an existing directory"}
 	}
-	s := &Space{ID: r.ID, Backend: Copy, Ref: r.Ref, Root: filepath.Join(r.Workdir, r.ID), Workdir: r.Workdir}
+	s := &Space{ID: r.ID, Backend: Copy, Ref: r.Ref, Root: filepath.Join(r.Workdir, r.ID), Workdir: r.Workdir, stop: ctxOf(r)}
 	s.Dir = s.Root
-	// What a failed attempt left, with no record, is this job's own.
-	if err := removeAll(s.Root); err != nil {
-		return nil, err
-	}
-	if err := removeState(s); err != nil {
+	// What a failed attempt or a failed close left, with no record, is this
+	// job's own: it is moved aside, never used (remove.go).
+	if err := retire(s); err != nil {
 		return nil, err
 	}
 	if err := os.MkdirAll(r.Workdir, 0o700); err != nil {
 		return nil, err
 	}
 	s.start = time.Now()
-	method, err := cloneTree(source, s.Root)
+	method, err := cloneTree(ctxOf(r), source, s.Root)
 	if err != nil {
-		removeAll(s.Root)
+		retire(s)
 		return nil, err
 	}
 	s.Method = method
 	if fi, err := os.Lstat(filepath.Join(s.Root, ".git")); err == nil && !fi.IsDir() {
 		if err := os.Remove(filepath.Join(s.Root, ".git")); err != nil {
-			removeAll(s.Root)
+			retire(s)
 			return nil, err
 		}
 	}
@@ -86,7 +84,7 @@ func (copyBackend) Open(r Request) (*Space, error) {
 		return nil, err
 	}
 	s.Shadow = true
-	if err := s.save(); err != nil {
+	if err := s.record(); err != nil {
 		copyBackend{}.Close(s)
 		return nil, err
 	}
@@ -126,13 +124,11 @@ func openPlaces(r Request) (*Space, error) {
 	if s, err := Load(r.Workdir, filepath.Join(r.Workdir, r.ID)); err == nil {
 		return s, nil // a retry of the job that made it
 	}
-	s := &Space{ID: r.ID, Backend: Copy, Root: filepath.Join(r.Workdir, r.ID), Workdir: r.Workdir}
+	s := &Space{ID: r.ID, Backend: Copy, Root: filepath.Join(r.Workdir, r.ID), Workdir: r.Workdir, stop: ctxOf(r)}
 	s.Dir = s.Root
-	// What a failed attempt left, with no record, is this job's own.
-	if err := removeAll(s.Root); err != nil {
-		return nil, err
-	}
-	if err := removeState(s); err != nil {
+	// What a failed attempt or a failed close left, with no record, is this
+	// job's own: it is moved aside, never used (remove.go).
+	if err := retire(s); err != nil {
 		return nil, err
 	}
 	if err := os.MkdirAll(s.Root, 0o700); err != nil {
@@ -144,12 +140,12 @@ func openPlaces(r Request) (*Space, error) {
 		// The folder's real path, never a link into the person's folder.
 		src, err := filepath.EvalSymlinks(filepath.Clean(p.Folder))
 		if err != nil {
-			removeAll(s.Root)
+			retire(s)
 			return nil, &Refusal{"a folder of the workspace is not an existing directory"}
 		}
-		method, err := cloneTree(src, dst)
+		method, err := cloneTree(ctxOf(r), src, dst)
 		if err != nil {
-			removeAll(s.Root)
+			retire(s)
 			return nil, err
 		}
 		// The slowest way any folder was copied names the copy's method.
@@ -158,7 +154,7 @@ func openPlaces(r Request) (*Space, error) {
 		}
 		if fi, err := os.Lstat(filepath.Join(dst, ".git")); err == nil && !fi.IsDir() {
 			if err := os.Remove(filepath.Join(dst, ".git")); err != nil {
-				removeAll(s.Root)
+				retire(s)
 				return nil, err
 			}
 		}
@@ -173,7 +169,7 @@ func openPlaces(r Request) (*Space, error) {
 		return nil, err
 	}
 	s.Shadow = true
-	if err := s.save(); err != nil {
+	if err := s.record(); err != nil {
 		copyBackend{}.Close(s)
 		return nil, err
 	}
@@ -267,14 +263,15 @@ func (copyBackend) UpdateFrom(s *Space, base string, folders FolderPaths, merge 
 	return UpdateResult{}, ErrNoUpdate
 }
 
+// Close takes the space's record away before any file of the copy goes
+// (retire). A close that cannot move the copy out of its place puts the
+// record back, so the copy stays whole and loads; once the copy is moved, no
+// part of it is ever loaded again.
 func (copyBackend) Close(s *Space) error {
 	if s.Root != filepath.Join(s.Workdir, s.ID) {
 		return ErrOutside
 	}
-	if err := removeAll(s.Root); err != nil {
-		return err
-	}
-	if err := removeState(s); err != nil {
+	if err := retire(s); err != nil {
 		return err
 	}
 	// Remove any legacy shared copy this close leaves unreferenced. No new copy
@@ -298,7 +295,7 @@ func (copyBackend) take(s *Space, t *trees, prev *treeState, save workspace.Hash
 		if start.IsZero() {
 			start = time.Now()
 		}
-		snap, err := workspace.Walk(s.Dir, nil, baseHasher(start, s.objectDir()))
+		snap, err := workspace.Walk(s.Dir, nil, baseHasher(s.stopCtx(), start, s.objectDir()))
 		if err != nil {
 			return treeState{}, 0, err
 		}
@@ -342,12 +339,9 @@ func openSnapshot(r Request) (*Space, error) {
 		return s, nil // a retry of the job that made it
 	}
 	s := &Space{ID: r.ID, Backend: Copy, Ref: r.Ref, Root: filepath.Join(r.Workdir, r.ID), Workdir: r.Workdir,
-		Method: MethodSnapshot, Snapshot: r.Snapshot.ID}
+		Method: MethodSnapshot, Snapshot: r.Snapshot.ID, stop: ctxOf(r)}
 	s.Dir = s.Root
-	if err := removeAll(s.Root); err != nil {
-		return nil, err
-	}
-	if err := removeState(s); err != nil {
+	if err := retire(s); err != nil {
 		return nil, err
 	}
 	if err := os.MkdirAll(r.Workdir, 0o700); err != nil {
@@ -355,14 +349,16 @@ func openSnapshot(r Request) (*Space, error) {
 	}
 	files, err := materialise(ctxOf(r), r.Snapshot, s.Root, 0o755)
 	if err != nil {
+		retire(s)
 		return nil, err
 	}
-	if err := s.save(); err != nil {
-		removeAll(s.Root)
-		return nil, err
-	}
+	// The record last, once the Base is written (remove.go).
 	if err := writeBase(s, files); err != nil {
-		copyBackend{}.Close(s)
+		retire(s)
+		return nil, err
+	}
+	if err := s.record(); err != nil {
+		retire(s)
 		return nil, err
 	}
 	// A copy built from a snapshot keeps its checkpoints the Merkle way and has
@@ -389,10 +385,15 @@ func writeBase(s *Space, files *workspace.Snapshot) error {
 // copyTree copies the folder src to dst, which must not exist: folders,
 // files and symbolic links, with their modes and modification times. A file
 // it cannot read, a socket or a device, is left out, as a Snapshot leaves it
-// out. Each file is a reflink where the disk has them.
-func copyTree(src, dst string) (string, error) {
+// out. Each file is a reflink where the disk has them. It stops with ctx's
+// error when ctx ends, within one entry or one chunk of a file, and leaves
+// what it copied for its caller to remove (#95).
+func copyTree(ctx context.Context, src, dst string) (string, error) {
 	files, linked := 0, 0
 	err := filepath.WalkDir(src, func(p string, d fs.DirEntry, err error) error {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
 		if err != nil {
 			if p == src {
 				return err
@@ -423,7 +424,7 @@ func copyTree(src, dst string) (string, error) {
 				return err
 			}
 		case info.Mode().IsRegular():
-			ok, err := copyFile(p, to, info.Mode().Perm(), true)
+			ok, err := copyFile(ctx, p, to, info.Mode().Perm(), true)
 			if errors.Is(err, errUnreadable) {
 				return nil
 			}
@@ -460,11 +461,16 @@ func copyTree(src, dst string) (string, error) {
 
 var errUnreadable = errors.New("isolation: unreadable")
 
+// copyChunk is how much of a file copyFile copies between two looks at its
+// context: a stop waits for one chunk at most. io.CopyN keeps the kernel's
+// own copy (copy_file_range, sendfile) for each chunk.
+const copyChunk = 32 << 20
+
 // copyFile copies the file src to dst, which must not exist, with mode
-// perm: a reflink when tryReflink and the disk has them, else byte by byte.
-// It answers whether it was a reflink. A src it cannot open is
-// errUnreadable.
-func copyFile(src, dst string, perm fs.FileMode, tryReflink bool) (bool, error) {
+// perm: a reflink when tryReflink and the disk has them, else byte by byte,
+// until ctx ends. It answers whether it was a reflink. A src it cannot open
+// is errUnreadable.
+func copyFile(ctx context.Context, src, dst string, perm fs.FileMode, tryReflink bool) (bool, error) {
 	in, err := os.Open(src)
 	if err != nil {
 		return false, errUnreadable
@@ -480,7 +486,17 @@ func copyFile(src, dst string, perm fs.FileMode, tryReflink bool) (bool, error) 
 		}
 		return true, os.Chmod(dst, perm)
 	}
-	_, err = io.Copy(out, in)
+	for err == nil {
+		if err = ctx.Err(); err != nil {
+			break
+		}
+		var n int64
+		n, err = io.CopyN(out, in, copyChunk)
+		if err == io.EOF || (err == nil && n < copyChunk) {
+			err = nil
+			break
+		}
+	}
 	if cerr := out.Close(); err == nil {
 		err = cerr
 	}

@@ -47,7 +47,11 @@ type Workspace struct {
 	// was a discard, so its unapplied changes were dropped and no apply has run
 	// since. Nil otherwise.
 	DiscardedAt *time.Time `json:"discarded_at,omitempty" doc:"When the workspace's latest action was a discard. Absent when its latest action was an apply, or it has neither."`
-	Closed      *time.Time `json:"closed,omitempty" doc:"When the copy was removed by Close. Absent once a later turn starts and rebuilds it."`
+	Closed      *time.Time `json:"closed,omitempty" doc:"When the copy was removed, by Close or by AgentBus putting it away once its work was settled and quiet. Absent once a later turn starts and rebuilds it."`
+	// LastAction is the newest outcome of an apply, discard, update or close
+	// of the workspace, as the record holds it. The routes answer before the
+	// work runs and name the outcome's id; this is where a caller reads it.
+	LastAction *event.Event `json:"last_action,omitempty" doc:"The newest outcome of an apply, discard, update or close of the workspace, as the record holds it: workspace.applied (applied, refused with the files and why, or failed), workspace.discarded, workspace.updated (updated, merged or conflict, with the files), workspace.closed, or workspace.failed (the action did nothing, and why). Those routes answer 202 before the work runs and name the event it will be; read your own by that event with GET /api/v0/workspaces/{id}/outcome, since a later action replaces this one. Absent when the workspace has had none."`
 }
 
 // WorkspaceFolder is one folder of a workspace.
@@ -115,7 +119,56 @@ func (s *Store) workspaceState(w *Workspace) error {
 	}
 	w.HeadTurn, w.AppliedTurn, w.DiscardedAt = a.Head(), a.AppliedTurn, a.DiscardedAt
 	w.Closed = a.ClosedAt
+	last, found, err := s.lastAction(w.ID)
+	if err != nil {
+		return err
+	}
+	if found {
+		w.LastAction = &last
+	}
 	return nil
+}
+
+// WorkspaceOutcome reads the outcome of one apply, discard, update or close
+// of the workspace by its event id, the id the route's 202 named. found is
+// false while the action has not run (or the id names none of ws's outcomes).
+// last_action holds only the newest, so a caller whose action was followed by
+// another reads its own here.
+func (s *Store) WorkspaceOutcome(ws, id string) (e event.Event, found bool, err error) {
+	var data string
+	err = s.r.QueryRow(`SELECT data FROM events WHERE kind IN ('workspace.applied', 'workspace.discarded',
+			'workspace.updated', 'workspace.closed', 'workspace.failed')
+		AND json_extract(data, '$.workspace') = ? AND json_extract(data, '$.id') = ? ORDER BY seq LIMIT 1`, ws, id).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return e, false, nil
+	}
+	if err != nil {
+		return e, false, fmt.Errorf("store: read outcome: %w", err)
+	}
+	if err := json.Unmarshal([]byte(data), &e); err != nil {
+		return e, false, fmt.Errorf("store: read outcome: %w", err)
+	}
+	return e, true, nil
+}
+
+// lastAction reads the workspace's newest outcome of an apply, discard, update
+// or close (LastAction). A pre-workspace turn.applied is not one: it names a
+// session, and its workspace's routes never queued it.
+func (s *Store) lastAction(ws string) (e event.Event, found bool, err error) {
+	var data string
+	err = s.r.QueryRow(`SELECT data FROM events WHERE kind IN ('workspace.applied', 'workspace.discarded',
+			'workspace.updated', 'workspace.closed', 'workspace.failed')
+		AND json_extract(data, '$.workspace') = ? ORDER BY seq DESC LIMIT 1`, ws).Scan(&data)
+	if errors.Is(err, sql.ErrNoRows) {
+		return e, false, nil
+	}
+	if err != nil {
+		return e, false, fmt.Errorf("store: read last action: %w", err)
+	}
+	if err := json.Unmarshal([]byte(data), &e); err != nil {
+		return e, false, fmt.Errorf("store: read last action: %w", err)
+	}
+	return e, true, nil
 }
 
 // Workspaces lists every workspace, newest first. Low volume: one read per

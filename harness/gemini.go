@@ -175,6 +175,12 @@ func (gemini) Refuse(t Turn) string {
 // Gemini CLI.
 const GeminiSubagentsUnkept = "the Gemini CLI cannot turn its own subagents off from its command line, so subagents = false does not apply to this turn"
 
+// ShellWall: the Gemini CLI is started without its own sandbox (no --sandbox,
+// and Info.CopySandbox is false), and the runner's whole-process wall is
+// retired (0.6.4), so its shell runs unwalled in a copy and in a direct folder
+// alike, held by the gateway's command rules only.
+func (gemini) ShellWall(Turn) string { return "" }
+
 // Unkept: the Gemini CLI's default policy allows its invoke_agent tool
 // (policies/agents.toml), and no flag denies a tool. As on agy, the turn runs
 // and records that the setting was not kept.

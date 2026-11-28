@@ -8,6 +8,7 @@ package workspace
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -38,10 +39,10 @@ type entry struct {
 	hash    string
 }
 
-// Racy: a file whose modification time is this close to when a Snapshot
-// was taken may change again without its time changing, since a file clock
-// ticks coarsely (every few milliseconds on Linux). The next Walk hashes it
-// again rather than trust its size and time.
+// Racy: a file whose modification or change time is this close to when a
+// Snapshot was taken may change again without its time changing, since a file
+// clock ticks coarsely (every few milliseconds on Linux). The next Walk
+// hashes it again rather than trust its size and time.
 const Racy = 2 * time.Second
 
 // Snapshot is a workspace's files, by slash-separated path from its root.
@@ -57,7 +58,16 @@ type Snapshot struct {
 type Hasher func(rel, path string, info fs.FileInfo) (string, error)
 
 // Hash is the Hasher Walk uses by default: a file's content, a link's target.
-func Hash(_, path string, info fs.FileInfo) (string, error) {
+func Hash(rel, path string, info fs.FileInfo) (string, error) {
+	return HashContext(context.Background(), rel, path, info)
+}
+
+// HashContext is Hash that stops with ctx's error when ctx ends, within one
+// piece of a big file.
+func HashContext(ctx context.Context, _, path string, info fs.FileInfo) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if info.Mode()&fs.ModeSymlink != 0 {
 		target, err := os.Readlink(path)
 		if err != nil {
@@ -65,15 +75,14 @@ func Hash(_, path string, info fs.FileInfo) (string, error) {
 		}
 		return hashBytes([]byte("link:" + target)), nil
 	}
-	return hashFile(path)
+	return hashFile(ctx, path)
 }
 
-// Walk records every file under root. A file whose size, modification time
-// and mode match prev's keeps prev's hash, even an empty one, unless its time
-// was within Racy of when prev was taken; every other file is passed to hash.
-// A nil hash is Hash. The root's .git, a folder in a repo or a file in a
-// worktree, is skipped. A symbolic link is recorded by its target, never
-// followed.
+// Walk records every file under root. A file that Keeps says is still the one
+// prev records keeps prev's hash, even an empty one; every other file is
+// passed to hash. A nil hash is Hash. The root's .git, a folder in a repo or
+// a file in a worktree, is skipped. A symbolic link is recorded by its target,
+// never followed.
 func Walk(root string, prev *Snapshot, hash Hasher) (*Snapshot, error) {
 	if hash == nil {
 		hash = Hash
@@ -96,10 +105,13 @@ func Walk(root string, prev *Snapshot, hash Hasher) (*Snapshot, error) {
 			break
 		}
 		e := entry{size: info.Size(), mode: info.Mode(), modTime: info.ModTime().UnixNano()}
-		if old, ok := prevEntry(prev, it.Rel); ok && old.size == e.size && old.modTime == e.modTime && old.mode == e.mode && !prev.racy(old.modTime) {
-			e.hash = old.hash
+		if old, ok := prevFile(prev, it.Rel); ok && Keeps(old, info, prev.taken) {
+			e.hash = old.Hash
 		} else {
 			h, err := hash(it.Rel, it.Path, info)
+			if Stopped(err) {
+				return nil, err // a stop fails the walk: no file is left out for it
+			}
 			if err != nil {
 				continue // unreadable: left out
 			}
@@ -132,6 +144,7 @@ func WalkParallel(root string, prev *Snapshot, hash Hasher, workers int) (*Snaps
 		info      fs.FileInfo
 		e         entry
 		ok        bool
+		err       error
 	}
 	var todo []*job
 	for _, it := range list {
@@ -144,8 +157,8 @@ func WalkParallel(root string, prev *Snapshot, hash Hasher, workers int) (*Snaps
 			break
 		}
 		e := entry{size: info.Size(), mode: info.Mode(), modTime: info.ModTime().UnixNano()}
-		if old, ok := prevEntry(prev, it.Rel); ok && old.size == e.size && old.modTime == e.modTime && old.mode == e.mode && !prev.racy(old.modTime) {
-			e.hash = old.hash
+		if old, ok := prevFile(prev, it.Rel); ok && Keeps(old, info, prev.taken) {
+			e.hash = old.Hash
 			s.files[it.Rel] = e
 			continue
 		}
@@ -160,6 +173,8 @@ func WalkParallel(root string, prev *Snapshot, hash Hasher, workers int) (*Snaps
 			for j := range next {
 				if h, err := hash(j.rel, j.path, j.info); err == nil {
 					j.e.hash, j.ok = h, true
+				} else {
+					j.err = err
 				}
 			}
 		}()
@@ -170,11 +185,20 @@ func WalkParallel(root string, prev *Snapshot, hash Hasher, workers int) (*Snaps
 	close(next)
 	wg.Wait()
 	for _, j := range todo {
+		if Stopped(j.err) {
+			return nil, j.err
+		}
 		if j.ok {
 			s.files[j.rel] = j.e
 		}
 	}
 	return s, nil
+}
+
+// Stopped says whether err is a stop (a context ended), which fails a walk,
+// rather than a file that could not be read, which a walk leaves out.
+func Stopped(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 // FormatTimes is each file's modification time, one "<unix nanoseconds>
@@ -258,14 +282,21 @@ func (s *Snapshot) DeleteUnder(dir string) {
 // Empty is a snapshot with no files, to fill with Set, taken now.
 func Empty() *Snapshot { return &Snapshot{files: map[string]entry{}, taken: time.Now().UnixNano()} }
 
-// Racy says whether a file of s modified at mtime (Unix nanoseconds) may have
-// changed since without its time changing: its time is within Racy of when
-// s was taken, or after. A snapshot whose time is not known trusts every
-// time, as one written before it was recorded.
-func (s *Snapshot) Racy(mtime int64) bool { return s.racy(mtime) }
-
-func (s *Snapshot) racy(mtime int64) bool {
-	return s.taken != 0 && mtime >= s.taken-int64(Racy)
+// Keeps says whether the file of info is still the file old records in a
+// snapshot taken at taken (Unix nanoseconds), so it keeps old's hash: its
+// size, modification time and mode are old's, and neither its modification
+// time nor its change time is within Racy of taken, or after. A write, a
+// rename, a link or a change of mode sets the change time to now, which no
+// program can set back, so a file moved over a twin of the same size and
+// time, or edited with its time put back (touch -r, cp -p, rsync -t), is not
+// kept. Where the system keeps no change time the modification time stands
+// for it. A snapshot whose time is not known (taken 0) trusts every time, as
+// one written before it was recorded.
+func Keeps(old File, info fs.FileInfo, taken int64) bool {
+	if info.Size() != old.Size || info.Mode() != old.Mode || info.ModTime().UnixNano() != old.ModTime {
+		return false
+	}
+	return taken == 0 || max(old.ModTime, changeTime(info)) < taken-int64(Racy)
 }
 
 // SetTaken sets when s was taken, as Walk does when it begins.
@@ -343,18 +374,17 @@ func HashOf(p string) (string, fs.FileMode, error) {
 		}
 		return hashBytes([]byte("link:" + target)), info.Mode(), nil
 	case info.Mode().IsRegular():
-		h, err := hashFile(p)
+		h, err := hashFile(context.Background(), p)
 		return h, info.Mode(), err
 	}
 	return "", info.Mode(), errors.New("not a file")
 }
 
-func prevEntry(prev *Snapshot, rel string) (entry, bool) {
+func prevFile(prev *Snapshot, rel string) (File, bool) {
 	if prev == nil {
-		return entry{}, false
+		return File{}, false
 	}
-	e, ok := prev.files[rel]
-	return e, ok
+	return prev.File(rel)
 }
 
 func hashBytes(b []byte) string {
@@ -362,15 +392,27 @@ func hashBytes(b []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func hashFile(p string) (string, error) {
+// hashPiece is how much of a file hashFile reads between two looks at ctx.
+const hashPiece = 32 << 20
+
+func hashFile(ctx context.Context, p string) (string, error) {
 	f, err := os.Open(p)
 	if err != nil {
 		return "", err
 	}
 	defer f.Close()
 	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
+	for {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+		n, err := io.CopyN(h, f, hashPiece)
+		if err == io.EOF || (err == nil && n < hashPiece) {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }

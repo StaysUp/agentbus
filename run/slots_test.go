@@ -3,7 +3,7 @@ package run
 import (
 	"net/http"
 	"path/filepath"
-	"strings"
+	"strconv"
 	"testing"
 	"time"
 
@@ -11,37 +11,23 @@ import (
 	"github.com/staysup/agentbus/store"
 )
 
-// The run limit comes from Config.MaxRuns, and its 429 names it. A session
-// runs one turn at a time.
-func TestMaxRuns(t *testing.T) {
-	rs := runs{max: 2}
-	for i, s := range []string{"a", "b"} {
-		if code, _ := rs.take(s); code != 0 {
-			t.Fatalf("take %d: %d", i, code)
+// A session runs one turn at a time. The engine counts nothing else: how many
+// turns run at once is control's to count, by lane (queue/lanes.go), so a
+// runner starts every turn it takes (before 0.6.7 the engine refused a fifth
+// with 429, whoever sent it).
+func TestSessionRunsOneTurnAtATime(t *testing.T) {
+	var rs runs
+	for i := range 100 {
+		if code, msg := rs.take("s" + strconv.Itoa(i)); code != 0 {
+			t.Fatalf("take %d: %d %q", i, code, msg)
 		}
 	}
-	if code, msg := rs.take("a"); code != http.StatusConflict || msg != TurnRunning {
+	if code, msg := rs.take("s0"); code != http.StatusConflict || msg != TurnRunning {
 		t.Fatalf("a busy session: %d %q", code, msg)
 	}
-	code, msg := rs.take("c")
-	if code != http.StatusTooManyRequests || !strings.HasPrefix(msg, "2 runs") {
-		t.Fatalf("third: %d %q", code, msg)
-	}
-	rs.release(nil, "a")
-	if code, _ := rs.take("c"); code != 0 {
+	rs.release(nil, "s0")
+	if code, _ := rs.take("s0"); code != 0 {
 		t.Fatalf("after a release: %d", code)
-	}
-	st, err := store.Open(filepath.Join(t.TempDir(), "events.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer st.Close()
-	e, err := New(Config{Store: st})
-	if err != nil || e.MaxRuns() != DefaultMaxRuns {
-		t.Fatalf("default: %v %d", err, e.MaxRuns())
-	}
-	if _, err := New(Config{Store: st, MaxRuns: -1}); err == nil {
-		t.Error("MaxRuns -1 accepted")
 	}
 }
 

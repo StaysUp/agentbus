@@ -244,3 +244,26 @@ func TestOpenRouterCost(t *testing.T) {
 		}
 	}
 }
+
+// An OpenRouter call on the person's own provider key (BYOK) reports only
+// OpenRouter's fee in usage.cost; the provider's charge is
+// cost_details.upstream_inference_cost (issue #94, OpenRouter's usage
+// accounting page, 2026-11-26). The call's cost is both, and is_byok is a
+// known name. Without the upstream cost the fee alone is partial.
+func TestOpenRouterBYOKCost(t *testing.T) {
+	const full = `"usage":{"input_tokens":33,"output_tokens":5,"total_tokens":38,"cost":0,"is_byok":true,` +
+		`"cost_details":{"upstream_inference_cost":0.000232,"upstream_inference_input_cost":0.000132,"upstream_inference_output_cost":0.0001}}`
+	for name, evs := range map[string][]event.Event{
+		"json":   reply(t, 200, "application/json", []byte(`{"model":"openai/gpt-6.1-sol","status":"completed","output":[],`+full+`}`)),
+		"stream": reply(t, 200, "text/event-stream", sse(`{"type":"response.completed","response":{"model":"openai/gpt-6.1-sol","status":"completed","output":[],`+full+`}}`)),
+	} {
+		wantUnexpected(t, evs)
+		if u := evs[0].Usage; u == nil || u.CostUSD == nil || *u.CostUSD != 0.000232 || u.CostPartial {
+			t.Errorf("%s: usage %+v", name, u)
+		}
+	}
+	evs := reply(t, 200, "application/json", []byte(`{"model":"m","status":"completed","output":[],"usage":{"input_tokens":33,"output_tokens":5,"cost":0,"is_byok":true}}`))
+	if u := evs[0].Usage; u == nil || u.CostUSD == nil || *u.CostUSD != 0 || !u.CostPartial {
+		t.Errorf("no upstream cost: usage %+v", u)
+	}
+}

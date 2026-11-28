@@ -7,6 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/staysup/agentbus/event"
 )
 
 // Close, rebuild, preview and apply through control and a separate runner.
@@ -79,12 +82,21 @@ func TestXProcCloseRebuildPreservesBase(t *testing.T) {
 				t.Fatal(err)
 			}
 			base := "/api/v0/workspaces/" + ws.Workspace
-			if code, raw := x.post(base+"/"+prior, map[string]any{}); code != 200 {
-				t.Fatalf("prior %s: %d %s", prior, code, raw)
+			// Every workspace action answers at once, queued, and names its
+			// outcome; the runner's work shows on the record as that event.
+			if e := x.act(ws.Workspace, prior, map[string]any{}); e.Kind == event.WorkspaceFailed {
+				t.Fatalf("prior %s: %+v", prior, e.Failed)
 			}
-			if code, raw := x.post(base+"/close", nil); code != 200 {
-				t.Fatalf("close: %d %s", code, raw)
+			if e := x.act(ws.Workspace, "close", nil); e.Kind != event.WorkspaceClosed {
+				t.Fatalf("close: %+v", e)
 			}
+			waitFor(t, "the workspace to read closed", func() bool {
+				code, raw := x.get(base)
+				var w struct {
+					Closed *time.Time `json:"closed"`
+				}
+				return code == 200 && json.Unmarshal(raw, &w) == nil && w.Closed != nil
+			})
 			if got, err := os.ReadFile(filepath.Join(folder, "kept.txt")); err != nil || string(got) != "keep\n" {
 				t.Fatalf("folder after close: %q %v", got, err)
 			}
@@ -92,8 +104,8 @@ func TestXProcCloseRebuildPreservesBase(t *testing.T) {
 			if code, raw := x.get(base + "/changes?fresh=true"); code != 200 {
 				t.Fatalf("preview: %d %s", code, raw)
 			}
-			if code, raw := x.post(base+"/apply", map[string]any{}); code != 200 {
-				t.Fatalf("apply: %d %s", code, raw)
+			if e := x.act(ws.Workspace, "apply", map[string]any{}); e.Applied == nil || e.Applied.Result != "applied" {
+				t.Fatalf("apply: %+v", e)
 			}
 			for name, want := range map[string]string{"a.txt": "base\n", "kept.txt": "keep\n", "session.txt": "session\n"} {
 				if got, err := os.ReadFile(filepath.Join(folder, name)); err != nil || string(got) != want {

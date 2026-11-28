@@ -42,13 +42,49 @@ func endedID(jobID string) string { return "evt_tn_" + jobID }
 // session-derived view keys on the session and this event has none (review P1,
 // 2026-11-19). FireOns finds it by turn (store.TurnEnded), which needs no
 // session.
-func recordTurnEnded(rec appender, j queue.Job, state, reason string, now time.Time) (stored bool, err error) {
-	if j.Kind != queue.KindTurn || j.Turn == "" {
+//
+// An exec job (a command an agent handed to AgentBus) gets command.ended in
+// its place, from the same two writers: result is the job's result (the
+// finish's, as the finisher ends it), read for the exit code and output.
+func recordTurnEnded(rec appender, j queue.Job, result []byte, state, reason string, now time.Time) (stored bool, err error) {
+	if j.Turn == "" {
 		return false, nil
 	}
-	return rec.AppendOnce(event.Event{ID: endedID(j.ID), Kind: event.TurnEnded, Time: now,
-		Turn: j.Turn, State: state, Error: reason})
+	switch j.Kind {
+	case queue.KindTurn:
+		return rec.AppendOnce(event.Event{ID: endedID(j.ID), Kind: event.TurnEnded, Time: now,
+			Turn: j.Turn, State: state, Error: reason})
+	case queue.KindExec:
+		return rec.AppendOnce(commandEnded(j, result, state, reason, now))
+	}
+	return false, nil
 }
+
+// commandEnded is exec job j's command.ended: its command and how it ended,
+// from result.
+func commandEnded(j queue.Job, result []byte, state, reason string, now time.Time) event.Event {
+	r, _ := queue.ReadResult(result)
+	c := &event.Command{ID: j.Turn, Line: j.Spec.Command, Output: r.Output, OutputBytes: r.OutputBytes,
+		TimedOut: r.TimedOut, DurationMS: r.DurationMS}
+	if r.ExitCode != nil {
+		c.ExitCode = *r.ExitCode
+	}
+	why := reason
+	if msg := r.Refused; msg != "" {
+		why = msg
+	} else if r.Error != "" {
+		why = r.Error
+	}
+	e := event.Event{ID: commandEndedID(j.ID), Kind: event.CommandEnded, Time: now, Turn: j.Turn, State: state,
+		Error: why, Command: c}
+	if ch := j.Links.Chain; ch != nil && ch.By != "" {
+		e.Origin = &event.Origin{Kind: event.OriginAsked, Session: ch.BySession, Turn: ch.By}
+	}
+	return e
+}
+
+// commandEndedID is the fixed id of an exec job's command.ended.
+func commandEndedID(jobID string) string { return "evt_cn_" + jobID }
 
 // TurnEndedGrace is how long the reconciler leaves a just-ended turn to the
 // finisher's own prompt turn.ended before it would write one itself. It only
@@ -75,7 +111,7 @@ func RecordTurnEnds(q *queue.Queue, rec appender, after *queue.Job, atOrBefore t
 	last := after
 	for i := range list {
 		j := list[i]
-		stored, err := recordTurnEnded(rec, j, queue.TurnState(j.State), j.Reason, endedAt(j))
+		stored, err := recordTurnEnded(rec, j, j.Result, queue.TurnState(j.State), j.Reason, endedAt(j))
 		if err != nil {
 			return n, last, err
 		}

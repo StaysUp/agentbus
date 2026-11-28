@@ -19,7 +19,7 @@ func TestRemovedRunnerEndsItsSessionsWork(t *testing.T) {
 	}
 	other := capsRunner(t, q, nil, nil)
 	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
-	j, a, ok, _, err := q.Take(r.ID, lease, false)
+	j, a, ok, _, err := q.Take(r.ID, lease, LaneInteractive)
 	if err != nil || !ok || j.ID != first.ID {
 		t.Fatalf("take: %v %v", ok, err)
 	}
@@ -36,7 +36,7 @@ func TestRemovedRunnerEndsItsSessionsWork(t *testing.T) {
 		t.Fatalf("apply: %v", err)
 	}
 	c.add(2 * RunnerFresh) // the runner went offline; the other one is seen again
-	if _, _, ok, _, err := q.Take(other.ID, lease, false); err != nil || ok {
+	if _, _, ok, _, err := q.Take(other.ID, lease, LaneInteractive); err != nil || ok {
 		t.Fatalf("the other runner took a job: %v %v", ok, err)
 	}
 	if err := q.RemoveRunner(DefaultTeam, r.ID); err != nil {
@@ -85,7 +85,7 @@ func TestRemovedRunnerEndsWorkQueuedLater(t *testing.T) {
 			t.Fatal(err)
 		}
 		first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
-		j, a, ok, _, err := q.Take(r.ID, lease, false)
+		j, a, ok, _, err := q.Take(r.ID, lease, LaneInteractive)
 		if err != nil || !ok || j.ID != first.ID {
 			t.Fatalf("take: %v %v", ok, err)
 		}
@@ -104,7 +104,7 @@ func TestRemovedRunnerEndsWorkQueuedLater(t *testing.T) {
 			t.Fatal(err)
 		}
 		next := makeJob(t, q, Spec{Session: ids.SessionID(j.Session)})
-		if got, _, ok, _, err := q.Take(r.ID, lease, false); err != nil || !ok || got.ID != next.ID {
+		if got, _, ok, _, err := q.Take(r.ID, lease, LaneInteractive); err != nil || !ok || got.ID != next.ID {
 			t.Fatalf("take next: %v %v", ok, err)
 		}
 		c.add(2 * RunnerFresh)
@@ -134,4 +134,44 @@ func TestRemovedRunnerEndsWorkQueuedLater(t *testing.T) {
 		}
 		ended(t, q, next.ID)
 	})
+}
+
+// A discard still queued when its runner is removed ends with the reason, and
+// is marked due for its workspace.failed: its route answered at once, so the
+// record is where the caller reads why it never ran.
+func TestRemovedRunnerMarksQueuedDiscardDue(t *testing.T) {
+	q, c := open(t)
+	r, err := q.RegisterRunner(DefaultTeam, "studio mac", nil, 4, HashToken(NewID("tok_")), &Capabilities{Connector: conA})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := makeJob(t, q, Spec{Harness: "claude", FolderRef: refX, Machine: conA, Isolate: true})
+	j, a, ok, _, err := q.Take(r.ID, lease, LaneInteractive)
+	if err != nil || !ok || j.ID != first.ID {
+		t.Fatalf("take: %v %v", ok, err)
+	}
+	if _, _, err := q.Start(r.ID, a.ID, 1, lease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.End(r.ID, a.ID, 1, Finish{Status: Finished, Session: j.Session, Result: []byte(`{"changeset":"` + hexOf('1') + `"}`),
+		Workspace: &Workspace{Kind: WorkspaceCopy, Space: j.ID}}); err != nil {
+		t.Fatal(err)
+	}
+	d, _, err := q.Discard(DefaultTeam, ids.WorkspaceID(first.Session), conA, nil)
+	if err != nil {
+		t.Fatalf("discard: %v", err)
+	}
+	c.add(2 * RunnerFresh)
+	if err := q.RemoveRunner(DefaultTeam, r.ID); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := q.Get(DefaultTeam, d.ID)
+	res, _ := ReadResult(got.Result)
+	if got.State != Failed || res.Refused != RunnerRemovedWhy("studio mac") || !res.OutcomeDue {
+		t.Fatalf("the queued discard: %s %s", got.State, got.Result)
+	}
+	due, err := q.OutcomesDue(nil, 10)
+	if err != nil || len(due) != 1 || due[0].ID != d.ID {
+		t.Fatalf("due: %v %v, want the discard", due, err)
+	}
 }

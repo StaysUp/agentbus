@@ -116,7 +116,7 @@ func TestLoginNeedsApproval(t *testing.T) {
 		t.Fatalf("approved state: %+v", st)
 	}
 	var tw TakenWork
-	if code := send(t, srv, l.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, &tw); code != 200 || tw.Job == nil {
+	if code := send(t, srv, l.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion, Lane: queue.LaneInteractive}, &tw); code != 200 || tw.Job == nil {
 		t.Fatalf("take once approved: %d %+v", code, tw)
 	}
 	if _, err := s.ApproveLogin(l.Login, l.Code); !errors.Is(err, queue.ErrBadState) {
@@ -142,7 +142,7 @@ func TestLoginRefusedOrExpired(t *testing.T) {
 	if _, err := s.ApproveLogin(a.Login, a.Code); !errors.Is(err, queue.ErrBadState) {
 		t.Fatalf("approve after refuse: %v", err)
 	}
-	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, nil); code != 401 {
+	if code := send(t, srv, a.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion, Lane: queue.LaneInteractive}, nil); code != 401 {
 		t.Fatalf("take after refuse: %d", code)
 	}
 	c.add(queue.LoginTTL)
@@ -247,7 +247,7 @@ func TestEnrollTokenStillWorks(t *testing.T) {
 	e := enroll(t, srv, 1)
 	makeJob(t, q, queue.Spec{Harness: "claude", Prompt: "hi"})
 	var tw TakenWork
-	if code := send(t, srv, e.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion}, &tw); code != 200 || tw.Job == nil {
+	if code := send(t, srv, e.Token, "POST", "/api/v0/runner/take", TakeRequest{Protocol: ProtocolVersion, Lane: queue.LaneInteractive}, &tw); code != 200 || tw.Job == nil {
 		t.Fatalf("take: %d", code)
 	}
 	if code := send(t, srv, e.Token, "GET", "/api/v0/runner/login", nil, nil); code != 401 {

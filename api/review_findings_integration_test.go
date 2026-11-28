@@ -72,7 +72,7 @@ func TestWorkspaceAppliedTurnResolvesByWorkspace(t *testing.T) {
 	sess := e.makeSession(t, ws)
 	turn := startTurn(t, e, `{"session":"`+sess+`","agent":"claude","prompt":"edit"}`)
 	waitEnded(t, e, turn.Turn)
-	if code, st := applyAs(t, e, token, turn.Turn); code != 200 || st.State != "applied" {
+	if code, st := applyAs(t, e, token, turn.Turn); code != 202 || st.State != "applied" {
 		t.Fatalf("apply: %d %+v", code, st)
 	}
 	var wsp store.Workspace
@@ -222,7 +222,7 @@ func reviewEnv(t *testing.T) (*env, string) {
 	t.Helper()
 	dir := t.TempDir()
 	script := `for a; do p="$a"; done; echo '{"type":"result","session_id":"sid-'$$'"}'; ` +
-		`pwd > "$D/pwd-$p"; env > "$D/env-$p.tmp"; mv "$D/env-$p.tmp" "$D/env-$p"; ` +
+		`pwd > "$D/pwd-$p.tmp"; mv "$D/pwd-$p.tmp" "$D/pwd-$p"; env > "$D/env-$p.tmp"; mv "$D/env-$p.tmp" "$D/env-$p"; ` +
 		`case "$p" in hold*) printf held > marker.txt; i=0; while [ ! -e "$D/release-$p" ] && [ $i -lt 1500 ]; do sleep 0.02; i=$((i+1)); done;; ` +
 		`*) printf '%s\n' "$p" > "$p.txt";; esac`
 	wire := func(agent, baseURL string, _ run.Access) (run.Launch, error) {
@@ -240,7 +240,7 @@ func TestFailedAskedTurnKeepsTheAskersCopy(t *testing.T) {
 	dir := t.TempDir()
 	// The first turn (the asker) runs a shell that writes a marker and holds;
 	// every later turn (the asked one) gets a missing binary and fails to start.
-	held := `pwd > "$D/pwd-$p"; env > "$D/env-$p.tmp"; mv "$D/env-$p.tmp" "$D/env-$p"; printf held > marker.txt; ` +
+	held := `pwd > "$D/pwd-$p.tmp"; mv "$D/pwd-$p.tmp" "$D/pwd-$p"; env > "$D/env-$p.tmp"; mv "$D/env-$p.tmp" "$D/env-$p"; printf held > marker.txt; ` +
 		`i=0; while [ ! -e "$D/release-$p" ] && [ $i -lt 1500 ]; do sleep 0.02; i=$((i+1)); done`
 	var once sync.Once
 	wire := func(agent, baseURL string, _ run.Access) (run.Launch, error) {

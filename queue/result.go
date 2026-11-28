@@ -20,6 +20,16 @@ type Result struct {
 	Error      string   `json:"error,omitempty"`
 	ModelCalls int      `json:"model_calls,omitempty"`
 	CostUSD    *float64 `json:"cost_usd,omitempty"`
+	// Output, OutputBytes, TimedOut and DurationMS, for an exec job: the end
+	// of what the command wrote to stdout and stderr together (at most
+	// MaxCommandOutput bytes, the end kept), all the bytes it wrote, whether
+	// it ran past its time and was stopped, and how long it ran. ExitCode is
+	// its exit code, or 128 plus the signal that ended it; Stopped says a
+	// person or an agent stopped it.
+	Output      string `json:"output,omitempty"`
+	OutputBytes int64  `json:"output_bytes,omitempty"`
+	TimedOut    bool   `json:"timed_out,omitempty"`
+	DurationMS  int64  `json:"duration_ms,omitempty"`
 	// Refused: why the turn did not start, and the status that says what
 	// kind (run.Refusal).
 	Refused string `json:"refused,omitempty"`
@@ -74,11 +84,23 @@ type Result struct {
 	// UpdatedEvent: an update's workspace.updated, by its id, in place of the
 	// outcome itself (as DiscardedEvent is for a discard).
 	UpdatedEvent string `json:"updated_event,omitempty"`
+	// FailedEvent: a discard's, update's or close's workspace.failed, by its
+	// id, when the job ended without doing its work (in place of Refused).
+	FailedEvent string `json:"failed_event,omitempty"`
+	// Kept: a put-away that control ended without a runner, since the
+	// workspace was not quiet and settled when it came due: why it kept the
+	// copy. KeptEvent is its workspace.kept in the record, once written.
+	Kept      string `json:"kept,omitempty"`
+	KeptEvent string `json:"kept_event,omitempty"`
 	// OutcomeDue: the job ended with no finish (its runner was lost), so
 	// no finisher wrote its outcome; control's sweep writes it to the
 	// record and sets the pointer in its place (OutcomesDue, KeepOutcome).
 	OutcomeDue bool `json:"outcome_due,omitempty"`
 }
+
+// MaxCommandOutput bounds the end of a command's output an exec job's result
+// keeps, and so what its delivery and command.ended carry.
+const MaxCommandOutput = 16 << 10
 
 // SnapshotTaken is a snapshot a connector took: its id, the blob of its
 // files' times, and how many files it holds. Its trees and files are blobs

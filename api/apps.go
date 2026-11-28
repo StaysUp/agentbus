@@ -40,7 +40,41 @@ import (
 // default. They are built in code, but checkApp validates them at New so an
 // edit to a route they step through cannot leave a default app unservable.
 func defaultApps() []toolreg.Tool {
-	return []toolreg.Tool{askAgentApp(), reviewTurnApp()}
+	return []toolreg.Tool{askAgentApp(), reviewTurnApp(), runCommandApp()}
+}
+
+// runCommandApp is run_command (H1): hand a long shell command to AgentBus, so
+// the turn ends when it answers and the command's end comes back as a new
+// turn. One step over POST /api/v0/commands, which records the delivery on in
+// the same write; an app rather than a route's own tool so a retried call
+// gets an idempotency key from the tool call and runs the command once.
+func runCommandApp() toolreg.Tool {
+	return toolreg.Tool{
+		Name: "run_command",
+		Description: "Hand a long shell command (such as a 10 to 15 minute make gate) to AgentBus, so your turn can end while it runs. " +
+			"Use it instead of a background shell command or nohup: those keep your turn running, or run where nothing records them. " +
+			"It runs in your workspace, on the runner that holds it, under your command rules, once your turn has ended; it never gets more than your turn may do, so it is refused, saying why, when your turn may not edit or your harness runs your commands in its own sandbox (Claude Code in a sandbox copy; codex always). " +
+			"The reply names the command at once; when it ends, its exit code and the end of its output come back to your session as a later turn: end your turn, and do not wait or poll for it. " +
+			"Stop it with POST /api/v0/commands/{id}/stop through agentbus-api. It does not give the command your turn's token.",
+		Inputs: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"command":         map[string]any{"type": "string", "description": "The shell command line, run by /bin/sh -c in your workspace's folder, such as make gate."},
+				"timeout_minutes": map[string]any{"type": "integer", "description": "Optional. The most minutes it may run, 1 to 240; past it the command is stopped. Absent: 30.", "minimum": 1, "maximum": MaxCommandMinutes},
+			},
+			"required":             []any{"command"},
+			"additionalProperties": false,
+		},
+		Where: toolreg.WhereControl,
+		Run: toolreg.Run{Kind: toolreg.RunApp, App: &toolreg.App{
+			Steps: []toolreg.Step{
+				{StepID: "run", OperationID: "runCommand",
+					RequestBody: map[string]any{"command": "$inputs.command", "timeout_minutes": "$inputs.timeout_minutes"},
+					Outputs:     map[string]string{"command": "$response.body#/command", "state": "$response.body#/state"}},
+			},
+			Outputs: map[string]string{"command": "$steps.run.outputs.command", "state": "$steps.run.outputs.state"},
+		}},
+	}
 }
 
 // reviewTurnApp is review_turn: ask another agent to review a turn, then deliver

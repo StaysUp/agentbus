@@ -67,6 +67,9 @@ const (
 	atTurn
 	// atJob: {id} is a turn with a job, in the job's session, to stop.
 	atJob
+	// atCommand: {id} is a command an agent handed to AgentBus, read and
+	// stopped as its asking session is.
+	atCommand
 	// atWorkspace: {id} is a workspace.
 	atWorkspace
 	// atBody: the body names the place, and the handler asks the grant:
@@ -326,6 +329,11 @@ func (l agentLimits) inReach(w http.ResponseWriter, s string) bool {
 // watches itself, would pass the caps.
 func (l agentLimits) watch(a *API, w http.ResponseWriter, j queue.Job, body *OnRequest) (string, queue.Maker, *queue.Chain, bool) {
 	found, ok, err := a.mayReadTurn(l.g, body.Turn, "")
+	if j.Kind == queue.KindExec {
+		// A command is read as its asking session is (GET /api/v0/commands/{id}).
+		found = true
+		ok, err = a.inAuthority(l.g, string(j.Spec.Session))
+	}
 	switch {
 	case err != nil:
 		a.internal(w)
@@ -347,7 +355,7 @@ func (l agentLimits) watch(a *API, w http.ResponseWriter, j queue.Job, body *OnR
 }
 
 // removeOn: an agent removes an on its own turn made, or one that delivers to
-// a session in its reach.
+// a session in its reach (agentOn).
 func (l agentLimits) removeOn(a *API, w http.ResponseWriter, id string) bool {
 	on, err := a.cfg.Queue.GetOn(queue.DefaultTeam, id)
 	switch {
@@ -358,10 +366,7 @@ func (l agentLimits) removeOn(a *API, w http.ResponseWriter, id string) bool {
 		a.internal(w)
 		return false
 	}
-	if on.Maker.Turn == l.g.Turn && on.Maker.Session == l.g.Session {
-		return true
-	}
-	in, err := a.inAuthority(l.g, on.Session)
+	in, err := a.agentOn(l.g, on)
 	switch {
 	case err != nil:
 		a.internal(w)
@@ -371,6 +376,20 @@ func (l agentLimits) removeOn(a *API, w http.ResponseWriter, id string) bool {
 		return false
 	}
 	return true
+}
+
+// agentOn says on is an agent's with grant g, to list and to remove: a turn's
+// on that g's own turn registered, or one that delivers to a session in g's
+// reach. An on over the record is control's own (the built-in put-away): no
+// agent's.
+func (a *API) agentOn(g run.Grant, on queue.On) (bool, error) {
+	if !queue.Delivers(on.Event) {
+		return false, nil
+	}
+	if on.Maker.Turn == g.Turn && on.Maker.Session == g.Session {
+		return true, nil
+	}
+	return a.inAuthority(g, on.Session)
 }
 
 // machines: a Direct session's machine is its reach; a Copy session reaches
@@ -493,6 +512,13 @@ func (a *API) allow(w http.ResponseWriter, r *http.Request, rt *route, id string
 		writeError(w, http.StatusForbidden, c.limits.refusal())
 		return nil, false
 	}
+	// The session query's shape is checked for every grant, the owner's too:
+	// the place check below is skipped for a grant that reaches everywhere.
+	if rt.at == atSessionQuery {
+		if _, _, ok := sessionQuery(w, r); !ok {
+			return nil, false
+		}
+	}
 	every, err := c.May(rt.action, run.Everywhere)
 	if err != nil {
 		a.internal(w)
@@ -531,13 +557,11 @@ func (a *API) within(w http.ResponseWriter, r *http.Request, rt *route, id strin
 	case atSession:
 		where = run.InSession(id)
 	case atSessionQuery:
+		// allow has checked the query's shape: sent, it is one session id.
 		q := r.URL.Query()
-		vs, sent := q["session"]
 		switch {
-		case sent && len(vs) != 1:
-			return refuse(turnSessionRefused)
-		case sent:
-			where = run.InSession(vs[0])
+		case q.Has("session"):
+			where = run.InSession(q.Get("session"))
 		case c.Session != "":
 			q.Set("session", c.Session)
 			r.URL.RawQuery = q.Encode()
@@ -573,6 +597,24 @@ func (a *API) within(w http.ResponseWriter, r *http.Request, rt *route, id strin
 		// The same reach as a read, so a child in a narrower copy cannot stop
 		// work in its parent's folders.
 		where, outside = run.InSession(string(j.Spec.Session)), turnStopRefused
+	case atCommand:
+		if a.cfg.Queue == nil {
+			writeError(w, http.StatusNotFound, noTurns)
+			return false
+		}
+		j, err := a.cfg.Queue.JobByCommand(queue.DefaultTeam, id)
+		switch {
+		case errors.Is(err, queue.ErrNotFound):
+			writeError(w, http.StatusNotFound, noCommand)
+			return false
+		case err != nil:
+			a.internal(w)
+			return false
+		}
+		where, outside = run.InSession(string(j.Spec.Session)), commandStopRefused
+		if rt.action == run.ActRead {
+			outside = turnSessionRefused
+		}
 	case atWorkspace:
 		where = run.InWorkspace(ids.WorkspaceID(id))
 	default:

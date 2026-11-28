@@ -35,7 +35,7 @@ import (
 	"github.com/staysup/agentbus/runner"
 )
 
-const loginUsage = "usage: agentbus login URL [agentbus runner's flags: -name NAME -folder DIR -labels a,b -capacity 4]\n" +
+const loginUsage = "usage: agentbus login URL [agentbus runner's flags: -name NAME -folder DIR -labels a,b -capacity N]\n" +
 	"  URL is control's address, such as http://192.168.1.10:8787"
 
 // loginDeps is what agentbus login reaches outside itself, so a test can
@@ -139,7 +139,7 @@ func runLogin(args []string, home string, stdout, stderr io.Writer, d loginDeps)
 	defer cancel()
 	var started jobs.LoginStarted
 	status, err := loginCall(ctx, d.http, "POST", target+"/api/v0/runner/login", "",
-		jobs.EnrollRequest{Name: name, Labels: labels, Capacity: c.maxRuns, Protocol: jobs.ProtocolVersion, Capabilities: d.caps()}, &started)
+		jobs.EnrollRequest{Name: name, Labels: labels, Capacity: runnerCapacity(c.capacity), Protocol: jobs.ProtocolVersion, Capabilities: d.caps()}, &started)
 	switch {
 	case err != nil:
 		fmt.Fprintf(stderr, "agentbus login: %s could not be reached\n", target)
@@ -313,4 +313,13 @@ func shellQuote(a string) string {
 		return a
 	}
 	return "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
+}
+
+// runnerCapacity is the capacity a machine's runner reports: its -capacity,
+// or jobs.MaxCapacity when it set none, so the settings decide.
+func runnerCapacity(n int) int {
+	if n == 0 {
+		return jobs.MaxCapacity
+	}
+	return n
 }

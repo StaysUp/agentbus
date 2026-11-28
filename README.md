@@ -11,11 +11,11 @@
 [![Latest release](https://img.shields.io/github/v/release/staysup/agentbus)](https://github.com/staysup/agentbus/releases)
 [![CI](https://github.com/StaysUp/agentbus/actions/workflows/ci.yml/badge.svg)](https://github.com/StaysUp/agentbus/actions/workflows/ci.yml)
 
-[Quickstart](#quickstart) &nbsp;&bull;&nbsp; [Demo](https://github.com/user-attachments/assets/674686dc-394d-4431-9e0b-a48ef3d8ef9d) &nbsp;&bull;&nbsp; [Docs](#docs) &nbsp;&bull;&nbsp; [Releases](https://github.com/staysup/agentbus/releases)
+[Quickstart](#quickstart) &nbsp;&bull;&nbsp; [Demo](https://github.com/user-attachments/assets/06bb50b3-1b9a-4656-a2dd-fe836de0a87e) &nbsp;&bull;&nbsp; [Docs](#docs) &nbsp;&bull;&nbsp; [Releases](https://github.com/staysup/agentbus/releases)
 
 </div>
 
-[![AgentBus 0.5.9: Codex reviews Claude Code's change and finds a P1; every model call with its cost. Click to watch the 2-minute demo.](docs/assets/cockpit-059.png)](https://github.com/StaysUp/agentbus/releases/tag/v0.5.9)
+[![AgentBus 0.6.7: Claude Code builds a change in a copy of your folder, Codex reviews it, and the fix waits in Changes until you Apply. Click to watch the 1-minute demo.](docs/assets/cockpit-067.png)](https://github.com/StaysUp/agentbus/releases/tag/v0.6.7)
 
 AgentBus sits between your coding agents and every model vendor. It runs the agents you already
 have (Claude Code, Codex, Antigravity, OpenCode, the Gemini CLI or any OpenRouter model) and tracks
@@ -102,7 +102,7 @@ installed, and a Claude and a ChatGPT subscription.
    "what do you think about the answer above?". Codex reads Claude's answer and gives its own.
 
 Every turn and every model call is now in the record, with its cost.
-By default (`-replay`), `agentbus up`, `server` and `runner` continue Claude and Codex sessions by sending the earlier turns' history through the gateway. Pass `-replay=false` when you want to use the vendor's own session resume instead.
+By default (`-replay`), `agentbus up`, `server` and `runner` continue Claude and Codex sessions by sending the earlier turns' history through the gateway. Pass `-replay=false` when you want to use the vendor's own session resume instead. AgentBus keeps that history within a budget by itself (40% of the model's window by default, `budget` in `/api/v0/settings/compaction`): older turns' long tool output becomes stubs the agent can fetch back, and the oldest turns become a short summary, while the record keeps every byte.
 
 ### Sign-ins and keys
 
@@ -157,8 +157,9 @@ When you start a session you pick how it runs. The choice is remembered.
 
 - **Copy (default).** The session works in its own copy of your folder. The agent's commands write
   only inside the copy, plus temporary files and package caches; reads across your disk stay open.
-  The network, Docker and local services work as normal. Several sessions can work on the same code
-  without stepping on each other.
+  The network works as normal. For Claude Code it is a list of hosts, and Docker and other local
+  services need a Direct session; [Limits](#limits) says why. Several sessions can work on the
+  same code without stepping on each other.
 - **Direct.** The session works in your folder itself, like your terminal. Nothing is held back.
 - **Locked.** Copy, plus hidden secrets and no writing to the internet. This comes later; the
   selector shows it, disabled.
@@ -193,11 +194,29 @@ their defaults are in `/docs`, under Settings).
   settings, skills, MCP servers and logins. **Use my config** fills the list. Sign-ins are never
   copied.
 - **Limits:** how much work one message may cause: how deep agents may ask each other, how many
-  turns, and the cost.
+  turns, and the cost; and how many turns agents start may run at once (see [Limits](#limits)).
 
 Whether a session runs Direct, Copy or Locked is a per-session choice in **New Session**, not a
 global setting; see [How a session runs](#how-a-session-runs-direct-copy-locked). A Copy's folder is
 cloned copy-on-write where the disk supports it, so a big `node_modules` costs nothing to copy.
+
+## Limits
+
+Turns you send start at once. They wait only for a turn already running in their workspace (one
+copy runs one turn at a time) and for their own session's earlier turns. They never wait for work
+agents asked for that has not started yet, even in the same workspace: your message goes ahead of it.
+
+Turns agents start are **delegated** work: a turn an agent asks for (`ask_agent`, a review it
+starts, a turn it sends with `agentbus-api`), in any session, your own included, and a reply
+AgentBus delivers into a session an agent started. Who asked decides it, not where the turn runs. One runner runs at most
+**8** of them at once. More wait in the queue, oldest first, and start as places free up. A reply
+delivered into your own session counts as yours.
+
+The number is `[limits] max_delegated_at_once` in the settings
+(`/api/v0/settings/permissions`), 1 to 64. A change holds for the next turn a runner takes, with no
+restart. The Runners page shows how it stands, such as "8 at once, 5 busy, 2 waiting"
+(`delegated` in `GET /api/v0/runners`). A runner on another machine can set its own lower ceiling
+with `agentbus runner -capacity N`.
 
 ## Known limits
 
@@ -216,11 +235,19 @@ cloned copy-on-write where the disk supports it, so a big `node_modules` costs n
   git credentials work as in your terminal, and a `.env` in a folder you read is visible. Only the
   agents' own login files are hidden, so Connect's sign-in is used. Hiding secrets comes with
   **Locked**, later.
-- **Copy's network for Claude Code, Antigravity and OpenCode is a broad allow-list, not fully
-  open.** These run on a sandbox engine that refuses a wildcard, so AgentBus allows the gateway, the
-  package registries (npm, PyPI, Go, crates) and GitHub, plus localhost and Docker; widen it from
-  real use. Codex is the exception: its own sandbox takes a truly open network. Antigravity's Copy
-  wall is only partly verified so far.
+- **Claude Code's Copy network is an allow-list, not fully open.** Its sandbox engine has no open
+  setting and refuses `*`. AgentBus allows the gateway, localhost, GitHub (`gh` included), the
+  package registries (npm, Yarn, PyPI, Go, crates). A command that calls any other host is refused.
+  Go tools such as `gh` verify TLS as in your terminal.
+- **Docker does not work in a Claude Code Copy session.** Use a Direct session for it. A Docker bind
+  mount would let a command write outside the copy, so the copy allows no local sockets: Docker's,
+  Lima's and ssh-agent's are closed too. `limactl start` also writes under `~/.lima`, outside the
+  copy.
+- Socket grants in your own managed or MDM settings, and socket paths in your user settings, still
+  apply in a Copy session. This closes in 0.6.8.
+- Codex's Copy network is truly open. Antigravity and OpenCode have no command sandbox of their own
+  yet, and the gateway's check on file edits outside the copy reads Claude Code's calls only. So in
+  a Copy session their commands and file edits can write outside the copy.
 - On ext4 a copy is a full copy. A clone (APFS) or a reflink (xfs, btrfs) is used where the disk can
   make one.
 - AgentBus has no file tools of its own: an agent reaches files through its CLI's built-in tools,
