@@ -168,6 +168,35 @@ func fakeAgent() {
 			resp.Body.Close()
 		}
 	}
+	// With AGENTBUS_FAKE_CODEX_CATALOG, codex's ask for the models its
+	// provider may use: a GET of the model_catalog_url its -c arguments set,
+	// with its version and the key its env_key names as the bearer, before
+	// its first model call (codex-cli 0.171.0, 2026-11-27). It writes
+	// "<status> <body>" to the file AGENTBUS_FAKE_CODEX_CATALOG names, or
+	// "none" when no catalog was set.
+	if out := os.Getenv("AGENTBUS_FAKE_CODEX_CATALOG"); out != "" {
+		var catalog, key string
+		for _, a := range os.Args[1:] {
+			if _, v, ok := strings.Cut(a, `.model_catalog_url="`); ok && strings.HasPrefix(a, "model_providers.") {
+				catalog = strings.TrimSuffix(v, `"`)
+			}
+			if _, v, ok := strings.Cut(a, `.env_key="`); ok && strings.HasPrefix(a, "model_providers.") {
+				key = os.Getenv(strings.TrimSuffix(v, `"`))
+			}
+		}
+		got := "none"
+		if catalog != "" {
+			got = "0 "
+			req, _ := http.NewRequest("GET", catalog+"?client_version=0.171.0", nil)
+			req.Header.Set("Authorization", "Bearer "+key)
+			if resp, err := http.DefaultClient.Do(req); err == nil {
+				b, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				got = strconv.Itoa(resp.StatusCode) + " " + string(b)
+			}
+		}
+		os.WriteFile(out, []byte(got), 0o600)
+	}
 	// With AGENTBUS_FAKE_CODEX_BODY, one model call as codex makes it: to the
 	// openai_base_url its -c argument names, or the base_url of the provider
 	// its -c arguments set, with the key its env_key names as the bearer, and

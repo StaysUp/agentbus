@@ -52,10 +52,12 @@ func connectFake(t *testing.T, home string, harnesses ...string) {
 
 // codexRelayArgs is how codex is pointed at a turn's base URL (BASE) when
 // its credential comes from control: a provider of its own, whose key is
-// the placeholder (harness codex WireRelay).
+// the placeholder and whose models are the account's (harness codex
+// WireRelay).
 const codexRelayArgs = `-c model_provider=agentbus_chatgpt -c model_providers.agentbus_chatgpt.name="OpenAI" ` +
 	`-c model_providers.agentbus_chatgpt.base_url="BASE/backend-api/codex" -c model_providers.agentbus_chatgpt.env_key="AGENTBUS_CODEX_TOKEN" ` +
-	`-c model_providers.agentbus_chatgpt.wire_api="responses" -c model_providers.agentbus_chatgpt.supports_websockets=false`
+	`-c model_providers.agentbus_chatgpt.wire_api="responses" -c model_providers.agentbus_chatgpt.supports_websockets=false ` +
+	`-c model_providers.agentbus_chatgpt.model_catalog_url="BASE/backend-api/codex/models"`
 
 // fakeSubscription is connectFake's token.
 const fakeSubscription = "fake-subscription-token-for-tests"

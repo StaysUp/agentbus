@@ -125,6 +125,15 @@ const relayProvider = "agentbus_chatgpt"
 // header, which the relay adds). supports_websockets=false: codex posts at
 // once. A runner's sessions are its own, so codex filing them under this
 // provider hides nothing from the person.
+//
+// model_catalog_url is the relay's list of the models the sign-in may use.
+// Without it codex on a provider of its own with a key (env_key) knows only
+// the models built into it and asks nobody, so a turn that names no model
+// runs on codex's built-in default, which the account may not offer (#112).
+// codex-cli 0.171.0, 2026-11-27, read from the "model:" line codex exec
+// prints before its first call: these flags without model_catalog_url,
+// gpt-6.2-sol, which the account refused; with it, gpt-6-luna, as plain
+// codex on the same sign-in picks.
 func (codex) WireRelay(baseURL, placeholder string) (env, args []string) {
 	p := "model_providers." + relayProvider + "."
 	return []string{codexRelayEnv + "=" + placeholder}, []string{
@@ -134,15 +143,16 @@ func (codex) WireRelay(baseURL, placeholder string) (env, args []string) {
 		"-c", p + `env_key="` + codexRelayEnv + `"`,
 		"-c", p + `wire_api="responses"`,
 		"-c", p + "supports_websockets=false",
+		"-c", p + `model_catalog_url="` + baseURL + `/backend-api/codex/models"`,
 	}
 }
 
-// WireModels: as WireRelay, with the provider's model_catalog_url at the
-// relay's list of models, and app-server. Without model_catalog_url codex
-// on a provider of its own with a key (env_key) lists only the models built
-// into it and asks nobody (codex-rs models-manager/src/manager.rs,
-// api_key_discovery_disabled, at rust-v0.164.0); with it, model/list asks
-// GET <model_catalog_url>?client_version=<its version> with the bearer and
+// WireModels: as WireRelay, and app-server. WireRelay's model_catalog_url
+// is what model/list reads: without it codex on a provider of its own with
+// a key (env_key) lists only the models built into it and asks nobody
+// (codex-rs models-manager/src/manager.rs, api_key_discovery_disabled, at
+// rust-v0.164.0); with it, model/list asks GET
+// <model_catalog_url>?client_version=<its version> with the bearer and
 // lists what that answers, without the built-in ones (measured, codex-cli
 // 0.164.0, 2026-11-14, against a local listener). The sign-in store is
 // the file: codex then looks for no sign-in in the system's keychain, and
@@ -150,7 +160,6 @@ func (codex) WireRelay(baseURL, placeholder string) (env, args []string) {
 func (c codex) WireModels(base, placeholder string) (env, args []string) {
 	env, args = c.WireRelay(base, placeholder)
 	return env, append(args,
-		"-c", "model_providers."+relayProvider+`.model_catalog_url="`+base+`/backend-api/codex/models"`,
 		"-c", `cli_auth_credentials_store="file"`,
 		"app-server")
 }
